@@ -1,1045 +1,2248 @@
-# Grain
+# grain
 
-**A single-node agent cluster.** One machine runs a controller VM and a
-small pool of sandbox VMs; label a GitHub issue or pull request, and an
-agent picks it up, does the work in a sandbox, and pushes a branch that the
-controller turns into a PR.
+A single-operator agent cluster, in Go. A daemon holds the task model,
+decides what runs now, dispatches each run to an agent framework in a
+sandbox, and opens the pull requests that come out of it -- driven from
+its own UI and CLI over REST, deployed as one container onto one VM.
 
-The point of the design is the credential boundary: **the untrusted
-execution environment holds nothing worth taking.** The agent *process* —
-`claude -p` — runs on the **controller**, with its entire native tool
-roster disabled and replaced by five narrow MCP tools, four of which reach
-the assigned sandbox over SSH; the fifth (`ask_question`) reaches a human
-instead, by posting to the GitHub issue/PR thread. The sandbox is where the
-work actually happens
-— the checkout, the builds, the `kind` clusters — and it holds no GitHub
-token and no Claude credential. Its only route out to GitHub is a git
-proxy on the controller, allowlist-checked and audit-logged. It *can* hold
-a GCP credential, if the deployment mints one: a real, short-lived
-service-account key, minted fresh per dispatch and revoked once the task
-ends (or after 24 hours regardless) — never anything capable of minting
-another.
+This is the Go rewrite that replaced v1's Python (a controller VM plus a
+pool of libvirt sandbox guests). v1's code is gone; `docs/design.md` is
+kept as the design several packages here still implement and cite.
 
-The host holds no *system* credential — no GitHub token, no GCP key, no
-Claude login; every one of those lives on the controller's `/data`. It
-holds one thing: an admin SSH key, for direct setup/repair/debugging access
-to the controller and every sandbox.
+Paths like `grain/automation/mcp_server.py` and `provision/sandbox.sh` in
+the notes below name v1's own files, for provenance -- what a package was
+ported from and what it deliberately changed. They are not in this
+repository; read them as history, not as somewhere to look.
+
+The map below is the whole of it, package by package.
 
 ```
-host (Debian, KVM — admin SSH key only, no system credentials)
-├── controller VM   automation loop · claude -p (as grain-agent) · git proxy
-│                   · mints/revokes a GCP key per dispatch · /data (every credential)
-│                       │
-│                       │  SSH, five MCP tools, nothing else
-│                       ▼
-├── sandbox-0       docker · kind · the workspace checkout — no GitHub/Claude
-│                   credential; a short-lived GCP key only if one was minted
-└── sandbox-1       (same)
+pkg/model/      the task model of docs/data-model.md
+pkg/model/sqlite/  opening the embedded SQLite database (modernc.org/sqlite,
+                pure Go, no cgo) — the only package that imports a driver.
+                Open is the one constructor there is: SQLite has no wire
+                protocol to dial, unlike the Dolt this replaced, and there
+                is only one writer to serialise now that the daemon is the
+                only thing that ever opens the store directly (see "The UI
+                and the CLI talk to the daemon over REST" below)
+pkg/dispatch/   which tasks run now: what one cycle decides to
+                do with the store, with no side effect beyond that
+                decision. It does not loop itself -- cmd/grain's "daemon"
+                subcommand's timer does, through pkg/orchestrator -- and
+                it carries no
+                scheduling policy: it drains task_ready until
+                max_concurrent runs are live
+pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
+                delimited JSON-RPC server exposing the sandbox tools
+                (run_command, read_file, edit_file, write_file) and the
+                escape-hatch tools (ask_question, comment_on_issue,
+                propose_task, add_review_comment). NewSandboxTools runs
+                those four locally, confined to a directory; NewSSHSandboxTools
+                (DockerExecRunner) runs the same four tools inside a
+                kontur-managed sandbox VM's guest instead, by exec'ing
+                into that VM's own container -- see "Reaching a sandbox
+                guest without a route into it" below
+pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
+                run's VM, the container names kontur derives from a VM
+                name, and the one `docker inspect` that tells a VM whose
+                container died from one still on its way up. It resolves
+                no address for a VM, because nothing needs one
+pkg/agent/      the Framework interface an agent driver implements
+pkg/agent/antigravity/  Framework via the Antigravity CLI -- Google's
+                `agy` binary, the one that replaced Gemini CLI -- run as a
+                subprocess on the controller. It replaced this repo's own
+                home-grown Gemini runtime, which drove the Gemini API's
+                function calling directly and looped tool calls in-process
+                against its own pkg/mcp/ registry; agy owns that loop now.
+                Two things agy lacks shape this package: there is no
+                --mcp-config, so each run gets a private HOME holding just
+                the settings file naming its own "mcpserver" server (a
+                per-user `agy mcp add` registration cannot express a
+                per-run sandbox binding); and there is no --max-turns, so
+                RunConfig.MaxTurns is enforced here, by counting completed
+                agent_response steps on the live stream and cancelling the
+                subprocess
+pkg/agent/claude/  Framework via the real `claude` CLI, run as a
+                subprocess on the controller (bwsalmon/agents#255) --
+                this points --mcp-config at this same grain binary's own
+                "mcpserver" subcommand (cmd/grain/mcpserver.go), the same
+                way v1's dispatch.py pointed it at
+                `python3 -m grain.automation.mcp_server`, and parses the
+                resulting --output-format stream-json transcript back into
+                an agent.Result
+pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
+                and revokes a Gemini API key, direct against the API Keys
+                API
+pkg/capability/gcpkey/  the gcp-key capability: a real MINT
+                model.CapabilityProvider that mints/revokes a per-task GCP
+                service-account key against the IAM API directly
+                (google.golang.org/api/iam/v1, no gcloud subprocess), plus
+                Reap, a standalone safety net that deletes anything GCP
+                itself reports as older than 24h regardless of whether a
+                Lease survived to say so
+pkg/secrets/    a model.CredentialResolver backed by its own embedded
+                SQLite database (<dir>/secrets.db), kept deliberately
+                separate from the task/config store's own database file
+                (bwsalmon/agents#366: "put secrets in a separate db,
+                config and tasks in a common db") -- the production
+                implementation CapabilityContext.Credentials had none of
+                until now
+pkg/gitproxy/   a port of grain/proxy: the only path from a sandbox to
+                GitHub. Authorizes by asking model.Store what the calling
+                sandbox's live task may touch (its Target and Reads)
+                instead of a hand-edited allowlist file; credential
+                selection and sandbox identity are still the same
+                file-based ladders grain/proxy uses. live_test.go proves
+                the whole thing end to end against a local git server —
+                see "What this actually verifies" below.
+pkg/github/     a port of grain/automation/github.py: the GitHub REST
+                calls a deployment needs (list/label issues, branches,
+                pull requests, review comments, draft reviews) behind a
+                Transport seam, the one layer up from gitproxy's own git
+                transport.
+pkg/github/githubsim/  a port of tests/test_live_issue_to_pr.py's
+                RealGitHubMock -- a stateful github.Transport backed by a
+                real bare git repo, for a live end-to-end test to wire a
+                real github.RESTClient against instead of the real
+                network.
+pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
+                dispatch.Cycle's own dispatches (resolving and
+                materializing each one's capabilities first, and revoking
+                what was minted once it finishes), turns a finished run's
+                tool calls into effects (a comment on the task, a pull
+                request, a filed follow-up task), and closes out a pull
+                request once GitHub reports it merged or closed. It no
+                longer polls anything: tasks arrive by being written
+                (see "Input is a model update, not a GitHub issue").
+                RunCycle runs the two halves as independent reconcilers
+                rather than one pipeline -- see "Reconcilers, not a
+                pipeline" below.
+e2e/            tasks filed the way a user would, carried through
+                dispatch.Cycle, a real agent/antigravity run, and a real
+                gitproxy push, against a real embedded SQLite store and a
+                local git
+                server standing in for GitHub — fixed scenarios plus a
+                randomized multi-user simulation (bwsalmon/agents#233).
+                random_test.go (bwsalmon/agents#338) is a second, higher-
+                layer randomized cluster test: the real grain CLI binary
+                (an operator), a real orchestrator.RunCycle against a real
+                githubsim.Sim (GitHub) and a scripted agent each choosing
+                among their own valid moves every round, checking after
+                each one that no slot stays stuck occupied and that
+                nothing pushed or merged ever silently disappears.
+                TestRandomizedClusterEndToEnd is the short, fixed-seed
+                version `go test ./...` always runs;
+                TestRandomizedClusterLong is the same driver run for much
+                longer by hand (its own doc comment says how) and does
+                nothing unless asked to. See "What this does not have
+                yet" below for where it stops. loadtest_test.go
+                (bwsalmon/agents#416) is a third: many tasks, across many
+                repos, many slots dispatching at once, several goroutines
+                writing to the same on-disk store concurrently with a
+                live RunCycle, to catch scheduling starvation, sqlite
+                contention and a capability leak at a scale none of the
+                above reach -- `make loadtest`, or that file's own doc
+                comment for how to size it up to an actual host.
+pkg/ui/         a JSON API, and the static frontend it serves, for
+                creating and managing tasks and their capability grants
+                by hand (bwsalmon/agents#237). It reads and writes
+                model.Store: creating a task here IS filing it, with no
+                GitHub issue and no poll in between -- see "Input is a
+                model update, not a GitHub issue" below. Client is that
+                code directly, over a *model.Store the caller already
+                has open; HTTPClient (bwsalmon/agents#363) is the same
+                method surface spoken over HTTP instead, against
+                whichever pkg/ui.Server a "grain daemon" is serving --
+                see "The UI and the CLI talk to the daemon over REST"
+                below
+cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
+                combined what used to be four, #363 folded a fifth --
+                the standalone "ui" subcommand -- into "daemon"): with no
+                subcommand, or one of the task-management verbs, main.go
+                is a CLI over pkg/ui.HTTPClient -- a REST client of
+                whichever "grain daemon" -server names, driven from a
+                terminal instead of a browser: list/get/create/update a
+                task, approve, attach or detach a capability, comment
+                (which also answers a parked question), close ("delete"
+                -- a task that ran is a record of a dispatch that
+                happened) or reopen one (bwsalmon/agents#271). "daemon"
+                (daemon.go, formerly cmd/graind) runs pkg/orchestrator's
+                RunCycle on a timer against one real embedded SQLite
+                store, until SIGINT/SIGTERM, with an in-process gitproxy,
+                a real github.RESTClient, and -- unless -ui-addr is
+                emptied out -- an in-process pkg/ui.Server over that same
+                store, all wired in. "mcpserver" (mcpserver.go, formerly
+                cmd/mcpserver) is the server as a standalone stdio mode
+                -- -sandbox-root for NewSandboxTools, or -kontur-vm (plus
+                pkg/kontur, above) for NewSSHSandboxTools against a real
+                kontur-managed VM -- what a running daemon (via
+                pkg/agent/claude) forks *this same binary* to get, rather
+                than needing a second one on disk. "demo" (demo.go,
+                formerly `grain ui -demo`) is a fifth, smaller mode: a
+                throwaway pkg/ui.Server over fake data and a temp-directory
+                store, for trying out the frontend with no daemon, no
+                store and no deployment behind it at all
 ```
 
-## Where the agent runs, and why it moved
-
-`claude -p` used to run *in* the sandbox, with a real Claude Code login
-sitting there, and Claude Code's own sandbox/permission settings tried to
-contain it. A full live-debugging session found that fundamentally broken:
-the credential leaks into any unsandboxed Bash subprocess's environment
-trivially (confirmed live with a plain `env`), the agent readily discovers
-`dangerouslyDisableSandbox: true` on its own to get there, and Landlock —
-kernel-level, immune to that flag — can protect a *file* but has no concept
-of environment variables at all. No amount of tuning closes that gap.
-
-So the credential left the untrusted environment entirely. Today
-`grain/automation/dispatch.py` starts `claude -p` on the controller, as a
-dedicated unprivileged `grain-agent` account, with:
-
-- `--tools ""` — the entire native tool roster emptied. Confirmed live:
-  `--allowedTools` alone does **not** do this (it is a permission hint, not
-  a roster filter); both flags together do, and the advertised tool list in
-  the `system/init` event shrinks to exactly what is named.
-- `--mcp-config <per-dispatch file> --strict-mcp-config` — pointing at
-  `grain/automation/mcp_server.py`, which exposes exactly six tools:
-  `run_command`, `read_file`, `edit_file`, `write_file` all resolve against
-  the *assigned* sandbox's workspace, over SSH — the sandbox's address,
-  user, and key are baked into the MCP server's argv at dispatch time,
-  never into a tool call's own arguments. `ask_question` and
-  `comment_on_issue` are different: neither ever touches the sandbox at
-  all, and both only ever write to a local file on the controller for the
-  orchestrator to relay as a GitHub comment (see "Asking the human a
-  question" and "Analysis-only tasks" below) — the agent still gets no
-  GitHub API access of its own.
-- `TodoWrite` and `Task` also allowed — a `Task`-spawned subagent inherits
-  the same empty roster (confirmed live by an explicit system denial, not
-  self-report), so delegation is safe to leave on.
-
-A sandbox therefore holds exactly one secret: its own git-proxy bearer
-token, which buys nothing but proxied access to allow-listed repos and is
-revocable per sandbox.
-
-## Asking the human a question
-
-An agent that's genuinely blocked — ambiguous requirements, a decision only
-a human can make — can call the `ask_question` MCP tool instead of guessing
-or grinding to a timeout. That ends its turn: `dispatch.py` resets a fixed
-per-unit file before every dispatch, the tool call writes the question
-there, and once the unit finishes, `core.py`'s sweep reads it back, posts
-it as a `🤖`-signed comment on the task issue, and swaps the in-progress label
-for `grain-agent-awaiting-reply` — **without** re-adding the trigger label,
-so the task doesn't immediately redispatch and re-ask the same question in
-a loop.
-
-The same machinery covers a task whose `/repo` directive is missing,
-malformed, or names a repo that isn't allow-listed: the comment says which
-of those it is, and the task waits in exactly the same state.
-
-The issue then sits idle until someone with write access to the task repo
-(GitHub's own `author_association`: owner, member, or collaborator) replies
-in the thread — every `run_once` checks each open question's comments for
-exactly that, and re-applies the trigger label on its own the moment one
-shows up, so the very next dispatch picks it back up with the reply already
-in its prompt (`_dispatch` always fetches the current comment thread). A
-trusted reply can also carry a `/repo`, `/pr` or `/base` directive, which
-is how a parked task gets repaired without editing the original body. A
-reply from anyone *without* write access is ignored: treating any comment
-as a redispatch trigger would let a random public commenter drive the agent
-with content of their choosing, on a public repo, which is exactly the
-prompt-injection gate the trigger label exists to close. Re-applying the
-label by hand still works too, as a fallback.
-
-The agent still never gets GitHub API access of its own — `core.py` is the
-only thing that posts the comment, and only from this one path
-(docs/roadmap.md items 12–13).
-
-## Analysis-only tasks
-
-Not every task is a code change. One filed only as a question, an
-investigation, or a request for a recommendation can end with a call to the
-`comment_on_issue` MCP tool instead of a `git push` (bwsalmon/agents#50,
-reworked by bwsalmon/agents#89). That works like `ask_question`'s file
-handoff — `dispatch.py` resets a fixed per-unit file before every dispatch,
-the tool call writes the comment there, and once the unit finishes,
-`core.py`'s sweep reads it back — but what happens with it depends on the
-branch, which is always checked first: if the agent never pushed anything,
-the comment is posted as a `🤖`-signed comment on the task issue instead of
-a pull request, and the task is tagged `grain-agent-completed` without the
-issue itself being closed. If the agent *did* push commits, a pull request
-opens for them exactly as it would without any comment at all — calling
-`comment_on_issue` never suppresses a pull request the branch actually
-earned, which is what `complete_analysis` (its predecessor) used to get
-wrong: it skipped the branch check outright whenever the agent called it,
-so an agent confused about which tool to call at the end of a task could
-push real commits and still lose the PR. Nothing is left pending
-afterwards, unlike a question — there is no reply to wait for.
-
-## Documentation
-
-- **[`docs/system-diagram.md`](docs/system-diagram.md)** — the picture:
-  every component, VM, port, and secret, and which trust boundary each
-  arrow crosses.
-- **[`docs/design.md`](docs/design.md)** — the reasoning: why a VM per
-  agent, the credential ladder, the threat model, what earlier revisions
-  traded away.
-- **[`docs/data-model.md`](docs/data-model.md)** — the task model: what a
-  task, a repo role, a folder, a capability, a pull request, a sub-task
-  and a run are, which of them GitHub owns and which grain does, how a
-  task reads more repos than it writes, and how review threads become
-  tasks. A design; no code implements it yet.
-- **[`docs/bootstrap.md`](docs/bootstrap.md)** — the design behind
-  `grain host bootstrap`, which collapses the old fourteen-step setup into
-  one command.
-- **[`docs/runbook.md`](docs/runbook.md)** — the operator procedure, in
-  more detail than this file, including rotation, stranded sandboxes, and
-  the known gaps.
-- **[`docs/host-adapter.md`](docs/host-adapter.md)** — the one
-  platform-specific module, and what a macOS port would have to replace.
-- **[`docs/beads-incus-feasibility.md`](docs/beads-incus-feasibility.md)** —
-  whether to rebuild on incus (a third host-adapter driver) and beads (a
-  graph issue tracker): what each buys, what incus costs the macOS plan,
-  and why beads' source of truth decides it.
-- **[`docs/brand.md`](docs/brand.md)** — the mark: what the figure is,
-  which one is fixed and which one animates, and the colours the UI is
-  built out of.
-- **[`docs/roadmap.md`](docs/roadmap.md)** — item-by-item status.
-- **[`docs/next-session.md`](docs/next-session.md)** — what is left before
-  a first real run, in the order worth doing it. Start here.
-
-> **`design.md`, `system-diagram.md`, `roadmap.md`, and `runbook.md`
-> predate the move described above** — they still describe `claude -p`
-> running on the sandbox with a login credential there. They are accurate
-> on everything else. The code, `provision/`, `next-session.md`, and this
-> file are current; for the live findings behind the change, read
-> `grain/automation/dispatch.py`'s and `mcp_server.py`'s module
-> docstrings.
-
-Read the ["Status and limits"](#status-and-limits) section before pointing
-this at a repo you care about.
-
----
-
-## Requirements
-
-**The host** is a Debian machine with nested virtualization — the design
-targets a GCP `n2-highmem-4` (4 vCPU, 32 GB), and that shape has been
-load-tested with two sandboxes plus the controller running real `kind`
-clusters and real from-source builds concurrently. CPU binds before
-memory; see [`docs/design.md`](docs/design.md)'s resource budget.
+`pkg/` holds every package here that a `cmd/` binary or another package
+imports; `cmd/` holds `main` packages only, per the standard Go project
+layout. `capability/` is the folder every model.CapabilityProvider lives
+under, `gcpkey` included — before this rename it sat at the top level
+instead, which is exactly the inconsistency bwsalmon/agents#248 asked to
+fix.
 
 ```sh
-ls /dev/kvm                       # must exist — nested virt is off by default on GCP
-sudo apt-get install -y \
-  qemu-system-x86 qemu-utils libvirt-daemon-system cloud-image-utils \
-  nftables python3 git openssh-client curl
+cd v2 && go test ./...
 ```
 
-`grain` itself is **stdlib-only Python 3.11+** — see `pyproject.toml`,
-`dependencies = []`. There is nothing to `pip install`, on the host or on
-the controller. The tools above are what the libvirt driver shells out to:
-`virsh` (pinned to `qemu:///system`), `qemu-img`, `cloud-localds`, `nft`,
-`ssh`.
-
-**The guests** are provisioned from a stock Debian cloud image by the two
-scripts in `provision/`. Fetch the image once:
-
-```sh
-sudo mkdir -p /var/lib/grain/images
-curl -fsSL -o /var/lib/grain/images/debian-12.qcow2 \
-  https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
-```
-
-`Cluster.image` (`grain/inventory.py`) still defaults to the bare string
-`"debian-12"`, so name the real path — either per-invocation with the
-global `--image` flag, or once in `/var/lib/grain/cluster.toml`:
-
-```toml
-sandbox_count = 2
-image = "/var/lib/grain/images/debian-12.qcow2"
-# subnet, bridge, and the per-role sizes keep their defaults unless set
-```
-
-**Off-host** you need a GitHub credential for the target repo (details
-under [Configure](#configure)) and a Claude Code login for the pool — one,
-not one per sandbox. A GCP service account is optional, for agents that
-need cloud access.
-
-## Install
-
-There is no package and no entry point — `grain` is invoked as
-`python3 -m grain.cli`, wrapped by `bin/grain` (`exec python3 -m grain.cli
-"$@"`, resolved against its own real path so it works from anywhere it's
-symlinked onto `PATH`, not just from inside the checkout). Clone it
-wherever you run it, then put that wrapper on `PATH`:
-
-```sh
-git clone https://github.com/bwsalmon/grain
-cd grain
-sudo ln -sf "$(pwd)/bin/grain" /usr/local/bin/grain   # the rest of this file assumes it
-```
-
-The same tree is deployed twice: **on the host**, where `grain host …`
-drives the hypervisor, and **on the controller** at `/opt/grain`, where
-everything else runs. Which machine a command belongs on is not
-cosmetic — the controller is the only one with `/data` and the
-credentials. `bin/grain` is symlinked onto the controller's `PATH`
-automatically (`provision/controller.sh`, and `terraform/gcp/files/deploy.sh`
-for the GCP host that plays the same role there) — this manual step is only
-needed for a host you set up yourself.
-
-| Command group | Runs on |
-|---|---|
-| `grain host up/create/start/stop/destroy/recreate/status/rules/egress` | host |
-| `grain host bootstrap/wait/deploy`, `grain controller configure`, `grain sandbox login` | host (they use the admin SSH key) |
-| `grain host cleanup/health` | controller (they reach sandboxes over the controller's own key) |
-| `grain automation …`, `grain sessions …`, `grain metadata …`, `grain github audit` | controller |
-| `python3 -m grain.proxy.server` | controller |
-
-Global flags go **before** the subcommand group: `--data-dir` (default
-`/data`), `--sandboxes`, `--image`, `--cluster-file` (default
-`/var/lib/grain/cluster.toml`), `--config-dir`, `--admin-ssh-public-key`,
-`--controller-ssh-public-key`, `--dry-run`. So
-`grain --data-dir /data automation run-once`, never
-`grain automation run-once --data-dir /data`.
-
-### Read before you apply
-
-This program rewrites the firewall of a machine you may only be able to
-reach through that firewall. Both escape hatches are first-class:
-
-```sh
-grain host rules                  # print the ruleset, apply nothing
-grain --dry-run host up           # print every command, run none
-```
-
-## Bring it up
-
-### The one-command path
-
-```sh
-sudo python3 -m grain.cli \
-  --image /var/lib/grain/images/debian-12.qcow2 \
-  host bootstrap \
-    --task-repo your-org/agent-tasks \
-    --target-repo your-org/your-repo \
-    --github-token-file /path/to/token \
-    --claude-credentials-file ~/.claude/.credentials.json
-```
-
-`--github-token-file -` reads the token from stdin instead. Both
-credential flags are optional on a re-run: a bare re-run does not clobber
-what is already in place.
-
-`grain/bootstrap.py` sequences eleven stages: preflight, an admin SSH
-keypair generated if none exists yet (`/var/lib/grain/admin-ssh{,.pub}` by
-default — trusted by the controller *and* every sandbox), network up,
-controller created and booted, wait for SSH and cloud-init, the
-controller's own key read back automatically, this tree deployed to
-`/opt/grain`, `/data` configured (repo config, GitHub token, Claude
-credential), every sandbox created and given a git-proxy token, the git
-proxy and automation timer enabled, and a verify pass.
-
-**No state file** — every stage converges from observed reality, so a
-re-run after a failure resumes rather than redoing completed work.
-`--dry-run` previews every command with nothing touched. Stage order is not
-reorderable: the controller's key has to be read back *before* any sandbox
-is created, since sandbox creation is what embeds it as an authorized key.
-
-The sections below walk through what each stage does, for debugging it or
-doing a step by hand.
-
-### On GCP, from a config repo
-
-[`templates/gcp/`](templates/gcp/) is a repository template
-that does everything above on GCP with nobody SSHing anywhere. Fork it and
-it holds only the deployment's configuration and its two workflows — the
-Terraform module and the scripts it ships into instance metadata live in
-this repo's own [`terraform/gcp/`](terraform/gcp/), and the deploy steps
-themselves in [`ci/`](ci/), so the workflow a fork owns is wiring rather
-than logic. All of it is pulled fresh by both workflows, pinned to the
-same `grain_ref` the deployment already uses to fetch grain onto the host,
-so a fork never carries a copy of any of it that could drift. Terraform creates the host — nested
-virtualization on, a persistent disk for `/var/lib/grain`, and a service
-account whose roles are one committed list — GitHub Actions applies it on
-every push to `main`, and a small service on the host watches instance
-metadata and re-runs `host bootstrap` whenever the config changes.
-
-That repo is also the task repo: an issue filed there and labelled
-`grain-agent` is what the agents pick up, so the queue and the deployment
-that serves it are one thing to set up, not two.
-
-The GitHub token and the Claude Code token live in its Actions secrets,
-which the deploy workflow pushes straight into the host's own instance
-metadata; the host reads them back locally, with no GCP credential of its
-own, so no separate GCP service ever holds them and no runner or SSH
-session ever touches the host — the arrangement
-[`docs/design.md`](docs/design.md#where-credentials-should-live) prefers.
-Everything else — machine type, sandbox count, target repos, IAM roles —
-is a diff you review before it ships.
-
-### 1. Network
-
-```sh
-sudo python3 -m grain.cli host rules      # read it first
-sudo python3 -m grain.cli host up
-```
-
-Creates the `br-grain` bridge and applies the nftables policy: sandboxes
-reach the git proxy and nothing else, sandbox↔sandbox is dropped,
-anti-spoofing rules pin each tap to its assigned address. Idempotent —
-re-run it after any inventory change.
-
-Egress from sandboxes is **open by default**, because agents need the
-internet for dependencies. `grain host egress allowlist` is the opt-in
-tightening; be honest with yourself that open egress means a compromised
-sandbox can exfiltrate whatever it can read.
-
-The host's own INPUT chain is deliberately *not* managed —
-`grain host rules --input-chain` renders one for hosts that need it, and
-nothing applies it automatically.
-
-### 2. Controller VM
-
-```sh
-sudo python3 -m grain.cli host create controller --provision provision/controller.sh
-sudo python3 -m grain.cli host wait controller
-sudo python3 -m grain.cli host status
-```
-
-Use the `controller` target specifically — `create`/`recreate` refuse
-`--provision` with `all`, since the controller and sandboxes take
-different scripts.
-
-`provision/controller.sh` installs Python, `gcloud` (for
-`gemini_keys.py`/`gcp_keys.py`'s own gcloud calls), the Claude Code CLI, a
-system user (`grain-agent`, for `claude -p` and the MCP server it spawns),
-the `/data/{secrets,config,state}` layout, and the `grain-automation.timer`
-/ `grain-git-proxy.service` units (**installed but left disabled**). It also
-generates the controller's own SSH keypair at
-`/data/secrets/controller-ssh{,.pub}`, idempotently — group-readable by
-`grain-agent`, which needs it to reach the sandbox it was dispatched
-against.
-
-It deliberately does **not** deploy this repo's code and does **not**
-enable any service. No secret is ever baked into a provisioning script,
-and both of those steps need real data.
-
-**Carry the controller's public key to the host.** The key is generated
-*on* the controller, and `LibvirtAdapter` — which runs *on the host* —
-needs it to inject as each sandbox's authorized key. Do this before
-creating sandboxes; a sandbox created first gets no controller-role
-authorized key at all and is unreachable from the automation dispatch path
-(though still reachable by the admin key below).
-
-```sh
-ssh -i /var/lib/grain/admin-ssh debian@10.100.0.2 \
-  cat /data/secrets/controller-ssh.pub \
-  | sudo tee /var/lib/grain/controller-ssh.pub > /dev/null
-```
-
-`/var/lib/grain/controller-ssh.pub` is the default
-`--controller-ssh-public-key` path; override the flag to keep it elsewhere.
-(`host bootstrap` does all of this automatically, including detecting a
-*changed* controller key and repairing existing sandboxes.)
-
-### Admin access
-
-Two keys, two purposes (`grain/adapter/libvirt.py`, `LibvirtAdapter.create`):
-an **admin** key, trusted by the controller *and* every sandbox, for setup,
-repair, and debugging; the **controller**'s own key, trusted by sandboxes
-only, for the automation dispatch path and the MCP server's tool calls.
-`host bootstrap` generates the admin key itself if
-`--admin-ssh-public-key` doesn't exist yet.
-
-```sh
-sudo python3 -m grain.cli sandbox login sandbox-0     # or 'controller'
-```
-
-Direct, interactive SSH using the admin key — no hop through the
-controller first. For a stuck `kind` cluster, a wedged docker daemon,
-anything `grain host health`/`cleanup`/`sessions browse` doesn't give
-enough visibility into.
-
-### 3. Sandbox VMs
-
-```sh
-sudo python3 -m grain.cli host create sandboxes --provision provision/sandbox.sh
-sudo python3 -m grain.cli host status
-```
-
-`provision/sandbox.sh` installs Docker from the official repo, `kind`, and
-the usual agent toolchain, raises the inotify limits `kind` needs (their
-absence fails as opaque `too many open files` errors), and pre-pulls the
-kind node image. It installs **no** Claude Code and places **no**
-credential — there is nothing on a sandbox to harden anymore.
-
-### 4. Deploy the code to the controller
-
-```sh
-sudo python3 -m grain.cli host deploy
-```
-
-No credential needed — `grain/adapter/deploy.py` pipes a `tar` of this
-working tree over the admin SSH path and extracts it as root; `/opt/grain`
-is created empty by the provisioning script. Since `grain` has no
-third-party dependencies, the source tree is the whole deployment.
-
-## Configure
-
-Everything below lives on the controller, under `/data`. This is the
-per-deployment data that a provisioning script has no business holding.
-
-```sh
-grain controller configure --task-repo owner/agent-tasks \
-  --target-repo owner/service-a --target-repo owner/service-b \
-  --github-token-file PATH \
-  --claude-credentials-file PATH
-```
-
-writes `automation.json` (the task repo), `repo-allowlist.json` (the
-target repos), the token file, the `credentials.json` entries pointing
-every one of those repos at it, and both copies of the Claude
-credential — over the admin SSH path, stdin, never argv. `host bootstrap`
-calls this for you; running it on its own is for adding a repo, rotating a
-token, or placing a Claude credential later without a full bootstrap
-re-run.
-
-```
-/data/
-  secrets/
-    controller-ssh, controller-ssh.pub   # generated by provision/controller.sh
-    claude-credentials.json              # the pool's one Claude Code login
-    sandbox-tokens.json                  # sandbox name -> git-proxy bearer token
-    gcp-service-account.json             # optional; 0600 -- gemini_keys.py's own primary key
-    github/
-      credentials.json                   # repo pattern -> credential name
-      <name>.token                       # one 0600 file per name above
-  config/
-    repo-allowlist.json                  # ["owner/repo", ...], default-deny
-    automation.json                      # AutomationConfig
-    gcp-key.json                         # optional; agent SA email + project id (bwsalmon/agents#126)
-    sandbox-github-key.json              # sandbox name -> named credential override, if any
-  state/
-    automation/state.json, audit.log, sessions/
-    automation/units/grain-task-<sandbox>/
-      prompt.md, mcp-config.json, transcript.jsonl   # one dir per dispatch
-    git-proxy/audit.log
-```
-
-**The Claude credential.** One login for the whole pool, on the controller
-only. `configure_claude_credentials` writes two copies: a root-owned
-reference copy at `/data/secrets/claude-credentials.json`, and the live
-copy `claude -p` actually reads at
-`/home/grain-agent/.claude/.credentials.json`, owned by `grain-agent`.
-Nothing places a Claude credential on a sandbox, and nothing should.
-
-**GitHub credentials.** `credentials.json` maps a repo pattern to a
-credential name, narrowest match wins, and the proxy records which one
-served each request:
-
-```json
-{"your-org/your-repo": "bot", "your-org/*": "bot", "*": "personal"}
-```
-
-Every value other than the literal `"anonymous"` needs a matching
-`<name>.token` file beside it — a `0600` file holding the raw token.
-Prefer a dedicated machine account invited as a collaborator (that needs
-repo admin, not org admin) over a personal token.
-
-**Withhold `workflow`, `delete_repo`, `write:org`, and every `admin:*`
-scope.** The `workflow` one is the non-obvious privilege escalation: an
-agent that can edit `.github/workflows/**` can make CI run code of its
-choosing with whatever secrets that workflow holds. Withholding the scope
-makes *GitHub* reject the push, which is a control your bugs cannot
-bypass. `grain github audit` checks this — see [Operate](#operate). A task
-that genuinely needs such a scope names a separate, narrowly-provisioned
-credential instead of widening the default one — see "Label an issue
-`grain-github-<name>`" below; `grain github audit` will (correctly) flag
-that credential too, since the scope really is there, deliberately.
-
-**Repo allowlist**, `/data/config/repo-allowlist.json` — the *target*
-repos this deployment may work in. Enforced twice against one file: by the
-git proxy on every fetch and push, and by the orchestrator when it resolves
-a task's `/repo` directive, so a task naming an off-list repo is parked
-with an explanation instead of failing later as an opaque clone error. The
-task repo does not belong here — no sandbox ever clones it. A plain JSON
-array, default-deny, hot-reloaded on every request with no restart:
-
-```json
-["your-org/your-repo"]
-```
-
-A repo must be on this list *and* covered by a `credentials.json` pattern
-before the proxy forwards anything for it.
-
-**Sandbox tokens**, `/data/secrets/sandbox-tokens.json` — what a
-sandbox's git credential helper presents to the proxy as its HTTP Basic
-password:
-
-```json
-{"sandbox-0": "…", "sandbox-1": "…"}
-```
-
-`host bootstrap` mints one per sandbox before the proxy first starts, which
-matters: the proxy loads this file once at startup, so a token minted only
-lazily on first dispatch would make that very first dispatch fail
-authentication (a live-found bug, fixed by `ensure_sandbox_tokens`). To add
-one by hand, `python3 -c 'import secrets; print(secrets.token_hex(32))'`
-and restart `grain-git-proxy.service`.
-
-**Automation**, `/data/config/automation.json` — `task_owner` and
-`task_repo` name the *task* repo (the polled queue) and are the only fields
-with no default. Which repos tasks may dispatch *into* is not configured
-here: that is `repo-allowlist.json`, the same list the git proxy enforces.
-
-```json
-{"task_owner": "your-org", "task_repo": "agent-tasks",
- "default_target_repo": null}
-```
-
-`default_target_repo` is the target for a task carrying no `/repo`
-directive. `null` (the default) makes the directive mandatory: a task
-without one is parked with a comment rather than dispatched at a guess.
-A single-repo deployment sets it to its own repo and writes no directives
-at all — which is what `grain controller configure --task-repo X` with no
-`--target-repo` produces.
-
-The defaults worth knowing: `trigger_label: "grain-agent"`,
-`in_progress_label: "grain-agent-in-progress"`,
-`awaiting_reply_label: "grain-agent-awaiting-reply"`,
-`gemini_key_label: "grain-gemini-key"`,
-`ssh_user: "debian"`, `ssh_key_path: "/data/secrets/controller-ssh"`,
-`runs_per_hour: 60`, `max_runtime_minutes: 120`. Also
-`github_host: "api.github.com"`, `git_forward_host: "github.com"`, and
-`github_use_tls: true` — right for every real deployment, and set
-otherwise only to point a live test at a mock GitHub
-(`--github-host`/`--git-forward-host`/`--github-insecure-http`).
-
-**Branch protection on the target repo.** Not scriptable from here — it
-needs admin on that repo — and it is load-bearing rather than optional:
-no direct pushes to the default branch from the agent credential, no
-force-push, no deletion, PRs required. The design deliberately enforces
-write safety at GitHub instead of by parsing pack files, because getting
-that wrong fails open.
-
-**Start the services**, now that `/opt/grain` holds code and `/data`
-holds credentials:
-
-```sh
-sudo systemctl enable --now grain-git-proxy.service
-sudo systemctl enable --now grain-automation.timer     # two-minute cadence
-```
-
-`systemctl cat grain-automation.timer` shows the exact unit; edit
-`/etc/systemd/system/*` and `daemon-reload` for a different cadence.
-
-**GCP (optional, bwsalmon/agents#126).** No key file to place by hand for
-this one — the controller mints its own, on demand, as the host's own
-attached identity:
-
-```sh
-grain controller configure \
-  --gcp-agent-service-account-email grain-agent@my-project.iam.gserviceaccount.com \
-  --gcp-project-id my-project
-```
-
-This writes `/data/config/gcp-key.json`. From the next dispatch on, every
-sandbox gets a freshly minted, short-lived key for that account pushed
-into it at `~/.gcp-service-account.json`, revoked once the task's slot
-frees (or after 24 hours regardless — see `grain/automation/gcp_keys.py`).
-The agent's own prompt tells it the path and how to use it; nothing is
-baked into the sandbox image.
-
-**Verify before trusting it:**
-
-```sh
-grain --data-dir /data automation status     # every sandbox should read `free`
-grain --data-dir /data github audit          # no `flagged` verdicts
-grain host health                            # every sandbox healthy
-```
-
-## Use it
-
-**File the task in the task repo, and label it `grain-agent`.** One repo
-is the agent set's queue: it is the only repo polled, labelled, or
-commented on. The code being changed is a *target* repo, named by the task
-itself:
-
-```
-Something is broken in the widget service.
-
-/repo acme/widget-service
-/pr 42            (optional: continue that PR instead of a fresh branch)
-/base develop     (optional: PR base; default is the target repo's own)
-```
-
-A directive can sit anywhere in the body, and a maintainer can add or
-correct one by replying to the issue — replies count as directives, from
-the same people who could have applied the label. `default_target_repo` in
-`automation.json` covers a deployment whose task repo *is* its code: set
-it and no task needs a `/repo` line at all.
-
-A target repo has to be on `/data/config/repo-allowlist.json`, the same
-list the git proxy enforces. A task naming anything else — or naming
-nothing, with no default configured — is **parked**: the orchestrator
-comments saying exactly what is wrong, swaps the trigger label for
-`grain-agent-awaiting-reply`, and picks the task back up once a maintainer
-replies. Nothing dispatches on a guess about which repo was meant.
-
-The next `run-once` pass picks a labelled task up, moves the label to
-`grain-agent-in-progress`, and claims a free sandbox. It also applies a
-second label naming *which* sandbox took it — `grain-agent-working-0`,
-`grain-agent-working-1`, and so on — re-applied every `run-once` cycle for
-as long as the task stays in progress and removed the moment it stops,
-however it stops (bwsalmon/agents#95, bwsalmon/agents#101), so it never
-sits stale once the work has moved on or a human has knocked it off by
-hand. Dispatch is two-sided:
-
-- On the **sandbox**: the workspace at `/home/debian/workspace` is cloned
-  (first task) or fetched-and-reset (every task after) through the git
-  proxy, and a git credential helper is pointed at that sandbox's proxy
-  token — delivered over stdin, never argv, so the token never lands in a
-  clone URL, in `ps`, or in command logs.
-- On the **controller**: `claude -p` starts as the transient unit
-  `grain-task-<sandbox>`, running as `grain-agent`, with the prompt on
-  stdin and the four MCP tools pointed at that sandbox. Untrusted issue
-  content never becomes a shell-interpolated argument anywhere in this
-  path.
-
-The agent works in the sandbox through those tools and pushes to
-`grain/issue-<N>` — `<N>` being the *task* issue's number. When the unit
-finishes, the sweeper verifies that branch exists in the target repo and
-opens the PR there, closing the task issue by a fully qualified
-`Closes owner/tasks#N` reference.
-
-The branch name is computed by the controller, never taken from the
-agent's own report — the prompt it received came from untrusted issue
-content, so nothing the agent says about what it pushed is trusted as an
-input to a GitHub write.
-
-**Add `/pr 42` to a task** to have an agent address review feedback, fix
-CI, or continue work in flight on an existing pull request in the target
-repo. Same pool, same rate limit; the workspace lands on the PR's own
-branch with its existing history, the prompt carries the PR's review
-comments, and it pushes more commits to that branch rather than opening a
-new one. The labels and the conversation still live on the task issue — no
-label of ours is ever applied in a target repo.
-
-**Add `/review true` alongside `/pr 42`** to have an agent *read* that
-pull request instead of continuing the work on it. The workspace lands on
-the same branch `/pr` alone would use, but the agent is told not to push
-anything — it leaves feedback with a dedicated tool instead, optionally
-attached to a specific file and line. Once the run finishes, everything it
-left is posted as a single **draft** review on the pull request: GitHub
-leaves a review with no `event` in the request `PENDING`, visible only to
-the credential that created it, until a human opens it on github.com and
-submits it themselves — an agent never approves, requests changes on, or
-even plain-comments its own (or anyone else's) code. `/review` with no
-`/pr` alongside it is refused and the task is parked, the same way an
-unlisted `/repo` is: a review needs a pull request to know which branch to
-read and which PR to post its draft against.
-
-**A completed task's PR is watched, too** (bwsalmon/agents#83): each
-`run-once` pass checks every still-open PR against a definite conflict
-(GitHub's own `mergeable` field reading `false`) or a definite failing
-check, and the first time either shows up for a given PR, grain files a
-*new* task suggesting the fix — never a second one for the same PR. That
-task is filed with `grain-agent-needs-approval`, not the trigger label, so
-it sits visibly in the queue without being picked up on its own; a comment
-on the original task links to it. Apply the trigger label to it, the same
-action that starts every other task, or comment `/lgtm` on it
-(bwsalmon/agents#136) — either one lets the agent set attempt the fix on
-a fresh branch built on top of the original PR's own branch — a PR stacked
-on that PR, not a second one against the target repo's default branch.
-That new task also carries `/auto-merge`, so once its own PR reads clean
-(no conflict, no pending or failing check) grain merges it straight into
-the original PR's branch itself — no second round of human review for the
-fix. A stuck fix (one that itself ends up with a conflict or a failing
-check) is left open rather than chained into another suggestion.
-
-**Label a task `grain-gemini-key`** to have a short-lived Gemini API key
-minted for that task, placed in its sandbox (the prompt tells the agent
-exactly where), and revoked automatically once the task's slot frees —
-success, failure, or stranded, whichever comes first. A label, not a body
-directive (bwsalmon/agents#49): the same "a human decided this" trust
-tier the trigger label itself carries, applied at any point before or
-during the run rather than parsed out of the issue's own untrusted text.
-Off by default: a deployment enables it once with `grain controller
-configure --gemini-project-id <project>` (see `docs/runbook.md`, "Enabling
-`grain-gemini-key`"); a task carrying the label before that's done is
-parked with a comment, the same as an unlisted `/repo`. The raw key never
-rides in the prompt file, only its path in the sandbox — see
-`grain/automation/gemini_keys.py` for why this is minted on the
-controller's own account rather than the sandbox-facing metadata broker.
-
-**Label a task `grain-scratch-repo`** (bwsalmon/agents#159) to dispatch it
-into a repo dedicated to testing grain itself, one per sandbox slot
-(`owner/grain-scratch-<sandbox>`), instead of anywhere named by `/repo` —
-the label overrides any `/repo` line entirely, since which of the scratch
-repos applies isn't known until a sandbox is actually picked. Off by
-default: a deployment enables it once with `grain controller configure
---scratch-repo-owner <owner>`; a task carrying the label before that's
-done is parked with a comment, the same as an unlisted `/repo`.
-Authentication is nothing custom (bwsalmon/agents#186): a personal access
-token with elevated permissions (Contents, Issues, Pull requests, and
-Checks — nothing else grain's own GitHub client ever exercises), placed
-like any other named credential (`grain controller configure --github-key
-scratch=PATH`), reaches every scratch repo through an `owner/*`
-`credentials.json` pattern an operator adds by hand — see
-`grain/automation/scratch_repo.py` and docs/runbook.md, "Enabling
-`grain-scratch-repo`", for the full setup. `--scratch-repo-owner` itself
-is plain, non-secret config: it only names which repo a given sandbox's
-scratch task should land in, and carries no credential of its own.
-
-**Label a task `grain-self-debug`** (bwsalmon/agents#62, #86) to give the
-agent four extra tools, all strictly read-only, for triaging a bug in
-grain itself rather than the target repo's own code:
-
-- `read_grain_logs`: recent `journalctl` entries for grain's own
-  controller services, `grain-automation.service` and
-  `grain-git-proxy.service` — or, via a third `unit` value `grain-task`,
-  this dispatch's own controller-side `claude -p` unit. `claude -p`'s
-  stdout is redirected to the transcript file `capture.py` reads, but its
-  stderr never is, so `grain-task` is the only way to see why a run
-  crashed before writing anything (bwsalmon/agents#97).
-- `check_grain_health`: the same ssh/systemd/docker/disk checks `grain
-  host health` reports to an operator, against either the task's assigned
-  sandbox or the controller itself.
-- `read_grain_config`: one of grain's own non-secret config files under
-  `/data/config` on the controller (`automation.json`,
-  `repo-allowlist.json`, `gemini-key.json`, `gcp-key.json`,
-  `scratch-repo.json`, `sandbox-github-key.json`) — every credential and
-  token this deployment holds lives under `/data/secrets` instead, which
-  none of these tools can reach.
-- `read_automation_audit_log`: recent entries from the dispatch/sweep
-  audit log — one line per state-machine decision the orchestrator made
-  (a task dispatched, skipped, succeeded, failed, or stranded, and why).
-
-Same trust tier as the other two labels above, and on unconditionally at
-the account level (`provision/controller.sh` grants `grain-agent`
-read-only `systemd-journal` group membership regardless of whether any
-task ever uses it), so unlike `grain-gemini-key` there is no separate
-`controller configure` step — the label alone turns these tools on for
-that task. Strictly read-only throughout: `read_grain_logs` can only read
-the journal for one of those three fixed units, `check_grain_health` never
-mutates anything it checks, `read_grain_config` is checked against a
-fixed allowlist of non-secret file names rather than a raw path, and
-`read_automation_audit_log` only ever reads the one audit log file — none
-of the four can write to anything or reach any other file, unit, or
-credential on the controller.
-
-**Label a task `grain-self-repair`** (bwsalmon/agents#99) to give the
-agent four more tools — the mutating counterpart to `grain-self-debug`
-above, kept behind its own label since none of these are read-only:
-
-- `restart_grain_service`: `systemctl restart` on
-  `grain-automation.service` or `grain-git-proxy.service`, for a wedged
-  service short of rebooting the whole controller.
-- `reboot_sandbox`: reboot the task's own assigned sandbox VM.
-- `reformat_sandbox`: run the same between-task hygiene (`kind delete
-  clusters --all`, `docker system prune -af --volumes`) grain already
-  runs automatically once a task finishes, callable mid-task instead of
-  only between tasks.
-- `reboot_controller`: reboot the controller VM this task's own session is
-  running on — a last resort that ends the task's turn immediately and
-  interrupts any other task running concurrently on the same controller,
-  recovered automatically by grain's own stranded-work sweep once the
-  controller is back.
-
-Same "on unconditionally, no separate `controller configure` step" shape
-as `grain-self-debug` — `provision/controller.sh` grants `grain-agent` a
-narrow, unconditional sudo rule covering exactly the command lines
-`restart_grain_service`/`reboot_controller` need, nothing else. **What it
-deliberately doesn't cover**: rebuilding a sandbox from scratch or
-re-running `grain host bootstrap`, both `HostAdapter` operations against
-the *host* machine's hypervisor that this deployment's controller has no
-credential or network path to reach at all (see `docs/runbook.md`,
-"Enabling `grain-self-repair`," for the gap spelled out in full) — a
-genuinely bad VM still needs an operator's `grain host recreate`.
-
-**Label an issue `grain-github-<name>`** to have that task's git pushes use
-a named credential instead of the deployment's default one — for a task
-that genuinely needs a scope the default deliberately withholds (the
-`workflow` scope, most notably: see "Withhold `workflow`..." above). An
-operator provisions the credential first with `grain controller configure
---github-key <name>=PATH` (or `grain host bootstrap --github-key
-<name>=PATH` on a first-time deploy — see `docs/runbook.md`, "Adding a
-named GitHub key," which also covers threading one through a Terraform/GCP
-deployment's own config repo via `GRAIN_GITHUB_KEYS`). Either way, it
-writes only `/data/secrets/github/<name>.token` — deliberately not a
-`credentials.json` entry, so it never becomes any repo's *default*
-credential, only a task-selected override. A label naming a credential
-that was never provisioned parks the task with a comment, same as an
-unlisted `/repo`; more than one `grain-github-*` label on the same issue
-does too, since which one applies would otherwise be a guess. The override
-applies for exactly that task's lifetime — set right before dispatch,
-cleared the moment its sandbox's slot frees — and, like the trigger label
-itself, only someone who can apply a label can ask for it.
-
-**Requiring a human to apply the label is the prompt-injection gate.**
-Anyone who can file an issue can put text in front of the agent; the
-label is what makes a person decide it runs.
-
-Run a pass by hand, or let the timer do it:
-
-```sh
-grain automation run-once        # sweep stranded work, then poll and dispatch
-grain automation status          # current sandbox -> issue/PR assignments
-```
-
-Agents get git transport only. There is no GitHub API from a sandbox and
-no `gh pr create` — all API work happens on the controller, which is the
-machine that already holds the credential.
-
-### Reading what an agent did
-
-```sh
-grain sessions list                          # trigger, sandbox, outcome, transcript?
-grain sessions list --kind pr --outcome failed
-grain sessions browse                        # curses UI; needs a real terminal
-```
-
-`claude -p` is run with `--output-format stream-json --verbose`, redirected
-to that dispatch's `transcript.jsonl`, and `--no-session-persistence` so
-Claude Code's own session store doesn't accumulate forever under the shared
-`grain-agent` account. Trajectories are captured **on completion**, before
-a sandbox's slot is freed — the unit name (and therefore the transcript
-path) is fixed per sandbox, so the next task overwrites it and
-fetch-on-demand would find the wrong task's content or none at all.
-
-Every dispatch and sweep decision is one JSON object per line in
-`/data/state/automation/audit.log`, with the outcome (`dispatched`,
-`succeeded`, `failed`, `stranded`, or a `skipped: …` reason). It is the
-first place to look when a run surprises you.
-
-## Operate
-
-```sh
-grain host status                    # VM states and addresses          (host)
-grain host health [name]             # SSH/docker/systemd/disk          (controller)
-grain host cleanup [name]            # kind delete + docker prune       (controller)
-grain host recreate <name> --provision provision/sandbox.sh            # (host)
-grain github audit                   # withheld-scope check             (controller)
-```
-
-`health` and `audit` both exit nonzero on a problem, so they drop
-straight into a cron job.
-
-**The sweeper handles most of it already.** Each `run-once` pass, before
-dispatching: it reads each tracked unit's state on the controller, a
-finished unit gets its label moved and its PR opened, a failed or stranded
-one gets the issue re-labelled and requeued, and either way the session's
-trajectory is captured, between-task cleanup runs on the sandbox (`kind
-delete clusters --all`, `docker system prune -af --volumes`), and a health
-check follows. A sandbox is clean the moment its slot frees.
-
-What is **not** automatic:
-
-- **A wedged-but-`ACTIVE` unit.** The sweeper can't tell "slow" from
-  "stuck", so it waits for `max_runtime_minutes`. Stop the unit by hand
-  (`sudo systemctl stop grain-task-<sandbox>` — on the **controller** now,
-  not the sandbox) and re-run `automation run-once` to let the sweep
-  collect it.
-- **Acting on a health warning.** Both `grain host health` and the
-  sweeper's own check *report*; neither quarantines a degraded sandbox or
-  stops dispatching to it. `grain host recreate <name>` is the usual fix.
-- **Recreating on a cadence.** Recreate is the deploy path for image
-  updates and the fix for a filling disk, and weekly is reasonable —
-  nothing schedules it. It is the routine operation most likely to be
-  forgotten until something breaks.
-- **Token rotation on recreate.** Despite what the design describes,
-  `recreate()` does not touch `sandbox-tokens.json` today. Rotate as a
-  separate step.
-
-**Rotation is uniformly "replace the file, restart the one service that
-reads it."** `config/` is watched; `secrets/` is not. The git proxy and
-the automation process both load credentials once at construction, so a
-running process keeps using the old token until restarted.
-
-**Backup is `/data`** — a provider snapshot is enough, nothing else in
-the system is stateful. And since the design has no inbound dependency
-(cron polling, no webhooks), **stopping the instance when idle is
-supported and cuts the bill roughly threefold.**
-
-### Adding a target repo
-
-Adding a repo tasks may dispatch into — the task repo itself is configured
-once, in `automation.json`, and adding another one means a second
-deployment.
-
-1. Add `"owner/repo"` to `repo-allowlist.json` (hot-reloaded). Tasks can
-   then name it with `/repo owner/repo`; until it is on the list, one that
-   does is parked with a comment saying so.
-2. Add a `credentials.json` entry pointing at a credential with a
-   matching token file.
-3. Apply branch protection on that repo — GitHub-side, manual, needed.
-4. `grain github audit`, and confirm the covering credential isn't
-   `flagged`.
-5. If using a machine account, invite it as a collaborator.
-
-## Development
-
-```sh
-python3 -m pytest              # unit tests: no hypervisor, no network, no root
-```
-
-705 unit tests pass on a bare machine; the live suites skip themselves
-cleanly there, so the command above is safe anywhere. They come in when the
-machine can run them:
-
-| Suite | Needs |
-|---|---|
-| `test_net_integration.py` | root and a reachable netfilter |
-| `test_vm_integration.py` | `/dev/kvm`, `qemu:///system`, `br-grain` up (it fetches the base image itself if missing) — includes an MCP-server-over-real-SSH round trip |
-| `test_controller_integration.py` | the same, but the base image must already be cached |
-| `test_bootstrap_integration.py` | the same — the two-key sandbox and the deploy/configure verbs |
-| `test_live_issue_to_pr.py` | the same — a full issue→PR run against a mocked GitHub |
-
-`.github/workflows/tests.yml` runs that same unscoped `python3 -m pytest`
-on every pull request and every push to `main`, against Python 3.11 and
-3.13 — the floor `pyproject.toml` declares and the stock interpreter on
-the Debian the host runs. A hosted runner has no `/dev/kvm` and no
-netfilter, so the live suites skip there exactly as they do on a bare
-machine, and the job holds no credential of any kind: it runs PR-branch
-code before a human has read it.
-
-```sh
-python3 -m tests.loadtest      # boot the real pool and measure it under kind + build load
-```
-
-> The live suites default to the same VM names a real deployment uses
-> (`controller`, `sandbox-0`), so an unscoped `pytest` on a host with a
-> live cluster up will destroy it. Scope it to specific files, or stop the
-> cluster first.
-
-This project holds itself to **verify live, not just unit tests**, and the
-record is worth the cost: the credential leak that moved `claude -p` to the
-controller, `--allowedTools` not actually emptying the tool roster, a
-root-owned unit directory blocking the agent's own transcript redirect,
-`claude` missing from a non-login shell's `PATH`, `git http-backend`
-denying push even with `GIT_HTTP_EXPORT_ALL=1`, a sandbox's first dispatch
-always failing proxy auth, transient units self-unloading on success — none
-of these were visible on paper. All surfaced by booting a guest and running
-the real thing on it.
-
-Layout:
-
-```
-grain/
-  inventory.py        names, addresses, ports, specs — one source of truth
-  run.py              command execution behind an interface (Real/DryRun/Fake)
-  cli.py              the whole operator surface
-  bootstrap.py        the eleven-stage `host bootstrap` sequencer
-  adapter/            the only platform-specific code: libvirt, lima, nftables
-  automation/         poll, dispatch, sweep, capture, session history
-    dispatch.py       starts claude -p on the controller, per sandbox
-    mcp_server.py     the four tools that are the agent's only reach
-    gcp_keys.py       mints/revokes a GCP service-account key per dispatch
-  proxy/              the git proxy: allowlist, tokens, credentials, audit
-provision/            controller.sh, sandbox.sh — cloud-init user-data
-ci/                   the deploy steps a config repo's own CI runs
-terraform/gcp/        the GCP module, and the scripts it ships to the host
-templates/gcp/        the config-repo template: configuration and workflows
-tests/
-  loadtest.py         the harness behind the resource-budget numbers
-  test_*.py           unit suites, plus the live suites in the table above
-```
-
-Addresses are **assigned, never discovered**: the inventory decides them
-and the adapter tells the VM. Asking the hypervisor afterwards would let
-the firewall rules and the VMs disagree about who is who, which is
-exactly what the anti-spoofing rules exist to prevent.
-
-## Status and limits
-
-The whole mechanical pipeline works, and most of it has been verified
-against real VMs — including a real `grain host bootstrap` run driving a
-real deployed `grain-automation.timer`, and a real `claude -p` dispatch,
-both against a mock GitHub server. What is genuinely not finished:
-
-- **Nothing here has run against a real GitHub repo or a real
-  credential.** Issue→PR is verified end to end against a mocked GitHub;
-  `grain github audit` is verified against scripted response shapes, not a
-  live token. Both need a real target repo with admin access.
-- **The controller-side agent has not completed a real issue→PR run.** The
-  mechanism is live-verified — the MCP tools over real SSH against a real
-  sandbox (including timeout enforcement), and all three sweep scenarios
-  (happy path, nonzero exit, exit-zero-no-push) end to end against real
-  infrastructure with a scripted stand-in for `claude`. What hasn't
-  happened since the move is a real logged-in agent working a real issue
-  through those four tools and pushing.
-- **No token mint has been verified** against a real GCP project.
-- **`git push` through the proxy is exercised live**, by the fake agent in
-  `test_live_issue_to_pr.py` against a real `git http-backend` behind a
-  real `GitProxy` — but never against real GitHub.
-- **Hardening (`docs/roadmap.md` item 7) is half done**: the tooling is
-  built and unit-tested; moving a real repo down the credential ladder and
-  applying branch protection need a real repo.
-
-And what the threat model does **not** defend, stated plainly: sequential
-tasks on one long-lived sandbox (task B inherits task A's filesystem);
-abuse of legitimate access while a sandbox is compromised — including the
-sandbox's own git-proxy token, which is scoped to allow-listed repos but is
-real; exfiltration under the default open-egress policy; malicious code in
-agent output — human PR review is the control, which is why the
-no-push-to-`main` rules are load-bearing; a compromised controller, which
-now runs the agent process *and* holds every credential; a compromised
-host, which owns the hypervisor and therefore every VM; and prompt
-injection via issue content, where requiring a human label is a mitigation
-rather than a guarantee.
+## Why Go
+
+Every substrate this design chose is Go, and one of them decided it:
+**v1's Dolt store embedded only in Go.** A Python controller had to reach
+it by shelling out to the `dolt` CLI, and a CLI has no bind parameters —
+so the Python version carried a module whose whole job was rendering
+untrusted issue titles and comment bodies into statements safely, by
+hand, against MySQL escaping rules it could not test. That module does
+not exist here. `database/sql` has parameters, and writes are real
+transactions rather than a best-effort batch — true when this store was
+Dolt and unchanged now that bwsalmon/agents#366 has replaced it with
+embedded SQLite (`pkg/model/sqlite`).
+
+The rest follows: Incus ships a Go client, so the host adapter becomes API
+calls rather than shelling to `virsh` and parsing output.
+
+## What this actually verifies
+
+The store's tests run against a **real embedded SQLite database** in a
+temp directory — not a fake, not a mock. They prove the DDL is valid, the
+views answer, the state machine walks every transition, and a blocked
+task unblocks itself when its dependency closes. The equivalent Python
+tests could only check the SQL grain *generated*, because there was no
+database engine to run it against without shelling out to a CLI.
+
+`gitproxy`'s `live_test.go` is the same discipline applied one layer up:
+a real bare git repo, served over real smart-HTTP by a real `git
+http-backend` process standing in for GitHub, behind a real `GitProxy`
+whose `Authorizer` reads a real embedded SQLite-backed `model.Store`,
+driven by a scripted (not live-CLI) `antigravity.Framework.Run` calling `run_command`
+the same way an agent would. It proves a task's `Target`/`Reads` are
+enough on their own to let a sandboxed `git clone`/`commit`/`push` reach
+the right repo and nothing else — no allowlist file exists anywhere in
+that test.
+
+## No more cgo
+
+Embedded Dolt needed cgo, and the binary was not static. It pulled in
+`go-icu-regex` and `gozstd`, so `CGO_ENABLED=0` did not build; what came
+out instead dynamically linked `libicu`, `libstdc++` and `libgcc`, and
+building it at all needed ICU's *headers* (`libicu-dev` on Debian/Ubuntu,
+`libicu-devel` on Fedora, a keg-only `brew install icu4c` on macOS with
+its own `CGO_CFLAGS`/`CGO_LDFLAGS`). The Makefile went on to link ICU
+*statically* into the binary targets on top of that, purely so the
+result would not refuse to start against a host whose ICU major version
+did not match the one it was built against — dynamically linked, it
+would have recorded a versioned SONAME (`libicui18n.so.74`) and died at
+exec time on a target shipping a different major, rather than at build
+time where someone would see it.
+
+bwsalmon/agents#366 removed all of it by removing Dolt. `modernc.org/sqlite`
+is a pure-Go transpilation of SQLite with no cgo anywhere in it, so none
+of the above — ICU headers, static linking, SONAME coupling — applies
+anymore; there is nothing here to link against, statically or otherwise.
+The Makefile's `$(CMDS)` target now sets `CGO_ENABLED=0` explicitly on
+its own, but for a narrower and still-real reason: even with no cgo left
+in this module's own dependency graph, `os/user` and `net`'s own
+cgo-based lookups would otherwise still pull in a dynamic link against
+libc, reintroducing the same "binary needs a newer glibc than the
+controller has" coupling ICU used to cause one layer up. Forcing it off
+produces a genuinely static binary with nothing left to carry to the
+controller. `make test`/`make vet` deliberately leave `CGO_ENABLED`
+alone, since `go test -race` needs cgo for the race detector and nothing
+about testing this module ships anywhere.
+
+`make container-build` still runs that same `make build`, out of this
+same Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain --
+the release `packer/kontur/build-guest.sh` builds its guest on (bookworm,
+via the `debootstrap` in `third_party/kontur`'s own Dockerfile) and
+`terraform/gcp/variables.tf` both deploy to -- but the image now exists
+purely to pin the Go compiler
+version, with no C toolchain or system library left for it to carry. The
+Go version is read back out of `go.mod` rather than written down twice,
+and `GOTOOLCHAIN=local` in the image turns a stale image into an error
+naming both versions instead of a silent toolchain download. The tree is
+bind-mounted rather than copied in, so both paths build from one copy of
+the rules; `.container-cache/` keeps the module and build caches, so only
+the first run is cold, and `make clean` removes it with `bin/`. The whole
+checkout is mounted, `.git` included, because `go build` stamps the binary
+with the commit and reads that from the `.git` at the root -- and it is
+mounted with git's `safe.directory` set for it, because the uid inside
+the container need not own the tree (rootless podman maps the invoking
+user to the container's root; Docker with userns-remap remaps it too),
+and git refusing a repository it reads as someone else's stops the build
+outright with `error obtaining VCS status: exit status 128` rather than
+merely leaving the stamp off. Go reports every failure of the git it
+shells out to under that one message, so if it appears anyway the cause
+is something else git cannot get past -- an unreadable index, a worktree
+or submodule whose real gitdir is outside the mount -- and
+`make container-build BUILDVCS=false` (or `make build BUILDVCS=false`,
+which it forwards) gets the build moving at the cost of the stamp, and
+of nothing else. It is
+not the default -- `make build` needs no container engine, is what
+`tests.yml` runs, and on a host that agrees with itself produces the same
+binary.
+
+## Input is a model update, not a GitHub issue
+
+**Done — all three stages have landed.**
+
+A task used to begin its life as a GitHub issue. `PollIssues` listed the
+task repo's labelled issues and turned each into a `model.Task`; the CLI
+and the UI created tasks by creating issues, approved them by swapping
+one label for another, attached a capability by adding a label, and
+carried the conversation in the issue's comment thread. GitHub was the
+input, and the store was a projection of it.
+
+That is being inverted. The CLI and the UI push model updates directly,
+the store is the record, and GitHub keeps exactly one artifact: the pull
+request a run produces, which tasks are still synced against
+(`SyncPullRequests`, the merge queue, check runs — all unchanged). Issues
+go away entirely rather than staying on as a mirror, because a mirror is
+just the two-writer problem in a new shape: a second place a task's state
+lives, with nothing reconciling the two (the same objection the "The UI"
+section below already raises against `pkg/ui` and the daemon both writing
+the same issue today).
+
+What that costs, stated plainly: the conversation, the audit trail and
+the "somewhere a human can watch this" surface all stop being GitHub's
+and become grain's, which means grain has to render them. That is what
+`task_comment` is for.
+
+**Landed (stage 1) — identity and the conversation, in `pkg/model`:**
+
+- `Store.NewTaskID` allocates from `task_sequence` instead of a task
+  being named after the issue it came from. Ids are decimal (`"42"`), so
+  the branch is `grain/task-42` where a GitHub-derived id put a whole
+  repo path inside the branch name. `AUTO_INCREMENT` rather than a
+  counter read and written back, because allocation has to stay correct
+  with a controller, a UI and a CLI all writing at once.
+- `model.Comment` plus `Store.AddComment`/`Store.Comments` are the
+  conversation as grain's own rows. The author is an `Attribution`, not a
+  bare `Principal`, because the distinction is load-bearing exactly here:
+  grain relaying an agent's question is (automation, on behalf of agent)
+  and a human answering is (human, nil) — the difference a signature
+  substring in a comment body used to gesture at with one bit.
+- `Observation.PendingQuestionCommentID` needs no schema change: it was
+  always a `BIGINT`, and it now names a `task_comment.id` instead of a
+  GitHub comment id. `TestAPendingQuestionNamesAStoredComment` pins that
+  down end to end, and
+  `TestATaskCanBeFiledWithNoGitHubIssueAtAll` proves the point of the
+  whole stage — an approved task with no `ExternalRef` reads `queued` and
+  is dispatchable.
+
+**Landed (stage 2) — the CLI and the UI write the store:**
+
+- `pkg/ui.Client` is store-backed. Creating a task *is* filing it:
+  `Store.NewTaskID` allocates, `PutTask` writes, and the task is in
+  `task_ready` before the call returns — where before it opened a GitHub
+  issue and waited for a poll to notice, which meant no task could be
+  created without GitHub reachable, or dispatched until the next tick.
+  `pkg/ui` imports nothing from `pkg/github` at all now.
+- **The two state vocabularies are one.** This package used to derive
+  state from labels with its own set, which had drifted: `needs_approval`
+  for what the store calls `proposed`, an `untracked` the store has no
+  notion of, and no `closed` that it does. State now comes from the
+  `task_state` view, so there is one derivation, not two.
+- `/repo`, `/base` and `/auto-merge` stop being directive lines parsed
+  out of an issue body and become what they always were in the store:
+  columns. `pkg/ui/directives.go` is deleted — a form edits fields.
+- Capability grants are `model.Grant` rows rather than GitHub labels, so
+  `Capability.Label` is gone from the wire shape.
+- **Replying resumes a parked task, in one act.** `AddComment` clears
+  `Observation.PendingQuestionCommentID`. Answering a question used to
+  take two — post a comment *and* re-apply the trigger label so the next
+  poll would notice — and forgetting the second left the task parked
+  forever.
+- `-data-dir` and the `-store-addr` flag it briefly had on both the CLI
+  and the "ui" subcommand of `cmd/grain` — landed here as a multi-writer
+  deployment (a daemon, a UI and a CLI, each opening the store directly),
+  and replaced by a single writer again once bwsalmon/agents#363 turned
+  the CLI and the UI into REST clients of the daemon; see "The UI and the
+  CLI talk to the daemon over REST" below.
+- `Store` grew `ListTasks`, `States` and `ObserveField`. The last is
+  `pkg/orchestrator`'s own `observeField` promoted: `Observe` REPLACEs the
+  whole observation row, so changing one field means reading it first,
+  and that stopped being one package's business once a person closing a
+  task from a CLI needed it too.
+
+**Landed (stage 3) — the orchestrator stops reading and writing issues:**
+
+- `PollIssues`, `pollIssue`, `fileTask`, `parkIssue`,
+  `requeueIfAwaitingReply` and `orchestrator.TaskID` are deleted, along
+  with the `poll` reconciler. `RunCycle` has two reconcilers now, not
+  three: there is no outside source of tasks left to reconcile against,
+  because a task filed by the CLI or the UI is in `task_ready` the moment
+  it is written rather than on whichever tick polls next.
+- Everything a run says lands in the store. `ask_question` and
+  `comment_on_issue` become `model.Comment`s attributed as grain relaying
+  an agent — (automation, on behalf of agent), the distinction v1 could
+  only gesture at by looking for a signature substring in a comment body.
+  `propose_task` files a real `model.Task` with no `Approval`, so
+  `proposeTaskTool`'s "a human must accept it first" contract is enforced
+  by the state machine rather than by withholding a label, and
+  `model.LinkProposedBy` records which task proposed it — something the
+  issue version had no way to say.
+- The merge queue's own two voices moved too: `fileFixTask` files a store
+  task instead of an issue, and both it and `escalateToUser` comment
+  through `Store.AddComment` as the `merge-queue` principal, so a human
+  reading a task's conversation can tell the queue's remarks from a
+  relayed agent's.
+- **Closing out is one write.** It used to be two — close the task's
+  GitHub issue, then record the closure — with the issue closed first and
+  the store told second, so a crash in between left a closed issue that
+  grain still believed was open.
+- `Task.ExternalRef`, `model.ExternalRef`, `model.ParseExternalRef` and
+  the `external_ref` column are gone (schema version 4).
+  `orchestrator.Config` loses `TaskRepo`, `TriggerLabel` and
+  `DefaultTarget`: there is no task repo to list, no label to look for,
+  and a task arrives with its `Target` already set because whatever wrote
+  it set one. The daemon loses the matching flags.
+
+GitHub is still reached, for exactly what is genuinely GitHub's: the
+branch a run pushed, the pull request opened for it, its checks, and its
+merge. `pkg/github` keeps its full client — `ListIssues` and friends are
+simply no longer called by anything outside their own tests.
+
+`pkg/orchestrator/live_test.go` is the proof, and it now drives the real
+path: a task filed through `pkg/ui.Client` exactly as a person at the CLI
+would, dispatched by `RunCycle` in the same cycle, pushed, opened as a
+pull request, and closed out once GitHub merges it — asserting at the end
+that `sim.Issues` is empty, because the only thing the whole run put on
+GitHub is the pull request. Its sibling proves the question path: a run
+parks, a human replies with one `AddComment`, and the next cycle resumes
+it.
+
+## Grain no longer keeps a commit history
+
+Embedded Dolt made every write a commit, named for what it was --
+`grain: approve task 2`, `grain: comment on task 1`, `grain: update task
+1` -- attributed to `grain` via an explicit `--author` so an embedded
+deployment's history did not just read as `root`, whoever had started the
+process. `dolt_log` was what grain had done and when; `dolt_diff_task`
+answered what *changed*, old and new value side by side; and every
+commit was a point the deployment could be reset to.
+
+bwsalmon/agents#366 gave that up on purpose. SQLite has nothing that
+plays the same role, and rebuilding one was never the point of the
+migration -- the issue's own "put secrets in a separate db, config and
+tasks in a common db" asked for a simpler store, not a versioned one.
+`Store.write` makes no commit of any kind now; `historyAuthor`,
+`commitHistory` and every test that once pinned this behaviour are gone
+along with `pkg/model/dolt` itself. What `Store` keeps is current state
+only -- a task's own `created_at`, a comment's `created_at`, a run's
+`started_at`/`finished_at` are all still there, but there is no way to
+ask "what did this task look like an hour ago" or "list everything grain
+has ever done" the way `dolt_log` could. A deployment that needs that
+kind of audit trail going forward has to build it as an explicit feature
+-- an events table, most likely -- rather than get it for free from the
+substrate; nothing here builds one yet.
+
+## Locking, not merging
+
+Every mutation runs in one transaction, and SQLite's own write lock is
+the whole of grain's concurrency control now. `sqlite.Open`'s DSN puts
+every transaction in immediate mode (`_txlock=immediate`), so the lock
+is acquired at `BEGIN` rather than at a transaction's first write
+statement: two overlapping mutations are serialised at that exact point
+every time, before either has touched a row -- one proceeds, and the
+other either waits out a five-second `busy_timeout` or fails outright
+with SQLite's own `SQLITE_BUSY`/"database is locked". `Store.write`
+retries a failed attempt from the top, re-reading whatever it needs
+through the transaction it is handed rather than anything read before
+the retry, up to five attempts, then `model.ErrConflict` — which
+`pkg/ui` maps to a 409 meaning plainly that the change did not land.
+There is no lock a caller has to remember to release, no per-row
+version, and nothing the mutating call sites (`Store.UpdateTask`,
+`Store.ObserveField` and the writes built on them) have to carry: it is
+all inside `write`/`writeOnce` (store.go).
+
+This replaces a mechanism that had to work much harder for a weaker
+guarantee. Dolt merged concurrent writers *cell by cell*, and only
+reported a conflict when two of them disagreed about the same cell — so
+two writers that each rewrote a task's tags as delete-all-then-reinsert
+could have their sets silently **unioned** into one neither asked for,
+with both commits reporting success. Grain's answer was a single shared
+row, `grain_write`, rewritten with a fresh random token on every
+transaction purely to force every overlap to look like a disagreement
+Dolt would refuse — and the token had to be random, never a counter: two
+writers that both read version N and both wrote N+1 would have *agreed*,
+so the merge would have succeeded and the same silent union would have
+happened anyway (the deleted `dolt/store_test.go`'s
+`TestACounterStampWouldNotConflict` pinned exactly that trap). None of
+that exists anymore. SQLite admits only one writer at a time, full stop,
+so there is nothing left for an artificial per-write marker to catch
+that the lock itself does not already catch.
+
+**Failure still needs no cleanup.** An operation that does not reach its
+commit leaves nothing behind: SQLite releases the write lock when the
+transaction ends, one way or the other, so there is no lock to release by
+hand, no version to reconcile, no half-written row — a process that dies
+mid-write leaves an aborted transaction and the store immediately usable
+by the next one (`TestAFailedWriteLeavesNothingBehind`).
+
+Two things this leans on were measured against the real engine rather
+than assumed, each pinned by a test so a wording change in the driver
+breaks it loudly: that `modernc.org/sqlite` reports a lost race as
+`"database is locked"` or `"SQLITE_BUSY"` (`sqlite/store_test.go`'s
+`TestSQLiteReportsABusyDatabase`, matched by message text because
+`pkg/model` imports no driver on purpose — `isSerializationFailure`'s
+own doc comment), and that a retried transaction rolls back its child
+rows along with everything else rather than leaving a partial write
+behind (`TestAConflictRollsBackChildRowsToo`).
+
+## Reconcilers, not a pipeline
+
+`RunCycle` runs three independent reconcilers — `poll`, `dispatch`,
+`sync` — and every one of them runs whatever the ones before it did.
+
+It used to be a pipeline: poll, and return on error; dispatch, and return
+on error; sync. That reads naturally and is wrong for the same reason
+edge-triggered controllers are wrong. Intake talks to GitHub's issues
+API, and a cycle that could not reach it also refused to advance a merge
+queue, close out a pull request GitHub had already merged, or run a
+dispatch whose task and slot were both sitting right there in the store.
+None of that work depended on the poll; it was just standing behind it.
+A GitHub blip during intake became a cycle in which grain did nothing at
+all.
+
+The reason those three can be reordered or skipped freely is that each is
+level-triggered and idempotent — it re-reads the store and GitHub every
+tick rather than acting on a change it was handed. Nothing is delivered
+to a reconciler, so nothing is lost by not running one: skipping costs a
+tick of latency and never correctness. Their order in `Reconcilers()` is
+a latency preference (an issue filed since the last tick dispatches on
+this one; a pull request opened moments ago by this very cycle is picked
+up without waiting), not a dependency.
+
+The same argument applies one level down, to the items inside each
+reconciler, and that is where it bites hardest in practice. One
+unparseable issue used to leave every issue behind it in the batch
+labelled and unfiled. One pull request GitHub would not answer for used
+to strand every other task's close-out. One slot whose sandbox failed to
+build used to abandon the dispatches `dispatch.Cycle` had already
+durably recorded runs for, idling those slots for a tick over a failure
+that was not theirs. Each of those loops now collects its failures and
+keeps going, and `RunCycle` joins the lot (`errors.Join`, so `errors.Is`
+still answers for any one of them) into the single line the daemon logs
+per tick.
+
+Two places deliberately do **not** isolate, and the reasoning is worth
+keeping:
+
+- **Inside one issue, intake still stops at the first error.** The
+  trigger label comes off last and only if the store write succeeded, so
+  a failure leaves the issue exactly as it was found — labelled, and
+  retried next tick. Isolating *within* an issue would mean removing the
+  label for work that did not land, which is the
+  persistence-before-irreversible-effect ordering v1's own notes
+  records finding a real bug from getting backwards once already.
+- **`SyncPullRequests`' gather loop still returns early on a store
+  error.** `queueHeads` decides which task is at the front of each repo's
+  merge queue by comparing entries against each other, so acting on a set
+  with one silently missing could promote the task behind the real head
+  and merge two changes in the wrong order. A store read failing there is
+  systemic anyway. Its *act* loop is isolated, because head-of-queue was
+  already settled against the complete set — an entry failing there
+  cannot make another entry merge that would not have merged regardless.
+
+`isolation_test.go` pins all of it down: each test fails one specific
+thing and asserts the unrelated work still landed. All five fail against
+the pipeline version, with the state assertion naming what it stranded.
+
+This is the first of the three steps toward the Kubernetes-shaped model
+the design is converging on. The other two are not built: optimistic
+concurrency on `Store`'s mutators (`task` has no version column, and
+`PutTask` is last-write-wins — there is only one process holding the
+store open now ("The UI and the CLI talk to the daemon over REST",
+below), but that process still serves concurrent requests: the frontend
+and a CLI invocation racing each other on the same task is exactly the
+same last-write-wins hazard, one layer up), and a real watch. Dolt would
+have made one nearly free — a commit hash as a `resourceVersion`,
+`dolt_diff` as a ready-made change feed with history — and bwsalmon/agents#366
+traded that away along with the rest of the commit history (see "Grain no
+longer keeps a commit history" above): SQLite has nothing built in that
+plays the same role, so a watch here would mean a change table or
+similar, built from scratch rather than read off the substrate for free.
+Note the ordering regardless: a watch is a latency optimization over
+level-triggered reconciliation, never a replacement for it, so it is
+worth having only once the reconcilers it would wake are independent and
+safe to run concurrently.
+
+## What this does not have yet
+
+A real host adapter, primarily. There used to be a second gap here too:
+two independent packages, `pkg/orchestrate` (bwsalmon/agents#254) and
+`pkg/orchestrator` (bwsalmon/agents#249), each decided *when* to call
+GitHub's REST API from a running `dispatch.Cycle`, built in parallel
+without either knowing about the other. bwsalmon/agents#263 reconciled
+them — `pkg/orchestrator` kept its own name and its more complete
+GitHub-facing
+half (issue intake via `PollIssues` — since deleted, see "Input is a
+model update, not a GitHub issue" above — a finished run's tool calls
+turned into a comment/PR/follow-up task via `ProcessResult`, and closing
+out a merged or closed PR via
+`SyncPullRequests`/`Store.OpenPullRequestLinks`),
+and gained what only `pkg/orchestrate` had: `RunDispatch` now resolves and
+materializes a dispatched task's capabilities, applies every placement
+under its sandbox root, and revokes what was minted once the run
+finishes, the same as `pkg/orchestrate`'s own `runDispatch` did — ported
+onto `orchestrator.Config`'s new `Capabilities`/`Credentials`/
+`MaxAgentTurns` fields. `cmd/grain`'s daemon subcommand now drives
+`pkg/orchestrator` instead (a small non-overlapping ticker around
+`RunCycle`, the same discipline
+`pkg/orchestrate`'s own `Reconciler.Run` held to), and `pkg/orchestrate`
+itself, along with the `model.TrackedTarget`/`Store.TrackedTargets` it
+alone used, is deleted — `Store.OpenPullRequestLinks` (below) already
+covered the same "which pull request should grain still be watching"
+question, more precisely, so keeping both was pure duplication.
+
+The daemon still defaults to the same "no host adapter" stand-in every
+other package here does: one local directory per slot doing sandbox duty
+(`orchestrator.HostSandboxes`). `orchestrator.KonturSandboxes`
+(bwsalmon/agents#262) is the real alternative `Deps.Sandboxes` also
+accepts — one bwsalmon/kontur-managed VM per dispatch slot, reached via
+`mcp.NewSSHSandboxTools` instead of a local directory, created
+via `kontur.Create` on first use and reused across cycles the same way
+`HostSandboxes` reuses its directories — and the daemon can now be
+pointed at it for real: `-kontur-sandboxes` opts a deployment in,
+with `-kontur-ssh-user`/`-kontur-exec-key`/`-kontur-workspace` for
+reaching the guest and repeatable `-kontur-create-arg` flags building
+`KonturConfig.CreateArgs` (bwsalmon/agents#274) — a deployment's own
+`konturctl vm create -h` decides what those are, most importantly whichever
+flag points at a built guest image (`../packer/kontur/`, below), since
+that flag's name is owned by bwsalmon/kontur's own CLI and still hasn't
+been reachable to confirm from this repo. `KonturSandboxes.
+ConfigureGitCredentials` (new alongside the flags) is the SSH equivalent
+of the `mcp.ConfigureGitCredentials` call the daemon already made once
+per slot for `HostSandboxes` — over `mcp.ConfigureGitCredentialsOverSSH`
+instead of `os.WriteFile`, since an SSH-backed slot has no local directory
+for the daemon to write into. A kontur VM's own guest image is still
+expected to arrive already carrying the operator's SSH key and a running
+sshd, the same assumption v1's own sandbox provisioning stood in for —
+`../packer/kontur/` is that successor (bwsalmon/agents#267).
+
+`konturSandbox.PlaceFile` is the second such equivalent, and it closes a
+gap that made every capability worth having unusable on exactly the
+deployments that run for real. A capability's `model.Placement`
+(`gcpkey`'s minted service-account key, `geminikey`'s API key,
+`githubsandbox`'s token) is delivered by `orchestrator.applyPlacements`,
+which until now had one route: `os.MkdirAll`/`os.WriteFile` under the
+local directory a `rootedSandbox` reports. A kontur VM has no such
+directory — that is the whole point of `rootedSandbox` — so
+`sandboxRoot` was empty, and any grant that actually materialized a
+sandbox-side placement failed its run during preparation, before the
+agent's first turn, with "this sandbox has no local directory to place it
+in". Since `scripts/setup.sh` installs `-kontur-sandboxes` for any
+host that can run a VM at all, the practical effect was that
+`grain-gcp-key` never reached a sandbox on a real deployment: the key was
+minted, the run failed, and `revokeAll` deleted it again. `orchestrator.
+SandboxPlacer` is the third optional interface a `Sandbox` can answer
+with, alongside `rootedSandbox` and `vmNamedSandbox`, and a kontur VM
+answers it over the same runner its tool calls and git credentials
+already use (`mcp.PlaceFileOverSSH`). `applyPlacements` prefers it
+wherever it exists: it writes into the sandbox itself, where a local root
+alongside it could only be a staging copy of the same credential on the
+controller's own disk. The remote write applies the placement's mode with
+`install -m` to an empty file *before* the content goes in, rather than
+`chmod`-ing afterwards the way `ConfigureGitCredentialsOverSSH` does —
+everything placed this way is credential material, and a `dd` that
+creates the file under the login user's umask leaves it world-readable
+until the next command runs.
+
+Whichever backend a slot uses, `RunDispatch` now clones the task's target
+into it before the agent's first turn (`orchestrator.prepareCheckout`):
+`Config.GitRemoteBase` — the daemon's own git proxy URL, the same one the
+credential files above are written for — plus the task's repo makes the
+clone URL, and the sandbox is left holding a checkout in `./work` with the
+branch the task will be pushed to already checked out (its `/base` when it
+has one, or the previous attempt's branch when the remote already carries
+it, so a redispatch fast-forwards its own work instead of colliding with
+it). `BuildPrompt` says so, in place of the nothing it used to say. This
+closes a gap live dispatch found the hard way: a sandbox starts empty, the
+prompt named the repo and the branch but never said to clone, and the
+proxy URL — the only address the sandbox can reach the repo through, since
+`ConfigureGitCredentials` writes the host but never a URL — reached the
+agent nowhere at all. An attempt's first tool call was a git command in
+an empty directory, "not a git repository", and the agent gave up there;
+only the redispatch behind it carried the task. It runs through the
+sandbox's own `run_command` tool rather than a second path into the
+sandbox, so one call covers a local directory and a kontur VM alike, and
+an empty `GitRemoteBase` (every test, and any deployment running no proxy)
+skips it and leaves the sandbox exactly as bare as it was before. What it
+does make load-bearing is an assumption `ConfigureGitCredentials` has
+always made quietly: that the sandbox can actually reach the proxy's
+address. The daemon binds it to `127.0.0.1:0`, which a local directory
+shares and a kontur VM does not — a slot that cannot reach it fails its
+dispatch with a clone error naming the repo (`fatal: unable to access
+'http://127.0.0.1:<port>/...': ... Couldn't connect to server`,
+bwsalmon/agents#567), where before it failed later and less legibly, on
+whatever the agent tried against a host its credential file matched but
+nothing could route to.
+
+bwsalmon/agents#567 closed that gap: `-kontur-git-proxy-host` (required
+alongside `-kontur-ssh-user`/`-kontur-exec-key`/`-kontur-workspace`
+whenever `-kontur-sandboxes` is set) names the address a kontur VM's
+guest can actually reach this daemon at — typically the docker bridge
+gateway its own outbound NAT (`third_party/kontur/internal/netshim`)
+routes through, since the guest's `127.0.0.1` is its own, unrelated
+loopback. Setting it makes `startGitProxy` bind every interface instead of
+just loopback, and advertise that host to every slot's sandbox in
+loopback's place. `scripts/setup.sh`'s `ensure_kontur_git_proxy_host`
+defaults `GRAIN_KONTUR_GIT_PROXY_HOST` to that gateway address
+automatically when an operator hasn't set one, preferring `docker network
+inspect bridge`'s own `.IPAM.Config` but falling back to the bridge
+device's own address (some docker builds, e.g. Debian's `docker.io`
+package, never populate that field for the default bridge's
+auto-allocated pool — bwsalmon/agents#572), the same "detect it, or
+disable kontur sandboxing for this run rather than install a daemon that
+would fail every task" shape `ensure_kontur_kvm_access` already uses for
+`/dev/kvm`.
+
+> **Superseded.** Everything in the next four paragraphs — `Recreate`, the
+> startup reset pass, `ensure` adopting a VM that already exists — was
+> removed when a sandbox stopped outliving the run that used it. It is
+> kept here because the *problem* it describes is the one "Slots are gone;
+> a sandbox belongs to one run" (below) solves differently, and that
+> section reads better against this one. For what the code does now, read
+> that.
+
+bwsalmon/agents#353 added two more pieces to `KonturSandboxes`.
+`KonturConfig.Backend` selects the value `konturctl vm create -backend`
+builds each slot's VM with, and defaults (`-kontur-backend`'s own default)
+to `kontur.BackendDocker`: run the VM directly against a local docker
+daemon, needing neither `konturctl setup` nor containerd/CNI/kubelet on
+the host, instead of kontur's own default static-pod backend under a
+standalone kubelet. Since the docker backend has no CRI for `crictl` to
+ask, `ToolsFor`/`ConfigureGitCredentials` resolve a docker-backed VM's
+reachable address via the new `kontur.DockerPodIP` (`docker inspect` on
+the otherwise-idle container `internal/dockervm` starts per VM purely to
+hold its network namespace open) instead of `kontur.PodIP`. And
+`KonturSandboxes.Recreate` — called by `cycle.go`'s `runOne` once a slot's
+dispatch is done, success or failure — deletes and rebuilds that slot's VM
+from scratch and reapplies `ConfigureGitCredentials` if it was ever called
+for that slot, the isolation boundary v1's own `HostAdapter.recreate()`
+gives a sandbox (`grain/adapter/base.py`), applied here per task instead
+of on a schedule. `HostSandboxes` implements no such method: the local-
+directory stand-in stays long-lived, resetting one between tasks still
+being "the caller's job" the same way it always has been.
+
+That per-task recreate covers every task that finishes, which is every
+task except the one whose process didn't. A daemon killed mid-run — OOMed,
+`SIGKILL`ed, a host that rebooted — never reaches `runOne`'s own recreate,
+so that run's VM outlives it with its whole filesystem intact, and
+`KonturSandboxes.ensure` deliberately adopts an existing VM rather than
+rebuilding it ("the same 'reuse what's there' choice
+`HostSandboxes.RootFor` makes"). The next task dispatched onto that slot
+inherited the dead run's checkout, credentials and leftover processes.
+`RecoverOrphanedRuns` was only ever the store-side half of recovering
+from that death: it finishes the rows a killed process left live, and has
+no sandbox to reach.
+
+`runDaemon` closed that gap with a reset pass over every slot at
+startup, before per-slot git credentials were configured and long before
+`RunCycle` could dispatch: one `Recreate` per kontur-backed slot, retried
+with the same capped backoff `configureSlotGitCredentials` uses
+(`resetSlotSandbox`). A slot that cannot be rebuilt stalls rather than
+being dispatched onto dirty — the isolation is the point of the pass, so
+downgrading to a reused VM would defeat it. On a clean start there is
+nothing to tear down, and `Recreate` skips the delete for a slot with no
+saved state: the pass is then exactly the `konturctl vm create` the
+credential loop would have made on its own, which is why a fresh
+deployment's `konturctl` argv log is unchanged. That skip is load-bearing,
+not cosmetic — with no saved state to read a backend off, `konturctl vm
+delete` falls back to the static-pod backend and tries to unlink a
+manifest path it never needed to touch, which fails outright when that
+directory is a root-owned `/etc/kubernetes/manifests` and the daemon runs
+as `grain`.
+
+Rebuilding at startup rather than lazily at the next dispatch also kept
+the VM boot off the critical path — it happened while the process was
+still coming up, not while a ready task waited on it. Host-backed
+deployments skipped the pass entirely, `HostSandboxes` having no
+`Recreate` to call. That is the one property a sandbox per run gives up
+rather than improves on, and "What this costs" at the end of the slots
+section below is where that trade is written down.
+
+bwsalmon/agents#466 ("Use kontur sandboxes") found and fixed three bugs
+that every other kontur test in this repo, all built against hand-written
+`kontur`/`docker`/`crictl` doubles, had no way to catch: `pkg/kontur`'s
+own `Create`/`Delete` were exec'ing a binary literally named `kontur` for
+`vm create`/`vm delete`, when that binary is `konturctl`'s job --
+`kontur` is a different, container-facing program entirely (its own
+`cmd/kontur/main.go` doc comment: "distinct from cmd/konturctl, which is
+the operator-facing CLI"); `kontur.DockerPodIP`'s `docker inspect`
+template dot-accessed `NetworkSettings.IPAddress` directly, which errors
+("map has no entry for key") against a real, current docker daemon
+(29.7.2) that omits the field from a container with no legacy
+single-network attachment, rather than returning it empty; and
+`KonturConfig.CreateArgs` had no way to give more than one slot's VM a
+distinct `-ip`/`-port` (`konturctl` requires both, with no default and no
+auto-allocation of its own), so any deployment with `-max-concurrent`
+greater than 1 would have asked every slot's VM to share the exact same
+address. The third is now `KonturConfig.BaseIP`/`BasePort`: set either
+and `ensure` derives slot's own `-ip`/`-port` from it and the slot's own
+number (`model.SlotNames`' own 1-based, all-numeric contract), rather
+than repeating a literal `-ip`/`-port` in `-kontur-create-arg` that could
+only ever be right for one slot. `pkg/orchestrator`'s
+`TestKonturSandboxesAgainstARealDockerBackedVM` is the test that
+found all three: it builds `konturctl` and bwsalmon/kontur's own OCI
+image from the vendored source and drives `KonturSandboxes.Acquire`
+against a real docker daemon and a real cloud-hypervisor VM under real
+KVM, skipping outright on a host missing either (as of this writing, that
+still stops short of a real dispatched tool call actually executing
+inside the guest over SSH -- see the test's own doc comment for why:
+packer/kontur's own guest image, the one built to actually carry
+`git`/build tooling and a working SSH login, is not yet published
+anywhere a test could fetch it from).
+
+bwsalmon/agents#478 closed that gap by deciding, and validating by hand
+under real KVM, the two things #466 left open: `packer/kontur/` no longer
+uses Packer/QEMU at all (a plain `debootstrap`+`chroot` pipeline now
+builds the guest directly, needing no VM boot and no cloud image to build
+against — see that directory's README.md, "Why no VM boot to build
+this"), and the guest's kernel is just Debian's own stock
+`linux-image-amd64` direct-kernel-booted by cloud-hypervisor, not a
+from-source PVH build — it already has `CONFIG_PVH` and working
+virtio-pci/virtio-blk/virtio-net, confirmed by hand once the actual
+blocker (`internal/hypervisor/args.go` needing `image_type=raw` on every
+disk, for a while a one-line vendored patch, now upstream — see
+`third_party/kontur/VENDORED.md`) and
+two guest-side gaps (systemd renaming the NIC away from `eth0`, and no
+`CONFIG_IP_PNP` to act on `konturctl`'s own `ip=` cmdline — both closed in
+`provision.sh`) were found and fixed. `TestKonturSandboxesAgainstARealDockerBackedVM`
+now builds that real guest image as part of the test itself and asserts a
+`run_command` tool call actually executes inside it over SSH, closing the
+gap this paragraph used to describe.
+
+The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
+`propose_task`, `add_review_comment`) a run's own MCP server wires
+internally are still discarded rather than posted anywhere real while a
+run is live — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
+after a run finishes, and relays `ask_question`/`comment_on_issue`/
+`propose_task` for real at that point (see the package tree entry
+above); giving `Framework.Run` (or its caller) a way to inject a live
+sink instead is still open, and `add_review_comment` calls are still
+just recorded and nothing more, since nothing yet dispatches with review
+intent for one to attach to. Neither sandbox stand-in carries any real
+isolation: a real deployment still needs the actual host adapter
+(creating a real VM/container per task and running commands in it over
+something better than "this process's own filesystem," or an SSH hop to
+a VM with no other tenancy boundary of its own), which remains v1
+Python — 15,903 lines of it, with 1,239 tests. Those tests are the asset
+in a rewrite; the assertions port, the harness does not.
+`orchestrator.Deps.Sandboxes`/`.Framework` are exactly the two seams a
+real host adapter and a real dispatched-agent connection would replace,
+without changing anything about `RunCycle`'s own shape.
+
+That relay only works because each framework's transcript parser puts a
+call's name through `mcp.BareToolName` before recording it: both CLIs
+report a tool loaded from their MCP config as
+`mcp__grain-sandbox__<tool>`, and `ProcessResult` matches the bare names
+`mcp/mock_tools.go` registered, so a parser recording the reported name
+verbatim matched none of them on any real run. What let that ship is
+worth naming, because the fix alone does not close it: the scripted agy
+in `antigravity`'s `testing.go` emitted the bare registry name, a
+spelling no real CLI produces, so every test standing on it -- the whole
+of `e2e` included -- exercised a shape that existed only in the harness.
+The fake now emits the qualified name and calls the registry with the
+bare one, which is what a real run does, so `e2e`'s propose-then-approve
+test covers the path an agent actually takes.
+
+`TrackedPullRequest` (`model.PullRequestRef`/`model.PrHealth`/
+`model.TrackedPullRequest`, `pkg/model/pullrequest.go`) turned out not to
+need a table of its own: `model.Task`'s existing `LinkFixes` link already
+records which PR a task's push produced, `task_observation` already
+records completion/closure, and `Store.OpenPullRequestLinks` is the one
+new read `pkg/orchestrator/sync.go`'s `SyncPullRequests` needed against
+those two tables — a `TrackedPullRequest` value is assembled fresh from a
+`GetPullRequest`/`ListCheckRuns` read each cycle rather than cached
+anywhere, which is what its own `ObservedAt` field is for. Folders are
+still unbuilt; nothing here needed them.
+
+`orchestrator`'s own directive parser (`ParseDirectives`) is deliberately
+narrower than `grain/automation/directives.py`: `/repo`, `/base`,
+`/auto-merge` and `/reads` only (bwsalmon/agents#352 added the last —
+repeatable, adding a repo to `Task.Reads` per line rather than replacing
+it, per docs/data-model.md's "One write target, many read targets"; a
+`Reads` entry is cloned read-only alongside the target and mentioned in
+`BuildPrompt`'s own prompt, but grants nothing — `gitproxy`'s authorizer,
+not this package, is what actually refuses a push to one). `/pr`
+(continue an existing PR), `/review` (post a
+review instead of pushing) and `/depends` (cross-task ordering) all need a
+dispatch shape `RunDispatch`/`BuildPrompt` don't build yet — every task
+today is `IntentImplement`, fresh branch, no continuation — and are listed
+in `directives.go`'s own doc comment as exactly that, not silently
+dropped. `add_review_comment` calls from a run are recorded (`agent.
+Result.ToolCalls` carries them, the same seam `ProcessResult` reads
+`ask_question`/`comment_on_issue`/`propose_task` off of) but never turned
+into a real `CreateReview` call for the same reason: nothing yet dispatches
+with review intent for one to attach to. `propose_task`'s `depends_on`
+also files today without resolving a same-run local `id` to the real issue
+number GitHub assigned it — each proposal lands as its own issue, with
+`depends_on` printed into nothing yet, since resolving it needs holding a
+whole batch open and rewriting cross-references after every one is filed.
+
+Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
+`SyncPullRequests` runs a merge queue, one per target repo, over every
+task that asked for `/auto-merge` and still has a PR open. Only the
+queue's head — the earliest submitted, per repo — is ever acted on in a
+cycle; a fix filed for the second task while the first is still being
+repaired would likely need refiling the moment the first merges and
+changes what the second is based against, so everything behind the head
+just waits. A conflicted or failing head gets a fix task filed straight
+into the store already approved (`Task.Approval` set by
+`PrincipalAutomation`, `LinkFixTask` recording which one) rather than
+`core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`
+issue and waited for a human to apply the trigger label or comment
+`/lgtm` — bwsalmon/agents#283 asked for exactly that human step to go
+away. The fix task carries `/base` the original PR's own branch and
+`/auto-merge true`, the same stacked-branch trick `_suggest_fix` used, so
+it dispatches on the very next `dispatch.Cycle` with no approval in
+between and, once clean, merges straight back into the branch it
+repairs. If it finishes and the original PR is still broken,
+`SyncPullRequests` gives up
+automatically rather than refiling: it comments explaining why, sets
+`Observation.MergeQueueBlockedAt`, and the queue moves on to the next
+task in that repo — a blocked task still merges the moment a human's own
+push makes it clean, it just stops being anyone's queue head, so it can
+no longer hold up what's behind it. No new record was needed for the
+queue itself: `queueHeads` derives head-of-queue from `Task.CreatedAt`
+and `Task.AutoMerge` fresh every cycle, the same "derive it, don't store
+it" discipline `TaskState` already holds to.
+
+The git proxy has moved, though (`gitproxy/`, above) — it is the one
+piece of "actually dispatching" v2 now owns outright, credential ladder
+and sandbox-token identity included. `grain/proxy`'s
+`SandboxCredentialOverrides` (bwsalmon/agents#52's per-task
+`grain-github-<name>` label) is a `Task.Grants` entry here instead of a
+second sandbox-keyed file: `model.GitCredentialGrant` is the Grant the
+label produces, `Store.GitCredentialOverride` resolves a sandbox's live
+task down to the name it names, and `GitProxy.Handle` uses that name
+against `CredentialSet.Get` in place of the owner/repo ladder whenever
+one is present — no override outlives the task, because it is stored
+with every other Grant the task carries rather than written and cleared
+around dispatch. `dispatch.Cycle` also mints no leases yet — a run's
+`Leases` field exists in the schema and `gitproxy` never reads it; the
+git proxy authorizes straight off `Task.Target`/`Reads` instead, which
+serves the same fail-closed purpose without depending on that field being
+populated first.
+
+The GitHub client has moved too (`pkg/github/`, above) — a straight port
+of `grain/automation/github.py`'s `GitHubClient`: every method (list/get/
+close/reopen an issue, add/remove a label, branch existence and its head
+commit, create/find a pull request, `default_branch`, review comments,
+check runs, the plain comment thread, `create_comment`, and
+`create_review`'s always-draft PR review) behind the same `Transport`
+seam the Python version uses, so `github_test.go` proves the same path
+building, pagination, and status handling against `FakeTransport` a unit
+test would, and `DryRunClient` makes the same "reads pass through,
+mutations print" split `gitproxy`'s dry-run tooling and `run.py`'s
+`DryRunRunner` both make elsewhere in this project. `pkg/github/githubsim/`
+is the "replicate v1's simulator" half: a port of
+`tests/test_live_issue_to_pr.py`'s `RealGitHubMock` as a stateful
+`github.Transport`, so a live end-to-end test gets the same trick that
+file's own docstring describes — every real `GitHubClient` behaviour
+(path building, JSON field extraction) still runs, with only the network
+call underneath swapped for an in-memory stand-in — and `BranchExists`
+answers from a real bare git repo via `git show-ref` rather than its own
+bookkeeping, since that check is the one a live test can't afford to
+fake. `pkg/orchestrator` decides when to call any of it: it dispatches a
+task through `dispatch.Cycle`, opens or reuses a pull request once a run
+pushes, and closes one out once GitHub reports it merged or closed. Its
+`live_test.go` drives the same two scenarios `e2e/e2e_test.go` already
+proved by hand (a push that becomes a merged, closed PR; a question that
+parks a task and a reply that resumes it) through
+`orchestrator.RunCycle` and a real `github.Client` against `githubsim`
+instead — starting, since the inversion, from a task filed through
+`pkg/ui.Client` the way a person at the CLI files one. This absorbed a second, independently-built
+package that once did a narrower version of the same job — see "What this
+does not have yet" below.
+
+The capability provider contract exists now too (`pkg/model/capability.go`),
+though nothing here ported it — `docs/data-model.md`'s design was never
+built in v1 either. `CapabilityProvider`'s four methods — `Resolve`,
+`Materialize`, `PromptSection`, `Revoke` — plus `Placement`, the
+vocabulary a provider returns rather than performs so material moves
+declaratively and never through a shell or a prompt. A provider here is
+handed no Runner at all, unlike the Python contract `docs/data-model.md`
+describes — v2 has no host adapter yet for one to run commands against,
+so starting from the declarative-only half of that design (the half a
+containerised provider is restricted to) costs nothing now and stays
+correct once a Runner exists. `ResolveGrants`, `MaterializeGrants` and
+`PromptSections` walk a task's `Grant`s against a `CapabilityRegistry`
+in registration order, honouring `docs/data-model.md`'s rule that a
+half-materialized capability is never described to the agent as
+present.
+
+`capability/geminikey/` is now a real `MINT` provider
+(bwsalmon/agents#239), porting `grain/automation/gemini_keys.py`'s
+`gemini-key` capability: it mints a Gemini API key scoped to the
+Generative Language API, places it at `/home/debian/.gemini-api-key`,
+and revokes it, calling the API Keys API directly through its Go client
+library rather than shelling out to `gcloud` the way the Python version
+has to — one of the two things `google.golang.org/api` was expected to
+correct, per "Two things the port corrected" above. `DeleteExpired` is
+the "clean up after 24 hours if leaked" safety net, mirroring
+`delete_expired_keys`.
+
+`gcpkey.Provider` (`pkg/capability/gcpkey/`) is now a real `MINT` provider too —
+`gcp-key`, ported from `grain/automation/gcp_keys.py` but talking to the
+IAM API directly rather than shelling to `gcloud`, and authenticated
+through `CapabilityContext.Credentials` rather than a Runner, so it needed
+no controller of its own to build. `model.Reaper` (`pkg/model/capability.go`)
+is new alongside it: an optional interface for a provider whose minted
+resource can outlive the `Lease` that recorded it, matching
+`docs/data-model.md`'s description of `gcp_keys.py`'s own
+`delete_expired_keys` as a backstop independent of any task record —
+`gcpkey.Provider.Reap` implements it by asking GCP's own key listing for
+the answer, not grain's store. `geminikey.DeleteExpired` plays the same
+backstop role for Gemini keys but stays a free function rather than a
+`model.Reaper` implementation, since an API key carries no service
+account of its own for a `ListKeys` call to scope to the way
+`gcpkey.Provider.Reap`'s does.
+
+Both providers can now point at the same standing credential —
+`geminikey.Capability.Credential` and `gcpkey.Provider.Config.
+MinterCredential` are each just a name resolved through
+`CapabilityContext.Credentials`, so an operator wires them to the same
+one to get bwsalmon/agents#239's "This can share the same account from
+the gcp capability" — the daemon is now the executor that does that
+wiring (`-gcp-project`/`-gcp-agent-service-account`, bwsalmon/agents#254,
+now driving `pkg/orchestrator.RunDispatch` rather than the original
+`pkg/orchestrate` package it shipped against, per bwsalmon/agents#263):
+it constructs a real `CapabilityContext` per dispatch, applies every
+`SideSandbox` `Placement` under the dispatch's sandbox root, and calls
+`Revoke` once the run finishes. `Reap` is still uncalled from any binary
+here — a standalone sweep independent of any one dispatch, matching
+`gcp_keys.py`'s own `delete_expired_keys` cron job rather than something
+a reconcile cycle runs itself, and is still open.
+
+`CapabilityContext.Credentials` (`model.CredentialResolver`) had no
+production implementation until `pkg/secrets/`: a `Store` reading a
+directory shaped like a Kubernetes Secret volume mount, so
+`gcp-key`'s minter credential (and any future capability's) resolves
+against real material rather than only the fakes `gcpkey_test.go` and
+`model/capability_test.go` supply. `CapabilitySpec` grew a `Requires`
+field alongside it -- the names, never the values, a capability
+resolves through that resolver -- which `gcpkey.Provider.Spec()` and
+`geminikey.Capability.Spec()` both set now, and which
+`docs/data-model.md`'s new "secret store is a folder, not a table"
+section is the checked-in listing of, per capability.
+
+`agent/antigravity` can run an agent end to end against `mcp/`'s tools today,
+and the daemon now calls it for real from `pkg/orchestrator`'s dispatch
+loop rather than only from a test — `orchestrator.HostSandboxes` is the
+only other thing `dispatch.Cycle`'s own dispatch path drives, and
+neither
+hands it more than a local directory to confine itself to yet
+(`mcp.ConfigureGitCredentials` sets that directory's git credentials up
+the same way v1's `configure_git_credentials` sets a real sandbox's up,
+once per slot at daemon startup). The `mcpserver` subcommand itself can
+now be pointed at a real remote VM instead — `-kontur-vm` resolves a
+bwsalmon/kontur-managed VM's SSH endpoint (`pkg/kontur`: the external port
+kontur persisted at `konturctl vm create` time, plus the pod IP that port
+answers on, asked of containerd via `crictl` since kontur has no
+apiserver to have recorded it anywhere itself), `mcp.NewSSHSandboxTools`
+runs the same four tools — `run_command`/`read_file`/`edit_file`/
+`write_file` — against it instead of a local directory (`grain mcpserver`
+can already be pointed at one by hand via `-kontur-vm`,
+bwsalmon/agents#256), and `orchestrator.KonturSandboxes`
+(bwsalmon/agents#262) is `Deps.Sandboxes`' real alternative to
+`HostSandboxes`: one kontur VM per dispatch slot, created via
+`kontur.Create` on first use and reused across cycles the same way
+`HostSandboxes` reuses its directories, torn down by nothing here (see
+that type's own doc comment). A kontur VM's own image is still expected to
+arrive already carrying the operator's SSH key and a running sshd, the
+same assumption v1's sandbox image build stood in for — `../packer/kontur/`
+is now that successor (bwsalmon/agents#267): a Packer template producing
+a qcow2 pre-baked with the operator's SSH key, a running sshd, and the
+same package list `provision/sandbox.sh` gives v1's own sandbox base —
+see that directory's README.md for why the key and sshd are baked in at
+build time rather than injected per-VM the way `LibvirtAdapter.create()`
+does it for v1, and for what's still unresolved there (the exact `kontur
+vm create` flag a deployment's own `KonturConfig.CreateArgs` above would
+pass the built image's location through as, owned by bwsalmon/kontur's
+own CLI and still not confirmed from this repo — bwsalmon/agents#274).
+The daemon still defaults `Deps.Sandboxes` to `HostSandboxes`, but
+`-kontur-sandboxes` (and the rest of its `-kontur-*`/
+`-cri-runtime-endpoint` flags, see "What this does not have yet" above)
+now opts a real deployment into `KonturSandboxes` instead — the flag that
+picks the image lives in `-kontur-create-arg`, repeated once per
+`konturctl vm create` flag/value pair a deployment's own `konturctl vm create
+-h` calls for, rather than a name this repo guesses at.
+
+A real `github.RESTClient` exists and is wired into the daemon too, driving
+every call `pkg/orchestrator` makes (issue listing/labelling, branch and
+pull-request state, check runs, comments) — but not the agent's own
+`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
+calls: a run's own MCP server still wires those to a `mcp.MockSink` it
+builds and discards internally on every call, so they still just record
+what they were asked to do rather than posting it anywhere real.
+`ProcessResult` only sees them after the fact, through the `agent.Result`
+`Run` returns, not while the run is live. Giving `Framework.Run` (or its
+caller) a way to inject a real sink is still open.
+
+`e2e/` is that whole chain driven by hand, in a test, rather than by
+`dispatch.Cycle` itself: it calls `dispatch.Cycle` to decide what runs,
+then
+drives `agent/antigravity` (scripted in most tests; the real `agy`
+binary in `live_test.go`, gated on `GEMINI_API_KEY` and an installed
+`agy`) through a sandbox-stand-in
+directory against a real `gitproxy` in front of a local git server, and
+plays the part of "the PR opened," "the PR merged" and "a human replied"
+with the same `store.Observe` calls a real GitHub-sync component would
+make. It proves the pieces already built compose correctly; it does not
+close the gap above, since nothing there is wired to run on its own yet.
+
+`self-debug` and `self-repair` (bwsalmon/agents#540, "configuration
+mode") went from `ui.DefaultCapabilities` names with nothing behind them
+to real `model.CapabilityProvider`s -- `pkg/capability/selfdebug` and
+`pkg/capability/selfrepair` -- but what each one grants is not material
+in a sandbox or text in a prompt, `model.CapabilityProvider`'s only two
+channels; it is tools. `orchestrator.Config.GrantTools` is the new,
+narrow seam that adds: a capability name to a function building extra
+`mcp.Tool`s, consulted by `runOne` only for an `Interactive` task, and
+kept as a caller-supplied map rather than a fifth `CapabilityProvider`
+method on purpose, so `model/capability.go`'s own "a provider is handed
+no Runner" stays true of the package itself even though a deployment can
+now wire one in from outside it. `selfdebug.SourceTools` is read-only --
+`read_grain_source`/`list_grain_source`, confined to whatever directory
+a deployment's `-upgrade-src-dir` already names, needing no confirmation
+of any kind, since nothing it exposes can change anything.
+`selfrepair.HostCommandTools`' `run_host_command` is the opposite: it
+runs a shell command directly against the same host `grain daemon`
+itself runs on -- no sandbox, no adapter, the real machine -- so every
+call posts the command into the task's own chat and blocks
+(`selfrepair.Confirm`, polling `Store.Comments`) until a human replies
+there with approve or deny, or a timeout refuses it for them. That block
+is a real synchronous wait inside one tool call, unlike every other
+human-in-the-loop primitive here (`ask_question` parks the whole run and
+picks a reply up on the next dispatch) -- it only works if the tools run
+in the same OS process as the store the reply lands on.
+
+**Nothing satisfies that any more.** It held while the default framework
+was the home-grown in-process Gemini runtime, which registered a run's
+tools in-process and so already held that `*model.Store` connection.
+Both frameworks that remain (`agent/antigravity`, `agent/claude`) fork a
+CLI that manages its own MCP connection and ignore `RunConfig.Tools`
+entirely, because there is no in-process registry to hand a forked
+process. `Config.GrantTools` still assembles these tools and
+`RunDispatch` still passes them, but no `Framework` consumes them, so
+`selfrepair`/`selfdebug`'s host tools reach no running agent today.
+Closing that gap means giving the `mcpserver` subcommand a route back to
+the store -- it takes only a sandbox root or a kontur VM name now (see
+`cmd/grain/mcpserver.go`), which is exactly the isolation that makes the
+subprocess frameworks safe, so it is a design question rather than a
+missing flag.
+
+bwsalmon/agents#621 turned that pair of capabilities into an explicit
+"configuration agent": an overlay button the frontend keeps reachable in
+the bottom-right corner of the screen no matter what view is on screen
+(`ConfigurationAgentButton.jsx`), which files a task with nothing but
+`{"configuration": true}` and opens its chat the moment it exists. What
+that one field expands into -- `Interactive` forced true, `self-debug`
+and `self-repair` both granted, a default title and a prompt oriented at
+helping with a problem, a question, or grain's own configuration -- is
+assembled once, server-side, in `ui.Client.CreateTask`, so nobody
+filing one (this button today, conceivably a CLI flag later) has to
+reassemble the bundle by hand. `Task.Configuration` also changes how
+`dispatch.Cycle` schedules the task: `dispatchConfiguration` starts every
+such task unconditionally, ahead of the capacity-gated loop that governs
+everything else, so the configuration agent can always start a sandbox
+even when the deployment is already at `MaxConcurrent` -- the moment
+someone reaches for it is often exactly the moment the deployment is
+already saturated.
+
+## The agent runtime is a CLI now, not our own turn loop
+
+grain used to drive the model itself. `pkg/agent/gemini` held a
+hand-written turn loop: call the Gemini API's function calling, translate
+each `mcp.ToolInfo` into a `genai.FunctionDeclaration`, execute whatever
+`FunctionCall` came back against an in-process `pkg/mcp` registry, append
+the results, go round again. It worked, and it was ours to maintain --
+the schema translation, the turn accounting, the thought/text split, the
+partial-result-on-failure rule, all of it code in this repo tracking an
+API that moves.
+
+`pkg/agent/antigravity` replaces it with Google's Antigravity CLI, the
+`agy` binary that replaced Gemini CLI. The loop is agy's now. What is
+left here is the shape `pkg/agent/claude` already settled on for driving
+a real CLI: build the arguments, hand it a prompt, parse the transcript
+it streams back. Both frameworks a deployment can pick between are now
+subprocess drivers, and `agent.Framework` is the seam that makes them
+interchangeable.
+
+Three things about agy shaped the port, none of them cosmetic.
+
+**It has no `--mcp-config`.** agy registers MCP servers per *user* --
+`agy mcp add` writes them into `~/.gemini`, and caches each server's tool
+manifests under `~/.gemini/antigravity-cli/mcp/<server>/`. A per-user
+registration cannot express what grain needs, which is a per-*run*
+binding: two runs dispatched concurrently against two different sandboxes
+would share one registration, and whichever wrote it last would decide
+where both runs' tools landed. So `Framework.Run` gives each run its own
+private `HOME` -- a temp directory holding nothing but the settings file
+naming that run's own `mcpserver` server -- and deletes it as the run
+returns. That has the same effect `claude`'s `--strict-mcp-config` has
+there: the only MCP server a run can see is its own, because there is no
+other settings file in the `HOME` it was given to find one in.
+
+**It has no `--max-turns`.** `RunConfig.MaxTurns` is therefore enforced
+here rather than by the binary, and enforced on the live stream rather
+than on the finished capture -- a cap applied after the process exits
+would report a runaway run without ever having stopped one. A small
+`io.Writer` spliced into agy's stdout counts completed `agent_response`
+steps as they stream past and cancels the run's context at the cap;
+`procgroup.Prepare` is what turns that into a kill of agy *and* its MCP
+child rather than an orphan.
+
+**It has no way to empty its native tool roster.** `claude` takes
+`--tools ''`, which is how `agent/claude` guarantees a run reaches the
+sandbox only through grain's own MCP tools. agy has no equivalent, so
+that guarantee is weaker here: what this package does instead is give the
+subprocess a `HOME` with exactly one MCP server in it and a working
+directory that is the sandbox, and report -- as a transcript line, on the
+run itself -- any tool agy's own `init` event advertises beyond the ones
+grain published. A deployment that needs a hard guarantee should run
+against a kontur sandbox, where the controller's filesystem is not
+reachable from the guest at all.
+
+Two smaller notes. The prompt travels over stdin as a `stream-json` user
+event, not as the argument to `--print`: untrusted issue content must
+never become a `ps`-visible argument, the same discipline v1's
+`dispatch.py` set. And `RunConfig.Addenda` -- folding a comment posted
+mid-run into the next turn -- is gone in practice, because it needed a
+turn boundary to poll at and neither remaining framework has one; a
+comment posted while a run is in flight waits for the next dispatch, as
+it already did under `agent/claude`.
+
+### What this cost
+
+`RunConfig.Tools` has no consumer any more. It was read only by the
+in-process runtime, and a forked CLI cannot be handed an in-process
+registry. `orchestrator.Config.GrantTools` still assembles
+`selfrepair.HostCommandTools` and `selfdebug.SourceTools`, and
+`RunDispatch` still passes them, but nothing consumes them -- so an
+Interactive task's `run_host_command` confirmation prompt
+(`selfrepair.Confirm`, which blocks on `Store.Comments` from inside a
+tool call) is not reachable by a running agent today. Closing that gap
+means giving the `mcpserver` subcommand a route back to the store, which
+it deliberately does not have: it takes a sandbox root or a kontur VM
+name and nothing else, and that narrowness is exactly what makes the
+subprocess frameworks safe to run. It is a design question, not a missing
+flag, so it is recorded here rather than guessed at.
+
+### Operating it
+
+`-agy-path` names the binary, defaulting to resolving `agy` on `$PATH`,
+and is flags-only for the same reason `-claude-path` is: where a binary
+lives is a property of the machine, not of the deployment's stored
+configuration. The `agent-framework` setting's vocabulary is now
+`"antigravity"` or `"claude"`; `"gemini"`, the name the default framework
+had while it was our own turn loop, is still accepted everywhere it can
+arrive -- a stored `grain_config` row, a config file, a `-agent-framework`
+flag -- and normalized to `"antigravity"` by
+`model.NormalizeAgentFramework`. Nothing rewrites those rows: folding the
+old spelling in on read is cheaper than a data migration and is the same
+answer for a unit file that still passes the old flag. A deployment
+upgrading across this change needs `agy` installed on the controller and
+otherwise keeps its existing `-gemini-api-key-file`, which `agy`
+authenticates with as `GEMINI_API_KEY` in the subprocess environment
+(never in argv).
+
+## Reaching a sandbox guest without a route into it
+
+A slot's VM guest is reached by exec'ing into that VM's own container:
+`docker exec <vm container> kontur exec` (`mcp.DockerExecRunner`).
+bwsalmon/kontur ships the guest-side half -- `kontur exec` SSHes to the
+guest's own tap-attached address, which the docker backend records as
+`KONTUR_EXEC_ADDR` when it starts the VM container. That address needs no
+address translation to reach, because the container shares the network
+namespace netshim set the tap up in: `internal/guestexec`'s own words,
+"reachable directly from this container's own network namespace ...
+without going through NETSHIM_GUEST_PORT's external DNAT at all."
+
+This replaced an SSH connection from the daemon to the external port
+netshim forwards on the VM's container address, and the reason to prefer
+it is how much only existed to describe that route in from outside:
+
+- `pkg/kontur` no longer reads kontur's state files or resolves an
+  address at all. `Port` (the external port, out of kontur's own JSON),
+  `PodIP` (crictl) and `DockerPodIP` (`docker inspect`, with its
+  `index`/`Networks` template) are all gone; `Exists` is what remains of
+  the state file, and only to answer "has this VM been created".
+- `KonturSandboxes` lost `resolveEndpoint` and `waitForSSHPort`, and with
+  them the `Backend`, `RuntimeEndpoint` and `SSHKey` config.
+- `mcp.SSHRunner` is gone; only its shell-quoting helpers survive
+  (`shellquote.go`), which the tools still need to build one command
+  string for the guest to parse.
+- Only the docker backend is supported, since it is the only one whose
+  VMs run as containers to exec into. `createArgs` passes
+  `-backend docker` itself rather than taking it as config.
+
+`TestKonturSandboxesDockerExecReachesTheGuestWithoutResolvingAnAddress`
+holds the claim: its fake docker cannot answer an address lookup and
+nothing is listening on any port, so getting tools back at all is the
+proof none of that is consulted.
+
+Two details are worth knowing:
+
+- **`-kontur-exec-key` is a path inside the VM's container**, not on the
+  host -- the same deployment keypair `ensure_kontur_ssh_key` generates
+  and `packer/kontur/guest-setup.sh` bakes into the guest's
+  `authorized_keys`, just named by where the container can read it.
+  `setup.sh` stages it into the images directory
+  `konturctl vm create -images-hostpath` already mounts read-only at
+  `/images`, so no new mount is involved. Left unset, `kontur exec` falls
+  back to the dedicated key kontur's own `Dockerfile` bakes in -- which
+  only a guest image built by that same Dockerfile authorizes, and a
+  deployment pointing `-disk` at `packer/kontur/build-guest.sh`'s output is not
+  using one. That is why the flag is required rather than defaulted.
+- **`docker exec` cannot distinguish a failure to reach the guest from a
+  guest command that exited 1**, the way `ssh` can with its own reserved
+  status: it reports the exit status of whatever it started, and
+  `kontur exec` exits with the guest command's own. `DockerExecRunner`
+  tells the two apart by the first line of stderr (see
+  `execFailedBeforeGuest`), erring toward "it never ran" -- the same
+  `exitCode == -1` the SSH transport reported for an unreachable sandbox.
+
+Readiness changed shape with the transport. `resolveEndpoint` could only
+wait for a TCP port to start answering, which happens before the guest
+has booted to a usable sshd; `waitForGuestExec` probes by running a whole
+command *in the guest*, so a caller holding a runner already knows one
+ran. Both fast-fail on a VM container that has already exited.
+
+What a fake cannot settle is whether `kontur exec` authenticates against
+*this* guest image at all -- that rests on kontur's own `KONTUR_EXEC_KEY`
+handling and on `packer/kontur/guest-setup.sh`'s `authorized_keys`, neither
+of which this repo's fakes own -- nor whether `KONTUR_EXEC_ADDR` is
+really set to somewhere the guest answers, nor whether exit statuses and
+stdin survive both hops. `TestKonturSandboxesAgainstARealDockerBackedVM`
+(`kontur_docker_real_test.go`) covers all four against a real
+konturctl/docker/cloud-hypervisor VM under real KVM, and skips wherever
+docker, `/dev/kvm` or the guest-image build prerequisites are missing --
+so it never runs on a hosted runner, and does run wherever kontur's
+prerequisites genuinely exist.
+
+## The UI
+
+`pkg/ui`, served by `cmd/grain`'s "daemon" subcommand (bwsalmon/agents#237,
+folded in by #363 -- it used to be its own "ui" subcommand), is
+[`docs/data-model.md`'s "first-party UI"
+direction](docs/data-model.md#direction-a-first-party-ui): create a
+task, approve a proposed one, attach or remove a capability, comment,
+close/reopen — everything a human used to do by hand to a task issue,
+from a form instead of a body of directive lines and a label picker.
+
+**It talks to the store, not to GitHub.** That direction's own "the UI is
+not a fourth record" rule is now satisfied outright rather than argued
+around: there is one record, and this reads and writes it. The two
+independent paths that used to touch the same GitHub issue — an operator
+working through `pkg/ui`, and the daemon's own reconcile loop — are one
+path to one store. `State` still comes from a derivation rather than a
+column, but it is `model.StateOf`'s own view now instead of a second
+label-shaped copy.
+
+**No OAuth, and now nothing to authenticate to.** The direction document
+calls for GitHub OAuth plus `author_association` as the permission gate.
+Neither `pkg/ui.Server` nor `cmd/grain`'s own CLI takes a GitHub
+credential at all any more — the daemon that serves the UI/API takes
+`-as`, naming the single principal every task and comment created
+through it is attributed to (defaulting to the OS user), and every
+caller of that API — the browser frontend, the CLI, anything else
+reaching it — acts as that one principal. This is a single-operator tool,
+reached however an operator's network puts it in front of them —
+loopback, an SSH tunnel, Tailscale, IAP (bwsalmon/agents#363) — rather
+than authenticated per caller; a real permission gate is worth building
+the day this runs somewhere with more than one operator behind it
+(bwsalmon/agents#237's follow-up), and it would gate store writes rather
+than API calls.
+
+**Why a local web server, not Electron/Tauri/a native app.** `go build`
+already produces one dependency-free binary per OS `cmd/grain` runs on
+(Mac, Linux today); a `net/http` server that opens the system's default
+browser gets "runs standalone on Mac and Linux" for free, in the one language
+every other substrate here already commits to (see "Why Go" above), with
+no second *runtime* — Node, Rust, Xcode — for a deployed binary to carry.
+"Set up to run on iOS/Android in the future" is what shapes `pkg/ui` into
+an HTTP+JSON API in the first place rather than server-rendered pages: a
+future mobile client — native, or a thin webview shell — is just another
+caller of the same `/api/*` surface the daemon's own embedded frontend
+already uses, with nothing about the server to rewrite — the same surface
+`pkg/ui.HTTPClient` gives `cmd/grain`'s own CLI (see "The UI and the CLI
+talk to the daemon over REST" below).
+
+The frontend itself (`pkg/ui/frontend/`, bwsalmon/agents#356) is React
+built with Vite, not the plain HTML/CSS/JS this section used to describe
+— that earlier no-framework, no-build-step choice bought a repo `go
+build` alone could produce, at the cost of every UI change being DOM
+plumbing by hand (`el()`, manual diffing against `lastList`/`lastDetail`
+to avoid stealing focus on a poll) in a ~1200-line file with nowhere to
+grow. React and its ecosystem — component boundaries, hooks, the wider
+supply of libraries a task UI eventually wants (routing, richer forms,
+charts) — buys back the extensibility that file was starting to cost,
+and is worth a real toolchain now that one is already needed to build
+it. What survives from "why a local web server" is the deployment shape,
+not the build step: `npm run build` (wired into `make build`/`test`/
+`vet` and the `go-test` CI job, and into `Dockerfile.build` for
+`container-build`) has to run before `go build` can see real content in
+`pkg/ui/static/` — the directory it `//go:embed`s — but that step runs
+once, at build time; the artifact `cmd/grain` ships is still the one
+dependency-free Go binary this section opened with, with the built
+frontend baked into it rather than a Node runtime tagging along.
+
+**Material UI (bwsalmon/agents#450) for primitives, not for its default
+look.** Every interactive element — buttons, text fields, checkboxes,
+selects, dialogs, chips, the error toast — is an `@mui/material`
+component now rather than a bespoke `<button className="primary">` or a
+hand-rolled dropdown; that buys the accessibility, keyboard handling and
+focus management (a modal that traps focus and closes on Escape, a
+select that behaves like a native one) those were quietly missing,
+without every screen reinventing it. `AppThemeProvider`
+(`pkg/ui/frontend/src/AppThemeProvider.jsx`) feeds MUI's own
+`ThemeProvider` a theme (`theme.js`) built from the same accent/danger/
+surface values `style.css`'s `:root` tokens already defined
+(bwsalmon/agents#364's Plane-inspired palette), so adopting MUI's
+components didn't also mean adopting Material Design's own visual
+language — the dense, dot-not-pill task rows and status colors this
+section's own screenshots would show are unchanged. `style.css` still
+owns what MUI has no primitive for: the state dot/badge, the sidebar's
+brand mark, and layout for the task list and detail panel.
+
+**`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
+#363) for trying out the frontend on its own.** A real `grain daemon`
+needs a real Gemini key, a real store, and a real deployment's tasks to
+look at anything. `grain demo` opens a throwaway embedded store in a
+fresh temp directory instead and seeds it with fake tasks, one in each
+`model.State` (`cmd/grain/demo.go`), through the same `ui.Client`/
+`model.Store` writes a human clicking through the UI would make — no fake
+`Store` standing in, matching the "real embedded SQLite, not a fake"
+discipline every test in this repo already holds to
+(`pkg/ui/client_test.go`). That makes it a real server exercising the real
+frontend code, with fake data as the only difference from a real
+deployment — useful for checking a frontend change renders every state
+correctly without an orchestrator, a sandbox, a Gemini key, a real store,
+or a git repo anywhere behind it. It takes no `-data-dir` of its own —
+there is no real store to point it at by mistake, only the throwaway one
+it creates and seeds itself.
+
+**Freshness, not a cache.** Every mutation in the frontend
+(`pkg/ui/frontend/src/App.jsx`'s `act`) re-fetches the task afterward
+rather than assuming its own optimistic update is now true, matching the
+direction document's "it shows freshness for anything" — read live from
+the store rather than presenting a stale value as current. There is
+nowhere here for staleness to hide since nothing is ever cached across
+one request.
+
+**And it refreshes itself.** A task changes state when `graind`
+dispatches it, when a run finishes, and when a pull request merges —
+none of which the browser is told about, so without a poll the screen
+only moves when somebody clicks. `App.jsx` re-reads every three seconds,
+skipping the tick entirely while the tab is hidden and never overlapping
+itself.
+
+Two details keep that useful rather than annoying. React's own
+reconciliation already skips DOM writes for output that hasn't actually
+changed, so an idle screen polled every three seconds never flickers,
+loses focus, or resets its scroll — the vanilla-JS frontend this
+replaced had to do that by hand, diffing a poll's JSON against
+`lastList`/`lastDetail` before deciding whether to re-render at all, and
+this needs none of it. And when the open task does change, an unsent
+comment survives the re-render because `DetailOverlay.jsx`'s comment box
+is an uncontrolled input: React never touches a `<textarea>`'s own DOM
+value on a re-render, only on mount, so a reply someone is halfway
+through typing is untouched by newer comments arriving underneath it.
+Both behaviors were checked by driving the real UI in a browser.
+
+Polling rather than a change feed is deliberate, and unlike when this
+store ran on Dolt, there is no longer a substrate underneath it to
+decline: SQLite gives grain no commit log and no ready-made diff to build
+a watch on (see "Grain no longer keeps a commit history" above), so a
+real feed would mean building one from scratch — a diff joined across
+six tables to answer "what changed about this task" (a capability toggle
+changes `task_grant`, a comment changes `task_comment`), a story for
+history that grows without bound, and handling for a cursor that has
+aged out. That is a real feature; polling is fifteen lines with nothing
+to get wrong, and for one operator watching a handful of tasks on the
+same machine the two are indistinguishable.
+
+## Deployment configuration lives in the store too
+
+bwsalmon/agents#320 asked the same "the store is the record" question
+"Input is a model update, not a GitHub issue" (above) already answered
+for tasks, aimed at the daemon's own flags this time: `-max-concurrent`,
+`-poll-interval`, `-gemini-model`, `-claude-model`, `-max-agent-turns`, `-github-host`,
+`-github-insecure-http`, `-gcp-project` and `-gcp-agent-service-account`
+used to be the only way to set any of these, which meant changing one
+meant restarting the daemon with a different command line, and there was
+nothing a UI could show a human short of re-parsing that command line
+somehow.
+
+`model.Config` (`pkg/model/config.go`) and `Store.GetConfig`/`PutConfig`
+are the store-backed answer: one row in `grain_config`, the same
+one-row-per-deployment shape `grain_schema` already uses. `cmd/grain`'s
+"daemon" subcommand's own `loadConfig` (`daemon.go`)
+reads it once at startup — before `RunCycle` starts, never again while
+running, since bwsalmon/agents#320 explicitly did not ask for graceful
+in-flight reloading — and writes those flags into it as a one-time seed
+the first time a deployment's store has no row yet, so a fresh
+`-data-dir` still starts from a real command line and a UI or a CLI
+always has something to read from its very first request. Every start
+after that reads the stored row back instead, discarding whatever the
+flags on that particular invocation said: the same "a flag that silently
+matters differently depending on how many times this has already run
+would be a worse surprise than one that is simply ignored after the
+first" call every store-backed field elsewhere in this project already
+makes. What stays flags-only either has to be reachable before there is
+a store to read from at all (`-data-dir`, the `-store-*` family) or
+names secret material rather than being configuration itself
+(`-gemini-api-key-file`, `-kontur-exec-key`) — bwsalmon/agents#320's own
+"but not the secrets."
+
+`pkg/ui.Settings`/`UpdateSettingsRequest` (`pkg/ui/settings.go`) and
+`GET`/`PUT /api/settings` are what actually let something change it:
+partial updates, the same nil-means-leave-this-one-alone convention
+`UpdateTaskRequest` already uses for a task's own fields, applied as a
+read-modify-write against whatever `grain_config` currently holds (or
+the zero `model.Config`, the first time). `grain settings` is the CLI
+side of the same `Client` methods — no flags prints what is stored (or
+that nothing is, yet); any flags apply just those, the way `grain
+update` already treats a task's own flags.
+
+`pkg/ui/frontend/` (bwsalmon/agents#333) now has a settings panel too —
+the topbar's "Settings" button opens a form reading `GET
+/api/settings`, distinguishing `configured: false` (nothing saved yet,
+before any daemon has started or any value set) from a populated one
+the same way `grain settings` (no flags) already does. Saving sends
+only the fields an operator actually changed via `PUT`, leaving the
+rest out of the request entirely so they can't clobber what's already
+stored — the same partial-update contract `UpdateSettingsRequest`'s
+pointer fields already give a CLI caller. A 400's `ValidationError`
+message (a bad duration string, an empty required field the first
+time) surfaces through the same error banner task creation's own
+validation errors already use.
+
+## Write-only secrets access when colocated
+
+`pkg/secrets.Store` (above, "no secret store in the model") was
+read-only until bwsalmon/agents#357: `Resolve` was the whole surface,
+since nothing except a dispatch resolving a capability's credential had
+any reason to touch it. A UI running alongside the server is a
+different caller with a different need — an operator who wants to set a
+GitHub token or rotate a Gemini key without hand-editing files under
+`-data-dir/secrets` over SSH.
+
+`Store.Set`, `DeleteKey`, `DeleteSecret` and `List` are the added
+surface. `List` reports `SecretInfo{Name, Keys}` for everything on
+disk — names and key names, never a value — which is what lets a caller
+show which secrets are set without this package ever handing one back
+outside of `Resolve` itself. `Set`/`DeleteKey`/`DeleteSecret` now also
+validate every path segment they're given (no `.`, `..`, or separator),
+tightened onto `Resolve` too: it used to let a key contain `/` and
+resolve wherever that led, which nothing exercised on purpose but which
+writing a caller-supplied string to disk can no longer risk.
+
+`pkg/ui`'s `Config.Secrets` is nil unless the deployment says otherwise.
+Before bwsalmon/agents#363, that meant naming the *server's* `-data-dir`
+from a second process — the standalone `grain ui`'s own `-server-data-dir`
+flag, only useful when that UI happened to run on the same host as the
+server it pointed at. Now that the UI only ever runs inside the daemon
+that owns the store (`cmd/grain/daemon.go`'s own `startUIServer`, "The UI
+and the CLI talk to the daemon over REST" below), it always has that
+directory to hand and wires it up unconditionally — there is no longer a
+cross-process case where it would not, and no flag to set. `grain demo`'s
+own throwaway UI is the one caller that still leaves it nil, on purpose:
+a fake store seeded with fake tasks has no real secrets to manage either.
+`GET /api/secrets` reports `{enabled, secrets}` either way, so the
+frontend's secrets pane can hide its controls behind a note rather than
+show ones that would only ever 404; `PUT`/`DELETE
+/api/secrets/{secret}/{key}` and `DELETE /api/secrets/{secret}` are the
+set/delete-one-key/delete-the-whole-secret surface, each answering with
+the refreshed `{enabled, secrets}` the same way a mutating task route
+answers with the task. `grain secrets` (`cmd/grain/secrets.go`) is the
+CLI side, a mode of its own alongside `daemon`/`mcpserver` rather than a
+`runCLI` verb, since it has nothing to do with the task store and
+opening one for it would be pure overhead: `-data-dir` here means what
+`grain daemon`'s own `-data-dir` does (secrets live at
+`<data-dir>/secrets`), `list`/`set`/`delete` mirror the API one-to-one,
+and `set` takes its value from `-value-file` or, left unset, from
+stdin — deliberately never from an argv flag, which any other process
+on the same host could read back out of this one's own command line.
+Unlike the UI, it never goes through the daemon's own REST API: it edits
+the files directly, so it works even when no daemon is running.
+
+`Config.Reboot` (bwsalmon/agents#395) is the same nil-means-unavailable
+shape as `Config.Secrets`, for a much smaller surface: a func the UI's
+"reboot host" button in the settings panel calls to reboot the machine
+`grain daemon` is itself running on, in place of an SSH session an
+operator would otherwise need just to run one command. `startUIServer`
+wires it to `sudo systemctl reboot` unconditionally, the same command
+v1's `reboot_controller` MCP tool already ran (`grain/automation/mcp_server.py`)
+for a task holding the `self-repair` capability — the difference here is
+who is pulling the trigger, a human at the UI rather than a task granted
+that capability, so there is no capability to gate it behind.
+`scripts/setup.sh` grants `$GRAIN_USER` (the unprivileged account
+`grain-daemon.service` runs as) passwordless sudo for exactly that one
+command line, the same narrow-as-possible sudoers shape
+`provision/controller.sh` already uses for v1. `GET /api/config` reports
+`rebootEnabled` so the button can hide itself rather than offer an action
+that would only ever 404 -- the case for `grain demo`'s throwaway UI,
+which leaves `Config.Reboot` nil since there is no real machine behind it
+worth rebooting.
+
+## Two agent frameworks, either per task
+
+`agent/antigravity` and `agent/claude` both existed for a while before
+either was actually a choice: `model.Config.AgentFramework` (bwsalmon/agents#609)
+stored one, and `cmd/grain`'s `buildAgentFramework` (#615) read it once,
+at startup, to build the single `agent.Framework` every dispatch then
+used. Two things were wrong with that shape, and they were the same
+thing twice: the framework was decided too early, and the credential it
+needed was decided somewhere an operator could not reach.
+
+`Deps.Framework` is a factory taking a name now --
+`func(ctx, framework string) (agent.Framework, error)` -- called per
+dispatch with the task's own `model.Task.AgentFramework`. Empty is the
+common case and means "this deployment's default", which
+`cmd/grain`'s own `defaultAgentFramework` resolves by re-reading
+`grain_config` on each dispatch rather than from the config loaded at
+startup: switching the default in Settings takes effect on the next run,
+not the next restart. A task that names one instead
+(`agentFramework` on `POST /api/tasks`, or the picker under New task ->
+Advanced options) overrides it for that task alone -- the same
+"zero means unset" per-task override `SandboxCPUs`/`SandboxMemoryMB`
+already are, for the same reason: a task filed with no choice must
+follow the deployment wherever it is set later, rather than pin itself
+to whatever was configured the moment it was filed.
+
+The credential each framework runs as moved with it. Both are stored in
+this deployment's own secrets database now, under the two well-known
+names `pkg/secrets` exports (`GeminiAPIKeySecret`,
+`ClaudeOAuthTokenSecret`), and the Settings pane writes them: a
+write-only field per framework, a set/not-set chip, and a Clear button,
+backed by `GET`/`PUT`/`DELETE /api/agent-keys/{framework}`. Nothing
+reads a value back out through the API, the same rule the secrets pane
+those are built on already holds to. `-gemini-api-key-file` and
+`-claude-oauth-token-file` still work and still seed a deployment
+(`scripts/setup.sh`, and `terraform/gcp`'s own
+`grain-gemini-api-key`/`grain-claude-oauth-token` instance metadata),
+but a key set through the UI wins over either, and takes effect on the
+next dispatch with no restart -- `agentCredential` reads the database
+first, then the file, on every framework it builds.
+
+What that costs is one client construction per dispatch instead of one
+per process, which is nothing beside the run it precedes. What it buys
+is that a daemon with no credential at all is now a perfectly ordinary
+state: it starts, serves the UI, and says which keys are missing --
+where before, `runDaemon` failed outright on a missing key file, leaving
+an operator with a UI reporting `reconcilerDown` and no way to fix it
+from there. A run whose framework has no credential fails as its own
+`setup-failed` run naming the pane to set it in
+(`orchestrator.runOne` builds the framework inside its setup guard,
+before `RunDispatch` takes over finishing the run), and
+`scripts/setup.sh` no longer holds `grain-daemon.service` back until a
+Gemini key exists: a UI that is not running is a credential that can
+never be pasted in.
+
+Both frameworks need a binary on the host, and that requirement
+outlived the wiring above. It was once claude's alone: `agent/claude`
+execs `claude` per dispatch, resolving a bare `"claude"` against the
+daemon's own `$PATH` when `-claude-path` is unset -- and nothing in the
+v2 deployment path ever put one there. v1 did (`provision/controller.sh`
+installed it for the `grain-agent` account `claude -p` ran as), but when
+the framework became a stored setting, and then a live per-task choice,
+the binary was never brought along. A deployment could therefore offer
+"claude" in Settings, report its OAuth token as set, and fail every run
+it dispatched with `executable file not found in $PATH`.
+`scripts/setup.sh` closed that with an `install_claude_cli` that ran the
+CLI's own installer on every deployed host, on every run and whichever
+framework was currently selected (selecting the other one reaches the
+very next dispatch). bwsalmon/agents#645 moved it one step earlier:
+`Dockerfile` installs it into the deployment image, in CI, so its
+presence is settled when the image is built rather than depending on
+every deployed host being able to reach claude.ai at deploy time -- see
+"The deployment is a container" below. The readiness summary still
+reports it alongside the two credentials, asked of the image rather than
+of the host, and `GRAIN_CLAUDE_PATH` still names an operator's own copy,
+which `setup.sh` bind-mounts into the container at that same path.
+
+Replacing the home-grown Gemini runtime with the Antigravity CLI ("The
+agent runtime is a CLI now", above) gave the other framework the same
+requirement: `agy` is a binary too, and for a while it was the one
+nothing installed anywhere -- an operator's own manual step on every
+host, for the *default* framework, which made "this deployment cannot
+dispatch anything" a state it could sit in indefinitely. `Dockerfile`
+installs both agent CLIs now (bwsalmon/agents#645), from their own
+installers, in CI: an image carrying one of them is an image that fails
+every run choosing the other, and which one a run chooses is a live
+per-task decision. `scripts/setup.sh` checks the image for both
+(`verify_agent_cli`) and reports each in its readiness summary;
+`GRAIN_AGY_PATH`/`GRAIN_CLAUDE_PATH` still override either with a copy on
+the host, bind-mounted in at the path they name.
+`buildAntigravityFramework` fails the same way `buildClaudeFramework`
+does when one is missing: naming the install, not the `$PATH` lookup, so
+an operator reads a missing binary rather than a broken grain.
+
+`grain-daemon.service` also exports a `HOME` that exists now
+(`$GRAIN_DATA_DIR/home`). `$GRAIN_USER` is created `--no-create-home`,
+so systemd would otherwise hand the daemon the `/home/grain` its passwd
+entry names and nothing ever creates -- which the daemon itself never
+minded and the claude CLI, which writes its own state under `$HOME`,
+would. `agy` needs nothing from it: `agent/antigravity` hands every run
+a private `HOME` of its own, for the per-run MCP isolation described
+above.
+
+One consequence worth naming: two frameworks writing into one
+`TranscriptDir` means two transcript formats in it at once, so
+`ui.Config.LiveTranscripts` can no longer be whichever reader matched
+the deployment's framework at startup. `cmd/grain`'s
+`liveTranscripts.Tail` picks per file instead.
+
+*How* it picks changed with the runtime replacement. While one framework
+tee'd an already-readable narrative, "does the file open with a JSON
+object" separated them. Both mirror their subprocess's own NDJSON now --
+claude's `--output-format stream-json`, agy's -- so the discriminator is
+the key each vocabulary tags its events with instead: claude's carry
+`type`, agy's carry `event` (`transcriptIsClaude`). It sniffs the first
+line that *parses* rather than the first line, since reading a file the
+framework is still appending to routinely catches a half-written one. A
+run's finished transcript needs none of this, since
+`agent.Result.Transcript` is already rendered text by the time the store
+sees it.
+
+## The UI and the CLI talk to the daemon over REST
+
+Dolt permitted one writer when embedded, which suited a cron-driven
+controller and did not suit a controller plus a UI plus a human at a
+CLI, each opening the store directly. That became real the moment the
+CLI and the UI started writing the store instead of GitHub ("Input is a
+model update, not a GitHub issue", above): for a while, the answer was a
+second writer *class* — `dolt.Connect` dialing a real Dolt SQL server
+instead of the embedded database, so a daemon, a UI and a CLI could all
+hold their own connection open at once, and later, once
+bwsalmon/agents#366 replaced Dolt with embedded SQLite, simply calling
+`sqlite.Open` (`pkg/model/sqlite`) on the same file directly: SQLite has
+no wire protocol to serve in the first place, so its own file locking —
+WAL mode, so a reader is never blocked by the one writer holding the
+lock; `_txlock=immediate` and a five-second `busy_timeout`, so an
+overlapping writer waits its turn or fails outright rather than
+corrupting anything (`pkg/model/sqlite`'s own doc comment; "Locking, not
+merging" above) — was enough to serialise a daemon, a UI and a CLI all
+writing the same file at once, no server process required.
+
+bwsalmon/agents#363 removed the second writer *entirely* rather than
+scaling it. The daemon now serves `pkg/ui.Server` itself, in-process
+(`cmd/grain/daemon.go`'s own `startUIServer`, gated on `-ui-addr`), over
+the exact `*model.Store` `RunCycle` already has open — no second
+connection, and no separate store process needed just to let the two
+coexist. `cmd/grain`'s task CLI stopped opening the store at all: it is
+`pkg/ui.HTTPClient` now, a plain REST client of that same server (`-server`,
+default `http://127.0.0.1:8420`), the identical JSON API the browser
+frontend already speaks. The frontend and the CLI reach that one process
+however an operator's network puts it in front of them — a loopback
+port, an SSH tunnel, Tailscale, IAP — which is also the whole
+answer to "does the API need its own auth": it doesn't, because nothing
+downstream of the daemon's own store connection accepts one, and
+whatever can reach `-ui-addr` at all acts as the daemon's one configured
+principal (`-as`). `scripts/setup.sh` reflects this: one systemd unit
+(`grain-daemon.service`), one store, no separate store process to run
+alongside it.
+
+There is no `-store-addr` or equivalent anymore, either: SQLite has no
+server mode to dial in the first place (`pkg/model/sqlite`'s own doc
+comment), so `grain daemon`'s `-data-dir` always names a plain file on
+its own disk, and every mode that ever took a store flag — `grain
+daemon`, and, before #363, the standalone `grain ui` and the CLI itself
+— takes just that one, with no "embedded, or a server" distinction left
+to make.
+
+## Deploying it
+
+`scripts/setup.sh` (bwsalmon/agents#355) is the first real answer to "how
+does this run anywhere" — this file's own opening line used to say
+nothing here was wired in yet, and now this is the one path that is. It
+runs `grain` directly on the target machine as a single
+`grain-daemon.service`, no controller VM involved: v2 has no host adapter
+yet (see "What this does not have yet" above), and its daemon already
+defaults to `orchestrator.HostSandboxes` — plain host directories, not a
+VM — so a controller VM would have bought nothing v1's own shape needed
+for a different reason (isolating a real per-task sandbox, which v2 does
+not have either way yet). It *pulls* what it deploys rather than
+building it — see "The deployment is a container" below — so `git` and
+`docker` are the only things it needs of the host, and it installs both
+itself on a vanilla Debian VM that has neither (`ensure_git`,
+`ensure_docker` -- bwsalmon/agents#617: until then, only
+`terraform/gcp/files/deploy.sh` guaranteed them before ever invoking
+this script, which was no help to a host that reaches this script the
+way this section's own opening line describes -- cloning the repo and
+running it directly, no Terraform involved); it also re-runs itself when
+the update it just pulled
+replaced the script mid-run, so a deploy never proceeds with the copy it
+started with (`reexec_if_updated`). There used to be a second service
+(`grain-ui.service`) and, before
+bwsalmon/agents#366 replaced it with embedded SQLite, a `dolt sql-server`
+container behind it, needed only because a daemon and a UI writing the
+same store used to mean two writers ("The UI and the CLI talk to the
+daemon over REST", above) — bwsalmon/agents#363 folded the UI into the
+daemon itself, so there is still exactly one service here and no store
+container. Safe to re-run: it is the installer and the
+updater both, seeding a secret or a config value only the first time and
+leaving anything already on disk alone every time after. `./setup.sh
+--help` lists every setting.
+
+`scripts/setup.sh` only ever *seeds* an already-minted
+`GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE` — until bwsalmon/agents#358, nothing
+in this repo minted one. `grain setup gcp` (`cmd/grain/setup.go`,
+`pkg/gcpsetup`) is that missing piece: it creates the agent and minter
+service accounts the gcp-key/gemini-key capabilities need, grants the
+minter `roles/iam.serviceAccountKeyAdmin` on the agent account (and, with
+`-enable-gemini-key`, `roles/serviceusage.apiKeysAdmin` on the project),
+enables the APIs both calls need, and — with `-mint-key -key-out <path>`
+— mints the minter's own key, ready to feed straight into `setup.sh` as
+`GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE`. It authenticates with Application
+Default Credentials by default, or `-credentials-file` for a specific
+operator identity. Every step is get-or-create: running it again is a
+no-op wherever the first run already succeeded. A step the credential it
+ran as can't perform (typically an IAM grant, needing more than Editor)
+is printed as a `gcloud` command to run by hand instead of aborting the
+whole run — re-running `grain setup gcp` afterward picks up right there.
+`pkg/gcpsetup/gcpsetup_test.go` covers the ordering, the idempotency, and
+the manual-step fallback against a fake `Admin`, no real project involved
+(the same bar `pkg/capability/gcpkey`'s own tests hold to); nobody has
+run it against a real project yet — the "Accepted limits" list above
+still says as much about GCP token minting generally, and this is a
+bootstrap for that gap, not a live-verified closing of it.
+
+`grain sync -config <path>` (`cmd/grain/sync.go`) is the reconfiguration
+half: the command a GitHub Action calls whenever a config repo's checked-
+in configuration changes. It reads one JSON file with up to two
+independent sections — `"settings"`, unmarshaled straight into
+`ui.UpdateSettingsRequest` and applied through `HTTPClient.UpdateSettings`
+against `-server`, the same running daemon `grain settings` itself talks
+to (bwsalmon/agents#363: there is no store flag here any more), and
+`"gcp"`, which re-runs the exact `pkg/gcpsetup.EnsureInfrastructure` logic
+`grain setup gcp` uses, so IAM drift (a binding removed by hand, a newly
+enabled gemini-key rollout that needs a grant it didn't before) gets
+repaired on every sync rather than only at install time. It never mints a
+new minter key on a `sync` run — that stays a deliberate,
+`grain setup gcp -mint-key` action. Reachability is the part this command
+does not solve: the daemon's UI/API is bound to loopback only by default
+(this section's own security note, above), so a workflow needs either a
+self-hosted runner that *is* the deployment host (the simplest shape: the
+workflow step becomes `grain sync -config deploy/grain.json`, `-server`'s
+own default already pointing at loopback, no network hop at all) or a
+tunnel of some kind — SSH, Tailscale, IAP — to wherever `-ui-addr` actually
+listens. A `"gcp"`-only sync needs neither — just a GCP credential, the
+same Workload Identity Federation the deploy workflow in the config repo
+already uses works here too, with no static key in the workflow. `cmd/grain/sync_test.go` covers both sections' validation and,
+for `"settings"`, a real round trip against an `httptest.Server` wrapping
+an embedded store, including a second, no-op sync run.
+
+Neither command invokes an agent to walk an operator through a manual
+step — printing the exact command was judged enough for a first version;
+see bwsalmon/agents#358's own "If there is enough we need to automate
+manually we may want to invoke an agent" for the option this leaves open,
+should the list of manual steps grow long enough on a real project to be
+worth it.
+
+## The deployment is a container
+
+Everything above described a deployment that a host *built*: clone the
+repo, run `make container-build`, install a binary, run it under systemd
+with whatever else the machine happened to have. bwsalmon/agents#645
+replaced that with one artifact. `Dockerfile` builds an image carrying
+`grain` and every binary it shells out to — `git`, the docker CLI,
+`konturctl`, the `claude` CLI —
+`.github/workflows/build-artifacts.yml` builds and pushes it to GHCR on
+every commit, and `scripts/setup.sh` pulls it.
+
+What that buys is not build speed, though a deploy did stop costing
+several minutes of Go and npm. It is that the set of things that have to
+be true of a deployed host shrank to `git` and `docker`. Before, a host
+could be running the right commit and still fail every dispatch because
+its `claude` CLI install had 403'd months ago (`install_claude_cli` was
+non-fatal on purpose — refusing to deploy over a blocked download would
+have been worse), or because a `konturctl` built from a stale vendored
+tree was still on its `PATH`, or because the deploy died on `make:
+command not found` for a package nobody lists. None of those states can
+exist now: the binaries and the daemon are one thing, versioned together,
+and what CI proved buildable is byte-for-byte what runs.
+
+Three tags per commit, each answering a different question:
+`sha-<short sha>` is exactly what is running and can never move;
+`<branch>` — that branch's name with `/` replaced by `-`, since a docker
+tag may not contain one — is what a deployment tracking a branch follows,
+and what the Upgrade button resolves; `latest` is `main`'s, under the
+name a human types. The image job runs on every branch, not just `main`,
+precisely because of the middle one: a branch with no image published for
+it is a branch nobody can upgrade onto. The two jobs that publish a
+*shared* name (the `build-latest` release, `kontur-sandbox:latest`) stay
+pinned to `main`.
+
+`grain-daemon.service` is a `docker run` of that image. The unit itself
+runs as root, because a docker client has to reach a root-owned socket to
+ask for anything; the *container* runs as `$GRAIN_USER`'s own uid:gid, so
+the store, the secrets database and every sandbox working tree come out
+owned exactly as they were before any of this was containerized.
+`setup.sh`'s `docker_run_args` is the whole list of what the process is
+given, and the reasoning per entry lives there; the shape of it is: host
+networking (the UI's port, and the git proxy every sandbox — a kontur VM
+in its own netns included — has to reach), the data/sandbox/source
+directories bind-mounted **at the paths they have on the host**, the
+journal read-only for the UI's Logs pane, and the docker socket only when
+kontur sandboxing or the Upgrade button actually needs it. Same-path
+mounting is not tidiness: `konturctl` writes a VM's disk overlay at a
+path and then hands that same path to the host's docker daemon as a bind
+mount, so a path that meant two different directories would silently
+produce a VM with the wrong disk.
+
+Two things a container cannot do for itself, and how it asks instead.
+Binding port 80 (`setup.sh`'s own default `-ui-addr`) needs
+`CAP_NET_BIND_SERVICE`, and `--cap-add` alone grants a non-root process
+nothing — so the image gives the `grain` binary the matching *file*
+capability, which turns that bounding-set entry into a grant for that one
+binary and for nothing else in the container, a task's own `bash -c`
+included. And rebooting the host, or restarting the service, reaches a
+systemd that is not there: the daemon touches a file under
+`$GRAIN_DATA_DIR/control` and a `.path` unit on the host turns it into
+the real command (`write_control_units`; `-reboot-cmd` and
+`-upgrade-restart-cmd` are what point it at those files). That replaced
+both `NOPASSWD` sudoers drop-ins this used to install, and grants
+strictly less — there is no sudo rule left to widen, and the only two
+things the daemon can cause are the two those units name.
+
+`grain` and `konturctl` are still on the host's `PATH`, as two-line
+wrappers around the same image (`install_cli_wrappers`), so an operator's
+`grain list` and `kontur-diag.sh`'s `konturctl vm list` reach exactly the
+build the service is running rather than a host copy that can drift from
+it. `setup.sh` uses the `grain` one itself, for `grain schema-version`
+and `grain secrets`.
+
+A kontur deployment runs *two* images, and only one of them is grain.
+The other is the sandbox container each task's VM runs inside
+(`packer/kontur/build-oci-image.sh`'s output, published as
+`kontur-sandbox`), and it used to be built on every host from that
+host's own checkout — which is precisely how a deployment could end up
+running grain from one commit and a sandbox from another. It is pulled
+now, and which one is not something a deployment is told: CI publishes a
+sandbox per commit, and the grain image built from that same commit
+carries its reference, stamped in at link time
+(`cmd/grain/sandboximage.go`, the Dockerfile's `SANDBOX_IMAGE` build
+arg). `grain sandbox-image` prints it; `setup.sh` pulls whatever it
+prints; and `pkg/upgrade`'s image path asks a *newly pulled* grain the
+same question and pulls its sandbox before cutting over, so the two
+halves move together or not at all. The stamp names the immutable
+`sha-` tag rather than a branch, which is what makes a rollback ask for
+its own older sandbox rather than whatever that branch points at today.
+
+The guest *disk* is the one thing a deployment still builds, and that is
+not an oversight: `packer/kontur/guest-setup.sh` bakes the deployment's
+own SSH public key into the image's `authorized_keys`, so a generically
+published disk would either carry a keypair everyone has or admit nobody
+at all. `kontur_image_bucket` still fetches one built centrally, for a
+fleet sharing a keypair.
+
+What stayed on the host, deliberately: the git checkout. It is no longer
+what grain is built from, but it is still where `setup.sh` itself comes
+from (and re-execs from, mid-run), where `packer/kontur`'s guest and OCI
+image builds run from, and what the self-debug capability reads grain's
+own source out of — mounted read-only into the container for that last
+one. Both agent CLIs are in the image, not on the host: `claude` and `agy`
+alike, installed from their own installers at build time ("Two agent
+frameworks, either per task", above). `GRAIN_CLAUDE_PATH` and
+`GRAIN_AGY_PATH` still name a copy on the host when a deployment has to
+pin a particular version, and `setup.sh` bind-mounts whatever they name
+at that same path.
+
+## Upgrading from the UI
+
+bwsalmon/agents#396 (filed "For v2") asked for a specific, narrow thing:
+target a branch from the UI, and have an "Upgrade" button download it,
+build it locally (containerized, since `make container-build` already
+was — see "Deploying it" above), and start running the new version, a
+host restart along the way accepted as fine for now. `pkg/upgrade` is
+that, and nothing more: `Upgrader.Start` fetches and hard-resets
+`-upgrade-src-dir` onto the given branch, runs `make container-build`
+there, installs the binary to `-upgrade-install-path`, and — if
+`-upgrade-restart-cmd` names one — runs a command to bring it up.
+`GET /api/upgrade` reports how that went (`idle`/`running`/`ok`/
+`failed`, with a detail string), persisted to a file under `-data-dir` so
+it survives the very restart it triggers; `POST /api/upgrade` starts one
+and serializes against a second call arriving while it's running.
+Deliberately absent, the same way `grain sync`'s manual-step fallback
+above stops short of walking an operator through it: no rollback if the
+new binary is broken, and no health check before cutting over to it —
+a build or install failure leaves the old binary running untouched
+(`RestartCmd` is never reached unless every earlier step succeeded), but
+a build that succeeds and then misbehaves at runtime is not something
+this catches.
+
+Checkout and build together are bounded by `Config.Timeout` (45 minutes
+by default) rather than running unbounded, and every command either one
+runs is killed by its whole process group, not just its own direct
+child, once that bound trips — bwsalmon/agents#633 ("v2 Deploys are
+hanging"): a stalled `git fetch` or a `make container-build` stuck on an
+unresponsive docker registry used to leave `GET /api/upgrade` reporting
+`running` forever, with no way for a second click to ever get past
+`ErrUpgradeInProgress` short of restarting the whole daemon process by
+hand.
+
+Every flag is empty by default, which disables the feature entirely (the
+UI's own Upgrade pane reports itself unavailable, the same convention the
+Secrets pane already uses for its own optional `-server-data-dir`
+wiring).
+
+Since bwsalmon/agents#645 there are two pipelines behind that one button,
+and `Config.Image` picks which (`pkg/upgrade/image.go`). A deployment
+that runs from an image has no checkout to fetch into, no toolchain to
+build with, and a binary at `-upgrade-install-path` that is not what the
+service runs — so "upgrade to branch X" becomes: pull
+`-upgrade-image:<tag for X>` (that branch with `/` replaced by `-`, the
+same substitution CI makes when it pushes — `TagForBranch`), run it once
+with `schema-version` as a health check, and write one
+`GRAIN_IMAGE=<ref>` line into `-upgrade-image-ref-file` before restarting.
+
+The unit reads that file as an `EnvironmentFile` and interpolates it into
+its own `ExecStart`, which is the whole mechanism: an upgrade repoints a
+deployment by writing one line, with no systemd unit to rewrite, no root
+anywhere in the path, and the same file `setup.sh` itself writes on every
+run — so the script and the button are two ways of doing one thing rather
+than two mechanisms that can disagree. It is also strictly simpler than
+the binary path in one way worth naming: there is no rollback, because
+the health check runs against the pulled image *before* the ref file is
+touched at all, so a failure leaves the deployment pointing exactly where
+it already pointed.
+
+`scripts/setup.sh` wires up the image path for the one deployment shape
+it knows about, and the restart it names is a touch of
+`$GRAIN_DATA_DIR/control/restart` rather than `sudo systemctl restart`:
+see "The deployment is a container" above for that channel and why a
+container needs one. `-upgrade-src-dir` is still passed alongside, but no
+longer means "build here" — with `-upgrade-image` set nothing builds, and
+that flag is now only what `grantTools` reads grain's own source out of
+for the self-debug capability.
+
+`GRAIN_ENABLE_UI_UPGRADE` (default `1`) is the escape hatch for a
+deployment shape that already has its own rollout mechanism and cannot
+tolerate a second one racing it: set to `0`, `setup.sh` leaves the
+upgrade flags off entirely, so the daemon starts with the feature
+disabled, same as if none of this section existed. `terraform/gcp`'s own metadata-driven rollout
+(`config-sync.sh`/`deploy.sh` — which watches the
+`grain-deploy-generation` instance-metadata attribute Terraform writes,
+and re-runs `deploy.sh`, and through it `setup.sh`, from there) sets
+exactly that, since Terraform's own state is the record of what
+`grain_ref` a GCP deployment is on, and letting an operator's UI click
+upgrade it out from under a `terraform apply` (or the reverse) would let
+the two silently disagree about what's actually running
+(bwsalmon/agents#405).
+
+
+## Slots are gone; a sandbox belongs to one run
+
+A *slot* was one identifier doing five unrelated jobs: the concurrency
+unit `dispatch.Cycle` drew from a fixed pool, the name a long-lived
+sandbox was built under and reused across tasks, the identity the git
+proxy authenticated, the number a kontur VM's `-ip`/`-port` were derived
+from, and the row the sandbox-health pane keyed on. Only the first was
+ever a real idea. The rest existed because that identifier happened to be
+durable, and each one cost something:
+
+- **Isolation had to be bolted on.** A slot's VM outlived every task
+  dispatched onto it, so `runOne` deleted and rebuilt it after each run,
+  `runDaemon` ran a reset pass over every slot at startup to cover the
+  runs a crash interrupted, and `KonturSandboxes` remembered each slot's
+  git credentials so the rebuild could reapply them.
+- **`HostSandboxes` never got that at all.** Its directories were
+  deliberately long-lived — resetting one between tasks was "the caller's
+  job", and no caller did — so sequential tasks on one slot genuinely
+  shared a filesystem.
+- **A proxy token outlived the tasks that used it.** One token per slot,
+  minted at startup, shared by every run that ever landed there.
+
+Now `Sandboxes` is a lifecycle rather than a lookup: `Acquire` builds one
+sandbox for one run, and the `Sandbox` it returns is `Release`d when that
+run ends, success or failure alike. A task cannot inherit a filesystem
+that no longer exists, so the recreate, the reset pass, the remembered
+credentials, and the `recreatingSandboxes`/`shapedSandboxes` optional
+interfaces are all gone with the problem they solved. What
+`docs/design.md` lists as a non-goal for v1 — "isolating *sequential*
+tasks on one sandbox from each other" — is here a property rather than
+something knowingly given up.
+
+**Concurrency is a count.** `Cycle` takes `max_concurrent` and starts
+runs until that many are live. The DB-level backstop that used to be a
+unique index on the slot each run claimed (bwsalmon/agents#434, catching
+two overlapping cycles that both thought a slot was free) is now a count
+inside `StartRun`'s own transaction, which rules that race out rather
+than detecting it after the fact; the index that remains says a task has
+at most one run in flight, which is what `task_state` already assumed.
+
+**A run outlives the cycle that started it.** `reconcileDispatch` used
+to wait for every run it dispatched, and `cmd/grain`'s reconcile loop
+waits for a cycle before it ticks again — so one long run held the whole
+controller. Nothing else was dispatched however much of `max_concurrent`
+was free, no pull request was synced, no schedule came due, until that
+agent finished. A deployment configured for several concurrent runs only
+ever reached that number when a single tick happened to find several
+tasks ready at once; a task filed a second after a run started waited out
+the whole run. `orchestrator.InFlight` is where the goroutines go
+instead: `RunCycle` returns once the dispatch *decisions* are made, and
+the next tick dispatches into whatever headroom is free then.
+
+The limit is still a count in the store, not a count here —
+`LiveRunCount`, re-checked inside `StartRun`'s transaction — which stays
+accurate across ticks precisely because a run's row stays live until the
+goroutine that outlived the cycle finishes it. What `InFlight` is for is
+waiting: `drainInFlight` gives a cancelled run its chance to release its
+sandbox before the process exits, and a test that dispatches
+asynchronously needs to know when the work is done. A `Deps` with no
+`InFlight` keeps the old shape, waiting for its own runs and joining
+their errors — which is what every one-shot caller (a test, a single
+cycle) wants, having no next tick to do the waiting for it.
+
+Ticking while a run is live opened one window that could not exist
+before. A run's row is finished (`FinishRun`, inside `RunDispatch`) a
+moment before `runOne` has turned its result into the effects it implies
+— the observation that says the task completed, the pull request it
+opened — and in between `task_state` sees no live run and no completion,
+so the task reads `queued` again. A tick landing there dispatched the
+same task a second time. `dispatch.Busy` closes it: the process still
+holding that result tells `Cycle` to pass over the task, without
+spending capacity on it, exactly the way a task still backing off after
+a failure is passed over.
+
+**A sandbox is named after its run.** Nothing else is in a position to
+name it — it is built for that run and destroyed with it — and a run ID
+is already unique, already durable, and already what a log line or a
+`konturctl vm list` most usefully shows. `task_run.sandbox` is that name;
+`task_run.slot` is gone. Under the docker backend the whole VM name must
+fit 11 bytes (netshim derives `tap-<name>` and `ctl-<name>` from it, and
+Linux caps an interface name at 15), so `VMNameFor` checks that budget
+and says what is spending it rather than letting `konturctl vm create`
+refuse an interface name several layers down. A two-byte prefix leaves
+nine, which covers five-digit task ids with double-digit attempts.
+
+**The proxy token dies with the run.** It is minted as that run's sandbox
+is prepared rather than once per slot at startup — the security property
+`docs/data-model.md` predicted would fall out of a sandbox per task. That
+required `gitproxy.SandboxTokens` to start re-reading its file when shown
+a token it does not recognise: pinning the map at startup was correct
+while every token was minted before the proxy started, and would now
+reject every run's git. `cmd/grain/daemon_token_ordering_test.go` used to
+pin the opposite guarantee and now pins this one.
+
+Moving the mint also made `SandboxTokenStore` concurrent for the first
+time. Every method on it is a read-modify-write of one JSON file, which
+was safe while `runDaemon` minted a slot at a time in its own startup
+preamble and is not while `reconcileDispatch` runs a goroutine per
+dispatch: unguarded, two mints lose each other's tokens and publish
+half-written JSON through a shared temp-file name, so a run ends up
+holding a token that never reached the file and fails every git operation
+it makes. It takes a mutex now, and writes through a uniquely-named temp
+file. `SandboxTokens.reload` had a matching hazard on the read side — it
+read the file and swapped the map in two critical sections, so a reload
+that read *earlier* could install its map over one that read *later* and
+answer "unknown" for a token that is on disk — and now does both under
+one hold of the write lock.
+
+And the file shrinks as well as grows: `Deps.RevokeSandboxToken` drops a
+sandbox's entry once it is released. One token per slot was a fixed set
+for a deployment's life; one per run is a new entry every dispatch, in a
+file every mint rewrites whole. This is upkeep rather than
+authorization — `Store.GitScope` already answers "no live run" for a
+finished run's sandbox, so a stale entry authorizes nothing either way.
+
+**`ReapOrphans` replaced the reset pass.** At startup no VM can belong to
+this process, so any under the deployment's own prefix is a leftover from
+one that died before it could release it — the same argument, at the same
+moment, `RecoverOrphanedRuns` makes for the rows such a process leaves
+live. It deletes them rather than rebuilding them, because they are meant
+to have been deleted already.
+
+**`KonturConfig.BaseIP`/`BasePort` became `IP`/`Port`,** passed verbatim
+to every VM rather than offset by a slot number. Under the docker backend
+— the only one this package builds VMs under — `internal/dockervm.Create`
+gives every VM its own netns-holder container that the VM joins with
+`--network container:`, so they share no bridge and cannot collide on an
+address, and `Port` only ever reaches `NETSHIM_VMS` inside that
+namespace. The derivation was guarding a collision that shape makes
+impossible; it dates from the static-pod backend, where a pod's
+containers genuinely did share a namespace. That reasoning is from
+kontur's own source rather than from two VMs observed coming up on one
+address, so it is worth confirming against a real NAT-mode host before
+leaning on it. Flat mode, the default, ignores both.
+
+**A run that cannot get a sandbox still has to be finished.**
+`dispatch.Cycle` makes a run durable before anything builds a sandbox for
+it, and `RunDispatch` — the only thing that finishes a run — is never
+reached when setup fails. Left there, the row stays live forever:
+`task_state` reads it as `running` so the task never returns to `queued`,
+`LiveRunCount` keeps counting it so the deployment loses a unit of
+`max_concurrent`, and `retryEligible` reads *finished* runs so the
+backoff never retries. Nothing sweeps it — `MaxRunRuntime` is enforced
+inside `RunDispatch`, `RecoverOrphanedRuns` is a startup pass — so it
+lasts until someone restarts the daemon. That was survivable while a
+slot's VM was built once at startup; with a VM boot on every dispatch's
+setup path it is the ordinary way a run fails, so `runOne` finishes such
+a run itself, outcome `setup-failed`, and dispatch's own backoff retries
+the task.
+
+Two smaller consequences of the same move. The first: **a VM's name stopped
+being anyone's choice.** The budget got tighter without the flag that spends
+it changing, since a name built from a run id needs more of
+`maxVMNameLen`'s 11 bytes than one built from a slot number. The first
+answer was `CheckNamePrefix`, refusing an outgrown
+`-kontur-vm-name-prefix` at startup rather than letting every dispatch
+discover it separately — which caught nothing, because the value it checks
+was never in this repo's Go: `scripts/setup.sh` and `terraform/gcp`
+both defaulted to `kontur-`, which fit while a VM was named `kontur-1`, and
+the default deploy path (kontur sandboxing being on by default) therefore
+refused to start at all.
+
+The check was the wrong shape. 11 bytes minus a run id's nine leaves two,
+and there is no useful choice to make inside two bytes — only a wrong one,
+whose cost is a daemon that cannot build a single VM. So the name is
+`orchestrator.VMNamePrefix`, a constant, and the flag that used to carry it
+is `-kontur-sandboxes`, a bool that only opts in. Deployments that must not
+reap each other's VMs get that from separate `-kontur-state-dir` values,
+which is what `ReapOrphans` actually lists from.
+
+`dispatch.RunID` gave a byte back at the same time: it reads
+`<task>-<attempt>` rather than `<task>-r<attempt>`, the `r` having said
+only what the field's position already said, while costing a decimal digit
+of task id. The nine bytes now cover eight digits of task id and attempt
+combined — `999999-99` fits exactly — and
+`TestVMNameBudgetCoversRealisticRunIDs` pins where that ceiling actually
+bites, since task ids only ever climb toward it.
+
+The second: `Release` runs on a context detached from
+cancellation, which is right, but now with a deadline: unbounded, a hung
+`konturctl vm delete` would pin the dispatch goroutine and the unfinished
+run row beneath it for the life of the process, which is the failure
+detaching is meant to prevent. `Acquire`'s own cleanup needs that same
+detachment for a sharper reason: `kontur.Delete` execs through
+`exec.CommandContext`, so against an already-cancelled context
+`deleteQuietly` did not merely fail — it never ran at all. Since `ctx` is
+cancelled whenever the daemon is stopping *or* a task was closed mid-run,
+the ordinary way an `Acquire` is interrupted was also the way it leaked a
+VM, until the next startup's `ReapOrphans` got to it.
+
+**What this costs.** A VM boot moves onto the critical path of every
+task, where it used to be paid once at startup. `docs/data-model.md`
+already names the mitigations — a golden image, and a warm spare booting
+ahead of demand — and neither is in place yet. Worth measuring before
+reaching for either: a warm spare is a pool of *VMs*, which is a much
+smaller idea than a pool of assignments, and does not bring slots back.
+
+The sandbox-health pane changed meaning with everything else: it reports
+live sandboxes, so an idle deployment shows nothing rather than a table
+of idle slots.

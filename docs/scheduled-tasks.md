@@ -9,14 +9,14 @@ row a UI can create, edit, pause and delete, not a template file an
 operator drops on the host.
 
 This document describes what is actually implemented on this branch
-(`v2/pkg/model/schedule.go`, `pkg/orchestrator/schedule.go`,
+(`pkg/model/schedule.go`, `pkg/orchestrator/schedule.go`,
 `pkg/ui/schedules.go`, `pkg/ui/frontend/src/components/
 ScheduledTasksOverlay.jsx`, and the accompanying tests), not a proposal —
 it exists so a reviewer has one place to read the shape of the feature
 and why it looks the way it does, alongside the code's own doc comments.
 I have read the diff in full; I have not been able to run `go build`/`go
 test` against it myself (this sandbox's Go toolchain is 1.19.8, and
-`v2/go.mod` requires 1.26.2 — a pre-existing environment limit, not
+`go.mod` requires 1.26.2 — a pre-existing environment limit, not
 something this change introduced), so the "does it actually pass"
 question is left to CI/review rather than asserted here.
 

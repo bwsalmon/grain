@@ -61,7 +61,7 @@ setup_script="$(
 image_name="${IMAGE_NAME:-kontur-guest}"
 version="$(git -C .. rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date -u +%Y%m%d%H%M%S)"
 # OUTPUT_DIR lets a caller that already knows exactly where it wants the
-# result -- v2/scripts/setup.sh's own ensure_kontur_images, building this
+# result -- scripts/setup.sh's own ensure_kontur_images, building this
 # locally on every host and caching the result by a content hash of its
 # own choosing -- skip parsing this script's stdout (or the timestamp in
 # $version, different on every invocation) to find it afterward. Unset,
@@ -100,7 +100,7 @@ if [ -n "${KONTUR_IMAGE_BUCKET:-}" ]; then
   echo "published: ${dest}/{vmlinuz,initrd.img,disk.img}"
 
   # Also publish under a stable "latest" prefix, alongside the versioned
-  # one above -- v2/scripts/setup.sh's own ensure_kontur_images always
+  # one above -- scripts/setup.sh's own ensure_kontur_images always
   # fetches this fixed location rather than discovering or hardcoding
   # today's <git-sha>-<timestamp> version string itself. The versioned
   # copy above is kept too, so a previous guest image is still there to

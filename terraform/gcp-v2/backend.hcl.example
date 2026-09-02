@@ -1,7 +1,0 @@
-# Copy to backend.hcl and fill in -- printed by bootstrap-gcp.sh once
-# you've run it.
-#
-#   terraform init -backend-config=backend.hcl
-
-bucket = "CHANGE-ME-bucket"
-prefix = "grain-v2-staging"

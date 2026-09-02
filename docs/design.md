@@ -1,5 +1,13 @@
 # Grain: a single-node agent cluster
 
+> **Historical.** This describes v1 — a controller VM plus a pool of
+> libvirt sandbox VMs, driven by a Python host adapter — whose code this
+> repository no longer carries. It is kept because it is still the spec
+> several packages implement and cite: the git proxy's credential ladder
+> and withheld scopes, the split surface between orchestrator and
+> sandbox, and the secrets-on-`/data` layout all originate here. Read it
+> for those; read `README.md` for what actually ships.
+
 ## Status
 
 Revision 5. **One host machine runs everything**: a controller VM and a
@@ -1319,7 +1327,7 @@ shows up by actually booting a guest and running a command on it, which is
 the same argument, made again, for why this project keeps holding itself to
 a "verify live, not just unit tests" bar.
 
-The [host adapter](host-adapter.md) stays agent-agnostic — it manages VMs
+The host adapter stays agent-agnostic — it manages VMs
 and a network, and neither cares what runs inside. Everything above binds
 only in `grain/automation/`, which is exactly where the choice now lives.
 
@@ -1435,7 +1443,7 @@ inputs regardless, which is the work, not the files.
    name (`gr-sb0`) the firewall's anti-spoofing rules expect, comes up with
    the cloud-init-assigned static address (`10.100.0.10`, matching the
    inventory exactly) and answers ping from the host. Two bugs surfaced and
-   were fixed in the process — see [host-adapter.md](host-adapter.md) for
+   were fixed in the process — see v1's host-adapter notes for
    both. `lima.py` is kept, unused for now: Lima's bridged mode is real on
    macOS, so it may still serve as that platform's driver.
 2. ~~Does 4 vCPU hold two sandboxes plus a controller~~ **Answered: yes, on
@@ -1495,7 +1503,7 @@ inputs regardless, which is the work, not the files.
    `n2-highmem-4` shape (4 vCPU, 32 GB).
 2. **Host adapter, first cut** — *done*: interface, Linux networking, and
    now a working VM driver (`libvirt.py`, since Lima answered open question
-   1 negatively — see [notes](host-adapter.md)). A real sandbox VM has been
+   1 negatively). A real sandbox VM has been
    created, started, reached at its assigned address, and destroyed
    end-to-end on this host.
 3. **Networking** — *done*: ruleset written, tested against a real kernel,

@@ -1,52 +1,65 @@
 locals {
-  # The config repo is the task repo unless you say otherwise: issues filed
-  # here and labelled `grain-agent` are the queue. CI supplies config_repo
-  # from github.repository, so the common case needs no configuration at
-  # all.
-  task_repo = var.task_repo != "" ? var.task_repo : var.config_repo
-
-  # Empty when local.agent_account_needed (iam.tf) is false --
-  # google_service_account.agent doesn't exist in that case, and no agent
-  # identity is part of this deployment at all.
   agent_service_account_email = local.agent_account_needed ? google_service_account.agent[0].email : ""
 
-  # Non-secret (docs/roadmap.md's "config, like task_repo" precedent for
-  # agent_service_account_email above): just the project id that turns the
-  # grain-gemini-key task label on, read by deploy.sh alongside the agent
-  # account's own key. Empty when enable_gemini_key is false, so deploy.sh
-  # never passes --gemini-project-id and the feature stays off.
-  gemini_project_id = var.enable_gemini_key ? var.project_id : ""
+  # Empty together with gcp_agent_service_account above whenever no
+  # agent account exists at all, mirroring v1's instance.tf's
+  # own gemini_project_id local: a -gcp-project daemon flag with no
+  # matching -gcp-agent-service-account is a combination nothing here
+  # has a reason to ever produce.
+  gcp_project = local.agent_account_needed ? var.project_id : ""
 
-  # bwsalmon/agents#113: 0 (falsy on the shell side, same "empty/zero is
-  # the off switch" idiom gemini_project_id above already uses) when
-  # enable_janitor is false, so deploy.sh never passes --janitor-ttl-hours
-  # and the feature stays off.
-  janitor_ttl_hours = var.enable_janitor ? var.janitor_ttl_hours : 0
-
-  # Everything the on-VM deploy script needs, and nothing it does not: no
-  # secret values here either -- the runtime credentials arrive separately,
-  # pushed straight into instance metadata by the deploy workflow after
-  # `terraform apply` returns, never through Terraform.
+  # Everything files/deploy.sh needs to run scripts/setup.sh, and
+  # nothing it does not -- no secret value here, the same
+  # precedent v1's instance.tf set: the GitHub PAT and the minter's
+  # own key arrive separately, pushed straight into instance metadata by
+  # push-secrets.sh after `terraform apply` returns, never through
+  # Terraform.
   grain_config = {
-    grain_repo_url                = var.grain_repo_url
-    grain_ref                     = var.grain_ref
-    debian_image_url              = var.debian_image_url
-    sandbox_count                 = var.sandbox_count
-    cluster_overrides             = var.cluster_overrides
-    task_repo                     = local.task_repo
-    target_repos                  = var.target_repos
-    default_target_repo           = var.default_target_repo
-    credential_name               = var.credential_name
-    agent_service_account_email   = local.agent_service_account_email
-    gemini_project_id             = local.gemini_project_id
-    deploy_timeout_secs           = var.deploy_timeout_minutes * 60
-    bootstrap_ssh_timeout_seconds = var.bootstrap_ssh_timeout_seconds
-    name_prefix                   = var.name_prefix
-    janitor_ttl_hours             = local.janitor_ttl_hours
-    scheduled_jobs                = var.scheduled_jobs
+    grain_repo_url            = var.grain_repo_url
+    grain_ref                 = var.grain_ref
+    grain_image               = var.grain_image
+    grain_image_tag           = var.grain_image_tag
+    grain_image_pull_user     = var.grain_image_pull_user
+    github_host               = var.github_host
+    credential_name           = var.credential_name
+    default_target_repo       = var.default_target_repo
+    target_repos              = join(",", var.test_repos)
+    ui_port                   = var.ui_port
+    slots                     = var.slots
+    poll_interval             = var.poll_interval
+    agy_path                  = var.agy_path
+    gemini_model              = var.gemini_model
+    claude_model              = var.claude_model
+    max_agent_turns           = var.max_agent_turns
+    gcp_project               = local.gcp_project
+    gcp_agent_service_account = local.agent_service_account_email
+
+    # See variables.tf's own "kontur" section -- enable_kontur_sandboxes on
+    # with these otherwise empty (the default) is not a misconfiguration:
+    # it tells scripts/setup.sh's own ensure_kontur_images to build both
+    # images itself rather than fetch a pair published elsewhere.
+    enable_kontur_sandboxes = var.enable_kontur_sandboxes
+    kontur_image_bucket     = var.kontur_image_bucket
+    kontur_oci_image        = var.kontur_oci_image
+    kontur_ssh_user         = var.kontur_ssh_user
+    kontur_workspace        = var.kontur_workspace
+    kontur_base_ip          = var.kontur_base_ip
+    kontur_base_port        = var.kontur_base_port
   }
 }
 
+# Holds v2's embedded SQLite store (pkg/model/sqlite), its secrets
+# database and credential files (pkg/secrets), and the sandbox working
+# directories orchestrator.HostSandboxes clones each task's repo into --
+# see scripts/setup.sh's own GRAIN_DATA_DIR default, /var/lib/grain,
+# which is also where files/startup.sh mounts this disk, so no override
+# is needed for the two to agree.
+#
+# Separate from the boot disk specifically so the host VM can be
+# recreated -- a new boot_image, a bigger machine_type, a from-scratch
+# `terraform apply` after deleting the instance -- without losing any of
+# that state (bwsalmon/agents#394's own "so the entire VM can be
+# redeployed if needed without wiping the state").
 resource "google_compute_disk" "data" {
   name   = "${var.name_prefix}-data"
   type   = var.data_disk_type
@@ -54,10 +67,6 @@ resource "google_compute_disk" "data" {
   size   = var.data_disk_gb
   labels = var.labels
 
-  # This disk is /var/lib/grain: the guest disks, the admin SSH key, and
-  # -- inside the controller's disk -- /data, which holds every credential
-  # and all automation state. Losing it is not recoverable from this repo.
-  # Remove this block deliberately if you really mean to destroy it.
   lifecycle {
     prevent_destroy = true
   }
@@ -74,10 +83,14 @@ resource "google_compute_instance" "host" {
   # instance; a machine_type change needs a stop, and this permits it.
   allow_stopping_for_update = true
 
-  # The whole point of this machine: grain runs libvirt guests on it.
-  # Without this there is no /dev/kvm and the deploy fails loudly.
-  advanced_machine_features {
-    enable_nested_virtualization = true
+  # /dev/kvm, for a deployment whose sandboxes are VMs rather than host
+  # directories. Without this the device does not exist and anything
+  # expecting it fails on the host, not here.
+  dynamic "advanced_machine_features" {
+    for_each = var.enable_nested_virtualization ? [1] : []
+    content {
+      enable_nested_virtualization = true
+    }
   }
 
   boot_disk {
@@ -106,18 +119,26 @@ resource "google_compute_instance" "host" {
   }
 
   service_account {
-    email = google_service_account.host.email
-    # Scopes are the legacy control; the roles on the account are the real
-    # one. cloud-platform here means "let IAM decide", which is what
-    # vm_service_account_roles is for.
+    email  = google_service_account.host.email
     scopes = ["cloud-platform"]
   }
 
   scheduling {
-    # Nested virtualization and live migration have a history; terminating
-    # and restarting is the boring choice, and config-sync reconverges on
-    # boot anyway.
-    on_host_maintenance = "TERMINATE"
+    # Follows enable_nested_virtualization, because the right answer
+    # differs and neither is safe as a blanket default.
+    #
+    # With nested guests: TERMINATE, the same choice terraform/gcp makes
+    # for v1, whose comment gives the reason -- "nested virtualization
+    # and live migration have a history". config-sync reconverges on
+    # boot, so a terminate-and-restart costs a rollout, not state.
+    #
+    # Without them: MIGRATE, so the daemon rides out a host maintenance
+    # event instead of being killed. This also matters for what can run
+    # here at all -- E2 rejects TERMINATE unless the instance is spot,
+    # so hardcoding TERMINATE made an E2 machine_type impossible, which
+    # is what "e2 instances do not support maintenance terminate unless
+    # spot" meant on a first apply.
+    on_host_maintenance = var.enable_nested_virtualization ? "TERMINATE" : "MIGRATE"
     automatic_restart   = true
   }
 
@@ -136,82 +157,80 @@ resource "google_compute_instance" "host" {
 
     startup-script = file("${path.module}/files/startup.sh")
 
-    # Shipped as metadata rather than fetched from this repo, so the host
-    # needs no credential for a repo that may well be private.
+    # Shipped as metadata, not fetched from this repo at boot, so the
+    # host needs no credential for grain even if it were private --
+    # mirrors v1's instance.tf's exact reasoning.
     grain-config-sync-script = file("${path.module}/files/config-sync.sh")
     grain-deploy-script      = file("${path.module}/files/deploy.sh")
 
     grain-config = jsonencode(local.grain_config)
 
-    # Changing this is what triggers a rollout: config-sync.sh only wakes
-    # up and re-runs deploy.sh when this value differs from the one it
-    # last deployed (files/config-sync.sh's own "watching
-    # grain-deploy-generation"). CI bumps var.deploy_generation to the
-    # config repo's own commit SHA, so a push there always changes it --
-    # but that variable defaults to the literal string "manual" for an
-    # operator applying by hand, and a second manual apply that only
-    # edits, say, sandbox_count leaves that default exactly as it was.
-    # Without the hashed suffix below, that combination -- change
-    # grain_config, `terraform apply`, and nothing rolls out, not even
-    # after rebooting the host, since config-sync's only trigger is this
-    # value and nothing else ever rechecks grain_config on its own -- was
-    # bwsalmon/agents#592 ("changing max concurrent agents takes no
-    # effect even after reboot"; sandbox_count is exactly the grain_config
-    # field that issue changed by hand). Folding a short hash of the whole
-    # grain_config blob in here means any real change to it changes this
-    # value too, whether or not var.deploy_generation itself also moved.
+    # Changing this is what triggers a rollout -- see variables.tf's
+    # deploy_generation. Folded together with a hash of grain_config
+    # itself, the same fix v1's instance.tf's own copy of this
+    # line got for bwsalmon/agents#592: without it, a manual `terraform
+    # apply` (deploy_generation's own "manual" default) that only edits a
+    # grain_config value never rolls out, because config-sync's whole
+    # trigger is this one field and nothing rechecks grain_config on its
+    # own -- not on the next tick, not after rebooting the host.
     grain-deploy-generation = "${var.deploy_generation}-${substr(sha256(jsonencode(local.grain_config)), 0, 12)}"
   }
 
-  # Catch the repo-wiring mistakes in the plan, where they cost a comment
-  # on a pull request, rather than on the host, where they cost a failed
-  # deploy and a journalctl session.
   lifecycle {
+    # E2 supports neither nested virtualization nor the TERMINATE
+    # maintenance policy it forces, and GCP reports the second failure
+    # first -- "e2 instances do not support maintenance terminate unless
+    # spot" -- which says nothing about nested virtualization at all.
+    # Caught here so the message names the actual constraint.
     precondition {
-      condition     = local.task_repo != ""
-      error_message = "Neither task_repo nor config_repo is set. CI passes config_repo from github.repository; running Terraform by hand needs one of the two in config/grain.tfvars."
+      condition     = !var.enable_nested_virtualization || !startswith(var.machine_type, "e2-")
+      error_message = "enable_nested_virtualization needs a machine family that supports it -- N1, N2, N2D, C2, C3 or M-series. E2 does not. Either pick a non-E2 machine_type, or set enable_nested_virtualization = false if this deployment's sandboxes are host directories."
     }
 
     precondition {
-      condition     = can(regex("^[^/[:space:]]+/[^/[:space:]]+$", local.task_repo))
-      error_message = "task_repo must be owner/name, got '${local.task_repo}'."
+      condition     = !(var.enable_gemini_key || var.agent_can_manage_compute_instances || var.agent_can_manage_gke) || var.deployer_member != ""
+      error_message = "enable_gemini_key, agent_can_manage_compute_instances, and agent_can_manage_gke all need a real key on the agent account to do anything -- set deployer_member so push-secrets.sh can mint one after apply (see iam.tf's deployer_manages_minter_keys)."
     }
 
+    # A guest image and an OCI image used to have to exist somewhere for
+    # setup.sh to fetch before it could bring up a single kontur VM, and
+    # neither had a project-independent default this module could supply
+    # -- so this precondition used to fail loudly here rather than
+    # applying a host that could never actually create one. That is no
+    # longer true (bwsalmon/agents#531, #645): with both left at their
+    # empty defaults, scripts/setup.sh's own ensure_kontur_images
+    # *pulls* the sandbox container -- the one the grain image it is
+    # deploying was built against, stamped in at build time, so nothing
+    # names it here -- and builds the guest disk itself on the host the
+    # first time it runs. See this module's README, "Kontur sandboxing",
+    # and that script's own kontur_image_tag for how the disk is named
+    # and cached so a later apply does not rebuild it for nothing.
+    # kontur_oci_image overrides the sandbox container; kontur_image_bucket
+    # fetches a pre-built guest disk instead of building one. They are
+    # independent, and each is optional on its own.
+
+    # A kontur VM is a nested cloud-hypervisor guest -- no /dev/kvm, no
+    # boot, regardless of anything else here.
     precondition {
-      condition     = alltrue([for r in var.target_repos : can(regex("^[^/[:space:]]+/[^/[:space:]]+$", r))])
-      error_message = "every entry in target_repos must be owner/name."
+      condition     = !var.enable_kontur_sandboxes || var.enable_nested_virtualization
+      error_message = "enable_kontur_sandboxes needs enable_nested_virtualization (for /dev/kvm) -- set both, or turn enable_kontur_sandboxes off."
     }
 
-    precondition {
-      # grain refuses to dispatch a task whose default target is not an
-      # allow-listed one. With target_repos empty the task repo is the
-      # sole target, and so the only legal default.
-      condition = var.default_target_repo == "" || (
-        length(var.target_repos) == 0
-        ? var.default_target_repo == local.task_repo
-        : contains(var.target_repos, var.default_target_repo)
-      )
-      error_message = "default_target_repo must be one of target_repos (or, with target_repos empty, the task repo itself)."
-    }
-
-    precondition {
-      # lockdown.tf's compute.vmExternalIpAccess policy denies external
-      # IPs project-wide, this host included -- catch the
-      # self-contradiction here rather than have the host's own
-      # access_config fail against a policy this same apply just put in
-      # place.
-      condition     = !(var.lock_down_project && var.assign_external_ip)
-      error_message = "lock_down_project denies external IPs project-wide, including on this host; set assign_external_ip = false (and enable_cloud_nat = true for egress) before turning lock_down_project on."
-    }
-
-    # grain-github-token and grain-claude-token are never declared here --
-    # the deploy workflow adds them directly with `gcloud compute
-    # instances add-metadata` after this resource exists, so the value
-    # never passes through Terraform or lands in the state file. Without
-    # this, the next apply would see them as drift and remove them.
+    # grain-github-token, grain-github-app-id/installation-id/private-key,
+    # grain-gemini-api-key, grain-claude-oauth-token and grain-gcp-minter-key
+    # are never declared here -- push-secrets.sh adds them directly with
+    # `gcloud compute instances add-metadata` once this resource exists,
+    # so none of them ever passes through Terraform or lands in the
+    # state file. Without this, the next apply would see them as drift
+    # and remove them.
     ignore_changes = [
       metadata["grain-github-token"],
-      metadata["grain-claude-token"],
+      metadata["grain-github-app-id"],
+      metadata["grain-github-app-installation-id"],
+      metadata["grain-github-app-private-key"],
+      metadata["grain-gemini-api-key"],
+      metadata["grain-claude-oauth-token"],
+      metadata["grain-gcp-minter-key"],
     ]
   }
 }

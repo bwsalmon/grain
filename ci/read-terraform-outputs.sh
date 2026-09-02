@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Publish the Terraform outputs the rest of the deploy workflow needs as
-# GitHub Actions step outputs.
+# Publish the terraform/gcp Terraform outputs the rest of the deploy
+# workflow reads as GitHub Actions step outputs.
 #
 # Every value a later step reads as steps.<id>.outputs.<name> is written
 # here. Adding a consumer without adding it here is the bug that made a
-# host come up with no GCP access at all (bwsalmon/agents#69): the
-# expression resolved to empty rather than failing, so the block that
-# minted and pushed the agent key was silently skipped.
+# v1 host come up with no GCP access at all (bwsalmon/agents#69): the
+# expression resolved to empty rather than failing, so the step that
+# minted and pushed the key was silently skipped. minter_service_account
+# is exactly that shape again here -- push-secrets.sh mints no minter key
+# at all when it is empty, and the gcp-key and gemini-key capabilities
+# then have no credential to mint with.
 #
 # Required env:
 #   GITHUB_OUTPUT  set by the Actions runner
@@ -17,17 +20,33 @@ github_output="${GITHUB_OUTPUT:?GITHUB_OUTPUT is not set (is this running outsid
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root/terraform/gcp"
 
+# One `terraform output -json`, parsed, rather than a `-raw` call per
+# name. -raw exits non-zero on a null value -- which url, dns_name and
+# load_balancer_ip all are when expose_ui_publicly is off -- and under
+# hashicorp/setup-terraform the `terraform` on PATH is a wrapper that
+# prints its own "::error::Terraform exited with code 1." annotation on
+# *stdout*. A `|| true` around it therefore captured that annotation as
+# the value, and the summary reported a URL of "::error::Terraform
+# exited with code 1.". -json emits every output at once, nulls
+# included, and needs no per-name failure handling.
+outputs="$(terraform output -json)"
+
+get() {
+  python3 -c '
+import json, sys
+v = json.load(sys.stdin).get(sys.argv[1], {}).get("value")
+sys.stdout.write("" if v is None else str(v))
+' "$1" <<<"$outputs"
+}
+
 {
-  echo "project_id=$(terraform output -raw project_id)"
-  echo "instance=$(terraform output -raw instance_name)"
-  echo "zone=$(terraform output -raw zone)"
-  # agent_service_account is null (not just absent) whenever no agent
-  # account is configured -- `-raw` errors on a null value, so that case
-  # has to fall back to empty rather than aborting the whole step, the
-  # same way write-deploy-summary.sh's null-safe outputs do.
-  echo "agent_service_account=$(terraform output -raw agent_service_account 2>/dev/null || true)"
-  # bwsalmon/agents#131: the identity the controller mints agent keys
-  # *as*. Always set (unlike agent_service_account, which is null when
-  # no agent account is configured), but read null-safe all the same.
-  echo "host_service_account=$(terraform output -raw host_service_account 2>/dev/null || true)"
+  echo "project_id=$(get project_id)"
+  echo "instance=$(get instance_name)"
+  echo "zone=$(get zone)"
+  echo "url=$(get url)"
+  # Empty exactly when expose_ui_publicly is off, which is how the
+  # summary decides whether to print a URL or the tunnel command.
+  echo "tunnel_command=$(get tunnel_command)"
+  echo "agent_service_account=$(get agent_service_account)"
+  echo "minter_service_account=$(get minter_service_account)"
 } >> "$github_output"

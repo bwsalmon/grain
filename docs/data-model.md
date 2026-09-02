@@ -440,7 +440,7 @@ and stops sharing a surface with the third row's labels.
   agents can write *target* repo content. A folder tree in the *task*
   repo, which no agent can write, needs no such rule — it is just a file
   next to the tasks it governs. There is precedent: a deployment already
-  has an operator-owned config repo forked from `templates/gcp/`, and
+  has an operator-owned config repo (bwsalmon/agents), and
   `labels.py` already treats it as the place deployment-wide decisions
   live.
 - **A task changes atomically.** Retargeting a task today means editing a
@@ -2019,13 +2019,13 @@ all for scoping a single deployment did not need. The model should
 express both. The deployment has already chosen simplicity once, with
 reasons written down.
 
-The `github-sandbox` capability (bwsalmon/agents#354, `v2/pkg/capability/
+The `github-sandbox` capability (bwsalmon/agents#354, `pkg/capability/
 githubsandbox`) reopens that choice deliberately, in v2's setting, where
 `bwsalmon/agents#186`'s two objections no longer hold: Go's
 `golang-jwt/jwt` signs the App JWT with no subprocess, and `app.go` is
 this capability's one minting call site, rebuilt fresh on every call the
 same way `gcpkey`'s own `NewMinter` is. `grain controller
-bootstrap-github-app` (`v2/cmd/grain/controller.go`) keeps setup close to
+bootstrap-github-app` (`cmd/grain/controller.go`) keeps setup close to
 the "username and password" the issue first asked for and this
 document's own PAT path would have needed anyway: one click, in a
 browser already logged into the bot account, no password ever reaching
@@ -2045,12 +2045,12 @@ in it**, which is exactly the kind of thing a UI should say out loud.
 "No secret store in the model" is about the *task* model above — nothing
 resolvable to material is allowed anywhere a `Task`, a `Grant`, or a UI
 can see it. Material still has to live somewhere, and in v2 that
-somewhere is `v2/pkg/secrets`: a `model.CredentialResolver` reading a
+somewhere is `pkg/secrets`: a `model.CredentialResolver` reading a
 directory shaped exactly like a Kubernetes Secret volume mount —
 `<dir>/<secret>/<key>`, one subdirectory per secret, one file per key,
 raw bytes, no wrapper format. `grain/proxy/credentials.py` and
-`v2/pkg/gitproxy/credentials.go`'s `<name>.token` convention already do this
-for GitHub credentials specifically; `v2/secrets.Store` generalises it to
+`pkg/gitproxy/credentials.go`'s `<name>.token` convention already do this
+for GitHub credentials specifically; `secrets.Store` generalises it to
 any capability, addressed the same way Kubernetes itself addresses one
 value in a Secret — `name`, or `name/key` when a secret carries more than
 one. Extensible because a new capability needing a new secret is an
@@ -2605,8 +2605,8 @@ of `run_once`. A `version` field and the established
 
 ## Implementation status
 
-`v2/` holds the first of this, in Go: the model types, the schema, and a
-SQLite-backed store. See [`v2/README.md`](../v2/README.md).
+This repository holds the first of this, in Go: the model types, the schema, and a
+SQLite-backed store. See [`README.md`](../README.md).
 
 | File | What it is |
 |---|---|
@@ -2632,12 +2632,12 @@ generated.
 
 Not yet built: folders, and a real host adapter for a dispatched run to
 execute against. The capability provider contract now exists
-(`v2/pkg/model/capability.go`, bwsalmon/agents#238), and so does
+(`pkg/model/capability.go`, bwsalmon/agents#238), and so does
 `TrackedPullRequest` — though as a value assembled fresh each cycle from
 `Task`'s own `LinkFixes` link and a live GitHub read
-(`v2/pkg/model/pullrequest.go`, `v2/pkg/orchestrator/sync.go`,
+(`pkg/model/pullrequest.go`, `pkg/orchestrator/sync.go`,
 bwsalmon/agents#249), not a table of its own; see that package's own doc
-comments for why a cache here would just go stale. `v2/pkg/orchestrator/`
+comments for why a cache here would just go stale. `pkg/orchestrator/`
 is what now reads and writes GitHub — polling labelled issues, dispatching
 through `dispatch.Cycle`, and closing out a finished PR. `core.py` is
 untouched.

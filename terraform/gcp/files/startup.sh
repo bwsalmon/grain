@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # GCE startup script. Runs as root on every boot, and must be idempotent.
 #
-# It does the two things that only make sense at boot -- get the data disk
-# mounted, get the config-sync service running -- and nothing else. All the
+# Mirrors v1's own startup script's shape exactly: mount the
+# data disk, install and enable config-sync, and nothing else. All the
 # real work is in deploy.sh, which config-sync fetches from instance
 # metadata so it can change without recreating the instance.
 set -euo pipefail
@@ -50,7 +50,7 @@ install_config_sync() {
 
   cat > /etc/systemd/system/grain-config-sync.service <<'UNIT'
 [Unit]
-Description=Watch instance metadata and redeploy grain when the config repo changes
+Description=Watch instance metadata and redeploy grain v2 when it changes
 After=network-online.target google-guest-agent.service
 Wants=network-online.target
 
@@ -59,8 +59,8 @@ Type=simple
 ExecStart=/opt/grain-deploy/config-sync.sh
 Restart=always
 RestartSec=10
-# The deploy drives libvirt, writes /var/lib/grain, and reads secrets
-# from its own instance metadata. It needs to be root.
+# The deploy writes /var/lib/grain, creates a system user, and reads
+# secrets from its own instance metadata. It needs to be root.
 User=root
 
 [Install]

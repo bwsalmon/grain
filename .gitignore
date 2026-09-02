@@ -2,20 +2,23 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .claude/settings.local.json
-v2/bin/
+/bin/
 # packer/kontur/build-guest.sh's own output -- a built kernel/initramfs/disk
 # triple, multiple GB once docker/gcloud/terraform are provisioned in, not
 # something to ever commit.
 packer/kontur/output/
+# The built binary `make build` leaves at the repository root when a
+# CMD is built without -o bin/. Anchored, so it cannot swallow cmd/grain/.
+/grain
+
 # Module and build caches the Makefile bind-mounts into the
-# container-build toolchain (v2/Dockerfile.build), owned by whoever ran make.
-v2/.container-cache/
-v2/grain
+# container-build toolchain (Dockerfile.build), owned by whoever ran make.
+.container-cache/
 # terraform init's working directory and its lock file, created in
-# terraform/gcp/ and terraform/gcp-v2/ by the `terraform` job in
+# terraform/gcp/ by the `terraform` job in
 # .github/workflows/tests.yml and by anyone running the same commands by
-# hand. The lock file stays out of the repo deliberately: the modules pin
-# `google ~> 6.8` in their own versions.tf, and a lock committed from one
+# hand. The lock file stays out of the repo deliberately: the module pins
+# `google ~> 6.8` in its own versions.tf, and a lock committed from one
 # machine's platform records only that platform's hashes.
 .terraform/
 .terraform.lock.hcl

@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # The rollout mechanism. Runs forever as a systemd service.
 #
+# Mirrors v1's own config-sync mechanism exactly:
 # Terraform writes a `grain-deploy-generation` attribute into instance
-# metadata; CI sets it to the commit SHA of the config repo. This service
-# hangs on the metadata server's wait_for_change endpoint, and every time
-# that value changes it re-fetches deploy.sh from metadata and runs it.
-# That is the whole "push to the config repo and it rolls out" path -- no
-# inbound SSH, no runner with credentials, no agent polling GitHub.
+# metadata, and this service hangs on the metadata server's
+# wait_for_change endpoint, re-fetching and running deploy.sh from
+# metadata every time that value changes. No inbound SSH, no runner with
+# credentials, no agent polling GitHub -- just `terraform apply` (or a
+# metadata edit) changing one value the host is already watching.
 #
 # A failed deploy is retried on the next wake-up, so a transient failure
-# (apt mirror, GitHub, a secret not pushed yet) self-heals without a
-# second push.
+# (an apt mirror, a Docker pull, GitHub, a secret not pushed yet)
+# self-heals without a second apply.
 set -euo pipefail
 
 readonly MD="http://metadata.google.internal/computeMetadata/v1"
@@ -18,15 +19,22 @@ readonly SELF="/opt/grain-deploy/config-sync.sh"
 readonly DEPLOY="/opt/grain-deploy/deploy.sh"
 readonly STATE="/var/lib/grain/.deploy-state"
 readonly WAIT_SECS=300
-readonly DEFAULT_DEPLOY_TIMEOUT=2700
+# Generous, though less of it is spent on grain itself than it used to
+# be: the deploy no longer builds a binary here at all -- it pulls the
+# image CI published (bwsalmon/agents#645) -- but a kontur deployment's
+# first run still builds its own guest image with debootstrap against a
+# real Debian mirror (scripts/setup.sh's ensure_kontur_images_build),
+# which is minutes, and a first pull of a several-hundred-megabyte image
+# on a slow link is not free either.
+readonly DEPLOY_TIMEOUT_SECS=2700
 
-log() { echo "config-sync: $*"; }
+log() { echo "grain-config-sync: $*"; }
 
 md() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1"; }
 
 # Guest attributes are readable from outside with
-# `gcloud compute instances get-guest-attributes`, which is how CI watches
-# a rollout land. Never put anything sensitive here.
+# `gcloud compute instances get-guest-attributes`, which is how CI (or
+# an operator) watches a rollout land. Never put anything sensitive here.
 guest_attr() {
   curl -fsS -X PUT --data "$2" -H "Metadata-Flavor: Google" \
     "$MD/instance/guest-attributes/grain/$1" >/dev/null 2>&1 || true
@@ -71,17 +79,8 @@ fetch_generation() {
   rm -f "$hdr" "$body"
 }
 
-deploy_timeout() {
-  md instance/attributes/grain-config 2>/dev/null \
-    | python3 -c 'import json,sys; print(int(json.load(sys.stdin).get("deploy_timeout_secs") or 0))' \
-      2>/dev/null || echo 0
-}
-
 run_deploy() {
-  local generation="$1" timeout_secs new rc
-  timeout_secs="$(deploy_timeout)"
-  [ "$timeout_secs" -gt 0 ] 2>/dev/null || timeout_secs="$DEFAULT_DEPLOY_TIMEOUT"
-
+  local generation="$1" new rc
   new="$(mktemp)"
   if ! md instance/attributes/grain-deploy-script > "$new" || [ ! -s "$new" ]; then
     log "could not fetch deploy script from metadata"
@@ -91,12 +90,36 @@ run_deploy() {
   install -m 0700 "$new" "$DEPLOY"
   rm -f "$new"
 
-  log "deploying generation $generation (timeout ${timeout_secs}s)"
+  log "deploying generation $generation (timeout ${DEPLOY_TIMEOUT_SECS}s)"
   guest_attr deploy-status "running"
   guest_attr deploy-generation "$generation"
 
-  rc=0
-  timeout --signal=TERM --kill-after=60 "$timeout_secs" "$DEPLOY" || rc=$?
+  # Tee'd rather than run bare so a failure can publish its own last
+  # words. "exit=127 generation=..." alone says a command was not found
+  # but never which one, and reading the journal that does say needs SSH
+  # to the host -- which is exactly what an operator locked out by OS
+  # Login, or debugging from CI, does not have. The tail goes into a
+  # guest attribute, which is readable with
+  # `gcloud compute instances get-guest-attributes` and no shell at all.
+  # tee's own stdout is this service's stdout, which systemd already
+  # wires to the journal -- so the output streams there live and lands in
+  # $out at the same time, with no second destination to name.
+  #
+  # It named one before: `tee /dev/stderr > "$out"`. Under systemd stderr
+  # is a socket, and /dev/stderr (a symlink to /proc/self/fd/2) cannot be
+  # reopened for writing on one -- tee died with "No such device or
+  # address" and took the deploy with it through the broken pipe, so the
+  # line added to explain failures was causing them.
+  #
+  # The status is taken in the `||` branch, not from a PIPESTATUS read on
+  # a following line. `pipeline || true` runs `true`, and `true` is itself
+  # a pipeline, so it resets PIPESTATUS -- a later ${PIPESTATUS[0]} reads
+  # 0 no matter how the deploy exited, which reported every failed
+  # rollout as converged.
+  local out rc=0
+  out="$(mktemp)"
+  timeout --signal=TERM --kill-after=60 "$DEPLOY_TIMEOUT_SECS" "$DEPLOY" 2>&1 \
+    | tee "$out" || rc="${PIPESTATUS[0]}"
 
   if [ "$rc" -eq 0 ]; then
     log "generation $generation deployed"
@@ -106,8 +129,13 @@ run_deploy() {
     log "generation $generation FAILED (exit $rc); will retry"
     echo "failed $generation" > "$STATE"
     guest_attr deploy-status "failed"
+    # Bounded hard: a guest attribute is a small value, and this is a
+    # pointer at the failure, not a log shipper. The journal remains the
+    # full record.
+    guest_attr deploy-tail "$(tail -c 1200 "$out" | tr -d '\000')"
   fi
   guest_attr deploy-detail "exit=$rc generation=$generation"
+  rm -f "$out"
   return "$rc"
 }
 
