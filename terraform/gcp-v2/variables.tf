@@ -473,6 +473,12 @@ variable "gemini_model" {
   default     = ""
 }
 
+variable "claude_model" {
+  type        = string
+  description = "Model override for the claude agent framework. Empty uses the daemon's own default (pkg/agent/claude.DefaultModel)."
+  default     = ""
+}
+
 variable "max_agent_turns" {
   type        = number
   description = <<-EOT

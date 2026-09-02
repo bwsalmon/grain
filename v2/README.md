@@ -1425,7 +1425,7 @@ same machine the two are indistinguishable.
 bwsalmon/agents#320 asked the same "the store is the record" question
 "Input is a model update, not a GitHub issue" (above) already answered
 for tasks, aimed at the daemon's own flags this time: `-max-concurrent`,
-`-poll-interval`, `-gemini-model`, `-max-agent-turns`, `-github-host`,
+`-poll-interval`, `-gemini-model`, `-claude-model`, `-max-agent-turns`, `-github-host`,
 `-github-insecure-http`, `-gcp-project` and `-gcp-agent-service-account`
 used to be the only way to set any of these, which meant changing one
 meant restarting the daemon with a different command line, and there was

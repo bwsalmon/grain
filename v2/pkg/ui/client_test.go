@@ -1696,9 +1696,10 @@ func TestGetSettingsIsUnconfiguredOnAFreshStore(t *testing.T) {
 }
 
 func firstSettings() ui.UpdateSettingsRequest {
-	pollInterval, maxConcurrent, geminiModel, host := "30s", 1, "gemini-2.5-pro", "github.com"
+	pollInterval, maxConcurrent, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
 	return ui.UpdateSettingsRequest{
-		PollInterval: &pollInterval, MaxConcurrent: &maxConcurrent, GeminiModel: &geminiModel, GitHubHost: &host,
+		PollInterval: &pollInterval, MaxConcurrent: &maxConcurrent,
+		GeminiModel: &geminiModel, ClaudeModel: &claudeModel, GitHubHost: &host,
 	}
 }
 

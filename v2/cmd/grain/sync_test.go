@@ -63,6 +63,7 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 	pollInterval := "45s"
 	maxConcurrent := 2
 	geminiModel := "gemini-test"
+	claudeModel := "claude-test"
 	githubHost := "github.example"
 
 	dir := t.TempDir()
@@ -80,7 +81,7 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 	srv := httptest.NewServer(ui.NewServer(ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.DefaultCapabilities()}, store))
 	defer srv.Close()
 
-	path := writeSyncConfig(t, dir, syncConfig{Settings: settingsRequest(pollInterval, maxConcurrent, geminiModel, githubHost)})
+	path := writeSyncConfig(t, dir, syncConfig{Settings: settingsRequest(pollInterval, maxConcurrent, geminiModel, claudeModel, githubHost)})
 
 	if err := cmdSync(context.Background(), []string{"-config", path, "-server", srv.URL}); err != nil {
 		t.Fatalf("cmdSync: %v", err)
@@ -97,9 +98,10 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}
-	if settings.PollInterval != pollInterval || settings.GeminiModel != geminiModel || settings.GitHubHost != githubHost {
-		t.Fatalf("settings = %+v, want poll interval %q, gemini model %q, github host %q",
-			settings, pollInterval, geminiModel, githubHost)
+	if settings.PollInterval != pollInterval || settings.GeminiModel != geminiModel ||
+		settings.ClaudeModel != claudeModel || settings.GitHubHost != githubHost {
+		t.Fatalf("settings = %+v, want poll interval %q, gemini model %q, claude model %q, github host %q",
+			settings, pollInterval, geminiModel, claudeModel, githubHost)
 	}
 	if settings.MaxConcurrent != 2 {
 		t.Fatalf("settings.MaxConcurrent = %v, want 2", settings.MaxConcurrent)
@@ -109,11 +111,12 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 // settingsRequest builds a syncConfig's own settings section with every
 // field the first-ever UpdateSettings call requires
 // (ui.Client.UpdateSettings's own doc comment) filled in.
-func settingsRequest(pollInterval string, maxConcurrent int, geminiModel, githubHost string) *ui.UpdateSettingsRequest {
+func settingsRequest(pollInterval string, maxConcurrent int, geminiModel, claudeModel, githubHost string) *ui.UpdateSettingsRequest {
 	return &ui.UpdateSettingsRequest{
 		PollInterval:  &pollInterval,
 		MaxConcurrent: &maxConcurrent,
 		GeminiModel:   &geminiModel,
+		ClaudeModel:   &claudeModel,
 		GitHubHost:    &githubHost,
 	}
 }

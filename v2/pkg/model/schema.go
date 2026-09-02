@@ -419,6 +419,11 @@ var Tables = []string{
 	// replaced the home-grown Gemini runtime may hold the legacy 'gemini'
 	// spelling instead; model.NormalizeAgentFramework folds that back in
 	// on read rather than a migration rewriting the row.
+	//
+	// claude_model is Config.ClaudeModel's own column -- agent/claude's
+	// counterpart to gemini_model, added the same way (DEFAULT '' both
+	// here and in Store.ensureConfigClaudeModelColumn for an
+	// already-created grain_config).
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -437,6 +442,7 @@ var Tables = []string{
   ` + "`agent_framework`" + `              TEXT    NOT NULL DEFAULT 'antigravity',
   ` + "`approved_by_default`" + `          INTEGER NOT NULL DEFAULT 0,
   ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 0,
+  ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
