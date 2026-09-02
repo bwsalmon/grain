@@ -6,13 +6,13 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 `main` and reaches here by a resync, not by being applied to this copy
 (see "Local patches" below).
 
-> **This snapshot is not from `main`.** It is
-> `claude/grain-container-deployment-lmna0q` at `c2892f3`
-> ([bwsalmon/kontur#35](https://github.com/bwsalmon/kontur/pull/35)),
-> because the grain changes alongside it cannot build or run without it.
-> Re-vendor from `main` once #35 merges, before this lands. The rule
-> above is not suspended -- the change lives upstream and arrives here by
-> a resync, this one just happens to be a resync of an open PR.
+This snapshot is kontur's `main` at
+`384e91a750402a31e5b733ae805617cb30181683` (2026-09-02), the merge of
+[bwsalmon/kontur#35](https://github.com/bwsalmon/kontur/pull/35). It was
+briefly vendored from that PR's branch while it was open, since the grain
+changes alongside it cannot build or run without it; re-vendoring from
+`main` after the merge produced a byte-identical tree, verified with
+`diff -r` against a fresh checkout.
 
 The snapshot history: it was first vendored at commit `a13a8cc` (2026-08-28, bwsalmon/agents#351), then
 partially re-synced to `3cf4f9286402753add8390302cfb7c1fa82e4f81`
