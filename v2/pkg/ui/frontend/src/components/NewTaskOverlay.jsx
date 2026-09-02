@@ -32,6 +32,11 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // lastBaseForRepo without fighting an uncontrolled <input>'s own
   // defaultValue (bwsalmon/agents#641).
   const [base, setBase] = useState(() => lastBaseForRepo(tasks, defaultRepo || ""));
+  // baseEdited tracks whether the human has typed into Base branch
+  // themselves, so handleRepoChange's prefill (below) never clobbers a
+  // value they already chose -- only ever a prefill from a previous repo
+  // pick, or the field's own initial empty state.
+  const baseEdited = useRef(false);
   // dependsOn is picked tasks ({id, title}), not just ids -- keeping the
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
@@ -49,14 +54,16 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
 
   // handleRepoChange prefills Base branch from whatever the newly-picked
   // repo's own last task used (bwsalmon/agents#641), rather than
-  // clobbering something the human already typed when the repo they
-  // picked has no history to prefill from. Gated on whether the repo has
-  // any (non-stale) task at all, not on lastBaseForRepo's return value --
-  // that value is "" both when there is no history and when the most
-  // recent task deliberately used the default branch, and only the
-  // former should leave a manually-typed base alone.
+  // clobbering something the human already typed (baseEdited.current) or
+  // a repo with no history to prefill from. That "no history" check is
+  // gated on whether the repo has any (non-stale) task at all, not on
+  // lastBaseForRepo's return value -- that value is "" both when there is
+  // no history and when the most recent task deliberately used the
+  // default branch, and only the former should leave a manually-typed
+  // base alone.
   const handleRepoChange = (r) => {
     setRepo(r);
+    if (baseEdited.current) return;
     const hasHistory = (tasks || []).some((t) => t.repo === r && !STALE_BASE_STATES.includes(t.state));
     if (hasHistory) setBase(lastBaseForRepo(tasks, r));
   };
@@ -175,7 +182,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           fullWidth
           margin="normal"
           value={base}
-          onChange={(e) => setBase(e.target.value)}
+          onChange={(e) => { baseEdited.current = true; setBase(e.target.value); }}
         />
         <TextField
           name="reads"
