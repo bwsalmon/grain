@@ -237,8 +237,7 @@ const (
 // a straggler elsewhere does not hide a failure already known, and
 // nothing here waits for every instance to settle before reporting one.
 func OutcomeOfPass(tasks []TaskSuiteTaskStatus) PassOutcome {
-	changed := false
-	anyFailed := false
+	changed, anyFailed, anyPending := false, false, false
 	for _, t := range tasks {
 		switch t.State {
 		case StateCompleted:
@@ -248,13 +247,22 @@ func OutcomeOfPass(tasks []TaskSuiteTaskStatus) PassOutcome {
 		case StateFailed, StateClosed:
 			anyFailed = true
 		default:
-			return PassPending
+			anyPending = true
 		}
 	}
-	if anyFailed {
+	switch {
+	case anyFailed:
+		// Ahead of anyPending deliberately, and the reason this loop
+		// records a straggler rather than returning on the first one it
+		// sees: a pass fires every item at once, so a failure in one
+		// item and a second item still running is the ordinary shape of
+		// a pass going wrong. Reporting PassPending there would leave
+		// the run active -- firing further passes, in TaskSuiteCount
+		// mode -- on a pass already known to have failed.
 		return PassFailed
-	}
-	if changed {
+	case anyPending:
+		return PassPending
+	case changed:
 		return PassChanged
 	}
 	return PassClean
