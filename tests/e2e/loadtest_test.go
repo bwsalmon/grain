@@ -49,7 +49,7 @@
 // file on every pull request, so a change that breaks it to build is
 // still caught there; only actually running it is opt in. Run it:
 //
-//	GRAIN_LOAD_TEST=1 go test ./e2e/... -run TestLoadSustainedConcurrency -v -timeout 15m
+//	GRAIN_LOAD_TEST=1 go test ./tests/e2e/... -run TestLoadSustainedConcurrency -v -timeout 15m
 //
 // or `make loadtest` (Makefile). This file's own defaults finish in a
 // couple of minutes on a modern laptop; every dimension is sized

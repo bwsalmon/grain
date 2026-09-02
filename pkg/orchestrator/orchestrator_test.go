@@ -51,9 +51,9 @@ func openStore(t *testing.T) (*model.Store, context.Context) {
 }
 
 // newSim is githubsim's own test helper, restated here (package-private,
-// deliberately duplicated -- see e2e/harness_test.go's own comment on
-// why the same choice is made throughout this codebase): a real bare git
-// repo behind a Sim, wired into a real github.RESTClient.
+// deliberately duplicated -- see tests/e2e/harness_test.go's own
+// comment on why the same choice is made throughout this codebase): a
+// real bare git repo behind a Sim, wired into a real github.RESTClient.
 func newSim(t *testing.T, owner, repo, branch string) (*githubsim.Sim, *github.RESTClient) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

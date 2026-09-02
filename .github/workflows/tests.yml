@@ -16,7 +16,7 @@
 # this job is only safe to trigger that way for as long as it has nothing
 # worth stealing -- the same argument the config repo's plan.yml makes for
 # never authenticating a plan-on-PR job. The suites that need a built
-# image (tests/'s two e2e harnesses) skip here and run in
+# image (tests/'s two python e2e harnesses) skip here and run in
 # build-artifacts.yml on push instead.
 name: tests
 
@@ -35,12 +35,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # tests/ is three suites: the cross-file content checks
-  # (test_container_deploy.py), which need nothing but the tree and run
-  # here, and the two e2e harnesses, which drive a real container and a
-  # real installer and so gate themselves on GRAIN_TEST_IMAGE /
-  # GRAIN_INSTALLER_E2E. Those two skip on this runner and are run for
-  # real by build-artifacts.yml, which has an image to give them.
+  # tests/ holds the Go end-to-end package (tests/e2e, run by the go-test
+  # job below along with everything else `go test ./...` reaches) and
+  # three Python suites, which are what this job runs: the cross-file
+  # content checks (test_container_deploy.py), which need nothing but the
+  # tree and run here, and the two e2e harnesses, which drive a real
+  # container and a real installer and so gate themselves on
+  # GRAIN_TEST_IMAGE / GRAIN_INSTALLER_E2E. Those two skip on this runner
+  # and are run for real by build-artifacts.yml, which has an image to
+  # give them.
   #
   # The content checks are worth their own job because nothing else sees
   # what they see: they assert agreements *between* files -- the
@@ -95,7 +98,7 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # gitproxy's live_test.go and e2e's live_test.go each gate
+      # gitproxy's live_test.go and tests/e2e's live_test.go each gate
       # themselves (missing `git`, unset GEMINI_API_KEY) -- they skip on a
       # runner that has none of that rather than failing.
       #

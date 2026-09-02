@@ -39,10 +39,10 @@ func setupBareRepoWithBranch(t *testing.T, branch string) string {
 
 // pushBranch pushes an empty commit on branch straight to bare, standing
 // in for a real dispatch's own git push -- restated here (package-private,
-// deliberately duplicated -- see e2e/harness_test.go's own comment on
-// why) from pkg/orchestrator's own helper of the same name, since a Sim
-// test that merges a pull request now needs the head branch to actually
-// exist for mergeIntoBase to merge.
+// deliberately duplicated -- see tests/e2e/harness_test.go's own
+// comment on why) from pkg/orchestrator's own helper of the same name,
+// since a Sim test that merges a pull request now needs the head branch
+// to actually exist for mergeIntoBase to merge.
 func pushBranch(t *testing.T, bare, branch string) {
 	t.Helper()
 	dir := t.TempDir()

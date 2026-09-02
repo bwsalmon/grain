@@ -1711,7 +1711,7 @@ reformat_store_if_schema_changed() {
 # --- 7. format the target repo, if it is empty --------------------------
 #
 # Every dispatch grain runs branches off an existing ref -- it never
-# creates the first one (e2e's own harness always seeds one commit
+# creates the first one (tests/e2e's own harness always seeds one commit
 # before driving anything against a bare repo). A repo created fresh on
 # GitHub has none, so `grain create -repo owner/name ...` would have
 # nothing to branch from. Detected with `git ls-remote`, which returns no
