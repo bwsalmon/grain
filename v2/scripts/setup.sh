@@ -916,22 +916,25 @@ PROFILE
 
 # --- 4. the unprivileged account grain runs as --------------------------
 
-# ensure_user creates $GRAIN_USER and, on every run, makes sure it is in
-# the systemd-journal group -- without it, journalctl refuses outright
-# ("No journal files were opened due to insufficient permission") when
-# the UI's own Logs page (pkg/ui/logs.go, pkg/systemlog.Journalctl) shells
-# out to read grain-daemon.service's own journal, which normally takes
-# membership in adm or systemd-journal. systemd-journal is the narrower
-# of the two -- read access to the journal alone, nothing else adm also
-# carries -- and every distribution this script otherwise assumes (a
-# working systemctl/journalctl) already creates that group by default, so
-# no getent guard is needed the way grant_docker_group's own one is.
+# ensure_user creates $GRAIN_USER.
+#
+# This user used to also be added to the systemd-journal group here, back
+# when the daemon ran directly on the host as $GRAIN_USER and journalctl
+# checked the invoking process's own supplementary groups. Now that
+# grain-daemon.service's ExecStart is a `docker run --user uid:gid`
+# (bwsalmon/agents#645), the process journalctl runs as inside the
+# container never sees this host account's group memberships at all --
+# `--user` there is two bare numbers, not a login, and Docker does not
+# consult this host's /etc/group for it. Granting the container
+# permission to read the journal files docker_run_args bind-mounts in is
+# instead done the same way docker socket access already is
+# (grant_docker_group's own comment): a --group-add of the group's numeric
+# GID on the `docker run` itself (docker_run_args, below).
 ensure_user() {
   if ! id -u "$GRAIN_USER" >/dev/null 2>&1; then
     log "Creating system user $GRAIN_USER"
     useradd --system --no-create-home --shell /usr/sbin/nologin "$GRAIN_USER"
   fi
-  usermod -aG systemd-journal "$GRAIN_USER"
 }
 
 # --- 5. the control channel: acting on the host from inside the container -
@@ -2190,7 +2193,13 @@ UNIT
 #                        them. Read-only, and whichever of the two
 #                        journal directories this host actually uses
 #                        (/var/log/journal when persistent storage is on,
-#                        /run/log/journal when it is not).
+#                        /run/log/journal when it is not). Paired with a
+#                        --group-add of systemd-journal's GID -- the files
+#                        just mounted in are group-readable by that group
+#                        alone, and $GRAIN_USER's membership in it on the
+#                        host (were it granted there, the way it used to
+#                        be) would not reach a process the container only
+#                        ever gave two bare uid:gid numbers.
 #   the docker socket    kontur (konturctl, and pkg/mcp's docker-exec
 #                        transport) and the Upgrade button's own `docker
 #                        pull` both talk to this host's engine. Mounted
@@ -2217,7 +2226,7 @@ UNIT
 #                        another environment variable -- so that needing
 #                        one does not mean editing this script.
 docker_run_args() {
-  local uid gid docker_gid
+  local uid gid docker_gid journal_gid
   uid="$(id -u "$GRAIN_USER")"
   gid="$(id -g "$GRAIN_USER")"
 
@@ -2237,8 +2246,18 @@ docker_run_args() {
   esac
 
   [ -f /etc/machine-id ] && DOCKER_ARGS+=(--volume /etc/machine-id:/etc/machine-id:ro)
-  [ -d /var/log/journal ] && DOCKER_ARGS+=(--volume /var/log/journal:/var/log/journal:ro)
-  [ -d /run/log/journal ] && DOCKER_ARGS+=(--volume /run/log/journal:/run/log/journal:ro)
+  if [ -d /var/log/journal ] || [ -d /run/log/journal ]; then
+    [ -d /var/log/journal ] && DOCKER_ARGS+=(--volume /var/log/journal:/var/log/journal:ro)
+    [ -d /run/log/journal ] && DOCKER_ARGS+=(--volume /run/log/journal:/run/log/journal:ro)
+    # The journal files this just mounted in are root:systemd-journal,
+    # mode 0640 -- unreadable to the container's own $GRAIN_USER without
+    # its numeric GID, the same --group-add docker_gid already does for
+    # the docker socket a few lines down. Permission is a kernel-level
+    # GID check, so it does not matter that nothing inside the image's
+    # own /etc/group names this GID systemd-journal (or anything at all).
+    journal_gid="$(getent group systemd-journal | cut -d: -f3)"
+    [ -n "$journal_gid" ] && DOCKER_ARGS+=(--group-add "$journal_gid")
+  fi
 
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ] || [ "$GRAIN_ENABLE_UI_UPGRADE" = "1" ]; then
     DOCKER_ARGS+=(--volume /var/run/docker.sock:/var/run/docker.sock)
