@@ -21,6 +21,18 @@ import (
 // MockSink internally (its own doc comment says so), so ToolCalls is the
 // only seam a caller outside that package has -- the same one
 // v2/e2e/harness_test.go's askedQuestion/pushedOK helpers already use.
+//
+// name is matched exactly, against the bare tool name pkg/mcp registers
+// ("ask_question", not "mcp__grain-sandbox__ask_question"). That is
+// agent.ToolCall.Name's own documented contract, enforced by each
+// Framework putting a reported name through mcp.BareToolName -- both CLIs
+// namespace an MCP server's tools by the key they loaded it under, and a
+// Framework that skipped that step would match nothing here and silently
+// cost every run its question and its closing comment (mcp.BareToolName's
+// own doc comment has the history). Each framework package has a test on
+// that invariant rather than this function tolerating both spellings: a
+// prefix leaking this far would also be in the log line and the
+// no_action detail below, so the place to stop it is where it is read.
 func firstToolCallArg(result *agent.Result, name, key string) (string, bool) {
 	for _, c := range result.ToolCalls {
 		if c.Name != name || c.IsError {

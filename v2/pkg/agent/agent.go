@@ -84,6 +84,17 @@ type RunConfig struct {
 // for a caller that wants the play-by-play rather than just the outcome --
 // the closest v2 equivalent of v1's transcript.py.
 type ToolCall struct {
+	// Name is the tool's own name, as v2/pkg/mcp registers it
+	// ("ask_question", "run_command"), never a CLI's namespaced
+	// spelling of it. Both frameworks drive a CLI that reports a tool
+	// loaded from an MCP config as "mcp__grain-sandbox__<tool>", so both
+	// put a reported name through mcp.BareToolName before recording it
+	// here, and any Framework added later must do the same: a consumer
+	// downstream of Result matches this field against the tool
+	// vocabulary pkg/mcp defines -- orchestrator.ProcessResult decides
+	// whether a run asked a question or left a closing comment by
+	// comparing against "ask_question" and "comment_on_issue" exactly --
+	// and a prefixed name silently matches none of them.
 	Name      string
 	Arguments map[string]any
 	Text      string
