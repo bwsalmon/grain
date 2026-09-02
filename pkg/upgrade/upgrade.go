@@ -57,7 +57,6 @@ import (
 type Phase string
 
 const (
-	PhaseIdle    Phase = "idle"
 	PhaseRunning Phase = "running"
 	PhaseOK      Phase = "ok"
 	PhaseFailed  Phase = "failed"

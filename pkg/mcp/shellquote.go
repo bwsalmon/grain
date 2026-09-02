@@ -4,22 +4,12 @@ import (
 	"strings"
 )
 
-// This file carries the shell-quoting helpers the remote sandbox tools
-// need. They outlived mcp.SSHRunner, the transport that first brought
-// them here: reaching a sandbox guest no longer means running a local
-// `ssh` binary against a forwarded port (see DockerExecRunner), but
+// This file carries the shell-quoting helper the remote sandbox tools
+// need. It outlived mcp.SSHRunner, the transport that first brought it
+// here: reaching a sandbox guest no longer means running a local `ssh`
+// binary against a forwarded port (see DockerExecRunner), but
 // sshRunCommandTool still has to build one shell command string for the
 // guest to parse, and shellQuote is what makes that safe.
-
-// shellJoin renders argv as a single POSIX-shell-safe string, quoting each
-// element so a remote shell's own re-parsing yields exactly argv again.
-func shellJoin(argv []string) string {
-	quoted := make([]string, len(argv))
-	for i, a := range argv {
-		quoted[i] = shellQuote(a)
-	}
-	return strings.Join(quoted, " ")
-}
 
 // shellQuote quotes s for a POSIX shell, single-quoting anything outside a
 // small safe set of characters -- a literal single quote inside s is

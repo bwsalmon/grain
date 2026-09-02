@@ -157,17 +157,8 @@ func (c *HTTPClient) SetCapability(ctx context.Context, id, capabilityID string,
 		setCapabilityRequest{ID: capabilityID, Attach: attach}, nil)
 }
 
-func (c *HTTPClient) SetDependency(ctx context.Context, id, dependsOnID string, attach bool) error {
-	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/depends-on",
-		setDependencyRequest{ID: dependsOnID, Attach: attach}, nil)
-}
-
 func (c *HTTPClient) Approve(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/approve", nil, nil)
-}
-
-func (c *HTTPClient) Submit(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/submit", nil, nil)
 }
 
 func (c *HTTPClient) AddComment(ctx context.Context, id, body string, attachments []AttachmentUpload) error {

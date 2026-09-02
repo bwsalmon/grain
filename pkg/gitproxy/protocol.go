@@ -79,9 +79,6 @@ func PktLine(data []byte) []byte {
 	return append([]byte(fmt.Sprintf("%04x", length)), data...)
 }
 
-// FlushPkt is the pkt-line flush marker.
-var FlushPkt = []byte("0000")
-
 // ErrPkt is a single ERR pkt-line -- the encoding every git client already
 // knows how to surface as an abort message, instead of the opaque "the
 // remote end hung up unexpectedly" a plain connection drop produces.

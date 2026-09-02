@@ -17,8 +17,7 @@ import (
 // GitHub org -- the same "no sandbox and no cloud" bar
 // model/capability_test.go's own test capabilities hold to.
 type fakeRepo struct {
-	createdAt   time.Time
-	deleteToken string // the permission set the token that deleted it carried, for assertions
+	createdAt time.Time
 }
 
 type fakeAppClient struct {

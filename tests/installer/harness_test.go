@@ -153,17 +153,6 @@ func sudo(argv ...string) result {
 	return run(append([]string{"sudo", "-n"}, argv...)...)
 }
 
-// mustRun fails the test when a command this suite depends on does not
-// succeed -- the setup steps, never the observations.
-func mustRun(t *testing.T, argv ...string) result {
-	t.Helper()
-	got := run(argv...)
-	if got.exitCode != 0 {
-		t.Fatal(got)
-	}
-	return got
-}
-
 // The data directory is 0750 $GRAIN_USER and its secrets 0700, which is
 // the point of it -- so the account running these tests cannot read it,
 // and every filesystem assertion below has to look as root. Asking through

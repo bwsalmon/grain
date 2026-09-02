@@ -45,15 +45,3 @@ func TestReconcilerDownDefaultsFalseAndLatchesTrue(t *testing.T) {
 		t.Fatal("reconcilerDown did not latch true")
 	}
 }
-
-func equalInts(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
