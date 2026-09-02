@@ -209,7 +209,8 @@ jobs:
           set -euo pipefail
           short_sha="${GITHUB_SHA:0:7}"
           image="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${short_sha}"
-          KONTUR_OCI_IMAGE="$image" ./packer/kontur/build-oci-image.sh
+          KONTUR_OCI_SOURCE_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            KONTUR_OCI_IMAGE="$image" ./packer/kontur/build-oci-image.sh
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # The branch tag, and -- on main alone -- `latest`. Same split, and

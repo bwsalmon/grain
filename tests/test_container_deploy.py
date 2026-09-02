@@ -288,6 +288,39 @@ def test_every_build_path_agrees_the_module_root_is_the_repository_root():
     assert "WORKDIR /src\n" in (ROOT / "Dockerfile.build").read_text()
 
 
+def test_both_published_images_claim_this_repository():
+    """Why a package appears in this repo's list rather than only the account's.
+
+    GHCR attaches a container package to a repository by
+    org.opencontainers.image.source and nothing else. An image without
+    it still builds, still pushes and still pulls -- it just lands under
+    the account's packages, unlinked, with the repo's access settings
+    not governing it. That is silent in every log, which is why it went
+    unnoticed until someone looked for the packages and found none.
+
+    Both images need it and neither had it: the grain Dockerfile carried
+    no LABEL at all, and the sandbox is built from the vendored kontur
+    Dockerfile, whose label names kontur's repository instead. The
+    sandbox's is overridden at build time rather than by editing
+    third_party/, so an operator building into their own registry keeps
+    the vendored label.
+    """
+    assert 'org.opencontainers.image.source="https://github.com/bwsalmon/grain"' \
+        in DOCKERFILE.read_text(), "the grain image does not claim this repository"
+
+    oci = (ROOT / "packer" / "kontur" / "build-oci-image.sh").read_text()
+    assert "KONTUR_OCI_SOURCE_REPO" in oci
+    assert "org.opencontainers.image.source=" in oci
+    # Unset must leave the vendored label alone -- the override is for the
+    # one publisher hosting this in another repository's namespace.
+    assert 'if [ -n "${KONTUR_OCI_SOURCE_REPO:-}" ]; then' in oci
+
+    # ...and CI is what sets it, next to the image name it pushes.
+    job = job_body(WORKFLOW.read_text(), "sandbox-container:")
+    assert "KONTUR_OCI_SOURCE_REPO=" in job, \
+        "CI builds the sandbox image without pointing it at this repository"
+
+
 def test_no_source_file_still_refers_to_the_v2_subdirectory():
     """The generalized form of the test above.
 

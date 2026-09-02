@@ -125,6 +125,16 @@ RUN mkdir -p /out && cd third_party/kontur && CGO_ENABLED=0 go build -o /out/kon
 
 FROM ${RUNTIME_IMAGE}
 
+# What attaches the published package to this repository. GHCR links a
+# container image to a repo by this label and nothing else: without it
+# the image is still pushed and still pullable, but it appears only under
+# the *account's* packages rather than in this repository's own list, and
+# the repo's access settings do not govern it. This image had no label at
+# all until now, which is why its packages have never shown up here.
+LABEL org.opencontainers.image.source="https://github.com/bwsalmon/grain" \
+      org.opencontainers.image.title="grain" \
+      org.opencontainers.image.description="The grain daemon and every binary it shells out to, in one image."
+
 # libcap2-bin is installed, used, and removed in this one layer: setcap
 # below is the only thing that needs it, and leaving it in the image
 # would hand a task's own `bash -c` a tool for handing out capabilities.

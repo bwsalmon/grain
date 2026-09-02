@@ -52,10 +52,25 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 echo "building ${KONTUR_OCI_IMAGE} from $(pwd)"
+
+# KONTUR_OCI_SOURCE_REPO overrides the image's
+# org.opencontainers.image.source, which the vendored Dockerfile sets to
+# kontur's own repository. That is right for anyone building this into
+# their own registry, and wrong for the one publisher that hosts it in a
+# *different* repository's namespace: this repo's CI pushes it to
+# ghcr.io/bwsalmon/grain/kontur-sandbox, and GHCR uses that label alone
+# to decide which repository a package belongs to. Left unset the
+# vendored label stands, so an operator's own build keeps pointing at
+# kontur.
+label_args=()
+if [ -n "${KONTUR_OCI_SOURCE_REPO:-}" ]; then
+  label_args+=(--label "org.opencontainers.image.source=${KONTUR_OCI_SOURCE_REPO}")
+fi
+
 # The Dockerfile uses `RUN --mount=type=cache`, which only the BuildKit
 # builder understands -- the classic builder fails outright on it ("the
 # --mount option requires BuildKit").
-DOCKER_BUILDKIT=1 docker build -t "$KONTUR_OCI_IMAGE" .
+DOCKER_BUILDKIT=1 docker build "${label_args[@]}" -t "$KONTUR_OCI_IMAGE" .
 
 # KONTUR_OCI_SKIP_PUSH=1 stops here, leaving the image built but only in
 # this host's own local docker image store -- exactly what a deployment
