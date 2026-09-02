@@ -350,7 +350,7 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 			t.Errorf("loadConfig log output = %q, want it to contain %q", got, want)
 		}
 	}
-	for _, unwanted := range []string{"-poll-interval", "-gemini-model", "-max-agent-turns", "-github-insecure-http", "-gcp-project", "-gcp-agent-service-account", "-target-repos"} {
+	for _, unwanted := range []string{"-poll-interval", "-gemini-model", "-claude-model", "-max-agent-turns", "-github-insecure-http", "-gcp-project", "-gcp-agent-service-account", "-target-repos"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("loadConfig log output = %q, should not mention %q since the flag and the store agree", got, unwanted)
 		}

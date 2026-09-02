@@ -41,6 +41,13 @@ import (
 )
 
 const (
+	// DefaultModel is the model claude is asked for when a caller names
+	// none. Left empty deliberately would mean "whatever the binary
+	// defaults to"; naming it here keeps a deployment's runs reproducible
+	// across claude CLI upgrades the same way agent/antigravity's own
+	// DefaultModel does.
+	DefaultModel = "claude-sonnet-5"
+
 	defaultMaxTurns = 20
 
 	// mcpServerName is the mcpServers key written into --mcp-config, and
@@ -103,6 +110,7 @@ type Framework struct {
 	run             runner
 	grainBinaryPath string
 	oauthToken      func(context.Context) (string, error)
+	model           string
 	maxTurns        int
 	konturSSHUser   string
 	konturExecKey   string
@@ -111,6 +119,11 @@ type Framework struct {
 
 // Option configures a Framework at construction time.
 type Option func(*Framework)
+
+// WithModel overrides the model claude is asked for.
+func WithModel(model string) Option {
+	return func(f *Framework) { f.model = model }
+}
 
 // WithMaxTurns overrides the default cap on agentic turns a single Run
 // allows before claude's own --max-turns cuts it off.
@@ -167,7 +180,7 @@ func New(claudePath, grainBinaryPath string, opts ...Option) *Framework {
 }
 
 func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework {
-	f := &Framework{run: run, grainBinaryPath: grainBinaryPath, maxTurns: defaultMaxTurns}
+	f := &Framework{run: run, grainBinaryPath: grainBinaryPath, model: DefaultModel, maxTurns: defaultMaxTurns}
 	for _, opt := range opts {
 		opt(f)
 	}
@@ -308,6 +321,9 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		"--output-format", "stream-json",
 		"--verbose",
 		"--max-turns", strconv.Itoa(maxTurns),
+	}
+	if f.model != "" {
+		args = append(args, "--model", f.model)
 	}
 	var env []string
 	if f.oauthToken != nil {
