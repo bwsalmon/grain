@@ -617,6 +617,34 @@ expected to arrive already carrying the operator's SSH key and a running
 sshd, the same assumption v1's own sandbox provisioning stood in for —
 `../packer/kontur/` is that successor (bwsalmon/agents#267).
 
+`konturSandbox.PlaceFile` is the second such equivalent, and it closes a
+gap that made every capability worth having unusable on exactly the
+deployments that run for real. A capability's `model.Placement`
+(`gcpkey`'s minted service-account key, `geminikey`'s API key,
+`githubsandbox`'s token) is delivered by `orchestrator.applyPlacements`,
+which until now had one route: `os.MkdirAll`/`os.WriteFile` under the
+local directory a `rootedSandbox` reports. A kontur VM has no such
+directory — that is the whole point of `rootedSandbox` — so
+`sandboxRoot` was empty, and any grant that actually materialized a
+sandbox-side placement failed its run during preparation, before the
+agent's first turn, with "this sandbox has no local directory to place it
+in". Since `v2/scripts/setup.sh` installs `-kontur-sandboxes` for any
+host that can run a VM at all, the practical effect was that
+`grain-gcp-key` never reached a sandbox on a real deployment: the key was
+minted, the run failed, and `revokeAll` deleted it again. `orchestrator.
+SandboxPlacer` is the third optional interface a `Sandbox` can answer
+with, alongside `rootedSandbox` and `vmNamedSandbox`, and a kontur VM
+answers it over the same runner its tool calls and git credentials
+already use (`mcp.PlaceFileOverSSH`). `applyPlacements` prefers it
+wherever it exists: it writes into the sandbox itself, where a local root
+alongside it could only be a staging copy of the same credential on the
+controller's own disk. The remote write applies the placement's mode with
+`install -m` to an empty file *before* the content goes in, rather than
+`chmod`-ing afterwards the way `ConfigureGitCredentialsOverSSH` does —
+everything placed this way is credential material, and a `dd` that
+creates the file under the login user's umask leaves it world-readable
+until the next command runs.
+
 Whichever backend a slot uses, `RunDispatch` now clones the task's target
 into it before the agent's first turn (`orchestrator.prepareCheckout`):
 `Config.GitRemoteBase` — the daemon's own git proxy URL, the same one the

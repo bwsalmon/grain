@@ -571,7 +571,16 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// erroring here on len(task.Grants) > 0 alone used to fail every
 	// Configuration agent task dispatched onto a non-rooted sandbox
 	// (bwsalmon/agents#643), whether or not it had anything to place.
+	//
+	// placer is the third way, and the one a kontur VM answers with for
+	// the grants that DO place something: a route into a sandbox with no
+	// local directory, which applyPlacements prefers over sandboxRoot
+	// whenever a sandbox offers one. Without it a deployment running
+	// -kontur-sandboxes could never receive a gcp-key/gemini-key/
+	// github-sandbox placement at all -- every such task failed during
+	// preparation instead.
 	var sandboxRoot, konturVM string
+	var placer SandboxPlacer
 	if rooted, ok := sandbox.(rootedSandbox); ok {
 		sandboxRoot, err = rooted.Root()
 		if err != nil {
@@ -580,6 +589,9 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	}
 	if named, ok := sandbox.(vmNamedSandbox); ok {
 		konturVM = named.VMName()
+	}
+	if placing, ok := sandbox.(SandboxPlacer); ok {
+		placer = placing
 	}
 
 	// Built here, after the sandbox and before RunDispatch takes over
@@ -597,7 +609,7 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// From here on RunDispatch owns finishing this run, on every path it
 	// can take -- so the setup guard above must not also finish it.
 	ranAgent = true
-	result, runErr := RunDispatch(ctx, deps.Store, framework, deps.Config, *task, d, tools, sandboxRoot, konturVM, now)
+	result, runErr := RunDispatch(ctx, deps.Store, framework, deps.Config, *task, d, tools, sandboxRoot, konturVM, placer, now)
 
 	if runErr != nil {
 		// A failed run is not necessarily an empty one. The framework

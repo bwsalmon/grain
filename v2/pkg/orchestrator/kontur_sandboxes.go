@@ -452,6 +452,18 @@ func (s *konturSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, 
 	return nil
 }
 
+// PlaceFile implements SandboxPlacer: a capability's placement written
+// into this VM's own filesystem over the same transport every tool call
+// uses -- what applyPlacements does with os.MkdirAll/os.WriteFile for a
+// host directory, and what a kontur VM had no route for at all until now
+// (SandboxPlacer's own doc comment).
+func (s *konturSandbox) PlaceFile(ctx context.Context, path, content, mode string) error {
+	if err := mcp.PlaceFileOverSSH(ctx, s.runner, path, content, mode); err != nil {
+		return fmt.Errorf("orchestrator: placing %s on kontur VM %q: %w", path, s.vmName, err)
+	}
+	return nil
+}
+
 // Release deletes the VM. This is the isolation boundary itself, not a
 // tidy-up after one: what makes the next run unable to see this one's
 // checkout, credentials or leftover processes is that none of it exists

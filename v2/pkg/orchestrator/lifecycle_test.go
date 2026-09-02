@@ -10,6 +10,8 @@ package orchestrator_test
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -190,6 +192,181 @@ func TestRunCycleFailsAGrantThatPlacesSomethingOntoANonRootedSandbox(t *testing.
 	}
 	if !strings.Contains(err.Error(), "no local directory to place it in") {
 		t.Errorf("RunCycle error = %v, want it to explain there was no local directory", err)
+	}
+}
+
+// placedFile is one PlaceFile call a placingSandbox saw.
+type placedFile struct {
+	path    string
+	content string
+	mode    string
+}
+
+// placingSandboxes hands out sandboxes shaped like a kontur VM's:
+// reachable, but with no local directory this process can write into --
+// and so with orchestrator.SandboxPlacer as their only route for a
+// capability placement. The wrapper embeds the Sandbox interface rather
+// than the concrete host sandbox, which is what hides Root: an embedded
+// interface value carries no methods outside its own method set, so
+// runOne's rootedSandbox assertion fails here exactly as it does for a
+// real konturSandbox.
+type placingSandboxes struct {
+	*orchestrator.HostSandboxes
+
+	mu     sync.Mutex
+	placed []placedFile
+	// alsoRooted makes the handed-out sandbox offer Root as well as
+	// PlaceFile, for the precedence test below. The root it reports is
+	// the real directory HostSandboxes made, so a placement taking the
+	// wrong branch lands somewhere observable rather than failing.
+	alsoRooted bool
+	roots      map[string]string
+}
+
+func (s *placingSandboxes) Acquire(ctx context.Context, name string, shape orchestrator.Shape) (orchestrator.Sandbox, error) {
+	inner, err := s.HostSandboxes.Acquire(ctx, name, shape)
+	if err != nil {
+		return nil, err
+	}
+	sb := &placingSandbox{Sandbox: inner, owner: s}
+	if !s.alsoRooted {
+		return sb, nil
+	}
+	// The host sandbox HostSandboxes handed back is rooted; this reads
+	// the directory back off it the same way runOne itself does, since
+	// the wrapper above is what hides that method from runOne.
+	rooted, ok := inner.(interface{ Root() (string, error) })
+	if !ok {
+		return nil, errors.New("HostSandboxes handed back a sandbox with no Root")
+	}
+	root, err := rooted.Root()
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.roots[name] = root
+	s.mu.Unlock()
+	return &rootedPlacingSandbox{placingSandbox: sb, root: root}, nil
+}
+
+func (s *placingSandboxes) calls() []placedFile {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]placedFile(nil), s.placed...)
+}
+
+type placingSandbox struct {
+	orchestrator.Sandbox
+	owner *placingSandboxes
+}
+
+func (s *placingSandbox) PlaceFile(ctx context.Context, path, content, mode string) error {
+	s.owner.mu.Lock()
+	defer s.owner.mu.Unlock()
+	s.owner.placed = append(s.owner.placed, placedFile{path: path, content: content, mode: mode})
+	return nil
+}
+
+// rootedPlacingSandbox offers both routes at once -- a shape no real
+// Sandbox has, built only to pin down which one applyPlacements takes.
+type rootedPlacingSandbox struct {
+	*placingSandbox
+	root string
+}
+
+func (s *rootedPlacingSandbox) Root() (string, error) { return s.root, nil }
+
+// TestRunCyclePlacesIntoASandboxThatCanOnlyBeReachedRemotely is the
+// regression the test above left open: a kontur VM has no local
+// directory, so for as long as applyPlacements had only that one route,
+// EVERY task granting gcp-key (or gemini-key, or github-sandbox) on a
+// deployment running -kontur-sandboxes -- which is what v2/scripts/
+// setup.sh installs for a real host -- failed during preparation, before
+// the agent's first turn, and the minted credential never reached the
+// sandbox at all. A sandbox that offers SandboxPlacer must have its
+// placements delivered over that instead, with the placement's own path
+// and mode intact.
+func TestRunCyclePlacesIntoASandboxThatCanOnlyBeReachedRemotely(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.Grants = []model.Grant{{Capability: "keyed", Via: model.GrantByLabel}}
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	sandboxes := &placingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir()), roots: map[string]string{}}
+	cap := &fakeCapability{name: "keyed", path: "/home/debian/.gcp-service-account.json", content: "minted-key"}
+	deps := orchestrator.Deps{
+		Store: store, Client: client, Sandboxes: sandboxes,
+		Framework:     completesWithAComment(),
+		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
+		MaxConcurrent: 1,
+	}
+
+	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v, want a placement onto a remotely-reachable sandbox to dispatch fine", err)
+	}
+
+	placed := sandboxes.calls()
+	if len(placed) != 1 {
+		t.Fatalf("PlaceFile calls = %+v, want exactly the one placement the grant materialized", placed)
+	}
+	want := placedFile{path: "/home/debian/.gcp-service-account.json", content: "minted-key", mode: "600"}
+	if placed[0] != want {
+		t.Errorf("PlaceFile call = %+v, want %+v", placed[0], want)
+	}
+}
+
+// A sandbox offering both routes takes the remote one: it is the sandbox
+// itself, where a local root alongside it could only be a staging copy of
+// the same credential on the controller's own disk -- see
+// applyPlacements' own doc comment.
+func TestRunCyclePrefersARemotePlacementOverALocalRoot(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.Grants = []model.Grant{{Capability: "keyed", Via: model.GrantByLabel}}
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+
+	sandboxes := &placingSandboxes{
+		HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		alsoRooted:    true,
+		roots:         map[string]string{},
+	}
+	cap := &fakeCapability{name: "keyed", path: "/home/debian/.gcp-service-account.json", content: "minted-key"}
+	deps := orchestrator.Deps{
+		Store: store, Client: client, Sandboxes: sandboxes,
+		Framework:     completesWithAComment(),
+		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
+		MaxConcurrent: 1,
+	}
+
+	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+
+	if placed := sandboxes.calls(); len(placed) != 1 {
+		t.Fatalf("PlaceFile calls = %+v, want the placement to have taken the remote route", placed)
+	}
+	sandboxes.mu.Lock()
+	roots := make([]string, 0, len(sandboxes.roots))
+	for _, root := range sandboxes.roots {
+		roots = append(roots, root)
+	}
+	sandboxes.mu.Unlock()
+	if len(roots) == 0 {
+		t.Fatal("no sandbox was acquired at all")
+	}
+	for _, root := range roots {
+		staged := filepath.Join(root, "home", "debian", ".gcp-service-account.json")
+		if _, err := os.Stat(staged); !os.IsNotExist(err) {
+			t.Errorf("the credential was also staged on the controller's own disk at %s (err=%v)", staged, err)
+		}
 	}
 }
 

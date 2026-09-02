@@ -253,7 +253,8 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 
 // RunDispatch drives one dispatch.Dispatch to completion: resolve and
 // materialize its task's capabilities (writing any SideSandbox placements
-// into sandboxRoot, which may be empty when the task has none to place),
+// through placer, or into sandboxRoot when the sandbox offers no placer --
+// both may be empty when the task has nothing to place),
 // run the agent against tools (whatever this run's own Sandbox.Tools
 // produced -- see the package doc comment on the local-directory-vs-
 // real-VM choice that makes), revoke whatever was materialized, and
@@ -270,7 +271,11 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 // agent.RunConfig framework.Run is given, for a Framework with no
 // in-process route to tools to reach the same sandbox by itself -- see
 // RunConfig's own doc comment. Either may be empty; runOne computes
-// whichever this run's own Sandbox can actually offer.
+// whichever this run's own Sandbox can actually offer. placer is the
+// third of those, and unlike the other two it is used here rather than
+// forwarded: it is how a sandbox with no local directory receives a
+// placement at all (see SandboxPlacer), and nil for one that has no
+// route of its own.
 //
 // While the agent runs, a background watchForTaskClosed goroutine polls
 // store for this task being closed and cancels the ctx the agent itself
@@ -282,7 +287,8 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 // killed this way finishes with outcome "cancelled", distinct from
 // "failed", and returns a non-nil error wrapping errTaskClosed.
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
-	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot, konturVM string, at time.Time) (*agent.Result, error) {
+	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot, konturVM string,
+	placer SandboxPlacer, at time.Time) (*agent.Result, error) {
 
 	run := model.Run{ID: d.RunID, TaskID: d.TaskID, Sandbox: d.RunID, Attempt: d.Attempt, StartedAt: at}
 	cc := model.CapabilityContext{Task: task, Run: run, Now: at, Workdir: sandboxRoot, Credentials: cfg.Credentials}
@@ -319,7 +325,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prompt string
 	var prepErr error
 	if checkoutErr == nil {
-		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, tools, comments, attachments, checkoutDir)
+		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments, attachments, checkoutDir)
 	}
 
 	var result *agent.Result
@@ -498,7 +504,7 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // the task it would work almost always depends on it. Ported from
 // pkg/orchestrate's own prepare (bwsalmon/agents#254).
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
-	cc model.CapabilityContext, sandboxRoot string, tools []mcp.Tool, comments []model.Comment,
+	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
 	attachments []model.Attachment, checkoutDir string) (materialized []model.Materialized, prompt string, err error) {
 
 	prompt = BuildPrompt(cc.Task, checkoutDir)
@@ -528,7 +534,7 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	if err != nil {
 		return materialized, prompt, fmt.Errorf("materializing capabilities: %w", err)
 	}
-	if err := applyPlacements(sandboxRoot, materialized); err != nil {
+	if err := applyPlacements(ctx, sandboxRoot, placer, materialized); err != nil {
 		return materialized, prompt, fmt.Errorf("applying placements: %w", err)
 	}
 	sections, err := model.PromptSections(ctx, cc, materialized)
@@ -541,15 +547,27 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	return materialized, prompt, nil
 }
 
-// applyPlacements writes every SideSandbox placement Materialize returned
-// into root, the local directory standing in for the sandbox -- see the
-// package doc comment. A placement's Path is always the absolute path it
-// would land at inside a real sandbox (gcpkey.SandboxKeyPath,
-// geminikey.KeyPath); root here plays the same role a chroot's own root
-// plays for an absolute path, which is why it is joined after stripping
-// the leading separator rather than passed through mcp.resolvePath --
-// that function confines an agent's own tool arguments, a different
-// question from where a controller-applied placement lands.
+// applyPlacements delivers every SideSandbox placement Materialize
+// returned into the sandbox, by whichever of the two routes that sandbox
+// has: placer, when it can write into itself over its own transport (a
+// kontur VM, over the same SSH/docker-exec runner its tool calls use --
+// see SandboxPlacer), or root, the local directory standing in for the
+// sandbox otherwise -- see the package doc comment.
+//
+// placer wins where both exist, because it writes into the sandbox
+// itself: a sandbox that offers one is telling this function where its
+// filesystem actually is, and a root alongside it (no current Sandbox has
+// both) could only be a staging copy of the same material on the
+// controller's own disk -- a second copy of a credential is exactly what
+// a placement should not leave behind.
+//
+// A placement's Path is always the absolute path it would land at inside
+// a real sandbox (gcpkey.SandboxKeyPath, geminikey.KeyPath), which placer
+// takes as given. root plays the same role a chroot's own root plays for
+// such a path, which is why it is joined after stripping the leading
+// separator rather than passed through mcp.resolvePath -- that function
+// confines an agent's own tool arguments, a different question from where
+// a controller-applied placement lands.
 //
 // A SideController placement is skipped, not written anywhere: no
 // current provider returns one (gcpkey and geminikey both mint straight
@@ -557,28 +575,37 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 // destination for one even is yet. Ported from pkg/orchestrate
 // (bwsalmon/agents#254).
 //
-// root is empty for a task dispatched onto a sandbox with no local
-// directory (a kontur VM -- see rootedSandbox's own doc comment). That is
-// only a problem for a grant that actually materializes a SideSandbox
-// placement (gcpkey, geminikey): most grants, including the Configuration
-// agent's own self-debug/self-repair, materialize none and so never reach
-// the loop body below at all (bwsalmon/agents#643).
-func applyPlacements(root string, materialized []model.Materialized) error {
+// Both root and placer are empty for a sandbox that offers neither. That
+// is only a problem for a grant that actually materializes a SideSandbox
+// placement (gcpkey, geminikey, githubsandbox): most grants, including
+// the Configuration agent's own self-debug/self-repair, materialize none
+// and so never reach the loop body below at all (bwsalmon/agents#643).
+func applyPlacements(ctx context.Context, root string, placer SandboxPlacer, materialized []model.Materialized) error {
 	for _, m := range materialized {
 		for _, p := range m.Materialization.Placements {
 			if p.Side != model.SideSandbox {
 				continue
 			}
+			// Parsed before either branch so an unusable mode is
+			// rejected the same way whichever route the placement
+			// takes -- placer is handed the octal string itself,
+			// since a remote `install -m` is what applies it there.
+			mode, err := strconv.ParseUint(p.EffectiveMode(), 8, 32)
+			if err != nil {
+				return fmt.Errorf("placement %s: invalid mode %q: %w", p.Path, p.Mode, err)
+			}
+			if placer != nil {
+				if err := placer.PlaceFile(ctx, p.Path, p.Content, p.EffectiveMode()); err != nil {
+					return fmt.Errorf("capability %q placing %s in the sandbox: %w", m.Grant.Capability, p.Path, err)
+				}
+				continue
+			}
 			if root == "" {
-				return fmt.Errorf("capability %q placed %s in the sandbox, but this sandbox has no local directory to place it in", m.Grant.Capability, p.Path)
+				return fmt.Errorf("capability %q placed %s in the sandbox, but this sandbox has no local directory to place it in and no way to place it remotely", m.Grant.Capability, p.Path)
 			}
 			full := filepath.Join(root, strings.TrimPrefix(p.Path, "/"))
 			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 				return fmt.Errorf("creating %s: %w", filepath.Dir(full), err)
-			}
-			mode, err := strconv.ParseUint(p.EffectiveMode(), 8, 32)
-			if err != nil {
-				return fmt.Errorf("placement %s: invalid mode %q: %w", p.Path, p.Mode, err)
 			}
 			if err := os.WriteFile(full, []byte(p.Content), os.FileMode(mode)); err != nil {
 				return fmt.Errorf("writing %s: %w", full, err)
