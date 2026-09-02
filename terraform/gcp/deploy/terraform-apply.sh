@@ -39,10 +39,11 @@ for f in backend.hcl "$tfvars_file"; do
   }
 done
 
-# grain's own root, two levels up from this file -- so the caller never
-# names grain's internal layout and a move here breaks nothing downstream.
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$root/terraform/gcp"
+# The module this deploys is the parent of this directory -- so the
+# caller never names grain's internal layout and a move here breaks
+# nothing downstream.
+module_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$module_dir"
 
 # --- the state bucket --------------------------------------------------
 #
@@ -128,8 +129,7 @@ terraform validate -no-color
 # plain retry a few minutes later routinely succeeds once the zone frees
 # up capacity, so back off and retry instead of failing the whole
 # rollout. Any other failure still fails immediately: retrying a bad
-# config or a real quota limit only burns the backoff budget. Same
-# reasoning, and the same patterns, as ci/terraform-apply.sh.
+# config or a real quota limit only burns the backoff budget.
 #
 # google_compute_instance.host's own metadata update (grain-deploy-generation,
 # every apply that changes anything in grain_config -- see instance.tf) is a

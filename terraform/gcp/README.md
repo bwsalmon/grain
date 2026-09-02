@@ -47,7 +47,7 @@ Terraform -- it also wires up workload identity federation, the same
 mechanism v1's own bootstrap script used, so CI needs no long-lived
 key.
 
-The state bucket is the one piece `ci/terraform-apply.sh` will also
+The state bucket is the one piece `deploy/terraform-apply.sh` will also
 create for itself, when a deploy finds it missing -- with the same
 uniform bucket-level access, versioning and public-access prevention
 this script applies. It only ever creates the name this script would
@@ -99,7 +99,7 @@ export INSTANCE="$(terraform output -raw instance_name)"
 export ZONE="$(terraform output -raw zone)"
 export MINTER_SERVICE_ACCOUNT="$(terraform output -raw minter_service_account)"
 export GRAIN_GITHUB_TOKEN="github_pat_..."   # a fine-grained PAT scoped to test_repos
-./push-secrets.sh
+./deploy/push-secrets.sh
 ```
 
 `GRAIN_GEMINI_API_KEY` is optional: with `enable_gemini_key` on (the
@@ -187,14 +187,15 @@ restart itself from inside a container -- see grain's own
 
 Everything above is the by-hand path. To have a config repo's GitHub
 Actions apply it instead, pass `--repo owner/name` to the bootstrap
-script and wire a workflow to the step scripts in grain's `ci/`:
+script and wire a workflow to the step scripts in this module's
+`deploy/`:
 
 ```
-ci/v2-staging-terraform-apply.sh    init, validate, apply (with stock-out retries)
-ci/v2-staging-read-outputs.sh       Terraform outputs -> Actions step outputs
-push-secrets.sh                     this directory's own, called with env
-ci/v2-staging-wait-for-host.sh      block until the host reports it converged
-ci/v2-staging-write-summary.sh      the job summary
+deploy/terraform-apply.sh    init, validate, apply (with stock-out retries)
+deploy/read-outputs.sh       Terraform outputs -> Actions step outputs
+deploy/push-secrets.sh       the same script the by-hand path runs, called with env
+deploy/wait-for-host.sh      block until the host reports it converged
+deploy/write-summary.sh      the job summary
 ```
 
 The step bodies live in grain, and the config repo's workflow only wires
@@ -205,6 +206,16 @@ so anything written *there* is something nobody re-syncs, while a fix
 here reaches every deployment on its next `grain_ref` bump. See
 `bwsalmon/agents`'s `.github/workflows/deploy-v2-staging.yml` for a
 worked example.
+
+These five paths are the interface a config repo pins, and all five
+moved into it: four from grain's old top-level `ci/`, and
+`push-secrets.sh` from the module root beside this README, so one
+deploy's steps are no longer split across two directories for no
+reason. A workflow still naming the old paths breaks on the
+`grain_ref` bump that first picks this layout up, so repoint it in the
+same change. Two names also shortened, now that the directory says the
+rest: `read-terraform-outputs.sh` is `read-outputs.sh`, and
+`write-deploy-summary.sh` is `write-summary.sh`.
 
 Two things differ from a by-hand deploy:
 
@@ -702,6 +713,11 @@ files/
   config-sync.sh  watch metadata, run a deploy when it changes
   deploy.sh       translate this deployment's config into a scripts/setup.sh call
 bootstrap-gcp.sh   one-time: state bucket, deployer service account, optional WIF
-push-secrets.sh    post-apply: push the GitHub PAT, the Gemini key, the kontur SSH key, and a minted minter key
+deploy/
+  push-secrets.sh     post-apply: push the GitHub PAT, the Gemini key, the kontur SSH key, and a minted minter key
+  terraform-apply.sh  init, validate, apply -- creates the state bucket if it is missing
+  read-outputs.sh     Terraform outputs -> Actions step outputs
+  wait-for-host.sh    block until the host reports it converged on this generation
+  write-summary.sh    the deploy's job summary
 example.tfvars, backend.hcl.example
 ```

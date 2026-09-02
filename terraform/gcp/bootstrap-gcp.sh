@@ -126,7 +126,7 @@ say "Granting the deployer what Terraform needs"
 # google_project_iam_member resources grant roles in the first place.
 #
 # storage.admin is project-level, unlike the two bucket-scoped storage
-# roles below, and is there for exactly one thing: ci/terraform-apply.sh
+# roles below, and is there for exactly one thing: deploy/terraform-apply.sh
 # creating the state bucket when it does not exist yet. A bucket-scoped
 # grant cannot do that -- it is made *on* a bucket, so the bucket has to
 # exist for the grant to be made at all, which is the chicken-and-egg
@@ -217,7 +217,7 @@ and set project_id = "${PROJECT_ID}", deployer_member =
 "serviceAccount:${DEPLOYER_EMAIL}" in your tfvars.
 
 Next: terraform init -backend-config=backend.hcl, terraform apply, then
-run push-secrets.sh once (see this directory's README) to give the host
+run deploy/push-secrets.sh once (see this directory's README) to give the host
 a GitHub token and a Gemini API key.
 DONE
 

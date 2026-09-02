@@ -3,7 +3,7 @@
 # grain-deploy-generation changes. Translates this deployment's
 # non-secret configuration (the grain-config metadata attribute) and its
 # two secrets (also metadata, but never Terraform inputs -- see
-# ../push-secrets.sh) into a call to scripts/setup.sh, which does the
+# ../deploy/push-secrets.sh) into a call to scripts/setup.sh, which does the
 # actual clone/pull/install/restart -- including the breaking-schema
 # reformat (bwsalmon/agents#394; see that script's own step 6).
 #
