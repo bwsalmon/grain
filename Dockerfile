@@ -142,7 +142,7 @@ RUN mkdir -p /out && cd third_party/kontur && CGO_ENABLED=0 go build -o /out/kon
 # -- but `make build`'s own `npm ci` creates it right here).
 RUN mkdir -p /src-export \
 	&& cp -a /src/. /src-export/ \
-	&& rm -rf /src-export/.git /src-export/bin /src-export/pkg/ui/frontend/node_modules
+	&& rm -rf /src-export/.git /src-export/bin /src-export/ui/node_modules
 
 FROM ${RUNTIME_IMAGE}
 

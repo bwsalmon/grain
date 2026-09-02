@@ -94,7 +94,7 @@ test -f ` + root + `/go.mod
 grep -q "^module github.com/bwsalmon/grain$" ` + root + `/go.mod
 test -d ` + root + `/cmd/grain
 test -d ` + root + `/pkg/capability/selfdebug
-for excluded in .git bin pkg/ui/frontend/node_modules; do
+for excluded in .git bin ui/node_modules; do
   if [ -e ` + root + `/$excluded ]; then echo "LEAKED $excluded"; exit 1; fi
 done
 echo source-present`

@@ -348,7 +348,7 @@ func TestBothPublishedImagesClaimThisRepository(t *testing.T) {
 		t.Error("the grain image does not claim this repository")
 	}
 
-	oci := read(t, "packer", "kontur", "build-oci-image.sh")
+	oci := read(t, "scripts", "kontur", "build-oci-image.sh")
 	contains(t, oci, "KONTUR_OCI_SOURCE_REPO")
 	contains(t, oci, "org.opencontainers.image.source=")
 	// Unset must leave the vendored label alone -- the override is for the
@@ -470,7 +470,7 @@ func TestTheSandboxReferenceIsStampedIntoTheGrainImage(t *testing.T) {
 
 // bwsalmon/agents#645: a deployment stopped building its sandbox.
 //
-// It used to run packer/kontur/build-oci-image.sh on every host, which is
+// It used to run scripts/kontur/build-oci-image.sh on every host, which is
 // how a deployment could end up running grain from one commit and a
 // sandbox from another. What is left building locally is the guest *disk*,
 // which bakes in this deployment's own SSH key and so cannot be published
@@ -522,10 +522,11 @@ func TestNoDeployScriptShellsOutToAnInterpreter(t *testing.T) {
 	for _, script := range [][]string{
 		{"scripts", "setup.sh"},
 		{"terraform", "gcp", "files", "deploy.sh"},
-		{"ci", "read-terraform-outputs.sh"},
-		{"ci", "terraform-apply.sh"},
-		{"ci", "wait-for-host.sh"},
-		{"ci", "write-deploy-summary.sh"},
+		{"terraform", "gcp", "deploy", "read-outputs.sh"},
+		{"terraform", "gcp", "deploy", "terraform-apply.sh"},
+		{"terraform", "gcp", "deploy", "wait-for-host.sh"},
+		{"terraform", "gcp", "deploy", "write-summary.sh"},
+		{"terraform", "gcp", "deploy", "push-secrets.sh"},
 	} {
 		for _, line := range strings.Split(stripComments(read(t, script...)), "\n") {
 			if strings.Contains(line, "python") {
