@@ -125,9 +125,10 @@ func parseEvents(stdout string) *parsedEvents {
 						fmt.Fprintf(&p.transcript, "%s\n\n", b.Text)
 					}
 				case "tool_use":
-					p.result.ToolCalls = append(p.result.ToolCalls, agent.ToolCall{Name: b.Name, Arguments: b.Input})
+					name := toolName(b.Name)
+					p.result.ToolCalls = append(p.result.ToolCalls, agent.ToolCall{Name: name, Arguments: b.Input})
 					p.pending[b.ID] = len(p.result.ToolCalls) - 1
-					fmt.Fprintf(&p.transcript, "> %s(%s)\n", b.Name, inputSummary(b.Input))
+					fmt.Fprintf(&p.transcript, "> %s(%s)\n", name, inputSummary(b.Input))
 				case "tool_result":
 					if idx, ok := p.pending[b.ToolUseID]; ok {
 						text := toolResultText(b.Content)
@@ -151,6 +152,24 @@ func parseEvents(stdout string) *parsedEvents {
 		}
 	}
 	return p
+}
+
+// toolName is the tool's own name -- what the "mcpserver" subcommand
+// registered it as -- recovered from the "mcp__<server>__<tool>" name
+// claude reports it under once it is loaded from --mcp-config (see
+// mcpServerName). Stripping the prefix here, in the one place a
+// transcript becomes an agent.Result, is what keeps that mangling a
+// detail of driving this particular CLI rather than something every
+// reader of Result.ToolCalls has to know about: orchestrator's
+// ProcessResult matches "propose_task", "ask_question" and
+// "comment_on_issue" by the names mcp/mock_tools.go gave them, and it
+// used to match none of them on a real run, because every name reaching
+// it was prefixed -- a proposed task filed by an agent was silently
+// dropped. An unprefixed name is passed through unchanged: Run empties
+// claude's native tool roster, so a run should have no unprefixed tool
+// to report, but a parser is not the place to assume that held.
+func toolName(reported string) string {
+	return strings.TrimPrefix(reported, "mcp__"+mcpServerName+"__")
 }
 
 // inputSummary renders a tool_use block's own input as compact JSON for a

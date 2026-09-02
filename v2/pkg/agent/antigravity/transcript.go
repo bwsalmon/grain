@@ -282,7 +282,26 @@ func (s *rawStep) toolCall() (string, map[string]any) {
 		}
 		args = s.ToolInfo.Parameters
 	}
-	return name, args
+	return toolName(name), args
+}
+
+// toolName is the tool's own name -- what the "mcpserver" subcommand
+// registered it as -- recovered from the "mcp__<server>__<tool>" name agy
+// reports it under once it is loaded from that run's MCP settings (see
+// mcpServerName). Stripping the prefix here, in the one place a
+// transcript becomes an agent.Result, is what keeps that mangling a
+// detail of driving this particular CLI rather than something every
+// reader of Result.ToolCalls has to know about: orchestrator's
+// ProcessResult matches "propose_task", "ask_question" and
+// "comment_on_issue" by the names mcp/mock_tools.go gave them, and it
+// used to match none of them on a real run, because every name reaching
+// it was prefixed -- a proposed task filed by an agent was silently
+// dropped. A name without the prefix
+// -- one of agy's own native tools, which it has no way to turn off (see
+// this package's doc comment) -- is passed through unchanged, so the two
+// stay distinguishable.
+func toolName(reported string) string {
+	return strings.TrimPrefix(reported, "mcp__"+mcpServerName+"__")
 }
 
 // toolResult reads what a terminal tool step returned. agy nests both

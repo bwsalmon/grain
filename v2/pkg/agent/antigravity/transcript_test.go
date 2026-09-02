@@ -171,3 +171,53 @@ func TestPartialTranscriptRecordsATerminalStepWithNoActiveOneBeforeIt(t *testing
 		t.Errorf("PartialTranscript = %q, want the orphaned terminal step's output", got)
 	}
 }
+
+// TestParseTranscriptStripsTheMCPServerPrefixFromToolNames pins the
+// spelling a real agy reports an MCP tool under. agy loads grain's tools
+// from that run's MCP settings and names every call
+// "mcp__grain-sandbox__<tool>" thereafter, so a Result whose ToolCalls
+// carried that name unchanged matched nothing downstream:
+// orchestrator.ProcessResult looks for "propose_task", "ask_question"
+// and "comment_on_issue" by the names mcp/mock_tools.go registered, and
+// so a real agent proposing a task had that proposal dropped on the
+// floor -- while every scripted test passed, because the fake in
+// testing.go used to emit the bare name no CLI ever produces.
+func TestParseTranscriptStripsTheMCPServerPrefixFromToolNames(t *testing.T) {
+	got, err := parseTranscript(stream(
+		initLine,
+		toolActive(0, "mcp__grain-sandbox__propose_task", `{"title":"follow-up","body":"more"}`),
+		toolDone(0, "mcp__grain-sandbox__propose_task", "Recorded"),
+		`{"event":"result","result":{"status":"SUCCESS","response":"proposed one"}}`,
+	))
+	if err != nil {
+		t.Fatalf("parseTranscript: %v", err)
+	}
+	if len(got.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls = %+v, want 1", got.ToolCalls)
+	}
+	if got.ToolCalls[0].Name != "propose_task" {
+		t.Errorf("ToolCalls[0].Name = %q, want the tool's own name %q", got.ToolCalls[0].Name, "propose_task")
+	}
+	if !strings.Contains(got.Transcript, "> propose_task(") {
+		t.Errorf("Transcript = %q, want the call rendered under its own name", got.Transcript)
+	}
+}
+
+// TestParseTranscriptLeavesAnUnprefixedToolNameAlone is the other half:
+// agy has no way to empty its own native tool roster (see this package's
+// doc comment), so a name that never came from grain's MCP server must
+// stay distinguishable from one that did.
+func TestParseTranscriptLeavesAnUnprefixedToolNameAlone(t *testing.T) {
+	got, err := parseTranscript(stream(
+		initLine,
+		toolActive(0, "Bash", `{"command":"true"}`),
+		toolDone(0, "Bash", "ok"),
+		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}`,
+	))
+	if err != nil {
+		t.Fatalf("parseTranscript: %v", err)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Name != "Bash" {
+		t.Fatalf("ToolCalls = %+v, want one call still named Bash", got.ToolCalls)
+	}
+}

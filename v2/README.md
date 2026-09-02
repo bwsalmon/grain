@@ -830,6 +830,23 @@ in a rewrite; the assertions port, the harness does not.
 real host adapter and a real dispatched-agent connection would replace,
 without changing anything about `RunCycle`'s own shape.
 
+That relay only works because each framework's transcript parser now
+strips the `mcp__grain-sandbox__` prefix off a tool call's name before it
+becomes an `agent.ToolCall`. Both CLIs report a tool loaded from their
+MCP config under that mangled name -- it is the same spelling
+`allowedTools()` builds to admit them in the first place -- while
+`ProcessResult` matches `propose_task`, `ask_question` and
+`comment_on_issue` by the names `mcp/mock_tools.go` registered. Nothing
+reconciled the two, so on a real run every match failed: a task an agent
+proposed was recorded in the transcript and then dropped, and so was a
+question it asked. Every test missed it for one reason -- the scripted
+agy in `antigravity`'s `testing.go` emitted the bare registry name, a
+spelling no real CLI produces, and the canned transcripts in
+`agent/claude`'s tests were written the same way. The fake now emits the
+prefixed name and calls the registry with the bare one, which is what a
+real run does, so `e2e`'s propose-then-approve test exercises the whole
+path instead of a shape that only existed in the harness.
+
 `TrackedPullRequest` (`model.PullRequestRef`/`model.PrHealth`/
 `model.TrackedPullRequest`, `pkg/model/pullrequest.go`) turned out not to
 need a table of its own: `model.Task`'s existing `LinkFixes` link already
