@@ -180,6 +180,52 @@ def test_the_data_directory_is_laid_out_before_the_cli_is_used():
     assert main.index("ensure_kontur_ssh_key") < main.index("setup_data_dir")
 
 
+def test_every_file_handed_to_the_containerised_cli_is_readable_by_it():
+    """The CLI is a `docker run --user $GRAIN_USER`; this script is root.
+
+    A file root writes with a 0600 umask is one that CLI cannot read --
+    and `grain secrets set -value-file` failing takes the whole deploy
+    down with it under `set -e`, after the image is pulled and before
+    grain-daemon.service is ever written. That is not hypothetical: it
+    is what a fresh VM with a minter key actually did, leaving a host
+    with the sync service, the image, and no daemon.
+
+    So anything staged for that CLI is created owned by $GRAIN_USER.
+    `install` does it in one step, rather than a chown afterwards that
+    leaves the file briefly readable by nobody but root.
+    """
+    code = setup_code()
+    staged = code[code.index("seed_gcp_minter_key() {"):]
+    staged = staged[:staged.index("\n}\n")]
+    assert '-value-file "$staged"' in staged, "the staged copy is no longer what is handed over"
+    assert 'install -m0600 -o "$GRAIN_USER" -g "$GRAIN_USER"' in staged, (
+        "the minter key is staged without giving it to $GRAIN_USER")
+    # The shape that caused it, so it cannot come back by hand.
+    assert "umask 077 && cat" not in staged
+
+
+def test_a_cli_that_cannot_answer_does_not_abort_the_deploy():
+    """`set -e` plus a command substitution is a trap worth pinning.
+
+    Each of these assigns the output of the containerised CLI to a
+    variable and then *checks* it -- but a non-zero exit inside `$( )` in
+    an assignment aborts the script before the check ever runs, turning
+    "report this and carry on" into "no service on this host". Every one
+    of them has to tolerate the failure it is written to describe.
+    """
+    code = setup_code()
+    for call in ("grain sandbox-image", "grain schema-version"):
+        line = [ln for ln in code.splitlines() if call in ln and '="$(' in ln]
+        assert line, f"{call} is no longer assigned from a command substitution"
+        assert all("|| true" in ln for ln in line), (
+            f"{call} aborts the deploy instead of reporting: {line}")
+    # agent_cli_in_image is assigned in two places; it absorbs the
+    # failure itself so neither caller has to.
+    helper = code[code.index("agent_cli_in_image() {"):]
+    helper = helper[:helper.index("\n}\n")]
+    assert "|| true" in helper
+
+
 def test_the_upgrade_button_is_wired_to_the_image_path():
     text = setup_text()
     assert '-upgrade-image "$GRAIN_IMAGE"' in text
