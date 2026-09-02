@@ -36,6 +36,13 @@
 // One exception to "drains into whatever headroom there is": the
 // configuration agent (Task.Configuration, bwsalmon/agents#621) is not
 // drawn from that headroom at all -- see dispatchConfiguration.
+//
+// One exception to "ordering is whatever task_ready yields", beyond the
+// backoff above: a caller may pass Busy to have Cycle pass over a task
+// it is itself still finishing with. That is not a scheduling policy
+// either -- it is the caller supplying the one fact task_ready cannot
+// know, that a run whose row is already finished has not yet had its
+// result acted on. See Busy.
 package dispatch
 
 import (
@@ -133,6 +140,57 @@ func retryEligible(ctx context.Context, store *model.Store, taskID string, now t
 	return !now.Before(streak.LastFinishedAt.Add(retryBackoff(streak.Count))), nil
 }
 
+// Option is one caller's adjustment to a single Cycle call. Variadic
+// rather than a parameter of its own because the overwhelming majority
+// of callers -- every test that drives a cycle against a store, and
+// every one-shot cycle -- want none of it, and a nil argument at every
+// one of those call sites would say less than their absence does.
+type Option func(*options)
+
+type options struct {
+	busy func(taskID string) bool
+}
+
+// Busy tells Cycle to pass over any task busy reports true for, without
+// spending capacity on it -- exactly the way a task still backing off
+// after a failure is passed over (retryEligible).
+//
+// It exists for one thing the store cannot answer on its own: a run's
+// row is finished (Store.FinishRun, inside RunDispatch) a moment before
+// the caller has turned that run's result into the effects it implies --
+// the observation that says the task completed, the pull request it
+// opened. In between, task_state sees no live run and no completion, so
+// the task reads 'queued' and this package would dispatch it a second
+// time, running the same work twice over. Nothing was ever wrong with
+// the view: what it lacks is knowledge that only the process still
+// holding that result has, which is what this option lets that process
+// supply (orchestrator.InFlight.Busy).
+//
+// It closed no gap while a cycle waited for the runs it started -- there
+// was no tick to fall in that window -- and it is required now that a
+// run outlives its cycle (orchestrator.InFlight's own doc comment).
+//
+// A caller that passes this is saying only "not yet, not from me": a
+// task passed over here is dispatched by a later cycle as soon as busy
+// stops saying so, on whatever the store says about it then.
+func Busy(busy func(taskID string) bool) Option {
+	return func(o *options) { o.busy = busy }
+}
+
+func newOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// skip reports whether taskID is one the caller has asked Cycle to pass
+// over this time round.
+func (o options) skip(taskID string) bool {
+	return o.busy != nil && o.busy(taskID)
+}
+
 // Cycle is one pass: start the next ready, backed-off tasks in
 // task_ready's own order until maxConcurrent runs are in flight, and
 // start nothing else. It is the entire dispatch decision for now — no
@@ -164,7 +222,8 @@ func retryEligible(ctx context.Context, store *model.Store, taskID string, now t
 // capacity it would otherwise have taken, so a task further down the
 // ready order is not made to wait behind one that is not actually
 // eligible yet.
-func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.Time) ([]Dispatch, error) {
+func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.Time, opts ...Option) ([]Dispatch, error) {
+	o := newOptions(opts)
 	// The configuration agent (Task.Configuration, bwsalmon/agents#621)
 	// dispatches first, and unconditionally -- see dispatchConfiguration's
 	// own doc comment for why it cannot wait on the same headroom check
@@ -172,7 +231,7 @@ func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.
 	// free-capacity math that follows accurate for everything else: a
 	// configuration task started here already counts as live by the time
 	// this function asks.
-	out, err := dispatchConfiguration(ctx, store, now)
+	out, err := dispatchConfiguration(ctx, store, now, o)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +259,9 @@ func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.
 			}
 			candidate := ready[readyIdx]
 			readyIdx++
+			if o.skip(candidate) {
+				continue
+			}
 			eligible, err := retryEligible(ctx, store, candidate, now)
 			if err != nil {
 				return nil, fmt.Errorf("dispatch: %w", err)
@@ -235,13 +297,16 @@ func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.
 // that might be. Making it wait behind the same headroom check as
 // ordinary work would strand it at the one moment it is most likely to
 // be needed.
-func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Time) ([]Dispatch, error) {
+func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Time, o options) ([]Dispatch, error) {
 	ready, err := store.ReadyConfiguration(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: reading ready configuration tasks: %w", err)
 	}
 	var out []Dispatch
 	for _, taskID := range ready {
+		if o.skip(taskID) {
+			continue
+		}
 		eligible, err := retryEligible(ctx, store, taskID, now)
 		if err != nil {
 			return nil, fmt.Errorf("dispatch: %w", err)

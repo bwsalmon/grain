@@ -577,3 +577,77 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 		}
 	}
 }
+
+// The window dispatch.Busy exists for, simulated with the store calls
+// the orchestrator makes for real: a run whose row is already finished
+// but whose result has not yet been turned into an observation. The
+// store says the task is queued again, and it is the caller -- still
+// holding that result -- that knows better.
+func TestCycleSkipsATaskItsCallerIsStillFinishingWith(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, task("t0", true), task("t1", true))
+
+	first, err := dispatch.Cycle(ctx, store, 1, now)
+	if err != nil || len(first) != 1 || first[0].TaskID != "t0" {
+		t.Fatalf("first cycle: %v, %+v", err, first)
+	}
+	// The run is over as far as the store is concerned; what it means for
+	// the task has not been recorded yet.
+	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := store.State(ctx, "t0"); st != model.StateQueued {
+		t.Fatalf("t0 state = %q, want queued -- the premise of this test", st)
+	}
+
+	busy := func(taskID string) bool { return taskID == "t0" }
+	second, err := dispatch.Cycle(ctx, store, 1, now.Add(2*time.Minute), dispatch.Busy(busy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// t1, not t0: being passed over must not cost t0's capacity, the same
+	// way a task still backing off does not cost the one behind it.
+	if len(second) != 1 || second[0].TaskID != "t1" {
+		t.Fatalf("cycle with t0 busy = %+v, want t1 dispatched into the free capacity instead", second)
+	}
+	if runs, err := store.Runs(ctx, "t0"); err != nil || len(runs) != 1 {
+		t.Fatalf("t0 has %d run(s) (%v), want only the one it was already finishing", len(runs), err)
+	}
+
+	// Once the caller is done with it, nothing about the task stops it
+	// being dispatched again on whatever the store says then.
+	if err := store.FinishRun(ctx, second[0].RunID, now.Add(3*time.Minute), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	third, err := dispatch.Cycle(ctx, store, 1, now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third) != 1 || third[0].TaskID != "t0" {
+		t.Fatalf("cycle with nothing busy = %+v, want t0 dispatched again", third)
+	}
+}
+
+// The configuration agent takes the same exemption from its own dispatch
+// path (dispatchConfiguration), which does not share the loop above.
+func TestCycleSkipsAConfigurationTaskItsCallerIsStillFinishingWith(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, configurationTask("config"))
+
+	first, err := dispatch.Cycle(ctx, store, 1, now)
+	if err != nil || len(first) != 1 || first[0].TaskID != "config" {
+		t.Fatalf("first cycle: %v, %+v", err, first)
+	}
+	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	busy := func(taskID string) bool { return taskID == "config" }
+	second, err := dispatch.Cycle(ctx, store, 1, now.Add(2*time.Minute), dispatch.Busy(busy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("cycle with the configuration task busy = %+v, want nothing dispatched", second)
+	}
+}

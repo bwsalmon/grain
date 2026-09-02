@@ -39,6 +39,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/github"
@@ -174,6 +175,23 @@ type Sim struct {
 	nextCommentID int
 	nextIssue     int
 	nextReviewID  int
+
+	// mu serialises Request, which is every mutation this double makes:
+	// the orchestrator dispatches concurrently -- a goroutine per run,
+	// and since a run now outlives the cycle that started it (see
+	// orchestrator.InFlight), several of them at once against one client
+	// -- so two runs really do reach a Sim at the same time. Nothing
+	// about the maps and slices above is safe for that on its own, and a
+	// double that corrupts its own state under the very concurrency the
+	// code it stands in for is built for would fail tests for a reason
+	// that has nothing to do with what they assert.
+	//
+	// One lock for the whole method, rather than something finer: a
+	// request here is microseconds of map work plus the occasional git
+	// command against BareRepo, which has to be serialised anyway.
+	// Fields are still read directly by tests, which do that before or
+	// after a cycle rather than during one.
+	mu sync.Mutex
 }
 
 // New returns a Sim seeded with no issues and no pull requests, answering
@@ -317,6 +335,9 @@ func jsonResponse(status int, v any) github.ApiResponse {
 // AssertionError -- a test exercising an endpoint this double doesn't yet
 // answer for should fail loudly, not silently get back a default "[]".
 func (s *Sim) Request(method, path string, headers map[string]string, body []byte) (github.ApiResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.Calls = append(s.Calls, Call{Method: method, Path: path})
 	p, qs := splitPathQuery(path)
 
