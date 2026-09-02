@@ -4,8 +4,8 @@
 // the model; this drives the exact same "pushed, then ran out of turns"
 // scenario through a real agent/antigravity run instead, gated on
 // GEMINI_API_KEY and an installed agy binary (liveFramework) the same way
-// e2e/live_test.go's TestLiveIssueCompletesEndToEnd is, so it runs in
-// CI (where neither is present) without failing but proves,
+// tests/e2e/live_test.go's TestLiveIssueCompletesEndToEnd is, so it
+// runs in CI (where neither is present) without failing but proves,
 // against the real model deciding its own tool calls, that a task
 // completed this way stops reporting a stale failure once it has (see
 // client.go's own guard added for this issue).

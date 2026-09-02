@@ -603,12 +603,12 @@ func closeTask(t *testing.T, ctx context.Context, store *model.Store, id string,
 // bwsalmon/agents#346's own scenario: a task closed while its run is
 // still live must actually stop that run's agent, not just prevent
 // dispatch.Cycle from starting another one and ProcessResult from opening
-// a pull request for it (e2e/close_while_live_test.go already covered
-// those two). fw here blocks on the very ctx RunDispatch hands
+// a pull request for it (tests/e2e/close_while_live_test.go already
+// covered those two). fw here blocks on the very ctx RunDispatch hands
 // framework.Run until it is cancelled, so this test only passes if
 // closing the task mid-run actually reaches that ctx -- proving
-// watchForTaskClosed's store-polled cancellation signal works end to end,
-// deterministically and fast (CancelPollInterval is set to a few
+// watchForTaskClosed's store-polled cancellation signal works end to
+// end, deterministically and fast (CancelPollInterval is set to a few
 // milliseconds), rather than relying on a real subprocess's own timing.
 func TestRunDispatchCancelsTheAgentWhenItsTaskIsClosedMidFlight(t *testing.T) {
 	store, ctx := openStore(t)
@@ -738,17 +738,17 @@ func TestRunDispatchCancelsAnAgentThatOutlivesMaxRunRuntime(t *testing.T) {
 }
 
 // TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall is the
-// race e2e/close_while_live_test.go itself exercises: dispatch.Cycle
-// claims a slot while a task is still running, the task is closed before
-// RunDispatch ever gets called for that already-claimed run, and only
-// then does RunDispatch actually run. Leaving this to
-// watchForTaskClosed's own polling ticker would make whether the agent's
-// first tool call ever reaches a real sandbox a race against
-// CancelPollInterval; RunDispatch instead checks synchronously, before
-// framework.Run is ever invoked, which this proves by using the default
-// (multi-second) CancelPollInterval and still finishing fast, and by
-// checking that framework.Run's own ctx already reads cancelled the
-// instant it starts.
+// race tests/e2e/close_while_live_test.go itself exercises:
+// dispatch.Cycle claims a slot while a task is still running, the task
+// is closed before RunDispatch ever gets called for that
+// already-claimed run, and only then does RunDispatch actually run.
+// Leaving this to watchForTaskClosed's own polling ticker would make
+// whether the agent's first tool call ever reaches a real sandbox a
+// race against CancelPollInterval; RunDispatch instead checks
+// synchronously, before framework.Run is ever invoked, which this
+// proves by using the default (multi-second) CancelPollInterval and
+// still finishing fast, and by checking that framework.Run's own ctx
+// already reads cancelled the instant it starts.
 func TestRunDispatchNeverLetsAnAlreadyClosedTaskReachARealToolCall(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")

@@ -19,5 +19,3 @@ bin/
 ui/node_modules/
 ui/test-results/
 ui/playwright-report/
-**/__pycache__/
-.pytest_cache/

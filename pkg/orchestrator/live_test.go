@@ -1,10 +1,11 @@
 // bwsalmon/agents#249's own live test: the two flagship scenarios
-// e2e/e2e_test.go already proves against manual store.Observe calls
-// standing in for "GitHub itself" (that file's own doc comments: "v2 has
-// no completion detector of its own yet," "no code in v2 does this yet
-// [merges/closes a PR]") -- driven here through RunCycle and a real
-// github.Client against githubsim instead, the way gitproxy/live_test.go
-// already holds the git-transport half to the same discipline.
+// tests/e2e/e2e_test.go already proves against manual store.Observe
+// calls standing in for "GitHub itself" (that file's own doc comments:
+// "v2 has no completion detector of its own yet," "no code in v2 does
+// this yet [merges/closes a PR]") -- driven here through RunCycle and a
+// real github.Client against githubsim instead, the way
+// gitproxy/live_test.go already holds the git-transport half to the
+// same discipline.
 package orchestrator_test
 
 import (
@@ -53,9 +54,9 @@ func (s credentialingSandboxes) Acquire(ctx context.Context, name string, shape 
 }
 
 // --- scripting helpers for the gemini agent, duplicated from
-// e2e/harness_test.go the same deliberate way gitproxy/live_test.go's
-// own comment explains: package-private test helpers are cheaper to
-// duplicate than to share. ---------------------------------------------
+// tests/e2e/harness_test.go the same deliberate way
+// gitproxy/live_test.go's own comment explains: package-private test
+// helpers are cheaper to duplicate than to share. -------------------
 
 func finalText(text string) antigravity.Step { return antigravity.TextStep(text) }
 

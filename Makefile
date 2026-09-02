@@ -196,14 +196,14 @@ test-e2e: frontend
 vet: frontend
 	go vet ./...
 
-# The sustained concurrent-load harness (e2e/loadtest_test.go,
+# The sustained concurrent-load harness (tests/e2e/loadtest_test.go,
 # bwsalmon/agents#416) -- skipped by `test` above (GRAIN_LOAD_TEST unset)
 # since it takes minutes rather than seconds and is meant to be run by
 # hand against a host actually sized for it, not on every commit. See
 # that file's own doc comment for how to size it up further; every
 # GRAIN_LOAD_TEST_* env var below is optional.
 loadtest: frontend
-	GRAIN_LOAD_TEST=1 go test ./e2e/... -run TestLoadSustainedConcurrency -v -timeout 30m
+	GRAIN_LOAD_TEST=1 go test ./tests/e2e/... -run TestLoadSustainedConcurrency -v -timeout 30m
 
 # CI has no equivalent fmt check; this just fails the way `go vet` does
 # when a file needs gofmt, instead of only listing it.

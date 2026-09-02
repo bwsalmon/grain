@@ -97,7 +97,7 @@ func TestRandomizedClusterEndToEnd(t *testing.T) {
 // is set) since nothing about CI should pay minutes for a test whose
 // whole point is to run far longer than CI ever should. Run it by hand:
 //
-//	GRAIN_LONG_SIM=1 go test ./e2e/... -run TestRandomizedClusterLong -v -timeout 30m
+//	GRAIN_LONG_SIM=1 go test ./tests/e2e/... -run TestRandomizedClusterLong -v -timeout 30m
 //
 // GRAIN_LONG_SIM_DURATION overrides the default 20 minutes (a Go
 // duration string, e.g. "5m"); remember to raise -timeout to match, since

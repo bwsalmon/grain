@@ -19,8 +19,8 @@ import (
 // straight off agent.Result.ToolCalls rather than a mcp.MockSink is
 // deliberate: a Framework.Run constructs and discards its own
 // MockSink internally (its own doc comment says so), so ToolCalls is the
-// only seam a caller outside that package has -- the same one
-// e2e/harness_test.go's askedQuestion/pushedOK helpers already use.
+// only seam a caller outside that package has -- the same one that
+// tests/e2e/harness_test.go's askedQuestion/pushedOK helpers use.
 //
 // name is matched exactly, against the bare tool name pkg/mcp registers
 // ("ask_question", not "mcp__grain-sandbox__ask_question"). That is

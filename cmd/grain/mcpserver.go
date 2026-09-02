@@ -10,17 +10,17 @@
 //
 // Its sandbox tools run against one of two backends: a local directory
 // (-sandbox-root, unchanged since before bwsalmon/agents#256 -- what
-// pkg/mcp's own tests and e2e/ still use, since neither wants a real VM),
-// or a real kontur-managed VM (-kontur-vm, see package kontur and
-// pkg/mcp's NewSSHSandboxTools) -- the wiring bwsalmon/agents#256 asked
-// for, so a run_command/read_file/edit_file/write_file call actually
-// lands inside one of the sandbox VMs kontur is running instead of the
-// local-directory stand-in pkg/mcp/sandbox_tools.go's own doc comment
-// describes. -kontur-backend selects which of kontur's two ways of
-// running that VM -kontur-vm was created with -- "docker" (the default,
-// bwsalmon/agents#353) needs just a local docker daemon; "static-pod"
-// needs a standalone kubelet (deploy/static-kubelet/README.md) and is
-// resolved via crictl instead.
+// pkg/mcp's own tests and tests/e2e/ still use, since neither wants a
+// real VM), or a real kontur-managed VM (-kontur-vm, see package kontur
+// and pkg/mcp's NewSSHSandboxTools) -- the wiring bwsalmon/agents#256
+// asked for, so a run_command/read_file/edit_file/write_file call
+// actually lands inside one of the sandbox VMs kontur is running
+// instead of the local-directory stand-in pkg/mcp/sandbox_tools.go's
+// own doc comment describes. -kontur-backend selects which of kontur's
+// two ways of running that VM -kontur-vm was created with -- "docker"
+// (the default, bwsalmon/agents#353) needs just a local docker daemon;
+// "static-pod" needs a standalone kubelet
+// (deploy/static-kubelet/README.md) and is resolved via crictl instead.
 package main
 
 import (

@@ -123,6 +123,27 @@ RUN make build BUILDVCS=${BUILDVCS} SANDBOX_IMAGE=${SANDBOX_IMAGE}
 # built in.
 RUN mkdir -p /out && cd third_party/kontur && CGO_ENABLED=0 go build -o /out/konturctl ./cmd/konturctl
 
+# The source the runtime stage carries, for the self-debug capability
+# (pkg/capability/selfdebug) -- read_grain_source and list_grain_source
+# are the agent's view of the code the binary next to them was built
+# from, so the two have to be the same commit. Baked in rather than
+# bind-mounted from a host checkout, which is what it used to be: that
+# checkout tracks a *branch*, this image is an immutable tag, and an
+# upgrade repoints one without touching the other -- so the agent read
+# the old source while the new binary ran, and a rollback inverted it.
+# Same reasoning as SANDBOX_IMAGE above: what a build goes with travels
+# inside it.
+#
+# Staged here rather than copied straight from /src, because three things
+# in this stage must not travel: .git (6MB of history nothing reads --
+# selfdebug is os.ReadFile and os.ReadDir, no git metadata), bin/ (this
+# stage's own build output, already copied as a binary below), and
+# node_modules (not in the build context at all -- .dockerignore drops it
+# -- but `make build`'s own `npm ci` creates it right here).
+RUN mkdir -p /src-export \
+	&& cp -a /src/. /src-export/ \
+	&& rm -rf /src-export/.git /src-export/bin /src-export/ui/node_modules
+
 FROM ${RUNTIME_IMAGE}
 
 # What attaches the published package to this repository. GHCR links a
@@ -157,6 +178,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=build /src/bin/grain /usr/local/bin/grain
 COPY --from=build /out/konturctl /usr/local/bin/konturctl
+# cmd/grain/daemon.go's defaultSourceDir -- keep the two in step.
+COPY --from=build /src-export /usr/local/share/grain/src
 
 # The UI/API binds -ui-addr, and scripts/setup.sh's own default for that
 # is port 80 -- which an unprivileged process cannot bind. The unit

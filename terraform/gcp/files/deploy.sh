@@ -33,18 +33,20 @@ md_optional() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1" 2>/dev/null || t
 # checkout this script keeps, which setup.sh and scripts/kontur's image
 # builds come out of), docker (grain-daemon.service *is* a `docker run`
 # now, so this is a runtime dependency, not only a deploy-time one), and
-# python3 (the `cfg` helper below).
+# jq (the `cfg` helper below, and two one-liners in setup.sh). jq
+# replaced a python3 that was installed on every host for three JSON
+# one-liners and nothing else.
 install_prerequisites() {
   local missing=0
-  for cmd in git docker python3; do
+  for cmd in git docker jq; do
     command -v "$cmd" >/dev/null 2>&1 || missing=1
   done
   if [ "$missing" -eq 0 ]; then
     return
   fi
-  log "installing git, docker, python3 (needed once; the deploy below clones with one, runs grain with the next, and reads its own config with the last)"
+  log "installing git, docker, jq (needed once; the deploy below clones with one, runs grain with the next, and reads its own config with the last)"
   apt-get update
-  apt-get install -y --no-install-recommends git docker.io python3 ca-certificates
+  apt-get install -y --no-install-recommends git docker.io jq ca-certificates
 }
 
 # Ship this host's systemd journal to Cloud Logging, so a failed deploy
@@ -101,13 +103,12 @@ YAML
   fi
 }
 
-# Before anything below, because `cfg` shells out to python3 and this is
-# what guarantees python3 exists. It used to run after the block that
-# reads the config, which meant every cfg call on a fresh host ran
-# against an interpreter that might not be installed yet -- and under
-# `set -e` the first one took the whole deploy down with status 127,
-# reported by config-sync only as "exit=127" with nothing naming the
-# missing command.
+# Before anything below, because `cfg` shells out to jq and this is what
+# guarantees jq exists. It used to run after the block that reads the
+# config, which meant every cfg call on a fresh host ran against a parser
+# that might not be installed yet -- and under `set -e` the first one took
+# the whole deploy down with status 127, reported by config-sync only as
+# "exit=127" with nothing naming the missing command.
 install_prerequisites
 
 # Immediately after, so everything below this line is readable off-host
@@ -118,8 +119,13 @@ ensure_ops_agent || true
 # --- read this deployment's configuration off the instance's own metadata --
 
 CONFIG_JSON="$(md instance/attributes/grain-config)"
+# An absent key and a null one both read as empty, which is what every
+# caller below treats as "not configured". Note that a JSON boolean comes
+# out in its JSON spelling ("true"), not Python's ("True") -- see
+# GRAIN_KONTUR_ENABLE below, which is the one caller that compares one.
 cfg() {
-  python3 -c 'import json, sys; v = json.loads(sys.argv[2]).get(sys.argv[1], ""); print(v if v is not None else "")' "$1" "$CONFIG_JSON"
+  printf '%s' "$CONFIG_JSON" \
+    | jq -r --arg k "$1" 'if (has($k) | not) or (.[$k] == null) then "" else .[$k] end'
 }
 
 GRAIN_REPO_URL="$(cfg grain_repo_url)"
@@ -260,7 +266,7 @@ env \
   GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="$MINTER_KEY_FILE" \
   GRAIN_TARGET_REPO="$DEFAULT_TARGET_REPO" \
   GRAIN_TARGET_REPOS="$TARGET_REPOS" \
-  GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "True" ] && echo 1 || echo 0)" \
+  GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "true" ] && echo 1 || echo 0)" \
   GRAIN_KONTUR_IMAGE_BUCKET="$KONTUR_IMAGE_BUCKET" \
   GRAIN_KONTUR_OCI_IMAGE="$KONTUR_OCI_IMAGE" \
   GRAIN_KONTUR_SSH_USER="$KONTUR_SSH_USER" \

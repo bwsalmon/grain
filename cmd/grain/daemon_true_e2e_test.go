@@ -32,10 +32,10 @@ package main
 // real deployment cares about: a simulated human merges it (a real git
 // merge over the same bare repo, plus a real HTTP PUT to githubsim's own
 // merge endpoint from a second, independent github.Client -- the same
-// technique e2e/cli_test.go uses for the scripted-agent version of this
-// story), and the test then waits for the daemon's own next reconcile
-// tick to notice the merge and close the task out, confirmed, again,
-// through the REST API rather than the store.
+// technique tests/e2e/cli_test.go uses for the scripted-agent version
+// of this story), and the test then waits for the daemon's own next
+// reconcile tick to notice the merge and close the task out, confirmed,
+// again, through the REST API rather than the store.
 //
 // Gated on GEMINI_API_KEY exactly like the other three live tests, so it
 // runs nowhere without a live key (including CI) and costs nothing when
@@ -65,8 +65,8 @@ import (
 // added on this file's own copy of syncedSim (daemon_live_test.go), since
 // this is the one test in this package that needs a second, independent
 // github.Client to act on a pull request sim's own dispatch already
-// opened, the same way e2e/cli_test.go's own syncedSim does for its
-// scripted-agent equivalent of this test.
+// opened, the same way tests/e2e/cli_test.go's own syncedSim does for
+// its scripted-agent equivalent of this test.
 func (s *syncedSim) firstPullRequestNumber() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

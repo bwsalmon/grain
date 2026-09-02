@@ -16,7 +16,7 @@
 # this job is only safe to trigger that way for as long as it has nothing
 # worth stealing -- the same argument the config repo's plan.yml makes for
 # never authenticating a plan-on-PR job. The suites that need a built
-# image (tests/'s two e2e harnesses) skip here and run in
+# image (tests/container and tests/installer) skip here and run in
 # build-artifacts.yml on push instead.
 name: tests
 
@@ -35,40 +35,21 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # tests/ is three suites: the cross-file content checks
-  # (test_container_deploy.py), which need nothing but the tree and run
-  # here, and the two e2e harnesses, which drive a real container and a
-  # real installer and so gate themselves on GRAIN_TEST_IMAGE /
-  # GRAIN_INSTALLER_E2E. Those two skip on this runner and are run for
-  # real by build-artifacts.yml, which has an image to give them.
+  # tests/ is four packages, all of them Go and all of them reached by the
+  # go-test job's own `go test ./...` below: tests/e2e (the end-to-end
+  # suite), tests/deploy (cross-file content checks, which need nothing but
+  # the tree), and tests/container and tests/installer, which drive a real
+  # container and a real installer and so gate themselves on
+  # GRAIN_TEST_IMAGE / GRAIN_INSTALLER_E2E. Those last two skip on this
+  # runner and are run for real by build-artifacts.yml, which has an image
+  # to give them.
   #
-  # The content checks are worth their own job because nothing else sees
-  # what they see: they assert agreements *between* files -- the
-  # Dockerfile, scripts/setup.sh, this workflow's sibling, the Makefile
-  # and terraform/gcp/files/deploy.sh all naming the same image, the same
-  # unit and the same paths -- which no single language's test suite can
-  # check.
-  pytest:
-    name: python suites
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      # These suites declare no dependencies beyond the standard library;
-      # pytest is the single exception, and pinning the major line keeps a
-      # future release's collection changes from turning CI red on a
-      # commit that touched nothing.
-      - name: Install pytest
-        run: python -m pip install --disable-pip-version-check "pytest>=8,<9"
-
-      - name: Run the python suites
-        run: python -m pytest
-
+  # tests/deploy is worth naming because nothing else sees what it sees: it
+  # asserts agreements *between* files -- the Dockerfile, scripts/setup.sh,
+  # this workflow's sibling, the Makefile and terraform/gcp/files/deploy.sh
+  # all naming the same image, the same unit and the same paths -- which no
+  # package's own tests can check. It used to be a Python suite with a job
+  # of its own; it is Go now, so it rides along with everything else.
   go-test:
     name: go
     runs-on: ubuntu-latest
@@ -95,7 +76,7 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # gitproxy's live_test.go and e2e's live_test.go each gate
+      # gitproxy's live_test.go and tests/e2e's live_test.go each gate
       # themselves (missing `git`, unset GEMINI_API_KEY) -- they skip on a
       # runner that has none of that rather than failing.
       #
@@ -260,10 +241,9 @@ jobs:
       - uses: actions/checkout@v4
 
       # A constraint, not an exact version: this tracks the current 1.13
-      # patch release the way the pytest-collect job pins a major line, so
-      # a patch release cannot turn CI red on a commit that touched
-      # nothing, and a deliberate bump moves the whole floor at once. The
-      # module's versions.tf already requires >= 1.6.0.
+      # patch release, so a patch release cannot turn CI red on a commit
+      # that touched nothing, and a deliberate bump moves the whole floor
+      # at once. The module's versions.tf already requires >= 1.6.0.
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~1.13.0"

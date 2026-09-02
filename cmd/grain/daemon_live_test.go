@@ -1,7 +1,7 @@
 package main
 
 // TestRunLiveDispatchesAndOpensAPullRequest is the daemon's own version
-// of e2e/live_test.go's TestLiveIssueCompletesEndToEnd and
+// of tests/e2e/live_test.go's TestLiveIssueCompletesEndToEnd and
 // pkg/orchestrator/live_test.go's TestRunCycleCompletesEndToEnd: the
 // closest thing to actually running `grain daemon` this repo can check
 // in. It calls run() itself -- the exact function daemon() (daemon.go,
@@ -20,7 +20,7 @@ package main
 // pkg/orchestrate.prepare() nor pkg/orchestrator.BuildPrompt tells a
 // dispatched agent what URL to clone -- the sandbox's git credentials
 // are scoped to the git proxy's own (ephemeral, local) host, which
-// nothing puts in the prompt (see both e2e/live_test.go's and
+// nothing puts in the prompt (see both tests/e2e/live_test.go's and
 // pkg/orchestrator/live_test.go's own prompts, which hardcode the remote
 // they built themselves for the same reason). Filed as its own issue
 // rather than fixed here, since the daemon's run() is what this file
@@ -79,7 +79,7 @@ func (s *syncedSim) pullRequestCount() int {
 // cfg.githubHost: REST API calls (/repos/...) go to sim, everything else
 // -- the actual git smart-HTTP traffic the git proxy forwards -- goes to
 // a real `git http-backend` over gitRoot, the same technique
-// e2e/harness_test.go's own gitHTTPBackend uses (duplicated here
+// tests/e2e/harness_test.go's own gitHTTPBackend uses (duplicated here
 // rather than exported, that file's own comment explains why).
 func githubHostServer(t *testing.T, sim *syncedSim, gitRoot string) string {
 	t.Helper()
@@ -113,11 +113,11 @@ func githubHostServer(t *testing.T, sim *syncedSim, gitRoot string) string {
 
 // gitHTTPBackendLive serves projectRoot over the smart-HTTP CGI contract
 // git itself defines, by shelling out to `git http-backend` per request
-// -- duplicated from e2e/harness_test.go's gitHTTPBackend rather than
-// exported (that file's own comment on why: an internal test helper in
-// another package's _test.go is not importable, and this codebase
-// prefers the duplication to a shared exported helper for exactly that
-// reason).
+// -- duplicated from tests/e2e/harness_test.go's gitHTTPBackend rather
+// than exported (that file's own comment on why: an internal test
+// helper in another package's _test.go is not importable, and this
+// codebase prefers the duplication to a shared exported helper for
+// exactly that reason).
 func gitHTTPBackendLive(projectRoot string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)

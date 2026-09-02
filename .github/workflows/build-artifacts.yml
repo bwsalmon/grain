@@ -171,49 +171,51 @@ jobs:
           echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
           echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.13"
+          go-version-file: go.mod
 
-      - name: Install pytest
-        run: python -m pip install --disable-pip-version-check "pytest>=8,<9"
-
-      # tests/test_container_e2e.py actually runs the image just
-      # built: it starts the daemon the way scripts/setup.sh's own
-      # unit starts it, drives the API and the CLI against it, and
-      # exercises the two host-facing mechanisms that only exist because
-      # grain is in a container -- the control files behind the
-      # reboot/restart buttons, and an upgrade pulling a tag out of a
-      # throwaway local registry. The suite skips itself without
-      # GRAIN_TEST_IMAGE, which is why ../tests.yml only collects it and
-      # this job is the one that runs it.
+      # tests/container actually runs the image just built: it starts the
+      # daemon the way scripts/setup.sh's own unit starts it, drives the
+      # API and the CLI against it, and exercises the two host-facing
+      # mechanisms that only exist because grain is in a container -- the
+      # control files behind the reboot/restart buttons, and an upgrade
+      # pulling a tag out of a throwaway local registry. Every test in it
+      # skips itself without GRAIN_TEST_IMAGE, which is why ../tests.yml's
+      # own `go test ./...` only compiles it and this job is the one that
+      # runs it.
+      #
+      # -count=1 so a cached "ok" from a run where they all skipped can
+      # never stand in for a real one, and -v because when a container
+      # fails to come up the per-step log is the only account of how far it
+      # got.
       #
       # A runner has what all of that needs and a hosted PR job does not
       # have to be trusted with: a docker daemon, systemd, and passwordless
-      # sudo. Nothing here holds the GHCR credential yet -- the login
-      # below is deliberately after this step.
+      # sudo. Nothing here holds the GHCR credential yet -- the login below
+      # is deliberately after this step.
       - name: Run the container e2e suite
         env:
           GRAIN_TEST_IMAGE: ${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}
-        run: python -m pytest tests/test_container_e2e.py -v
+        run: go test ./tests/container/... -count=1 -v -timeout 30m
 
-      # tests/test_installer_e2e.py runs scripts/setup.sh itself,
-      # as root, against this runner: a real system user, real units in
-      # /etc/systemd/system, a real service. That is destructive, which
-      # is why it takes an explicit GRAIN_INSTALLER_E2E=1 and skips
-      # everywhere else -- and it is the point, because the failure it
-      # exists for (a deploy dying between pulling the image and writing
-      # the unit) is invisible to anything that only drives the image.
+      # tests/installer runs scripts/setup.sh itself, as root, against this
+      # runner: a real system user, real units in /etc/systemd/system, a
+      # real service. That is destructive, which is why it takes an
+      # explicit GRAIN_INSTALLER_E2E=1 and skips everywhere else -- and it
+      # is the point, because the failure it exists for (a deploy dying
+      # between pulling the image and writing the unit) is invisible to
+      # anything that only drives the image.
       #
       # Last, and separate from the suite above: it takes over
-      # /usr/local/bin/grain and the daemon unit for the length of the
-      # run, so nothing after it on this runner should expect either to
-      # be untouched.
+      # /usr/local/bin/grain and the daemon unit for the length of the run,
+      # so nothing after it on this runner should expect either to be
+      # untouched.
       - name: Run the installer e2e suite
         env:
           GRAIN_TEST_IMAGE: ${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}
           GRAIN_INSTALLER_E2E: "1"
-        run: python -m pytest tests/test_installer_e2e.py -v
+        run: go test ./tests/installer/... -count=1 -v -timeout 30m
 
       - name: Log in to GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin

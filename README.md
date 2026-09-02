@@ -117,7 +117,7 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 RunCycle runs the two halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
                 pipeline" below.
-e2e/            tasks filed the way a user would, carried through
+tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
                 local git
@@ -143,6 +143,28 @@ e2e/            tasks filed the way a user would, carried through
                 contention and a capability leak at a scale none of the
                 above reach -- `make loadtest`, or that file's own doc
                 comment for how to size it up to an actual host.
+tests/deploy/   the cross-file agreements no package's own tests can see:
+                the Dockerfile, scripts/setup.sh, build-artifacts.yml, the
+                Makefile and terraform/gcp/files/deploy.sh all naming the
+                same image, the same unit and the same paths. Content
+                checks only -- it runs none of it -- so it costs nothing
+                and runs on every commit.
+tests/container/  the same claims driven for real, against a built image:
+                that the store survives the container it was written from,
+                that files come out owned by the host account rather than
+                root, that a non-root process reaches port 80 through a
+                file capability, that a control file written inside reaches
+                a systemd unit outside, and that an upgrade pulls a real
+                tag from a real registry. Every test skips without
+                GRAIN_TEST_IMAGE, so `go test ./...` on a laptop stays a
+                unit run; build-artifacts.yml is what hands it an image.
+tests/installer/  scripts/setup.sh itself, run as root against the machine
+                running the tests -- a real system user, real units, a real
+                service -- because the deploy that came up with the image
+                pulled and no grain-daemon.service was invisible to
+                everything that only drove the image. Destructive, so it
+                additionally needs GRAIN_INSTALLER_E2E=1 and skips
+                everywhere it is not asked for explicitly.
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237). The Go half only: the
@@ -865,10 +887,10 @@ verbatim matched none of them on any real run. What let that ship is
 worth naming, because the fix alone does not close it: the scripted agy
 in `antigravity`'s `testing.go` emitted the bare registry name, a
 spelling no real CLI produces, so every test standing on it -- the whole
-of `e2e` included -- exercised a shape that existed only in the harness.
-The fake now emits the qualified name and calls the registry with the
-bare one, which is what a real run does, so `e2e`'s propose-then-approve
-test covers the path an agent actually takes.
+of `tests/e2e` included -- exercised a shape that existed only in the
+harness. The fake now emits the qualified name and calls the registry
+with the bare one, which is what a real run does, so `tests/e2e`'s
+propose-then-approve test covers the path an agent actually takes.
 
 `TrackedPullRequest` (`model.PullRequestRef`/`model.PrHealth`/
 `model.TrackedPullRequest`, `pkg/model/pullrequest.go`) turned out not to
@@ -971,9 +993,10 @@ bookkeeping, since that check is the one a live test can't afford to
 fake. `pkg/orchestrator` decides when to call any of it: it dispatches a
 task through `dispatch.Cycle`, opens or reuses a pull request once a run
 pushes, and closes one out once GitHub reports it merged or closed. Its
-`live_test.go` drives the same two scenarios `e2e/e2e_test.go` already
-proved by hand (a push that becomes a merged, closed PR; a question that
-parks a task and a reply that resumes it) through
+`live_test.go` drives the same two scenarios
+`tests/e2e/e2e_test.go` already proved by hand (a push that becomes a
+merged, closed PR; a question that parks a task and a reply that
+resumes it) through
 `orchestrator.RunCycle` and a real `github.Client` against `githubsim`
 instead — starting, since the inversion, from a task filed through
 `pkg/ui.Client` the way a person at the CLI files one. This absorbed a second, independently-built
@@ -1104,8 +1127,8 @@ what they were asked to do rather than posting it anywhere real.
 `Run` returns, not while the run is live. Giving `Framework.Run` (or its
 caller) a way to inject a real sink is still open.
 
-`e2e/` is that whole chain driven by hand, in a test, rather than by
-`dispatch.Cycle` itself: it calls `dispatch.Cycle` to decide what runs,
+`tests/e2e/` is that whole chain driven by hand, in a test, rather than
+by `dispatch.Cycle` itself: it calls `dispatch.Cycle` to decide what runs,
 then
 drives `agent/antigravity` (scripted in most tests; the real `agy`
 binary in `live_test.go`, gated on `GEMINI_API_KEY` and an installed

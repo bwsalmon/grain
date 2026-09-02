@@ -8,7 +8,7 @@ package e2e
 // left to decide its own tool calls, actually completes an issue the way
 // the scripted tests assume a model would:
 //
-//	GEMINI_API_KEY=... go test ./e2e/... -run TestLiveIssueCompletesEndToEnd -v
+//	GEMINI_API_KEY=... go test ./tests/e2e/... -run TestLiveIssueCompletesEndToEnd -v
 
 import (
 	"context"

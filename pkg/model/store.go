@@ -519,10 +519,11 @@ func (s *Store) ensureConfigTaskDefaultsColumns(ctx context.Context) error {
 // (model.Config.ClaudeModel's own doc comment has the reasoning) to a
 // database created before this column existed, the same probe-then-ALTER
 // approach ensureConfigAgentFrameworkColumn already uses. It defaults to
-// '' -- a database upgraded across this migration reads back an empty
-// ClaudeModel until an operator sets one through Settings, the same gap
-// ui.UpdateSettings' own "required the first time settings are saved"
-// check exists to prevent for a deployment configured from scratch.
+// the empty string -- a database upgraded across this migration reads
+// back an empty ClaudeModel until an operator sets one through Settings,
+// the same gap ui.UpdateSettings' own "required the first time settings
+// are saved" check exists to prevent for a deployment configured from
+// scratch.
 func (s *Store) ensureConfigClaudeModelColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `claude_model` FROM `grain_config` WHERE 1 = 0")
 	if err == nil {

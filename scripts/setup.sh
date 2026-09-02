@@ -21,9 +21,12 @@
 #      update replaced this script itself, re-runs the new copy in place
 #      of this one (reexec_if_updated), so a run always deploys with the
 #      code it just pulled rather than the code it started with. The
-#      checkout is no longer what grain is built from (see 2), but it is
-#      still what this script, scripts/kontur's own image builds and the
-#      self-debug capability's read of grain's own source all come from
+#      checkout is no longer what grain is built from (see 2), nor what
+#      the self-debug capability reads -- the image carries its own copy
+#      of the source it was built from, so the agent's view of the code
+#      cannot drift from the binary running it -- but it is still what
+#      this script re-execs out of and what scripts/kontur's own guest
+#      image builds come from
 #   2. pulls the deployment image -- $GRAIN_IMAGE:$GRAIN_IMAGE_TAG,
 #      published to GHCR by ../.github/workflows/build-artifacts.yml
 #      on every commit -- instead of building a binary here
@@ -572,6 +575,31 @@ ensure_git() {
 }
 ensure_git
 
+# Same shape as ensure_git, and added with the python3 it replaced.
+#
+# python3 needed no such helper: every Debian cloud image carries one, so
+# the three one-liners that used it were safe to assume. jq is not on that
+# list. A host reaching this script through terraform/gcp/files/deploy.sh
+# already has jq -- deploy.sh's own `cfg` needs it before this script
+# starts, and its install_prerequisites is what puts it there -- but the
+# standalone path this file's header describes (clone onto a bare Debian
+# VM, run it) would otherwise reach gcs_fetch and die with a bare 127,
+# which is exactly the unreadable failure deploy.sh's own comment on
+# install_prerequisites' ordering complains about.
+ensure_jq() {
+  command -v jq >/dev/null 2>&1 && return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    log "installing jq (this script reads JSON from the GCP metadata server with it)"
+    apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq || true
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "setup.sh: required command not found: jq, and it could not be installed automatically -- install it (e.g. 'apt-get install jq') and re-run" >&2
+    exit 1
+  fi
+}
+ensure_jq
+
 # Installs the docker.io package if the CLI is missing, then makes sure
 # the daemon is actually up -- a fresh install's postinst usually starts
 # it already, but this does not rely on that. The `docker info` check a
@@ -823,7 +851,6 @@ args=(
   --volume ${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}
 )
 [ -d "${GRAIN_SANDBOX_DIR}" ] && args+=(--volume ${GRAIN_SANDBOX_DIR}:${GRAIN_SANDBOX_DIR})
-[ -d "${GRAIN_SRC_DIR}" ] && args+=(--volume ${GRAIN_SRC_DIR}:${GRAIN_SRC_DIR}:ro)
 # konturctl talks to this host's docker daemon and keeps its VM records
 # out here; the image paths it hands docker are host paths, so each has
 # to be mounted at the very path it already has.
@@ -1016,18 +1043,6 @@ ExecStart=/usr/bin/systemctl restart grain-daemon.service
 UNIT
 }
 
-# ensure_src_dir_readable keeps $GRAIN_SRC_DIR readable by $GRAIN_USER.
-#
-# The checkout is no longer something the daemon writes to -- it is
-# mounted read-only into the container, and nothing in there builds
-# (bwsalmon/agents#645) -- but it is still what the self-debug capability
-# reads grain's own source out of, and sync_repo runs as root, so a
-# world-unreadable umask on this host would otherwise leave the daemon
-# looking at a tree it cannot open.
-ensure_src_dir_readable() {
-  chmod -R a+rX "$GRAIN_SRC_DIR" 2>/dev/null || true
-}
-
 # grant_docker_group adds $GRAIN_USER to the docker group if it exists.
 #
 # Nothing in the *container* needs this: grain-daemon.service's own
@@ -1066,10 +1081,15 @@ grant_docker_group() {
 # what make the token itself actually able to do either. Only used by
 # ensure_kontur_guest_fetch -- the local build path needs no GCP
 # credential of its own at all.
+#
+# `jq -e` rather than a bare filter: a metadata response without the key
+# is a credential this host does not have, and `// empty` plus -e turns
+# that into no output and a non-zero exit rather than the string "null"
+# travelling on into an Authorization header.
 kontur_gcp_access_token() {
   curl -fsS -H "Metadata-Flavor: Google" \
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])'
+    | jq -er '.access_token // empty'
 }
 
 # gcs_fetch downloads gs://$1/$2 to file $3 using kontur_gcp_access_token,
@@ -1078,7 +1098,10 @@ kontur_gcp_access_token() {
 # comment on why.
 gcs_fetch() {
   local bucket="$1" object="$2" dest="$3" encoded_object
-  encoded_object="$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
+  # @uri escapes everything outside the unreserved set (A-Za-z0-9-_.~),
+  # "/" included -- an object name is one path segment of the API URL, not
+  # a path.
+  encoded_object="$(jq -rn --arg o "$object" '$o|@uri')"
   curl -fsS -H "Authorization: Bearer $(kontur_gcp_access_token)" \
     "https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encoded_object}?alt=media" \
     -o "$dest"
@@ -1711,7 +1734,7 @@ reformat_store_if_schema_changed() {
 # --- 7. format the target repo, if it is empty --------------------------
 #
 # Every dispatch grain runs branches off an existing ref -- it never
-# creates the first one (e2e's own harness always seeds one commit
+# creates the first one (tests/e2e's own harness always seeds one commit
 # before driving anything against a bare repo). A repo created fresh on
 # GitHub has none, so `grain create -repo owner/name ...` would have
 # nothing to branch from. Detected with `git ls-remote`, which returns no
@@ -1847,13 +1870,14 @@ write_systemd_units() {
   # upgrade repoints the service by writing one line and restarting, with
   # no unit to rewrite and no root anywhere in the path.
   #
-  # -upgrade-src-dir rides along, and no longer means "build here": with
-  # -upgrade-image set the daemon never builds, and this is only what
-  # grantTools (cmd/grain/daemon.go) reads grain's own source out of for
-  # the self-debug capability. It is passed only alongside the Upgrade
-  # button for the same reason it always was -- it is the same read-only
-  # mount either way, and a deployment that turned this feature off has
-  # said it wants nothing here wired up.
+  # -upgrade-src-dir is not passed at all. It used to ride along, not to
+  # build (with -upgrade-image set the daemon never does) but because
+  # grantTools read the checkout it named for the self-debug capability.
+  # The deployment image now carries the source it was built from
+  # (Dockerfile), and cmd/grain/daemon.go's sourceDir prefers that copy
+  # over any flag -- which is the point: this checkout tracks a branch and
+  # the image is a fixed tag, so the two drifted apart on every upgrade
+  # and the agent read source that was not what was running.
   #
   # Left unset entirely when GRAIN_ENABLE_UI_UPGRADE=0
   # (terraform/gcp's own deploy.sh sets exactly that): the daemon
@@ -1864,7 +1888,6 @@ write_systemd_units() {
     daemon_args+=(
       -upgrade-image "$GRAIN_IMAGE"
       -upgrade-image-ref-file "$IMAGE_REF_FILE"
-      -upgrade-src-dir "$GRAIN_SRC_DIR"
       -upgrade-restart-cmd touch -upgrade-restart-cmd "$CONTROL_DIR/restart"
     )
   fi
@@ -2085,7 +2108,6 @@ docker_run_args() {
     --env "HOME=${GRAIN_DATA_DIR}/home"
     --volume "${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}"
     --volume "${GRAIN_SANDBOX_DIR}:${GRAIN_SANDBOX_DIR}"
-    --volume "${GRAIN_SRC_DIR}:${GRAIN_SRC_DIR}:ro"
   )
 
   case "${GRAIN_UI_ADDR##*:}" in
@@ -2309,7 +2331,6 @@ main() {
   sync_repo
   reexec_if_updated "$@"
   ensure_user
-  ensure_src_dir_readable
   grant_docker_group
   pull_image
   # After ensure_user: the wrappers run the image as that account, so it

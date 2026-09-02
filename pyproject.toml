@@ -1,9 +1,0 @@
-# There is no Python package here any more -- v1's `grain` package is
-# gone. What is left under tests/ is one suite of cross-file content
-# checks (test_container_deploy.py) plus two e2e harnesses that drive
-# the built container and the installer script, which skip unless
-# .github/workflows/build-artifacts.yml hands them an image. This file
-# stays only to give pytest a rootdir and a testpath, so `python -m
-# pytest` from the repository root collects them without arguments.
-[tool.pytest.ini_options]
-testpaths = ["tests"]
