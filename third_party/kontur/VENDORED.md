@@ -41,7 +41,7 @@ which is upstream `33fe6af` plus
 -- public half in the guest rootfs, private half in the runtime image --
 with one `kontur run` generates per boot and hands the guest on the
 kernel command line. That keypair was the reason a grain deployment
-could not pull a published guest disk: `packer/kontur/guest-setup.sh`
+could not pull a published guest disk: `scripts/kontur/guest-setup.sh`
 had to bake *this* deployment's own SSH key in at build time, so there
 was no such thing as a generic published guest image. With the key
 arriving at boot there is nothing deployment-specific left in the disk,
@@ -88,10 +88,10 @@ order instead of being renamed. Alpine's guest isn't affected -- OpenRC
 plus mdev doesn't do udev's predictable-naming renaming in the first
 place.
 
-`packer/kontur/build-guest.sh` builds this repo's sandbox guest on top of
+`scripts/kontur/build-guest.sh` builds this repo's sandbox guest on top of
 kontur's own Dockerfile stages, so this class of bug -- systemd renaming a
 NIC before the service that configures it can find it -- is one grain
-already hit and fixed independently: `packer/kontur/guest-setup.sh`'s
+already hit and fixed independently: `scripts/kontur/guest-setup.sh`'s
 `GUEST_SETUP_SCRIPT` hook has masked `/etc/systemd/network/99-default.link`
 since the previous resync (`9a43152`), for exactly the same symptom on
 exactly the same NIC. That mask runs on top of kontur's
@@ -100,7 +100,7 @@ upstream fix masks a layer lower (`80-net-setup-link.rules` itself), so
 this resync does not change grain's own guest image's behavior -- the two
 fixes overlap rather than stack. It does fix kontur's *own* bundled
 default guest disk image (the one a plain `docker run kontur` boots
-without `packer/kontur` in the picture at all), which had no such
+without `scripts/kontur` in the picture at all), which had no such
 workaround.
 
 ## Why this copy exists
@@ -117,8 +117,8 @@ anything else about how it behaves can read the source here (e.g.
 It is a plain copy, not a git submodule or subtree. Nothing under this repository's own Go tree
 depends on it as *code* -- `go.mod` does not require it and nothing
 imports `github.com/bwsalmon/kontur`. Its Dockerfile, however, is built:
-`packer/kontur/build-oci-image.sh` builds the runtime image from this
-directory, and `packer/kontur/build-guest.sh` builds the sandbox guest
+`scripts/kontur/build-oci-image.sh` builds the runtime image from this
+directory, and `scripts/kontur/build-guest.sh` builds the sandbox guest
 from the same Dockerfile's `guest-artifacts` target. So a resync here
 changes what a deployment actually runs, not just what a task can read.
 

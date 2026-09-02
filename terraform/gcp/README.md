@@ -158,7 +158,7 @@ commit to grain (`Dockerfile`). Three variables decide which one:
 
 - **`grain_ref`** names the branch. It is still what the on-host
   checkout tracks -- `files/deploy.sh` clones it, and that checkout is
-  where `scripts/setup.sh` itself and `packer/kontur`'s guest/OCI
+  where `scripts/setup.sh` itself and `scripts/kontur`'s guest/OCI
   image builds come from -- and, by default, also which image tag runs:
   that branch's name with `/` replaced by `-`, which is how CI tags it.
 - **`grain_image_tag`** overrides that. Set it to `sha-<short sha>` --
@@ -364,7 +364,7 @@ yourself, and none of this runs.
 real `bwsalmon/kontur`-managed VMs, one per slot, over SSH
 (`orchestrator.KonturSandboxes`) instead of plain host directories
 (`orchestrator.HostSandboxes`) -- the same nested cloud-hypervisor guest
-`packer/kontur/README.md` documents building, now actually wired through
+`scripts/kontur/README.md` documents building, now actually wired through
 this deployment shape (bwsalmon/agents#504) rather than only configurable
 by hand-editing the systemd unit afterward.
 
@@ -374,7 +374,7 @@ working deployment -- but it no longer needs anything built or published
 by hand first (bwsalmon/agents#531): `scripts/setup.sh`'s own
 `ensure_kontur_ssh_key`/`ensure_kontur_images`/`ensure_konturctl`/
 `ensure_kontur_kvm_access` generate an SSH keypair, build the guest image
-(`packer/kontur/build-guest.sh` -- one `docker build`, no VM boot and no
+(`scripts/kontur/build-guest.sh` -- one `docker build`, no VM boot and no
 root, several minutes against a real Debian mirror) and the OCI image
 (`build-oci-image.sh` -- a plain `docker build`, no push), build and
 install `konturctl` itself onto the host's `PATH` (`grain-daemon` execs
@@ -384,13 +384,13 @@ grant `$GRAIN_USER` `/dev/kvm` and `docker` group access, and seed the
 generated SSH key, all before `write_systemd_units` wires up
 `grain daemon`'s own `-kontur-*` flags. This runs every deploy
 generation, not just the first, but `ensure_kontur_images`'s own
-`kontur_image_tag` -- a hash of `packer/kontur`'s own git tree (what the
+`kontur_image_tag` -- a hash of `scripts/kontur`'s own git tree (what the
 guest image is provisioned from), `third_party/kontur`'s own vendored git
 tree (the kontur version baked into the OCI image), and the SSH public
 key in play -- names and caches the result, so a re-run with nothing
 changed rebuilds neither image; only a `guest-setup.sh` edit, a
 `third_party/kontur` vendor bump, or a rotated keypair does. See
-`packer/kontur/README.md` for what the guest-image build actually does
+`scripts/kontur/README.md` for what the guest-image build actually does
 and why.
 
 Any one of those steps failing (the guest build unable to reach a Debian
@@ -415,7 +415,7 @@ bwsalmon/agents#531 had to:
 
    ```sh
    export KONTUR_IMAGE_BUCKET="<a GCS bucket you control, name only, no gs://>"
-   ../../packer/kontur/build-guest.sh
+   ../../scripts/kontur/build-guest.sh
    ```
 
    Set `kontur_image_bucket` to the same bucket name. There is no secret

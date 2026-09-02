@@ -78,7 +78,7 @@ type KonturConfig struct {
 	//
 	// Flat mode needs a guest image built from kontur's own guest
 	// overlays, for the control link "kontur exec" arrives on -- see
-	// kontur.NetModeFlat's own doc comment. packer/kontur/build-guest.sh
+	// kontur.NetModeFlat's own doc comment. scripts/kontur/build-guest.sh
 	// produces one; a deployment pulling a *prebuilt* guest image from
 	// GRAIN_KONTUR_IMAGE_BUCKET has to republish it from that build
 	// before switching, or every sandbox becomes unreachable.

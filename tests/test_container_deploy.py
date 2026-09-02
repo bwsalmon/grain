@@ -308,7 +308,7 @@ def test_both_published_images_claim_this_repository():
     assert 'org.opencontainers.image.source="https://github.com/bwsalmon/grain"' \
         in DOCKERFILE.read_text(), "the grain image does not claim this repository"
 
-    oci = (ROOT / "packer" / "kontur" / "build-oci-image.sh").read_text()
+    oci = (ROOT / "scripts" / "kontur" / "build-oci-image.sh").read_text()
     assert "KONTUR_OCI_SOURCE_REPO" in oci
     assert "org.opencontainers.image.source=" in oci
     # Unset must leave the vendored label alone -- the override is for the
@@ -469,7 +469,7 @@ def test_the_sandbox_reference_is_stamped_into_the_grain_image():
 def test_the_sandbox_container_is_pulled_and_never_built():
     """bwsalmon/agents#645: a deployment stopped building its sandbox.
 
-    It used to run packer/kontur/build-oci-image.sh on every host, which
+    It used to run scripts/kontur/build-oci-image.sh on every host, which
     is how a deployment could end up running grain from one commit and a
     sandbox from another. What is left building locally is the guest
     *disk*, which bakes in this deployment's own SSH key and so cannot be
