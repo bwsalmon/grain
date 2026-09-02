@@ -30,8 +30,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -74,13 +73,13 @@ func newPRReuseSim(t *testing.T, owner, repo, branch string) (*githubsim.Sim, *g
 // is no previous attempt's clone left to trip over. It was load-bearing
 // while a sandbox was a slot's and outlived every attempt dispatched onto
 // it.
-func pushMoreScript(remote, branch, taskID string) []*genai.GenerateContentResponse {
+func pushMoreScript(remote, branch, taskID string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout " + branch + " && " +
 		"echo 'second change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'second agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed more commits to " + branch),
 	}

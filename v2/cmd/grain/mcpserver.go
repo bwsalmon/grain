@@ -2,7 +2,7 @@
 // cmd/mcpserver binary before bwsalmon/agents#313 combined every mode
 // into one: it serves the sandbox tools and the mocked GitHub-shaped
 // escape hatches over its own stdin/stdout, so anything that can spawn a
-// subprocess and speak MCP -- not just v2/agent/gemini's in-process
+// subprocess and speak MCP -- not just an in-process
 // client -- can drive it. Real MCP clients (an actual `claude` or
 // `gemini` CLI's --mcp-config, for instance) can point at this same
 // grain binary, "mcpserver" and its own flags as the configured args, as

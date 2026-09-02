@@ -39,10 +39,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -200,10 +198,10 @@ func withStore(t *testing.T, dir string, fn func(*model.Store, context.Context))
 
 // scriptedFramework turns a scripted response sequence into the
 // func() agent.Framework factory orchestrator.Deps wants, one fresh
-// gemini.NewForTest per dispatch -- duplicated from pkg/orchestrator's own
+// antigravity.NewForTest per dispatch -- duplicated from pkg/orchestrator's own
 // live_test.go helper of the same name for the same reason openCLIStore is.
-func scriptedFramework(script []*genai.GenerateContentResponse) func() agent.Framework {
-	return func() agent.Framework { return gemini.NewForTest(&scriptedGenerator{responses: script}) }
+func scriptedFramework(script []antigravity.Step) func() agent.Framework {
+	return func() agent.Framework { return antigravity.NewForTest(antigravity.Steps(script...)) }
 }
 
 func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {

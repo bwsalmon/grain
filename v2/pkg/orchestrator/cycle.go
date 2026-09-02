@@ -17,7 +17,7 @@ import (
 
 // Deps is everything one RunCycle call needs. Framework is a factory, not
 // a shared instance: a real deployment gives every dispatch its own agent
-// conversation, the way gemini.Framework.Run's own in-process MCP server
+// conversation, the way a run's own MCP server
 // is scoped to one run's own tools at a time. Sandboxes is HostSandboxes
 // for the local-directory stand-in, or KonturSandboxes for a real
 // bwsalmon/kontur-managed VM — see the package doc comment.

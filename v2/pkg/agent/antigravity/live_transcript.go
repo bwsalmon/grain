@@ -1,4 +1,4 @@
-package claude
+package antigravity
 
 import (
 	"os"
@@ -22,12 +22,12 @@ type LiveTranscriptDir struct {
 // transcript is in it so far. ok is false when that file does not exist
 // yet -- a run whose Framework has not opened RunConfig.TranscriptPath
 // yet, was never given one at all, or is running a Framework other than
-// this package's own (agent/antigravity writes a different event
-// vocabulary and reads it back with its own LiveTranscriptDir, since a
-// deployment only ever wires one Framework's reader into
-// ui.Config.LiveTranscripts at a time) -- which a caller should read the
-// same way a LiveTranscript-less deployment would: fall back to whatever
-// the store has recorded once the run finishes.
+// this package's own (agent/claude mirrors its own subprocess's
+// stream-json, a different event vocabulary read back by its own
+// claude.LiveTranscriptDir, since a deployment only ever wires one
+// Framework's reader into ui.Config.LiveTranscripts at a time) -- which a
+// caller should read the same way a LiveTranscript-less deployment would:
+// fall back to whatever the store has recorded once the run finishes.
 func (d LiveTranscriptDir) Tail(runID string) (string, bool, error) {
 	data, err := os.ReadFile(filepath.Join(d.Dir, runID))
 	if os.IsNotExist(err) {

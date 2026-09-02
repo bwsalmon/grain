@@ -25,8 +25,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
@@ -188,7 +187,7 @@ func resolveLiveRun(t *testing.T, w *world, round int, id string, st *simTask, r
 	t.Helper()
 	*clock = clock.Add(time.Second)
 
-	var script []*genai.GenerateContentResponse
+	var script []antigravity.Step
 	switch r := rng.Float64(); {
 	case r < 0.55:
 		script = pushScriptOwnFile(w.remote(st.repo.Owner, st.repo.Name), st.branch, id)

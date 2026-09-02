@@ -446,18 +446,24 @@ func (s *Store) ensureConfigShowClosedByDefaultColumn(ctx context.Context) error
 // ensureConfigAgentFrameworkColumn adds grain_config.agent_framework
 // (model.Config.AgentFramework's own doc comment has the reasoning) to a
 // database created before bwsalmon/agents#609, the same probe-then-ALTER
-// approach ensureConfigShowClosedByDefaultColumn already uses. Defaulting
-// to 'gemini' matches model.AgentFrameworkGemini -- the only framework
-// any deployment has ever actually run -- so an upgraded deployment reads
-// back exactly what it already ran before this column existed, rather
-// than an empty string no agent.Framework implementation is named by.
+// approach ensureConfigShowClosedByDefaultColumn already uses. It
+// defaults to model.AgentFrameworkAntigravity, the framework a
+// deployment that has never chosen one runs.
+//
+// A database that already has this column may well hold the legacy
+// 'gemini' spelling instead, from before agent/antigravity replaced the
+// home-grown Gemini runtime that word named. Nothing rewrites those rows
+// -- ReadConfig runs every value through model.NormalizeAgentFramework
+// on the way out, which is both cheaper than a data migration and the
+// same answer for a config file or a -agent-framework flag that also
+// still says "gemini".
 func (s *Store) ensureConfigAgentFrameworkColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `agent_framework` FROM `grain_config` WHERE 1 = 0")
 	if err == nil {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx,
-		"ALTER TABLE `grain_config` ADD COLUMN `agent_framework` TEXT NOT NULL DEFAULT 'gemini'")
+		"ALTER TABLE `grain_config` ADD COLUMN `agent_framework` TEXT NOT NULL DEFAULT 'antigravity'")
 	return err
 }
 
@@ -2030,6 +2036,11 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
 	c.TargetRepos = splitCSV(targetRepos)
+	// A row written before agent/antigravity replaced the home-grown
+	// Gemini runtime still says "gemini"; folding that in here rather
+	// than migrating the row is what ensureConfigAgentFrameworkColumn's
+	// own doc comment describes.
+	c.AgentFramework = NormalizeAgentFramework(c.AgentFramework)
 	return c, nil
 }
 

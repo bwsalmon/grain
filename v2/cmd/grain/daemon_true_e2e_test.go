@@ -3,7 +3,7 @@ package main
 // TestRunLiveWithKonturAndRESTAPIOpensAPullRequest is bwsalmon/agents#373's
 // "true e2e test": every real dependency this repo already has a live
 // test for individually -- the real Gemini API
-// (pkg/agent/gemini/gemini_live_test.go), a real GitHub stand-in reached
+// (pkg/agent/antigravity's own live test), a real GitHub stand-in reached
 // over real HTTP (githubsim, daemon_live_test.go), and kontur-backed
 // sandboxing (daemon_kontur_wiring_test.go) -- combined in one run, with
 // the task itself filed and approved through the real REST API
@@ -54,7 +54,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -197,7 +197,7 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	go func() {
 		done <- run(ctx, config{
 			dataDir: dataDir, maxConcurrent: 1, pollInterval: 5 * time.Second,
-			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: gemini.DefaultModel, maxAgentTurns: 15,
+			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
 			githubHost: githubHost, githubInsecureHTTP: true,
 
 			uiAddr: uiAddr, actor: "tester",

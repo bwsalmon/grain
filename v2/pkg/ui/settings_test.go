@@ -172,10 +172,11 @@ func TestUpdateSettingsRoundTripsTaskDefaults(t *testing.T) {
 }
 
 // TestUpdateSettingsRoundTripsAgentFramework is bwsalmon/agents#609's own
-// setting: unset it reads back "gemini" (model.AgentFrameworkGemini, the
-// only framework any deployment has ever run), and setting it to "claude"
-// sticks through a GetSettings read the same way ShowClosedByDefault's
-// own round trip does above.
+// setting: unset it reads back "antigravity"
+// (model.AgentFrameworkAntigravity, the framework a deployment that has
+// never chosen one runs), and setting it to "claude" sticks through a
+// GetSettings read the same way ShowClosedByDefault's own round trip does
+// above.
 func TestUpdateSettingsRoundTripsAgentFramework(t *testing.T) {
 	c, _, ctx := testClient(t)
 	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
@@ -186,8 +187,8 @@ func TestUpdateSettingsRoundTripsAgentFramework(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.AgentFramework != model.AgentFrameworkGemini {
-		t.Fatalf("AgentFramework = %q with nothing set, want %q", read.AgentFramework, model.AgentFrameworkGemini)
+	if read.AgentFramework != model.AgentFrameworkAntigravity {
+		t.Fatalf("AgentFramework = %q with nothing set, want %q", read.AgentFramework, model.AgentFrameworkAntigravity)
 	}
 
 	claude := model.AgentFrameworkClaude
@@ -204,8 +205,9 @@ func TestUpdateSettingsRoundTripsAgentFramework(t *testing.T) {
 }
 
 // TestUpdateSettingsRejectsUnknownAgentFramework is UpdateSettings' own
-// allow-list check: anything other than model.AgentFrameworkGemini/
-// AgentFrameworkClaude is a validation error, not a value silently
+// allow-list check: anything other than model.AgentFrameworkAntigravity/
+// AgentFrameworkClaude (or the legacy "gemini" spelling, normalized to
+// the former) is a validation error, not a value silently
 // stored, the same way an unparseable pollInterval or an empty
 // geminiModel already are.
 func TestUpdateSettingsRejectsUnknownAgentFramework(t *testing.T) {

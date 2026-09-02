@@ -35,11 +35,22 @@ pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
                 container died from one still on its way up. It resolves
                 no address for a VM, because nothing needs one
 pkg/agent/      the Framework interface an agent driver implements
-pkg/agent/gemini/  Framework via the Gemini API, talking to its own
-                in-process pkg/mcp/ server
+pkg/agent/antigravity/  Framework via the Antigravity CLI -- Google's
+                `agy` binary, the one that replaced Gemini CLI -- run as a
+                subprocess on the controller. It replaced this repo's own
+                home-grown Gemini runtime, which drove the Gemini API's
+                function calling directly and looped tool calls in-process
+                against its own pkg/mcp/ registry; agy owns that loop now.
+                Two things agy lacks shape this package: there is no
+                --mcp-config, so each run gets a private HOME holding just
+                the settings file naming its own "mcpserver" server (a
+                per-user `agy mcp add` registration cannot express a
+                per-run sandbox binding); and there is no --max-turns, so
+                RunConfig.MaxTurns is enforced here, by counting completed
+                agent_response steps on the live stream and cancelling the
+                subprocess
 pkg/agent/claude/  Framework via the real `claude` CLI, run as a
                 subprocess on the controller (bwsalmon/agents#255) --
-                unlike agent/gemini there is no in-process API to drive, so
                 this points --mcp-config at this same grain binary's own
                 "mcpserver" subcommand (cmd/grain/mcpserver.go), the same
                 way v1's dispatch.py pointed it at
@@ -94,7 +105,7 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 rather than one pipeline -- see "Reconcilers, not a
                 pipeline" below.
 e2e/            tasks filed the way a user would, carried through
-                dispatch.Cycle, a real agent/gemini run, and a real
+                dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
                 local git
                 server standing in for GitHub — fixed scenarios plus a
@@ -200,7 +211,7 @@ database engine to run it against without shelling out to a CLI.
 a real bare git repo, served over real smart-HTTP by a real `git
 http-backend` process standing in for GitHub, behind a real `GitProxy`
 whose `Authorizer` reads a real embedded SQLite-backed `model.Store`,
-driven by a scripted (not live-API) `gemini.Framework.Run` calling `run_command`
+driven by a scripted (not live-CLI) `antigravity.Framework.Run` calling `run_command`
 the same way an agent would. It proves a task's `Target`/`Reads` are
 enough on their own to let a sandboxed `git clone`/`commit`/`push` reach
 the right repo and nothing else — no allowlist file exists anywhere in
@@ -772,7 +783,7 @@ now builds that real guest image as part of the test itself and asserts a
 gap this paragraph used to describe.
 
 The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
-`propose_task`, `add_review_comment`) `agent/gemini.Framework.Run` wires
+`propose_task`, `add_review_comment`) a run's own MCP server wires
 internally are still discarded rather than posted anywhere real while a
 run is live — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
 after a run finishes, and relays `ask_question`/`comment_on_issue`/
@@ -972,7 +983,7 @@ resolves through that resolver -- which `gcpkey.Provider.Spec()` and
 `docs/data-model.md`'s new "secret store is a folder, not a table"
 section is the checked-in listing of, per capability.
 
-`agent/gemini` can run an agent end to end against `mcp/`'s tools today,
+`agent/antigravity` can run an agent end to end against `mcp/`'s tools today,
 and the daemon now calls it for real from `pkg/orchestrator`'s dispatch
 loop rather than only from a test — `orchestrator.HostSandboxes` is the
 only other thing `dispatch.Cycle`'s own dispatch path drives, and
@@ -1018,7 +1029,7 @@ A real `github.RESTClient` exists and is wired into the daemon too, driving
 every call `pkg/orchestrator` makes (issue listing/labelling, branch and
 pull-request state, check runs, comments) — but not the agent's own
 `ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
-calls: `gemini.Framework.Run` still wires those to a `mcp.MockSink` it
+calls: a run's own MCP server still wires those to a `mcp.MockSink` it
 builds and discards internally on every call, so they still just record
 what they were asked to do rather than posting it anywhere real.
 `ProcessResult` only sees them after the fact, through the `agent.Result`
@@ -1028,8 +1039,9 @@ caller) a way to inject a real sink is still open.
 `e2e/` is that whole chain driven by hand, in a test, rather than by
 `dispatch.Cycle` itself: it calls `dispatch.Cycle` to decide what runs,
 then
-drives `agent/gemini` (scripted in most tests; the real API in
-`live_test.go`, gated on `GEMINI_API_KEY`) through a sandbox-stand-in
+drives `agent/antigravity` (scripted in most tests; the real `agy`
+binary in `live_test.go`, gated on `GEMINI_API_KEY` and an installed
+`agy`) through a sandbox-stand-in
 directory against a real `gitproxy` in front of a local git server, and
 plays the part of "the PR opened," "the PR merged" and "a human replied"
 with the same `store.Observe` calls a real GitHub-sync component would
@@ -1059,12 +1071,23 @@ call posts the command into the task's own chat and blocks
 there with approve or deny, or a timeout refuses it for them. That block
 is a real synchronous wait inside one tool call, unlike every other
 human-in-the-loop primitive here (`ask_question` parks the whole run and
-picks a reply up on the next dispatch) -- it only works because
-`gemini.Framework.Run` registers a run's tools in-process and so already
-holds the same `*model.Store` connection the reply lands on;
-`claude.Framework.Run` ignores `RunConfig.Tools` entirely and isn't
-wired into any real deployment, so this is, for now, a gemini-only
-capability in practice, same as the rest of `Config.GrantTools`.
+picks a reply up on the next dispatch) -- it only works if the tools run
+in the same OS process as the store the reply lands on.
+
+**Nothing satisfies that any more.** It held while the default framework
+was the home-grown in-process Gemini runtime, which registered a run's
+tools in-process and so already held that `*model.Store` connection.
+Both frameworks that remain (`agent/antigravity`, `agent/claude`) fork a
+CLI that manages its own MCP connection and ignore `RunConfig.Tools`
+entirely, because there is no in-process registry to hand a forked
+process. `Config.GrantTools` still assembles these tools and
+`RunDispatch` still passes them, but no `Framework` consumes them, so
+`selfrepair`/`selfdebug`'s host tools reach no running agent today.
+Closing that gap means giving the `mcpserver` subcommand a route back to
+the store -- it takes only a sandbox root or a kontur VM name now (see
+`cmd/grain/mcpserver.go`), which is exactly the isolation that makes the
+subprocess frameworks safe, so it is a design question rather than a
+missing flag.
 
 bwsalmon/agents#621 turned that pair of capabilities into an explicit
 "configuration agent": an overlay button the frontend keeps reachable in
@@ -1083,6 +1106,103 @@ everything else, so the configuration agent can always start a sandbox
 even when the deployment is already at `MaxConcurrent` -- the moment
 someone reaches for it is often exactly the moment the deployment is
 already saturated.
+
+## The agent runtime is a CLI now, not our own turn loop
+
+grain used to drive the model itself. `pkg/agent/gemini` held a
+hand-written turn loop: call the Gemini API's function calling, translate
+each `mcp.ToolInfo` into a `genai.FunctionDeclaration`, execute whatever
+`FunctionCall` came back against an in-process `pkg/mcp` registry, append
+the results, go round again. It worked, and it was ours to maintain --
+the schema translation, the turn accounting, the thought/text split, the
+partial-result-on-failure rule, all of it code in this repo tracking an
+API that moves.
+
+`pkg/agent/antigravity` replaces it with Google's Antigravity CLI, the
+`agy` binary that replaced Gemini CLI. The loop is agy's now. What is
+left here is the shape `pkg/agent/claude` already settled on for driving
+a real CLI: build the arguments, hand it a prompt, parse the transcript
+it streams back. Both frameworks a deployment can pick between are now
+subprocess drivers, and `agent.Framework` is the seam that makes them
+interchangeable.
+
+Three things about agy shaped the port, none of them cosmetic.
+
+**It has no `--mcp-config`.** agy registers MCP servers per *user* --
+`agy mcp add` writes them into `~/.gemini`, and caches each server's tool
+manifests under `~/.gemini/antigravity-cli/mcp/<server>/`. A per-user
+registration cannot express what grain needs, which is a per-*run*
+binding: two runs dispatched concurrently against two different sandboxes
+would share one registration, and whichever wrote it last would decide
+where both runs' tools landed. So `Framework.Run` gives each run its own
+private `HOME` -- a temp directory holding nothing but the settings file
+naming that run's own `mcpserver` server -- and deletes it as the run
+returns. That has the same effect `claude`'s `--strict-mcp-config` has
+there: the only MCP server a run can see is its own, because there is no
+other settings file in the `HOME` it was given to find one in.
+
+**It has no `--max-turns`.** `RunConfig.MaxTurns` is therefore enforced
+here rather than by the binary, and enforced on the live stream rather
+than on the finished capture -- a cap applied after the process exits
+would report a runaway run without ever having stopped one. A small
+`io.Writer` spliced into agy's stdout counts completed `agent_response`
+steps as they stream past and cancels the run's context at the cap;
+`procgroup.Prepare` is what turns that into a kill of agy *and* its MCP
+child rather than an orphan.
+
+**It has no way to empty its native tool roster.** `claude` takes
+`--tools ''`, which is how `agent/claude` guarantees a run reaches the
+sandbox only through grain's own MCP tools. agy has no equivalent, so
+that guarantee is weaker here: what this package does instead is give the
+subprocess a `HOME` with exactly one MCP server in it and a working
+directory that is the sandbox, and report -- as a transcript line, on the
+run itself -- any tool agy's own `init` event advertises beyond the ones
+grain published. A deployment that needs a hard guarantee should run
+against a kontur sandbox, where the controller's filesystem is not
+reachable from the guest at all.
+
+Two smaller notes. The prompt travels over stdin as a `stream-json` user
+event, not as the argument to `--print`: untrusted issue content must
+never become a `ps`-visible argument, the same discipline v1's
+`dispatch.py` set. And `RunConfig.Addenda` -- folding a comment posted
+mid-run into the next turn -- is gone in practice, because it needed a
+turn boundary to poll at and neither remaining framework has one; a
+comment posted while a run is in flight waits for the next dispatch, as
+it already did under `agent/claude`.
+
+### What this cost
+
+`RunConfig.Tools` has no consumer any more. It was read only by the
+in-process runtime, and a forked CLI cannot be handed an in-process
+registry. `orchestrator.Config.GrantTools` still assembles
+`selfrepair.HostCommandTools` and `selfdebug.SourceTools`, and
+`RunDispatch` still passes them, but nothing consumes them -- so an
+Interactive task's `run_host_command` confirmation prompt
+(`selfrepair.Confirm`, which blocks on `Store.Comments` from inside a
+tool call) is not reachable by a running agent today. Closing that gap
+means giving the `mcpserver` subcommand a route back to the store, which
+it deliberately does not have: it takes a sandbox root or a kontur VM
+name and nothing else, and that narrowness is exactly what makes the
+subprocess frameworks safe to run. It is a design question, not a missing
+flag, so it is recorded here rather than guessed at.
+
+### Operating it
+
+`-agy-path` names the binary, defaulting to resolving `agy` on `$PATH`,
+and is flags-only for the same reason `-claude-path` is: where a binary
+lives is a property of the machine, not of the deployment's stored
+configuration. The `agent-framework` setting's vocabulary is now
+`"antigravity"` or `"claude"`; `"gemini"`, the name the default framework
+had while it was our own turn loop, is still accepted everywhere it can
+arrive -- a stored `grain_config` row, a config file, a `-agent-framework`
+flag -- and normalized to `"antigravity"` by
+`model.NormalizeAgentFramework`. Nothing rewrites those rows: folding the
+old spelling in on read is cheaper than a data migration and is the same
+answer for a unit file that still passes the old flag. A deployment
+upgrading across this change needs `agy` installed on the controller and
+otherwise keeps its existing `-gemini-api-key-file`, which `agy`
+authenticates with as `GEMINI_API_KEY` in the subprocess environment
+(never in argv).
 
 ## Reaching a sandbox guest without a route into it
 

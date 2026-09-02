@@ -105,7 +105,7 @@ export default function SettingsOverlay({ onClose, showError }) {
     if (autoMergeByDefault !== !!settings.autoMergeByDefault) payload.autoMergeByDefault = autoMergeByDefault;
 
     const agentFramework = form.elements.agentFramework.value;
-    if (agentFramework !== (settings.agentFramework || "gemini")) payload.agentFramework = agentFramework;
+    if (agentFramework !== (settings.agentFramework || "antigravity")) payload.agentFramework = agentFramework;
 
     try {
       await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
@@ -151,13 +151,13 @@ export default function SettingsOverlay({ onClose, showError }) {
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
             <Typography variant="subtitle2" sx={{ mt: 2 }}>Agent framework</Typography>
-            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "gemini"} sx={{ mb: 1 }}>
-              <FormControlLabel value="gemini" control={<Radio />} label="Gemini" />
+            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "antigravity"} sx={{ mb: 1 }}>
+              <FormControlLabel value="antigravity" control={<Radio />} label="Antigravity" />
               <FormControlLabel value="claude" control={<Radio />} label="Claude" />
             </RadioGroup>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Which agent.Framework a run is driven by. Claude support is not yet wired into dispatch -- selecting it
-              here does not change what a run actually does.
+              Which agent.Framework a run is driven by: the Antigravity CLI (agy) or the Claude CLI, each run as a
+              subprocess on the controller. Changing this takes effect when the daemon next restarts.
             </Typography>
             <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />

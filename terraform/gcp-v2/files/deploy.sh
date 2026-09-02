@@ -124,6 +124,9 @@ UI_PORT="$(cfg ui_port)"
 SLOTS="$(cfg slots)"
 POLL_INTERVAL="$(cfg poll_interval)"
 GEMINI_MODEL="$(cfg gemini_model)"
+# Where the Antigravity CLI lives, if not on $PATH -- see setup.sh's own
+# GRAIN_AGY_PATH and verify_agent_cli.
+AGY_PATH="$(cfg agy_path)"
 MAX_AGENT_TURNS="$(cfg max_agent_turns)"
 GCP_PROJECT="$(cfg gcp_project)"
 GCP_AGENT_SERVICE_ACCOUNT="$(cfg gcp_agent_service_account)"
@@ -240,6 +243,7 @@ env \
   GRAIN_GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID" \
   GRAIN_GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
   GRAIN_GEMINI_API_KEY="$GEMINI_API_KEY" \
+  GRAIN_AGY_PATH="$AGY_PATH" \
   GRAIN_GEMINI_MODEL="$GEMINI_MODEL" \
   GRAIN_MAX_AGENT_TURNS="$MAX_AGENT_TURNS" \
   GRAIN_GCP_PROJECT="$GCP_PROJECT" \

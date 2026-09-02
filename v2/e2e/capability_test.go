@@ -29,9 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
@@ -98,7 +97,7 @@ func (p *testCapabilityProvider) wasRevoked() bool {
 // the sandbox root instead, since run_command's cmd.Dir is root and an
 // absolute path in the command string would instead name a real path on
 // this test process's own host.
-func capabilityPushScript(remote, branch, taskID, placementPath, wantContent string) []*genai.GenerateContentResponse {
+func capabilityPushScript(remote, branch, taskID, placementPath, wantContent string) []antigravity.Step {
 	relPath := strings.TrimPrefix(placementPath, "/")
 	readBack := fmt.Sprintf("test \"$(cat %s)\" = %q", relPath, wantContent)
 	push := "git clone " + remote + " work && cd work && " +
@@ -106,7 +105,7 @@ func capabilityPushScript(remote, branch, taskID, placementPath, wantContent str
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": readBack}),
 		toolCall("run_command", map[string]any{"command": push}),
 		finalText("read the capability's placement and pushed " + branch),

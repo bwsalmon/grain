@@ -52,7 +52,7 @@ const DefaultAPITargetService = "generativelanguage.googleapis.com"
 const displayNamePrefix = "grain-"
 
 // OperatingKeyDisplayName names the daemon's own long-lived operating
-// key -- the one pkg/agent/gemini runs as, seeded at deploy time by
+// key -- the one pkg/agent/antigravity runs as, seeded at deploy time by
 // `grain secrets mint-gemini-key` (cmd/grain/secrets.go) rather than
 // supplied by hand.
 //
@@ -240,7 +240,7 @@ func (c *Capability) minter(ctx context.Context, cc model.CapabilityContext) (mi
 }
 
 // MintOperatingKey mints the daemon's own long-lived Gemini API key --
-// the credential pkg/agent/gemini runs as, distinct from the per-task
+// the credential pkg/agent/antigravity runs as, distinct from the per-task
 // keys Materialize mints -- authenticating with the credential named
 // credentialName, the same standing minter credential the capability
 // itself uses.

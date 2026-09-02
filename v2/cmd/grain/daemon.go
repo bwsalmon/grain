@@ -71,8 +71,8 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/agent/claude"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/v2/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/v2/pkg/capability/geminikey"
@@ -130,12 +130,14 @@ func daemon(args []string) {
 	defaultTargetRepo := fs.String("default-target-repo", "", "owner/name a task created through the UI/API with no repo of its own targets")
 	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any"+seedOnly)
 
-	agentFramework := fs.String("agent-framework", model.AgentFrameworkGemini,
-		"which agent.Framework a run is driven by: \""+model.AgentFrameworkGemini+"\" (agent/gemini, the in-process "+
-			"Gemini API loop) or \""+model.AgentFrameworkClaude+"\" (agent/claude, the real claude CLI as a "+
-			"subprocess -- see -claude-path/-claude-oauth-token-file)"+seedOnly)
+	agentFramework := fs.String("agent-framework", model.AgentFrameworkAntigravity,
+		"which agent.Framework a run is driven by: \""+model.AgentFrameworkAntigravity+"\" (agent/antigravity, the "+
+			"Antigravity CLI's agy binary as a subprocess -- see -agy-path) or \""+model.AgentFrameworkClaude+
+			"\" (agent/claude, the real claude CLI as a subprocess -- see -claude-path/-claude-oauth-token-file). "+
+			"\""+model.LegacyAgentFrameworkGemini+"\" is accepted as the former spelling of "+
+			model.AgentFrameworkAntigravity+seedOnly)
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
-	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
+	geminiModel := fs.String("gemini-model", antigravity.DefaultModel, "model the agent framework calls"+seedOnly)
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)"+seedOnly)
 
 	// claudePath and claudeOAuthTokenFile are only consulted when the
@@ -148,6 +150,9 @@ func daemon(args []string) {
 	// was chosen). Modeled on -gemini-api-key-file: secret material, not
 	// configuration itself, so both stay flags-only rather than moving
 	// into model.Config the way -gemini-model did.
+	agyPath := fs.String("agy-path", "", "path to the Antigravity CLI binary (agy) agent/antigravity runs as a "+
+		"subprocess; empty resolves \"agy\" against $PATH instead. Only used when the agent-framework setting is "+
+		"\""+model.AgentFrameworkAntigravity+"\"")
 	claudePath := fs.String("claude-path", "", "path to the claude CLI binary agent/claude runs as a subprocess; "+
 		"empty resolves \"claude\" against $PATH instead. Only used when the agent-framework setting is \"claude\"")
 	claudeOAuthTokenFile := fs.String("claude-oauth-token-file", "", "file holding the Claude Code OAuth token the "+
@@ -295,8 +300,13 @@ func daemon(args []string) {
 		fmt.Fprintln(os.Stderr, "grain daemon: -max-concurrent must be at least 1")
 		os.Exit(2)
 	}
-	if *agentFramework != model.AgentFrameworkGemini && *agentFramework != model.AgentFrameworkClaude {
-		fmt.Fprintf(os.Stderr, "grain daemon: -agent-framework must be %q or %q\n", model.AgentFrameworkGemini, model.AgentFrameworkClaude)
+	// NormalizeAgentFramework first, so the legacy "gemini" spelling a
+	// deployment's own unit file may still pass keeps working across the
+	// upgrade that replaced that framework with agent/antigravity.
+	*agentFramework = model.NormalizeAgentFramework(*agentFramework)
+	if *agentFramework != model.AgentFrameworkAntigravity && *agentFramework != model.AgentFrameworkClaude {
+		fmt.Fprintf(os.Stderr, "grain daemon: -agent-framework must be %q or %q\n",
+			model.AgentFrameworkAntigravity, model.AgentFrameworkClaude)
 		os.Exit(2)
 	}
 	var targetReposList []string
@@ -313,6 +323,7 @@ func daemon(args []string) {
 		targetRepos:      targetReposList,
 		agentFramework:   *agentFramework,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
+		agyPath:    *agyPath,
 		claudePath: *claudePath, claudeOAuthTokenFile: *claudeOAuthTokenFile,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
@@ -360,12 +371,16 @@ type config struct {
 	maxAgentTurns    int
 
 	// agentFramework selects which agent.Framework runDaemon builds --
-	// model.AgentFrameworkGemini or model.AgentFrameworkClaude -- and is
+	// model.AgentFrameworkAntigravity or model.AgentFrameworkClaude -- and is
 	// store-backed (model.Config.AgentFramework) the same way geminiModel
 	// is: -agent-framework only seeds it the first time a deployment's
 	// store has none; `grain settings` (or the Settings UI) is what
 	// changes it after that.
 	agentFramework string
+	// agyPath is flags-only, like claudePath below: where the Antigravity
+	// CLI binary lives is a property of the machine, not of the
+	// deployment's stored configuration.
+	agyPath string
 	// claudePath and claudeOAuthTokenFile are flags-only, like
 	// geminiAPIKeyFile -- see -claude-path/-claude-oauth-token-file's own
 	// flag doc comments for why neither is store-backed.
@@ -478,11 +493,11 @@ func run(ctx context.Context, cfg config) error {
 	// transcriptDir is where a run's own agent.Framework may mirror its
 	// transcript-in-progress live, and where the UI server below reads one
 	// back from for a still-running attempt -- the two sides of
-	// bwsalmon/agents#467's live tailing (agent/gemini's own share of it
-	// added by bwsalmon/agents#513, since gemini.New in runDaemon below,
-	// not claude.New, is what production actually runs), agreeing on this
+	// bwsalmon/agents#467's live tailing (since antigravity.New in
+	// runDaemon below, not claude.New, is what production actually
+	// runs), agreeing on this
 	// directory (and, within it, the run-ID-named file
-	// orchestrator.RunDispatch and gemini.LiveTranscriptDir each
+	// orchestrator.RunDispatch and antigravity.LiveTranscriptDir each
 	// independently compute) is what lets them talk to each other without
 	// either package importing the other. It must exist before any run
 	// can write into it -- orchestrator's own NewHostSandboxes makes the
@@ -656,20 +671,21 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 
 // buildAgentFramework constructs the one agent.Framework this deployment
 // runs every dispatched run against, chosen by cfg.agentFramework --
-// model.AgentFrameworkGemini (agent/gemini, the in-process API loop this
-// package always built before bwsalmon/agents#615) or
+// model.AgentFrameworkAntigravity (agent/antigravity, the Antigravity
+// CLI's agy binary as a subprocess, which replaced the home-grown
+// in-process Gemini API loop this package built before it) or
 // model.AgentFrameworkClaude (agent/claude, the real claude CLI as a
-// subprocess -- bwsalmon/agents#609 added the setting, #615 this
+// subprocess -- bwsalmon/agents#609 added the setting, #615 that
 // branch). Chosen once, here, rather than re-read per run: cfg itself is
 // only ever loaded once, at startup (loadConfig's own doc comment), so a
 // change made through `grain settings` needs a restart to take effect
 // either way.
 //
 // liveTranscriptDir (startUIServer, below) has to agree with whichever
-// branch this takes: gemini.LiveTranscriptDir and claude.LiveTranscriptDir
-// read two different transcript file formats (RunConfig.TranscriptPath's
-// own doc comment), and only the one matching the Framework a run actually
-// used will ever find one.
+// branch this takes: antigravity.LiveTranscriptDir and
+// claude.LiveTranscriptDir read two different transcript file formats
+// (RunConfig.TranscriptPath's own doc comment), and only the one matching
+// the Framework a run actually used will ever find one.
 func buildAgentFramework(ctx context.Context, cfg config) (agent.Framework, error) {
 	switch cfg.agentFramework {
 	case model.AgentFrameworkClaude:
@@ -707,11 +723,30 @@ func buildAgentFramework(ctx context.Context, cfg config) (agent.Framework, erro
 		if err != nil {
 			return nil, fmt.Errorf("reading -gemini-api-key-file: %w", err)
 		}
-		f, err := gemini.New(ctx, apiKey, gemini.WithModel(cfg.geminiModel))
-		if err != nil {
-			return nil, fmt.Errorf("building the Gemini agent: %w", err)
+		agyPath := cfg.agyPath
+		if agyPath == "" {
+			resolved, err := exec.LookPath("agy")
+			if err != nil {
+				return nil, fmt.Errorf("resolving the agy binary (-agy-path is unset, and none found on $PATH): %w", err)
+			}
+			agyPath = resolved
 		}
-		return f, nil
+		grainBinaryPath, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("resolving this binary's own path, for agy's MCP settings: %w", err)
+		}
+		opts := []antigravity.Option{
+			antigravity.WithAPIKey(apiKey),
+			antigravity.WithModel(cfg.geminiModel),
+		}
+		if cfg.konturSandboxes {
+			// Only meaningful with -kontur-sandboxes, exactly as for
+			// agent/claude above: a run dispatched onto a plain
+			// orchestrator.HostSandboxes directory reaches it through
+			// RunConfig.SandboxRoot instead.
+			opts = append(opts, antigravity.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
+		}
+		return antigravity.New(agyPath, grainBinaryPath, opts...), nil
 	}
 }
 
@@ -1013,7 +1048,7 @@ func liveTranscriptDir(cfg config, transcriptDir string) ui.LiveTranscript {
 	if cfg.agentFramework == model.AgentFrameworkClaude {
 		return claude.LiveTranscriptDir{Dir: transcriptDir}
 	}
-	return gemini.LiveTranscriptDir{Dir: transcriptDir}
+	return antigravity.LiveTranscriptDir{Dir: transcriptDir}
 }
 
 // startGitProxy serves gitproxy.NewHandler on a random port, and returns
@@ -1121,7 +1156,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// choice of Framework.Run has mirrored so far into
 		// transcriptDir/<runID> for a still-running attempt (transcriptDir's
 		// own doc comment on the shared directory convention).
-		// gemini.LiveTranscriptDir and claude.LiveTranscriptDir read two
+		// antigravity.LiveTranscriptDir and claude.LiveTranscriptDir read two
 		// different file formats (RunConfig.TranscriptPath's own doc
 		// comment) and are not interchangeable, so this has to agree with
 		// cfg.agentFramework -- the same setting buildAgentFramework

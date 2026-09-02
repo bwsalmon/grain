@@ -2,9 +2,10 @@
 // TestRunCycleOpensAPullRequestForABranchAFailedRunAlreadyPushed already
 // proves the salvage path with a scripted agent.Framework standing in for
 // the model; this drives the exact same "pushed, then ran out of turns"
-// scenario through a real Gemini model instead, gated on GEMINI_API_KEY
-// the same way v2/e2e/live_test.go's TestLiveIssueCompletesEndToEnd is,
-// so it runs in CI (where the key is unset) without failing but proves,
+// scenario through a real agent/antigravity run instead, gated on
+// GEMINI_API_KEY and an installed agy binary (liveFramework) the same way
+// v2/e2e/live_test.go's TestLiveIssueCompletesEndToEnd is, so it runs in
+// CI (where neither is present) without failing but proves,
 // against the real model deciding its own tool calls, that a task
 // completed this way stops reporting a stale failure once it has (see
 // client.go's own guard added for this issue).
@@ -13,23 +14,14 @@
 package orchestrator_test
 
 import (
-	"context"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 )
 
 func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T) {
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		t.Skip("GEMINI_API_KEY not set; skipping live Gemini integration test")
-	}
-
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets514", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets514"}
@@ -46,17 +38,12 @@ func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T
 			"tool, so do not reply with plain text first, and do not split this across multiple "+
 			"tool calls. Call run_command exactly once, with a single shell command (chain steps "+
 			"with &&) that clones "+sim.BareRepo+" into a directory named work, creates and checks "+
-			"out the branch named above inside it, appends the line 'gemini was here' to NOTES.md "+
+			"out the branch named above inside it, appends the line 'the agent was here' to NOTES.md "+
 			"(creating it if needed), commits that change, and pushes the branch to the origin remote.")
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
 
-	genCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
-	framework, err := gemini.New(genCtx, apiKey)
-	if err != nil {
-		t.Fatalf("gemini.New: %v", err)
-	}
+	framework := liveFramework(t)
 
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
