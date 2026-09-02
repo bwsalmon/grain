@@ -1062,9 +1062,11 @@ human-in-the-loop primitive here (`ask_question` parks the whole run and
 picks a reply up on the next dispatch) -- it only works because
 `gemini.Framework.Run` registers a run's tools in-process and so already
 holds the same `*model.Store` connection the reply lands on;
-`claude.Framework.Run` ignores `RunConfig.Tools` entirely and isn't
-wired into any real deployment, so this is, for now, a gemini-only
-capability in practice, same as the rest of `Config.GrantTools`.
+`claude.Framework.Run` ignores `RunConfig.Tools` entirely -- it is wired
+into real dispatch now ("Two agent frameworks, either per task" below),
+but a run driven by it still reaches nothing in this process, so this
+is a gemini-only capability in practice, same as the rest of
+`Config.GrantTools`.
 
 bwsalmon/agents#621 turned that pair of capabilities into an explicit
 "configuration agent": an overlay button the frontend keeps reachable in
@@ -1423,6 +1425,70 @@ command line, the same narrow-as-possible sudoers shape
 that would only ever 404 -- the case for `grain demo`'s throwaway UI,
 which leaves `Config.Reboot` nil since there is no real machine behind it
 worth rebooting.
+
+## Two agent frameworks, either per task
+
+`agent/gemini` and `agent/claude` both existed for a while before either
+was actually a choice: `model.Config.AgentFramework` (bwsalmon/agents#609)
+stored one, and `cmd/grain`'s `buildAgentFramework` (#615) read it once,
+at startup, to build the single `agent.Framework` every dispatch then
+used. Two things were wrong with that shape, and they were the same
+thing twice: the framework was decided too early, and the credential it
+needed was decided somewhere an operator could not reach.
+
+`Deps.Framework` is a factory taking a name now --
+`func(ctx, framework string) (agent.Framework, error)` -- called per
+dispatch with the task's own `model.Task.AgentFramework`. Empty is the
+common case and means "this deployment's default", which
+`cmd/grain`'s own `defaultAgentFramework` resolves by re-reading
+`grain_config` on each dispatch rather than from the config loaded at
+startup: switching the default in Settings takes effect on the next run,
+not the next restart. A task that names one instead
+(`agentFramework` on `POST /api/tasks`, or the picker under New task ->
+Advanced options) overrides it for that task alone -- the same
+"zero means unset" per-task override `SandboxCPUs`/`SandboxMemoryMB`
+already are, for the same reason: a task filed with no choice must
+follow the deployment wherever it is set later, rather than pin itself
+to whatever was configured the moment it was filed.
+
+The credential each framework runs as moved with it. Both are stored in
+this deployment's own secrets database now, under the two well-known
+names `pkg/secrets` exports (`GeminiAPIKeySecret`,
+`ClaudeOAuthTokenSecret`), and the Settings pane writes them: a
+write-only field per framework, a set/not-set chip, and a Clear button,
+backed by `GET`/`PUT`/`DELETE /api/agent-keys/{framework}`. Nothing
+reads a value back out through the API, the same rule the secrets pane
+those are built on already holds to. `-gemini-api-key-file` and
+`-claude-oauth-token-file` still work and still seed a deployment
+(`scripts/setup.sh`, and `terraform/gcp-v2`'s own
+`grain-gemini-api-key`/`grain-claude-oauth-token` instance metadata),
+but a key set through the UI wins over either, and takes effect on the
+next dispatch with no restart -- `agentCredential` reads the database
+first, then the file, on every framework it builds.
+
+What that costs is one client construction per dispatch instead of one
+per process, which is nothing beside the run it precedes. What it buys
+is that a daemon with no credential at all is now a perfectly ordinary
+state: it starts, serves the UI, and says which keys are missing --
+where before, `runDaemon` failed outright on a missing key file, leaving
+an operator with a UI reporting `reconcilerDown` and no way to fix it
+from there. A run whose framework has no credential fails as its own
+`setup-failed` run naming the pane to set it in
+(`orchestrator.runOne` builds the framework inside its setup guard,
+before `RunDispatch` takes over finishing the run), and
+`scripts/setup.sh` no longer holds `grain-daemon.service` back until a
+Gemini key exists: a UI that is not running is a credential that can
+never be pasted in.
+
+One consequence worth naming: two frameworks writing into one
+`TranscriptDir` means two transcript formats in it at once -- claude
+mirrors its own `--output-format stream-json`, gemini tees an
+already-readable narrative -- so `ui.Config.LiveTranscripts` can no
+longer be whichever reader matched the deployment's framework at
+startup. `cmd/grain`'s `liveTranscripts.Tail` picks per file instead, by
+whether what is in it opens with a JSON object; a run's finished
+transcript needs none of this, since `agent.Result.Transcript` is
+already rendered text by the time the store sees it.
 
 ## The UI and the CLI talk to the daemon over REST
 

@@ -424,7 +424,26 @@ type Task struct {
 	// local directory to place it in.
 	SandboxCPUs     int
 	SandboxMemoryMB int
-	CreatedAt       *time.Time
+	// AgentFramework overrides Config.AgentFramework for this task's own
+	// dispatch only -- the per-task escape hatch alongside the
+	// deployment-wide default, for a task better suited to one framework
+	// than the other (a change the `claude` CLI's own tooling handles
+	// well, say, filed on a deployment that runs agent/gemini by
+	// default). Empty, the default, means "use the deployment default",
+	// the same "zero means unset" contract SandboxCPUs/SandboxMemoryMB
+	// above already use -- so a task created before this field existed
+	// reads back as deferring to the deployment rather than as an
+	// explicit choice of a framework that did not exist for it.
+	//
+	// Its vocabulary is Config.AgentFramework's own
+	// (AgentFrameworkGemini/AgentFrameworkClaude); ui.CreateTask
+	// validates it the same way ui.UpdateSettings validates the
+	// deployment-wide one, rather than the schema (schema.go's own doc
+	// comment on why an enum is TEXT here). Applied by
+	// orchestrator.runOne, once per dispatch, when it asks Deps.Framework
+	// for the agent.Framework this run is driven by.
+	AgentFramework string
+	CreatedAt      *time.Time
 
 	// OrderKey is this task's position in the backlog -- Store.Ready
 	// dispatches ascending, so the task with the smallest OrderKey among

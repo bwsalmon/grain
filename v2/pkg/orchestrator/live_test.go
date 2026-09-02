@@ -105,8 +105,10 @@ func askScript(question string) []*genai.GenerateContentResponse {
 	}
 }
 
-func scriptedFramework(script []*genai.GenerateContentResponse) func() agent.Framework {
-	return func() agent.Framework { return gemini.NewForTest(&scriptedGenerator{responses: script}) }
+func scriptedFramework(script []*genai.GenerateContentResponse) func(context.Context, string) (agent.Framework, error) {
+	return func(context.Context, string) (agent.Framework, error) {
+		return gemini.NewForTest(&scriptedGenerator{responses: script}), nil
+	}
 }
 
 // fileTask creates a task exactly the way a person at the CLI or the UI

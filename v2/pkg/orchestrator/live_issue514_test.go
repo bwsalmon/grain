@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
@@ -60,7 +59,7 @@ func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T
 
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
-		Framework: func() agent.Framework { return framework },
+		Framework: orchestrator.StaticFramework(framework),
 		// The real repro: a budget so tight the model cannot possibly
 		// also reply with a final answer once it has spent its one turn
 		// on the shell command that matters -- turning "exceeded max

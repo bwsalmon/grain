@@ -228,7 +228,7 @@ project.
 
 ## Secrets never touch Terraform
 
-Three values never appear in a `.tf` file, a `tfvars` file, or the
+Four kinds of value never appear in a `.tf` file, a `tfvars` file, or the
 Terraform state:
 
 - **The GitHub PAT** -- a fine-grained token scoped, on GitHub's own side,
@@ -236,11 +236,21 @@ Terraform state:
   `-target-repos` allow-list -- see that variable's own doc comment and
   this module's README, "Repo enforcement."
 - **The Gemini API key** -- the daemon's own operating key
-  (`pkg/agent/gemini`), needed before `grain-daemon.service` will even
-  start. Distinct from the gemini-key *capability*
+  (`pkg/agent/gemini`). Distinct from the gemini-key *capability*
   (`pkg/capability/geminikey`), which mints its own short-lived keys per
-  task once this one has the daemon running at all. Optional to supply:
-  see "The daemon's own Gemini key" below.
+  task. Optional to supply: see "The daemon's own Gemini key" below.
+- **The Claude Code OAuth token** -- the same thing for the other agent
+  framework (`pkg/agent/claude`), pushed as
+  `GRAIN_CLAUDE_CODE_OAUTH_TOKEN`. Also optional, and for a reason that
+  now applies to the Gemini key too: either credential can be pasted
+  into the UI instead (Settings -> Agent frameworks), which stores it in
+  the host's own secrets database and takes precedence over whatever
+  metadata carries. The daemon starts and serves the UI with neither set;
+  only a *dispatch* needs one, and a run whose framework has none fails
+  saying exactly that. Push one to have a deployment come up already able
+  to dispatch, without anyone opening the UI first. Which framework a run
+  is driven by is a store-backed setting, overridable per task, so a
+  deployment that might use either wants both.
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
 - **The kontur SSH private key** (with `enable_kontur_sandboxes`, the
@@ -251,7 +261,7 @@ Terraform state:
   exec'ing into that VM's container rather than connecting to it from
   outside. See "Kontur sandboxing" below.
 
-All four go straight into the host instance's own metadata via
+All of them go straight into the host instance's own metadata via
 `push-secrets.sh`, which any identity with `deployer_manages_minter_keys`
 (iam.tf) and edit access to the instance can run -- never through Secret
 Manager, so nothing needs a project-wide secret-reading grant, and never
@@ -280,9 +290,11 @@ narrower than a hand-made one, since a key created by hand in the
 console is unrestricted unless someone remembers to restrict it.
 
 What it removes is a first-deploy footgun: without it, applying and
-pushing secrets leaves you with a daemon that installs and then silently
-never starts, because the one credential it cannot come up without is
-the one nobody has pasted in yet.
+pushing secrets leaves you with a deployment whose every dispatched run
+fails at setup, because the credential its agent framework runs as is
+the one nobody has pasted in yet. (The daemon itself comes up either
+way now, and its Settings pane is the other way to fix that -- see
+v2/README.md, "Two agent frameworks, either per task".)
 
 Three things worth knowing:
 

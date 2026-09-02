@@ -123,6 +123,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskConfigurationColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureTaskAgentFrameworkColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -389,6 +392,24 @@ func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
 	return err
 }
 
+// ensureTaskAgentFrameworkColumn adds task.agent_framework (schema.go's
+// own DDL comment on the table has the reasoning) to a database created
+// before this column existed, the same probe-then-ALTER approach every
+// other ensure*Column migration here uses. It defaults to ”,
+// Task.AgentFramework's own "unset, use the deployment default" zero
+// value -- so every task already in such a database reads back as
+// deferring to Config.AgentFramework, which is exactly what it did
+// before a task could carry a framework of its own.
+func (s *Store) ensureTaskAgentFrameworkColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `agent_framework` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `agent_framework` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
 // ensureTaskInteractiveColumn adds task.interactive (schema.go's own DDL
 // comment on the table has the reasoning -- bwsalmon/agents#539) to a
 // database created before this column existed, the same probe-then-ALTER
@@ -610,13 +631,14 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`, `agent_framework`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
 		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.Interactive, t.Configuration,
+		t.AgentFramework,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -891,7 +913,8 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`"
+	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`," +
+	"`agent_framework`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -907,7 +930,8 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration); err != nil {
+		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration,
+		&t.AgentFramework); err != nil {
 		return Task{}, err
 	}
 

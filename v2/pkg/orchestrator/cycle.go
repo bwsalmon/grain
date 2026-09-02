@@ -29,7 +29,21 @@ type Deps struct {
 	Store     *model.Store
 	Client    github.Client
 	Sandboxes Sandboxes
-	Framework func() agent.Framework
+	// Framework builds the agent.Framework one dispatch is driven by.
+	// The string is the task's own model.Task.AgentFramework -- empty
+	// meaning "this deployment's default" (model.Config.AgentFramework),
+	// which only the caller knows, so resolving that is the factory's
+	// job and not this package's (cmd/grain's own agentFrameworks).
+	//
+	// It returns an error rather than a Framework for the case a
+	// deployment can now genuinely be in: the credential that framework
+	// runs as (a Gemini API key, a Claude Code OAuth token) is set from
+	// the UI, so it may simply not be there yet when a task naming that
+	// framework comes up for dispatch. runOne reports that as a
+	// setup-failed run naming what is missing, rather than the daemon
+	// refusing to start at all the way a startup-time construction had
+	// to.
+	Framework func(ctx context.Context, framework string) (agent.Framework, error)
 	Config    Config
 	// MintSandboxToken returns the git-proxy bearer token identifying a
 	// sandbox -- gitproxy.SandboxTokenStore.EnsureToken, in a deployment;
@@ -139,6 +153,17 @@ func Reconcilers() []Reconciler {
 		{Name: "qualifications", Reconcile: reconcileQualifications},
 		{Name: "suites", Reconcile: reconcileSuites},
 	}
+}
+
+// StaticFramework adapts one already-built agent.Framework to what
+// Deps.Framework wants -- for a caller with exactly one framework and no
+// per-task choice to make (every test in this repo, and any embedder
+// driving a single framework of its own). A real deployment does not use
+// it: cmd/grain builds the framework a run needs when that run is
+// dispatched, from the credential the UI has by then, which is the whole
+// point of the factory taking a name and returning an error.
+func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Framework, error) {
+	return func(context.Context, string) (agent.Framework, error) { return f, nil }
 }
 
 // RunCycle is v2's whole Orchestrator.run_once equivalent: let
@@ -499,10 +524,22 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		konturVM = named.VMName()
 	}
 
+	// Built here, after the sandbox and before RunDispatch takes over
+	// finishing this run, so a task naming a framework whose credential
+	// is not configured yet ends as a setup-failed run saying exactly
+	// that (the guard above) rather than as a failed agent run.
+	// task.AgentFramework is empty for a task that made no choice of its
+	// own; Deps.Framework is what turns that into the deployment's
+	// default.
+	framework, err := deps.Framework(ctx, task.AgentFramework)
+	if err != nil {
+		return fmt.Errorf("orchestrator: building the agent framework for run %s: %w", d.RunID, err)
+	}
+
 	// From here on RunDispatch owns finishing this run, on every path it
 	// can take -- so the setup guard above must not also finish it.
 	ranAgent = true
-	result, runErr := RunDispatch(ctx, deps.Store, deps.Framework(), deps.Config, *task, d, tools, sandboxRoot, konturVM, now)
+	result, runErr := RunDispatch(ctx, deps.Store, framework, deps.Config, *task, d, tools, sandboxRoot, konturVM, now)
 
 	if runErr != nil {
 		// A failed run is not necessarily an empty one. The framework

@@ -54,8 +54,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -131,28 +133,35 @@ func daemon(args []string) {
 	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any"+seedOnly)
 
 	agentFramework := fs.String("agent-framework", model.AgentFrameworkGemini,
-		"which agent.Framework a run is driven by: \""+model.AgentFrameworkGemini+"\" (agent/gemini, the in-process "+
-			"Gemini API loop) or \""+model.AgentFrameworkClaude+"\" (agent/claude, the real claude CLI as a "+
-			"subprocess -- see -claude-path/-claude-oauth-token-file)"+seedOnly)
-	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as (required)")
+		"which agent.Framework a run is driven by by default: \""+model.AgentFrameworkGemini+"\" (agent/gemini, the "+
+			"in-process Gemini API loop) or \""+model.AgentFrameworkClaude+"\" (agent/claude, the real claude CLI as a "+
+			"subprocess -- see -claude-path/-claude-oauth-token-file). Seeds the store-backed setting the UI edits, and "+
+			"a task can override it for its own dispatch"+seedOnly)
+	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as. "+
+		"Optional now that the key can be set from the UI instead (Settings -> Agent frameworks, stored as the "+
+		"\""+secrets.GeminiAPIKeySecret+"\" secret): a key set there wins, and this file is what a deployment "+
+		"seeded one with before that existed. With neither, a run driven by the gemini framework fails as "+
+		"setup-failed saying so, rather than the daemon refusing to start")
 	geminiModel := fs.String("gemini-model", gemini.DefaultModel, "Gemini model the agent framework calls"+seedOnly)
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)"+seedOnly)
 
-	// claudePath and claudeOAuthTokenFile are only consulted when the
-	// store's agent-framework setting (bwsalmon/agents#609, `grain
-	// settings`) reads back "claude" -- unlike -gemini-api-key-file above,
-	// neither is required at flag-parse time, since which framework a
-	// deployment actually runs is store-backed and not known until
-	// loadConfig has read it back (runDaemon fails, at that point, with a
-	// clear error if -claude-oauth-token-file is still unset and "claude"
-	// was chosen). Modeled on -gemini-api-key-file: secret material, not
-	// configuration itself, so both stay flags-only rather than moving
-	// into model.Config the way -gemini-model did.
+	// claudePath and claudeOAuthTokenFile are only consulted when a run
+	// is actually driven by agent/claude -- the store's agent-framework
+	// setting (bwsalmon/agents#609, `grain settings`), or a task's own
+	// override of it (model.Task.AgentFramework). Neither is required at
+	// flag-parse time, and neither is required at all any more: both
+	// frameworks' credentials are settable from the UI, into the secrets
+	// database (secrets.ClaudeOAuthTokenSecret), which is where
+	// agentCredential looks before it looks at either file. They stay
+	// flags-only rather than moving into model.Config for the same
+	// reason -gemini-api-key-file does: secret material, not
+	// configuration itself.
 	claudePath := fs.String("claude-path", "", "path to the claude CLI binary agent/claude runs as a subprocess; "+
 		"empty resolves \"claude\" against $PATH instead. Only used when the agent-framework setting is \"claude\"")
 	claudeOAuthTokenFile := fs.String("claude-oauth-token-file", "", "file holding the Claude Code OAuth token the "+
-		"agent authenticates as, passed to the claude subprocess as CLAUDE_CODE_OAUTH_TOKEN (required when the "+
-		"agent-framework setting is \"claude\")")
+		"agent authenticates as, passed to the claude subprocess as CLAUDE_CODE_OAUTH_TOKEN. Optional, and the "+
+		"exact counterpart of -gemini-api-key-file above: the UI stores one as the "+
+		"\""+secrets.ClaudeOAuthTokenSecret+"\" secret and that wins over this file")
 
 	githubHost := fs.String("github-host", "github.com", "GitHub git host -- what the proxy forwards to and, via github.APIHost, where REST calls go; override to point at a mock for local testing"+seedOnly)
 	githubInsecureHTTP := fs.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)"+seedOnly)
@@ -359,12 +368,15 @@ type config struct {
 	geminiModel      string
 	maxAgentTurns    int
 
-	// agentFramework selects which agent.Framework runDaemon builds --
+	// agentFramework is this deployment's default agent.Framework --
 	// model.AgentFrameworkGemini or model.AgentFrameworkClaude -- and is
 	// store-backed (model.Config.AgentFramework) the same way geminiModel
 	// is: -agent-framework only seeds it the first time a deployment's
 	// store has none; `grain settings` (or the Settings UI) is what
-	// changes it after that.
+	// changes it after that. Only a fallback here: defaultAgentFramework
+	// re-reads that stored row per dispatch, so a default changed in the
+	// UI takes effect on the next run rather than the next restart, and
+	// a task naming a framework of its own never consults either.
 	agentFramework string
 	// claudePath and claudeOAuthTokenFile are flags-only, like
 	// geminiAPIKeyFile -- see -claude-path/-claude-oauth-token-file's own
@@ -550,8 +562,8 @@ func run(ctx context.Context, cfg config) error {
 }
 
 // runDaemon is everything that makes cfg's deployment actually dispatch
-// and reconcile tasks: the git proxy, the agent framework
-// (buildAgentFramework), orphaned-run and orphaned-VM recovery, and
+// and reconcile tasks: the git proxy, the per-dispatch agent framework
+// factory (agentFrameworks), orphaned-run and orphaned-VM recovery, and
 // RunCycle's own reconcile loop. Sandbox tokens and git credentials are
 // not among them any more:
 // both are per run now, minted and configured as each run's sandbox is
@@ -591,9 +603,23 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	}
 	defer stopProxy(context.Background())
 
-	agentFramework, err := buildAgentFramework(ctx, cfg)
-	if err != nil {
-		return err
+	// The secrets database this deployment's UI writes agent credentials
+	// into, and the one orchestrator.Config.Credentials below already
+	// resolves a capability's own secrets through -- the same directory,
+	// opened once and shared by both.
+	secretStore := secrets.New(filepath.Join(cfg.dataDir, "secrets"))
+
+	// Built per dispatch now rather than here (agentFrameworks' own doc
+	// comment), so nothing about a missing or not-yet-pasted agent
+	// credential can stop this loop from starting: a task needing one
+	// fails as its own setup-failed run instead, which is a state the UI
+	// shows and an operator can fix in Settings without a restart. What
+	// is worth saying at startup is that the default framework cannot
+	// run yet, since otherwise the first symptom is a task that fails
+	// the moment anyone files one.
+	buildFramework := agentFrameworks(cfg, store, secretStore)
+	if _, err := buildFramework(ctx, ""); err != nil {
+		log.Printf("grain daemon: the default agent framework is not ready: %v", err)
 	}
 
 	credentials, err := gitproxy.LoadCredentialSet(filepath.Join(cfg.dataDir, "secrets", "github"))
@@ -632,10 +658,10 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 
 	deps := orchestrator.Deps{
 		Store: store, Client: githubClient, Sandboxes: sandboxes,
-		Framework: func() agent.Framework { return agentFramework },
+		Framework: buildFramework,
 		Config: orchestrator.Config{
 			Capabilities:  registry,
-			Credentials:   secrets.New(filepath.Join(cfg.dataDir, "secrets")),
+			Credentials:   secretStore,
 			MaxAgentTurns: cfg.maxAgentTurns,
 			TranscriptDir: transcriptDir,
 			// The same proxy URL the credential files above are written
@@ -654,65 +680,163 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	return nil
 }
 
-// buildAgentFramework constructs the one agent.Framework this deployment
-// runs every dispatched run against, chosen by cfg.agentFramework --
-// model.AgentFrameworkGemini (agent/gemini, the in-process API loop this
-// package always built before bwsalmon/agents#615) or
-// model.AgentFrameworkClaude (agent/claude, the real claude CLI as a
-// subprocess -- bwsalmon/agents#609 added the setting, #615 this
-// branch). Chosen once, here, rather than re-read per run: cfg itself is
-// only ever loaded once, at startup (loadConfig's own doc comment), so a
-// change made through `grain settings` needs a restart to take effect
-// either way.
+// agentFrameworks returns the factory orchestrator.Deps.Framework wants:
+// the agent.Framework one dispatch is driven by, chosen per run rather
+// than once at startup (bwsalmon/agents#615 built exactly one, here, and
+// every run used it).
 //
-// liveTranscriptDir (startUIServer, below) has to agree with whichever
-// branch this takes: gemini.LiveTranscriptDir and claude.LiveTranscriptDir
-// read two different transcript file formats (RunConfig.TranscriptPath's
-// own doc comment), and only the one matching the Framework a run actually
-// used will ever find one.
-func buildAgentFramework(ctx context.Context, cfg config) (agent.Framework, error) {
-	switch cfg.agentFramework {
-	case model.AgentFrameworkClaude:
-		claudePath := cfg.claudePath
-		if claudePath == "" {
-			resolved, err := exec.LookPath("claude")
-			if err != nil {
-				return nil, fmt.Errorf("resolving the claude binary (-claude-path is unset, and none found on $PATH): %w", err)
-			}
-			claudePath = resolved
+// Two things made per-run construction necessary. A task can now name a
+// framework of its own (model.Task.AgentFramework) and override the
+// deployment-wide default, so which one a run needs is not known until
+// that run comes up; and both frameworks' credentials are settable from
+// the UI now (pkg/ui's "Agent frameworks" section, writing the
+// secrets.GeminiAPIKeySecret/ClaudeOAuthTokenSecret entries this reads),
+// so the key a run authenticates with is whatever is in the secrets
+// database at the moment it is dispatched -- not whatever a file held
+// when this process started.
+//
+// The cost is one client construction per dispatch instead of one per
+// process, which is nothing next to the run itself: gemini.New builds an
+// HTTP client, and claude.New builds a struct.
+func agentFrameworks(cfg config, store *model.Store, secretStore *secrets.Store) func(context.Context, string) (agent.Framework, error) {
+	return func(ctx context.Context, framework string) (agent.Framework, error) {
+		if framework == "" {
+			framework = defaultAgentFramework(ctx, store, cfg)
 		}
-		if cfg.claudeOAuthTokenFile == "" {
-			return nil, fmt.Errorf("-claude-oauth-token-file is required when -agent-framework is %q", model.AgentFrameworkClaude)
+		switch framework {
+		case model.AgentFrameworkClaude:
+			return buildClaudeFramework(ctx, cfg, secretStore)
+		case model.AgentFrameworkGemini:
+			return buildGeminiFramework(ctx, cfg, secretStore)
+		default:
+			// Unreachable through the UI (ui.UpdateSettings and
+			// ui.CreateTask both validate against the same two names),
+			// so this is a store written by hand or by a newer build --
+			// worth naming rather than silently running the default.
+			return nil, fmt.Errorf("unknown agent framework %q: expected %q or %q",
+				framework, model.AgentFrameworkGemini, model.AgentFrameworkClaude)
 		}
-		oauthToken, err := readTrimmedFile(cfg.claudeOAuthTokenFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading -claude-oauth-token-file: %w", err)
-		}
-		grainBinaryPath, err := os.Executable()
-		if err != nil {
-			return nil, fmt.Errorf("resolving this binary's own path, for claude's --mcp-config: %w", err)
-		}
-		opts := []claude.Option{claude.WithOAuthToken(oauthToken)}
-		if cfg.konturSandboxes {
-			// Only meaningful with -kontur-sandboxes: a run dispatched
-			// onto a plain orchestrator.HostSandboxes directory reaches it
-			// through RunConfig.SandboxRoot instead (RunDispatch, via
-			// cycle.go's own rootedSandbox/vmNamedSandbox split), which
-			// needs none of this.
-			opts = append(opts, claude.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
-		}
-		return claude.New(claudePath, grainBinaryPath, opts...), nil
-	default:
-		apiKey, err := readTrimmedFile(cfg.geminiAPIKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("reading -gemini-api-key-file: %w", err)
-		}
-		f, err := gemini.New(ctx, apiKey, gemini.WithModel(cfg.geminiModel))
-		if err != nil {
-			return nil, fmt.Errorf("building the Gemini agent: %w", err)
-		}
-		return f, nil
 	}
+}
+
+// defaultAgentFramework is the deployment-wide setting a task that named
+// no framework of its own is dispatched with. Read from the store on
+// every dispatch, not from cfg: unlike the seed-only settings loadConfig
+// folds in at startup, this one is a live choice an operator makes in
+// Settings and expects the next run to honour, and re-reading one row
+// per dispatch is far cheaper than the run it precedes. cfg's own value
+// (the -agent-framework flag, seeded into that row the first time) is
+// the fallback for a store that cannot be read or has no config row yet.
+func defaultAgentFramework(ctx context.Context, store *model.Store, cfg config) string {
+	if store != nil {
+		if stored, err := store.GetConfig(ctx); err == nil && stored != nil && stored.AgentFramework != "" {
+			return stored.AgentFramework
+		}
+	}
+	if cfg.agentFramework == "" {
+		return model.AgentFrameworkGemini
+	}
+	return cfg.agentFramework
+}
+
+func buildGeminiFramework(ctx context.Context, cfg config, secretStore *secrets.Store) (agent.Framework, error) {
+	apiKey, err := agentCredential(ctx, secretStore, secrets.GeminiAPIKeySecret, cfg.geminiAPIKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading the Gemini API key: %w", err)
+	}
+	if apiKey == "" {
+		return nil, errors.New("no Gemini API key is configured: set one in the UI " +
+			"(Settings -> Agent frameworks), or point -gemini-api-key-file at a file holding one")
+	}
+	f, err := gemini.New(ctx, apiKey, gemini.WithModel(cfg.geminiModel))
+	if err != nil {
+		return nil, fmt.Errorf("building the Gemini agent: %w", err)
+	}
+	return f, nil
+}
+
+func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.Store) (agent.Framework, error) {
+	claudePath := cfg.claudePath
+	if claudePath == "" {
+		resolved, err := exec.LookPath("claude")
+		if err != nil {
+			return nil, fmt.Errorf("resolving the claude binary (-claude-path is unset, and none found on $PATH): %w", err)
+		}
+		claudePath = resolved
+	}
+	// Checked here, so a task dispatched with no token ends as a
+	// setup-failed run naming what is missing (orchestrator.runOne's own
+	// guard), rather than as a claude subprocess failing to authenticate
+	// several minutes later with a message about credentials that says
+	// nothing about where grain reads them from.
+	token, err := agentCredential(ctx, secretStore, secrets.ClaudeOAuthTokenSecret, cfg.claudeOAuthTokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading the Claude Code OAuth token: %w", err)
+	}
+	if token == "" {
+		return nil, errors.New("no Claude Code OAuth token is configured: set one in the UI " +
+			"(Settings -> Agent frameworks), or point -claude-oauth-token-file at a file holding one")
+	}
+	grainBinaryPath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolving this binary's own path, for claude's --mcp-config: %w", err)
+	}
+	// Resolved again inside the Run rather than closing over the token
+	// just read: a token replaced in Settings between this construction
+	// and the subprocess actually starting is the one that should be
+	// used, and re-reading it is one SQLite row.
+	opts := []claude.Option{
+		claude.WithOAuthTokenFunc(func(ctx context.Context) (string, error) {
+			return agentCredential(ctx, secretStore, secrets.ClaudeOAuthTokenSecret, cfg.claudeOAuthTokenFile)
+		}),
+	}
+	if cfg.konturSandboxes {
+		// Only meaningful with -kontur-sandboxes: a run dispatched
+		// onto a plain orchestrator.HostSandboxes directory reaches it
+		// through RunConfig.SandboxRoot instead (RunDispatch, via
+		// cycle.go's own rootedSandbox/vmNamedSandbox split), which
+		// needs none of this.
+		opts = append(opts, claude.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
+	}
+	return claude.New(claudePath, grainBinaryPath, opts...), nil
+}
+
+// agentCredential reads the credential one agent framework runs as: the
+// secrets database first -- the one the UI writes (pkg/ui's
+// handleSetAgentKey), so a key pasted into Settings takes effect on the
+// next dispatch with no restart and no file to place -- and only then
+// the startup flag naming a file, which is how a deployment seeded one
+// before the UI could (scripts/setup.sh's own seed_secret) and how a
+// bare `grain daemon` run outside a deployment still can.
+//
+// "" with no error means this deployment has neither, which is a state
+// the daemon now runs in perfectly happily: the UI is up, and that is
+// where the missing key gets set. A secret that is simply absent is not
+// an error either -- secrets.Store.Resolve reports one as such, and
+// every deployment that has only ever used the file has exactly that.
+func agentCredential(ctx context.Context, secretStore *secrets.Store, secret, file string) (string, error) {
+	if secretStore != nil {
+		if value, err := secretStore.Resolve(ctx, secret); err == nil {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed, nil
+			}
+		}
+	}
+	if file == "" {
+		return "", nil
+	}
+	value, err := readTrimmedFile(file)
+	if errors.Is(err, fs.ErrNotExist) {
+		// A path that names nothing is the same "nothing configured this
+		// way" as an unset flag: scripts/setup.sh passes
+		// -gemini-api-key-file unconditionally, pointing at a file it
+		// only writes once a key exists to write.
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 // reconcilerDown reports whether runDaemon has given up entirely --
@@ -1006,14 +1130,52 @@ func openStore(dataDir string) (*model.Store, *sql.DB, error) {
 	return store, db, nil
 }
 
-// liveTranscriptDir returns the ui.LiveTranscript reader matching
-// whichever agent.Framework buildAgentFramework built for cfg -- see
-// startUIServer's own comment on why the two must agree.
-func liveTranscriptDir(cfg config, transcriptDir string) ui.LiveTranscript {
-	if cfg.agentFramework == model.AgentFrameworkClaude {
-		return claude.LiveTranscriptDir{Dir: transcriptDir}
+// liveTranscriptDir returns the ui.LiveTranscript reader for
+// transcriptDir. It can no longer be one framework's reader chosen at
+// startup: a task carries its own model.Task.AgentFramework now, so two
+// runs live in this same directory in two different formats
+// (RunConfig.TranscriptPath's own doc comment), and picking by
+// deployment default would leave every overriding task's live transcript
+// blank until it finished.
+//
+// So the format is decided per file, by what is in it, rather than per
+// deployment -- see liveTranscripts.Tail.
+func liveTranscriptDir(transcriptDir string) ui.LiveTranscript {
+	return liveTranscripts{
+		dir:    transcriptDir,
+		claude: claude.LiveTranscriptDir{Dir: transcriptDir},
+		gemini: gemini.LiveTranscriptDir{Dir: transcriptDir},
 	}
-	return gemini.LiveTranscriptDir{Dir: transcriptDir}
+}
+
+// liveTranscripts reads a still-running run's transcript-in-progress
+// with whichever framework's reader matches the file it finds.
+type liveTranscripts struct {
+	dir    string
+	claude claude.LiveTranscriptDir
+	gemini gemini.LiveTranscriptDir
+}
+
+// Tail sniffs the file rather than being told which framework wrote it.
+// The two formats are trivially distinguishable and the daemon has no
+// per-run record of the framework to consult anyway: agent/claude mirrors
+// claude's own --output-format stream-json, so the file opens with a JSON
+// object, while agent/gemini tees an already-human-readable narrative,
+// which never does. A file that is neither (empty so far, or a partial
+// first line) reads as the gemini form, whose Tail is a plain trim -- the
+// same "nothing to show yet" a caller already handles.
+func (l liveTranscripts) Tail(runID string) (string, bool, error) {
+	data, err := os.ReadFile(filepath.Join(l.dir, runID))
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "{") {
+		return l.claude.Tail(runID)
+	}
+	return l.gemini.Tail(runID)
 }
 
 // startGitProxy serves gitproxy.NewHandler on a random port, and returns
@@ -1117,16 +1279,16 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 			"git-proxy-audit": systemlog.File{Path: filepath.Join(cfg.dataDir, "state", "git-proxy", "audit.log")},
 			"config-sync":     systemlog.Journalctl{Unit: "grain-v2-config-sync.service"},
 		},
-		// liveTranscriptDir reads back whatever buildAgentFramework's own
-		// choice of Framework.Run has mirrored so far into
-		// transcriptDir/<runID> for a still-running attempt (transcriptDir's
-		// own doc comment on the shared directory convention).
-		// gemini.LiveTranscriptDir and claude.LiveTranscriptDir read two
-		// different file formats (RunConfig.TranscriptPath's own doc
-		// comment) and are not interchangeable, so this has to agree with
-		// cfg.agentFramework -- the same setting buildAgentFramework
-		// switches on in runDaemon, cfg being the one thing both share.
-		LiveTranscripts: liveTranscriptDir(cfg, transcriptDir),
+		// liveTranscriptDir reads back whatever the Framework driving a
+		// still-running attempt has mirrored so far into
+		// transcriptDir/<runID> (transcriptDir's own doc comment on the
+		// shared directory convention). gemini.LiveTranscriptDir and
+		// claude.LiveTranscriptDir read two different file formats
+		// (RunConfig.TranscriptPath's own doc comment), and with a task
+		// able to override this deployment's framework both formats can
+		// be in this one directory at once -- so the reader wired here
+		// picks between them per file rather than per deployment.
+		LiveTranscripts: liveTranscriptDir(transcriptDir),
 		// orchestrator.ChecksUnavailable reads process-lifetime state
 		// RunCycle's own reconcile loop sets the first time GitHub 403s a
 		// check-runs read against this deployment's credential -- see its

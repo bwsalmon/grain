@@ -198,12 +198,16 @@ func withStore(t *testing.T, dir string, fn func(*model.Store, context.Context))
 	fn(store, ctx)
 }
 
-// scriptedFramework turns a scripted response sequence into the
-// func() agent.Framework factory orchestrator.Deps wants, one fresh
-// gemini.NewForTest per dispatch -- duplicated from pkg/orchestrator's own
-// live_test.go helper of the same name for the same reason openCLIStore is.
-func scriptedFramework(script []*genai.GenerateContentResponse) func() agent.Framework {
-	return func() agent.Framework { return gemini.NewForTest(&scriptedGenerator{responses: script}) }
+// scriptedFramework turns a scripted response sequence into the factory
+// orchestrator.Deps.Framework wants, one fresh gemini.NewForTest per
+// dispatch -- duplicated from pkg/orchestrator's own live_test.go helper
+// of the same name for the same reason openCLIStore is. The framework
+// name a real deployment would switch on is ignored: there is one
+// scripted framework here, and every task in these tests takes it.
+func scriptedFramework(script []*genai.GenerateContentResponse) func(context.Context, string) (agent.Framework, error) {
+	return func(context.Context, string) (agent.Framework, error) {
+		return gemini.NewForTest(&scriptedGenerator{responses: script}), nil
+	}
 }
 
 func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {

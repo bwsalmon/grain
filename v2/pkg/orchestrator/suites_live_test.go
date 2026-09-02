@@ -53,7 +53,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent"
 	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
@@ -182,7 +181,7 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
-		Framework: func() agent.Framework { return framework },
+		Framework: orchestrator.StaticFramework(framework),
 	}
 
 	pass1TaskID := suiteRun.PassTasks(1)[0].TaskID

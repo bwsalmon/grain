@@ -111,3 +111,12 @@ export function lastBaseForRepo(tasks, repo) {
   }
   return latest ? latest.base : "";
 }
+
+// frameworkLabel names an agent framework the way the UI talks about it
+// -- model.AgentFrameworkGemini/AgentFrameworkClaude are wire values, not
+// display text, and two panes (the per-task picker on New task, the
+// "Agent framework" row on a task's detail) would otherwise each spell
+// them out and drift.
+export function frameworkLabel(framework) {
+  return framework === "claude" ? "Claude" : "Gemini";
+}
