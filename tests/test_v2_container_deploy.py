@@ -194,7 +194,13 @@ def test_the_dockerfile_carries_every_binary_grain_shells_out_to():
     for pkg in ("git", "openssh-client", "ca-certificates", "systemd"):
         assert pkg in text, f"{pkg} is not installed in the runtime image"
     assert "konturctl" in text
+    # Both agent CLIs, not just one: the framework a run uses is a live
+    # per-task choice, so an image with only one of them fails every run
+    # that chooses the other. agy was the one nothing installed anywhere
+    # until bwsalmon/agents#645 -- an operator's manual step on every
+    # host, for the *default* framework.
     assert "claude.ai/install.sh" in text
+    assert "antigravity.google/cli/install.sh" in text
     # CAP_NET_BIND_SERVICE reaches a non-root process in a container only
     # through a file capability -- --cap-add alone grants it nothing, so
     # the default -ui-addr (port 80) would fail to bind without this.

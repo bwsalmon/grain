@@ -28,8 +28,9 @@
 #      published to GHCR by ../../.github/workflows/build-artifacts.yml
 #      on every commit -- instead of building a binary here
 #      (bwsalmon/agents#645). That image carries grain *and* every binary
-#      it shells out to: git, the docker CLI, konturctl and the claude
-#      CLI (v2/Dockerfile). What this host has to have shrinks to `git`
+#      it shells out to: git, the docker CLI, konturctl, and both agent
+#      CLIs -- claude and agy (v2/Dockerfile). What this host has to have
+#      shrinks to `git`
 #      and `docker`, which this script still installs itself if a vanilla
 #      Debian VM doesn't have them (ensure_git, ensure_docker;
 #      bwsalmon/agents#617) -- no `make`, no Go or Node toolchain, no
@@ -195,18 +196,15 @@ GRAIN_GITHUB_APP_PRIVATE_KEY="${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 
 GRAIN_GEMINI_API_KEY="${GRAIN_GEMINI_API_KEY:-}"
 GRAIN_GEMINI_MODEL="${GRAIN_GEMINI_MODEL:-}"
-# Where the Antigravity CLI (agy) lives *on this host*. Unlike the claude
-# CLI, agy is not in the deployment image at all -- this repo has no
-# verified installer URL for it (v2/README.md, "The agent runtime is a
-# CLI now"), so there is nothing to bake in -- which makes this path the
-# only way the default agent framework ever gets a binary to run: what it
-# names is bind-mounted into the container at the same path and passed as
-# -agy-path. Empty falls back to resolving "agy" inside the container,
-# which finds nothing unless an image was built with one.
+# Path to an Antigravity CLI (agy) on *this host* to run instead of the
+# one baked into the image -- GRAIN_CLAUDE_PATH's exact counterpart for
+# the other agent framework, and empty for the same reason: the image
+# carries one (v2/Dockerfile), so an ordinary deployment resolves "agy"
+# inside the container with nothing to install and nothing per-host to
+# keep in step with the build.
 #
-# ~/.gemini/bin/agy is where its own installer puts it. verify_agent_cli
-# below says all this out loud, non-fatally, rather than letting the
-# daemon fail at its first dispatch.
+# Set, this host's copy is bind-mounted into the container at that same
+# path and the daemon is pointed at it (-agy-path).
 GRAIN_AGY_PATH="${GRAIN_AGY_PATH:-}"
 GRAIN_MAX_AGENT_TURNS="${GRAIN_MAX_AGENT_TURNS:-}"
 
@@ -419,11 +417,10 @@ Recognized variables:
                              (default: empty, use the image's). What it names
                              is bind-mounted into the container at the same
                              path
-  GRAIN_AGY_PATH            path on THIS HOST to the Antigravity CLI (agy) the
-                             default agent framework runs as a subprocess.
-                             Bind-mounted in the same way -- and, unlike claude,
-                             the only way to have one at all: agy is not in the
-                             image (no installer to bake in)
+  GRAIN_AGY_PATH            path on THIS HOST to an Antigravity CLI (agy) to run
+                             instead of the image's own, for the other agent
+                             framework. Bind-mounted the same way (default:
+                             empty, use the image's)
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
@@ -1877,30 +1874,71 @@ format_target_repo_if_empty() {
 
 # --- 8. the systemd unit ---------------------------------------------------
 
-# The default agent framework (agent/antigravity) runs Google's
-# Antigravity CLI as a subprocess, so unlike the in-process Gemini
-# runtime it replaced it needs a binary on this host. Report a missing
-# one here, where the log is already being read, rather than letting
-# grain-daemon.service come up and fail at its first dispatch with
-# "resolving the agy binary".
+# Both agent frameworks run a CLI as a subprocess -- agent/antigravity
+# execs `agy`, agent/claude execs `claude` -- and the deployment image
+# carries both (v2/Dockerfile). This checks that what is about to be
+# deployed actually does, rather than letting grain-daemon.service come
+# up and fail at its first dispatch with "executable file not found in
+# $PATH".
 #
-# Never fatal: this script is re-run on every deploy generation, a host
-# may legitimately be running -agent-framework claude instead, and an
-# install that lands after this point still works with no further
-# action. Warning and carrying on is the same trade ensure_ops_agent
-# makes.
-verify_agent_cli() {
-  if [ -n "$GRAIN_AGY_PATH" ]; then
-    [ -x "$GRAIN_AGY_PATH" ] && return
-    log "WARNING: GRAIN_AGY_PATH=$GRAIN_AGY_PATH is not an executable file on this host."
+# Asked of the image, not of this host: that is where they live now. The
+# exception is an operator-named copy (GRAIN_CLAUDE_PATH/GRAIN_AGY_PATH),
+# which is a host path by definition -- docker_run_args mounts it in, and
+# a path that names nothing executable out here is worth saying out loud
+# here rather than discovering at dispatch.
+#
+# Never fatal, and reported rather than enforced: which framework a run
+# uses is a live UI choice, a deployment may legitimately only ever use
+# one of them, and an image missing one still runs everything else. The
+# readiness summary says it again at the end.
+agent_cli_in_image() {
+  docker run --rm --entrypoint sh "$GRAIN_IMAGE_REF" -c "command -v $1" 2>/dev/null | head -n1
+}
+
+# report_agent_cli renders one agent CLI's line for the readiness summary:
+# where it resolves, or MISSING and why. $1 is the binary, $2 the
+# operator's override for it, $3 that override's variable name.
+report_agent_cli() {
+  local name="$1" override="$2" var="$3" path
+  if [ -n "$override" ]; then
+    if [ -x "$override" ]; then
+      printf '%s (mounted from this host)\n' "$override"
+    else
+      printf 'MISSING (%s names nothing executable on this host)\n' "$var"
+    fi
+    return
   fi
-  log "WARNING: no Antigravity CLI (agy) for this deployment to run. The default agent"
-  log "         framework runs it as a subprocess, so dispatches will fail until there is"
-  log "         one. Unlike the claude CLI, agy is not in the deployment image -- this repo"
-  log "         has no verified installer URL to bake one in with -- so install it on this"
-  log "         host (its own installer targets ~/.gemini/bin/agy) and set GRAIN_AGY_PATH,"
-  log "         which is what mounts it into the container. A deployment running"
-  log "         -agent-framework claude instead can ignore this."
+  path="$(agent_cli_in_image "$name")"
+  if [ -n "$path" ]; then
+    printf '%s (in %s)\n' "$path" "$GRAIN_IMAGE_REF"
+  else
+    printf 'MISSING\n'
+  fi
+}
+
+verify_agent_cli() {
+  local name path override
+  for name in agy claude; do
+    case "$name" in
+      agy) override="$GRAIN_AGY_PATH" ;;
+      claude) override="$GRAIN_CLAUDE_PATH" ;;
+    esac
+    if [ -n "$override" ]; then
+      if [ -x "$override" ]; then
+        continue
+      fi
+      log "WARNING: the $name path this deployment was given ($override) is not an executable"
+      log "         file on this host. docker_run_args mounts it into the container at that"
+      log "         same path, so a dispatch using it will fail until it is one."
+      continue
+    fi
+    path="$(agent_cli_in_image "$name")"
+    [ -n "$path" ] && continue
+    log "WARNING: $GRAIN_IMAGE_REF carries no \"$name\" binary. The agent framework that runs"
+    log "         it as a subprocess cannot dispatch until it does -- deploy an image built"
+    log "         with it (v2/Dockerfile installs both agent CLIs), or set the matching"
+    log "         GRAIN_AGY_PATH/GRAIN_CLAUDE_PATH to a copy on this host."
+  done
 }
 
 write_systemd_units() {
@@ -2242,23 +2280,20 @@ enable_services() {
 # list` holds to.
 report_readiness() {
   local github="MISSING" gemini="MISSING" claude="MISSING" minter="MISSING" daemon ready=1
-  # The binary, not the token: they are independent, and a deployment
-  # with the token set and no CLI is exactly the state that fails every
-  # claude run with "executable file not found in $PATH".
+  # The binaries, not the tokens: they are independent, and a deployment
+  # with a token set and no CLI is exactly the state that fails every run
+  # of that framework with "executable file not found in $PATH". Both are
+  # reported, because which framework a run uses is a live per-task
+  # choice -- a deployment is only really ready when both can run.
   #
-  # Asked of the *image*, not of this host: that is where the CLI lives
-  # now (v2/Dockerfile), so `command -v claude` out here would report a
-  # host that has nothing to do with whether a dispatch can run. The
-  # exception is an operator-named copy, which is a host path by
-  # definition -- docker_run_args mounts it in.
-  local claude_cli="MISSING"
-  if [ -n "$GRAIN_CLAUDE_PATH" ]; then
-    [ -x "$GRAIN_CLAUDE_PATH" ] && claude_cli="$GRAIN_CLAUDE_PATH (mounted from this host)" || claude_cli="MISSING (GRAIN_CLAUDE_PATH names nothing executable on this host)"
-  elif claude_cli="$(docker run --rm --entrypoint sh "$GRAIN_IMAGE_REF" -c 'command -v claude' 2>/dev/null)" && [ -n "$claude_cli" ]; then
-    claude_cli="$claude_cli (in $GRAIN_IMAGE_REF)"
-  else
-    claude_cli="MISSING"
-  fi
+  # Asked of the *image*, not of this host: that is where they live now
+  # (v2/Dockerfile), so `command -v` out here would report a host that
+  # has nothing to do with whether a dispatch can run. The exception is
+  # an operator-named copy, which is a host path by definition --
+  # docker_run_args mounts it in.
+  local claude_cli agy_cli
+  claude_cli="$(report_agent_cli claude "$GRAIN_CLAUDE_PATH" GRAIN_CLAUDE_PATH)"
+  agy_cli="$(report_agent_cli agy "$GRAIN_AGY_PATH" GRAIN_AGY_PATH)"
 
   if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
      && [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ]; then
@@ -2290,6 +2325,7 @@ report_readiness() {
   echo "    Gemini key:        $gemini"
   echo "    Claude token:      $claude"
   echo "    claude CLI:        $claude_cli"
+  echo "    agy CLI:           $agy_cli"
   echo "    GCP minter key:    $minter"
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: unrestricted -- any repo a task names is allowed>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
@@ -2311,16 +2347,23 @@ report_readiness() {
     echo "       but every dispatched run fails at setup. Set one in the UI (Settings ->"
     echo "       Agent frameworks) or re-run with GRAIN_GEMINI_API_KEY/GRAIN_CLAUDE_CODE_OAUTH_TOKEN."
   fi
+  # Not a readiness failure on its own: a deployment that only ever uses
+  # one framework neither needs nor misses the other. Still worth a line
+  # each, because nothing in the UI says a framework it offers cannot run
+  # here.
   case "$claude_cli" in
     MISSING*)
-      # Not a readiness failure: a gemini deployment neither needs nor
-      # misses this. It is still worth a line, because nothing in the UI
-      # says the framework it offers cannot run here.
-      echo "    -- no claude CLI in $GRAIN_IMAGE_REF: the \"claude\" agent framework cannot run"
-      echo "       until there is one (Settings -> Agent framework, and the per-task override,"
-      echo "       still offer it). That image was built with INSTALL_CLAUDE_CLI=0 or its"
-      echo "       install failed in CI -- deploy a tag that has one, or point"
-      echo "       GRAIN_CLAUDE_PATH at a copy on this host."
+      echo "    -- no claude CLI: the \"claude\" agent framework cannot run until there is one"
+      echo "       (Settings -> Agent framework, and the per-task override, still offer it)."
+      echo "       Deploy an image built with it, or point GRAIN_CLAUDE_PATH at a copy here."
+      ;;
+  esac
+  case "$agy_cli" in
+    MISSING*)
+      echo "    -- no agy CLI: the \"antigravity\" agent framework cannot run until there is"
+      echo "       one, and it is the default -- so a deployment in this state dispatches"
+      echo "       nothing unless every task overrides the framework. Deploy an image built"
+      echo "       with it, or point GRAIN_AGY_PATH at a copy here."
       ;;
   esac
   if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then

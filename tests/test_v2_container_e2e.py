@@ -283,9 +283,13 @@ def test_the_image_carries_every_binary_the_daemon_shells_out_to():
     first dispatch, the first kontur VM, or the first look at the Logs
     pane, which is exactly the class of failure putting them in an image
     was meant to end.
+
+    Both agent CLIs are in that list on purpose: which framework a run
+    uses is a live per-task choice, so an image carrying one of them is
+    an image that fails every run choosing the other.
     """
     script = (
-        "for b in git bash konturctl docker claude journalctl ssh curl; do "
+        "for b in git bash konturctl docker claude agy journalctl ssh curl; do "
         'command -v "$b" >/dev/null || { echo "MISSING $b"; exit 1; }; '
         "done; echo all-present"
     )

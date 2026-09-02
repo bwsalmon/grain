@@ -1622,15 +1622,20 @@ which `setup.sh` bind-mounts into the container at that same path.
 
 Replacing the home-grown Gemini runtime with the Antigravity CLI ("The
 agent runtime is a CLI now", above) gave the other framework the same
-requirement: `agy` is a binary too. It is in neither the image nor the
-host install, because this repo has no verified installer URL for it to
-run -- so `scripts/setup.sh` checks for it instead (`verify_agent_cli`)
-and warns, loudly and non-fatally, when `GRAIN_AGY_PATH` does not name an
-executable on the host (which is what a container deployment has to have,
-since that path is what gets mounted in). `buildAntigravityFramework` fails
-the same way `buildClaudeFramework` does when it is missing: naming the
-install, not the `$PATH` lookup, so an operator reads a missing package
-rather than a broken grain.
+requirement: `agy` is a binary too, and for a while it was the one
+nothing installed anywhere -- an operator's own manual step on every
+host, for the *default* framework, which made "this deployment cannot
+dispatch anything" a state it could sit in indefinitely. `v2/Dockerfile`
+installs both agent CLIs now (bwsalmon/agents#645), from their own
+installers, in CI: an image carrying one of them is an image that fails
+every run choosing the other, and which one a run chooses is a live
+per-task decision. `scripts/setup.sh` checks the image for both
+(`verify_agent_cli`) and reports each in its readiness summary;
+`GRAIN_AGY_PATH`/`GRAIN_CLAUDE_PATH` still override either with a copy on
+the host, bind-mounted in at the path they name.
+`buildAntigravityFramework` fails the same way `buildClaudeFramework`
+does when one is missing: naming the install, not the `$PATH` lookup, so
+an operator reads a missing binary rather than a broken grain.
 
 `grain-daemon.service` also exports a `HOME` that exists now
 (`$GRAIN_DATA_DIR/home`). `$GRAIN_USER` is created `--no-create-home`,
@@ -1897,10 +1902,12 @@ what grain is built from, but it is still where `setup.sh` itself comes
 from (and re-execs from, mid-run), where `packer/kontur`'s guest and OCI
 image builds run from, and what the self-debug capability reads grain's
 own source out of — mounted read-only into the container for that last
-one. `agy` is the other: the Antigravity CLI is not in the image because
-this repo has no verified installer URL to bake one in with ("The agent
-runtime is a CLI now", above), so `GRAIN_AGY_PATH` names a copy on the
-host and `setup.sh` bind-mounts it in at that same path.
+one. Both agent CLIs are in the image, not on the host: `claude` and `agy`
+alike, installed from their own installers at build time ("Two agent
+frameworks, either per task", above). `GRAIN_CLAUDE_PATH` and
+`GRAIN_AGY_PATH` still name a copy on the host when a deployment has to
+pin a particular version, and `setup.sh` bind-mounts whatever they name
+at that same path.
 
 ## Upgrading from the UI
 

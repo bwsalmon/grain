@@ -816,9 +816,10 @@ func buildAntigravityFramework(ctx context.Context, cfg config, secretStore *sec
 			// switched frameworks in Settings (where nothing mentions a
 			// CLI) reads a bare "executable file not found in $PATH" as
 			// grain being broken rather than as a host missing a package.
-			return nil, fmt.Errorf("the Antigravity CLI (agy) is not installed on this host: %w -- "+
-				"re-run scripts/setup.sh, install it by hand (its own installer targets "+
-				"~/.gemini/bin/agy), or point -agy-path at an existing copy", err)
+			return nil, fmt.Errorf("the Antigravity CLI (agy) is not installed: %w -- "+
+				"the deployment image carries one (v2/Dockerfile), so this is either an image "+
+				"built without it or a grain running outside one; deploy an image that has it, "+
+				"or point -agy-path at an existing copy", err)
 		}
 		agyPath = resolved
 	}
@@ -865,18 +866,19 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 	if claudePath == "" {
 		resolved, err := exec.LookPath("claude")
 		if err != nil {
-			// Named as an install, not as a lookup failure. Unlike the
-			// Gemini framework, whose every requirement is a credential
-			// the UI can set, this one needs a binary on the host -- and
-			// an operator who has just switched frameworks in Settings
-			// (where nothing mentions a CLI at all) reads a bare
-			// "executable file not found in $PATH" as grain being broken
-			// rather than as a host that is missing a package.
-			// scripts/setup.sh installs it, so re-running a deploy is
-			// the fix for a deployment that predates it.
-			return nil, fmt.Errorf("the claude CLI is not installed on this host: %w -- "+
-				"re-run scripts/setup.sh (it installs the CLI), install it by hand "+
-				"(https://claude.ai/install.sh), or point -claude-path at an existing copy", err)
+			// Named as an install, not as a lookup failure. Both agent
+			// frameworks need a binary, and an operator who has just
+			// switched frameworks in Settings (where nothing mentions a
+			// CLI at all) reads a bare "executable file not found in
+			// $PATH" as grain being broken rather than as something
+			// missing an install. The deployment image carries both
+			// (v2/Dockerfile), so on a real deployment this means an
+			// image built without it -- not a host to go install
+			// anything on.
+			return nil, fmt.Errorf("the claude CLI is not installed: %w -- "+
+				"the deployment image carries one (v2/Dockerfile), so this is either an image "+
+				"built without it or a grain running outside one; deploy an image that has it, "+
+				"or point -claude-path at an existing copy", err)
 		}
 		claudePath = resolved
 	}

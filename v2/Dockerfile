@@ -34,20 +34,22 @@
 #                     those VMs. Built here from third_party/kontur, the
 #                     same vendored copy the sandbox image is built from,
 #                     so the two cannot drift apart in a deployment
-#   claude            agent/claude runs the Claude Code CLI as a
-#                     subprocess. Installed here rather than by
-#                     setup.sh's own install_claude_cli, which this
-#                     replaces: a CLI baked into the image is one whose
-#                     presence is settled at build time, in CI, instead
-#                     of depending on every deployed host being able to
-#                     reach claude.ai at deploy time
+#   claude, agy       the two agent CLIs a dispatch actually runs:
+#                     agent/claude execs the Claude Code CLI,
+#                     agent/antigravity execs Google's Antigravity CLI.
+#                     Both frameworks are a live, per-task choice
+#                     (README.md, "Two agent frameworks, either per
+#                     task"), so an image carrying one of them is an
+#                     image that fails every run choosing the other --
+#                     they belong here together or not at all.
 #
-# The one runtime dependency deliberately *not* here is `agy`, the
-# Antigravity CLI agent/antigravity runs: this repo has no verified
-# installer URL for it (README.md, "The agent runtime is a CLI now"), so
-# there is nothing to bake in. setup.sh bind-mounts an operator's own
-# copy into the container instead when GRAIN_AGY_PATH names one, and
-# warns exactly as it did before when it does not.
+#                     Installed here rather than by setup.sh's own
+#                     install_claude_cli, which this replaces: a CLI
+#                     baked into the image has its presence settled at
+#                     build time, in CI, instead of depending on every
+#                     deployed host being able to reach claude.ai and
+#                     antigravity.google at deploy time -- and on
+#                     depending on it again on every re-deploy, forever.
 #
 # Build it from the *repository root*, not from v2/:
 #
@@ -195,6 +197,44 @@ RUN if [ "$INSTALL_CLAUDE_CLI" = "1" ]; then \
 		test -x /opt/claude/.local/bin/claude; \
 		ln -sf /opt/claude/.local/bin/claude /usr/local/bin/claude; \
 		chmod -R a+rX /opt/claude; \
+	fi
+
+# The Antigravity CLI, the same way and for the same reasons: fetched to
+# a file rather than piped into a shell, installed under a fixed
+# world-readable $HOME (its installer, like claude's, puts the binary in
+# $HOME/.local/bin), symlinked onto the default PATH so the daemon's own
+# bare exec.LookPath("agy") finds it, and fatal on failure so a build
+# that could not fetch it is re-run rather than shipped.
+#
+# The installer verifies its own SHA512 of the binary it downloads, which
+# is why there is no checksum written down here to go stale.
+#
+# Where it lands is *found* rather than assumed, unlike claude's above:
+# that path (~/.local/bin) is one this repo has proven by building the
+# image, and this one is documented only by Google, so a layout change on
+# their side should move the symlink rather than fail the build for a
+# binary that is actually there. `agy --version` at the end is what makes
+# "found something named agy" mean "installed something that runs".
+#
+# This is what setup.sh's verify_agent_cli used to warn about on every
+# deploy: the repo had no installer URL for agy, so the default agent
+# framework's binary was the operator's to install by hand on every host,
+# and a deployment could offer "antigravity" in Settings and fail every
+# run that chose it. GRAIN_AGY_PATH still overrides this with a copy on
+# the host, for a deployment pinning a particular version.
+ARG INSTALL_AGY_CLI=1
+RUN if [ "$INSTALL_AGY_CLI" = "1" ]; then \
+		set -eu; \
+		mkdir -p /opt/antigravity; \
+		curl -fsSL --max-time 120 https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh; \
+		test -s /tmp/agy-install.sh; \
+		HOME=/opt/antigravity bash /tmp/agy-install.sh; \
+		rm -f /tmp/agy-install.sh; \
+		agy="$(find /opt/antigravity -type f -name agy -perm -u+x | head -n1)"; \
+		test -n "$agy"; \
+		ln -sf "$agy" /usr/local/bin/agy; \
+		chmod -R a+rX /opt/antigravity; \
+		agy --version >/dev/null; \
 	fi
 
 # No USER of its own. The unit scripts/setup.sh writes always passes
