@@ -86,7 +86,7 @@ func asyncDeps(t *testing.T, store *model.Store, fw *blockingFramework, maxConcu
 		Store:         store,
 		Client:        client,
 		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     func() agent.Framework { return fw },
+		Framework:     orchestrator.StaticFramework(fw),
 		MaxConcurrent: maxConcurrent,
 		Runs:          runs,
 	}, runs
