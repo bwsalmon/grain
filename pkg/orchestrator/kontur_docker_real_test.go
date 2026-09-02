@@ -74,6 +74,21 @@ import (
 // of these says which.
 func konturDockerRealTestPrereqs(t *testing.T) {
 	t.Helper()
+	// Opt-in rather than "run wherever the host happens to allow it".
+	// GitHub's Linux runners do expose /dev/kvm, so before this gate the
+	// checks below passed in tests.yml's go-test job too and this ~5.6
+	// minute suite ran twice per commit -- once there, once in the
+	// real-vm job built for it. The go-test copy had no timeout of its
+	// own, so it ran against `go test`'s 600s per-package default with
+	// about 1.8x headroom, and lost that race often enough to redden PRs
+	// that had not touched any of this (bwsalmon/grain#519).
+	//
+	// Coverage is unchanged: real-vm sets this and asserts both tests
+	// reported "--- PASS", so dropping the variable there fails that job
+	// loudly rather than quietly skipping the suite it exists to run.
+	if os.Getenv("GRAIN_REAL_VM_TESTS") == "" {
+		t.Skip("GRAIN_REAL_VM_TESTS not set; this suite runs in tests.yml's real-vm job (set it to 1 to run locally)")
+	}
 	if runtime.GOOS != "linux" {
 		t.Skip("real kontur/docker VMs are only wired up for Linux hosts")
 	}
