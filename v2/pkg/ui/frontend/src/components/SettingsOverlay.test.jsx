@@ -27,13 +27,33 @@ describe("SettingsOverlay", () => {
     api.mockReset();
   });
 
-  it("loads settings and populates the form with them", async () => {
+  it("loads settings and populates the General form with them", async () => {
     api.mockResolvedValueOnce(settings);
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
     expect(screen.getByDisplayValue("2")).toBeInTheDocument();
+  });
+
+  it("loads settings and populates the Agents form with them", async () => {
+    api.mockResolvedValueOnce(settings);
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
+
     expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Antigravity" })).toBeChecked();
+  });
+
+  it("keeps agent framework, model and keys off the General tab", async () => {
+    api.mockResolvedValueOnce(settings);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.queryByLabelText(/Gemini model/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Antigravity" })).not.toBeInTheDocument();
   });
 
   it("points to the repos pane instead of editing target repos itself", async () => {
@@ -58,8 +78,10 @@ describe("SettingsOverlay", () => {
   // pane already fetched (no second request).
   it("offers a key field per agent framework, marked set or not", async () => {
     api.mockResolvedValueOnce({ ...settings, agentKeysEnabled: true, claudeOAuthTokenSet: true });
+    const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByLabelText("Gemini API key")).toBeInTheDocument();
     expect(screen.getByLabelText("Claude Code OAuth token")).toBeInTheDocument();
@@ -135,6 +157,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
     await user.clear(cpusInput);
@@ -156,6 +179,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByLabelText(/Sandbox vCPUs/)).toHaveValue(4);
     expect(screen.getByLabelText(/Sandbox memory/)).toHaveValue(8192);
@@ -169,8 +193,10 @@ describe("SettingsOverlay", () => {
   // reads as a deliberately zeroed-out sandbox.
   it("shows kontur's default shape as a placeholder, not a literal 0, when unset", async () => {
     api.mockResolvedValueOnce(settings);
+    const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     const cpusInput = screen.getByLabelText(/Sandbox vCPUs/);
     const memoryInput = screen.getByLabelText(/Sandbox memory/);
@@ -189,6 +215,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     await user.clear(screen.getByLabelText(/Sandbox vCPUs/));
     await user.clear(screen.getByLabelText(/Sandbox memory/));
@@ -237,6 +264,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByRole("radio", { name: "Antigravity" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "Claude" }));
@@ -254,6 +282,7 @@ describe("SettingsOverlay", () => {
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByRole("radio", { name: "Claude" })).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Save" }));
