@@ -111,6 +111,9 @@ export default function SettingsOverlay({ onClose, showError }) {
     const geminiModel = form.elements.geminiModel.value.trim();
     if (geminiModel !== (settings.geminiModel || "")) payload.geminiModel = geminiModel;
 
+    const claudeModel = form.elements.claudeModel.value.trim();
+    if (claudeModel !== (settings.claudeModel || "")) payload.claudeModel = claudeModel;
+
     const maxAgentTurnsRaw = form.elements.maxAgentTurns.value.trim();
     if (maxAgentTurnsRaw !== "") {
       const maxAgentTurns = parseInt(maxAgentTurnsRaw, 10);
@@ -165,7 +168,7 @@ export default function SettingsOverlay({ onClose, showError }) {
           {!settings.configured && (
             <Alert severity="info" sx={{ mb: 2 }}>
               Not configured yet -- nothing has been saved for this deployment. Poll interval, max concurrent and
-              GitHub host here, and Gemini model on the Agents tab, are required the first time.
+              GitHub host here, and Gemini model and Claude model on the Agents tab, are required the first time.
             </Alert>
           )}
           <form onSubmit={submitGeneral}>
@@ -220,8 +223,8 @@ export default function SettingsOverlay({ onClose, showError }) {
         <>
           {!settings.configured && (
             <Alert severity="info" sx={{ mb: 2 }}>
-              Gemini model here, and poll interval, max concurrent and GitHub host on the General tab, are required
-              the first time settings are saved.
+              Gemini model and Claude model here, and poll interval, max concurrent and GitHub host on the General
+              tab, are required the first time settings are saved.
             </Alert>
           )}
           <form onSubmit={submitAgents}>
@@ -237,6 +240,7 @@ export default function SettingsOverlay({ onClose, showError }) {
             </Typography>
             <AgentKeysSection settings={settings} showError={showError} />
             <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="claudeModel" label="Claude model" defaultValue={settings.claudeModel || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
             {/* bwsalmon/agents#610: an unset override (0, stored) is left blank here
                 rather than shown as a literal 0 -- 0 vCPUs/0 MiB is not what a

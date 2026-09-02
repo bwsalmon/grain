@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityName, completionPhase, knownRepos, repoRows } from "./state.js";
+import { capabilityName, completionPhase, knownRepos, lastBaseForRepo, repoRows } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -65,6 +65,40 @@ describe("knownRepos", () => {
 
   it("falls back to tasks alone on an unrestricted deployment", () => {
     expect(knownRepos({ targetRepos: [] }, [{ repo: "acme/widgets" }])).toEqual(["acme/widgets"]);
+  });
+});
+
+describe("lastBaseForRepo", () => {
+  it("returns the most recently created task's base for that repo", () => {
+    const tasks = [
+      { repo: "acme/widgets", base: "release/1", createdAt: "2026-08-01T00:00:00Z" },
+      { repo: "acme/widgets", base: "release/2", createdAt: "2026-08-02T00:00:00Z" },
+    ];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/2");
+  });
+
+  it("returns empty when the most recent task on record left base unset, even if an older one set one", () => {
+    const tasks = [
+      { repo: "acme/widgets", base: "release/1", createdAt: "2026-08-01T00:00:00Z" },
+      { repo: "acme/widgets", base: "", createdAt: "2026-08-02T00:00:00Z" },
+    ];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("");
+  });
+
+  it("skips a failed or closed task and falls back to an older one", () => {
+    const tasks = [
+      { repo: "acme/widgets", base: "release/1", createdAt: "2026-08-01T00:00:00Z", state: "completed" },
+      { repo: "acme/widgets", base: "release/2", createdAt: "2026-08-02T00:00:00Z", state: "failed" },
+    ];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/1");
+  });
+
+  it("returns empty when no repo is given", () => {
+    expect(lastBaseForRepo([{ repo: "acme/widgets", base: "release/1" }], "")).toBe("");
+  });
+
+  it("returns empty when the repo has no tasks on record", () => {
+    expect(lastBaseForRepo([], "acme/widgets")).toBe("");
   });
 });
 
