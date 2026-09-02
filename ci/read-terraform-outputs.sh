@@ -31,12 +31,10 @@ cd "$root/terraform/gcp"
 # included, and needs no per-name failure handling.
 outputs="$(terraform output -json)"
 
+# A name terraform did not emit, and one whose value is null, both read as
+# empty -- which is what the summary below treats as "not configured".
 get() {
-  python3 -c '
-import json, sys
-v = json.load(sys.stdin).get(sys.argv[1], {}).get("value")
-sys.stdout.write("" if v is None else str(v))
-' "$1" <<<"$outputs"
+  jq -r --arg k "$1" 'if (.[$k].value // null) == null then "" else .[$k].value end' <<<"$outputs"
 }
 
 {

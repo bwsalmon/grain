@@ -457,7 +457,7 @@ func TestTerraformDeployNoLongerInstallsAToolchain(t *testing.T) {
 	text := read(t, "terraform", "gcp", "files", "deploy.sh")
 	prerequisites := body(t, text, "install_prerequisites() {")
 
-	contains(t, prerequisites, "for cmd in git docker python3; do")
+	contains(t, prerequisites, "for cmd in git docker jq; do")
 	if makeWord.MatchString(prerequisites) {
 		t.Error("make is still installed on the host")
 	}
@@ -468,4 +468,45 @@ func TestTerraformDeployNoLongerInstallsAToolchain(t *testing.T) {
 			t.Errorf("%s is not passed to setup.sh", v)
 		}
 	}
+}
+
+// A deployed host runs no interpreter but its own shell.
+//
+// `cfg`, the GCS object encoder and the metadata token reader were three
+// python3 one-liners, which is why every VM apt-installed an interpreter
+// -- for three lines of JSON handling and nothing else. They are jq now.
+// Asserted rather than left to the prerequisites list above, because the
+// failure mode is additive: a fourth one-liner would work on any host that
+// happens to have python3, and only fail on the minimal image this
+// deployment actually gets.
+func TestNoDeployScriptShellsOutToAnInterpreter(t *testing.T) {
+	for _, script := range [][]string{
+		{"scripts", "setup.sh"},
+		{"terraform", "gcp", "files", "deploy.sh"},
+		{"ci", "read-terraform-outputs.sh"},
+		{"ci", "terraform-apply.sh"},
+		{"ci", "wait-for-host.sh"},
+		{"ci", "write-deploy-summary.sh"},
+	} {
+		for _, line := range strings.Split(stripComments(read(t, script...)), "\n") {
+			if strings.Contains(line, "python") {
+				t.Errorf("%s still needs an interpreter: %s",
+					filepath.Join(script...), strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+// The one place a JSON boolean's spelling is load-bearing.
+//
+// `cfg` was a python3 one-liner, and `print` spells True with a capital T,
+// so this comparison was written against Python's spelling rather than
+// JSON's. jq emits "true", so the comparison had to move with it. Getting
+// that wrong is silent in a way worth guarding: no error anywhere, just a
+// deployment that came up on HostSandboxes with kontur configured, because
+// the string never matched and GRAIN_KONTUR_ENABLE was always 0.
+func TestTheKonturToggleComparesAgainstTheSpellingCfgEmits(t *testing.T) {
+	code := stripComments(read(t, "terraform", "gcp", "files", "deploy.sh"))
+	contains(t, code, `[ "$ENABLE_KONTUR_SANDBOXES" = "true" ]`)
+	absent(t, code, `= "True"`)
 }

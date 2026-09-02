@@ -572,6 +572,31 @@ ensure_git() {
 }
 ensure_git
 
+# Same shape as ensure_git, and added with the python3 it replaced.
+#
+# python3 needed no such helper: every Debian cloud image carries one, so
+# the three one-liners that used it were safe to assume. jq is not on that
+# list. A host reaching this script through terraform/gcp/files/deploy.sh
+# already has jq -- deploy.sh's own `cfg` needs it before this script
+# starts, and its install_prerequisites is what puts it there -- but the
+# standalone path this file's header describes (clone onto a bare Debian
+# VM, run it) would otherwise reach gcs_fetch and die with a bare 127,
+# which is exactly the unreadable failure deploy.sh's own comment on
+# install_prerequisites' ordering complains about.
+ensure_jq() {
+  command -v jq >/dev/null 2>&1 && return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    log "installing jq (this script reads JSON from the GCP metadata server with it)"
+    apt-get update -qq || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq || true
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "setup.sh: required command not found: jq, and it could not be installed automatically -- install it (e.g. 'apt-get install jq') and re-run" >&2
+    exit 1
+  fi
+}
+ensure_jq
+
 # Installs the docker.io package if the CLI is missing, then makes sure
 # the daemon is actually up -- a fresh install's postinst usually starts
 # it already, but this does not rely on that. The `docker info` check a
@@ -1066,10 +1091,15 @@ grant_docker_group() {
 # what make the token itself actually able to do either. Only used by
 # ensure_kontur_guest_fetch -- the local build path needs no GCP
 # credential of its own at all.
+#
+# `jq -e` rather than a bare filter: a metadata response without the key
+# is a credential this host does not have, and `// empty` plus -e turns
+# that into no output and a non-zero exit rather than the string "null"
+# travelling on into an Authorization header.
 kontur_gcp_access_token() {
   curl -fsS -H "Metadata-Flavor: Google" \
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])'
+    | jq -er '.access_token // empty'
 }
 
 # gcs_fetch downloads gs://$1/$2 to file $3 using kontur_gcp_access_token,
@@ -1078,7 +1108,10 @@ kontur_gcp_access_token() {
 # comment on why.
 gcs_fetch() {
   local bucket="$1" object="$2" dest="$3" encoded_object
-  encoded_object="$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
+  # @uri escapes everything outside the unreserved set (A-Za-z0-9-_.~),
+  # "/" included -- an object name is one path segment of the API URL, not
+  # a path.
+  encoded_object="$(jq -rn --arg o "$object" '$o|@uri')"
   curl -fsS -H "Authorization: Bearer $(kontur_gcp_access_token)" \
     "https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encoded_object}?alt=media" \
     -o "$dest"
