@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -676,21 +675,53 @@ func TestRunFallsBackToTheExitErrorWhenTheStreamSaysNothing(t *testing.T) {
 	}
 }
 
-// The turn cap is a backstop under Config.MaxRunRuntime, not the primary
-// limit: v1 passed claude no --max-turns at all, and the 20 this started
-// at cut real runs off mid-task (a turn is one model/tool round trip).
-func TestDefaultMaxTurnsLeavesRoomForARealTask(t *testing.T) {
+// No cap by default: v1 passed claude no --max-turns at all, and any
+// number this package picks is a guess at how much work a task deserves
+// that fails a working run when it guesses low. Config.MaxRunRuntime is
+// what actually bounds a runaway run.
+func TestRunPassesNoMaxTurnsByDefault(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "done"})}
 	f := newFramework(fake, "mcpserver-path")
 
 	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := strconv.Atoi(argValue(fake.gotArgs, "--max-turns"))
-	if err != nil {
-		t.Fatalf("--max-turns = %q: %v", argValue(fake.gotArgs, "--max-turns"), err)
+	for _, a := range fake.gotArgs {
+		if a == "--max-turns" {
+			t.Fatalf("args = %v, want no --max-turns at all when none is configured", fake.gotArgs)
+		}
 	}
-	if got < 100 {
-		t.Errorf("--max-turns = %d, too low for the read/edit/test/commit/push shape of a real grain task", got)
+}
+
+// A deployment that does want a ceiling still gets one, passed through
+// unchanged -- "unlimited" is the default, not the only option.
+func TestRunPassesAnExplicitMaxTurnsThrough(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "done"})}
+	f := newFramework(fake, "mcpserver-path")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir(), MaxTurns: 12}); err != nil {
+		t.Fatal(err)
+	}
+	if got := argValue(fake.gotArgs, "--max-turns"); got != "12" {
+		t.Errorf("--max-turns = %q, want 12", got)
+	}
+}
+
+// With no cap configured there is no number to tell an operator to raise,
+// so the error must not invent one -- it would send them looking for a
+// setting that is already unlimited.
+func TestRunNamesNoTurnBudgetWhenNoneWasConfigured(t *testing.T) {
+	fake := &fakeRunner{stdout: maxTurnsStdout(t), err: errors.New("exit status 1 (stderr: )")}
+	f := newFramework(fake, "mcpserver-path")
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "(0)") {
+		t.Errorf("err = %q, want no fabricated turn budget in the message", err)
+	}
+	if !strings.Contains(err.Error(), "turn limit") {
+		t.Errorf("err = %q, want it to still say the run was stopped at a turn limit", err)
 	}
 }

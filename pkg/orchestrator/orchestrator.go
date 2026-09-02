@@ -173,7 +173,9 @@ type Config struct {
 	// asks for by name, e.g. gcpkey's minter service account.
 	Credentials model.CredentialResolver
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
-	// agent framework's own default in place.
+	// agent framework's own default in place, which for both frameworks
+	// is no cap at all (agent/claude's defaultMaxTurns has why). What
+	// actually bounds a runaway run is MaxRunRuntime below.
 	MaxAgentTurns int
 	// GitRemoteBase is the base URL of this deployment's git proxy
 	// (cmd/grain/daemon.go's startGitProxy), which RunDispatch turns into
@@ -217,10 +219,11 @@ type Config struct {
 	// exec.CommandContext/procgroup.
 	//
 	// Zero uses defaultMaxRunRuntime. There is no "uncapped" value the
-	// way MaxAgentTurns' own zero means "the framework's own default":
-	// an uncapped run is exactly the gap this field exists to close, so
-	// a deployment that really wants a longer ceiling sets one
-	// explicitly instead of switching this off.
+	// way MaxAgentTurns' own zero means "no turn cap": an uncapped run
+	// is exactly the gap this field exists to close -- all the more so
+	// now that it is the only ceiling a default deployment has -- so a
+	// deployment that really wants a longer one sets it explicitly
+	// instead of switching this off.
 	MaxRunRuntime time.Duration
 
 	// Now reads the current time, and exists for the one timestamp

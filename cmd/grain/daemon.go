@@ -147,7 +147,7 @@ func daemon(args []string) {
 		"setup-failed saying so, rather than the daemon refusing to start")
 	geminiModel := fs.String("gemini-model", antigravity.DefaultModel, "model the antigravity agent framework calls"+seedOnly)
 	claudeModel := fs.String("claude-model", claude.DefaultModel, "model the claude agent framework calls"+seedOnly)
-	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)"+seedOnly)
+	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)"+seedOnly)
 
 	// claudePath and claudeOAuthTokenFile are only consulted when a run
 	// is actually driven by agent/claude -- the store's agent-framework

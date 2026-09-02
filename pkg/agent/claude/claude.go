@@ -48,23 +48,28 @@ const (
 	// DefaultModel does.
 	DefaultModel = "claude-sonnet-5"
 
-	// defaultMaxTurns caps the model/tool round trips one run may take
-	// before claude's own --max-turns cuts it off. It is deliberately
-	// far above the 20 this started at: a turn here is one model/tool
-	// round trip, and the ordinary shape of a grain task -- read the
-	// repo, edit, run the tests, read the failures, edit again, commit,
-	// push -- spends twenty of them before it has done anything at all.
-	// v1 (grain/automation/dispatch.py) passed claude no --max-turns
-	// whatsoever and let the wall clock be the only bound, so every real
-	// run this project has ever completed ran with more turns available
-	// than 20; capping there turned "the agent is still working" into a
-	// failed run.
+	// defaultMaxTurns is the cap on model/tool round trips a run may take
+	// before claude's own --max-turns cuts it off, and zero means no cap
+	// at all: Run passes no --max-turns whatsoever, exactly as v1
+	// (grain/automation/dispatch.py) always did.
 	//
-	// The real bound on a runaway loop is orchestrator's own
-	// Config.MaxRunRuntime (two hours by default), which stops a run
-	// that is spinning regardless of how cheap its turns are. This stays
-	// a backstop under it rather than the primary limit.
-	defaultMaxTurns = 200
+	// A turn here is one model/tool round trip, and the ordinary shape of
+	// a grain task -- read the repo, edit, run the tests, read the
+	// failures, edit again, commit, push -- spends dozens of them. Any
+	// number picked here is a guess at how much work a task deserves,
+	// made by a package that knows nothing about the task; guessing wrong
+	// does not slow a run down, it fails one that was working. The 20
+	// this started at did exactly that, and while raising it made that
+	// rarer it left the same cliff a little further out.
+	//
+	// Turns were never the bound worth enforcing anyway. What a runaway
+	// run actually costs is wall-clock time and tokens, and
+	// orchestrator's Config.MaxRunRuntime (two hours by default) already
+	// stops one on the first of those regardless of how fast its turns
+	// go. A deployment that does want a turn ceiling still sets one --
+	// `grain settings -max-agent-turns`, RunConfig.MaxTurns, or
+	// WithMaxTurns -- and gets it passed through unchanged.
+	defaultMaxTurns = 0
 
 	// mcpServerName is the mcpServers key written into --mcp-config, and
 	// therefore the prefix claude reports every tool under
@@ -153,8 +158,10 @@ func WithModel(model string) Option {
 	return func(f *Framework) { f.model = model }
 }
 
-// WithMaxTurns overrides the default cap on agentic turns a single Run
-// allows before claude's own --max-turns cuts it off.
+// WithMaxTurns sets the cap on agentic turns a single Run allows before
+// claude's own --max-turns cuts it off. Zero -- which is also the default
+// -- means no cap: see defaultMaxTurns for why that is the right default
+// and Config.MaxRunRuntime for what actually bounds a runaway run.
 func WithMaxTurns(n int) Option {
 	return func(f *Framework) { f.maxTurns = n }
 }
@@ -357,7 +364,12 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		"--allowedTools", strings.Join(allowedTools(), ","),
 		"--output-format", "stream-json",
 		"--verbose",
-		"--max-turns", strconv.Itoa(maxTurns),
+	}
+	// Omitted entirely rather than passed as a large number when no cap
+	// is configured: "unlimited" is a thing the CLI already does by
+	// default, and a big number is still a cliff (see defaultMaxTurns).
+	if maxTurns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(maxTurns))
 	}
 	if f.model != "" {
 		args = append(args, "--model", f.model)
@@ -410,13 +422,18 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 func runFailure(stdout string, maxTurns int, runErr error) error {
 	p := parseEvents(stdout)
 	switch {
-	case p.resultSubtype == maxTurnsSubtype:
+	case p.resultSubtype == maxTurnsSubtype && maxTurns > 0:
 		// Named in plain words rather than passed through as a subtype:
-		// this is not a fault of claude or of the model but grain's own
+		// this is not a fault of claude or of the model but a configured
 		// --max-turns budget running out, and the operator reading the
 		// failed run needs to be told which number to raise. Phrased to
 		// match agent/antigravity's own turn-cap error.
 		return fmt.Errorf("claude: exceeded max turns (%d) without a final answer", maxTurns)
+	case p.resultSubtype == maxTurnsSubtype:
+		// No cap was configured, so claude hit one of its own -- naming
+		// a number grain never set would send an operator looking for a
+		// setting that is already unlimited.
+		return fmt.Errorf("claude: the CLI stopped the run at its own turn limit without a final answer")
 	case p.resultErr != nil:
 		return p.resultErr
 	}

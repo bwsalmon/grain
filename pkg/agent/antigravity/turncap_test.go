@@ -181,3 +181,20 @@ func TestRunLeavesTheTranscriptFileForTheCallerToClean(t *testing.T) {
 		t.Errorf("transcript file gone after Run returned: %v", err)
 	}
 }
+
+// The default is no cap, so this same fake runs all 50 of its turns
+// through untouched -- where the former default of 20 would have
+// cancelled it a third of the way in. What bounds a runaway run is
+// orchestrator's Config.MaxRunRuntime, not a turn count guessed here.
+func TestRunDoesNotCapTurnsByDefault(t *testing.T) {
+	r := &cancelWatchingRunner{}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()})
+	if err != nil && strings.Contains(err.Error(), "exceeded max turns") {
+		t.Fatalf("Run err = %v, want no turn cap with none configured", err)
+	}
+	if turns := strings.Count(r.transcriptSoFar, "agent_response"); turns != 50 {
+		t.Errorf("subprocess produced %d turns, want all 50 -- something capped it", turns)
+	}
+}
