@@ -777,7 +777,7 @@ variable "iap_brand_support_email" {
 variable "iap_brand_application_title" {
   type        = string
   description = "Application title shown on the IAP OAuth consent screen."
-  default     = "grain v2 (staging)"
+  default     = "grain"
 }
 
 variable "iap_client_id" {
