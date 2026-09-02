@@ -40,4 +40,8 @@ ENV GOTOOLCHAIN=local
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
 	&& rm -rf /var/lib/apt/lists/*
 
-WORKDIR /src/v2
+# The bind-mounted tree's root, which is the Go module root since v1's
+# removal promoted it there. The Makefile's container-build passes -w
+# explicitly anyway, so this is what someone running the builder image by
+# hand lands in.
+WORKDIR /src

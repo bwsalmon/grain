@@ -111,7 +111,7 @@ func buildKonturctl(t *testing.T) string {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "konturctl")
 	cmd := exec.Command("go", "build", "-o", bin, "./cmd/konturctl")
-	cmd.Dir = "../../../third_party/kontur"
+	cmd.Dir = "../../third_party/kontur"
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building konturctl from third_party/kontur: %v\n%s", err, out)
 	}
@@ -128,7 +128,7 @@ func buildKonturDockerImage(t *testing.T) (image string) {
 	t.Helper()
 	image = "grain-kontur-e2e-test:latest"
 	cmd := exec.Command("docker", "build", "-t", image, ".")
-	cmd.Dir = "../../../third_party/kontur"
+	cmd.Dir = "../../third_party/kontur"
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("building the kontur OCI image from third_party/kontur/Dockerfile: %v\n%s", err, out)
 	}

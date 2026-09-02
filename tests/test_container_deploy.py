@@ -255,6 +255,39 @@ def test_the_dockerfile_carries_every_binary_grain_shells_out_to():
     assert '"/usr/local/bin/grain"]' in text
 
 
+def test_every_build_path_agrees_the_module_root_is_the_repository_root():
+    """v1's removal promoted the Go tree from v2/ to the root.
+
+    Three files encode that layout independently, and nothing else checks
+    them together: the Dockerfile builds the binary, the Makefile mounts
+    and builds the same tree in a container, and Dockerfile.build is the
+    toolchain image both land in. A stale `v2` segment in any one of them
+    is invisible to `go build` and to every Go test -- it only surfaces
+    as a failed image build, which is minutes into CI and needs a docker
+    daemon to reproduce.
+
+    That is not hypothetical: `make -C v2 build` survived the promotion
+    in the Dockerfile and broke the grain-container job, while the whole
+    Go suite stayed green.
+    """
+    dockerfile = DOCKERFILE.read_text()
+    # Built at the context root, which is the module root.
+    assert "RUN make build" in dockerfile
+    assert "make -C v2" not in dockerfile
+    # ...and the binary comes back from the root's own bin/, not v2/bin/.
+    assert "COPY --from=build /src/bin/grain" in dockerfile
+
+    makefile = (ROOT / "Makefile").read_text()
+    # The containerised build mounts the checkout and works at its root.
+    assert '-v "$(CURDIR)":/src' in makefile
+    assert "-w /src $(BUILDER_IMAGE)" in makefile
+    # `make image`'s context is this directory, not its parent.
+    assert "-f Dockerfile ." in makefile
+    assert "-f Dockerfile .." not in makefile
+
+    assert "WORKDIR /src\n" in (ROOT / "Dockerfile.build").read_text()
+
+
 def test_the_workflow_publishes_the_image_on_every_branch():
     """The UI's Upgrade button targets a branch by name, which in a
     container deployment means pulling that branch's tag -- so a branch

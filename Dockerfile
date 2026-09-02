@@ -1,4 +1,4 @@
-# The image a v2 deployment actually runs: `grain` and every binary it
+# The image a grain deployment actually runs: `grain` and every binary it
 # shells out to, in one artifact CI publishes to GHCR on every commit
 # (../.github/workflows/build-artifacts.yml) and scripts/setup.sh pulls
 # rather than builds -- bwsalmon/agents#645.
@@ -112,7 +112,7 @@ ARG BUILDVCS=auto
 # exact sha- tag of the sandbox image built from this same commit, so the
 # two halves of a kontur deployment can never be two different commits.
 ARG SANDBOX_IMAGE=
-RUN make -C v2 build BUILDVCS=${BUILDVCS} SANDBOX_IMAGE=${SANDBOX_IMAGE}
+RUN make build BUILDVCS=${BUILDVCS} SANDBOX_IMAGE=${SANDBOX_IMAGE}
 
 # konturctl only -- not `kontur` or `kontur-mem-agent`, which run inside
 # each sandbox VM's own container (the image
