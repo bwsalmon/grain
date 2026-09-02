@@ -95,7 +95,7 @@ func capabilityCatalog() []model.CapabilitySpec {
 
 // missingConfigFor is capabilityProviders' own gates
 // (cmd/grain/daemon.go), read back as the human-facing labels Settings'
-// General tab already uses for the same two fields -- gcp-key needs
+// Capabilities tab already uses for the same two fields -- gcp-key needs
 // both a project and the service account it mints keys for; gemini-key
 // needs only the project, sharing it with whatever standing credential
 // mints under it.
