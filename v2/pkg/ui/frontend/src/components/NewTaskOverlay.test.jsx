@@ -242,6 +242,30 @@ describe("NewTaskOverlay", () => {
     expect(payload.base).toBe("my-custom-branch");
   });
 
+  // A repo's most recent task can itself have deliberately used the
+  // deployment default (no base at all) -- that is a real suggestion
+  // ("build off the default branch here"), not an absence of one, and
+  // should clear out whatever base picking an earlier repo prefilled.
+  it("clears a prefilled Base branch when the newly-picked repo's most recent task used the default branch", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/other"] };
+    const tasks = [
+      { id: "1", title: "Off a release branch", repo: "acme/widgets", base: "release/2.0", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "Off the default branch", repo: "acme/other", base: "", createdAt: "2026-06-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/other");
+    expect(screen.getByLabelText(/Base branch/)).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("");
+  });
+
   // bwsalmon/agents#539: an interactive task always queues immediately
   // (no "Queue immediately" checkbox left to check), and its creator is
   // taken straight to its chat rather than back to the task list.
