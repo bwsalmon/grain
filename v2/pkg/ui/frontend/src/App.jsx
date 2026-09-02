@@ -397,6 +397,7 @@ export default function App() {
               tasks={tasks}
               onRefresh={refreshSuites}
               onRefreshRuns={refreshSuiteRuns}
+              onRefreshTemplates={refreshTemplates}
               showError={showError}
             />
           ) : (
