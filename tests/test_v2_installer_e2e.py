@@ -108,6 +108,24 @@ def sudo(*argv: str, **kwargs) -> subprocess.CompletedProcess:
     return run(*prefix, *argv, **kwargs)
 
 
+# The data directory is 0750 $GRAIN_USER and its secrets 0700, which is
+# the point of it -- so the account running these tests cannot read it,
+# and every filesystem assertion below has to look as root. Asking
+# through sudo rather than loosening the deployment is what keeps the
+# test honest about what it is inspecting.
+def sudo_test(flag: str, path) -> bool:
+    return sudo("test", flag, str(path), check=False, timeout=60).returncode == 0
+
+
+def sudo_uid(path) -> int:
+    out = sudo("stat", "-c", "%u", str(path), timeout=60).stdout.strip()
+    return int(out)
+
+
+def sudo_read(path) -> str:
+    return sudo("cat", str(path), timeout=60).stdout
+
+
 def free_port() -> int:
     import socket
 
@@ -287,7 +305,7 @@ def test_the_minter_credential_reached_the_secrets_database(deployment):
     assert "gcp-key-minter" in listed.stdout, (
         f"the minter credential never landed:\n{listed.stdout}\n{listed.stderr}")
     # And the staging copy does not outlive the command that needed it.
-    assert not (deployment["data"] / "secrets" / ".minter-key.staged.json").exists()
+    assert not sudo_test("-e", deployment["data"] / "secrets" / ".minter-key.staged.json")
 
 
 def test_what_the_deployment_writes_is_owned_by_the_service_account(deployment):
@@ -303,9 +321,15 @@ def test_what_the_deployment_writes_is_owned_by_the_service_account(deployment):
     uid = pwd.getpwnam(deployment["user"]).pw_uid
     data = deployment["data"]
     for path in (data, data / "secrets", data / "home", data / "image.env"):
-        assert path.exists(), f"{path} was never created"
-        assert path.stat().st_uid == uid, (
-            f"{path} is owned by uid {path.stat().st_uid}, not {deployment['user']} ({uid})")
+        assert sudo_test("-e", path), f"{path} was never created"
+        assert sudo_uid(path) == uid, (
+            f"{path} is owned by uid {sudo_uid(path)}, not {deployment['user']} ({uid})")
+
+    # The flip side, and the reason every check above needs sudo: the
+    # data directory is not readable by an arbitrary account on the host.
+    assert not os.access(data, os.R_OK), (
+        f"{data} is readable by {os.getlogin() if hasattr(os, 'getlogin') else 'this user'} -- "
+        "the store and the secrets database are supposed to be the service account's alone")
 
 
 def test_the_unit_runs_the_image_this_deploy_was_given(deployment):
@@ -315,10 +339,10 @@ def test_the_unit_runs_the_image_this_deploy_was_given(deployment):
     the deployment runs -- and setup.sh writing it is what makes a
     re-run with a different GRAIN_IMAGE_TAG a rollback.
     """
-    ref = (deployment["data"] / "image.env").read_text().strip()
+    ref = sudo_read(deployment["data"] / "image.env").strip()
     assert ref == f"GRAIN_IMAGE={deployment['image']}", ref
 
-    unit = Path("/etc/systemd/system/grain-daemon.service").read_text()
+    unit = sudo_read("/etc/systemd/system/grain-daemon.service")
     assert "docker" in unit and "run --name grain-daemon" in unit
     assert f"EnvironmentFile={deployment['data']}/image.env" in unit
 
@@ -335,7 +359,7 @@ def test_the_host_control_units_are_installed_and_watching(deployment):
         state = sudo("systemctl", "is-active", unit, check=False, timeout=60).stdout.strip()
         assert state == "active", f"{unit} is {state!r}, so nothing is watching for requests"
     control = deployment["data"] / "control"
-    assert control.is_dir(), f"{control} was never created"
+    assert sudo_test("-d", control), f"{control} was never created"
 
 
 def test_the_cli_wrapper_talks_to_the_deployment_it_installed(deployment):
