@@ -566,7 +566,8 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	fs := flag.NewFlagSet("grain settings", flag.ContinueOnError)
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum number of tasks dispatched at once")
-	geminiModel := fs.String("gemini-model", "", "Gemini model the agent framework calls")
+	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
+	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
 	githubHost := fs.String("github-host", "", "GitHub API host")
 	var githubInsecureHTTP bool
@@ -590,6 +591,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
+		case "claude-model":
+			v := *claudeModel
+			req.ClaudeModel = &v
 		case "max-agent-turns":
 			v := *maxAgentTurns
 			req.MaxAgentTurns = &v
@@ -721,6 +725,7 @@ func (p *printer) settings(s ui.Settings) {
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
 	fmt.Printf("max concurrent: %d\n", s.MaxConcurrent)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
+	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
 	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)
 	fmt.Printf("github host:    %s\n", s.GitHubHost)
 	fmt.Printf("github insecure http: %t\n", s.GitHubInsecureHTTP)

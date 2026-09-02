@@ -388,6 +388,30 @@ func TestAllowedToolsNamesAllEightGrainSandboxTools(t *testing.T) {
 	}
 }
 
+func TestRunPassesTheDefaultModelWhenNoneIsGiven(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "mcpserver-path")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := argValue(fake.gotArgs, "--model"); got != DefaultModel {
+		t.Errorf("--model = %q, want %q (DefaultModel)", got, DefaultModel)
+	}
+}
+
+func TestWithModelOverridesTheDefault(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "mcpserver-path", WithModel("claude-opus-5"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	if got := argValue(fake.gotArgs, "--model"); got != "claude-opus-5" {
+		t.Errorf("--model = %q, want %q", got, "claude-opus-5")
+	}
+}
+
 func TestWithMaxTurnsOverridesTheDefault(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
 	f := newFramework(fake, "mcpserver-path", WithMaxTurns(5))

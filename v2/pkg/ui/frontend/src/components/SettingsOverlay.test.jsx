@@ -12,6 +12,7 @@ const settings = {
   pollInterval: "30s",
   maxConcurrent: 2,
   geminiModel: "gemini-2.5-pro",
+  claudeModel: "claude-sonnet-5",
   maxAgentTurns: 40,
   githubHost: "github.com",
   githubInsecureHttp: false,
@@ -34,6 +35,7 @@ describe("SettingsOverlay", () => {
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
     expect(screen.getByDisplayValue("2")).toBeInTheDocument();
     expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("claude-sonnet-5")).toBeInTheDocument();
   });
 
   it("points to the repos pane instead of editing target repos itself", async () => {
