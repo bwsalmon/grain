@@ -178,8 +178,8 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 
 	deps := orchestrator.Deps{
 		Store: store, Client: gh, Sandboxes: sandboxes,
-		Framework: func() agent.Framework {
-			return antigravity.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics))
+		Framework: func(context.Context, string) (agent.Framework, error) {
+			return antigravity.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics)), nil
 		},
 		Config:        orchestrator.Config{Capabilities: registry},
 		MaxConcurrent: cfg.slots,

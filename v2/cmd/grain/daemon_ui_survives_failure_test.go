@@ -1,14 +1,21 @@
 // bwsalmon/agents#550: "make sure ui with logs stays up even if the
 // daemon has failed." Before run()/runDaemon split apart (daemon.go), a
-// failure anywhere past startUIServer -- a bad -gemini-api-key-file among
-// them -- returned an error out of run() itself, which tore the UI/API
-// server down via its own defer right along with everything else, then
-// exited the process (daemon()'s own log.Fatalf). That is exactly the
-// moment an operator most needs the UI up: to see what is wrong. This
-// test drives run() with a -gemini-api-key-file that does not exist, the
-// simplest way to make runDaemon fail immediately, and proves the UI/API
-// server it already started stays reachable anyway, rather than either
-// test asserting on cmd/grain's own private goroutine plumbing.
+// failure anywhere past startUIServer returned an error out of run()
+// itself, which tore the UI/API server down via its own defer right
+// along with everything else, then exited the process (daemon()'s own
+// log.Fatalf). That is exactly the moment an operator most needs the UI
+// up: to see what is wrong. This test drives run() with a data directory
+// the git proxy cannot lay its own state out under, the simplest
+// remaining way to make runDaemon fail immediately, and proves the
+// UI/API server it already started stays reachable anyway, rather than
+// asserting on cmd/grain's own private goroutine plumbing.
+//
+// It used to induce that failure with a -gemini-api-key-file that did
+// not exist, which no longer is one: an agent credential is set from the
+// UI now, so a daemon with none runs on and reports it per dispatch
+// (agentFrameworks) rather than giving up -- which is the whole point,
+// since the UI this test is about is where that key gets pasted in.
+// TestRunKeepsReconcilingWithNoAgentCredential covers that directly.
 package main
 
 import (
@@ -38,14 +45,24 @@ func TestRunKeepsTheUIServerUpWhenTheRestOfTheDaemonFails(t *testing.T) {
 	}
 
 	uiAddr := freeTCPAddr(t)
+	// A plain file where the git proxy needs a directory: runDaemon's
+	// startGitProxy fails on its very first call (gitproxy.BuildProxy ->
+	// NewFileAuditLog, which cannot create its audit.log under a regular
+	// file), before credentials or the reconcile loop ever start -- the
+	// earliest a real misconfiguration plausibly could. Deliberately
+	// state/git-proxy and not state itself: run() creates
+	// state/transcripts before it starts the UI at all, so a file in the
+	// way of *that* would fail the very thing this test needs up.
+	if err := os.MkdirAll(filepath.Join(dataDir, "state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "state", "git-proxy"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	cfg := config{
 		dataDir: dataDir, sandboxDir: t.TempDir(), maxConcurrent: 1, pollInterval: time.Hour,
-		// A gemini API key file that was never written: runDaemon's own
-		// readTrimmedFile(cfg.geminiAPIKeyFile) fails on its very first
-		// call, before the git proxy, credentials, or reconcile loop ever
-		// start -- the earliest a real misconfiguration plausibly could.
-		geminiAPIKeyFile: filepath.Join(dataDir, "no-such-gemini-key"),
-		githubHost:       "127.0.0.1:0", githubInsecureHTTP: true,
+		githubHost: "127.0.0.1:0", githubInsecureHTTP: true,
 		uiAddr: uiAddr, actor: "tester",
 	}
 
@@ -55,7 +72,8 @@ func TestRunKeepsTheUIServerUpWhenTheRestOfTheDaemonFails(t *testing.T) {
 	go func() { runErr <- run(ctx, cfg) }()
 
 	// The UI/API server must come up and answer, even though runDaemon
-	// behind it is (or soon will be) failing on the missing key file --
+	// behind it is (or soon will be) failing on that unusable data
+	// directory --
 	// ListTasks needs nothing from runDaemon (no store write, no git
 	// proxy, no agent framework), just the store startUIServer already
 	// has its own handle on.

@@ -43,6 +43,13 @@ type Config struct {
 	// subprocess). Empty reads back as AgentFrameworkAntigravity
 	// (ui.UpdateSettings' own default).
 	//
+	// It is the deployment-wide default, not the last word: a task
+	// carries its own Task.AgentFramework, and a non-empty one overrides
+	// this for that task's dispatch alone. cmd/grain/daemon.go's
+	// agentFrameworks re-reads this row on every dispatch, so a change
+	// made here takes effect on the next run rather than at the next
+	// restart.
+	//
 	// The value "gemini" is this field's own legacy spelling, from when
 	// the default was a home-grown in-process Gemini API loop
 	// (pkg/agent/gemini, removed when agent/antigravity replaced it).
@@ -161,19 +168,33 @@ const (
 	LegacyAgentFrameworkGemini = "gemini"
 )
 
-// NormalizeAgentFramework maps what a stored row, a config file or a
-// command-line flag says into the vocabulary above: empty and the legacy
-// "gemini" both read back as AgentFrameworkAntigravity, everything else
-// unchanged (including a value that names nothing, which the caller --
-// ui.UpdateSettings, or daemon.go's own flag check -- is the one to
-// reject). Every place that reads Config.AgentFramework goes through
-// this, so "which spellings are accepted" is answered once rather than
-// re-derived at each site.
-func NormalizeAgentFramework(v string) string {
-	switch v {
-	case "", LegacyAgentFrameworkGemini:
+// NormalizeAgentFrameworkName maps the legacy "gemini" spelling onto the
+// framework it now names, and leaves everything else -- including "" --
+// exactly as it found it. This is the form the per-task override wants
+// (model.Task.AgentFramework), where "" is a meaningful value in its own
+// right: "no override, use whatever the deployment is set to". Turning
+// that into a framework name would silently pin every task ever created
+// to one.
+func NormalizeAgentFrameworkName(v string) string {
+	if v == LegacyAgentFrameworkGemini {
 		return AgentFrameworkAntigravity
-	default:
-		return v
 	}
+	return v
+}
+
+// NormalizeAgentFramework is NormalizeAgentFrameworkName plus the
+// deployment-wide reading of "": there is no "no framework" for a
+// deployment, so an unset Config.AgentFramework is AgentFrameworkAntigravity.
+// Everything else is returned unchanged, including a value that names
+// nothing -- the caller (ui.UpdateSettings, or daemon.go's own flag
+// check) is the one to reject that.
+//
+// Every place that reads Config.AgentFramework goes through one of these
+// two, so "which spellings are accepted, and what does empty mean here"
+// is answered once rather than re-derived at each site.
+func NormalizeAgentFramework(v string) string {
+	if v == "" {
+		return AgentFrameworkAntigravity
+	}
+	return NormalizeAgentFrameworkName(v)
 }

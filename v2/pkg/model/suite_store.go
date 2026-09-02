@@ -182,6 +182,14 @@ func (s *Store) UpdateTaskSuite(ctx context.Context, id string, mutate func(*Tas
 // comment) and does not join back to task_suite for anything.
 func (s *Store) DeleteTaskSuite(ctx context.Context, id string) error {
 	return s.write(ctx, "delete task suite "+id, func(tx *sql.Tx) error {
+		// Both tables, in one transaction: task_suite_item carries no
+		// foreign key onto task_suite (nothing in this schema does), so
+		// dropping only the parent row would leave every item behind for
+		// good -- rows TaskSuitesUsingTemplate still finds and then has
+		// to discard for naming a suite that no longer exists.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM `task_suite_item` WHERE `suite_id` = ?", id); err != nil {
+			return err
+		}
 		_, err := tx.ExecContext(ctx, "DELETE FROM `task_suite` WHERE `id` = ?", id)
 		return err
 	})

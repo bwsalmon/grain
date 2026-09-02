@@ -82,8 +82,10 @@ func askScript(question string) []antigravity.Step {
 	}
 }
 
-func scriptedFramework(script []antigravity.Step) func() agent.Framework {
-	return func() agent.Framework { return antigravity.NewForTest(antigravity.Steps(script...)) }
+func scriptedFramework(script []antigravity.Step) func(context.Context, string) (agent.Framework, error) {
+	return func(context.Context, string) (agent.Framework, error) {
+		return antigravity.NewForTest(antigravity.Steps(script...)), nil
+	}
 }
 
 // fileTask creates a task exactly the way a person at the CLI or the UI

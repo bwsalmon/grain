@@ -131,7 +131,7 @@ func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []
 type Framework struct {
 	run             runner
 	grainBinaryPath string
-	apiKey          string
+	apiKey          func(context.Context) (string, error)
 	model           string
 	maxTurns        int
 	konturSSHUser   string
@@ -162,7 +162,23 @@ func WithMaxTurns(n int) Option {
 // private HOME writeMCPSettings hands agy workable: a run authenticating
 // by env var needs nothing out of the real ~/.gemini it no longer sees.
 func WithAPIKey(key string) Option {
-	return func(f *Framework) { f.apiKey = key }
+	return WithAPIKeyFunc(func(context.Context) (string, error) { return key, nil })
+}
+
+// WithAPIKeyFunc is WithAPIKey for a deployment whose key is not known
+// once, at construction: fn is called on every Run instead, so a key set
+// (or replaced) while the daemon is running takes effect on the next run
+// rather than at the next restart. cmd/grain's daemon reads it out of the
+// secrets database the UI writes to, which is what makes "paste the key
+// into Settings" work at all (see that package's own agentCredential).
+//
+// An error from fn fails the run: a key that cannot be read is not the
+// same as a deployment that deliberately configured none, which stays
+// what an empty string means here (Run then passes no GEMINI_API_KEY at
+// all and lets the subprocess authenticate from its own ambient
+// environment).
+func WithAPIKeyFunc(fn func(context.Context) (string, error)) Option {
+	return func(f *Framework) { f.apiKey = fn }
 }
 
 // WithKonturSSH gives a Framework what it needs to reach a
@@ -416,8 +432,14 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	}
 
 	env := []string{"HOME=" + home}
-	if f.apiKey != "" {
-		env = append(env, "GEMINI_API_KEY="+f.apiKey)
+	if f.apiKey != nil {
+		apiKey, err := f.apiKey(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("antigravity: reading the API key: %w", err)
+		}
+		if apiKey != "" {
+			env = append(env, "GEMINI_API_KEY="+apiKey)
+		}
 	}
 
 	stdin, err := userEvent(cfg.Prompt)

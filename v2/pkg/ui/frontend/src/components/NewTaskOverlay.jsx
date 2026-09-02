@@ -3,7 +3,7 @@ import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, C
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { knownRepos, lastBaseForRepo } from "../state.js";
+import { frameworkLabel, knownRepos, lastBaseForRepo } from "../state.js";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
@@ -79,6 +79,10 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       autoMerge: form.elements.autoMerge.checked,
       sandboxCpus: parseInt(data.get("sandboxCpus"), 10) || 0,
       sandboxMemoryMb: parseInt(data.get("sandboxMemoryMb"), 10) || 0,
+      // "" is the deployment default, not a framework: the server reads
+      // an empty agentFramework as "whichever one this deployment is set
+      // to when the task dispatches" (model.Task.AgentFramework).
+      agentFramework: data.get("agentFramework") || "",
       capabilities,
       dependsOn: dependsOn.map((t) => t.id),
       reads,
@@ -240,6 +244,26 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               label="Interactive session (open a live chat here instead of running in the background)"
               sx={{ display: "flex" }}
             />
+            <TextField
+              select
+              name="agentFramework"
+              label="Agent framework"
+              defaultValue=""
+              // displayEmpty: "" is a real choice here (the deployment's
+              // own framework), not the absence of one, so the closed
+              // select has to show its label rather than a blank box.
+              SelectProps={{ displayEmpty: true }}
+              helperText="which agent drives this one task -- set the deployment's own default, and each framework's key, in Settings"
+              fullWidth
+              margin="normal"
+              size="small"
+            >
+              <MenuItem value="">
+                {`Deployment default${config && config.agentFramework ? ` (${frameworkLabel(config.agentFramework)})` : ""}`}
+              </MenuItem>
+              <MenuItem value="antigravity">Antigravity</MenuItem>
+              <MenuItem value="claude">Claude</MenuItem>
+            </TextField>
             <fieldset>
               <legend>Sandbox shape override <span className="hint">optional, kontur-managed deployments only</span></legend>
               <TextField
