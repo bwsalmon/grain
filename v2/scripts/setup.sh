@@ -165,6 +165,9 @@ GRAIN_CLAUDE_CODE_OAUTH_TOKEN="${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 # resolves "claude" against the daemon's own $PATH -- which is where
 # install_claude_cli below puts it.
 GRAIN_CLAUDE_PATH="${GRAIN_CLAUDE_PATH:-}"
+# Override the daemon's default Claude model -- the exact counterpart of
+# GRAIN_GEMINI_MODEL above.
+GRAIN_CLAUDE_MODEL="${GRAIN_CLAUDE_MODEL:-}"
 # Whether to install the Claude Code CLI on this host. 1 (the default)
 # installs it on every run; 0 skips it, for an air-gapped host or one
 # whose CLI is managed some other way (name that copy with
@@ -347,6 +350,8 @@ Recognized variables:
                              framework runs as a subprocess. Empty resolves "agy"
                              on \$PATH
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
+  GRAIN_CLAUDE_MODEL        override the daemon's default Claude model. Seeded once,
+                             the exact counterpart of GRAIN_GEMINI_MODEL above
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
                              can exhaust: reading a few files, writing one, running
@@ -1740,6 +1745,7 @@ write_systemd_units() {
   [ -n "$GRAIN_AGY_PATH" ] && daemon_args+=(-agy-path "$GRAIN_AGY_PATH")
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ -n "$GRAIN_CLAUDE_PATH" ] && daemon_args+=(-claude-path "$GRAIN_CLAUDE_PATH")
+  [ -n "$GRAIN_CLAUDE_MODEL" ] && daemon_args+=(-claude-model "$GRAIN_CLAUDE_MODEL")
   [ -n "$GRAIN_MAX_AGENT_TURNS" ] && daemon_args+=(-max-agent-turns "$GRAIN_MAX_AGENT_TURNS")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
