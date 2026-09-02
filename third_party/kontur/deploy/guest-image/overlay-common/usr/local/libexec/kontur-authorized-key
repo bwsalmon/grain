@@ -1,0 +1,81 @@
+#!/bin/sh
+# Install the SSH key "kontur exec" will authenticate with, from the
+# kernel command line, before sshd starts.
+#
+# kontur generates a fresh keypair in the VM's own container on every boot
+# (see internal/guestkey) and passes the public half here as
+# "kontur.authorized_key=<base64 of an authorized_keys line>". Base64
+# because a key line contains spaces and the kernel command line is
+# space-separated.
+#
+# This is what lets a guest image be published: with no keypair baked in
+# at build time, the image carries no secret, and every VM booted from it
+# authorizes a different key that exists only for as long as it is
+# running. It also removes a subtler trap -- a baked keypair only worked
+# when the guest image and the runtime image that boots it came out of the
+# same `docker build`, since each build generated its own.
+#
+# The key is always installed for root, and additionally for the account
+# named by "kontur.authorized_key_user=" if there is one -- which is how a
+# caller execs as an image's own unprivileged account (KONTUR_EXEC_USER)
+# without the image and the caller having had to agree on a name at build
+# time.
+#
+# A guest booted with no key parameter -- an operator running this image
+# by hand, or one who set CHV_CMDLINE themselves -- is left exactly as it
+# was, including any GUEST_SSH_AUTHORIZED_KEY the image was built with.
+set -eu
+
+CMDLINE="${KONTUR_CMDLINE_FILE:-/proc/cmdline}"
+PASSWD="${KONTUR_PASSWD_FILE:-/etc/passwd}"
+
+param() {
+	sed -n "s/.*\\b$1=\\([^ ]*\\).*/\\1/p" "$CMDLINE"
+}
+
+key_b64="$(param kontur.authorized_key)"
+if [ -z "$key_b64" ]; then
+	exit 0
+fi
+
+key="$(printf '%s' "$key_b64" | base64 -d)"
+if [ -z "$key" ]; then
+	echo "kontur-authorized-key: kontur.authorized_key did not decode" >&2
+	exit 1
+fi
+
+# install_for writes the key as the sole authorized_keys entry for one
+# account. Sole, not appended: this runs on every boot, and appending
+# would grow the file by one dead key per boot. An operator key baked in
+# at build time lives in the image's own authorized_keys for accounts this
+# never touches.
+install_for() {
+	user="$1"
+	# getent(1) is not in every guest -- busybox provides it, but only in
+	# some builds -- while awk and /etc/passwd are in all of them.
+	home="$(awk -F: -v u="$user" '$1 == u {print $6}' "$PASSWD")"
+	uid="$(awk -F: -v u="$user" '$1 == u {print $3}' "$PASSWD")"
+	gid="$(awk -F: -v u="$user" '$1 == u {print $4}' "$PASSWD")"
+	if [ -z "$home" ]; then
+		echo "kontur-authorized-key: no account $user in $PASSWD -- not authorizing it" >&2
+		return 1
+	fi
+
+	mkdir -p "$home/.ssh"
+	printf '%s\n' "$key" > "$home/.ssh/authorized_keys"
+	# sshd's StrictModes refuses an authorized_keys file, or a .ssh
+	# directory, that anyone but its owner can write.
+	chmod 0700 "$home/.ssh"
+	chmod 0600 "$home/.ssh/authorized_keys"
+	chown "$uid:$gid" "$home/.ssh" "$home/.ssh/authorized_keys"
+}
+
+install_for root
+
+extra="$(param kontur.authorized_key_user)"
+if [ -n "$extra" ] && [ "$extra" != root ]; then
+	# A missing account is worth failing over: the caller asked to exec as
+	# it, so a guest that boots without it authorized is a guest they
+	# cannot reach, and failing here says why.
+	install_for "$extra"
+fi

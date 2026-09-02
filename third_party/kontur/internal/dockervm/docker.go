@@ -249,6 +249,14 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 	if addr := spec.ExecAddr(); addr != "" {
 		vmArgs = append(vmArgs, "-e", "KONTUR_EXEC_ADDR="+addr)
 	}
+	// Read twice inside the container, for the two halves of one fact:
+	// "kontur run" puts it on the guest's kernel command line so the
+	// generated key is authorized for this account, and "kontur exec"
+	// (which docker exec runs with the container's own environment) logs
+	// in as it. See VMSpec.GuestUser.
+	if spec.GuestUser != "" {
+		vmArgs = append(vmArgs, "-e", "KONTUR_EXEC_USER="+spec.GuestUser)
+	}
 	vmArgs = append(vmArgs, spec.KonturImage, "run")
 	if err := d.run(ctx, io.Discard, vmArgs...); err != nil {
 		_ = d.remove(ctx, netnsName)

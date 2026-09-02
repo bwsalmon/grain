@@ -52,6 +52,7 @@ import (
 
 	"github.com/bwsalmon/kontur/internal/config"
 	"github.com/bwsalmon/kontur/internal/guestexec"
+	"github.com/bwsalmon/kontur/internal/guestkey"
 	"github.com/bwsalmon/kontur/internal/hypervisor"
 	"github.com/bwsalmon/kontur/internal/memagent"
 	"github.com/bwsalmon/kontur/internal/netshim"
@@ -120,6 +121,10 @@ func runVM() error {
 		return err
 	}
 
+	if err := ensureGuestKey(&cfg, guestexec.DefaultKeyPath); err != nil {
+		return err
+	}
+
 	if netshim.FlatEnabled() {
 		if err := applyFlatNet(&cfg); err != nil {
 			return err
@@ -167,6 +172,81 @@ func runVM() error {
 		os.Exit(exitErr.ExitCode())
 	}
 	return err
+}
+
+// ensureGuestKey makes sure a keypair "kontur exec" can authenticate with
+// exists for the guest this run is about to boot, and that the guest will
+// authorize it.
+//
+// On a fresh boot that means generating one and appending its public half
+// to the kernel command line, which the guest installs before starting
+// sshd (deploy/guest-image's kontur-authorized-key). The key lives only
+// in this container, only for this guest's boot -- see internal/guestkey
+// for why that replaced a keypair baked into the image.
+//
+// A restore is the exception, and it is not a small one. BuildArgs passes
+// no command line at all when resuming from a snapshot: cloud-hypervisor
+// replays the entire machine from the snapshot's own config.json, and the
+// guest never boots a kernel, so nothing would read a freshly generated
+// key. Its authorized_keys still holds whatever the boot that was
+// suspended installed. Generating a new key here would therefore not
+// "rotate" anything -- it would lock this container out of the guest it
+// just resumed. So a restore reuses that boot's key instead.
+//
+// Which is why the key is also saved beside the snapshot whenever one is
+// configured: the container's own writable layer does not survive being
+// recreated, and a snapshot exists precisely to be resumed by a later
+// container than the one that took it.
+func ensureGuestKey(cfg *config.Config, keyPath string) error {
+	saved := savedKeyPath(cfg.SnapshotPath)
+
+	if hypervisor.SnapshotExists(cfg.SnapshotPath) {
+		if _, err := os.Stat(keyPath); err == nil {
+			return nil
+		}
+		if err := copyKey(saved, keyPath); err != nil {
+			return fmt.Errorf("recovering the resumed guest's exec key from %s: %w", saved, err)
+		}
+		log.Printf("resuming from %s: reusing the exec key that boot installed", cfg.SnapshotPath)
+		return nil
+	}
+
+	authorized, err := guestkey.Generate(keyPath)
+	if err != nil {
+		return fmt.Errorf("generating this boot's guest exec key: %w", err)
+	}
+	cfg.Cmdline = guestkey.WithParams(cfg.Cmdline, authorized, guestexec.UserFromEnv())
+
+	if saved != "" {
+		if err := copyKey(keyPath, saved); err != nil {
+			return fmt.Errorf("saving the exec key for a later resume: %w", err)
+		}
+	}
+	return nil
+}
+
+// savedKeyPath returns where this VM's exec key is kept so that a
+// container recreated around the same snapshot can still reach the guest,
+// or "" when no snapshot is configured and the question cannot arise.
+func savedKeyPath(snapshotPath string) string {
+	if snapshotPath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(snapshotPath), "exec_id_ed25519")
+}
+
+func copyKey(src, dst string) error {
+	if src == "" {
+		return fmt.Errorf("no snapshot directory to read it from")
+	}
+	key, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, key, 0o600)
 }
 
 // startMemAgent starts internal/memagent's listener in the background so

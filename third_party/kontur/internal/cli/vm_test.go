@@ -384,6 +384,25 @@ func TestVMLifecycle_FlatMode(t *testing.T) {
 		t.Errorf("saved DockerRunOpts after update = %v, want %v (replaced, not appended)", saved.DockerRunOpts, want)
 	}
 
+	// A further update that omits -docker-run-opt entirely preserves the
+	// previously saved list rather than clearing it: registerVMFlags
+	// defaults the flag to the saved spec's own list, so "update" behaves
+	// the same way for -docker-run-opt as it does for every other flag --
+	// give it and it replaces, omit it and the saved value is kept.
+	if _, stderr, err := runVMArgs(t, "update", "web", "--cpus", "4", "--state-dir", stateDir); err != nil {
+		t.Fatalf("update (no -docker-run-opt) error = %v, stderr = %s", err, stderr)
+	}
+	saved, err = staticpod.Load(stateDir, "web")
+	if err != nil {
+		t.Fatalf("saved state not found after second update: %v", err)
+	}
+	if want := []string{"-p", "9090:80"}; !reflect.DeepEqual(saved.DockerRunOpts, want) {
+		t.Errorf("saved DockerRunOpts after update without -docker-run-opt = %v, want %v (preserved)", saved.DockerRunOpts, want)
+	}
+	if saved.CPUs != 4 {
+		t.Errorf("saved CPUs after update without -docker-run-opt = %d, want 4", saved.CPUs)
+	}
+
 	if _, stderr, err := runVMArgs(t, "delete", "web", "--state-dir", stateDir); err != nil {
 		t.Fatalf("delete error = %v, stderr = %s", err, stderr)
 	}

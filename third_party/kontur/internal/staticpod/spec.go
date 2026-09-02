@@ -84,6 +84,21 @@ type VMSpec struct {
 	Port      int    `json:"port"`
 	GuestPort int    `json:"guestPort"`
 
+	// GuestUser is an account inside the guest, besides root, that
+	// "kontur exec" may log in as -- KONTUR_EXEC_USER on the VM
+	// container.
+	//
+	// It is one setting rather than two because the VM container reads it
+	// twice, for the two halves of the same fact: "kontur run" puts it on
+	// the guest's kernel command line so the guest authorizes this boot's
+	// generated key for that account (see internal/guestkey), and "kontur
+	// exec" reads it to decide who to log in as. Naming the account in
+	// only one of those places gives either a key authorized for someone
+	// nobody logs in as, or a login as someone with no key.
+	//
+	// Empty means root, which is always authorized.
+	GuestUser string `json:"guestUser,omitempty"`
+
 	Bridge        string `json:"bridge"`
 	BridgeCIDR    string `json:"bridgeCIDR"`
 	ExternalIface string `json:"externalIface"`

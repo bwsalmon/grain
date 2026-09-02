@@ -303,3 +303,28 @@ func argsHave(args []string, name, value string) bool {
 	}
 	return false
 }
+
+// See the matching test in pkg/agent/claude: with `kontur run` generating
+// a keypair per guest, no exec key is the normal configuration, and an
+// empty "-exec-key" is worse than none at all.
+func TestRunOmitsExecKeyWhenUnset(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithKonturSSH("agent", "", "/workspace"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", KonturVM: "grain-run-7"}); err != nil {
+		t.Fatalf("a kontur run with no exec key should work, got: %v", err)
+	}
+	var settings struct {
+		MCPServers map[string]struct {
+			Args []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(r.homeAtRun), &settings); err != nil {
+		t.Fatalf("settings file was not JSON: %v", err)
+	}
+	for _, arg := range settings.MCPServers[mcpServerName].Args {
+		if arg == "-exec-key" {
+			t.Errorf("args = %v, want no -exec-key when none is configured", settings.MCPServers[mcpServerName].Args)
+		}
+	}
+}

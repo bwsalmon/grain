@@ -1,12 +1,20 @@
 # Vendored from bwsalmon/kontur
 
-This directory is a source snapshot of [bwsalmon/kontur](https://github.com/bwsalmon/kontur)'s
-`main` branch, pulled through the grain git proxy at commit
-`63b5defa558f9f9c96f68d122eb1e63ce4eaa199` (2026-09-01). Always vendor
-from `main`: grain is kontur's primary consumer, so a change grain needs
-belongs on kontur's `main` and reaches here by a resync, not by being
-applied to this copy (see "Local patches" below). It was first
-vendored at commit `a13a8cc` (2026-08-28, bwsalmon/agents#351), then
+This directory is a source snapshot of [bwsalmon/kontur](https://github.com/bwsalmon/kontur),
+pulled through the grain git proxy. Always vendor from `main`: grain is
+kontur's primary consumer, so a change grain needs belongs on kontur's
+`main` and reaches here by a resync, not by being applied to this copy
+(see "Local patches" below).
+
+> **This snapshot is not from `main`.** It is
+> `claude/grain-container-deployment-lmna0q` at `c2892f3`
+> ([bwsalmon/kontur#35](https://github.com/bwsalmon/kontur/pull/35)),
+> because the grain changes alongside it cannot build or run without it.
+> Re-vendor from `main` once #35 merges, before this lands. The rule
+> above is not suspended -- the change lives upstream and arrives here by
+> a resync, this one just happens to be a resync of an open PR.
+
+The snapshot history: it was first vendored at commit `a13a8cc` (2026-08-28, bwsalmon/agents#351), then
 partially re-synced to `3cf4f9286402753add8390302cfb7c1fa82e4f81`
 (2026-08-30, bwsalmon/agents#477, three files only), fully re-synced to
 `71e277ac37e1d28a5e36ce18e9a4d80ae5a7615f` (2026-08-30,
@@ -23,7 +31,34 @@ three local patches going upstream plus the build-time guest setup hook),
 and fully re-synced to `9a43152b09807814ba1a364fab313a72183f9bac`
 (2026-08-31, flat networking mode and CI, bwsalmon/kontur#29 and #30).
 
-## This resync: mask udev's NIC rename for the flat-mode control link
+## This resync: a per-boot guest exec keypair
+
+Everything between `63b5def` (the previous snapshot) and this branch,
+which is upstream `33fe6af` plus
+[bwsalmon/kontur#35](https://github.com/bwsalmon/kontur/pull/35).
+
+#35 replaces the keypair kontur's Dockerfile used to bake into the image
+-- public half in the guest rootfs, private half in the runtime image --
+with one `kontur run` generates per boot and hands the guest on the
+kernel command line. That keypair was the reason a grain deployment
+could not pull a published guest disk: `packer/kontur/guest-setup.sh`
+had to bake *this* deployment's own SSH key in at build time, so there
+was no such thing as a generic published guest image. With the key
+arriving at boot there is nothing deployment-specific left in the disk,
+and `ensure_kontur_guest_build` can become a pull.
+
+It also removes a trap grain had already worked around: the baked
+keypair's two halves only matched when the guest image and the runtime
+image came out of the same `docker build`, which is why grain managed a
+keypair of its own (`ensure_kontur_ssh_key`, `-kontur-exec-key`) instead
+of using kontur's. That is all deleted here.
+
+`konturctl vm create -guest-user` is the one new input: kontur authorizes
+root, and grain execs as `debian`, so the account has to be named. It
+sets `KONTUR_EXEC_USER` on the VM container, where `kontur run` reads it
+to authorize the account and `kontur exec` reads it to log in as.
+
+## Previous resync: mask udev's NIC rename for the flat-mode control link
 
 `63b5def` is the merge of a single upstream commit, `6d69560`, into
 `main`. **This snapshot still has no local patches** -- every file here is

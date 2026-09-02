@@ -43,7 +43,8 @@ Copied verbatim into the rootfs before it's packed into `disk.img`:
 
 | File | Purpose |
 |---|---|
-| `overlay-common/etc/ssh/sshd_config.d/10-console.conf` | Forces every SSH session through the wrapper below and disables password auth (root has no password at all, only whatever key `GUEST_SSH_AUTHORIZED_KEY` bakes in at build time). |
+| `overlay-common/etc/ssh/sshd_config.d/10-console.conf` | Forces every SSH session through the wrapper below and disables password auth (root has no password at all -- only the key `kontur run` generates per boot, plus whatever `GUEST_SSH_AUTHORIZED_KEY` bakes in at build time). |
+| `overlay-common/usr/local/libexec/kontur-authorized-key` | Installs the per-boot `kontur exec` key from the kernel command line, before sshd starts. Run by `kontur-authorized-key.service` (Debian) / `/etc/init.d/kontur-authorized-key` (Alpine). |
 | `overlay-common/usr/local/libexec/kontur-ssh-console-wrap` | Runs the session under `script`, which mirrors its output to `/dev/console` (ttyS0) in addition to the real SSH client. |
 | `overlay-common/etc/acpi/events/powerbtn` | `acpid` event config matching the ACPI power button, pointing at `/etc/acpi/powerbtn.sh` -- see "Graceful shutdown" below for why that script's own contents differ per variant. |
 | `overlay-debian/etc/acpi/powerbtn.sh` | Runs `systemctl poweroff`. |
@@ -101,13 +102,24 @@ adding a separate logging pipeline inside the guest.
 ## Getting SSH access
 
 Root login is key-only (`PermitRootLogin prohibit-password` plus no
-password set). By default this image already authorizes one key: the
-public half of a keypair the top-level `Dockerfile`'s `exec-keypair`
-stage generates at build time, whose private half is baked into the
-outer `kontur` image so `kontur exec` (see the top-level README's
-"Execing into a VM") always has a way in without any of this section's
-setup. Pass your own public key at build time too, to allow your own
-key-based root login *alongside* that one:
+password set), and this image authorizes **no key at build time**.
+
+`kontur exec` (see the top-level README's "Execing into a VM") still
+always has a way in without any of this section's setup, but the key it
+uses is generated per boot rather than baked in: `kontur run` creates an
+ed25519 keypair in the VM's own container, passes the public half to the
+guest on the kernel command line, and `kontur-authorized-key.service`
+installs it before sshd starts. See `internal/guestkey`.
+
+That is what makes this image publishable. A baked keypair was one secret
+shared by every VM ever booted from a given build, shipped inside the
+image; it also only worked when the guest image and the runtime image
+that boots it came out of the *same* `docker build`, since each build
+generated its own -- so a separately published guest silently authorized
+a key nobody held.
+
+Pass your own public key at build time to allow your own key-based root
+login alongside the generated one:
 
 ```sh
 docker build --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat ~/.ssh/id_ed25519.pub)" -t kontur .

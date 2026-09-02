@@ -259,7 +259,7 @@ func TestRunWritesMCPConfigPointingAtTheKonturVM(t *testing.T) {
 	if !ok {
 		t.Fatalf("mcp-config missing grain-sandbox server: %+v", cfg)
 	}
-	want := []string{"mcpserver", "-kontur-vm", "g-1-1", "-ssh-user", "root", "-exec-key", "/images/key", "-workspace", "/workspace"}
+	want := []string{"mcpserver", "-kontur-vm", "g-1-1", "-ssh-user", "root", "-workspace", "/workspace", "-exec-key", "/images/key"}
 	if len(server.Args) != len(want) {
 		t.Fatalf("args = %v, want %v", server.Args, want)
 	}
@@ -539,5 +539,32 @@ func TestMockToolCallsNeverReachAnyNetwork(t *testing.T) {
 	}
 	if len(result.ToolCalls) != 1 || result.ToolCalls[0].IsError {
 		t.Fatalf("ToolCalls = %+v", result.ToolCalls)
+	}
+}
+
+// The normal case now: no exec key configured, because `kontur run`
+// generates one per guest and `kontur exec`'s own default path already
+// holds it. Passing "-exec-key" with an empty value instead of omitting
+// it would have mcpserver hand KONTUR_EXEC_KEY="" to kontur exec, which
+// reads an empty path as a key it cannot open rather than as "unset".
+func TestRunOmitsExecKeyWhenUnset(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "/path/to/grain", WithKonturSSH("root", "", "/workspace"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", KonturVM: "g-1-1"}); err != nil {
+		t.Fatalf("a kontur run with no exec key should work, got: %v", err)
+	}
+	var cfg struct {
+		MCPServers map[string]struct {
+			Args []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(fake.gotMCPConfig, &cfg); err != nil {
+		t.Fatalf("mcp-config was not valid JSON: %v (%s)", err, fake.gotMCPConfig)
+	}
+	for _, arg := range cfg.MCPServers["grain-sandbox"].Args {
+		if arg == "-exec-key" {
+			t.Errorf("args = %v, want no -exec-key when none is configured", cfg.MCPServers["grain-sandbox"].Args)
+		}
 	}
 }

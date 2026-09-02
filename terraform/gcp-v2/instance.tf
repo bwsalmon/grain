@@ -217,8 +217,8 @@ resource "google_compute_instance" "host" {
     }
 
     # grain-github-token, grain-github-app-id/installation-id/private-key,
-    # grain-gemini-api-key, grain-claude-oauth-token, grain-gcp-minter-key,
-    # and grain-kontur-ssh-key are never declared here -- push-secrets.sh adds them directly with
+    # grain-gemini-api-key, grain-claude-oauth-token and grain-gcp-minter-key
+    # are never declared here -- push-secrets.sh adds them directly with
     # `gcloud compute instances add-metadata` once this resource exists,
     # so none of them ever passes through Terraform or lands in the
     # state file. Without this, the next apply would see them as drift
@@ -231,7 +231,6 @@ resource "google_compute_instance" "host" {
       metadata["grain-gemini-api-key"],
       metadata["grain-claude-oauth-token"],
       metadata["grain-gcp-minter-key"],
-      metadata["grain-kontur-ssh-key"],
     ]
   }
 }

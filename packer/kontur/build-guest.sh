@@ -26,11 +26,9 @@
 # the previous build did need.
 #
 # Usage:
-#   OPERATOR_SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)" ./build-guest.sh
+#   ./build-guest.sh
 set -euo pipefail
 cd "$(dirname "$0")"
-
-: "${OPERATOR_SSH_PUBLIC_KEY:?set OPERATOR_SSH_PUBLIC_KEY to the operator SSH public key this image should carry (see README.md)}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "build-guest.sh: docker not found" >&2
@@ -45,12 +43,17 @@ shquote() {
 
 # kontur's hook writes GUEST_SETUP_SCRIPT to a file and execs it with only
 # its own build stage's environment (third_party/kontur's Dockerfile,
-# guest-customized stage), so the two variables guest-setup.sh reads have
-# to travel inside the script text itself. They are inserted immediately
+# guest-customized stage), so the one variable guest-setup.sh reads has
+# to travel inside the script text itself. It is inserted immediately
 # after the shebang, which has to stay on line 1 for the exec to work.
+#
+# There used to be a second, OPERATOR_SSH_PUBLIC_KEY, and it was the
+# reason the image this produces was deployment-specific. kontur now
+# generates a keypair per boot and passes the public half to the guest on
+# the kernel command line, so what comes out of here is generic -- see
+# guest-setup.sh's "No SSH key is baked in".
 setup_script="$(
   head -n 1 guest-setup.sh
-  printf 'OPERATOR_SSH_PUBLIC_KEY=%s\n' "$(shquote "${OPERATOR_SSH_PUBLIC_KEY}")"
   printf 'SANDBOX_SETUP_SCRIPT=%s\n' "$(shquote "${SANDBOX_SETUP_SCRIPT:-}")"
   tail -n +2 guest-setup.sh
 )"

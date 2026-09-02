@@ -617,14 +617,13 @@ variable "kontur_image_bucket" {
     itself instead (bwsalmon/agents#531) and this is never read.
 
     The guest disk is the one thing a deployment still builds rather than
-    pulls, and it cannot be otherwise by default: guest-setup.sh bakes
-    this deployment's own SSH public key into its authorized_keys, so
-    there is no generic published disk to fetch. Set this for an operator
-    who would rather build once, centrally, and share the result across a
-    fleet that all use one keypair -- which then also needs
-    GRAIN_KONTUR_SSH_KEY pushed by push-secrets.sh, since the disk
-    already has that key's public half baked in and setup.sh must not
-    generate a different one. Unrelated to kontur_oci_image above, which
+    pulls. Nothing deployment-specific goes into it any more -- kontur
+    generates an SSH keypair per VM boot and hands the guest the public
+    half on its kernel command line, where guest-setup.sh used to bake
+    one in -- so a disk built anywhere works anywhere, and this needs no
+    matching secret pushed alongside it. Set it for an operator who would
+    rather build once, centrally, and share the result across a fleet.
+    Unrelated to kontur_oci_image above, which
     is a container and is always pulled; this module does not create the bucket for you,
     so create one by hand (`gsutil mb`) and grant the host service account
     read access to it yourself, or via a `google_storage_bucket_iam_member`

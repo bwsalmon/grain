@@ -82,6 +82,7 @@ type vmFlags struct {
 	ip                            *string
 	port                          *int
 	guestPort                     *int
+	guestUser                     *string
 	bridge                        *string
 	bridgeCIDR                    *string
 	externalIface                 *string
@@ -115,6 +116,7 @@ func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v.ip = fs.String("ip", d.IP, "address netshim assigns this VM on its bridge subnet; the guest must configure the same address")
 	v.port = fs.Int("port", d.Port, "external port on the pod IP that forwards to this VM")
 	v.guestPort = fs.Int("guest-port", d.GuestPort, "port the guest listens on internally")
+	v.guestUser = fs.String("guest-user", d.GuestUser, "guest account, besides root, that \"kontur exec\" logs in as: the guest authorizes this boot's generated key for it too (empty means root)")
 	v.bridge = fs.String("bridge", d.Bridge, "name of the in-pod bridge netshim creates")
 	v.bridgeCIDR = fs.String("bridge-cidr", d.BridgeCIDR, "the bridge's own address and subnet; -ip must fall within it")
 	v.externalIface = fs.String("external-iface", d.ExternalIface, "the pod's primary interface")
@@ -145,6 +147,7 @@ func (v *vmFlags) toSpec(name string) staticpod.VMSpec {
 		IP:                            *v.ip,
 		Port:                          *v.port,
 		GuestPort:                     *v.guestPort,
+		GuestUser:                     *v.guestUser,
 		Bridge:                        *v.bridge,
 		BridgeCIDR:                    *v.bridgeCIDR,
 		ExternalIface:                 *v.externalIface,

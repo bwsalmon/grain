@@ -185,22 +185,6 @@ if [ -n "$minter_key_json" ]; then
   printf '%s' "$minter_key_json" > "$MINTER_KEY_FILE"
 fi
 
-KONTUR_SSH_KEY_FILE=""
-kontur_ssh_key="$(md_optional instance/attributes/grain-kontur-ssh-key)"
-if [ -n "$kontur_ssh_key" ]; then
-  KONTUR_SSH_KEY_FILE="$SECRET_DIR/kontur-ssh-key"
-  umask 077
-  # Trailing newline appended deliberately: the "$(...)" above already
-  # stripped whatever the metadata value ended with, and an OpenSSH
-  # private key one newline short of its original bytes fails to parse
-  # ("error in libcrypto") -- v2/scripts/setup.sh's own seed_secret has
-  # the same fix, for the same reason (bwsalmon/agents#543).
-  printf '%s\n' "$kontur_ssh_key" > "$KONTUR_SSH_KEY_FILE"
-fi
-if [ "$ENABLE_KONTUR_SANDBOXES" = "True" ] && [ -z "$KONTUR_SSH_KEY_FILE" ]; then
-  log "enable_kontur_sandboxes is on but no grain-kontur-ssh-key is in instance metadata yet -- setup.sh will leave kontur sandboxing off until push-secrets.sh has pushed one (see terraform/gcp-v2 README, \"Kontur sandboxing\")"
-fi
-
 if [ -z "$GITHUB_TOKEN" ] && [ -z "$GITHUB_APP_ID" ]; then
   log "no grain-github-token or grain-github-app-id in instance metadata yet -- deploying with no GitHub credential; run push-secrets.sh once one is ready"
 fi
@@ -230,8 +214,7 @@ log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo absent)" \
     "| gemini key: $([ -n "$GEMINI_API_KEY" ] && echo present || echo 'absent, will mint')" \
     "| claude token: $([ -n "$CLAUDE_OAUTH_TOKEN" ] && echo present || echo absent)" \
     "| minter key: $([ -n "$MINTER_KEY_FILE" ] && echo present || echo MISSING)"
-log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_image_bucket=${KONTUR_IMAGE_BUCKET:-<empty>} kontur_oci_image=${KONTUR_OCI_IMAGE:-<empty>}" \
-    "| kontur ssh key: $([ -n "$KONTUR_SSH_KEY_FILE" ] && echo present || echo MISSING)"
+log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_image_bucket=${KONTUR_IMAGE_BUCKET:-<empty>} kontur_oci_image=${KONTUR_OCI_IMAGE:-<empty>}"
 
 # --- run v2/scripts/setup.sh, which does everything else --------------
 #
@@ -281,7 +264,6 @@ env \
   GRAIN_KONTUR_IMAGE_BUCKET="$KONTUR_IMAGE_BUCKET" \
   GRAIN_KONTUR_OCI_IMAGE="$KONTUR_OCI_IMAGE" \
   GRAIN_KONTUR_SSH_USER="$KONTUR_SSH_USER" \
-  GRAIN_KONTUR_SSH_KEY_FILE="$KONTUR_SSH_KEY_FILE" \
   GRAIN_KONTUR_WORKSPACE="$KONTUR_WORKSPACE" \
   GRAIN_KONTUR_BASE_IP="$KONTUR_BASE_IP" \
   GRAIN_KONTUR_BASE_PORT="$KONTUR_BASE_PORT" \

@@ -201,3 +201,38 @@ func TestRender_FlatModeWithoutControlLinkOmitsExecAddr(t *testing.T) {
 		t.Errorf("manifest sets KONTUR_EXEC_ADDR with no control link, which has no address to dial:\n%s", out)
 	}
 }
+
+// GuestUser has to reach the VM container, because both halves of it are
+// read there: "kontur run" authorizes the guest account, "kontur exec"
+// logs in as it. See VMSpec.GuestUser.
+func TestRender_GuestUser(t *testing.T) {
+	s := baseSpec()
+	s.GuestUser = "debian"
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if got, want := envValue(t, out, "KONTUR_EXEC_USER"), "debian"; got != want {
+		t.Errorf("KONTUR_EXEC_USER = %q, want %q", got, want)
+	}
+}
+
+// Unset means root, which the guest authorizes unconditionally -- so the
+// variable is left out rather than sent as an empty string, which
+// guestexec would read as an account named "".
+func TestRender_NoGuestUser(t *testing.T) {
+	s := baseSpec()
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if strings.Contains(out, "KONTUR_EXEC_USER") {
+		t.Errorf("manifest sets KONTUR_EXEC_USER with no guest user configured:\n%s", out)
+	}
+}

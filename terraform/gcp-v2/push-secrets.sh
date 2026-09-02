@@ -55,25 +55,7 @@
 #                                      which stores them in the host's own secrets database
 #                                      and takes precedence over whatever is pushed here.
 #                                      Push one to have a deployment come up already able to
-#                                      dispatch, without anyone opening the UI first
-#   GRAIN_KONTUR_SSH_KEY                the private half of the SSH keypair
-#                                      orchestrator.KonturSandboxes authenticates to each
-#                                      kontur VM's guest with (staged into the images
-#                                      directory and named by -kontur-exec-key). Optional: with
-#                                      enable_kontur_sandboxes on and this unset,
-#                                      v2/scripts/setup.sh's own ensure_kontur_ssh_key
-#                                      generates a keypair itself and bakes its public half
-#                                      into the guest image it builds (bwsalmon/agents#531)
-#                                      -- set this only to pin a specific keypair instead,
-#                                      e.g. one shared across a fleet building its guest
-#                                      image once, centrally (see this directory's README,
-#                                      "Kontur sandboxing"). The public half then has to be
-#                                      baked into the guest image separately, at build time,
-#                                      via packer/kontur/build-guest.sh's own
-#                                      OPERATOR_SSH_PUBLIC_KEY -- both halves have to come
-#                                      from the same keypair, and rotating one without also
-#                                      rebuilding the guest image with the other leaves them
-#                                      mismatched.
+#                                      dispatch, without anyone opening the UI first.
 #   GRAIN_IMAGE_PULL_TOKEN             the password half of a `docker login` against the
 #                                      registry grain_image lives in, for a deployment
 #                                      running a private image (a GitHub PAT with
@@ -113,7 +95,6 @@ push_secret "grain-github-app-installation-id" "${GRAIN_GITHUB_APP_INSTALLATION_
 push_secret "grain-github-app-private-key" "${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
 push_secret "grain-claude-oauth-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
-push_secret "grain-kontur-ssh-key" "${GRAIN_KONTUR_SSH_KEY:-}"
 # Only for a deployment whose grain_image lives in a registry that needs
 # credentials -- ghcr.io/bwsalmon/grain's own package is public and pulls
 # anonymously, so this is empty (and skipped) in the ordinary case. The

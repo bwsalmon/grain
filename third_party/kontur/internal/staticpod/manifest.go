@@ -169,6 +169,14 @@ spec:
         - name: KONTUR_EXEC_ADDR
           value: {{yq .ExecAddr}}
 {{- end}}
+{{- if .GuestUser}}
+        # Read twice inside the container, for the two halves of one
+        # fact: "kontur run" puts it on the guest's kernel command line so
+        # this boot's generated key is authorized for this account, and
+        # "kontur exec" logs in as it. See VMSpec.GuestUser.
+        - name: KONTUR_EXEC_USER
+          value: {{yq .GuestUser}}
+{{- end}}
       securityContext:
         privileged: true
       volumeMounts:

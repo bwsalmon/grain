@@ -233,13 +233,22 @@ func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 	case cfg.SandboxRoot != "":
 		return []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}, nil
 	case cfg.KonturVM != "":
-		if f.konturSSHUser == "" || f.konturExecKey == "" || f.konturWorkspace == "" {
+		if f.konturSSHUser == "" || f.konturWorkspace == "" {
 			return nil, fmt.Errorf("claude: RunConfig.KonturVM is set but this Framework has no kontur SSH config (see WithKonturSSH)")
 		}
-		return []string{
+		args := []string{
 			"mcpserver", "-kontur-vm", cfg.KonturVM,
-			"-ssh-user", f.konturSSHUser, "-exec-key", f.konturExecKey, "-workspace", f.konturWorkspace,
-		}, nil
+			"-ssh-user", f.konturSSHUser, "-workspace", f.konturWorkspace,
+		}
+		// Omitted rather than passed empty when unset, which is the
+		// normal case: "kontur run" generates a keypair for each guest it
+		// boots, so `kontur exec`'s own default path already holds a key
+		// that guest authorizes. An explicit key is only for a custom
+		// guest image that authorizes one of its own.
+		if f.konturExecKey != "" {
+			args = append(args, "-exec-key", f.konturExecKey)
+		}
+		return args, nil
 	default:
 		return nil, fmt.Errorf("claude: RunConfig.SandboxRoot or .KonturVM is required")
 	}

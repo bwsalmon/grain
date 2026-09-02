@@ -33,15 +33,23 @@ type KonturConfig struct {
 	SSHUser string
 	// ExecKeyPath is the private key `kontur exec` authenticates to the
 	// guest with, as a path *inside the VM's own container* rather than
-	// on the host. Required: left empty, `kontur exec` falls back to the
-	// dedicated key bwsalmon/kontur's own Dockerfile bakes into the image
-	// and authorizes on the guest rootfs that same Dockerfile builds --
-	// which a deployment pointing -disk at packer/kontur/build-guest.sh's
-	// output is not booting.
+	// on the host.
 	//
-	// The images directory internal/dockervm already mounts read-only at
-	// /images is the natural place to put it: it needs no change to
-	// kontur to be readable there.
+	// Optional, and normally empty. `kontur run` generates a keypair for
+	// each guest it boots and hands the guest the public half on its
+	// kernel command line, so `kontur exec`'s own default path already
+	// holds a key that guest authorizes (bwsalmon/kontur's
+	// internal/guestkey). Set this only for a custom guest image that
+	// authorizes a key of its own instead; the images directory
+	// internal/dockervm mounts read-only at /images is the natural place
+	// to put one.
+	//
+	// This used to be required, and grain used to generate and distribute
+	// that keypair itself, because kontur's baked-in key only worked when
+	// the guest disk and the runtime image came out of the same
+	// `docker build` -- which a deployment pointing -disk at its own
+	// guest build was not doing. The keypair moving into the boot removed
+	// the mismatch and the deployment-side key management with it.
 	ExecKeyPath string
 	// Workspace is the working directory run_command/read_file/edit_file/
 	// write_file operate in on each VM.
