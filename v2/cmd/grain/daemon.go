@@ -1126,10 +1126,14 @@ func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Durati
 // depended on how many times the daemon had already started would be a
 // worse surprise than one that is simply ignored after the first.
 //
-// Picking up a change made through the store still needs a restart --
-// this reads grain_config exactly once, at startup, applying no update
-// while RunCycle is running. bwsalmon/agents#320 explicitly did not ask
-// for graceful in-flight reloading, so run() does not attempt it.
+// Picking up a change made through the store still needs a restart for
+// every field but one -- this reads grain_config exactly once, at
+// startup, applying no update while RunCycle is running.
+// bwsalmon/agents#320 explicitly did not ask for graceful in-flight
+// reloading, so run() does not attempt it. MaxConcurrent is the
+// exception: RunCycle itself re-reads grain_config every cycle (its own
+// doc comment), so cfg.maxConcurrent below only ever matters as the
+// value a fresh database is seeded with.
 //
 // Only the fields with no bearing on reaching the store in the first
 // place move through here: -data-dir and -gemini-api-key-file (a
