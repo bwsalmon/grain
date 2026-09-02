@@ -109,6 +109,9 @@ export default function SettingsOverlay({ onClose, showError }) {
     const geminiModel = form.elements.geminiModel.value.trim();
     if (geminiModel !== (settings.geminiModel || "")) payload.geminiModel = geminiModel;
 
+    const claudeModel = form.elements.claudeModel.value.trim();
+    if (claudeModel !== (settings.claudeModel || "")) payload.claudeModel = claudeModel;
+
     const maxAgentTurnsRaw = form.elements.maxAgentTurns.value.trim();
     if (maxAgentTurnsRaw !== "") {
       const maxAgentTurns = parseInt(maxAgentTurnsRaw, 10);
@@ -174,7 +177,7 @@ export default function SettingsOverlay({ onClose, showError }) {
       {!settings.configured && (
         <Alert severity="info" sx={{ mb: 2 }}>
           Not configured yet -- nothing has been saved for this deployment. Poll interval and max concurrent
-          (General), Gemini model (Agents) and GitHub host (GitHub) are required the first time.
+          (General), Gemini model and Claude model (Agents) and GitHub host (GitHub) are required the first time.
         </Alert>
       )}
       <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
@@ -278,6 +281,7 @@ export default function SettingsOverlay({ onClose, showError }) {
           </Typography>
           <AgentKeysSection settings={settings} showError={showError} />
           <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
+          <TextField name="claudeModel" label="Claude model" defaultValue={settings.claudeModel || ""} autoComplete="off" fullWidth margin="normal" />
           <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
 
           <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>

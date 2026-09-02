@@ -1409,7 +1409,7 @@ func testConfig() model.Config {
 		// both come back as AgentFrameworkAntigravity (see
 		// TestGetConfigNormalizesTheLegacyAgentFrameworkName below).
 		AgentFramework: model.AgentFrameworkAntigravity,
-		GeminiModel:    "gemini-2.5-pro", MaxAgentTurns: 40,
+		GeminiModel:    "gemini-2.5-pro", ClaudeModel: "claude-sonnet-5", MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
 		TargetRepos:     []string{"acme/widgets", "acme/gadgets"},
@@ -2064,6 +2064,54 @@ func TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault(t *testing.T) 
 		// exactly as it does to a fresh one, the same default
 		// ensureConfigShowClosedByDefaultColumn's own doc comment explains.
 		t.Fatalf("ShowClosedByDefault after migrating = true, want false")
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingClaudeModel is the same
+// migration, applied to grain_config.claude_model
+// (model.Config.ClaudeModel's own doc comment has the reasoning).
+func TestInitMigratesAnExistingDatabaseMissingClaudeModel(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-claude-model grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-claude-model config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.claude_model: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.ClaudeModel != "" {
+		t.Fatalf("ClaudeModel after migrating = %q, want \"\"", got.ClaudeModel)
 	}
 }
 

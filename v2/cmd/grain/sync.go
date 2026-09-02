@@ -171,6 +171,7 @@ func printSettingsDiff(before, after ui.Settings) {
 		{"poll interval", before.PollInterval, after.PollInterval},
 		{"max concurrent", fmt.Sprint(before.MaxConcurrent), fmt.Sprint(after.MaxConcurrent)},
 		{"gemini model", before.GeminiModel, after.GeminiModel},
+		{"claude model", before.ClaudeModel, after.ClaudeModel},
 		{"max agent turns", fmt.Sprint(before.MaxAgentTurns), fmt.Sprint(after.MaxAgentTurns)},
 		{"github host", before.GitHubHost, after.GitHubHost},
 		{"github insecure http", fmt.Sprint(before.GitHubInsecureHTTP), fmt.Sprint(after.GitHubInsecureHTTP)},
