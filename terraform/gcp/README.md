@@ -47,6 +47,18 @@ Terraform -- it also wires up workload identity federation, the same
 mechanism v1's own bootstrap script used, so CI needs no long-lived
 key.
 
+The state bucket is the one piece `ci/terraform-apply.sh` will also
+create for itself, when a deploy finds it missing -- with the same
+uniform bucket-level access, versioning and public-access prevention
+this script applies. It only ever creates the name this script would
+have chosen, `<project_id>-<name_prefix>-tfstate`; a `backend.hcl`
+naming anything else is treated as a deliberate choice (or a typo) and
+fails rather than being created, since a mistyped bucket would otherwise
+give a deployment an empty state and have it build a second copy of
+itself. Everything else here still has to be run once by hand: the
+deployer account and the workload identity pool cannot bootstrap
+themselves from a job that authenticates as them.
+
 **2. Fill in the config.** Copy `example.tfvars` and `backend.hcl.example`
 and fill in every `CHANGE-ME`. At minimum: `project_id`,
 `deployer_member`, and `iap_members` -- an empty `iap_members` is a valid
