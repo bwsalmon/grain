@@ -272,9 +272,6 @@ func TestUpgraderRemovesBackupOnceHealthCheckPasses(t *testing.T) {
 
 func TestUpgraderStartRejectsConcurrentUpgrade(t *testing.T) {
 	_, checkout := newFixtureRepo(t, "feature")
-	if err := os.MkdirAll(checkout, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	u := New(Config{
 		SrcDir: checkout,
@@ -376,6 +373,38 @@ func TestUpgraderTimesOutInsteadOfHangingForever(t *testing.T) {
 	if err := u.Start("feature"); err != nil {
 		t.Errorf("Start after a timed-out upgrade: %v, want nil (u.running should have cleared)", err)
 	}
+
+	// That Start is a *real* run: it fetches and checks out inside
+	// SrcDir before reaching the build that will time out. Returning
+	// here leaves it doing that while t.TempDir's cleanup deletes the
+	// tree underneath it, which fails the test from the cleanup path:
+	//
+	//   TempDir RemoveAll cleanup: unlinkat .../checkout/.git:
+	//   directory not empty
+	//
+	// Seen on CI rather than reasoned about. Wait for the second run to
+	// finish so the tree is quiet before the test returns.
+	waitForRunStartedAfter(t, u, *status.StartedAt)
+}
+
+// waitForRunStartedAfter blocks until an upgrade begun after `since` has
+// finished. Phase alone cannot express that -- a second run's failure
+// looks exactly like the first's -- so this keys on the status's own
+// StartedAt, which Start stamps afresh every time.
+func waitForRunStartedAfter(t *testing.T, u *Upgrader, since time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := u.Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.StartedAt != nil && status.StartedAt.After(since) && status.FinishedAt != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for the second upgrade run to finish")
 }
 
 func TestUpgraderStartRejectsInvalidBranch(t *testing.T) {
