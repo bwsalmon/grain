@@ -220,9 +220,20 @@ resource "google_compute_instance" "host" {
     # grain-gemini-api-key, grain-claude-oauth-token and grain-gcp-minter-key
     # are never declared here -- push-secrets.sh adds them directly with
     # `gcloud compute instances add-metadata` once this resource exists,
-    # so none of them ever passes through Terraform or lands in the
-    # state file. Without this, the next apply would see them as drift
-    # and remove them.
+    # so no secret is written into a .tf file, a tfvars file, or anything
+    # this module is applied from. Without this block, the next apply
+    # would see them as drift and remove them.
+    #
+    # What it does not do is keep them out of Terraform's *state*. Refresh
+    # reads the instance's real metadata back on every run, so state holds
+    # each of these values, and a plan that *replaces* this instance
+    # renders all of them in full: ignore_changes governs in-place diffs,
+    # not the prior state a destroy is printed from. That is what put the
+    # minter account's private key in a deploy log in bwsalmon/agents#653,
+    # and it is why deploy/terraform-apply.sh filters the apply's output
+    # and why the state bucket deserves the same care as the secrets
+    # themselves -- see this module's README, "Secrets never touch
+    # Terraform."
     ignore_changes = [
       metadata["grain-github-token"],
       metadata["grain-github-app-id"],

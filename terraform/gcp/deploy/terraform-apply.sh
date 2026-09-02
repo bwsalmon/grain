@@ -149,10 +149,58 @@ terraform validate -no-color
 # apply` is safe here the same way it is for a stock-out: this resource's
 # state was never advanced, so the next attempt just retries the same
 # SetMetadata call. See bwsalmon/agents#636.
+
+# Terraform renders a *replaced* resource's prior state in full, and
+# instance.tf's own lifecycle.ignore_changes does not suppress any of it:
+# that block keeps push-secrets.sh's metadata out of an in-place diff, not
+# out of the state a destroy is rendered from. Refresh reads the
+# instance's real metadata back on every run, so any apply that replaces
+# the host -- a bigger boot_disk_gb, a new boot_image or machine_type,
+# each of which forces replacement -- prints every secret sitting on it,
+# the minter account's private key included, into a log everyone who can
+# read the workflow run can read (bwsalmon/agents#653, where exactly that
+# happened). GitHub Actions masks the values a workflow handed it as
+# secrets; it cannot mask the minter key, which push-secrets.sh mints
+# during the run.
+#
+# So the apply is filtered before it reaches the log or "$out": PEM
+# private-key bodies go, and so do the values of the metadata keys
+# push-secrets.sh writes. Redacting rather than silencing the apply
+# altogether, because this log is the first real plan a deployment ever
+# gets -- a config repo's plan.yml runs unauthenticated on purpose -- so
+# which resource changed, which attribute, and that it was replaced all
+# have to survive. Ordinary applies print none of this anyway
+# (ignore_changes covers them); this is the replacement case.
+#
+# Keyed on the metadata names rather than on the values, because the
+# values are exactly what this script must never be trusted to have seen.
+# The identifiers around them stay: private_key_id in particular names
+# which key to revoke if one did leak before this existed.
+redact() {
+  awk '
+    inkey {
+      if ($0 ~ /END[A-Z ]*PRIVATE KEY-----/) inkey = 0
+      next
+    }
+    /"(grain-github-token|grain-github-app-id|grain-github-app-installation-id|grain-github-app-private-key|grain-gemini-api-key|grain-claude-oauth-token|grain-gcp-minter-key)"/ && / = "/ {
+      sub(/ = ".*/, " = (redacted by terraform-apply.sh)")
+    }
+    /BEGIN[A-Z ]*PRIVATE KEY-----/ {
+      print "                        # (private key redacted by terraform-apply.sh)"
+      fflush()
+      if ($0 !~ /END[A-Z ]*PRIVATE KEY-----/) inkey = 1
+      next
+    }
+    # fflush on every line: awk block-buffers a pipe, and without this a
+    # 45-minute apply would print nothing until it had finished.
+    { print; fflush() }
+  '
+}
+
 apply() {
   terraform apply -input=false -auto-approve -no-color \
     -var-file="$config_dir/$tfvars_file" \
-    -var="deploy_generation=$deploy_generation" 2>&1 | tee "$out"
+    -var="deploy_generation=$deploy_generation" 2>&1 | redact | tee "$out"
 }
 
 echo "--- terraform apply"

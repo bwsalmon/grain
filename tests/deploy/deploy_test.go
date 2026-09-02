@@ -621,3 +621,108 @@ func TestTheKonturToggleComparesAgainstTheSpellingCfgEmits(t *testing.T) {
 	contains(t, code, `[ "$ENABLE_KONTUR_SANDBOXES" = "true" ]`)
 	absent(t, code, `= "True"`)
 }
+
+// The apply's own output is the last place a secret can escape, and the
+// only test here that runs a script rather than reading one.
+//
+// An apply that *replaces* the host renders the instance's prior state in
+// full, push-secrets.sh's metadata included, because
+// lifecycle.ignore_changes governs in-place diffs and not the state a
+// destroy is printed from (instance.tf says the same thing at the block
+// itself). That is not hypothetical: raising boot_disk_gb forces
+// replacement, and doing so printed the minter account's private key into
+// a deploy log (bwsalmon/agents#653). GitHub Actions masks the values a
+// workflow handed it; the minter key is minted mid-run, so nothing
+// upstream of this filter can mask it.
+//
+// So terraform-apply.sh's redact runs here for real, over a diff shaped
+// like the one that leaked: content checks cannot tell a filter that works
+// from a filter with a typo in its regex, and a filter with a typo in its
+// regex is indistinguishable from no filter at all until the day it
+// matters.
+func TestTheApplyRedactsSecretsOutOfItsOwnOutput(t *testing.T) {
+	// body stops at the closing brace rather than including it, so the
+	// function has to be closed again before bash will take it.
+	fn := body(t, read(t, "terraform", "gcp", "deploy", "terraform-apply.sh"), "redact() {") + "\n}"
+
+	// Every value here is fake, and every one of them is shaped like the
+	// real thing it stands in for -- a jsonencode'd minter key with a
+	// heredoc PEM, a one-line token, and a PEM rendered inline with
+	// escaped newlines, which is the other way the provider prints one.
+	const diff = `      ~ metadata                   = {
+          - "grain-gcp-minter-key"     = jsonencode(
+                {
+                  - client_email                = "grain-main-gcp-key-minter@example.iam.gserviceaccount.com"
+                  - private_key                 = <<-EOT
+                        -----BEGIN PRIVATE KEY-----
+                        MIIEvQIBADANBgkqhkiG9w0BAQEFAASCsentinelHEREDOC
+                        -----END PRIVATE KEY-----
+                    EOT
+                  - private_key_id              = "cbc69cd7d294521700f8744cc2a835c1"
+                }
+            ) -> null
+          - "grain-claude-oauth-token" = "sk-ant-oat-sentinelTOKEN" -> null
+          - "grain-github-token"       = "github_pat_sentinelPAT" -> null
+          - "grain-github-app-private-key" = "-----BEGIN RSA PRIVATE KEY-----\nsentinelINLINE\n-----END RSA PRIVATE KEY-----"
+        }
+      ~ initialize_params {
+          ~ size                        = 50 -> 100 # forces replacement
+        }
+`
+
+	cmd := exec.Command("bash", "-c", fn+"\nredact")
+	cmd.Stdin = strings.NewReader(diff)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running redact: %v\n%s", err, out)
+	}
+	got := string(out)
+
+	for _, secret := range []string{
+		"sentinelHEREDOC", "sentinelTOKEN", "sentinelPAT", "sentinelINLINE",
+	} {
+		if strings.Contains(got, secret) {
+			t.Errorf("redact let %s through:\n%s", secret, got)
+		}
+	}
+
+	// Redacted, not silenced. The plan has to stay worth reading: this log
+	// is the first authenticated plan a deployment ever gets, since a
+	// config repo's plan.yml deliberately runs without credentials. And
+	// private_key_id is what names the key to revoke when one did leak.
+	for _, kept := range []string{
+		`"grain-gcp-minter-key"`,
+		`"grain-claude-oauth-token"`,
+		`"grain-github-app-private-key"`,
+		"cbc69cd7d294521700f8744cc2a835c1",
+		"size                        = 50 -> 100 # forces replacement",
+	} {
+		if !strings.Contains(got, kept) {
+			t.Errorf("redact dropped %s, which is not a secret:\n%s", kept, got)
+		}
+	}
+}
+
+// The filter above is keyed on metadata names, so it can only cover the
+// keys push-secrets.sh actually writes -- and instance.tf's own
+// ignore_changes is the list of those, kept in one place. A secret added
+// to one and not the other is silently unredacted, which is exactly the
+// failure this whole change exists to stop.
+func TestEverySecretMetadataKeyIsBothIgnoredAndRedacted(t *testing.T) {
+	// Cut at the closing bracket on its own line: every entry in the list
+	// ends in a "]" of its own.
+	ignored := between(t,
+		read(t, "terraform", "gcp", "instance.tf"), "ignore_changes = [", "\n    ]")
+	redactor := body(t,
+		read(t, "terraform", "gcp", "deploy", "terraform-apply.sh"), "redact() {")
+
+	keys := regexp.MustCompile(`metadata\["([^"]+)"\]`).FindAllStringSubmatch(ignored, -1)
+	if len(keys) == 0 {
+		t.Fatal("instance.tf's ignore_changes names no metadata keys")
+	}
+	for _, k := range keys {
+		if !strings.Contains(redactor, k[1]) {
+			t.Errorf("%s is pushed onto the instance but terraform-apply.sh's redact does not cover it", k[1])
+		}
+	}
+}
