@@ -90,12 +90,23 @@ func PartialTranscript(stdout string) string {
 // and PartialTranscript (however much exists so far) so the two can never
 // build the transcript text itself two different ways.
 type parsedEvents struct {
-	result     agent.Result
-	pending    map[string]int
-	sawResult  bool
-	resultErr  error
-	transcript strings.Builder
+	result    agent.Result
+	pending   map[string]int
+	sawResult bool
+	resultErr error
+	// resultSubtype is the terminal result event's own "subtype" when
+	// that event reported a failure, kept apart from resultErr's
+	// rendered text so a caller can branch on the machine-readable name
+	// rather than by matching on a message (claude.go's runFailure).
+	resultSubtype string
+	transcript    strings.Builder
 }
+
+// maxTurnsSubtype is the result-event subtype claude reports when its own
+// --max-turns budget ran out -- the single most common way a run that was
+// working fine ends up an error, and the one runFailure translates into
+// words an operator can act on.
+const maxTurnsSubtype = "error_max_turns"
 
 func parseEvents(stdout string) *parsedEvents {
 	p := &parsedEvents{pending: map[string]int{}}
@@ -154,6 +165,7 @@ func parseEvents(stdout string) *parsedEvents {
 		case "result":
 			p.sawResult = true
 			if ev.IsError {
+				p.resultSubtype = ev.Subtype
 				p.resultErr = fmt.Errorf("claude: run ended in error (subtype=%s): %s", ev.Subtype, ev.Result)
 				continue
 			}

@@ -310,7 +310,14 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	}
 
 	cap := refusingCapability{name: "locked", reason: "not for you"}
-	cfg := orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)}
+	// Now: this test's own clock, not the wall clock -- dispatch's retry
+	// backoff compares a run's finished_at against the clock the next
+	// Cycle is given, and the two have to be on the same timeline (see
+	// orchestrator.Config.Now).
+	cfg := orchestrator.Config{
+		Capabilities: model.NewCapabilityRegistry(cap),
+		Now:          func() time.Time { return clock },
+	}
 
 	clock = clock.Add(time.Minute)
 	if _, err := orchestrator.RunDispatch(w.ctx, w.store, panicIfRun{}, cfg, *dispatched, d, nil, w.prepareSandbox(d), "", nil, clock); err == nil {

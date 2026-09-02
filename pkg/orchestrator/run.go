@@ -416,7 +416,16 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		}
 	}
 
-	finishErr := store.FinishRun(ctx, d.RunID, at, outcome, detail)
+	// cfg.now(), not at: at is the moment RunCycle began this whole
+	// cycle, recorded as this run's StartedAt above, and passing it here
+	// as well stamped finished_at with the start time -- so every run
+	// ever recorded, however long the agent actually worked, read back
+	// as having taken zero seconds. That reading is what `grain get` and
+	// the UI's own attempt timeline show, and it hid the difference
+	// between a run that failed on its first turn and one that worked
+	// for an hour before it did -- the first question anyone asks of a
+	// failed run. See Config.Now.
+	finishErr := store.FinishRun(ctx, d.RunID, cfg.now(), outcome, detail)
 	if finishErr == nil && result != nil && result.Transcript != "" {
 		// A separate write, after FinishRun's own -- see
 		// Store.SetRunTranscript's own doc comment on why (bwsalmon/
