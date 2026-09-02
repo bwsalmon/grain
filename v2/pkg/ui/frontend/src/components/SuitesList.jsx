@@ -25,7 +25,7 @@ function describeMode(run) {
 // "flat list, click a row to edit, a '+' button to add one" shape,
 // with a second list (runs) beneath it since a suite's own status lives
 // in what it has run, not in the suite itself.
-export default function SuitesList({ suites, suiteRuns, templates = [], config, tasks, onRefresh, onRefreshRuns, showError }) {
+export default function SuitesList({ suites, suiteRuns, templates = [], config, tasks, onRefresh, onRefreshRuns, onRefreshTemplates, showError }) {
   const [showNew, setShowNew] = useState(false);
   const [editing, setEditing] = useState(null);
   const [running, setRunning] = useState(null); // suite id a "Run" click opened SuiteRunOverlay for, or true for the bare "+ Run" button
@@ -75,10 +75,25 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
       {suiteRuns.length === 0 && <ListEmpty>No task suite runs yet.</ListEmpty>}
 
       {showNew && (
-        <SuiteOverlay templates={templates} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
+        <SuiteOverlay
+          templates={templates}
+          config={config}
+          onClose={() => setShowNew(false)}
+          onSaved={onRefresh}
+          onTemplatesChanged={onRefreshTemplates}
+          showError={showError}
+        />
       )}
       {editing && (
-        <SuiteOverlay suite={editing} templates={templates} onClose={() => setEditing(null)} onSaved={onRefresh} showError={showError} />
+        <SuiteOverlay
+          suite={editing}
+          templates={templates}
+          config={config}
+          onClose={() => setEditing(null)}
+          onSaved={onRefresh}
+          onTemplatesChanged={onRefreshTemplates}
+          showError={showError}
+        />
       )}
       {running && (
         <SuiteRunOverlay

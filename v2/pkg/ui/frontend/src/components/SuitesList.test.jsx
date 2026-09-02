@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import SuitesList from "./SuitesList.jsx";
@@ -147,6 +147,57 @@ describe("SuitesList", () => {
     });
     expect(onRefresh).toHaveBeenCalled();
     expect(screen.queryByRole("heading", { name: "New task suite" })).not.toBeInTheDocument();
+  });
+
+  it("creates a task template inline from the suite overlay and preselects it", async () => {
+    const createdTemplate = { id: "template-new", name: "New template" };
+    api.mockResolvedValueOnce(createdTemplate); // POST /api/templates
+    api.mockResolvedValueOnce({}); // POST /api/suites
+    const onRefreshTemplates = vi.fn().mockResolvedValue();
+    const user = userEvent.setup();
+    renderList({ suites: [], suiteRuns: [], onRefreshTemplates });
+
+    await user.click(screen.getByRole("button", { name: "+ New suite" }));
+    await user.type(screen.getByLabelText(/Name/), "Nightly sweep");
+    await user.click(screen.getByRole("button", { name: "+ New template" }));
+
+    const templateDialog = screen.getAllByRole("dialog").at(-1);
+    expect(within(templateDialog).getByRole("heading", { name: "New template" })).toBeInTheDocument();
+
+    await user.type(within(templateDialog).getByLabelText(/Name/), "New template");
+    await user.type(within(templateDialog).getByLabelText(/Task title/), "Bump dependencies");
+    await user.type(within(templateDialog).getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(within(templateDialog).getByRole("button", { name: "Add template" }));
+
+    expect(api).toHaveBeenCalledWith("/api/templates", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "New template",
+        title: "Bump dependencies",
+        description: "",
+        repo: "acme/widgets",
+        base: "",
+        autoMerge: false,
+        reads: [],
+        capabilities: [],
+      }),
+    });
+    expect(onRefreshTemplates).toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "New template" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add suite" }));
+
+    expect(api).toHaveBeenLastCalledWith("/api/suites", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Nightly sweep",
+        templateIds: ["template-new"],
+        mode: "until_clean",
+        maxPasses: 5,
+        requireApproval: false,
+        autoMerge: true,
+      }),
+    });
   });
 
   it("sends count rather than maxPasses once the mode is a fixed number of runs", async () => {
