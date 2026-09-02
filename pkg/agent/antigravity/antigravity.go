@@ -63,7 +63,21 @@ const (
 	// DefaultModel did.
 	DefaultModel = "gemini-3.1-pro"
 
-	defaultMaxTurns = 20
+	// defaultMaxTurns is the cap on agentic turns a run may take before
+	// turnCap stops it, and zero means no cap at all -- the same default
+	// agent/claude carries, and for the same reason: a turn is one
+	// model/tool round trip, the ordinary shape of a grain task spends
+	// dozens of them, and a number picked here by a package that knows
+	// nothing about the task does not slow a run down when it guesses
+	// wrong, it fails one that was working.
+	//
+	// orchestrator's Config.MaxRunRuntime (two hours by default) is what
+	// actually bounds a runaway run. A deployment that does want a turn
+	// ceiling still sets one -- `grain settings -max-agent-turns`,
+	// RunConfig.MaxTurns, or WithMaxTurns -- and turnCap enforces it
+	// exactly as before; it already reads a non-positive max as "no cap"
+	// (turnCap.Write), so nothing else here changes.
+	defaultMaxTurns = 0
 
 	// mcpServerName is the key written into agy's MCP settings, and
 	// therefore the prefix agy reports every tool under
@@ -149,10 +163,11 @@ func WithModel(model string) Option {
 	return func(f *Framework) { f.model = model }
 }
 
-// WithMaxTurns overrides the default cap on agentic turns a single Run
-// allows. Unlike agent/claude's option of the same name, this is not
-// passed to the binary -- agy has no --max-turns -- but enforced by Run
-// itself; see this package's own doc comment.
+// WithMaxTurns sets the cap on agentic turns a single Run allows. Unlike
+// agent/claude's option of the same name, this is not passed to the
+// binary -- agy has no --max-turns -- but enforced by Run itself; see
+// this package's own doc comment. Zero -- which is also the default --
+// means no cap; see defaultMaxTurns.
 func WithMaxTurns(n int) Option {
 	return func(f *Framework) { f.maxTurns = n }
 }

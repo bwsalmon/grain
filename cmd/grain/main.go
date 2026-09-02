@@ -572,7 +572,7 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	maxConcurrent := fs.Int("max-concurrent", 0, "maximum number of tasks dispatched at once")
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
-	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = the framework's own default)")
+	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)")
 	githubHost := fs.String("github-host", "", "GitHub API host")
 	var githubInsecureHTTP bool
 	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS")
