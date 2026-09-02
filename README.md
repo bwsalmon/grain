@@ -2207,6 +2207,22 @@ moment, `RecoverOrphanedRuns` makes for the rows such a process leaves
 live. It deletes them rather than rebuilding them, because they are meant
 to have been deleted already.
 
+**`HostSandboxes` sweeps too, and had to.** The same argument holds for a
+run's directory, but only `KonturSandboxes` implemented `ReapOrphans` at
+first, so nothing ever removed a directory whose process died before its
+`Release` could run — and being killed mid-run is the ordinary case here,
+not a rare one: `grain-daemon.service` stops its container with `docker
+stop --time 30`, while a run's own unwinding is allowed minutes
+(`cmd/grain`'s `shutdownDrain`), so every upgrade or restart that lands
+on a run in flight leaves that run's whole checkout behind. Those
+accumulate one per killed run until the filesystem `-sandbox-dir` sits on
+is full, at which point `Acquire`'s `mkdir` fails with `ENOSPC` and
+*every* task fails at setup, before its agent starts — a deployment that
+is wedged permanently rather than one that recovers. Both backends
+implement the sweep now, and `runDaemon` asks for it by interface
+(`orphanReaper`) rather than by holding a concrete `KonturSandboxes`
+alongside `Deps.Sandboxes`, so a restart is what reclaims the space.
+
 **`KonturConfig.BaseIP`/`BasePort` became `IP`/`Port`,** passed verbatim
 to every VM rather than offset by a slot number. Under the docker backend
 — the only one this package builds VMs under — `internal/dockervm.Create`
