@@ -65,10 +65,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -222,7 +220,7 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 	deps := orchestrator.Deps{
 		Client: client, Sandboxes: sandboxes, MaxConcurrent: maxConcurrent,
 		Framework: func(context.Context, string) (agent.Framework, error) {
-			return gemini.NewForTest(&randomGenerator{
+			return antigravity.NewForTest(&randomGenerator{
 				mu: &genMu, rng: rng, githubHost: githubHost, pushed: roundAttempts, coverage: coverage,
 			}), nil
 		},
@@ -451,11 +449,10 @@ func branchIsAncestor(t *testing.T, bare, ref, ancestor string) bool {
 // comment: "a factory, not a shared instance").
 var promptRe = regexp.MustCompile(`Work in (\S+)\. Push your change to a new branch named "([^"]+)"`)
 
-// randomGenerator implements gemini's own (unexported) contentGenerator
-// interface by deciding, the first time it is asked, which script this
-// dispatch's turn plays out -- randomPushScript below, or
-// harness_test.go's own failScript/askScript -- then replays that same
-// script for every further call the way scriptedGenerator does, since one
+// randomGenerator implements antigravity.Script by deciding, the first
+// time it is asked, which script this dispatch's turn plays out --
+// randomPushScript below, or harness_test.go's own failScript/askScript
+// -- then playing that same script out one step per call, since one
 // Framework (and so one randomGenerator) is only ever used for one run.
 type randomGenerator struct {
 	// mu guards every access below to rng, pushed and coverage: they are
@@ -470,13 +467,13 @@ type randomGenerator struct {
 	pushed     map[string]string // taskID -> branch, written on a push decision (an attempt, not yet a confirmed one -- see runRandomizedCluster's roundAttempts)
 	coverage   *clusterCoverage
 
-	script []*genai.GenerateContentResponse
+	script []antigravity.Step
 	calls  int
 }
 
-func (g *randomGenerator) GenerateContent(_ context.Context, _ string, contents []*genai.Content, _ *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+// Next implements antigravity.Script.
+func (g *randomGenerator) Next(prompt string) (antigravity.Step, bool) {
 	if g.script == nil {
-		prompt := promptText(contents)
 		m := promptRe.FindStringSubmatch(prompt)
 		if m == nil {
 			panic("random cluster: could not find the target repo/branch in the prompt: " + prompt)
@@ -515,11 +512,11 @@ func (g *randomGenerator) GenerateContent(_ context.Context, _ string, contents 
 	}
 	if g.calls >= len(g.script) {
 		g.calls++
-		return nil, nil
+		return antigravity.Step{}, false
 	}
-	resp := g.script[g.calls]
+	step := g.script[g.calls]
 	g.calls++
-	return resp, nil
+	return step, true
 }
 
 // randomPushScript is harness_test.go's own pushScript, with two changes
@@ -538,28 +535,17 @@ func (g *randomGenerator) GenerateContent(_ context.Context, _ string, contents 
 // second attempt reusing a fixed name would otherwise find an earlier
 // attempt's own clone (complete or, after a failed one, half-written)
 // still sitting there and fail to clone into it.
-func randomPushScript(remote, branch, taskID, dir string) []*genai.GenerateContentResponse {
+func randomPushScript(remote, branch, taskID, dir string) []antigravity.Step {
 	file := "task-" + taskID + ".md"
 	cmd := "git clone " + remote + " " + dir + " && cd " + dir + " && " +
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' > " + file + " && " +
 		"git add " + file + " && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}
-}
-
-// promptText reads back the very first content's text -- gemini.go's own
-// Run seeds history with exactly one entry, genai.NewContentFromText(cfg.
-// Prompt, genai.RoleUser), so contents[0] is cfg.Prompt on every call
-// this generator ever sees, first turn or last.
-func promptText(contents []*genai.Content) string {
-	if len(contents) == 0 || len(contents[0].Parts) == 0 {
-		return ""
-	}
-	return contents[0].Parts[0].Text
 }
 
 // openPullRequests returns every pull request sim currently reads as

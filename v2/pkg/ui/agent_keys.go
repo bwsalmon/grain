@@ -28,8 +28,11 @@ import (
 // configuration, and nothing that reaches the store's config row is
 // write-only the way this must be.
 func agentKeySecret(framework string) (string, bool) {
-	switch framework {
-	case model.AgentFrameworkGemini:
+	// Normalized first, so the legacy "gemini" spelling still resolves
+	// to the same secret it always did -- agent/antigravity runs agy,
+	// which authenticates with exactly that Gemini API key.
+	switch model.NormalizeAgentFrameworkName(framework) {
+	case model.AgentFrameworkAntigravity:
 		return secrets.GeminiAPIKeySecret, true
 	case model.AgentFrameworkClaude:
 		return secrets.ClaudeOAuthTokenSecret, true

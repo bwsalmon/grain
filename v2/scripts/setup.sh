@@ -143,6 +143,14 @@ GRAIN_GITHUB_APP_PRIVATE_KEY="${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 
 GRAIN_GEMINI_API_KEY="${GRAIN_GEMINI_API_KEY:-}"
 GRAIN_GEMINI_MODEL="${GRAIN_GEMINI_MODEL:-}"
+# Where the Antigravity CLI (agy) lives. Empty -- the default -- lets the
+# daemon resolve "agy" on $PATH, which is what a host with a normal
+# install wants. Set it when agy is installed somewhere off $PATH (its
+# own installer targets ~/.gemini/bin), the same way GRAIN_CLAUDE_PATH
+# exists for the claude binary. agy is a prerequisite of the default
+# agent framework: verify_agent_cli below says so out loud rather than
+# letting the daemon fail at its first dispatch.
+GRAIN_AGY_PATH="${GRAIN_AGY_PATH:-}"
 GRAIN_MAX_AGENT_TURNS="${GRAIN_MAX_AGENT_TURNS:-}"
 
 # The Claude Code OAuth token agent/claude authenticates as, for a
@@ -335,6 +343,9 @@ Recognized variables:
                              never fatal -- the deploy carries on and says so
   GRAIN_CLAUDE_CLI_DIR      where that install lands (default /opt/claude-cli);
                              /usr/local/bin/claude is symlinked into it
+  GRAIN_AGY_PATH            path to the Antigravity CLI (agy) the default agent
+                             framework runs as a subprocess. Empty resolves "agy"
+                             on \$PATH
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
@@ -1669,7 +1680,33 @@ format_target_repo_if_empty() {
 
 # --- 8. the systemd unit ---------------------------------------------------
 
+# The default agent framework (agent/antigravity) runs Google's
+# Antigravity CLI as a subprocess, so unlike the in-process Gemini
+# runtime it replaced it needs a binary on this host. Report a missing
+# one here, where the log is already being read, rather than letting
+# grain-daemon.service come up and fail at its first dispatch with
+# "resolving the agy binary".
+#
+# Never fatal: this script is re-run on every deploy generation, a host
+# may legitimately be running -agent-framework claude instead, and an
+# install that lands after this point still works with no further
+# action. Warning and carrying on is the same trade ensure_ops_agent
+# makes.
+verify_agent_cli() {
+  if [ -n "$GRAIN_AGY_PATH" ]; then
+    [ -x "$GRAIN_AGY_PATH" ] && return
+    log "WARNING: GRAIN_AGY_PATH=$GRAIN_AGY_PATH is not an executable file."
+  elif command -v agy >/dev/null 2>&1; then
+    return
+  fi
+  log "WARNING: no Antigravity CLI (agy) found. The default agent framework runs it as a"
+  log "         subprocess, so dispatches will fail until it is installed (its own installer"
+  log "         targets ~/.gemini/bin/agy) or GRAIN_AGY_PATH points at it. A deployment"
+  log "         running -agent-framework claude instead can ignore this."
+}
+
 write_systemd_units() {
+  verify_agent_cli
   log "Writing grain-daemon.service"
 
   local daemon_args=(
@@ -1700,6 +1737,7 @@ write_systemd_units() {
       -upgrade-restart-cmd sudo -upgrade-restart-cmd systemctl -upgrade-restart-cmd restart -upgrade-restart-cmd grain-daemon.service
     )
   fi
+  [ -n "$GRAIN_AGY_PATH" ] && daemon_args+=(-agy-path "$GRAIN_AGY_PATH")
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ -n "$GRAIN_CLAUDE_PATH" ] && daemon_args+=(-claude-path "$GRAIN_CLAUDE_PATH")
   [ -n "$GRAIN_MAX_AGENT_TURNS" ] && daemon_args+=(-max-agent-turns "$GRAIN_MAX_AGENT_TURNS")

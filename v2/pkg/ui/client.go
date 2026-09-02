@@ -543,8 +543,10 @@ type CreateTaskRequest struct {
 	// (Settings' own "Agent framework"). "" (the default) means no
 	// override: the task is driven by whichever framework the deployment
 	// is set to when it dispatches. Anything but "" must be one of
-	// model.AgentFrameworkGemini/AgentFrameworkClaude, validated the same
-	// way UpdateSettings validates the deployment-wide setting.
+	// model.AgentFrameworkAntigravity/AgentFrameworkClaude (the legacy
+	// "gemini" spelling is accepted and normalized to the former),
+	// validated the same way UpdateSettings validates the
+	// deployment-wide setting.
 	AgentFramework string   `json:"agentFramework"`
 	Capabilities   []string `json:"capabilities"`
 	// DependsOn is a set of task IDs this task cannot dispatch ahead of --
@@ -778,12 +780,15 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 // deployment-wide setting, which has no such reading, empty is accepted
 // here rather than rejected as unset.
 func validateAgentFramework(framework string) error {
-	switch framework {
-	case "", model.AgentFrameworkGemini, model.AgentFrameworkClaude:
+	// NormalizeAgentFrameworkName, not NormalizeAgentFramework: "" must
+	// stay "" here, since for a task it means "no override" rather than
+	// naming a framework (model.Task.AgentFramework's own doc comment).
+	switch model.NormalizeAgentFrameworkName(framework) {
+	case "", model.AgentFrameworkAntigravity, model.AgentFrameworkClaude:
 		return nil
 	default:
 		return validationErrorf("agentFramework must be %q, %q, or empty for this deployment's default",
-			model.AgentFrameworkGemini, model.AgentFrameworkClaude)
+			model.AgentFrameworkAntigravity, model.AgentFrameworkClaude)
 	}
 }
 

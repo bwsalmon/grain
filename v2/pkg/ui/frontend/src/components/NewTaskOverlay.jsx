@@ -261,7 +261,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               <MenuItem value="">
                 {`Deployment default${config && config.agentFramework ? ` (${frameworkLabel(config.agentFramework)})` : ""}`}
               </MenuItem>
-              <MenuItem value="gemini">Gemini</MenuItem>
+              <MenuItem value="antigravity">Antigravity</MenuItem>
               <MenuItem value="claude">Claude</MenuItem>
             </TextField>
             <fieldset>

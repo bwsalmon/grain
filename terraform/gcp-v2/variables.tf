@@ -455,9 +455,21 @@ variable "github_host" {
   default     = "github.com"
 }
 
+variable "agy_path" {
+  type        = string
+  description = <<-EOT
+    Path to the Antigravity CLI (agy) the default agent framework runs as
+    a subprocess. Empty resolves "agy" on $PATH, which is what a host
+    with a normal install wants; set it when agy lives somewhere off
+    $PATH (its own installer targets ~/.gemini/bin/agy). A deployment
+    running agent_framework "claude" instead does not need it.
+  EOT
+  default     = ""
+}
+
 variable "gemini_model" {
   type        = string
-  description = "Gemini model override. Empty uses the daemon's own default (pkg/agent/gemini.DefaultModel)."
+  description = "Model override. Empty uses the daemon's own default (pkg/agent/antigravity.DefaultModel)."
   default     = ""
 }
 
@@ -465,7 +477,7 @@ variable "max_agent_turns" {
   type        = number
   description = <<-EOT
     Cap on model/tool round trips in a single agent run. 0 leaves the
-    framework's own default, which is 20 (v2/pkg/agent/gemini's
+    framework's own default, which is 20 (v2/pkg/agent/antigravity's
     defaultMaxTurns).
 
     That default is tight for real work, and exhausting it is a hard

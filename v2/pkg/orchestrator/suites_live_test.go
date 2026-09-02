@@ -14,7 +14,7 @@ package orchestrator_test
 // reports "nothing to do" on the next once that fix has landed, rather
 // than hallucinating a change or looping forever. This is what checks
 // that, gated on GEMINI_API_KEY exactly like this package's own
-// live_test.go and pkg/agent/gemini/gemini_live_test.go, so it costs
+// live_test.go and pkg/agent/antigravity's own live test, so it costs
 // nothing and runs nowhere (including CI) without a live key:
 //
 //	GEMINI_API_KEY=... go test ./pkg/orchestrator/... -run TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops -v -timeout 5m
@@ -53,7 +53,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -162,8 +162,6 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 		t.Fatalf("create suite run: %v", err)
 	}
 
-	geminiCtx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
-	defer cancel()
 	// WithMaxTurns well above the default 20: this run's own sandbox
 	// exploration (listing the checkout, reading calc.py, editing,
 	// running git commands) costs several turns before the model ever
@@ -173,10 +171,7 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 	// way a real deployment's own retry-until-task_streak-caps already
 	// does (model.MaxConsecutiveFailures) -- but a higher cap up front
 	// means fewer of them are needed.
-	framework, err := gemini.New(geminiCtx, apiKey, gemini.WithMaxTurns(40))
-	if err != nil {
-		t.Fatalf("gemini.New: %v", err)
-	}
+	framework := liveFramework(t, antigravity.WithMaxTurns(40))
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
 	deps := orchestrator.Deps{
@@ -308,7 +303,7 @@ func bareFileAt(t *testing.T, bareDir, branch, path string) string {
 // dispatchUntilSettled runs cycles against deps until taskID reaches a
 // terminal state (completed, failed or closed) or attempts run out,
 // tolerating a RunCycle error on any one attempt -- a live model
-// occasionally exceeding gemini.WithMaxTurns is exactly the kind of
+// occasionally exceeding antigravity.WithMaxTurns is exactly the kind of
 // per-run failure model.MaxConsecutiveFailures (5) already exists to
 // absorb in a real deployment, so this test affords the same handful of
 // retries rather than failing outright on the first one, the same way a

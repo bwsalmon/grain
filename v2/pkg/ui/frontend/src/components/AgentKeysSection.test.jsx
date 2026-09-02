@@ -58,7 +58,7 @@ describe("AgentKeysSection", () => {
 
     await user.click(screen.getAllByRole("button", { name: "Clear" })[0]);
 
-    expect(api).toHaveBeenCalledWith("/api/agent-keys/gemini", { method: "DELETE" });
+    expect(api).toHaveBeenCalledWith("/api/agent-keys/antigravity", { method: "DELETE" });
     expect(await screen.findAllByText("not set")).toHaveLength(2);
   });
 

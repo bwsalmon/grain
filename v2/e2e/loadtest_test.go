@@ -71,7 +71,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
@@ -179,7 +179,7 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 	deps := orchestrator.Deps{
 		Store: store, Client: gh, Sandboxes: sandboxes,
 		Framework: func(context.Context, string) (agent.Framework, error) {
-			return gemini.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics)), nil
+			return antigravity.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics)), nil
 		},
 		Config:        orchestrator.Config{Capabilities: registry},
 		MaxConcurrent: cfg.slots,

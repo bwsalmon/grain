@@ -106,10 +106,10 @@ func TestConfigReportsTheDeploymentAgentFramework(t *testing.T) {
 	srv, client := testServer(t)
 	ctx := context.Background()
 
-	// Nothing saved yet: the same "gemini" every deployment has always
+	// Nothing saved yet: the same default every deployment has always
 	// run, rather than an empty string the frontend would have to know to
 	// interpret.
-	if got := decode[map[string]any](t, do(t, srv, http.MethodGet, "/api/config", "")); got["agentFramework"] != model.AgentFrameworkGemini {
+	if got := decode[map[string]any](t, do(t, srv, http.MethodGet, "/api/config", "")); got["agentFramework"] != model.AgentFrameworkAntigravity {
 		t.Fatalf("agentFramework = %v before any settings were saved, want gemini", got["agentFramework"])
 	}
 

@@ -480,7 +480,7 @@ func TestRunWithNoTranscriptPathWritesNoFile(t *testing.T) {
 	// this" rather than trying to open a file at an empty path.
 }
 
-// TestMockToolCallsNeverReachAnyNetwork mirrors agent/gemini's own test of
+// TestMockToolCallsNeverReachAnyNetwork mirrors agent/antigravity's own test of
 // the same name: proving the escape-hatch tools this transcript parser
 // reports on are only ever mocked ones as far as this package is
 // concerned -- it never talks to GitHub itself, only parses what

@@ -411,13 +411,14 @@ var Tables = []string{
 	// that now-unused column.
 	//
 	// agent_framework (bwsalmon/agents#609) is Config.AgentFramework's own
-	// column -- DEFAULT 'gemini' both here and in
+	// column -- DEFAULT 'antigravity' both here and in
 	// Store.ensureConfigAgentFrameworkColumn (the same CREATE TABLE IF NOT
 	// EXISTS limitation means an already-created grain_config gets it from
-	// there instead) so an upgraded deployment reads back exactly the
-	// framework it already ran before this column existed, the same
-	// "upgrade changes nothing until an operator opts in" shape
-	// ensureConfigShowClosedByDefaultColumn gives show_closed_by_default.
+	// there instead), naming the framework a deployment that has never
+	// chosen one runs. A database written before agent/antigravity
+	// replaced the home-grown Gemini runtime may hold the legacy 'gemini'
+	// spelling instead; model.NormalizeAgentFramework folds that back in
+	// on read rather than a migration rewriting the row.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -433,7 +434,7 @@ var Tables = []string{
   ` + "`sandbox_cpus`" + `                INTEGER NOT NULL DEFAULT 0,
   ` + "`sandbox_memory_mb`" + `            INTEGER NOT NULL DEFAULT 0,
   ` + "`show_closed_by_default`" + `       INTEGER NOT NULL DEFAULT 0,
-  ` + "`agent_framework`" + `              TEXT    NOT NULL DEFAULT 'gemini',
+  ` + "`agent_framework`" + `              TEXT    NOT NULL DEFAULT 'antigravity',
   ` + "`approved_by_default`" + `          INTEGER NOT NULL DEFAULT 0,
   ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)

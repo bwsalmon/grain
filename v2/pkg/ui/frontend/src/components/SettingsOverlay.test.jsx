@@ -238,7 +238,7 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    expect(screen.getByRole("radio", { name: "Gemini" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Antigravity" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "Claude" }));
 
     await user.click(screen.getByRole("button", { name: "Save" }));

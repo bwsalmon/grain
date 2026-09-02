@@ -131,10 +131,12 @@ export function lastBaseForRepo(tasks, repo) {
 }
 
 // frameworkLabel names an agent framework the way the UI talks about it
-// -- model.AgentFrameworkGemini/AgentFrameworkClaude are wire values, not
-// display text, and two panes (the per-task picker on New task, the
-// "Agent framework" row on a task's detail) would otherwise each spell
-// them out and drift.
+// -- model.AgentFrameworkAntigravity/AgentFrameworkClaude are wire
+// values, not display text, and two panes (the per-task picker on New
+// task, the "Agent framework" row on a task's detail) would otherwise
+// each spell them out and drift. "gemini" is the former wire value for
+// Antigravity and still arrives from a store written before the rename,
+// so it falls through to the same label rather than being special-cased.
 export function frameworkLabel(framework) {
-  return framework === "claude" ? "Claude" : "Gemini";
+  return framework === "claude" ? "Claude" : "Antigravity";
 }

@@ -16,8 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 )
@@ -258,7 +257,7 @@ type loadGenerator struct {
 	rng     *rand.Rand
 	metrics *loadMetrics
 
-	script   []*genai.GenerateContentResponse
+	script   []antigravity.Step
 	calls    int
 	start    time.Time
 	reported bool
@@ -268,8 +267,8 @@ func newLoadGenerator(rngMu *sync.Mutex, rng *rand.Rand, metrics *loadMetrics) *
 	return &loadGenerator{rngMu: rngMu, rng: rng, metrics: metrics}
 }
 
-// GenerateContent's own timing -- start at the first call, reported once
-// the script is exhausted -- is this file's only window onto how long a
+// Next's own timing -- start at the first call, reported once the script
+// is exhausted -- is this file's only window onto how long a
 // dispatch actually ran in wall-clock terms: model.Run's own
 // StartedAt/FinishedAt (task_run) are both stamped with RunCycle's own
 // tick-start `now` (dispatch.Cycle and RunDispatch never call time.Now()
@@ -277,7 +276,8 @@ func newLoadGenerator(rngMu *sync.Mutex, rng *rand.Rand, metrics *loadMetrics) *
 // run actually took and cannot answer whether two dispatches actually
 // overlapped. See loadtest_test.go's own reportConcurrency for what this
 // is measured for.
-func (g *loadGenerator) GenerateContent(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+// Next implements antigravity.Script.
+func (g *loadGenerator) Next(string) (antigravity.Step, bool) {
 	if g.script == nil {
 		g.start = time.Now()
 		g.rngMu.Lock()
@@ -287,21 +287,21 @@ func (g *loadGenerator) GenerateContent(context.Context, string, []*genai.Conten
 		work := toolCall("run_command", map[string]any{"command": fmt.Sprintf("sleep %.3f", workSeconds)})
 		switch {
 		case r < 0.5:
-			g.script = []*genai.GenerateContentResponse{
+			g.script = []antigravity.Step{
 				work,
 				toolCall("comment_on_issue", map[string]any{"comment": "done -- nothing to push, just an answer"}),
 				finalText("closed out"),
 			}
 			g.metrics.recordOutcome(loadOutcomeClose)
 		case r < 0.75:
-			g.script = []*genai.GenerateContentResponse{
+			g.script = []antigravity.Step{
 				work,
 				toolCall("run_command", map[string]any{"command": "echo simulated load-test failure >&2; exit 1"}),
 				finalText("could not complete the task"),
 			}
 			g.metrics.recordOutcome(loadOutcomeFail)
 		default:
-			g.script = []*genai.GenerateContentResponse{
+			g.script = []antigravity.Step{
 				work,
 				toolCall("ask_question", map[string]any{"question": "need direction to continue"}),
 				finalText("waiting on a reply"),
@@ -311,22 +311,22 @@ func (g *loadGenerator) GenerateContent(context.Context, string, []*genai.Conten
 	}
 	if g.calls >= len(g.script) {
 		g.calls++
-		return nil, nil
+		return antigravity.Step{}, false
 	}
-	resp := g.script[g.calls]
+	step := g.script[g.calls]
 	g.calls++
 	if g.calls == len(g.script) && !g.reported {
-		// The framework never calls GenerateContent again once a
-		// response carries no function call (the case above is dead in
-		// practice for that reason) -- this handing back the script's
-		// own last entry, a plain finalText, already happens after
-		// every tool call this dispatch made (including the real
-		// `sleep`) has finished, so this is the last moment this
-		// generator ever sees, not the branch above.
+		// The framework never calls Next again once a step carries no
+		// tool call (the case above is dead in practice for that
+		// reason) -- this handing back the script's own last entry, a
+		// plain finalText, already happens after every tool call this
+		// dispatch made (including the real `sleep`) has finished, so
+		// this is the last moment this generator ever sees, not the
+		// branch above.
 		g.metrics.recordDispatchSpan(g.start, time.Now())
 		g.reported = true
 	}
-	return resp, nil
+	return step, true
 }
 
 // --- metrics --------------------------------------------------------------

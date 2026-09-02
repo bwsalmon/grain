@@ -373,7 +373,8 @@ type configResponse struct {
 	// "deployment default" option of its own per-task framework picker,
 	// so whoever files a task can see which framework leaving that alone
 	// actually means. Never empty: an unset stored value reads back as
-	// model.AgentFrameworkGemini, the same defaulting ui.Settings does.
+	// model.AgentFrameworkAntigravity, the same defaulting ui.Settings
+	// does.
 	AgentFramework string `json:"agentFramework"`
 }
 
@@ -390,14 +391,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		RebootEnabled: s.tasks.Config.Reboot != nil,
 		TargetRepos:   s.tasks.targetRepos(),
 	}
-	resp.AgentFramework = model.AgentFrameworkGemini
+	resp.AgentFramework = model.AgentFrameworkAntigravity
 	if cfg != nil {
 		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
-		if cfg.AgentFramework != "" {
-			resp.AgentFramework = cfg.AgentFramework
-		}
+		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()

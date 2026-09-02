@@ -13,10 +13,10 @@ import api from "../api.js";
 // goes in, presence comes back, and no value is ever read out.
 const FRAMEWORKS = [
   {
-    id: "gemini",
+    id: "antigravity",
     label: "Gemini API key",
     setFlag: "geminiApiKeySet",
-    help: "the key agent/gemini's own API client runs as -- stored as the \"gemini-api-key\" secret",
+    help: "the key the Antigravity CLI (agy) authenticates with -- stored as the \"gemini-api-key\" secret",
   },
   {
     id: "claude",

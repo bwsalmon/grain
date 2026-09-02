@@ -12,10 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/orchestrator"
 	"github.com/bwsalmon/grain/v2/pkg/ui"
@@ -59,55 +57,34 @@ func (s credentialingSandboxes) Acquire(ctx context.Context, name string, shape 
 // own comment explains: package-private test helpers are cheaper to
 // duplicate than to share. ---------------------------------------------
 
-type scriptedGenerator struct {
-	responses []*genai.GenerateContentResponse
-	calls     int
+func finalText(text string) antigravity.Step { return antigravity.TextStep(text) }
+
+func toolCall(name string, args map[string]any) antigravity.Step {
+	return antigravity.ToolStep(name, args)
 }
 
-func (g *scriptedGenerator) GenerateContent(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-	if g.calls >= len(g.responses) {
-		g.calls++
-		return nil, nil
-	}
-	resp := g.responses[g.calls]
-	g.calls++
-	return resp, nil
-}
-
-func finalText(text string) *genai.GenerateContentResponse {
-	return &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{Content: genai.NewContentFromText(text, genai.RoleModel)}},
-	}
-}
-
-func toolCall(name string, args map[string]any) *genai.GenerateContentResponse {
-	return &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{Content: genai.NewContentFromFunctionCall(name, args, genai.RoleModel)}},
-	}
-}
-
-func pushScript(remote, branch, taskID string) []*genai.GenerateContentResponse {
+func pushScript(remote, branch, taskID string) []antigravity.Step {
 	cmd := "git clone " + remote + " work && cd work && " +
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}
 }
 
-func askScript(question string) []*genai.GenerateContentResponse {
-	return []*genai.GenerateContentResponse{
+func askScript(question string) []antigravity.Step {
+	return []antigravity.Step{
 		toolCall("ask_question", map[string]any{"question": question}),
 		finalText("waiting on a reply"),
 	}
 }
 
-func scriptedFramework(script []*genai.GenerateContentResponse) func(context.Context, string) (agent.Framework, error) {
+func scriptedFramework(script []antigravity.Step) func(context.Context, string) (agent.Framework, error) {
 	return func(context.Context, string) (agent.Framework, error) {
-		return gemini.NewForTest(&scriptedGenerator{responses: script}), nil
+		return antigravity.NewForTest(antigravity.Steps(script...)), nil
 	}
 }
 

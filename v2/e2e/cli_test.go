@@ -39,10 +39,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -198,15 +196,15 @@ func withStore(t *testing.T, dir string, fn func(*model.Store, context.Context))
 	fn(store, ctx)
 }
 
-// scriptedFramework turns a scripted response sequence into the factory
-// orchestrator.Deps.Framework wants, one fresh gemini.NewForTest per
+// scriptedFramework turns a scripted step sequence into the factory
+// orchestrator.Deps.Framework wants, one fresh antigravity.NewForTest per
 // dispatch -- duplicated from pkg/orchestrator's own live_test.go helper
 // of the same name for the same reason openCLIStore is. The framework
 // name a real deployment would switch on is ignored: there is one
 // scripted framework here, and every task in these tests takes it.
-func scriptedFramework(script []*genai.GenerateContentResponse) func(context.Context, string) (agent.Framework, error) {
+func scriptedFramework(script []antigravity.Step) func(context.Context, string) (agent.Framework, error) {
 	return func(context.Context, string) (agent.Framework, error) {
-		return gemini.NewForTest(&scriptedGenerator{responses: script}), nil
+		return antigravity.NewForTest(antigravity.Steps(script...)), nil
 	}
 }
 

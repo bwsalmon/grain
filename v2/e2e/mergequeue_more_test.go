@@ -37,8 +37,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -54,13 +53,13 @@ import (
 // against the first dispatch's own leftover "work" directory -- the same
 // reason configPushScript and resolveScript (mergequeue_conflict_test.go)
 // already clean up first.
-func cleanPushScript(remote, branch, taskID string) []*genai.GenerateContentResponse {
+func cleanPushScript(remote, branch, taskID string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}
@@ -74,14 +73,14 @@ func cleanPushScript(remote, branch, taskID string) []*genai.GenerateContentResp
 // than cloning and branching from whatever HEAD happens to be, is what
 // keeps this from conflicting with whatever the task it repairs already
 // pushed to the same file names.
-func fixPushScript(remote, baseBranch, fixBranch string) []*genai.GenerateContentResponse {
+func fixPushScript(remote, baseBranch, fixBranch string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout -b " + baseBranch + " origin/" + baseBranch + " && " +
 		"git checkout -b " + fixBranch + " && " +
 		"echo 'fix' > FIX.md && " +
 		"git add FIX.md && git commit -q -m 'fix for " + fixBranch + "' && " +
 		"git push origin " + fixBranch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed a fix to " + fixBranch),
 	}
@@ -94,14 +93,14 @@ func fixPushScript(remote, baseBranch, fixBranch string) []*genai.GenerateConten
 // fileFixTask's own doc comment on why a fix task's Base is that branch
 // rather than main), the same as resolveScript, so its own pull request
 // is trivially mergeable back into it.
-func fixDoesNotResolveScript(remote, baseBranch, fixBranch string) []*genai.GenerateContentResponse {
+func fixDoesNotResolveScript(remote, baseBranch, fixBranch string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout -b " + baseBranch + " origin/" + baseBranch + " && " +
 		"git checkout -b " + fixBranch + " && " +
 		"echo 'attempted a fix' > ATTEMPT.md && " +
 		"git add ATTEMPT.md && git commit -q -m 'attempted a fix, does not touch the real conflict' && " +
 		"git push origin " + fixBranch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed an attempted fix to " + fixBranch),
 	}

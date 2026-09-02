@@ -24,8 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
@@ -70,13 +69,13 @@ func (s worldSandbox) Release(ctx context.Context) error { return nil }
 // configPushScript is the scripted turn the original task's own agent
 // takes: push a branch that adds CONFIG.md with content, the file this
 // whole test's conflict is built around.
-func configPushScript(remote, branch, content string) []*genai.GenerateContentResponse {
+func configPushScript(remote, branch, content string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout -b " + branch + " && " +
 		"echo '" + content + "' > CONFIG.md && " +
 		"git add CONFIG.md && git commit -q -m 'agent commit for " + branch + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}
@@ -89,14 +88,14 @@ func configPushScript(remote, branch, content string) []*genai.GenerateContentRe
 // baseBranch's own side of the conflict SyncPullRequests detected. This is
 // a real git merge that has to resolve a real conflict, not a canned file
 // write standing in for one.
-func resolveScript(remote, baseBranch, fixBranch string) []*genai.GenerateContentResponse {
+func resolveScript(remote, baseBranch, fixBranch string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
 		"git checkout -b " + baseBranch + " origin/" + baseBranch + " && " +
 		"git checkout -b " + fixBranch + " && " +
 		"git fetch origin main && " +
 		"git merge origin/main -X ours -m 'resolve conflict with main' && " +
 		"git push origin " + fixBranch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("resolved the conflict and pushed " + fixBranch),
 	}

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/agent/claude"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
@@ -90,10 +91,16 @@ func TestAgentFrameworksSaysWhereToSetAMissingCredential(t *testing.T) {
 	// below comes back; absent -- every CI runner -- and the framework
 	// fails one step earlier, on the missing binary, which is a correct
 	// error about a different missing thing.
-	cfg := config{claudePath: filepath.Join(t.TempDir(), "claude")}
+	// -agy-path is stubbed for the same reason, both frameworks needing
+	// a binary now that agent/antigravity runs the Antigravity CLI where
+	// the in-process Gemini runtime needed nothing on the host.
+	cfg := config{
+		agyPath:    filepath.Join(t.TempDir(), "agy"),
+		claudePath: filepath.Join(t.TempDir(), "claude"),
+	}
 	build := agentFrameworks(cfg, testStore(t), testSecrets(t))
 
-	for _, framework := range []string{model.AgentFrameworkGemini, model.AgentFrameworkClaude} {
+	for _, framework := range []string{model.AgentFrameworkAntigravity, model.AgentFrameworkClaude} {
 		_, err := build(ctx, framework)
 		if err == nil {
 			t.Fatalf("building the %s framework with no credential succeeded", framework)
@@ -107,12 +114,12 @@ func TestAgentFrameworksSaysWhereToSetAMissingCredential(t *testing.T) {
 	}
 }
 
-// The counterpart to the test above, for the other thing the claude
-// framework needs and the Gemini one does not: a binary on the host.
-// Nothing in the v2 deployment path installed it until scripts/setup.sh's
-// own install_claude_cli, so this is the error a deployment that predates
-// that -- or one whose install was blocked -- actually hits, once per
-// dispatch, the moment someone selects "claude" in Settings.
+// The counterpart to the test above, for the other thing each framework
+// needs: a binary on the host. Nothing in the v2 deployment path
+// installed claude's until scripts/setup.sh's own install_claude_cli, so
+// this is the error a deployment that predates that -- or one whose
+// install was blocked -- actually hits, once per dispatch, the moment
+// someone selects "claude" in Settings.
 func TestAgentFrameworksSaysHowToInstallAMissingClaudeCLI(t *testing.T) {
 	// An empty $PATH, so this asserts the same thing whether or not the
 	// machine running it happens to have a claude binary -- the reverse
@@ -167,12 +174,12 @@ func TestAgentFrameworksBuildsClaudeFromAUISetToken(t *testing.T) {
 func TestDefaultAgentFrameworkFollowsTheStoredSetting(t *testing.T) {
 	ctx := context.Background()
 	store := testStore(t)
-	cfg := config{agentFramework: model.AgentFrameworkGemini}
+	cfg := config{agentFramework: model.AgentFrameworkAntigravity}
 
 	// Nothing stored yet: the flag's own value, which is what seeded the
 	// row every other deployment already has.
-	if got := defaultAgentFramework(ctx, store, cfg); got != model.AgentFrameworkGemini {
-		t.Fatalf("defaultAgentFramework = %q with an empty store, want gemini", got)
+	if got := defaultAgentFramework(ctx, store, cfg); got != model.AgentFrameworkAntigravity {
+		t.Fatalf("defaultAgentFramework = %q with an empty store, want antigravity", got)
 	}
 
 	if err := store.PutConfig(ctx, model.Config{
@@ -189,6 +196,54 @@ func TestDefaultAgentFrameworkFollowsTheStoredSetting(t *testing.T) {
 	}
 }
 
+// The same missing-binary path for the other framework. agent/
+// antigravity runs Google's Antigravity CLI as a subprocess, so a
+// deployment that upgraded across the runtime replacement has a host
+// that never installed one -- and unlike claude's, scripts/setup.sh does
+// not install it (no verified installer to run), only warns. That makes
+// this the error such a deployment actually hits, so it has to say what
+// to do about it.
+func TestAgentFrameworksSaysHowToInstallAMissingAgyCLI(t *testing.T) {
+	// An empty $PATH, so this asserts the same thing whether or not the
+	// machine running it happens to have an agy binary.
+	t.Setenv("PATH", t.TempDir())
+	secretStore := testSecrets(t)
+	if err := secretStore.Set(secrets.GeminiAPIKeySecret, secrets.AgentCredentialKey, []byte("AIza-fake")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := agentFrameworks(config{}, testStore(t), secretStore)(context.Background(), model.AgentFrameworkAntigravity)
+	if err == nil {
+		t.Fatal("building the antigravity framework with no agy binary succeeded")
+	}
+	if !strings.Contains(err.Error(), "not installed") {
+		t.Errorf("error = %v; want it to name the CLI as not installed", err)
+	}
+}
+
+// A stored row or a task still carrying the framework's former name has
+// to dispatch onto the framework that name now means, rather than into
+// agentFrameworks' unknown-framework error. Nothing rewrites those rows
+// (model.Config.AgentFramework's own doc comment), so this is the whole
+// upgrade path for a deployment that set the framework before the
+// rename.
+func TestAgentFrameworksAcceptsTheLegacyGeminiName(t *testing.T) {
+	cfg := config{agyPath: filepath.Join(t.TempDir(), "agy")}
+	secretStore := testSecrets(t)
+	if err := secretStore.Set(secrets.GeminiAPIKeySecret, secrets.AgentCredentialKey, []byte("AIza-fake")); err != nil {
+		t.Fatal(err)
+	}
+
+	framework, err := agentFrameworks(cfg, testStore(t), secretStore)(
+		context.Background(), model.LegacyAgentFrameworkGemini)
+	if err != nil {
+		t.Fatalf("building the framework named %q: %v", model.LegacyAgentFrameworkGemini, err)
+	}
+	if _, ok := framework.(*antigravity.Framework); !ok {
+		t.Fatalf("framework = %T, want *antigravity.Framework", framework)
+	}
+}
+
 func TestLiveTranscriptsPicksTheFormatPerFile(t *testing.T) {
 	dir := t.TempDir()
 	transcripts := liveTranscriptDir(dir)
@@ -198,8 +253,14 @@ func TestLiveTranscriptsPicksTheFormatPerFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "run-claude"), []byte(claudeLine+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// ...while agent/gemini tees an already-readable narrative.
-	if err := os.WriteFile(filepath.Join(dir, "run-gemini"), []byte("thinking about the parser\n"), 0o600); err != nil {
+	// ...and agent/antigravity mirrors agy's, which is NDJSON too. The
+	// two are told apart by the key each tags its events with -- "type"
+	// above, "event" here -- since "does it open with a brace" stopped
+	// separating them when the in-process Gemini runtime (which tee'd an
+	// already-readable narrative) was replaced.
+	agyLine := `{"event":"step_update","step_update":{"step_index":0,"state":"DONE",` +
+		`"step_type":"agent_response","text_delta":"thinking about the parser"}}`
+	if err := os.WriteFile(filepath.Join(dir, "run-agy"), []byte(agyLine+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -214,9 +275,12 @@ func TestLiveTranscriptsPicksTheFormatPerFile(t *testing.T) {
 		t.Fatalf("Tail(run-claude) = %q, want it parsed rather than handed back raw", text)
 	}
 
-	text, ok, err = transcripts.Tail("run-gemini")
+	text, ok, err = transcripts.Tail("run-agy")
 	if err != nil || !ok || text != "thinking about the parser" {
-		t.Fatalf("Tail(run-gemini) = %q, %v, %v; want the narrative trimmed", text, ok, err)
+		t.Fatalf("Tail(run-agy) = %q, %v, %v; want agy's stream-json decoded", text, ok, err)
+	}
+	if strings.Contains(text, `"event"`) {
+		t.Fatalf("Tail(run-agy) = %q, want it parsed rather than handed back raw", text)
 	}
 
 	if text, ok, err := transcripts.Tail("run-that-never-started"); err != nil || ok || text != "" {

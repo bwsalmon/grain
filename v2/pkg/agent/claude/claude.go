@@ -7,11 +7,9 @@
 // tool roster emptied out, reaching the sandbox only through the MCP tools
 // grain's own "mcpserver" subcommand exposes (v2/cmd/grain/mcpserver.go).
 //
-// Unlike agent/gemini, there is no lightweight API this package can drive
-// in-process -- claude -p is the actual product bwsalmon/agents#255 asked
-// to add as an option, so Run spawns it directly over os/exec and lets it
-// manage its own MCP connection, rather than this package looping turns
-// itself the way agent/gemini's Run does. --mcp-config points that
+// claude -p is the actual product bwsalmon/agents#255 asked to add as an
+// option, so Run spawns it directly over os/exec and lets it manage its
+// own MCP connection rather than looping turns itself. --mcp-config points that
 // connection at grainBinaryPath (this same grain binary -- bwsalmon/
 // agents#313 combined what used to be a standalone cmd/mcpserver build
 // into a subcommand of the one binary everything else here runs as too)
