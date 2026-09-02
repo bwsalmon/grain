@@ -1,6 +1,3 @@
-__pycache__/
-*.pyc
-.pytest_cache/
 .claude/settings.local.json
 /bin/
 # packer/kontur/build-guest.sh's own output -- a built kernel/initramfs/disk

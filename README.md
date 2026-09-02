@@ -143,6 +143,28 @@ tests/e2e/      tasks filed the way a user would, carried through
                 contention and a capability leak at a scale none of the
                 above reach -- `make loadtest`, or that file's own doc
                 comment for how to size it up to an actual host.
+tests/deploy/   the cross-file agreements no package's own tests can see:
+                the Dockerfile, scripts/setup.sh, build-artifacts.yml, the
+                Makefile and terraform/gcp/files/deploy.sh all naming the
+                same image, the same unit and the same paths. Content
+                checks only -- it runs none of it -- so it costs nothing
+                and runs on every commit.
+tests/container/  the same claims driven for real, against a built image:
+                that the store survives the container it was written from,
+                that files come out owned by the host account rather than
+                root, that a non-root process reaches port 80 through a
+                file capability, that a control file written inside reaches
+                a systemd unit outside, and that an upgrade pulls a real
+                tag from a real registry. Every test skips without
+                GRAIN_TEST_IMAGE, so `go test ./...` on a laptop stays a
+                unit run; build-artifacts.yml is what hands it an image.
+tests/installer/  scripts/setup.sh itself, run as root against the machine
+                running the tests -- a real system user, real units, a real
+                service -- because the deploy that came up with the image
+                pulled and no grain-daemon.service was invisible to
+                everything that only drove the image. Destructive, so it
+                additionally needs GRAIN_INSTALLER_E2E=1 and skips
+                everywhere it is not asked for explicitly.
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
                 by hand (bwsalmon/agents#237). It reads and writes

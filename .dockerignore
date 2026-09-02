@@ -19,5 +19,3 @@ bin/
 pkg/ui/frontend/node_modules/
 pkg/ui/frontend/test-results/
 pkg/ui/frontend/playwright-report/
-**/__pycache__/
-.pytest_cache/
