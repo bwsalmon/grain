@@ -29,13 +29,15 @@ md_optional() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1" 2>/dev/null || t
 # published for this commit -- so the Go/Node toolchain, and the `make`
 # that used to drive it, are CI's problem rather than a deployed host's.
 #
-# What is left is what the deployment genuinely runs on: git (the
-# checkout this script keeps, which setup.sh and scripts/kontur's image
-# builds come out of), docker (grain-daemon.service *is* a `docker run`
-# now, so this is a runtime dependency, not only a deploy-time one), and
-# jq (the `cfg` helper below, and two one-liners in setup.sh). jq
-# replaced a python3 that was installed on every host for three JSON
-# one-liners and nothing else.
+# What is left is what this deploy itself runs on: git (the checkout
+# above, which is how a copy of setup.sh gets onto this host at all),
+# docker (grain-daemon.service *is* a `docker run` now, so this is a
+# runtime dependency, not only a deploy-time one), and jq (the `cfg`
+# helper below). jq replaced a python3 that was installed on every host
+# for three JSON one-liners and nothing else; two of those three were in
+# setup.sh, which needs neither jq nor git any more (see its own header,
+# "What this host has to have"), so what is left here is this script's
+# own list rather than the deployment's.
 install_prerequisites() {
   local missing=0
   for cmd in git docker jq; do
@@ -157,12 +159,40 @@ KONTUR_WORKSPACE="$(cfg kontur_workspace)"
 KONTUR_BASE_IP="$(cfg kontur_base_ip)"
 KONTUR_BASE_PORT="$(cfg kontur_base_port)"
 
-# --- clone (once) or leave the update to setup.sh's own sync_repo -----
+# --- clone or update the checkout this script runs setup.sh out of -----
+#
+# Kept current here, rather than left to setup.sh to update itself
+# mid-run the way it used to (its own sync_repo, and the re-exec that
+# went with it). setup.sh no longer clones anything at all -- it needs
+# nothing on a host but docker and systemd, and takes the source it does
+# need out of the deployment image -- so this checkout exists for one
+# reason: to be where this deploy finds a copy of setup.sh. Which makes
+# keeping it in step with GRAIN_REF the job of whatever put it there,
+# i.e. this script, which is itself refetched from instance metadata by
+# config-sync.sh on every deploy.
+#
+# A hard reset, not a pull: nothing is meant to edit this checkout on a
+# deployed host, so a local change here is either a mistake or an
+# operator's in-progress debugging, and neither should be able to pin a
+# fleet host to a stale setup.sh.
+#
+# git 2.35.2+ refuses to operate on a repository it does not own
+# ("detected dubious ownership in repository at ..."), and this checkout
+# can be one: root clones it, and an older deployment may have left it
+# owned by the grain account instead. Exempted once, globally, and
+# guarded so re-runs do not pile up duplicate entries.
+git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$SRC_DIR" \
+  || git config --global --add safe.directory "$SRC_DIR"
 
 if [ ! -d "$SRC_DIR/.git" ]; then
   log "cloning $GRAIN_REPO_URL ($GRAIN_REF) into $SRC_DIR"
   mkdir -p "$(dirname "$SRC_DIR")"
   git clone --quiet --branch "$GRAIN_REF" "$GRAIN_REPO_URL" "$SRC_DIR"
+else
+  log "updating $SRC_DIR to $GRAIN_REF"
+  git -C "$SRC_DIR" fetch --quiet origin "$GRAIN_REF"
+  git -C "$SRC_DIR" checkout --quiet "$GRAIN_REF"
+  git -C "$SRC_DIR" reset --quiet --hard "origin/$GRAIN_REF"
 fi
 
 # --- secrets: read from metadata into a tmpfs directory, never a repo,
@@ -238,9 +268,7 @@ log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_image_bucket=${KO
 # (bwsalmon/agents#405).
 
 env \
-  GRAIN_REPO_URL="$GRAIN_REPO_URL" \
   GRAIN_REF="$GRAIN_REF" \
-  GRAIN_SRC_DIR="$SRC_DIR" \
   GRAIN_IMAGE="$GRAIN_IMAGE" \
   GRAIN_IMAGE_TAG="$GRAIN_IMAGE_TAG" \
   GRAIN_IMAGE_PULL_USER="$GRAIN_IMAGE_PULL_USER" \

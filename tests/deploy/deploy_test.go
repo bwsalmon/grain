@@ -21,6 +21,7 @@ package deploy
 import (
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -490,6 +491,76 @@ func TestTheSandboxContainerIsPulledAndNeverBuilt(t *testing.T) {
 	absent(t, code, "localhost:5000/kontur:latest")
 	// The guest disk build stays.
 	contains(t, code, "build-guest.sh")
+}
+
+// setup.sh runs on a host with docker and systemd, and nothing else.
+//
+// It used to want git and jq as well, and installed both itself on any
+// host that lacked them -- which made "what a host has to have before it
+// can deploy" a list that grew quietly, one apt package at a time, every
+// time a step here wanted a tool the shell does not have. The image this
+// deployment runs already carries git, curl and grain's own source, so
+// every such step borrows one out of it (setup.sh's own image_run)
+// instead.
+//
+// Asserted against the code, per tool and per command position: a `git`
+// inside a container command line is the whole point, and prose about
+// the git proxy or a "-kontur-git-proxy-host" flag is neither. The
+// container context is opened by an image_run and runs to the end of
+// that call -- the first line that neither continues onto the next nor
+// leaves a quote open.
+func TestTheInstallerNeedsNothingOnTheHostButDockerAndSystemd(t *testing.T) {
+	// Not an exhaustive list of things a base system lacks: these are
+	// the ones this script has actually reached for. `install`,
+	// `useradd` and `getent` are deliberately absent from it -- those
+	// come with any distribution's base install, which docker and
+	// systemd do not.
+	hostTool := regexp.MustCompile(`(^|[|;&(]|\$\()\s*(git|jq|curl|wget|python3|make|gsutil|gcloud|ip)\b`)
+
+	inImage := false
+	openQuote := false
+	for n, line := range strings.Split(setupCode(t), "\n") {
+		if !inImage && strings.Contains(line, "image_run") {
+			inImage, openQuote = true, false
+		}
+		if inImage {
+			if strings.Count(line, "'")%2 == 1 {
+				openQuote = !openQuote
+			}
+			if !openQuote && !strings.HasSuffix(line, `\`) {
+				inImage = false
+			}
+			continue
+		}
+		if m := hostTool.FindStringSubmatch(line); m != nil {
+			t.Errorf("setup.sh:%d runs %s on the host, outside any image_run: %s",
+				n+1, m[2], strings.TrimSpace(line))
+		}
+	}
+}
+
+// Nothing rewrites setup.sh underneath the process running it.
+//
+// sync_repo pulled a new copy of the checkout over the file this process
+// was reading, which is why reexec_if_updated had to exist: every step
+// after the pull was otherwise the *old* script's version of that step.
+// Neither is needed once the script keeps no checkout -- and neither may
+// come back without the other, so both spellings are pinned.
+func TestTheInstallerNeitherClonesNorReplacesItself(t *testing.T) {
+	code := setupCode(t)
+	for _, gone := range []string{"sync_repo", "reexec_if_updated", "GRAIN_SRC_DIR", "GRAIN_REPO_URL"} {
+		absent(t, code, gone)
+	}
+	// The source the kontur guest build reads comes out of the image
+	// instead, so it is the same source the binary was built from.
+	contains(t, code, "unpack_image_source")
+	contains(t, code, `docker cp "$cid:/usr/local/share/grain/src/."`)
+
+	// Which makes keeping the copy of setup.sh on a deployed host
+	// current the job of whatever put it there: on the GCP path, the
+	// deploy script that runs it.
+	deploy := stripComments(read(t, "terraform", "gcp", "files", "deploy.sh"))
+	contains(t, deploy, `git -C "$SRC_DIR" reset --quiet --hard "origin/$GRAIN_REF"`)
 }
 
 func TestTerraformDeployNoLongerInstallsAToolchain(t *testing.T) {
