@@ -939,7 +939,7 @@ separate from, `gcp_keys.py` above, for two reasons:
   authenticates with the primary GCP service-account key placed at
   `/data/secrets/gcp-service-account.json` (`configure_gcp_service_account`)
   — the agent account's *own* key, minted by CI and rotated on every
-  deploy (`ci/push-host-secrets.sh`) — rather than the controller's
+  deploy (v1's `push-host-secrets.sh`) — rather than the controller's
   attached host identity `gcp_keys.py` uses. Reasonable either way for this
   one feature (a Gemini key is a bearer secret regardless of who mints it,
   so there is no equivalent "must not self-mint" hazard), and left

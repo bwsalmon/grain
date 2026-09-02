@@ -17,8 +17,8 @@ set -euo pipefail
 
 github_output="${GITHUB_OUTPUT:?GITHUB_OUTPUT is not set (is this running outside Actions?)}"
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$root/terraform/gcp"
+module_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$module_dir"
 
 # One `terraform output -json`, parsed, rather than a `-raw` call per
 # name. -raw exits non-zero on a null value -- which url, dns_name and
