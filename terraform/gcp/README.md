@@ -289,8 +289,8 @@ own project.
 
 ## Secrets never touch Terraform
 
-Four kinds of value never appear in a `.tf` file, a `tfvars` file, or the
-Terraform state:
+Four kinds of value never appear in a `.tf` file, a `tfvars` file, or any
+plan this module is applied from:
 
 - **The GitHub PAT** -- a fine-grained token scoped, on GitHub's own side,
   to `test_repos`, which is also wired into the daemon's own
@@ -324,6 +324,31 @@ keeps a later `terraform apply` from treating them as drift and erasing
 them. `files/deploy.sh` reads them back purely locally, over the instance
 metadata server, with no GCP credential of the host's own required to do
 it.
+
+They do, however, reach the Terraform **state**, which is worth being
+exact about because believing otherwise leaked one of them. Nothing here
+writes them, but `terraform refresh` reads the instance's real metadata
+back on every run, so the state file in the state bucket holds each of
+these values. Two consequences:
+
+- **The state bucket is as sensitive as the secrets themselves.**
+  `bootstrap-gcp.sh` already gives it uniform bucket-level access and
+  public access prevention; treat read access to it as read access to the
+  PAT, the OAuth token and the minter's key.
+- **A replacement of the host prints them.** `lifecycle.ignore_changes`
+  (instance.tf) suppresses in-place diffs, not the prior state a destroy
+  is rendered from -- so an apply that replaces the instance (a bigger
+  `boot_disk_gb`, a new `boot_image`, a new `machine_type`) renders every
+  one of these values in full. In bwsalmon/agents#653 that put the minter
+  account's private key in a deploy workflow's log. `deploy/terraform-apply.sh`
+  now filters the apply's output for exactly this, so the plan stays
+  readable and the values do not; a key exposed before that filter existed
+  needs revoking, not just redacting.
+
+Neither of these is a reason to route the secrets through Terraform
+instead. Keeping them out of configuration is what makes them absent from
+diffs, pull requests and this repository; the state and the destroy diff
+are the residue, and are handled where they occur.
 
 ## The daemon's own Gemini key
 
