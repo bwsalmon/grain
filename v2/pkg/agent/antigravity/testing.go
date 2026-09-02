@@ -182,7 +182,20 @@ func (r *scriptRunner) Run(ctx context.Context, args []string, stdin string, _ [
 			return out.String(), err
 		}
 		idx++
-		if err := emit(toolEvent(idx, stateActive, next.Tool, next.Args, "", false)); err != nil {
+		// A script names a tool the way this package's registry does
+		// ("propose_task"); agy names it the way it loaded it from its MCP
+		// settings (mcp.QualifiedToolName's "mcp__grain-sandbox__
+		// propose_task"). The stream this fake emits has to use agy's
+		// spelling, or every test built on it exercises a name no real run
+		// ever produces -- which is exactly how a parser that recorded the
+		// reported name verbatim handed orchestrator.ProcessResult tool
+		// names it could never match, dropping a real agent's ask_question,
+		// comment_on_issue and propose_task calls on the floor while this
+		// whole suite passed (mcp.BareToolName's own doc comment has the
+		// full cost). The call itself still goes to the registry under the
+		// bare name, which is what the server registered it as.
+		reported := mcp.QualifiedToolName(next.Tool)
+		if err := emit(toolEvent(idx, stateActive, reported, next.Args, "", false)); err != nil {
 			return out.String(), err
 		}
 		text, isError := callTool(ctx, client, next.Tool, next.Args)
@@ -190,7 +203,7 @@ func (r *scriptRunner) Run(ctx context.Context, args []string, stdin string, _ [
 		if isError {
 			state = stateError
 		}
-		if err := emit(toolEvent(idx, state, next.Tool, next.Args, text, isError)); err != nil {
+		if err := emit(toolEvent(idx, state, reported, next.Args, text, isError)); err != nil {
 			return out.String(), err
 		}
 		idx++
