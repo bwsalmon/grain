@@ -52,10 +52,12 @@ const (
 
 	// mcpServerName is the mcpServers key written into --mcp-config, and
 	// therefore the prefix claude reports every tool under
-	// ("mcp__<name>__<tool>") -- matching v1's own "grain-sandbox" naming
-	// (dispatch.py's _mcp_config_json) purely for continuity; claude does
-	// not care what this string is.
-	mcpServerName = "grain-sandbox"
+	// ("mcp__<name>__<tool>"). It lives in pkg/mcp rather than here
+	// because both halves of that convention -- writing the prefix onto
+	// --allowedTools, and taking it back off a reported call before
+	// recording it (transcript.go) -- have to agree, and agent/antigravity
+	// needs the identical pair for its own CLI.
+	mcpServerName = mcp.ToolNamespace
 )
 
 // runner is the one seam this package needs to actually invoke the claude
@@ -196,10 +198,10 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 func allowedTools() []string {
 	var names []string
 	for _, t := range mcp.NewSandboxTools("") {
-		names = append(names, fmt.Sprintf("mcp__%s__%s", mcpServerName, t.Name))
+		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	for _, t := range mcp.NewMockTools(&mcp.MockSink{}) {
-		names = append(names, fmt.Sprintf("mcp__%s__%s", mcpServerName, t.Name))
+		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	return names
 }

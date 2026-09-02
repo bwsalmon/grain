@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/bwsalmon/grain/v2/pkg/agent"
+	"github.com/bwsalmon/grain/v2/pkg/mcp"
 )
 
 // rawEvent is one --output-format stream-json line -- the same event shape
@@ -125,7 +126,15 @@ func parseEvents(stdout string) *parsedEvents {
 						fmt.Fprintf(&p.transcript, "%s\n\n", b.Text)
 					}
 				case "tool_use":
-					name := toolName(b.Name)
+					// Bare, not as claude reported it: claude names every
+					// tool it loaded from --mcp-config
+					// "mcp__grain-sandbox__<tool>" (this package's own
+					// allowedTools writes that prefix), and
+					// agent.ToolCall.Name is the tool's identity rather
+					// than one CLI's spelling of it. mcp.BareToolName's
+					// own doc comment has what recording the prefixed
+					// name cost.
+					name := mcp.BareToolName(b.Name)
 					p.result.ToolCalls = append(p.result.ToolCalls, agent.ToolCall{Name: name, Arguments: b.Input})
 					p.pending[b.ID] = len(p.result.ToolCalls) - 1
 					fmt.Fprintf(&p.transcript, "> %s(%s)\n", name, inputSummary(b.Input))
@@ -152,24 +161,6 @@ func parseEvents(stdout string) *parsedEvents {
 		}
 	}
 	return p
-}
-
-// toolName is the tool's own name -- what the "mcpserver" subcommand
-// registered it as -- recovered from the "mcp__<server>__<tool>" name
-// claude reports it under once it is loaded from --mcp-config (see
-// mcpServerName). Stripping the prefix here, in the one place a
-// transcript becomes an agent.Result, is what keeps that mangling a
-// detail of driving this particular CLI rather than something every
-// reader of Result.ToolCalls has to know about: orchestrator's
-// ProcessResult matches "propose_task", "ask_question" and
-// "comment_on_issue" by the names mcp/mock_tools.go gave them, and it
-// used to match none of them on a real run, because every name reaching
-// it was prefixed -- a proposed task filed by an agent was silently
-// dropped. An unprefixed name is passed through unchanged: Run empties
-// claude's native tool roster, so a run should have no unprefixed tool
-// to report, but a parser is not the place to assume that held.
-func toolName(reported string) string {
-	return strings.TrimPrefix(reported, "mcp__"+mcpServerName+"__")
 }
 
 // inputSummary renders a tool_use block's own input as compact JSON for a

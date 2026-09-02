@@ -830,22 +830,19 @@ in a rewrite; the assertions port, the harness does not.
 real host adapter and a real dispatched-agent connection would replace,
 without changing anything about `RunCycle`'s own shape.
 
-That relay only works because each framework's transcript parser now
-strips the `mcp__grain-sandbox__` prefix off a tool call's name before it
-becomes an `agent.ToolCall`. Both CLIs report a tool loaded from their
-MCP config under that mangled name -- it is the same spelling
-`allowedTools()` builds to admit them in the first place -- while
-`ProcessResult` matches `propose_task`, `ask_question` and
-`comment_on_issue` by the names `mcp/mock_tools.go` registered. Nothing
-reconciled the two, so on a real run every match failed: a task an agent
-proposed was recorded in the transcript and then dropped, and so was a
-question it asked. Every test missed it for one reason -- the scripted
-agy in `antigravity`'s `testing.go` emitted the bare registry name, a
-spelling no real CLI produces, and the canned transcripts in
-`agent/claude`'s tests were written the same way. The fake now emits the
-prefixed name and calls the registry with the bare one, which is what a
-real run does, so `e2e`'s propose-then-approve test exercises the whole
-path instead of a shape that only existed in the harness.
+That relay only works because each framework's transcript parser puts a
+call's name through `mcp.BareToolName` before recording it: both CLIs
+report a tool loaded from their MCP config as
+`mcp__grain-sandbox__<tool>`, and `ProcessResult` matches the bare names
+`mcp/mock_tools.go` registered, so a parser recording the reported name
+verbatim matched none of them on any real run. What let that ship is
+worth naming, because the fix alone does not close it: the scripted agy
+in `antigravity`'s `testing.go` emitted the bare registry name, a
+spelling no real CLI produces, so every test standing on it -- the whole
+of `e2e` included -- exercised a shape that existed only in the harness.
+The fake now emits the qualified name and calls the registry with the
+bare one, which is what a real run does, so `e2e`'s propose-then-approve
+test covers the path an agent actually takes.
 
 `TrackedPullRequest` (`model.PullRequestRef`/`model.PrHealth`/
 `model.TrackedPullRequest`, `pkg/model/pullrequest.go`) turned out not to
