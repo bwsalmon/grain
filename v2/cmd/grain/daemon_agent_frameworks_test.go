@@ -82,7 +82,16 @@ func TestAgentCredentialIsEmptyWithNeitherSourceRatherThanAnError(t *testing.T) 
 
 func TestAgentFrameworksSaysWhereToSetAMissingCredential(t *testing.T) {
 	ctx := context.Background()
-	build := agentFrameworks(config{}, testStore(t), testSecrets(t))
+	// -claude-path names a file that need not exist (claude.New does not
+	// stat it) purely so the claude leg gets past exec.LookPath and
+	// reaches the credential check this is about. Without it, the answer
+	// depends on whether the machine running the test happens to have a
+	// claude binary on $PATH: present, and the credential error asserted
+	// below comes back; absent -- every CI runner -- and the framework
+	// fails one step earlier, on the missing binary, which is a correct
+	// error about a different missing thing.
+	cfg := config{claudePath: filepath.Join(t.TempDir(), "claude")}
+	build := agentFrameworks(cfg, testStore(t), testSecrets(t))
 
 	for _, framework := range []string{model.AgentFrameworkGemini, model.AgentFrameworkClaude} {
 		_, err := build(ctx, framework)
