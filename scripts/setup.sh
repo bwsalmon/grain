@@ -25,7 +25,7 @@
 #      the self-debug capability reads -- the image carries its own copy
 #      of the source it was built from, so the agent's view of the code
 #      cannot drift from the binary running it -- but it is still what
-#      this script re-execs out of and what packer/kontur's own guest
+#      this script re-execs out of and what scripts/kontur's own guest
 #      image builds come from
 #   2. pulls the deployment image -- $GRAIN_IMAGE:$GRAIN_IMAGE_TAG,
 #      published to GHCR by ../.github/workflows/build-artifacts.yml
@@ -297,7 +297,7 @@ GRAIN_KONTUR_IMAGES_HOSTPATH="${GRAIN_KONTUR_IMAGES_HOSTPATH:-/var/lib/vm-images
 GRAIN_KONTUR_DISK_HOSTPATH="${GRAIN_KONTUR_DISK_HOSTPATH:-/var/lib/kontur/vm-disks}"
 # The guest account the daemon execs as, and the account konturctl's
 # -guest-user tells kontur to authorize this boot's generated key for.
-# There is no key here to configure: see packer/kontur/guest-setup.sh's
+# There is no key here to configure: see scripts/kontur/guest-setup.sh's
 # "No SSH key is baked in".
 GRAIN_KONTUR_SSH_USER="${GRAIN_KONTUR_SSH_USER:-debian}"
 GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
@@ -307,7 +307,7 @@ GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
 # on a shared private bridge and its own forwarded port -- which is all
 # GRAIN_KONTUR_BASE_IP/GRAIN_KONTUR_BASE_PORT below exist to derive, and
 # which flat mode ignores. Flat mode needs a guest image carrying kontur's
-# own guest overlays (packer/kontur/build-guest.sh builds one); a
+# own guest overlays (scripts/kontur/build-guest.sh builds one); a
 # deployment pulling a prebuilt guest from GRAIN_KONTUR_IMAGE_BUCKET must
 # republish it from that build before switching.
 GRAIN_KONTUR_NET="${GRAIN_KONTUR_NET:-flat}"
@@ -467,7 +467,7 @@ Recognized variables:
                              and, unless GRAIN_KONTUR_IMAGE_BUCKET names a
                              pre-built one, builds its own guest disk here on
                              first use (ensure_kontur_images, below -- see
-                             packer/kontur/README.md for what that runs).
+                             scripts/kontur/README.md for what that runs).
                              Needs /dev/kvm on this host (nested
                              virtualization) either way. Left off (with a
                              logged reason) if any prerequisite below is
@@ -481,7 +481,7 @@ Recognized variables:
                              never built here.
   GRAIN_KONTUR_IMAGE_BUCKET  fetch the guest DISK (not the container above)
                              from a bucket someone already published one to
-                             (packer/kontur/build-guest.sh's own
+                             (scripts/kontur/build-guest.sh's own
                              KONTUR_IMAGE_BUCKET; this script fetches its
                              "latest" alias) instead of building one here.
                              Any such disk works: nothing deployment-
@@ -506,7 +506,7 @@ Recognized variables:
                              VM (default: /home/debian, GRAIN_KONTUR_SSH_USER's own home)
   GRAIN_KONTUR_NET           kontur networking mode: "flat" (default) or "nat".
                              Flat needs a guest built by build-guest.sh; see
-                             packer/kontur/README.md.
+                             scripts/kontur/README.md.
   GRAIN_KONTUR_BASE_IP       "-ip" slot 1's kontur VM gets; every later slot's
                              (nat mode only -- ignored under flat)
                              is the next address after it (default: 169.254.100.10)
@@ -648,7 +648,7 @@ sync_repo() {
   # kontur_image_tag, later in main(), redirects git's stderr to
   # /dev/null and falls back to the literal string "unknown", which
   # silently breaks the content-hash caching that tag exists for: a
-  # packer/kontur edit or third_party/kontur vendor bump would stop
+  # scripts/kontur edit or third_party/kontur vendor bump would stop
   # changing the tag at all, so ensure_kontur_guest_build
   # would keep reusing whatever it built the first time, forever. The
   # same failure hits this function's own git calls below whenever the
@@ -1109,13 +1109,13 @@ gcs_fetch() {
 
 # kontur_image_tag names the guest image ensure_kontur_guest_build
 # builds and caches by hashing exactly what defines its contents:
-# packer/kontur's own git tree (guest-setup.sh and build-guest.sh -- the "startup
+# scripts/kontur's own git tree (guest-setup.sh and build-guest.sh -- the "startup
 # script" a guest image is provisioned from) and third_party/kontur's own
 # vendored git tree (the kontur binary and cloud-hypervisor version the
 # OCI image actually bakes in -- the "kontur version"). The operator SSH
 # public key used to be hashed in here too, since it decided the guest's
 # authorized_keys; nothing about a key reaches the disk any more (kontur
-# generates one per boot -- see packer/kontur/guest-setup.sh's "No SSH key
+# generates one per boot -- see scripts/kontur/guest-setup.sh's "No SSH key
 # is baked in"), so rotating one no longer forces a rebuild. Either tree
 # changing -- a guest-setup.sh edit, a third_party/kontur vendor bump -- changes
 # this tag, which is exactly what tells ensure_kontur_guest_build it has
@@ -1123,14 +1123,14 @@ gcs_fetch() {
 # "name the image based on the hash of the startup script and kontur
 # version so it knows when it needs to re-generate it"). Nothing here
 # hashes file *contents* by hand the way, say, Terraform's own filesha256
-# would: packer/kontur and third_party/kontur already live inside
+# would: scripts/kontur and third_party/kontur already live inside
 # GRAIN_SRC_DIR's own git checkout, so their tree object IDs already are
 # exactly that, for free.
 kontur_image_tag() {
-  local packer_tree tp_tree
-  packer_tree="$(git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:packer/kontur" 2>/dev/null || echo unknown)"
+  local kontur_tree tp_tree
+  kontur_tree="$(git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:scripts/kontur" 2>/dev/null || echo unknown)"
   tp_tree="$(git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:third_party/kontur" 2>/dev/null || echo unknown)"
-  printf '%s\n' "${packer_tree}:${tp_tree}" | sha256sum | awk '{print $1}' | cut -c1-16
+  printf '%s\n' "${kontur_tree}:${tp_tree}" | sha256sum | awk '{print $1}' | cut -c1-16
 }
 
 ensure_kontur_images() {
@@ -1148,7 +1148,7 @@ ensure_kontur_images() {
   # from one commit and a sandbox from another.
   #
   # The guest *disk* is still built here when no bucket names a
-  # pre-built one, and that is not an oversight: packer/kontur/
+  # pre-built one, and that is not an oversight: scripts/kontur/
   # guest-setup.sh bakes this deployment's own SSH public key into the
   # image's authorized_keys, so there is no such thing as a generic
   # published guest disk to pull -- one would either carry a private key
@@ -1263,7 +1263,7 @@ ensure_kontur_guest_fetch() {
 # build again.
 #
 # This is the one thing a deployment still builds rather than pulls, and
-# it is not for want of publishing it: packer/kontur/guest-setup.sh bakes
+# it is not for want of publishing it: scripts/kontur/guest-setup.sh bakes
 # this deployment's own SSH public key into the image's authorized_keys,
 # so a generically published guest disk would either carry a keypair
 # everybody has or admit nobody at all. See ensure_kontur_images' own
@@ -1278,14 +1278,14 @@ ensure_kontur_guest_build() {
   if [ -s "$img_dir/vmlinuz" ] && [ -s "$img_dir/initrd.img" ] && [ -s "$img_dir/disk.img" ]; then
     log "kontur guest image ${tag} already built -- reusing it"
   else
-    log "Building kontur guest image ${tag} (packer/kontur/build-guest.sh -- one docker build, no VM boot; this can take several minutes)"
+    log "Building kontur guest image ${tag} (scripts/kontur/build-guest.sh -- one docker build, no VM boot; this can take several minutes)"
     local tmp_out
     tmp_out="$(mktemp -d)"
     if ! env \
         SANDBOX_SETUP_SCRIPT="" \
         OUTPUT_DIR="$tmp_out" \
-        "$GRAIN_SRC_DIR/packer/kontur/build-guest.sh"; then
-      log "  packer/kontur/build-guest.sh failed -- leaving kontur sandboxing off this run"
+        "$GRAIN_SRC_DIR/scripts/kontur/build-guest.sh"; then
+      log "  scripts/kontur/build-guest.sh failed -- leaving kontur sandboxing off this run"
       rm -rf "$tmp_out"
       GRAIN_KONTUR_ENABLE=0
       return
@@ -1934,7 +1934,7 @@ write_systemd_units() {
   # itself), not a version string this script has to track.
   # -guest-port 22 is not optional: konturctl's own default is 80, which
   # silently refuses every connection to this image's actual sshd
-  # (packer/kontur/README.md, "guest-port 22 is not optional").
+  # (scripts/kontur/README.md, "guest-port 22 is not optional").
   # -disk-readonly=false/-disk-hostpath give each VM a genuinely
   # persistent, writable root filesystem instead of the read-only one
   # -images-hostpath alone provides (bwsalmon/agents#510):

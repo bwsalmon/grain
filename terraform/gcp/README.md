@@ -47,7 +47,7 @@ Terraform -- it also wires up workload identity federation, the same
 mechanism v1's own bootstrap script used, so CI needs no long-lived
 key.
 
-The state bucket is the one piece `ci/terraform-apply.sh` will also
+The state bucket is the one piece `deploy/terraform-apply.sh` will also
 create for itself, when a deploy finds it missing -- with the same
 uniform bucket-level access, versioning and public-access prevention
 this script applies. It only ever creates the name this script would
@@ -99,7 +99,7 @@ export INSTANCE="$(terraform output -raw instance_name)"
 export ZONE="$(terraform output -raw zone)"
 export MINTER_SERVICE_ACCOUNT="$(terraform output -raw minter_service_account)"
 export GRAIN_GITHUB_TOKEN="github_pat_..."   # a fine-grained PAT scoped to test_repos
-./push-secrets.sh
+./deploy/push-secrets.sh
 ```
 
 `GRAIN_GEMINI_API_KEY` is optional: with `enable_gemini_key` on (the
@@ -158,7 +158,7 @@ commit to grain (`Dockerfile`). Three variables decide which one:
 
 - **`grain_ref`** names the branch. It is still what the on-host
   checkout tracks -- `files/deploy.sh` clones it, and that checkout is
-  where `scripts/setup.sh` itself and `packer/kontur`'s guest/OCI
+  where `scripts/setup.sh` itself and `scripts/kontur`'s guest/OCI
   image builds come from -- and, by default, also which image tag runs:
   that branch's name with `/` replaced by `-`, which is how CI tags it.
 - **`grain_image_tag`** overrides that. Set it to `sha-<short sha>` --
@@ -187,14 +187,15 @@ restart itself from inside a container -- see grain's own
 
 Everything above is the by-hand path. To have a config repo's GitHub
 Actions apply it instead, pass `--repo owner/name` to the bootstrap
-script and wire a workflow to the step scripts in grain's `ci/`:
+script and wire a workflow to the step scripts in this module's
+`deploy/`:
 
 ```
-ci/v2-staging-terraform-apply.sh    init, validate, apply (with stock-out retries)
-ci/v2-staging-read-outputs.sh       Terraform outputs -> Actions step outputs
-push-secrets.sh                     this directory's own, called with env
-ci/v2-staging-wait-for-host.sh      block until the host reports it converged
-ci/v2-staging-write-summary.sh      the job summary
+deploy/terraform-apply.sh    init, validate, apply (with stock-out retries)
+deploy/read-outputs.sh       Terraform outputs -> Actions step outputs
+deploy/push-secrets.sh       the same script the by-hand path runs, called with env
+deploy/wait-for-host.sh      block until the host reports it converged
+deploy/write-summary.sh      the job summary
 ```
 
 The step bodies live in grain, and the config repo's workflow only wires
@@ -205,6 +206,16 @@ so anything written *there* is something nobody re-syncs, while a fix
 here reaches every deployment on its next `grain_ref` bump. See
 `bwsalmon/agents`'s `.github/workflows/deploy-v2-staging.yml` for a
 worked example.
+
+These five paths are the interface a config repo pins, and all five
+moved into it: four from grain's old top-level `ci/`, and
+`push-secrets.sh` from the module root beside this README, so one
+deploy's steps are no longer split across two directories for no
+reason. A workflow still naming the old paths breaks on the
+`grain_ref` bump that first picks this layout up, so repoint it in the
+same change. Two names also shortened, now that the directory says the
+rest: `read-terraform-outputs.sh` is `read-outputs.sh`, and
+`write-deploy-summary.sh` is `write-summary.sh`.
 
 Two things differ from a by-hand deploy:
 
@@ -364,7 +375,7 @@ yourself, and none of this runs.
 real `bwsalmon/kontur`-managed VMs, one per slot, over SSH
 (`orchestrator.KonturSandboxes`) instead of plain host directories
 (`orchestrator.HostSandboxes`) -- the same nested cloud-hypervisor guest
-`packer/kontur/README.md` documents building, now actually wired through
+`scripts/kontur/README.md` documents building, now actually wired through
 this deployment shape (bwsalmon/agents#504) rather than only configurable
 by hand-editing the systemd unit afterward.
 
@@ -374,7 +385,7 @@ working deployment -- but it no longer needs anything built or published
 by hand first (bwsalmon/agents#531): `scripts/setup.sh`'s own
 `ensure_kontur_ssh_key`/`ensure_kontur_images`/`ensure_konturctl`/
 `ensure_kontur_kvm_access` generate an SSH keypair, build the guest image
-(`packer/kontur/build-guest.sh` -- one `docker build`, no VM boot and no
+(`scripts/kontur/build-guest.sh` -- one `docker build`, no VM boot and no
 root, several minutes against a real Debian mirror) and the OCI image
 (`build-oci-image.sh` -- a plain `docker build`, no push), build and
 install `konturctl` itself onto the host's `PATH` (`grain-daemon` execs
@@ -384,13 +395,13 @@ grant `$GRAIN_USER` `/dev/kvm` and `docker` group access, and seed the
 generated SSH key, all before `write_systemd_units` wires up
 `grain daemon`'s own `-kontur-*` flags. This runs every deploy
 generation, not just the first, but `ensure_kontur_images`'s own
-`kontur_image_tag` -- a hash of `packer/kontur`'s own git tree (what the
+`kontur_image_tag` -- a hash of `scripts/kontur`'s own git tree (what the
 guest image is provisioned from), `third_party/kontur`'s own vendored git
 tree (the kontur version baked into the OCI image), and the SSH public
 key in play -- names and caches the result, so a re-run with nothing
 changed rebuilds neither image; only a `guest-setup.sh` edit, a
 `third_party/kontur` vendor bump, or a rotated keypair does. See
-`packer/kontur/README.md` for what the guest-image build actually does
+`scripts/kontur/README.md` for what the guest-image build actually does
 and why.
 
 Any one of those steps failing (the guest build unable to reach a Debian
@@ -415,7 +426,7 @@ bwsalmon/agents#531 had to:
 
    ```sh
    export KONTUR_IMAGE_BUCKET="<a GCS bucket you control, name only, no gs://>"
-   ../../packer/kontur/build-guest.sh
+   ../../scripts/kontur/build-guest.sh
    ```
 
    Set `kontur_image_bucket` to the same bucket name. There is no secret
@@ -702,6 +713,11 @@ files/
   config-sync.sh  watch metadata, run a deploy when it changes
   deploy.sh       translate this deployment's config into a scripts/setup.sh call
 bootstrap-gcp.sh   one-time: state bucket, deployer service account, optional WIF
-push-secrets.sh    post-apply: push the GitHub PAT, the Gemini key, the kontur SSH key, and a minted minter key
+deploy/
+  push-secrets.sh     post-apply: push the GitHub PAT, the Gemini key, the kontur SSH key, and a minted minter key
+  terraform-apply.sh  init, validate, apply -- creates the state bucket if it is missing
+  read-outputs.sh     Terraform outputs -> Actions step outputs
+  wait-for-host.sh    block until the host reports it converged on this generation
+  write-summary.sh    the deploy's job summary
 example.tfvars, backend.hcl.example
 ```

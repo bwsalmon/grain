@@ -2,7 +2,7 @@
 # Customizes a bwsalmon/kontur guest image into a grain sandbox guest.
 #
 # This is the script handed to kontur's own build-time guest setup hook,
-# replacing packer/kontur/provision.sh and the debootstrap pipeline
+# replacing scripts/kontur/provision.sh and the debootstrap pipeline
 # build.sh drove it from: kontur's Dockerfile already builds a guest
 # rootfs (debootstrap --variant=minbase, plus its own overlays) and packs
 # it into a disk image with `mke2fs -d`, so grain no longer builds one of
@@ -279,7 +279,7 @@ ln -sf /etc/systemd/system/kontur-net-cmdline.service \
 # script itself is left in place, unreferenced, for anyone who wants to
 # invoke it deliberately.
 cat > /etc/ssh/sshd_config.d/10-console.conf <<'EOF'
-# grain (packer/kontur/guest-setup.sh) replaced kontur's own version of
+# grain (scripts/kontur/guest-setup.sh) replaced kontur's own version of
 # this file. The hardening below is kept verbatim; the ForceCommand that
 # mirrored every session to the serial console is deliberately not, since
 # it runs each command under a pty -- which merges stdout with stderr and
@@ -333,7 +333,7 @@ update-initramfs -u -k all
 mkdir -p /etc/kontur-guest
 cat > /etc/kontur-guest/README <<'DOC'
 This is a grain sandbox guest: a bwsalmon/kontur guest image plus the
-customization packer/kontur/guest-setup.sh applies at build time. See that
+customization scripts/kontur/guest-setup.sh applies at build time. See that
 directory's README.md for the pipeline.
 
 Added on top of kontur's own guest image:

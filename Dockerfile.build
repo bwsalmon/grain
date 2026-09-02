@@ -1,6 +1,6 @@
 # The toolchain the Makefile's `container-build` target links in, so that
 # what produces bin/grain is Debian 12 -- the release every machine this
-# project deploys to runs (the bookworm guest packer/kontur/build-guest.sh
+# project deploys to runs (the bookworm guest scripts/kontur/build-guest.sh
 # builds, terraform/gcp/variables.tf's debian-cloud/debian-12)
 # -- whatever the
 # machine driving the build happens to be. grain is pure Go (the
@@ -31,12 +31,12 @@ FROM ${GO_IMAGE}:${GO_VERSION}-bookworm
 # bumped apart).
 ENV GOTOOLCHAIN=local
 
-# pkg/ui/frontend (bwsalmon/agents#356) needs a JS toolchain of its own
-# now: `make build` runs `npm ci && npm run build` there before `go
-# build`, so this image carries one too rather than leaving
-# container-build unable to reproduce it. Debian 12's own nodejs/npm
-# packages are recent enough for the pinned Vite version pkg/ui/frontend
-# builds with -- no NodeSource repo to add just for this.
+# ui/ (bwsalmon/agents#356) needs a JS toolchain of its own now: `make
+# build` runs `npm ci && npm run build` there before `go build`, so this
+# image carries one too rather than leaving container-build unable to
+# reproduce it. Debian 12's own nodejs/npm packages are recent enough
+# for the pinned Vite version ui/ builds with -- no NodeSource repo to
+# add just for this.
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
 	&& rm -rf /var/lib/apt/lists/*
 

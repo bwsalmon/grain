@@ -9,7 +9,7 @@ import { defineConfig } from "@playwright/test";
 const PORT = process.env.GRAIN_E2E_PORT || 8421;
 const baseURL = `http://127.0.0.1:${PORT}`;
 
-// e2e is the one suite in this package that is not jsdom (vite.config.js's
+// e2e is the one suite in this tree that is not jsdom (vite.config.js's
 // own `test` block, which vitest reads): a real Chromium, driven by
 // Playwright, against a real pkg/ui.Server over a real embedded SQLite
 // store -- see webServer below and e2e/tasks.spec.js's own doc comment
@@ -26,13 +26,13 @@ export default defineConfig({
   webServer: {
     // `grain demo`: a real pkg/ui.Server over a real embedded SQLite
     // store in a throwaway temp directory, serving the real built
-    // frontend out of ../static (populated by `npm run build` /
+    // frontend out of ../pkg/ui/static (populated by `npm run build` /
     // `make frontend`, which has to have already run for go:embed to
     // have anything real to compile in) -- built for exactly this,
     // trying the frontend out against a real server with no daemon,
     // orchestrator, sandbox or GitHub behind it. -open=false: nothing
     // here has a display to hand a browser to.
-    command: `go run ../../../cmd/grain demo -addr 127.0.0.1:${PORT} -open=false`,
+    command: `go run ../cmd/grain demo -addr 127.0.0.1:${PORT} -open=false`,
     url: `${baseURL}/api/config`,
     reuseExistingServer: false,
     timeout: 60_000,

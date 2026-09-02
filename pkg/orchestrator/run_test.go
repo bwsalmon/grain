@@ -856,3 +856,42 @@ func TestRunDispatchLeavesTranscriptPathEmptyWithoutATranscriptDir(t *testing.T)
 		t.Errorf("TranscriptPath = %q, want empty with no Config.TranscriptDir set", gotPath)
 	}
 }
+
+// finished_at used to be stamped with the same `at` RunCycle passed in as
+// the run's StartedAt, so every run ever recorded read back as having
+// taken zero seconds -- the UI's attempt timeline showed a run that had
+// worked for an hour and one that died on its first turn identically,
+// which is the first thing anyone wants to know about a failed run.
+func TestRunDispatchRecordsWhenTheRunActuallyFinished(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return &agent.Result{ToolCalls: []agent.ToolCall{{Name: "run_command", Text: "ok"}}}, nil
+	})
+
+	// baseTime is the fixed clock this package's tests dispatch against,
+	// far from wall-clock now -- which is exactly what makes it able to
+	// tell the two timestamps apart.
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", nil, baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+
+	runs, err := store.Runs(ctx, "t1")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("Runs = (%+v, %v)", runs, err)
+	}
+	if runs[0].FinishedAt == nil {
+		t.Fatal("FinishedAt = nil, want the run to be finished")
+	}
+	if !runs[0].FinishedAt.After(runs[0].StartedAt) {
+		t.Errorf("FinishedAt (%s) is not after StartedAt (%s); the run's own duration is unreadable",
+			runs[0].FinishedAt, runs[0].StartedAt)
+	}
+}

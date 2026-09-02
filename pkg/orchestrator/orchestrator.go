@@ -173,7 +173,9 @@ type Config struct {
 	// asks for by name, e.g. gcpkey's minter service account.
 	Credentials model.CredentialResolver
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
-	// agent framework's own default in place.
+	// agent framework's own default in place, which for both frameworks
+	// is no cap at all (agent/claude's defaultMaxTurns has why). What
+	// actually bounds a runaway run is MaxRunRuntime below.
 	MaxAgentTurns int
 	// GitRemoteBase is the base URL of this deployment's git proxy
 	// (cmd/grain/daemon.go's startGitProxy), which RunDispatch turns into
@@ -217,11 +219,26 @@ type Config struct {
 	// exec.CommandContext/procgroup.
 	//
 	// Zero uses defaultMaxRunRuntime. There is no "uncapped" value the
-	// way MaxAgentTurns' own zero means "the framework's own default":
-	// an uncapped run is exactly the gap this field exists to close, so
-	// a deployment that really wants a longer ceiling sets one
-	// explicitly instead of switching this off.
+	// way MaxAgentTurns' own zero means "no turn cap": an uncapped run
+	// is exactly the gap this field exists to close -- all the more so
+	// now that it is the only ceiling a default deployment has -- so a
+	// deployment that really wants a longer one sets it explicitly
+	// instead of switching this off.
 	MaxRunRuntime time.Duration
+
+	// Now reads the current time, and exists for the one timestamp
+	// RunDispatch cannot take from its caller: when a run finished.
+	// Every other moment this package records is the `at` RunCycle hands
+	// down -- the moment the cycle began -- and a run's finish is the one
+	// that is genuinely later than that, by however long the agent
+	// worked. Stamping finished_at with `at` too made every run ever
+	// recorded read back as zero seconds long.
+	//
+	// nil is the wall clock, which is what a real deployment wants. A
+	// test driving this package off a fake clock sets it so a run's
+	// finish lands on the same timeline as the `at` it dispatched with;
+	// dispatch's own retry backoff compares the two.
+	Now func() time.Time
 	// TranscriptDir, if set, is a directory RunDispatch asks each run's
 	// agent.Framework to mirror its own transcript-in-progress into, one
 	// file per run named after d.RunID -- agent.RunConfig.TranscriptPath's
@@ -287,6 +304,14 @@ func (c Config) maxRunRuntime() time.Duration {
 		return c.MaxRunRuntime
 	}
 	return defaultMaxRunRuntime
+}
+
+// now reads Config.Now, or the wall clock when a caller set none.
+func (c Config) now() time.Time {
+	if c.Now != nil {
+		return c.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // HostSandboxes hands out one directory per run, on the host this process

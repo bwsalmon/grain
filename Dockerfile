@@ -86,10 +86,10 @@ FROM ${GO_IMAGE}:${GO_VERSION}-bookworm AS build
 # time, undoing the pin.
 ENV GOTOOLCHAIN=local
 
-# pkg/ui/frontend is React+Vite and `make build` runs `npm ci && npm run
-# build` there before `go build`, so this stage carries a JS toolchain
-# for the same reason Dockerfile.build does -- and, as there, Debian 12's
-# own nodejs/npm are recent enough for the pinned Vite version, with no
+# ui/ is React+Vite and `make build` runs `npm ci && npm run build`
+# there before `go build`, so this stage carries a JS toolchain for the
+# same reason Dockerfile.build does -- and, as there, Debian 12's own
+# nodejs/npm are recent enough for the pinned Vite version, with no
 # NodeSource repo to add.
 RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
 	&& rm -rf /var/lib/apt/lists/*

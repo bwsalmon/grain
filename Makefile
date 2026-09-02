@@ -33,7 +33,7 @@ LDFLAGS := $(if $(SANDBOX_IMAGE),-X main.defaultSandboxImage=$(SANDBOX_IMAGE),)
 #
 # `make container-build` runs this same `make build`, out of this same
 # Makefile, inside Dockerfile.build's pinned Debian 12 toolchain -- the
-# release packer/kontur/build-guest.sh and terraform/gcp/variables.tf
+# release scripts/kontur/build-guest.sh and terraform/gcp/variables.tf
 # both deploy to -- so neither depends on the machine that drove it. It
 # is not the default: it wants a container engine, and a first run pays
 # for an image pull and a cold module cache, which is a poor trade on a
@@ -81,18 +81,18 @@ all: vet test build
 
 build: frontend $(CMDS)
 
-# pkg/ui/frontend (bwsalmon/agents#356) is React+Vite, built into
-# pkg/ui/static -- the directory server.go embeds -- rather than
-# checked in itself, so this has to run before `go build`/`go vet`/`go
-# test` can see real content there. `npm ci` rather than `npm install`:
-# a reproducible install from package-lock.json, the same reason `go
-# build` trusts go.sum over re-resolving go.mod.
+# ui/ (bwsalmon/agents#356) is React+Vite, built into pkg/ui/static --
+# the directory server.go embeds -- rather than checked in itself, so
+# this has to run before `go build`/`go vet`/`go test` can see real
+# content there. `npm ci` rather than `npm install`: a reproducible
+# install from package-lock.json, the same reason `go build` trusts
+# go.sum over re-resolving go.mod.
 #
 # The find clears out a previous build first rather than leaving Vite's
-# own emptyOutDir to do it: that would also take ../static/.gitignore,
-# .gitkeep and placeholder.html with it, the three files that let
-# go:embed compile against this generated directory on a fresh checkout
-# that has never run `npm run build` at all.
+# own emptyOutDir to do it: that would also take pkg/ui/static's own
+# .gitignore, .gitkeep and placeholder.html with it, the three files
+# that let go:embed compile against this generated directory on a fresh
+# checkout that has never run `npm run build` at all.
 #
 # placeholder.html is exempt because it is *tracked*, unlike everything
 # else this deletes. Removing it left the checkout permanently dirty,
@@ -109,7 +109,7 @@ build: frontend $(CMDS)
 frontend:
 	find pkg/ui/static -mindepth 1 -not -name '.gitignore' -not -name '.gitkeep' \
 		-not -name 'placeholder.html' -delete
-	cd pkg/ui/frontend && npm ci && npm run build
+	cd ui && npm ci && npm run build
 
 # BUILDVCS is passed explicitly rather than left to `go build`'s default
 # (which is this same `auto`) so that turning it off is a documented word
@@ -178,20 +178,20 @@ container-build: builder
 # nothing but .gitkeep.
 test: frontend
 	go test -race ./...
-	cd pkg/ui/frontend && npm test
+	cd ui && npm test
 
-# pkg/ui/frontend/e2e (bwsalmon/agents#415) drives the real built
-# frontend through a real Chromium, over a real pkg/ui.Server
-# (playwright.config.js's webServer runs `go run ./cmd/grain demo`) --
-# unlike `test` above, that needs a real browser on the machine, which
-# `npx playwright install --with-deps` fetches and apt-installs itself.
+# ui/e2e (bwsalmon/agents#415) drives the real built frontend through a
+# real Chromium, over a real pkg/ui.Server (playwright.config.js's
+# webServer runs `go run ../cmd/grain demo`) -- unlike `test` above,
+# that needs a real browser on the machine, which `npx playwright
+# install --with-deps` fetches and apt-installs itself.
 # Left out of `test`/`all` and its own target instead: forcing a ~300MB
 # browser download and a handful of apt packages (X11, fonts, codecs --
 # see playwright.config.js) on every `make test` would be a poor trade
 # for a checkout that just wants the unit suite; CI runs this as its own
 # job (.github/workflows/tests.yml) so the coverage still exists.
 test-e2e: frontend
-	cd pkg/ui/frontend && npx playwright install --with-deps chromium && npm run test:e2e
+	cd ui && npx playwright install --with-deps chromium && npm run test:e2e
 
 vet: frontend
 	go vet ./...

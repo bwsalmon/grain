@@ -3,7 +3,7 @@
 # grain-deploy-generation changes. Translates this deployment's
 # non-secret configuration (the grain-config metadata attribute) and its
 # two secrets (also metadata, but never Terraform inputs -- see
-# ../push-secrets.sh) into a call to scripts/setup.sh, which does the
+# ../deploy/push-secrets.sh) into a call to scripts/setup.sh, which does the
 # actual clone/pull/install/restart -- including the breaking-schema
 # reformat (bwsalmon/agents#394; see that script's own step 6).
 #
@@ -30,7 +30,7 @@ md_optional() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1" 2>/dev/null || t
 # that used to drive it, are CI's problem rather than a deployed host's.
 #
 # What is left is what the deployment genuinely runs on: git (the
-# checkout this script keeps, which setup.sh and packer/kontur's image
+# checkout this script keeps, which setup.sh and scripts/kontur's image
 # builds come out of), docker (grain-daemon.service *is* a `docker run`
 # now, so this is a runtime dependency, not only a deploy-time one), and
 # jq (the `cfg` helper below, and two one-liners in setup.sh). jq

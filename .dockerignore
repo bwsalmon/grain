@@ -1,7 +1,7 @@
 # The build context for Dockerfile, whose context is this repository
 # root (it builds konturctl out of third_party/kontur and reads the
 # commit stamp out of .git, neither of which is under the Go tree).
-# Nothing else in this repo builds from here: packer/kontur's two builds
+# Nothing else in this repo builds from here: scripts/kontur's two builds
 # each cd into their own directory first, and Dockerfile.build -- the
 # toolchain image, which COPYs nothing -- carries its own
 # Dockerfile.build.dockerignore excluding everything, which BuildKit
@@ -16,6 +16,6 @@
 # resolving against a tree built for a different platform.
 bin/
 .container-cache/
-pkg/ui/frontend/node_modules/
-pkg/ui/frontend/test-results/
-pkg/ui/frontend/playwright-report/
+ui/node_modules/
+ui/test-results/
+ui/playwright-report/

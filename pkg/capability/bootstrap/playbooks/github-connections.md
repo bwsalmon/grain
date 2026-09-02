@@ -36,7 +36,7 @@ preference:
 
 ## 1. Ask which shape of credential
 
-Two supported shapes, per `terraform/gcp/push-secrets.sh`'s own doc
+Two supported shapes, per `terraform/gcp/deploy/push-secrets.sh`'s own doc
 comment and `pkg/gitproxy`:
 
 - **A fine-grained PAT**, scoped to the specific repos this deployment

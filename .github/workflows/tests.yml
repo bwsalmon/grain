@@ -65,7 +65,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: pkg/ui/frontend/package-lock.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Build frontend
         run: make frontend
@@ -80,16 +80,20 @@ jobs:
       # themselves (missing `git`, unset GEMINI_API_KEY) -- they skip on a
       # runner that has none of that rather than failing.
       #
-      # pkg/orchestrator's own real-VM tests gate on /dev/kvm and so skip
-      # here too, but only because this step gives them no docker daemon
-      # to build against in the time it has -- the real-vm job below runs
-      # them for real. Do not read this step's "ok" for that package as
-      # covering them.
+      # pkg/orchestrator's own real-VM tests gate on GRAIN_REAL_VM_TESTS,
+      # which only the real-vm job below sets, so they skip here. Do not
+      # read this step's "ok" for that package as covering them.
+      #
+      # They used to gate on /dev/kvm alone, which reads like it excludes
+      # them from a hosted runner and does not: these runners have it, so
+      # the suite ran here too, twice per commit, against `go test`'s 600s
+      # per-package default. It needs ~336s of that, and lost the race
+      # often enough to redden PRs that had touched none of it.
       - name: Test
         run: go test ./...
 
       - name: Test frontend
-        working-directory: pkg/ui/frontend
+        working-directory: ui
         run: npm test
 
   # A separate job rather than a step in go-test above: this needs a real
@@ -112,7 +116,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: pkg/ui/frontend/package-lock.json
+          cache-dependency-path: ui/package-lock.json
 
       # Builds the frontend, installs Chromium and its apt dependencies,
       # then runs the Playwright suite against a real pkg/ui.Server
@@ -124,10 +128,13 @@ jobs:
   # the daemon does -- pkg/orchestrator/kontur_docker_real_test.go, the
   # only test that covers the sandbox path end to end.
   #
-  # It gates on /dev/kvm, and for its whole life nothing gave it one, so
+  # It gated on /dev/kvm, and for its whole life nothing gave it one, so
   # it never ran: `go test ./...` in go-test above reports "ok" for that
   # package with both real tests skipped, which reads exactly like
-  # coverage and is not. What that cost, concretely: bwsalmon/kontur#35
+  # coverage and is not. (It gates on GRAIN_REAL_VM_TESTS now, set in
+  # this job alone, so that "ok" stays a skip by design rather than by
+  # whatever the runner happened to provide.) What that cost, concretely:
+  # bwsalmon/kontur#35
   # moved the guest's SSH keypair from build time to boot time, and left
   # this test handing build-guest.sh an OPERATOR_SSH_PUBLIC_KEY that no
   # longer existed and pointing ExecKeyPath at a key no guest would
@@ -159,7 +166,9 @@ jobs:
       # The whole point of the job. konturDockerRealTestPrereqs skips on a
       # missing /dev/kvm, so without this the suite would quietly do
       # nothing and this job would pass -- the exact failure it exists to
-      # make impossible.
+      # make impossible. (It also skips unless GRAIN_REAL_VM_TESTS is set,
+      # which the suite step below sets and nothing else does; the
+      # "--- PASS" assertion there is what catches dropping it.)
       - name: Require KVM
         run: |
           if [ ! -e /dev/kvm ]; then
@@ -174,6 +183,8 @@ jobs:
       # for a real run. -v because when a guest fails to come up, the
       # per-step log is the only account of how far it got.
       - name: Real KVM sandbox suite
+        env:
+          GRAIN_REAL_VM_TESTS: "1"
         run: |
           go test ./pkg/orchestrator/ \
             -run 'TestKonturSandboxesAgainstARealDockerBackedVM|TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently' \

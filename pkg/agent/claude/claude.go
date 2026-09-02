@@ -48,7 +48,28 @@ const (
 	// DefaultModel does.
 	DefaultModel = "claude-sonnet-5"
 
-	defaultMaxTurns = 20
+	// defaultMaxTurns is the cap on model/tool round trips a run may take
+	// before claude's own --max-turns cuts it off, and zero means no cap
+	// at all: Run passes no --max-turns whatsoever, exactly as v1
+	// (grain/automation/dispatch.py) always did.
+	//
+	// A turn here is one model/tool round trip, and the ordinary shape of
+	// a grain task -- read the repo, edit, run the tests, read the
+	// failures, edit again, commit, push -- spends dozens of them. Any
+	// number picked here is a guess at how much work a task deserves,
+	// made by a package that knows nothing about the task; guessing wrong
+	// does not slow a run down, it fails one that was working. The 20
+	// this started at did exactly that, and while raising it made that
+	// rarer it left the same cliff a little further out.
+	//
+	// Turns were never the bound worth enforcing anyway. What a runaway
+	// run actually costs is wall-clock time and tokens, and
+	// orchestrator's Config.MaxRunRuntime (two hours by default) already
+	// stops one on the first of those regardless of how fast its turns
+	// go. A deployment that does want a turn ceiling still sets one --
+	// `grain settings -max-agent-turns`, RunConfig.MaxTurns, or
+	// WithMaxTurns -- and gets it passed through unchanged.
+	defaultMaxTurns = 0
 
 	// mcpServerName is the mcpServers key written into --mcp-config, and
 	// therefore the prefix claude reports every tool under
@@ -102,7 +123,17 @@ func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []
 	}
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+		// stdout is returned alongside the error rather than discarded --
+		// the same contract agent/antigravity's own execRunner already
+		// settled on, and for the same reason. claude exits non-zero for
+		// every run whose terminal "result" event is an error, including
+		// the routine "--max-turns ran out" one, and it reports that
+		// error on stdout as stream-json rather than on stderr: a caller
+		// handed only `exit status 1 (stderr: )` cannot tell a run that
+		// edited, committed and pushed before it ran out of turns from
+		// one that never started. Everything worth knowing about the
+		// failure is in the bytes below.
+		return stdout.String(), fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
 }
@@ -127,8 +158,10 @@ func WithModel(model string) Option {
 	return func(f *Framework) { f.model = model }
 }
 
-// WithMaxTurns overrides the default cap on agentic turns a single Run
-// allows before claude's own --max-turns cuts it off.
+// WithMaxTurns sets the cap on agentic turns a single Run allows before
+// claude's own --max-turns cuts it off. Zero -- which is also the default
+// -- means no cap: see defaultMaxTurns for why that is the right default
+// and Config.MaxRunRuntime for what actually bounds a runaway run.
 func WithMaxTurns(n int) Option {
 	return func(f *Framework) { f.maxTurns = n }
 }
@@ -331,7 +364,12 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		"--allowedTools", strings.Join(allowedTools(), ","),
 		"--output-format", "stream-json",
 		"--verbose",
-		"--max-turns", strconv.Itoa(maxTurns),
+	}
+	// Omitted entirely rather than passed as a large number when no cap
+	// is configured: "unlimited" is a thing the CLI already does by
+	// default, and a big number is still a cliff (see defaultMaxTurns).
+	if maxTurns > 0 {
+		args = append(args, "--max-turns", strconv.Itoa(maxTurns))
 	}
 	if f.model != "" {
 		args = append(args, "--model", f.model)
@@ -351,9 +389,75 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	// must never become a shell- or ps-visible argument (dispatch.py's own
 	// docstring makes the identical point about its `dd`/stdin-redirect
 	// path).
-	stdout, err := f.run.Run(ctx, args, cfg.Prompt, env, tee)
-	if err != nil {
-		return nil, fmt.Errorf("claude: running claude: %w", err)
+	stdout, runErr := f.run.Run(ctx, args, cfg.Prompt, env, tee)
+	result, parseErr := parseTranscript(stdout)
+	switch {
+	case runErr != nil:
+		// partialResult, not nil: a run that pushed a branch before
+		// claude exited non-zero has already changed the world, and
+		// agent.Framework's own contract is that the caller gets both
+		// halves. Returning nil here is what used to strand that work --
+		// and, because orchestrator.RunDispatch only records a
+		// transcript for a non-nil Result and then removes the live
+		// mirror it had been rendering, what used to make a failed run's
+		// transcript vanish from the UI the moment it failed.
+		return partialResult(result, stdout), runFailure(stdout, maxTurns, runErr)
+	case parseErr != nil:
+		// A capture with no terminal result event: claude exited 0 but
+		// its output was truncated mid-stream. Same reasoning as above --
+		// whatever it did get done still comes back.
+		return partialResult(result, stdout), parseErr
 	}
-	return parseTranscript(stdout)
+	return result, nil
+}
+
+// runFailure says why a claude subprocess that exited non-zero failed,
+// preferring the stream's own account to the exit status. claude reports
+// a failed run as a terminal "result" event with is_error set (subtype
+// error_max_turns, error_during_execution, ...) written to stdout, then
+// exits 1 with nothing at all on stderr -- so runErr on its own renders
+// as the useless "exit status 1 (stderr: )". The stream knows better;
+// runErr is only the fallback for a subprocess that died before saying
+// anything (a missing binary, a signal, a cancelled context).
+func runFailure(stdout string, maxTurns int, runErr error) error {
+	p := parseEvents(stdout)
+	switch {
+	case p.resultSubtype == maxTurnsSubtype && maxTurns > 0:
+		// Named in plain words rather than passed through as a subtype:
+		// this is not a fault of claude or of the model but a configured
+		// --max-turns budget running out, and the operator reading the
+		// failed run needs to be told which number to raise. Phrased to
+		// match agent/antigravity's own turn-cap error.
+		return fmt.Errorf("claude: exceeded max turns (%d) without a final answer", maxTurns)
+	case p.resultSubtype == maxTurnsSubtype:
+		// No cap was configured, so claude hit one of its own -- naming
+		// a number grain never set would send an operator looking for a
+		// setting that is already unlimited.
+		return fmt.Errorf("claude: the CLI stopped the run at its own turn limit without a final answer")
+	case p.resultErr != nil:
+		return p.resultErr
+	}
+	return fmt.Errorf("claude: running claude: %w", runErr)
+}
+
+// partialResult is what Run hands back alongside an error: whatever the
+// run managed to do before it failed.
+//
+// A run that produced no events at all gets a nil Result, not an empty
+// one -- agent.Framework's own contract draws exactly that line ("a nil
+// Result with an error means the run never started"), and callers depend
+// on it: orchestrator.RunDispatch treats a non-nil Result as a run whose
+// tool calls it must process, so an empty one for a run that never
+// reached its sandbox would report an agent that touched it.
+func partialResult(parsed *agent.Result, stdout string) *agent.Result {
+	if parsed != nil {
+		return parsed
+	}
+	p := parseEvents(stdout)
+	if len(p.result.ToolCalls) == 0 && p.transcript.Len() == 0 {
+		return nil
+	}
+	partial := p.result
+	partial.Transcript = strings.TrimSpace(p.transcript.String())
+	return &partial
 }

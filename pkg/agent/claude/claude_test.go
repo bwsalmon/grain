@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -566,5 +567,161 @@ func TestRunOmitsExecKeyWhenUnset(t *testing.T) {
 		if arg == "-exec-key" {
 			t.Errorf("args = %v, want no -exec-key when none is configured", cfg.MCPServers["grain-sandbox"].Args)
 		}
+	}
+}
+
+// maxTurnsStdout is the shape a real `claude -p --output-format
+// stream-json` capture has when its --max-turns budget runs out: a run
+// that did real work -- streamed text, called a tool, got a result back
+// -- and only then hit the cap. Captured against claude 2.1.258, which
+// exits 1 with *nothing on stderr* and reports the failure only here,
+// as the terminal result event.
+func maxTurnsStdout(t *testing.T) string {
+	t.Helper()
+	return strings.Join([]string{
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "pushing the branch"}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "assistant",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "tool_use", "id": "call-1", "name": "run_command",
+					"input": map[string]any{"command": "git push"},
+				}},
+			},
+		}),
+		streamJSONLine(t, map[string]any{
+			"type": "user",
+			"message": map[string]any{
+				"content": []map[string]any{{
+					"type": "tool_result", "tool_use_id": "call-1", "content": "branch pushed",
+				}},
+			},
+		}),
+		// "result": null, exactly as claude sends it for this subtype --
+		// there is no final answer to report, which is the whole point.
+		streamJSONLine(t, map[string]any{
+			"type": "result", "subtype": "error_max_turns", "is_error": true, "result": nil,
+		}),
+	}, "\n")
+}
+
+// A claude that exits non-zero has still already done whatever it did
+// before it failed, and Run owes its caller that record: returning nil
+// here is what stranded a pushed branch, and -- because
+// orchestrator.RunDispatch only records a transcript for a non-nil
+// Result, then removes the live mirror the UI had been rendering -- what
+// made a failed run's transcript vanish from the UI the instant it
+// failed.
+func TestRunReturnsTheWorkDoneBeforeANonZeroExit(t *testing.T) {
+	fake := &fakeRunner{stdout: maxTurnsStdout(t), err: errors.New("exit status 1 (stderr: )")}
+	f := newFramework(fake, "mcpserver-path")
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error for a claude that exited non-zero")
+	}
+	if result == nil {
+		t.Fatal("Result = nil; a failed run's completed work must still come back")
+	}
+	if len(result.ToolCalls) != 1 || result.ToolCalls[0].Name != "run_command" {
+		t.Errorf("ToolCalls = %+v, want the run_command the run made before it failed", result.ToolCalls)
+	}
+	if !strings.Contains(result.Transcript, "pushing the branch") {
+		t.Errorf("Transcript = %q, want the text streamed before the failure", result.Transcript)
+	}
+}
+
+// "exit status 1 (stderr: )" is what claude gives a caller that reads
+// only the exit status, and it says nothing at all. The stream's own
+// terminal result event knows why, and that is what an operator reading
+// the failed run in the UI has to be shown.
+func TestRunNamesTheTurnCapRatherThanTheExitStatus(t *testing.T) {
+	fake := &fakeRunner{stdout: maxTurnsStdout(t), err: errors.New("exit status 1 (stderr: )")}
+	f := newFramework(fake, "mcpserver-path", WithMaxTurns(7))
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if got, want := err.Error(), "claude: exceeded max turns (7) without a final answer"; got != want {
+		t.Errorf("err = %q, want %q", got, want)
+	}
+}
+
+// A subprocess that died before saying anything -- no binary, a signal,
+// a cancelled context -- has no result event to explain itself, so the
+// exit error is all there is and must not be swallowed.
+func TestRunFallsBackToTheExitErrorWhenTheStreamSaysNothing(t *testing.T) {
+	fake := &fakeRunner{err: errors.New("exec: \"claude\": executable file not found in $PATH")}
+	f := newFramework(fake, "mcpserver-path")
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "executable file not found") {
+		t.Errorf("err = %q, want the underlying exec error", err)
+	}
+	// nil, not an empty Result: agent.Framework's contract is that a nil
+	// Result with an error means the run never started, and
+	// orchestrator.RunDispatch reads it that way.
+	if result != nil {
+		t.Errorf("Result = %+v, want nil for a run that never started", result)
+	}
+}
+
+// No cap by default: v1 passed claude no --max-turns at all, and any
+// number this package picks is a guess at how much work a task deserves
+// that fails a working run when it guesses low. Config.MaxRunRuntime is
+// what actually bounds a runaway run.
+func TestRunPassesNoMaxTurnsByDefault(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "done"})}
+	f := newFramework(fake, "mcpserver-path")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range fake.gotArgs {
+		if a == "--max-turns" {
+			t.Fatalf("args = %v, want no --max-turns at all when none is configured", fake.gotArgs)
+		}
+	}
+}
+
+// A deployment that does want a ceiling still gets one, passed through
+// unchanged -- "unlimited" is the default, not the only option.
+func TestRunPassesAnExplicitMaxTurnsThrough(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "done"})}
+	f := newFramework(fake, "mcpserver-path")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir(), MaxTurns: 12}); err != nil {
+		t.Fatal(err)
+	}
+	if got := argValue(fake.gotArgs, "--max-turns"); got != "12" {
+		t.Errorf("--max-turns = %q, want 12", got)
+	}
+}
+
+// With no cap configured there is no number to tell an operator to raise,
+// so the error must not invent one -- it would send them looking for a
+// setting that is already unlimited.
+func TestRunNamesNoTurnBudgetWhenNoneWasConfigured(t *testing.T) {
+	fake := &fakeRunner{stdout: maxTurnsStdout(t), err: errors.New("exit status 1 (stderr: )")}
+	f := newFramework(fake, "mcpserver-path")
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "(0)") {
+		t.Errorf("err = %q, want no fabricated turn budget in the message", err)
+	}
+	if !strings.Contains(err.Error(), "turn limit") {
+		t.Errorf("err = %q, want it to still say the run was stopped at a turn limit", err)
 	}
 }

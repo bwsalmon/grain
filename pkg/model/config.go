@@ -74,7 +74,9 @@ type Config struct {
 	// runs agent/claude simply leaves this unread.
 	ClaudeModel string
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
-	// agent framework's own default in place.
+	// agent framework's own default in place, which for both frameworks
+	// is no cap at all (agent/claude's defaultMaxTurns has why). A run's
+	// real ceiling is orchestrator.Config.MaxRunRuntime.
 	MaxAgentTurns int
 	// GitHubHost is the GitHub API host -- overridable to point at a mock
 	// for local testing.

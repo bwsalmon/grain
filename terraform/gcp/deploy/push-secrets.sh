@@ -2,7 +2,7 @@
 # Push this deployment's secrets into the host instance's own metadata,
 # and mint a fresh minter service account key for this run.
 #
-# Mirrors the mechanism v1's own ci/push-host-secrets.sh used: the
+# Mirrors the mechanism v1's own push-host-secrets.sh used: the
 # only place a secret value is ever decrypted, going straight into the
 # instance's own metadata over the Compute API -- never through Secret
 # Manager, never through Terraform, so none of it is in the state file.
@@ -44,7 +44,7 @@
 #                                      one gets the daemon running at all. Optional: with
 #                                      enable_gemini_key on, the host mints this key for
 #                                      itself from the minter credential pushed below --
-#                                      see this directory's README, "The daemon's own
+#                                      see the module's README (../README.md), "The daemon's own
 #                                      Gemini key". Set it only to use a key of your own.
 #   GRAIN_CLAUDE_CODE_OAUTH_TOKEN      the Claude Code OAuth token agent/claude
 #                                      authenticates as, for a deployment whose agent
@@ -107,8 +107,8 @@ push_secret "grain-image-pull-token" "${GRAIN_IMAGE_PULL_TOKEN:-}"
 # this script rather than once -- iam.tf's deployer_manages_minter_keys
 # is what lets the identity running this script do so -- and the two
 # oldest keys beyond the newest are invalidated afterward, the same
-# rotate-and-prune-to-two schedule ci/push-host-secrets.sh already uses
-# for v1's own minter key, so a stale credential from a previous run
+# rotate-and-prune-to-two schedule v1's own push-host-secrets.sh used
+# for its minter key, so a stale credential from a previous run
 # does not linger indefinitely.
 #
 # scripts/setup.sh's own seed_gcp_minter_key only ever seeds the
