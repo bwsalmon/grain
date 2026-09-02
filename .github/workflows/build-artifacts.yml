@@ -1,10 +1,13 @@
-# Builds v2's release artifacts on every checkin to main and stores them
-# in GitHub, so a deployment (or an operator poking around) can fetch a
+# Builds v2's release artifacts on every checkin and stores them in
+# GitHub, so a deployment (or an operator poking around) can fetch a
 # known-good build without having to check out the repo and run a
-# toolchain locally -- bwsalmon/agents#622.
+# toolchain locally -- bwsalmon/agents#622, #645.
 #
-# Three artifacts, matching the three build outputs packer/kontur/README.md
-# already documents as "what a deployment needs published":
+# Two of the four -- the binaries release and, inside its own job, the
+# kontur-sandbox `latest` tag -- are main's alone, since each publishes a
+# single shared name. The three artifacts themselves match what
+# packer/kontur/README.md already documents as "what a deployment needs
+# published":
 #   - the grain binary itself (v2/Makefile's `build`)
 #   - the kontur binaries (`kontur`, `konturctl`, `kontur-mem-agent`) that
 #     manage kontur-backed sandbox VMs
@@ -12,7 +15,10 @@
 #     (packer/kontur/build-oci-image.sh) a kontur-backed deployment runs
 #     to get those binaries and a pinned cloud-hypervisor release, built
 #     with no guest-specific customization -- see that script's own
-#     comment ("The image this produces is deliberately generic").
+#     comment ("The image this produces is deliberately generic"). Its
+#     per-commit tag is stamped into the grain image built from that same
+#     commit, which is how a deployment knows which sandbox goes with the
+#     grain it is running without being told (bwsalmon/agents#645).
 #
 # Deliberately not a fourth artifact here: the guest VM disk
 # (packer/kontur/build-guest.sh's disk.img/vmlinuz/initrd.img) is a
@@ -34,15 +40,45 @@
 # free and gives a rollback target the single-release binaries don't
 # have.
 #
-# push-to-main only, not pull_request: publishing needs a GITHUB_TOKEN
-# with contents:write and packages:write, and running that against an
+# The fourth artifact, and the one a deployment now actually runs, is the
+# grain image itself (v2/Dockerfile, bwsalmon/agents#645): `grain` plus
+# every binary it shells out to -- git, the docker CLI, konturctl, the
+# claude CLI -- in one image v2/scripts/setup.sh pulls instead of
+# building a binary on the deployed host. That job runs on *every*
+# branch, not just main: the UI's own Upgrade button targets a branch by
+# name (v2/pkg/upgrade), which in a container deployment means pulling
+# that branch's tag, so a branch with no image published for it is a
+# branch nobody can upgrade onto.
+#
+# That job builds the image, *runs* it -- tests/test_v2_container_e2e.py
+# starts the daemon inside it the way v2/scripts/setup.sh's own unit
+# does and drives it through its API, its CLI, the reboot/restart control
+# files and a real image upgrade -- and only then logs in and pushes. A
+# commit whose container does not come up cannot become a tag a
+# deployment might pull, and the credential that could publish one is
+# never held while a container built from the tree is running.
+#
+# push, not pull_request: publishing needs a GITHUB_TOKEN with
+# contents:write and packages:write, and running that against an
 # unreviewed PR branch is exactly what ../tests.yml's own comment on
 # pull_request-vs-push warns against for a job that holds a credential.
+# A `push` event only ever fires for a branch in this repository, which
+# takes write access to create -- a fork's PR branch never triggers one --
+# so extending the image jobs to every branch does not widen who can make
+# a credentialed job run. The two *shared* names (build-latest's release
+# assets, kontur-sandbox:latest) stay main's: the first by an `if` on its
+# whole job, the second by a condition on the one step that moves it, so
+# a branch push publishes its own tags and moves nothing anyone else
+# resolves.
 name: build-artifacts
 
 on:
   push:
-    branches: [main]
+    # Every branch, tags excluded: an image is published per branch (the
+    # grain-container job below), and a tag push would otherwise publish
+    # one under the tag's own name, which nothing here or in
+    # v2/scripts/setup.sh ever resolves.
+    branches: ['**']
 
 permissions:
   contents: read
@@ -59,6 +95,11 @@ concurrency:
 jobs:
   binaries:
     name: binaries (grain, kontur)
+    # main only: this job's single build-latest release is a shared name,
+    # and a branch push overwriting its assets would leave "the latest
+    # build" meaning whichever branch published last. See this file's own
+    # header on which jobs are pinned to main and why.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -153,8 +194,16 @@ jobs:
       # their own registry would run (KONTUR_OCI_SKIP_PUSH unset here, so
       # it pushes); this just points KONTUR_OCI_IMAGE at GHCR instead of
       # a project's Artifact Registry. Tagged with the commit's short SHA
-      # first, then re-tagged `latest` below from the already-built local
-      # image, rather than building twice.
+      # first, then re-tagged below from the already-built local image,
+      # rather than building twice.
+      #
+      # Every branch, not main only, since bwsalmon/agents#645: the grain
+      # image built from this same commit has *this* reference stamped
+      # into it (grain-container below passes it as --build-arg
+      # SANDBOX_IMAGE), and a deployment running that grain resolves the
+      # sandbox by that exact tag. A sandbox published on main alone
+      # would leave every branch build naming an image that does not
+      # exist.
       - name: Build and push (commit tag)
         id: build
         run: |
@@ -164,9 +213,118 @@ jobs:
           KONTUR_OCI_IMAGE="$image" ./packer/kontur/build-oci-image.sh
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
-      - name: Tag and push :latest
+      # The branch tag, and -- on main alone -- `latest`. Same split, and
+      # the same reasoning, as grain-container's own three names: a
+      # shared name that every kontur deployment resolves is main's to
+      # move, and nobody else's.
+      - name: Tag and push
         run: |
           set -euo pipefail
-          latest="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:latest"
-          docker tag "${{ steps.build.outputs.image }}" "$latest"
-          docker push "$latest"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox"
+          branch_tag="${GITHUB_REF_NAME//\//-}"
+          docker tag "${{ steps.build.outputs.image }}" "${image}:${branch_tag}"
+          docker push "${image}:${branch_tag}"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "${{ steps.build.outputs.image }}" "${image}:latest"
+            docker push "${image}:latest"
+          fi
+
+  grain-container:
+    name: grain container
+    # The sandbox container this image will name has to exist before this
+    # one is published: `grain sandbox-image` out of the published image
+    # is what v2/scripts/setup.sh pulls and what an upgrade pulls
+    # alongside it, so publishing a grain that names a tag no job ever
+    # pushed would be publishing a deployment that cannot dispatch.
+    needs: sandbox-container
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Built before logging in, and published only after the e2e suite
+      # below has driven it: a credential is held for the shortest span
+      # that gets the image pushed, and an image that does not come up is
+      # never a tag some deployment might pull. `make -C v2 image` is the
+      # same target a laptop runs (see that Makefile's own `image`
+      # comment), so what CI publishes and what a developer builds come
+      # from one copy of the build rules -- no marketplace build action.
+      #
+      # SANDBOX_IMAGE stamps the sandbox container built from this same
+      # commit into the binary (cmd/grain/sandboximage.go), which is what
+      # lets a deployment need no configuration for it at all -- and what
+      # makes a rollback to an older grain ask for its own older sandbox
+      # rather than today's. It names the immutable sha- tag, never the
+      # branch tag, for exactly that reason.
+      - name: Build the image
+        id: build
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
+          sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${GITHUB_SHA:0:7}"
+          make -C v2 image IMAGE="${image}:sha-${GITHUB_SHA:0:7}" SANDBOX_IMAGE="$sandbox"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check "pytest>=8,<9"
+
+      # tests/test_v2_container_e2e.py actually runs the image just
+      # built: it starts the daemon the way v2/scripts/setup.sh's own
+      # unit starts it, drives the API and the CLI against it, and
+      # exercises the two host-facing mechanisms that only exist because
+      # grain is in a container -- the control files behind the
+      # reboot/restart buttons, and an upgrade pulling a tag out of a
+      # throwaway local registry. The suite skips itself without
+      # GRAIN_TEST_IMAGE, which is why the repository-wide `pytest` job
+      # in ../tests.yml never runs it and this one does.
+      #
+      # A runner has what all of that needs and a hosted PR job does not
+      # have to be trusted with: a docker daemon, systemd, and passwordless
+      # sudo. Nothing here holds the GHCR credential yet -- the login
+      # below is deliberately after this step.
+      - name: Run the container e2e suite
+        env:
+          GRAIN_TEST_IMAGE: ${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}
+        run: python -m pytest tests/test_v2_container_e2e.py -v
+
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Three names for one image, each answering a different question.
+      #
+      #   sha-<short>  what exactly is running -- immutable, and the only
+      #                tag that can never be moved out from under a
+      #                deployment pinned to it
+      #   <branch>     what this branch is at now: the tag
+      #                v2/scripts/setup.sh resolves from GRAIN_REF, and
+      #                the one the UI's Upgrade button pulls when an
+      #                operator names a branch (v2/pkg/upgrade's
+      #                TagForBranch). '/' is not legal in a docker tag,
+      #                so it becomes '-' -- the same substitution
+      #                TagForBranch makes, and the reason it is written
+      #                down in both places rather than derived once
+      #   latest       main's own branch tag under the name a human
+      #                types, published on main alone
+      - name: Push
+        run: |
+          set -euo pipefail
+          image="${{ steps.build.outputs.image }}"
+          sha_tag="${{ steps.build.outputs.tag }}"
+          branch_tag="${GITHUB_REF_NAME//\//-}"
+          docker tag "${image}:${sha_tag}" "${image}:${branch_tag}"
+          docker push "${image}:${sha_tag}"
+          docker push "${image}:${branch_tag}"
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            docker tag "${image}:${sha_tag}" "${image}:latest"
+            docker push "${image}:latest"
+          fi
+          echo "published ${image}:${sha_tag} and ${image}:${branch_tag}"

@@ -7,6 +7,20 @@ CMDS := grain
 
 BUILDVCS ?= auto
 
+# The sandbox container this build of grain goes with -- stamped into the
+# binary, so a deployment needs to be told nothing and a rollback to an
+# older tag asks for its *own* older sandbox rather than today's. See
+# cmd/grain/sandboximage.go for what reads it and why it is a build-time
+# value at all.
+#
+# Empty here on purpose: the source default in that file (the tag CI
+# keeps pointed at main) is what an unstamped `make build` should get,
+# and stamping an empty string over it would replace a real answer with
+# no answer. ../.github/workflows/build-artifacts.yml passes the exact
+# sha- tag of the sandbox image built from this same commit.
+SANDBOX_IMAGE ?=
+LDFLAGS := $(if $(SANDBOX_IMAGE),-X main.defaultSandboxImage=$(SANDBOX_IMAGE),)
+
 # --- Containerised build ----------------------------------------------
 #
 # grain is pure Go (bwsalmon/agents#366 removed the one dependency that
@@ -46,7 +60,22 @@ CONTAINER_CACHE ?= $(CURDIR)/.container-cache
 # does that, and the flag disappears with it.
 CONTAINER_USER ?= $(shell id -u):$(shell id -g)
 
-.PHONY: all build test test-e2e vet fmt clean builder container-build frontend loadtest $(CMDS)
+# --- the deployment image ---------------------------------------------
+#
+# `make image` builds Dockerfile (not Dockerfile.build: that one is the
+# toolchain `container-build` above runs in) -- the runtime image a
+# deployment actually runs, carrying bin/grain and every binary it shells
+# out to. ../.github/workflows/build-artifacts.yml builds the same image
+# the same way on every commit and pushes it to GHCR, so this target is
+# for a local build against a change to the Dockerfile itself, not
+# something a deployment ever needs to run.
+#
+# The context is the repository root, not this directory: konturctl is
+# built from ../third_party/kontur and `go build`'s commit stamp comes
+# from ../.git. GO_VERSION is passed for the same reason `builder` passes
+# it -- one version, read out of go.mod.
+IMAGE ?= grain:dev
+.PHONY: all build test test-e2e vet fmt clean builder container-build image frontend loadtest $(CMDS)
 
 all: vet test build
 
@@ -108,7 +137,7 @@ frontend:
 # CGO_ENABLED alone: `go test -race` requires it (the race detector is a
 # cgo library), and nothing about testing this module ships anywhere.
 $(CMDS):
-	CGO_ENABLED=0 go build -buildvcs=$(BUILDVCS) -o $(BIN)/$@ ./cmd/$@
+	CGO_ENABLED=0 go build -buildvcs=$(BUILDVCS) -ldflags "$(LDFLAGS)" -o $(BIN)/$@ ./cmd/$@
 
 builder:
 	$(CONTAINER_ENGINE) build \
@@ -186,3 +215,11 @@ fmt:
 
 clean:
 	rm -rf $(BIN) $(CONTAINER_CACHE)
+
+image:
+	$(CONTAINER_ENGINE) build \
+		--build-arg GO_IMAGE=$(GO_IMAGE) \
+		--build-arg GO_VERSION=$(GO_VERSION) \
+		--build-arg BUILDVCS=$(BUILDVCS) \
+		$(if $(SANDBOX_IMAGE),--build-arg SANDBOX_IMAGE=$(SANDBOX_IMAGE),) \
+		-t $(IMAGE) -f Dockerfile ..

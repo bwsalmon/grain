@@ -407,8 +407,61 @@ variable "grain_repo_url" {
 
 variable "grain_ref" {
   type        = string
-  description = "Branch, tag, or commit of grain to deploy. Pin a tag or SHA for a reproducible staging build."
+  description = <<-EOT
+    Branch of grain to deploy. Names two things that move together: the
+    checkout files/deploy.sh keeps on the host (which is where
+    v2/scripts/setup.sh itself, and packer/kontur's own image builds,
+    come from), and -- unless grain_image_tag overrides it -- which
+    published image the daemon runs, since CI tags one per branch.
+
+    A tag or commit SHA still works for the checkout, but has no image
+    published under that name: set grain_image_tag to sha-<short sha>
+    alongside it to pin the running build (see that variable).
+  EOT
   default     = "main"
+}
+
+variable "grain_image" {
+  type        = string
+  description = <<-EOT
+    Image repository, with no tag, that grain-daemon.service runs --
+    grain plus every binary it shells out to, built and pushed on every
+    commit by .github/workflows/build-artifacts.yml (v2/Dockerfile).
+
+    Override it to deploy from a mirror or a private copy; a registry
+    that needs credentials also needs grain_image_pull_user and a token
+    pushed by push-secrets.sh.
+  EOT
+  default     = "ghcr.io/bwsalmon/grain/grain"
+}
+
+variable "grain_image_tag" {
+  type        = string
+  description = <<-EOT
+    Which tag of grain_image to run. Empty (the default) follows
+    grain_ref: the branch tag CI publishes for it, which is that branch
+    name with "/" replaced by "-".
+
+    Set it to sha-<short sha> to pin this deployment to one immutable
+    build, and to roll one back: every commit publishes such a tag, so a
+    rollback is this variable plus a `terraform apply`, with no rebuild
+    anywhere.
+  EOT
+  default     = ""
+}
+
+variable "grain_image_pull_user" {
+  type        = string
+  description = <<-EOT
+    Username for `docker login` against grain_image's registry, for a
+    private package. The token half is a secret and never a Terraform
+    input -- push-secrets.sh puts it in instance metadata, exactly as it
+    does for the GitHub PAT.
+
+    Empty (the default) pulls anonymously, which is what
+    ghcr.io/bwsalmon/grain's own public package needs.
+  EOT
+  default     = ""
 }
 
 variable "test_repos" {
@@ -560,12 +613,19 @@ variable "kontur_image_bucket" {
     and disk.img, under a "latest" alias setup.sh always fetches (see
     packer/kontur/build-guest.sh's own KONTUR_IMAGE_BUCKET, and its comment on
     why the alias exists). Optional: left empty (the default),
-    v2/scripts/setup.sh's own ensure_kontur_images builds the guest image
-    itself instead (bwsalmon/agents#531) and this is never read. Set this
-    together with kontur_oci_image (both empty, or both set -- one alone
-    is a misconfiguration) for an operator who would rather build once,
-    centrally, and share the result across many hosts than pay that build
-    cost on each of them; this module does not create the bucket for you,
+    v2/scripts/setup.sh's own ensure_kontur_images builds the guest disk
+    itself instead (bwsalmon/agents#531) and this is never read.
+
+    The guest disk is the one thing a deployment still builds rather than
+    pulls, and it cannot be otherwise by default: guest-setup.sh bakes
+    this deployment's own SSH public key into its authorized_keys, so
+    there is no generic published disk to fetch. Set this for an operator
+    who would rather build once, centrally, and share the result across a
+    fleet that all use one keypair -- which then also needs
+    GRAIN_KONTUR_SSH_KEY pushed by push-secrets.sh, since the disk
+    already has that key's public half baked in and setup.sh must not
+    generate a different one. Unrelated to kontur_oci_image above, which
+    is a container and is always pulled; this module does not create the bucket for you,
     so create one by hand (`gsutil mb`) and grant the host service account
     read access to it yourself, or via a `google_storage_bucket_iam_member`
     alongside this module referencing google_service_account.host.email --
@@ -578,23 +638,26 @@ variable "kontur_image_bucket" {
 variable "kontur_oci_image" {
   type        = string
   description = <<-EOT
-    Full reference (e.g. "us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest")
-    of a pre-built bwsalmon/kontur OCI image (third_party/kontur's own
-    Dockerfile) to fetch instead of building one on the host -- setup.sh
-    pulls and retags it as konturctl's own default
-    "localhost:5000/kontur:latest" -- see that script's own
-    ensure_kontur_images_fetch for why a real registry at :5000 is never
-    actually needed for this. Optional: left empty (the default),
-    v2/scripts/setup.sh's own ensure_kontur_images builds the OCI image
-    itself instead (bwsalmon/agents#531) and this is never read. Set this
-    together with kontur_image_bucket (both empty, or both set -- one
-    alone is a misconfiguration) for an operator who would rather build
-    once, centrally, and share the result across many hosts: build and
-    push it with a plain `docker build`/`docker push` against an Artifact
-    Registry repository you create once (this module grants the host
-    service account project-wide roles/artifactregistry.reader when this
-    is set -- see iam.tf's host_reads_kontur_registry -- but does not
-    create the repository itself).
+    The sandbox container each task's VM runs inside -- a bwsalmon/kontur
+    OCI image (third_party/kontur's own Dockerfile).
+
+    Leave it empty, which is almost always right. The grain image this
+    deployment runs has the reference of the sandbox built from its own
+    commit stamped into it at build time, and v2/scripts/setup.sh pulls
+    that (bwsalmon/agents#645) -- so grain and its sandbox are always one
+    commit's worth of each other, including after a rollback, with
+    nothing to configure and nothing built on the host.
+
+    Set it to run a different one: a mirror, a private copy, or a sandbox
+    pinned apart from grain's own. It is pulled either way. Pointing it
+    at an Artifact Registry repository in this project works -- the host
+    service account gets project-wide roles/artifactregistry.reader when
+    this is set (iam.tf's host_reads_kontur_registry), though this module
+    does not create the repository itself.
+
+    Unrelated to kontur_image_bucket below, which is about the guest
+    disk. The two used to be set together or not at all; they are
+    independent now.
   EOT
   default     = ""
 }

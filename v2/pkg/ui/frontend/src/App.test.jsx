@@ -435,7 +435,15 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Debugging" }));
 
     expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
-    expect(screen.getByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
+
+    // Sandbox health is a tab of that overlay, not a second pane rendered
+    // beside Logs (bwsalmon/agents#640 split them) -- only the active
+    // tab's panel is mounted, so reaching it means clicking it, the same
+    // way DebugOverlay.test.jsx's own "shows Sandbox health on its own
+    // tab" does.
+    await user.click(screen.getByRole("tab", { name: "Sandbox health" }));
+
+    expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {

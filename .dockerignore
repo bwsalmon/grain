@@ -1,0 +1,21 @@
+# The build context for v2/Dockerfile, whose context is this repository
+# root (it builds konturctl out of third_party/kontur and reads the
+# commit stamp out of .git, neither of which is under v2/). Nothing else
+# in this repo builds from here: packer/kontur's two builds each cd into
+# their own directory first, and v2/.dockerignore -- which excludes
+# everything -- belongs to Dockerfile.build, whose context is v2/.
+#
+# .git is deliberately NOT excluded: `go build` stamps bin/grain with the
+# commit it came from and can only read that here.
+
+# Build outputs and caches, none of which the image build reads and all
+# of which are large: bin/grain is ~200 MB on its own, and shipping a
+# host's node_modules would both bloat the context and risk `npm ci`
+# resolving against a tree built for a different platform.
+v2/bin/
+v2/.container-cache/
+v2/pkg/ui/frontend/node_modules/
+v2/pkg/ui/frontend/test-results/
+v2/pkg/ui/frontend/playwright-report/
+**/__pycache__/
+.pytest_cache/

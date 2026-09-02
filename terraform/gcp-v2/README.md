@@ -137,6 +137,40 @@ The GitHub-side setup (`github-connections.md`, `github-test-repos.md`
 in the same directory) has no Terraform involved at all -- see those
 playbooks for why.
 
+## What actually runs on the host
+
+`grain-daemon.service` runs a container image, not a binary this host
+built (bwsalmon/agents#645): grain plus every binary it shells out to,
+published to GHCR by `.github/workflows/build-artifacts.yml` on every
+commit to grain (`v2/Dockerfile`). Three variables decide which one:
+
+- **`grain_ref`** names the branch. It is still what the on-host
+  checkout tracks -- `files/deploy.sh` clones it, and that checkout is
+  where `v2/scripts/setup.sh` itself and `packer/kontur`'s guest/OCI
+  image builds come from -- and, by default, also which image tag runs:
+  that branch's name with `/` replaced by `-`, which is how CI tags it.
+- **`grain_image_tag`** overrides that. Set it to `sha-<short sha>` --
+  published for every commit -- to pin this deployment to one immutable
+  build. A rollback is that variable plus a `terraform apply`: no
+  rebuild anywhere, and the old image is still in the registry.
+- **`grain_image`** is the repository, for a mirror or a private copy.
+  A registry needing credentials takes `grain_image_pull_user` here and
+  a `GRAIN_IMAGE_PULL_TOKEN` through `push-secrets.sh`;
+  `ghcr.io/bwsalmon/grain`'s own package is public and pulls
+  anonymously.
+
+Two consequences worth knowing before a first deploy. A deploy no longer
+compiles anything on this host, so `grain_ref` pointing at a tag or a
+commit SHA -- fine for the checkout -- has no image published under that
+name, and needs `grain_image_tag` set alongside it. And the host now
+needs to reach the registry: an egress policy that allowed GitHub and a
+Debian mirror also needs `ghcr.io`.
+
+For the container's own shape -- what it is given, what it deliberately
+is not, and the two systemd path units that let it reboot the host and
+restart itself from inside a container -- see grain's own
+`v2/README.md`, "The deployment is a container".
+
 ## Deploying it from CI
 
 Everything above is the by-hand path. To have a config repo's GitHub
@@ -386,25 +420,24 @@ bwsalmon/agents#531 had to:
    Never regenerate this keypair without also rebuilding the guest image
    -- both halves have to match, and nothing checks that they still do.
 
-2. **Build and push the OCI image** (the `kontur` binary and the pinned
-   cloud-hypervisor release, from `third_party/kontur`'s own Dockerfile --
-   a plain `docker build`/`docker push`, no root needed):
+2. **Nothing, for the sandbox container.** It is pulled, and which one
+   is not a decision this deployment makes: CI publishes a sandbox image
+   per commit, and the grain image a host runs carries the reference of
+   the one built from its own commit (`grain sandbox-image`), so the two
+   halves are always one commit's worth of each other -- including after
+   a rollback, which asks for its own older sandbox rather than whatever
+   is newest (bwsalmon/agents#645).
 
-   ```sh
-   export KONTUR_OCI_IMAGE="us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest"
-   ../../packer/kontur/build-oci-image.sh
-   ```
+   `kontur_oci_image` overrides that with a reference of your own -- a
+   mirror, a private copy, or a sandbox pinned apart from grain's. It is
+   pulled either way, and built on the host in no case. (Pointing it at
+   an Artifact Registry repository in this project works; create the
+   repository yourself first.)
 
-   (Create the Artifact Registry repository yourself first, and
-   authenticate docker to it -- e.g. `gcloud auth configure-docker
-   <region>-docker.pkg.dev` -- this script does neither for you.) Set
-   `kontur_oci_image` to the same reference.
-
-`kontur_image_bucket` and `kontur_oci_image` are both-or-neither: set
-together, `ensure_kontur_images` fetches this bucket's `latest` alias and
-pulls this OCI image on every run instead of building either itself; left
-at their empty defaults (the common case now), it builds both locally
-instead, as described above.
+The two variables are independent, and each is optional on its own:
+`kontur_oci_image` names the sandbox *container*, `kontur_image_bucket`
+fetches a pre-built guest *disk*. Left at their empty defaults -- the
+common case -- the container is pulled and the disk is built here.
 
 Set `enable_kontur_sandboxes = false` to keep a deployment on
 host-directory sandboxing indefinitely -- nothing above is required then,

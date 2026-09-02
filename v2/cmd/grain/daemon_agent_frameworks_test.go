@@ -115,11 +115,11 @@ func TestAgentFrameworksSaysWhereToSetAMissingCredential(t *testing.T) {
 }
 
 // The counterpart to the test above, for the other thing each framework
-// needs: a binary on the host. Nothing in the v2 deployment path
-// installed claude's until scripts/setup.sh's own install_claude_cli, so
-// this is the error a deployment that predates that -- or one whose
-// install was blocked -- actually hits, once per dispatch, the moment
-// someone selects "claude" in Settings.
+// needs: a binary to exec. v2/Dockerfile carries both agent CLIs now
+// (bwsalmon/agents#645), so on a real deployment this error means an
+// image built without one rather than a host missing a package -- and it
+// is still what a dispatch hits, once per run, the moment someone
+// selects that framework in Settings.
 func TestAgentFrameworksSaysHowToInstallAMissingClaudeCLI(t *testing.T) {
 	// An empty $PATH, so this asserts the same thing whether or not the
 	// machine running it happens to have a claude binary -- the reverse
@@ -135,13 +135,13 @@ func TestAgentFrameworksSaysHowToInstallAMissingClaudeCLI(t *testing.T) {
 		t.Fatal("building the claude framework with no claude binary succeeded")
 	}
 	// "executable file not found in $PATH" alone reads as grain being
-	// broken; an operator needs to be told this is a host missing a
-	// package, and what puts it there.
+	// broken; an operator needs to be told this is a missing install,
+	// and where the binary is supposed to come from.
 	if !strings.Contains(err.Error(), "not installed") {
 		t.Errorf("error = %v; want it to name the CLI as not installed", err)
 	}
-	if !strings.Contains(err.Error(), "setup.sh") {
-		t.Errorf("error = %v; want it to point at the script that installs the CLI", err)
+	if !strings.Contains(err.Error(), "Dockerfile") {
+		t.Errorf("error = %v; want it to name where the CLI comes from", err)
 	}
 }
 
@@ -218,6 +218,14 @@ func TestAgentFrameworksSaysHowToInstallAMissingAgyCLI(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not installed") {
 		t.Errorf("error = %v; want it to name the CLI as not installed", err)
+	}
+	// v2/Dockerfile carries agy now (bwsalmon/agents#645), which it did
+	// not when this error was written: the message used to send an
+	// operator off to install it by hand on the host, and the honest
+	// answer on a real deployment is that the image was built without
+	// it.
+	if !strings.Contains(err.Error(), "Dockerfile") {
+		t.Errorf("error = %v; want it to name where the CLI comes from", err)
 	}
 }
 

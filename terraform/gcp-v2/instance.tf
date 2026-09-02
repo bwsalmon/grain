@@ -17,6 +17,9 @@ locals {
   grain_config = {
     grain_repo_url            = var.grain_repo_url
     grain_ref                 = var.grain_ref
+    grain_image               = var.grain_image
+    grain_image_tag           = var.grain_image_tag
+    grain_image_pull_user     = var.grain_image_pull_user
     github_host               = var.github_host
     credential_name           = var.credential_name
     default_target_repo       = var.default_target_repo
@@ -194,15 +197,17 @@ resource "google_compute_instance" "host" {
     # neither had a project-independent default this module could supply
     # -- so this precondition used to fail loudly here rather than
     # applying a host that could never actually create one. That is no
-    # longer true (bwsalmon/agents#531): v2/scripts/setup.sh's own
-    # ensure_kontur_images now builds both images itself, on the host, the
-    # first time it runs, when kontur_image_bucket/kontur_oci_image are
-    # left at their empty defaults -- see this module's README, "Kontur
-    # sandboxing", and that script's own kontur_image_tag for how the
-    # result is named and cached so a later apply does not rebuild it for
-    # nothing. Setting kontur_image_bucket/kontur_oci_image together still
-    # works, for an operator who would rather build once centrally and
-    # share the result across many hosts than pay that cost on each.
+    # longer true (bwsalmon/agents#531, #645): with both left at their
+    # empty defaults, v2/scripts/setup.sh's own ensure_kontur_images
+    # *pulls* the sandbox container -- the one the grain image it is
+    # deploying was built against, stamped in at build time, so nothing
+    # names it here -- and builds the guest disk itself on the host the
+    # first time it runs. See this module's README, "Kontur sandboxing",
+    # and that script's own kontur_image_tag for how the disk is named
+    # and cached so a later apply does not rebuild it for nothing.
+    # kontur_oci_image overrides the sandbox container; kontur_image_bucket
+    # fetches a pre-built guest disk instead of building one. They are
+    # independent, and each is optional on its own.
 
     # A kontur VM is a nested cloud-hypervisor guest -- no /dev/kvm, no
     # boot, regardless of anything else here.

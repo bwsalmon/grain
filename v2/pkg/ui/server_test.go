@@ -487,7 +487,7 @@ func TestSettingsRoutesReadAndWrite(t *testing.T) {
 	}
 
 	rec = do(t, srv, http.MethodPut, "/api/settings",
-		`{"pollInterval":"1m","maxConcurrent":2,"geminiModel":"gemini-2.5-pro","githubHost":"github.com"}`)
+		`{"pollInterval":"1m","maxConcurrent":2,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put status = %d, want 200: %s", rec.Code, rec.Body)
 	}
