@@ -361,6 +361,15 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
    underneath it. */
 .badge-mark::before { content: none; }
 
+/* .badge-icon is for a badge that is only the state icon -- no label
+   text beside it -- sitting in a fixed column ahead of a task's title
+   (TaskList, RepoReleases' qualification list). Unlike .badge-mark's
+   20px grain mark, every other state is still the 11px ::before dot, so
+   without a fixed, centred box here a running row's icon column would
+   be 9px wider than every other row's and the titles after it would
+   not line up. */
+.badge-icon { width: 20px; justify-content: center; }
+
 /* .badge-running's own spin animation still drives RepoList's chip
    (bwsalmon/agents#546), which badges a repo's *count* of running tasks
    rather than one task's live status, so there is no single task for a
