@@ -145,16 +145,18 @@ e2e/            tasks filed the way a user would, carried through
                 comment for how to size it up to an actual host.
 pkg/ui/         a JSON API, and the static frontend it serves, for
                 creating and managing tasks and their capability grants
-                by hand (bwsalmon/agents#237). It reads and writes
-                model.Store: creating a task here IS filing it, with no
-                GitHub issue and no poll in between -- see "Input is a
-                model update, not a GitHub issue" below. Client is that
-                code directly, over a *model.Store the caller already
-                has open; HTTPClient (bwsalmon/agents#363) is the same
-                method surface spoken over HTTP instead, against
-                whichever pkg/ui.Server a "grain daemon" is serving --
-                see "The UI and the CLI talk to the daemon over REST"
-                below
+                by hand (bwsalmon/agents#237). The Go half only: the
+                frontend's source is ui/ below, built into pkg/ui/static
+                (which server.go go:embeds) rather than checked in
+                itself. It reads and writes model.Store: creating a task
+                here IS filing it, with no GitHub issue and no poll in
+                between -- see "Input is a model update, not a GitHub
+                issue" below. Client is that code directly, over a
+                *model.Store the caller already has open; HTTPClient
+                (bwsalmon/agents#363) is the same method surface spoken
+                over HTTP instead, against whichever pkg/ui.Server a
+                "grain daemon" is serving -- see "The UI and the CLI talk
+                to the daemon over REST" below
 cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 combined what used to be four, #363 folded a fifth --
                 the standalone "ui" subcommand -- into "daemon"): with no
@@ -182,14 +184,25 @@ cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 throwaway pkg/ui.Server over fake data and a temp-directory
                 store, for trying out the frontend with no daemon, no
                 store and no deployment behind it at all
+ui/             the React+Vite frontend pkg/ui.Server serves
+                (bwsalmon/agents#356): the one non-Go tree here, which is
+                why it sits beside pkg/ rather than under it. `npm run
+                build` writes it into pkg/ui/static, so `make frontend`
+                has to run before `go build`/`go vet`/`go test` -- see
+                "The UI" below. e2e/ here is its own Playwright suite
+                (`make test-e2e`), separate from the repository-root
+                e2e/ above
 ```
 
 `pkg/` holds every package here that a `cmd/` binary or another package
 imports; `cmd/` holds `main` packages only, per the standard Go project
-layout. `capability/` is the folder every model.CapabilityProvider lives
-under, `gcpkey` included — before this rename it sat at the top level
-instead, which is exactly the inconsistency bwsalmon/agents#248 asked to
-fix.
+layout. `ui/` is outside both because nothing in it is a Go package at
+all -- it is an npm workspace with its own toolchain, dependencies and
+test runner, and burying that under `pkg/` only made it look like one
+more importable package. `capability/` is the folder every
+model.CapabilityProvider lives under, `gcpkey` included — before this
+rename it sat at the top level instead, which is exactly the
+inconsistency bwsalmon/agents#248 asked to fix.
 
 ```sh
 cd v2 && go test ./...
@@ -1381,24 +1394,24 @@ already uses, with nothing about the server to rewrite — the same surface
 `pkg/ui.HTTPClient` gives `cmd/grain`'s own CLI (see "The UI and the CLI
 talk to the daemon over REST" below).
 
-The frontend itself (`pkg/ui/frontend/`, bwsalmon/agents#356) is React
-built with Vite, not the plain HTML/CSS/JS this section used to describe
-— that earlier no-framework, no-build-step choice bought a repo `go
-build` alone could produce, at the cost of every UI change being DOM
-plumbing by hand (`el()`, manual diffing against `lastList`/`lastDetail`
-to avoid stealing focus on a poll) in a ~1200-line file with nowhere to
-grow. React and its ecosystem — component boundaries, hooks, the wider
-supply of libraries a task UI eventually wants (routing, richer forms,
-charts) — buys back the extensibility that file was starting to cost,
-and is worth a real toolchain now that one is already needed to build
-it. What survives from "why a local web server" is the deployment shape,
-not the build step: `npm run build` (wired into `make build`/`test`/
-`vet` and the `go-test` CI job, and into `Dockerfile.build` for
-`container-build`) has to run before `go build` can see real content in
-`pkg/ui/static/` — the directory it `//go:embed`s — but that step runs
-once, at build time; the artifact `cmd/grain` ships is still the one
-dependency-free Go binary this section opened with, with the built
-frontend baked into it rather than a Node runtime tagging along.
+The frontend itself (`ui/`, bwsalmon/agents#356) is React built with
+Vite, not the plain HTML/CSS/JS this section used to describe — that
+earlier no-framework, no-build-step choice bought a repo `go build`
+alone could produce, at the cost of every UI change being DOM plumbing
+by hand (`el()`, manual diffing against `lastList`/`lastDetail` to avoid
+stealing focus on a poll) in a ~1200-line file with nowhere to grow.
+React and its ecosystem — component boundaries, hooks, the wider supply
+of libraries a task UI eventually wants (routing, richer forms, charts)
+— buys back the extensibility that file was starting to cost, and is
+worth a real toolchain now that one is already needed to build it. What
+survives from "why a local web server" is the deployment shape, not the
+build step: `npm run build` (wired into `make build`/`test`/`vet` and
+the `go-test` CI job, and into `Dockerfile.build` for `container-build`)
+has to run before `go build` can see real content in `pkg/ui/static/` —
+the directory it `//go:embed`s — but that step runs once, at build time;
+the artifact `cmd/grain` ships is still the one dependency-free Go
+binary this section opened with, with the built frontend baked into it
+rather than a Node runtime tagging along.
 
 **Material UI (bwsalmon/agents#450) for primitives, not for its default
 look.** Every interactive element — buttons, text fields, checkboxes,
@@ -1408,15 +1421,15 @@ hand-rolled dropdown; that buys the accessibility, keyboard handling and
 focus management (a modal that traps focus and closes on Escape, a
 select that behaves like a native one) those were quietly missing,
 without every screen reinventing it. `AppThemeProvider`
-(`pkg/ui/frontend/src/AppThemeProvider.jsx`) feeds MUI's own
-`ThemeProvider` a theme (`theme.js`) built from the same accent/danger/
-surface values `style.css`'s `:root` tokens already defined
-(bwsalmon/agents#364's Plane-inspired palette), so adopting MUI's
-components didn't also mean adopting Material Design's own visual
-language — the dense, dot-not-pill task rows and status colors this
-section's own screenshots would show are unchanged. `style.css` still
-owns what MUI has no primitive for: the state dot/badge, the sidebar's
-brand mark, and layout for the task list and detail panel.
+(`ui/src/AppThemeProvider.jsx`) feeds MUI's own `ThemeProvider` a theme
+(`theme.js`) built from the same accent/danger/surface values
+`style.css`'s `:root` tokens already defined (bwsalmon/agents#364's
+Plane-inspired palette), so adopting MUI's components didn't also mean
+adopting Material Design's own visual language — the dense, dot-not-pill
+task rows and status colors this section's own screenshots would show
+are unchanged. `style.css` still owns what MUI has no primitive for: the
+state dot/badge, the sidebar's brand mark, and layout for the task list
+and detail panel.
 
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
@@ -1436,12 +1449,11 @@ there is no real store to point it at by mistake, only the throwaway one
 it creates and seeds itself.
 
 **Freshness, not a cache.** Every mutation in the frontend
-(`pkg/ui/frontend/src/App.jsx`'s `act`) re-fetches the task afterward
-rather than assuming its own optimistic update is now true, matching the
-direction document's "it shows freshness for anything" — read live from
-the store rather than presenting a stale value as current. There is
-nowhere here for staleness to hide since nothing is ever cached across
-one request.
+(`ui/src/App.jsx`'s `act`) re-fetches the task afterward rather than
+assuming its own optimistic update is now true, matching the direction
+document's "it shows freshness for anything" — read live from the store
+rather than presenting a stale value as current. There is nowhere here
+for staleness to hide since nothing is ever cached across one request.
 
 **And it refreshes itself.** A task changes state when `graind`
 dispatches it, when a run finishes, and when a pull request merges —
@@ -1518,18 +1530,17 @@ side of the same `Client` methods — no flags prints what is stored (or
 that nothing is, yet); any flags apply just those, the way `grain
 update` already treats a task's own flags.
 
-`pkg/ui/frontend/` (bwsalmon/agents#333) now has a settings panel too —
-the topbar's "Settings" button opens a form reading `GET
-/api/settings`, distinguishing `configured: false` (nothing saved yet,
-before any daemon has started or any value set) from a populated one
-the same way `grain settings` (no flags) already does. Saving sends
-only the fields an operator actually changed via `PUT`, leaving the
-rest out of the request entirely so they can't clobber what's already
-stored — the same partial-update contract `UpdateSettingsRequest`'s
-pointer fields already give a CLI caller. A 400's `ValidationError`
-message (a bad duration string, an empty required field the first
-time) surfaces through the same error banner task creation's own
-validation errors already use.
+`ui/` (bwsalmon/agents#333) now has a settings panel too — the topbar's
+"Settings" button opens a form reading `GET /api/settings`,
+distinguishing `configured: false` (nothing saved yet, before any daemon
+has started or any value set) from a populated one the same way `grain
+settings` (no flags) already does. Saving sends only the fields an
+operator actually changed via `PUT`, leaving the rest out of the request
+entirely so they can't clobber what's already stored — the same
+partial-update contract `UpdateSettingsRequest`'s pointer fields already
+give a CLI caller. A 400's `ValidationError` message (a bad duration
+string, an empty required field the first time) surfaces through the
+same error banner task creation's own validation errors already use.
 
 ## Write-only secrets access when colocated
 

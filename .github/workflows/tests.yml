@@ -84,7 +84,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: pkg/ui/frontend/package-lock.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Build frontend
         run: make frontend
@@ -108,7 +108,7 @@ jobs:
         run: go test ./...
 
       - name: Test frontend
-        working-directory: pkg/ui/frontend
+        working-directory: ui
         run: npm test
 
   # A separate job rather than a step in go-test above: this needs a real
@@ -131,7 +131,7 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: pkg/ui/frontend/package-lock.json
+          cache-dependency-path: ui/package-lock.json
 
       # Builds the frontend, installs Chromium and its apt dependencies,
       # then runs the Playwright suite against a real pkg/ui.Server

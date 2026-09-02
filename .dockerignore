@@ -16,8 +16,8 @@
 # resolving against a tree built for a different platform.
 bin/
 .container-cache/
-pkg/ui/frontend/node_modules/
-pkg/ui/frontend/test-results/
-pkg/ui/frontend/playwright-report/
+ui/node_modules/
+ui/test-results/
+ui/playwright-report/
 **/__pycache__/
 .pytest_cache/

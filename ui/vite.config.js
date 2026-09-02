@@ -2,16 +2,16 @@ import { defineConfig } from "vite";
 import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
-// Builds straight into ../static, the directory pkg/ui.Server embeds
-// with //go:embed -- so `npm run build` here is the one required
+// Builds straight into ../pkg/ui/static, the directory pkg/ui.Server
+// embeds with //go:embed -- so `npm run build` here is the one required
 // pre-step before `go build`, and the daemon still ships as a
 // single binary with this output baked in.
 export default defineConfig({
   plugins: [react()],
   build: {
-    outDir: "../static",
+    outDir: "../pkg/ui/static",
     // False, and left to the `frontend` Makefile target instead: Vite's
-    // own emptying would also delete ../static/.gitignore and
+    // own emptying would also delete ../pkg/ui/static/.gitignore and
     // .gitkeep, the two files that make go:embed compile against an
     // otherwise-untracked, generated directory on a fresh checkout.
     emptyOutDir: false,
