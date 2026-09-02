@@ -48,11 +48,9 @@ those overlays, which a rootfs built from scratch in this directory never
 had.
 
 What that buys: one build instead of two, no root/debootstrap requirement
-for a guest image build, and -- because kontur generates its `kontur exec`
-keypair inside the same `docker build` that produces the guest rootfs it
-authorizes it on -- the keypair becomes self-contained again, which would
-retire `-kontur-exec-key` and the key-staging step `v2/scripts/setup.sh`
-does for it.
+for a guest image build, and -- since bwsalmon/kontur#35 -- a guest image
+with no key in it at all, which retired `-kontur-exec-key` and the
+key-staging step `v2/scripts/setup.sh` used to do for it.
 
 ### Status: both the kernel and the hook have landed upstream
 
@@ -196,21 +194,21 @@ same three files, with the same names, the old `build.sh` produced.
 `build-guest.sh` in its place, and no longer installs debootstrap or
 e2fsprogs, since the build needs neither (nor root).
 
-`guest-setup.sh` reads two variables (`OPERATOR_SSH_PUBLIC_KEY`, and
-`SANDBOX_SETUP_SCRIPT` if set). kontur's hook execs the script with only
-its own build stage's environment, so `build-guest.sh` inserts both as
-assignments immediately after the script's shebang -- which has to stay
-on line 1 for the exec to work -- rather than passing them as build args
-of their own.
+`guest-setup.sh` reads one variable (`SANDBOX_SETUP_SCRIPT`, if set).
+kontur's hook execs the script with only its own build stage's
+environment, so `build-guest.sh` inserts it as an assignment immediately
+after the script's shebang -- which has to stay on line 1 for the exec to
+work -- rather than passing it as a build arg of its own.
 
-Still open, and deliberately not done here: kontur generates its `kontur
-exec` keypair inside this same build and authorizes it for **root**,
-while this guest's sandbox account is `debian` (what `-kontur-ssh-user`
-names, and what `guest-setup.sh` installs the operator key for). So
-`-kontur-exec-key` and the key-staging `v2/scripts/setup.sh` does for it
-do *not* fall out of this change for free, the way this section
-previously assumed -- retiring them needs the exec key authorized for
-`debian` too, or the sandbox account moved to root.
+It used to read a second, `OPERATOR_SSH_PUBLIC_KEY`, and that was what
+made the image deployment-specific. Resolved upstream in
+bwsalmon/kontur#35: kontur now generates the `kontur exec` keypair in the
+VM's own container on every boot and hands the guest the public half on
+its kernel command line, and `konturctl vm create -guest-user` names the
+extra account to authorize it for -- which is what closed the last gap
+here, kontur authorizing **root** while this guest's sandbox account is
+`debian`. `-kontur-exec-key` and the key staging `v2/scripts/setup.sh`
+did for it are both gone.
 
 See "Verified live (bwsalmon/agents#577)" above -- the build has now been
 run and the result booted, for the Debian path.
@@ -363,7 +361,6 @@ etc -- without forking this directory, set `SANDBOX_SETUP_SCRIPT` to a
 script's contents (not a path) before running `build-guest.sh`:
 
 ```sh
-export OPERATOR_SSH_PUBLIC_KEY="$(cat /path/to/operator_key.pub)"
 export SANDBOX_SETUP_SCRIPT="$(cat my-setup.sh)"
 ./build-guest.sh
 ```
@@ -439,7 +436,6 @@ above.
 ### Building and publishing
 
 ```sh
-export OPERATOR_SSH_PUBLIC_KEY="$(cat /path/to/operator_key.pub)"
 export KONTUR_IMAGE_BUCKET="<a GCS bucket this deployment's operator controls>"
 ./build-guest.sh
 ```
@@ -472,17 +468,10 @@ here") is the precedent to follow rather than inventing a
 project-specific bucket name a deployment didn't choose; see
 `terraform/gcp-v2/variables.tf`'s own `kontur_image_bucket` for where that
 name is actually configured for that deployment shape.
-`OPERATOR_SSH_PUBLIC_KEY` is not a secret (it's a public key), but is
-still left to the environment rather than a repo file, so it's the
-deployment's own operator key and not one hand-picked here -- see
-`terraform/gcp-v2/README.md`, "Kontur sandboxing", for where that keypair
-comes from on that deployment shape. A deployment building its own guest
-image (`v2/scripts/setup.sh`'s own `ensure_kontur_ssh_key`/
-`ensure_kontur_images`, bwsalmon/agents#531) generates one itself and
-never needs this reaching `push-secrets.sh` at all; an operator pinning a
-specific keypair instead still has to push its private half as
-`grain daemon`'s own `-kontur-ssh-key`, via that script's own
-`GRAIN_KONTUR_SSH_KEY`.
+No SSH key is involved either way. The image this builds carries none
+(bwsalmon/kontur#35 -- kontur generates one per VM boot instead), so
+there is nothing here for `push-secrets.sh` to carry and no keypair for a
+deployment and its guest image to keep in sync.
 
 The other half of what a deployment needs published -- the `kontur`
 binary and the cloud-hypervisor release bundled with it, not the guest

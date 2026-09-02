@@ -287,13 +287,6 @@ Terraform state:
   deployment that might use either wants both.
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
-- **The kontur SSH private key** (with `enable_kontur_sandboxes`, the
-  default) -- what authenticates to each slot's VM guest. `setup.sh`
-  stages it into the images directory konturctl mounts read-only at
-  `/images` in every VM container, and `grain daemon`'s own
-  `-kontur-exec-key` names it there, since the daemon reaches a guest by
-  exec'ing into that VM's container rather than connecting to it from
-  outside. See "Kontur sandboxing" below.
 
 All of them go straight into the host instance's own metadata via
 `push-secrets.sh`, which any identity with `deployer_manages_minter_keys`
@@ -399,26 +392,21 @@ centrally, and share the result across many hosts than pay that build
 cost on each of them still can, the way every deployment before
 bwsalmon/agents#531 had to:
 
-1. **Build and publish the guest image.** Needs docker (the rootfs is
-   built inside the build, so no root and nothing to install here) and an
-   SSH keypair:
+1. **Build and publish the guest image.** Needs docker and nothing else
+   (the rootfs is built inside the build, so no root and nothing to
+   install here). No SSH key is involved: kontur generates a keypair in
+   each VM's own container at boot and hands the guest the public half on
+   its kernel command line, so the disk this produces is generic and
+   carries no secret.
 
    ```sh
-   ssh-keygen -t ed25519 -N '' -f kontur_key   # -> kontur_key, kontur_key.pub
-   export OPERATOR_SSH_PUBLIC_KEY="$(cat kontur_key.pub)"
    export KONTUR_IMAGE_BUCKET="<a GCS bucket you control, name only, no gs://>"
    ../../packer/kontur/build-guest.sh
    ```
 
-   Set `kontur_image_bucket` to the same bucket name, and push the
-   private half of that keypair as this deployment's own secret:
-
-   ```sh
-   GRAIN_KONTUR_SSH_KEY="$(cat kontur_key)" PROJECT=... INSTANCE=... ZONE=... ./push-secrets.sh
-   ```
-
-   Never regenerate this keypair without also rebuilding the guest image
-   -- both halves have to match, and nothing checks that they still do.
+   Set `kontur_image_bucket` to the same bucket name. There is no secret
+   to push alongside it, and nothing to keep in sync: an image built
+   anywhere works for any deployment.
 
 2. **Nothing, for the sandbox container.** It is pulled, and which one
    is not a decision this deployment makes: CI publishes a sandbox image

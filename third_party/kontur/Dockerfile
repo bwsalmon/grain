@@ -57,22 +57,6 @@ ARG GUEST_SSH_AUTHORIZED_KEY=""
 # place secrets -- it is as public as the image is.
 ARG GUEST_SETUP_SCRIPT=""
 
-# Generates a dedicated ed25519 keypair "kontur exec" (internal/guestexec)
-# uses to authenticate against the guest's sshd, independent of
-# GUEST_SSH_AUTHORIZED_KEY above -- that one is an operator's own,
-# optional public key for their own interactive access; this one exists
-# purely so "kontur exec" (and so `kubectl exec`, see the top-level
-# README's "Execing into a VM" section) always has a way in, without
-# needing a key managed outside the image build. The private half is
-# copied only into the final image below (see the "final" stage), never
-# passed as an ARG the way GUEST_SSH_AUTHORIZED_KEY is -- an ARG's value
-# is recorded in the image history, fine for a public key but not this
-# one's private half.
-FROM debian:bookworm-slim AS exec-keypair
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/*
-RUN ssh-keygen -t ed25519 -N "" -C kontur-exec -f /exec_id_ed25519
-
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -170,7 +154,6 @@ RUN debootstrap --variant=minbase \
 
 COPY deploy/guest-image/overlay-common/ /rootfs/
 COPY deploy/guest-image/overlay-debian/ /rootfs/
-COPY --from=exec-keypair /exec_id_ed25519.pub /rootfs/root/.ssh/kontur-exec.pub
 COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontur-mem-agent
 
 # - The console wrapper and ACPI power-button handler need their
@@ -188,10 +171,13 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 #   debootstrap; they're removed so every VM booted from this image
 #   doesn't share the same ones -- kontur-ssh-host-keys.service
 #   regenerates them on first boot instead.
-# - The exec-keypair stage's public key is always authorized, so "kontur
-#   exec" always has a way in; GUEST_SSH_AUTHORIZED_KEY, if given, is
-#   appended alongside it for an operator's own interactive access. Root
-#   has no password at all either way (see
+# - No key is authorized at build time. "kontur exec" gets in with a
+#   keypair "kontur run" generates for each boot and passes to the guest
+#   on the kernel command line, which kontur-authorized-key.service
+#   installs before sshd starts (see internal/guestkey) -- so this image
+#   carries no secret and can be published. GUEST_SSH_AUTHORIZED_KEY, if
+#   given, is still baked in for an operator's own interactive access.
+#   Root has no password at all either way (see
 #   overlay-common/etc/ssh/sshd_config.d).
 # - systemd-udevd's own /lib/udev/rules.d/80-net-setup-link.rules renames
 #   NICs to "predictable" names (e.g. virtio-pci's second NIC becomes
@@ -208,6 +194,11 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 RUN set -eux; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-authorized-key; \
+    for t in sed base64 awk mkdir chmod chown; do \
+      [ -e "/rootfs/bin/$t" ] || [ -e "/rootfs/usr/bin/$t" ] || \
+        { echo "kontur-authorized-key execs $t, which this rootfs does not have" >&2; exit 1; }; \
+    done; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
     ln -sf /dev/null /rootfs/etc/udev/rules.d/80-net-setup-link.rules; \
     ln -sf /etc/systemd/system/kontur-ssh-host-keys.service \
@@ -216,10 +207,11 @@ RUN set -eux; \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-mem-agent.service; \
     ln -sf /etc/systemd/system/kontur-control-net.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-control-net.service; \
+    ln -sf /etc/systemd/system/kontur-authorized-key.service \
+      /rootfs/etc/systemd/system/multi-user.target.wants/kontur-authorized-key.service; \
     rm -f /rootfs/etc/ssh/ssh_host_*; \
     install -d -m0700 /rootfs/root/.ssh; \
-    cat /rootfs/root/.ssh/kontur-exec.pub > /rootfs/root/.ssh/authorized_keys; \
-    rm -f /rootfs/root/.ssh/kontur-exec.pub; \
+    : > /rootfs/root/.ssh/authorized_keys; \
     if [ -n "${GUEST_SSH_AUTHORIZED_KEY}" ]; then \
       printf '%s\n' "${GUEST_SSH_AUTHORIZED_KEY}" >> /rootfs/root/.ssh/authorized_keys; \
     fi; \
@@ -253,7 +245,6 @@ RUN printf 'http://dl-cdn.alpinelinux.org/alpine/v%s/main\nhttp://dl-cdn.alpinel
 
 COPY deploy/guest-image/overlay-common/ /rootfs/
 COPY deploy/guest-image/overlay-alpine/ /rootfs/
-COPY --from=exec-keypair /exec_id_ed25519.pub /rootfs/root/.ssh/kontur-exec.pub
 COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontur-mem-agent
 
 # Nothing enables OpenRC services on install the way Debian's
@@ -272,18 +263,23 @@ RUN set -eux; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
     chmod 0755 /rootfs/etc/init.d/kontur-mem-agent; \
     chmod 0755 /rootfs/etc/init.d/kontur-control-net; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-authorized-key; \
+    chmod 0755 /rootfs/etc/init.d/kontur-authorized-key; \
+    for t in sed base64 awk mkdir chmod chown; do \
+      [ -e "/rootfs/bin/$t" ] || [ -e "/rootfs/usr/bin/$t" ] || \
+        { echo "kontur-authorized-key execs $t, which this rootfs does not have" >&2; exit 1; }; \
+    done; \
     for svc in devfs dmesg mdev hwdrivers; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/sysinit/"${svc}"; \
     done; \
     for svc in hwclock modules sysctl hostname bootmisc syslog; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/boot/"${svc}"; \
     done; \
-    for svc in local sshd acpid kontur-control-net kontur-mem-agent; do \
+    for svc in local sshd acpid kontur-control-net kontur-mem-agent kontur-authorized-key; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/default/"${svc}"; \
     done; \
     install -d -m0700 /rootfs/root/.ssh; \
-    cat /rootfs/root/.ssh/kontur-exec.pub > /rootfs/root/.ssh/authorized_keys; \
-    rm -f /rootfs/root/.ssh/kontur-exec.pub; \
+    : > /rootfs/root/.ssh/authorized_keys; \
     if [ -n "${GUEST_SSH_AUTHORIZED_KEY}" ]; then \
       printf '%s\n' "${GUEST_SSH_AUTHORIZED_KEY}" >> /rootfs/root/.ssh/authorized_keys; \
     fi; \
@@ -389,11 +385,6 @@ COPY --from=guest-image /disk.img /var/lib/kontur/guest/disk.img
 # outside the image (a node-local kernel cache, a hostPath, or an
 # emptyDir populated by a fetch-at-pod-start init container).
 COPY --from=fetch-kernel /out/vmlinux /var/lib/kontur/guest/vmlinux
-# internal/guestexec's default KONTUR_EXEC_KEY -- see the exec-keypair
-# stage above for why this is generated at build time rather than passed
-# in, and deploy/guest-image/README.md for the matching public half this
-# image's guest disk always authorizes.
-COPY --chmod=0600 --from=exec-keypair /exec_id_ed25519 /etc/kontur/exec_id_ed25519
 
 LABEL org.opencontainers.image.title="kontur" \
       org.opencontainers.image.description="Boots a single cloud-hypervisor VM as PID 1 (\"run\", the default), sets up pod-local VM networking (\"netshim\"), or execs a command inside the VM guest over SSH (\"exec\")" \

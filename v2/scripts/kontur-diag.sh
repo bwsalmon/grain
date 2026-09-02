@@ -47,10 +47,13 @@
 #
 # With no vm-name it diagnoses every VM in the state directory. Override
 # the state directory with KONTUR_STATE_DIR (default /var/lib/kontur/vms,
-# matching pkg/kontur.DefaultStateDir), and the identity/user the final
-# end-to-end check uses with KONTUR_SSH_KEY/KONTUR_SSH_USER (the same
-# values grain's own -kontur-exec-key/-kontur-ssh-user carry; that check is
-# skipped when no key is given).
+# matching pkg/kontur.DefaultStateDir), and the account the final
+# end-to-end check logs in as with KONTUR_SSH_USER (the same value
+# grain's own -kontur-ssh-user carries). KONTUR_SSH_KEY is optional and
+# normally unset: kontur generates a keypair for each guest it boots and
+# leaves it at `kontur exec`'s own default path inside the VM container,
+# so the check needs no identity of its own. Set it only against a custom
+# guest image that authorizes a key of its own instead.
 
 set -uo pipefail
 
@@ -375,17 +378,21 @@ diagnose() {
   # invocation rather than a raw ssh dial -- the latter tests a path
   # nothing in grain actually takes under the docker backend, in either
   # net mode.
+  # KONTUR_EXEC_KEY is passed only when one was given: empty would name a
+  # key file `kontur exec` cannot open, rather than meaning "use your own
+  # default" -- which is the whole point now that kontur generates one per
+  # boot and leaves it at exactly that default.
+  local key_env=()
   if [ -n "$SSH_KEY" ]; then
-    local out
-    if out="$(docker exec -e "KONTUR_EXEC_USER=$SSH_USER" -e "KONTUR_EXEC_KEY=$SSH_KEY" \
-        "$vm_c" kontur exec -- whoami 2>&1)"; then
-      ok "docker exec $vm_c kontur exec -- whoami succeeds ($out) -- this VM is fully reachable the way grain reaches it"
-    else
-      bad "docker exec $vm_c kontur exec -- whoami failed"
-      sed 's/^/           /' <<<"$out"
-    fi
+    key_env=(-e "KONTUR_EXEC_KEY=$SSH_KEY")
+  fi
+  local out
+  if out="$(docker exec -e "KONTUR_EXEC_USER=$SSH_USER" "${key_env[@]}" \
+      "$vm_c" kontur exec -- whoami 2>&1)"; then
+    ok "docker exec $vm_c kontur exec -- whoami succeeds ($out) -- this VM is fully reachable the way grain reaches it"
   else
-    info "set KONTUR_SSH_KEY (and KONTUR_SSH_USER) to also run the end-to-end 'kontur exec' check"
+    bad "docker exec $vm_c kontur exec -- whoami failed"
+    sed 's/^/           /' <<<"$out"
   fi
 
   # ---- Guest console: the evidence for every hop-4 failure --------------

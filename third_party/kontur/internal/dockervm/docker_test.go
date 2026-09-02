@@ -361,3 +361,43 @@ func TestCreate_FlatModeNoControlLink(t *testing.T) {
 		}
 	}
 }
+
+// GuestUser has to reach the VM container, because both halves of it are
+// read there: "kontur run" puts it on the guest's kernel command line so
+// the generated key is authorized for that account, and "kontur exec" --
+// which docker exec runs with the container's own environment -- logs in
+// as it. See staticpod.VMSpec.GuestUser.
+func TestCreate_GuestUser(t *testing.T) {
+	d, calls := testDocker(t)
+	spec := testSpec()
+	spec.GuestUser = "debian"
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	if err := Create(context.Background(), d, spec, &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	got := calls()
+	vmCall := got[len(got)-1]
+	if !containsArg(vmCall, "KONTUR_EXEC_USER=debian") {
+		t.Errorf("VM call = %v, missing KONTUR_EXEC_USER", vmCall)
+	}
+}
+
+// Unset means root, so the variable is left out rather than sent empty --
+// guestexec would read "" as an account of that name rather than as
+// "unset".
+func TestCreate_NoGuestUser(t *testing.T) {
+	d, calls := testDocker(t)
+	if err := Create(context.Background(), d, testSpec(), &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	got := calls()
+	for _, arg := range got[len(got)-1] {
+		if strings.HasPrefix(arg, "KONTUR_EXEC_USER=") {
+			t.Errorf("VM call sets %q with no guest user configured", arg)
+		}
+	}
+}

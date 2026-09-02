@@ -38,8 +38,14 @@ const (
 	envKeyPath        = "KONTUR_EXEC_KEY"
 	envConnectTimeout = "KONTUR_EXEC_CONNECT_TIMEOUT"
 
-	defaultUser           = "root"
-	defaultKeyPath        = "/etc/kontur/exec_id_ed25519"
+	defaultUser = "root"
+	// DefaultKeyPath is where Config.KeyPath looks for the private key
+	// when KONTUR_EXEC_KEY is unset, and so where "kontur run" writes the
+	// keypair it generates for the guest it is booting (see
+	// internal/guestkey). Exported because those two have to agree and
+	// there is no configuration tying them together.
+	DefaultKeyPath        = "/etc/kontur/exec_id_ed25519"
+	defaultKeyPath        = DefaultKeyPath
 	defaultConnectTimeout = 30 * time.Second
 
 	dialTimeout   = 3 * time.Second
@@ -85,6 +91,16 @@ type Config struct {
 }
 
 // FromEnv builds a Config from the process environment.
+// UserFromEnv returns the guest account KONTUR_EXEC_USER names, or "" if
+// it is unset. "kontur run" uses it to tell the guest which extra account
+// to authorize its generated key for, so that the account a caller execs
+// as and the account the guest authorizes are one setting rather than two
+// that can disagree. Unlike FromEnv this needs no address, since it is
+// read while booting the VM rather than while connecting to it.
+func UserFromEnv() string {
+	return os.Getenv(envUser)
+}
+
 func FromEnv() (Config, error) {
 	cfg := Config{
 		Addr:    os.Getenv(envAddr),

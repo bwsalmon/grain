@@ -240,11 +240,12 @@ func daemon(args []string) {
 	konturSSHUser := fs.String("kontur-ssh-user", "",
 		"username to SSH into each kontur VM as (required with -kontur-sandboxes)")
 	konturExecKey := fs.String("kontur-exec-key", "",
-		"path, *inside the VM's container*, of the private key `kontur exec` authenticates to the guest with "+
-			"(required with -kontur-sandboxes) -- e.g. /images/kontur-exec-key for a key placed in the "+
-			"directory -kontur-create-arg's own -images-hostpath already mounts read-only at /images. Left "+
-			"unset, `kontur exec` falls back to the key bwsalmon/kontur bakes into its own image, which only a "+
-			"guest image built by that same Dockerfile authorizes.")
+		"path, *inside the VM's container*, of the private key `kontur exec` authenticates to the guest with. "+
+			"Optional, and normally left unset: `kontur run` generates a keypair for each guest it boots and "+
+			"hands the guest the public half on its kernel command line, so the default path already holds a "+
+			"key that guest authorizes (bwsalmon/kontur's internal/guestkey). Set this only for a custom guest "+
+			"image that authorizes a key of its own instead -- e.g. /images/kontur-exec-key for a key placed in "+
+			"the directory -kontur-create-arg's own -images-hostpath mounts read-only at /images.")
 	konturWorkspace := fs.String("kontur-workspace", "",
 		"working directory run_command/read_file/edit_file/write_file operate in on each kontur VM (required with -kontur-sandboxes)")
 	var konturCreateArgs stringSliceFlag
@@ -326,10 +327,6 @@ func daemon(args []string) {
 	if *konturSandboxes {
 		if *konturSSHUser == "" {
 			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-ssh-user is required with -kontur-sandboxes")
-			os.Exit(2)
-		}
-		if *konturExecKey == "" {
-			fmt.Fprintln(os.Stderr, "grain daemon: -kontur-exec-key is required with -kontur-sandboxes")
 			os.Exit(2)
 		}
 		if *konturWorkspace == "" {

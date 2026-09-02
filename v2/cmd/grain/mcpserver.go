@@ -46,7 +46,7 @@ func mcpserver(args []string) {
 		"name of a kontur-managed VM (bwsalmon/kontur) to run the sandbox tools against over SSH, "+
 			"instead of a local directory (mutually exclusive with -sandbox-root)")
 	sshUser := fs.String("ssh-user", "", "username to SSH into -kontur-vm as (required with -kontur-vm)")
-	execKey := fs.String("exec-key", "", "path, *inside -kontur-vm's container*, of the private key `kontur exec` authenticates to the guest with (required with -kontur-vm)")
+	execKey := fs.String("exec-key", "", "path, *inside -kontur-vm's container*, of the private key `kontur exec` authenticates to the guest with. Optional: left unset, `kontur exec` uses the keypair `kontur run` generates for that guest at boot, which is what a stock bwsalmon/kontur guest image authorizes (see its internal/guestkey). Set it only for a custom guest image that authorizes a key of its own instead.")
 	workspace := fs.String("workspace", "",
 		"working directory run_command/read_file/edit_file/write_file operate in on -kontur-vm (required with -kontur-vm)")
 	fs.Parse(args)
@@ -103,10 +103,6 @@ func mcpserver(args []string) {
 func mustKonturSandboxTools(konturVM, sshUser, execKey, workspace string) []mcp.Tool {
 	if sshUser == "" {
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -ssh-user is required with -kontur-vm")
-		os.Exit(2)
-	}
-	if execKey == "" {
-		fmt.Fprintln(os.Stderr, "grain mcpserver: -exec-key is required with -kontur-vm")
 		os.Exit(2)
 	}
 	if workspace == "" {

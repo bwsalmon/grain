@@ -176,8 +176,6 @@ def test_the_data_directory_is_laid_out_before_the_cli_is_used():
     # `grain sandbox-image`); reformat_store_if_schema_changed and
     # report_readiness follow it.
     assert main.index("setup_data_dir") < main.index("reformat_store_if_schema_changed")
-    # And the key it seeds has to be found or generated before that.
-    assert main.index("ensure_kontur_ssh_key") < main.index("setup_data_dir")
 
 
 def test_every_file_handed_to_the_containerised_cli_is_readable_by_it():

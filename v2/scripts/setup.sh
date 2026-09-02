@@ -240,7 +240,7 @@ GRAIN_TARGET_REPO="${GRAIN_TARGET_REPO:-}"
 GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
 GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 
-# See "Kontur sandboxing" below (ensure_kontur_ssh_key/ensure_kontur_images/
+# See "Kontur sandboxing" below (ensure_kontur_images/
 # ensure_kontur_kvm_access) and terraform/gcp-v2/README.md's
 # own section of the same name. GRAIN_KONTUR_ENABLE=1 (off by default here
 # -- terraform/gcp-v2's own enable_kontur_sandboxes variable is what
@@ -258,19 +258,20 @@ GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
 #                           this host runs at the time it was built --
 #                           so the two are always from one commit.
 #   the guest disk          fetched from GRAIN_KONTUR_IMAGE_BUCKET when
-#                           that names one, and otherwise built here,
-#                           with a generated SSH keypair baked into it if
-#                           none is provided or seeded. It cannot be
-#                           published generically, because that key is
-#                           per-deployment.
-#
-# GRAIN_KONTUR_SSH_KEY_FILE overrides the generated keypair with a
-# specific one of an operator's own choosing -- required alongside
-# GRAIN_KONTUR_IMAGE_BUCKET, whose guest disk already has some other
-# key baked in.
+#                           that names one, and otherwise built here.
+#                           Nothing deployment-specific goes into it any
+#                           more, so one built anywhere works everywhere:
+#                           kontur generates a keypair per VM boot and
+#                           hands the guest the public half on its kernel
+#                           command line (third_party/kontur's
+#                           internal/guestkey), where it used to be baked
+#                           in at build time. Publishing this the way the
+#                           sandbox container already is, and dropping the
+#                           local build entirely, is the follow-up that
+#                           unblocks.
 GRAIN_KONTUR_ENABLE="${GRAIN_KONTUR_ENABLE:-0}"
 # Remembers what was actually asked for, since ensure_kontur_images/
-# ensure_kontur_kvm_access/seed_kontur_ssh_key overwrite GRAIN_KONTUR_ENABLE
+# ensure_kontur_kvm_access overwrite GRAIN_KONTUR_ENABLE
 # itself back to 0 on a failure partway through -- report_readiness uses
 # this to tell "kontur was never requested" apart from "kontur was
 # requested but a prerequisite wasn't ready this run".
@@ -282,10 +283,6 @@ GRAIN_KONTUR_IMAGE_BUCKET="${GRAIN_KONTUR_IMAGE_BUCKET:-}"
 # copy, or a sandbox image pinned apart from grain's own.
 GRAIN_KONTUR_OCI_IMAGE="${GRAIN_KONTUR_OCI_IMAGE:-}"
 GRAIN_KONTUR_IMAGES_HOSTPATH="${GRAIN_KONTUR_IMAGES_HOSTPATH:-/var/lib/vm-images}"
-# Filename the kontur SSH private key is staged under inside
-# GRAIN_KONTUR_IMAGES_HOSTPATH (see ensure_kontur_exec_key), and so the
-# basename of the /images path -kontur-exec-key points the daemon at.
-GRAIN_KONTUR_EXEC_KEY_NAME="${GRAIN_KONTUR_EXEC_KEY_NAME:-kontur-exec-key}"
 # -images-hostpath is always mounted read-only (it's a shared, node-local
 # image cache several VMs may read from concurrently -- see
 # third_party/kontur/README.md, "Operating a node (konturctl CLI)"), so a
@@ -295,8 +292,11 @@ GRAIN_KONTUR_EXEC_KEY_NAME="${GRAIN_KONTUR_EXEC_KEY_NAME:-kontur-exec-key}"
 # ensure_kontur_kvm_access creates it -- since konturctl runs directly as
 # that user, not inside a container the way -disk itself is read.
 GRAIN_KONTUR_DISK_HOSTPATH="${GRAIN_KONTUR_DISK_HOSTPATH:-/var/lib/kontur/vm-disks}"
+# The guest account the daemon execs as, and the account konturctl's
+# -guest-user tells kontur to authorize this boot's generated key for.
+# There is no key here to configure: see packer/kontur/guest-setup.sh's
+# "No SSH key is baked in".
 GRAIN_KONTUR_SSH_USER="${GRAIN_KONTUR_SSH_USER:-debian}"
-GRAIN_KONTUR_SSH_KEY_FILE="${GRAIN_KONTUR_SSH_KEY_FILE:-}"
 GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
 # flat: the guest is spliced onto its sandbox container's own segment and
 # takes over the address docker assigned it, so nothing here has to assign
@@ -481,8 +481,8 @@ Recognized variables:
                              (packer/kontur/build-guest.sh's own
                              KONTUR_IMAGE_BUCKET; this script fetches its
                              "latest" alias) instead of building one here.
-                             Needs GRAIN_KONTUR_SSH_KEY_FILE too: that disk
-                             has some specific key baked into it already.
+                             Any such disk works: nothing deployment-
+                             specific is baked into a guest image now.
   GRAIN_KONTUR_IMAGES_HOSTPATH  where the guest image (fetched, or built
                              locally and cached by a hash of what defines its
                              contents -- see kontur_image_tag) lands, bind-
@@ -494,16 +494,11 @@ Recognized variables:
                              own default) -- without this, a VM's root
                              filesystem is read-only, since
                              GRAIN_KONTUR_IMAGES_HOSTPATH always is
-  GRAIN_KONTUR_SSH_USER      username to SSH into each kontur VM as (default: debian)
-  GRAIN_KONTUR_SSH_KEY_FILE  path to the private half of a specific SSH keypair
-                             to bake the public half of into the guest image,
-                             for an operator who wants one keypair reused
-                             across a fleet (push-secrets.sh's own
-                             GRAIN_KONTUR_SSH_KEY does exactly that). Optional:
-                             with none given, and none already seeded,
-                             ensure_kontur_ssh_key generates one itself; either
-                             way it ends up seeded once into
-                             $GRAIN_DATA_DIR/secrets/kontur-ssh-key
+  GRAIN_KONTUR_SSH_USER      username to SSH into each kontur VM as, and the
+                             account konturctl's -guest-user has kontur
+                             authorize this boot's generated key for
+                             (default: debian). There is no key to
+                             configure: kontur generates one per VM boot.
   GRAIN_KONTUR_WORKSPACE     working directory tools operate in on each kontur
                              VM (default: /home/debian, GRAIN_KONTUR_SSH_USER's own home)
   GRAIN_KONTUR_NET           kontur networking mode: "flat" (default) or "nat".
@@ -1089,116 +1084,17 @@ gcs_fetch() {
     -o "$dest"
 }
 
-# ensure_kontur_ssh_key finds or generates the SSH keypair a guest image
-# bakes in as the operator account's only authorized_keys entry
-# (packer/kontur/guest-setup.sh's own OPERATOR_SSH_PUBLIC_KEY), before
-# ensure_kontur_images needs the public half to build one. Generating one
-# automatically -- rather than requiring an operator to run `ssh-keygen`
-# and push-secrets.sh by hand before a first deploy, the way
-# terraform/gcp-v2/README.md's "Kontur sandboxing" used to -- is the other
-# half of what removes that manual step (bwsalmon/agents#531): a fresh
-# host with none of this configured still ends up with a working keypair,
-# with no extra input required.
-#
-# Checked in order: GRAIN_KONTUR_SSH_KEY_FILE (an operator's own explicit
-# choice), then $GRAIN_DATA_DIR/secrets/kontur-ssh-key (a previous run's
-# generated-or-seeded key -- reused rather than replaced, since the guest
-# image already baked in the matching public half and a mismatched keypair
-# cannot SSH in at all), then generated fresh. Sets KONTUR_SSH_PUBLIC_KEY
-# (fed into the guest-image build below) and KONTUR_SSH_PRIVATE_KEY
-# (seeded into $GRAIN_DATA_DIR/secrets by seed_kontur_ssh_key, once that
-# directory exists -- setup_data_dir runs well after this) -- both left
-# empty, and GRAIN_KONTUR_ENABLE reset to 0, on any failure below.
-KONTUR_SSH_PUBLIC_KEY=""
-KONTUR_SSH_PRIVATE_KEY=""
-
-ensure_kontur_ssh_key() {
-  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
-    return
-  fi
-  if ! command -v ssh-keygen >/dev/null 2>&1; then
-    log "GRAIN_KONTUR_ENABLE=1 but ssh-keygen is not installed -- leaving kontur sandboxing off this run"
-    GRAIN_KONTUR_ENABLE=0
-    return
-  fi
-
-  local existing="" existing_is_managed=0
-  if [ -n "$GRAIN_KONTUR_SSH_KEY_FILE" ] && [ -s "$GRAIN_KONTUR_SSH_KEY_FILE" ]; then
-    existing="$GRAIN_KONTUR_SSH_KEY_FILE"
-  elif [ -s "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" ]; then
-    existing="$GRAIN_DATA_DIR/secrets/kontur-ssh-key"
-    existing_is_managed=1
-  fi
-
-  if [ -n "$existing" ]; then
-    KONTUR_SSH_PRIVATE_KEY="$(cat "$existing")"
-    KONTUR_SSH_PUBLIC_KEY="$(ssh-keygen -y -f "$existing" 2>/dev/null || true)"
-    if [ -n "$KONTUR_SSH_PUBLIC_KEY" ]; then
-      return
-    fi
-    KONTUR_SSH_PRIVATE_KEY=""
-    # $GRAIN_DATA_DIR/secrets/kontur-ssh-key is the slot this script
-    # alone ever writes (GRAIN_KONTUR_SSH_KEY_FILE, above, is always an
-    # operator's own explicit choice instead) -- so a corrupt file there
-    # can only be this script's own past mistake (bwsalmon/agents#543:
-    # seed_secret used to drop the trailing newline an OpenSSH private
-    # key needs). seed_secret's own never-overwrite contract means
-    # nothing would ever replace it on its own, wedging kontur off on
-    # every future run even after that bug is fixed -- so, but only when
-    # this run is about to build its own guest image right alongside it
-    # (no GRAIN_KONTUR_IMAGE_BUCKET/GRAIN_KONTUR_OCI_IMAGE pinning this
-    # host to a specific already-published keypair -- the same condition
-    # the generate-fresh path below already requires), move it aside and
-    # fall through to generate a fresh one instead of just giving up.
-    if [ "$existing_is_managed" = "1" ] && [ -z "$GRAIN_KONTUR_IMAGE_BUCKET" ] && [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
-      log "GRAIN_KONTUR_ENABLE=1 but $existing is not a valid SSH private key -- moving it aside and generating a fresh one"
-      mv -f "$existing" "$existing.invalid.$(date +%s)"
-    else
-      log "GRAIN_KONTUR_ENABLE=1 but $existing is not a valid SSH private key -- leaving kontur sandboxing off this run"
-      GRAIN_KONTUR_ENABLE=0
-      return
-    fi
-  fi
-
-  # A guest image built and published elsewhere (GRAIN_KONTUR_IMAGE_BUCKET
-  # set -- ensure_kontur_guest_fetch, not _build, is what this run will
-  # actually take) already has some specific public key baked into its
-  # authorized_keys. Generating a fresh one here would not match it --
-  # every kontur VM would then fail to SSH in with no clue why, since
-  # nothing checks the two still agree (this file's own header on that,
-  # and push-secrets.sh's). Only safe to generate one when this run is
-  # about to build its own guest image right alongside it
-  # (ensure_kontur_guest_build, below), which bakes in whatever key this
-  # function hands it.
-  #
-  # The bucket alone, not GRAIN_KONTUR_OCI_IMAGE too: the sandbox
-  # container carries no SSH key and is pulled either way now
-  # (bwsalmon/agents#645), so which one a deployment runs has nothing to
-  # say about whether a keypair can be generated here.
-  if [ -n "$GRAIN_KONTUR_IMAGE_BUCKET" ]; then
-    log "GRAIN_KONTUR_ENABLE=1 but no kontur SSH key is available -- set GRAIN_KONTUR_SSH_KEY_FILE, or push-secrets.sh's own GRAIN_KONTUR_SSH_KEY, to the private half of whatever keypair the guest image at GRAIN_KONTUR_IMAGE_BUCKET already has baked in; leaving kontur sandboxing off this run"
-    GRAIN_KONTUR_ENABLE=0
-    return
-  fi
-
-  log "No kontur SSH keypair yet -- generating one (its public half is baked into the guest image ensure_kontur_images builds next; no manual step needed)"
-  local tmp
-  tmp="$(mktemp -d)"
-  ssh-keygen -q -t ed25519 -N '' -f "$tmp/key" -C grain-kontur
-  KONTUR_SSH_PRIVATE_KEY="$(cat "$tmp/key")"
-  KONTUR_SSH_PUBLIC_KEY="$(cat "$tmp/key.pub")"
-  rm -rf "$tmp"
-}
-
 # kontur_image_tag names the guest image ensure_kontur_guest_build
 # builds and caches by hashing exactly what defines its contents:
 # packer/kontur's own git tree (guest-setup.sh and build-guest.sh -- the "startup
 # script" a guest image is provisioned from) and third_party/kontur's own
 # vendored git tree (the kontur binary and cloud-hypervisor version the
-# OCI image actually bakes in -- the "kontur version"), plus the operator
-# SSH public key (a different keypair means a different authorized_keys
-# baked into the guest disk). Any one of those changing -- a provision.sh
-# edit, a third_party/kontur vendor bump, a rotated keypair -- changes
+# OCI image actually bakes in -- the "kontur version"). The operator SSH
+# public key used to be hashed in here too, since it decided the guest's
+# authorized_keys; nothing about a key reaches the disk any more (kontur
+# generates one per boot -- see packer/kontur/guest-setup.sh's "No SSH key
+# is baked in"), so rotating one no longer forces a rebuild. Either tree
+# changing -- a guest-setup.sh edit, a third_party/kontur vendor bump -- changes
 # this tag, which is exactly what tells ensure_kontur_guest_build it has
 # to rebuild rather than reuse what is already on disk (bwsalmon/agents#531:
 # "name the image based on the hash of the startup script and kontur
@@ -1211,45 +1107,7 @@ kontur_image_tag() {
   local packer_tree tp_tree
   packer_tree="$(git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:packer/kontur" 2>/dev/null || echo unknown)"
   tp_tree="$(git -C "$GRAIN_SRC_DIR" rev-parse "HEAD:third_party/kontur" 2>/dev/null || echo unknown)"
-  printf '%s\n' "${packer_tree}:${tp_tree}:${KONTUR_SSH_PUBLIC_KEY}" | sha256sum | awk '{print $1}' | cut -c1-16
-}
-
-# ensure_kontur_images makes sure both artifacts a kontur VM needs are on
-# this host before write_systemd_units can wire up -kontur-create-arg with
-# anything real for `konturctl vm create` to find: the sandbox container
-# the VM runs inside, and the guest disk it boots.
-#
-# It used to build both, from this checkout, on every host
-# (bwsalmon/agents#531 made that the default so a first deploy did not
-# fail for want of images nobody had published). bwsalmon/agents#645 split
-# them: the container is pulled, the disk is still built. The function
-# itself now just says which is which -- the two ensure_ functions below
-# carry the reasoning.
-
-# ensure_kontur_exec_key copies the deployment's kontur SSH private key
-# into GRAIN_KONTUR_IMAGES_HOSTPATH, which konturctl mounts read-only at
-# /images inside every VM container it starts. That is where `kontur exec`
-# reads it from (-kontur-exec-key, below): the daemon reaches a sandbox
-# guest by exec'ing into that VM's own container, so the key has to be
-# readable *there*, not on the host where the daemon runs.
-#
-# It is the same key ensure_kontur_ssh_key already generated and
-# packer/kontur/guest-setup.sh already baked into the guest's own
-# authorized_keys -- copied, not moved, since $GRAIN_DATA_DIR/secrets
-# remains where the deployment's own copy lives.
-ensure_kontur_exec_key() {
-  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
-    return
-  fi
-  if [ ! -s "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" ]; then
-    log "kontur exec key: $GRAIN_DATA_DIR/secrets/kontur-ssh-key is missing or empty -- leaving kontur sandboxing off this run"
-    GRAIN_KONTUR_ENABLE=0
-    return
-  fi
-  install -d -m 0755 "$GRAIN_KONTUR_IMAGES_HOSTPATH"
-  install -m 0600 "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" \
-    "$GRAIN_KONTUR_IMAGES_HOSTPATH/$GRAIN_KONTUR_EXEC_KEY_NAME"
-  log "kontur exec key staged at $GRAIN_KONTUR_IMAGES_HOSTPATH/$GRAIN_KONTUR_EXEC_KEY_NAME (/images/$GRAIN_KONTUR_EXEC_KEY_NAME in each VM container)"
+  printf '%s\n' "${packer_tree}:${tp_tree}" | sha256sum | awk '{print $1}' | cut -c1-16
 }
 
 ensure_kontur_images() {
@@ -1401,7 +1259,6 @@ ensure_kontur_guest_build() {
     local tmp_out
     tmp_out="$(mktemp -d)"
     if ! env \
-        OPERATOR_SSH_PUBLIC_KEY="$KONTUR_SSH_PUBLIC_KEY" \
         SANDBOX_SETUP_SCRIPT="" \
         OUTPUT_DIR="$tmp_out" \
         "$GRAIN_SRC_DIR/packer/kontur/build-guest.sh"; then
@@ -1539,20 +1396,6 @@ ensure_kontur_git_proxy_host() {
   log "kontur git proxy host defaulted to docker bridge gateway $GRAIN_KONTUR_GIT_PROXY_HOST"
 }
 
-# seed_kontur_ssh_key writes KONTUR_SSH_PRIVATE_KEY -- found or generated
-# by ensure_kontur_ssh_key, above, well before $GRAIN_DATA_DIR/secrets
-# necessarily existed to write it into -- to
-# $GRAIN_DATA_DIR/secrets/kontur-ssh-key, the same never-overwrite
-# contract seed_secret gives every other plain-file secret -- reused
-# directly here since an SSH private key is just another multi-line
-# value, nothing seed_secret's own printf '%s' needs to treat specially.
-seed_kontur_ssh_key() {
-  if [ "$GRAIN_KONTUR_ENABLE" != "1" ]; then
-    return
-  fi
-  seed_secret "$GRAIN_DATA_DIR/secrets/kontur-ssh-key" "$KONTUR_SSH_PRIVATE_KEY"
-}
-
 # --- 6. data directory and secrets --------------------------------------
 
 seed_secret() {
@@ -1563,15 +1406,16 @@ seed_secret() {
   #
   # Trailing newline appended deliberately: $2 reaches every caller
   # through at least one layer of "$(...)" command substitution (here,
-  # in ensure_kontur_ssh_key, in files/deploy.sh reading metadata --
-  # bash strips every trailing newline doing that), so without adding
-  # one back a multi-line PEM/OpenSSH-format value -- kontur-ssh-key
-  # chief among them -- is written one newline short of what it started
-  # as. ssh-keygen/ssh both refuse to parse an OpenSSH private key
-  # missing its final newline ("error in libcrypto", no clearer
-  # message), which is exactly what made ensure_kontur_ssh_key call its
-  # own freshly-generated, self-seeded key invalid on every later run
-  # (bwsalmon/agents#543). Harmless for every other seed_secret caller
+  # in files/deploy.sh reading metadata -- bash strips every trailing
+  # newline doing that), so without adding one back a multi-line
+  # PEM/OpenSSH-format value is written one newline short of what it
+  # started as. ssh-keygen/ssh both refuse to parse an OpenSSH private
+  # key missing its final newline ("error in libcrypto", no clearer
+  # message), which is what made the kontur SSH key this script used to
+  # generate and seed invalid on every later run (bwsalmon/agents#543).
+  # That key is gone -- kontur generates its own per boot now -- but the
+  # GCP minter key is written through here the same way and would hit
+  # exactly the same thing. Harmless for every other seed_secret caller
   # (github token, gemini-api-key): both are read with strings.TrimSpace
   # (pkg/gitproxy/credentials.go, cmd/grain/daemon.go's own
   # readTrimmedFile).
@@ -1696,8 +1540,6 @@ setup_data_dir() {
   seed_gcp_minter_key
 
   mint_gemini_operating_key
-
-  seed_kontur_ssh_key
 
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ]; then
     log "  no GitHub credential configured yet -- set GRAIN_GITHUB_TOKEN, or all three of"
@@ -2049,8 +1891,8 @@ write_systemd_units() {
   # KonturSandboxes over HostSandboxes (cmd/grain/daemon.go's run()); the
   # VM name itself is not configurable, since a VM name has 11 bytes to
   # live in and a run id needs nine of them (orchestrator.VMNamePrefix) --
-  # only ever passed once ensure_kontur_images/ensure_kontur_kvm_access/
-  # seed_kontur_ssh_key have all actually succeeded this run (each resets
+  # only ever passed once ensure_kontur_images/ensure_kontur_kvm_access
+  # have both actually succeeded this run (each resets
   # GRAIN_KONTUR_ENABLE to 0 on its own failure), so a host that cannot
   # yet dispatch onto a real VM keeps dispatching into host directories
   # instead of installing a daemon that would fail every task. -backend
@@ -2080,7 +1922,6 @@ write_systemd_units() {
     daemon_args+=(
       -kontur-sandboxes
       -kontur-ssh-user "$GRAIN_KONTUR_SSH_USER"
-      -kontur-exec-key "/images/$GRAIN_KONTUR_EXEC_KEY_NAME"
       -kontur-workspace "$GRAIN_KONTUR_WORKSPACE"
       -kontur-net "$GRAIN_KONTUR_NET"
       -kontur-git-proxy-host "$GRAIN_KONTUR_GIT_PROXY_HOST"
@@ -2091,6 +1932,13 @@ write_systemd_units() {
       -kontur-create-arg -initramfs -kontur-create-arg /images/current/initrd.img
       -kontur-create-arg -disk-readonly=false
       -kontur-create-arg -disk-hostpath -kontur-create-arg "$GRAIN_KONTUR_DISK_HOSTPATH"
+      # kontur authorizes this boot's generated key for root; the daemon
+      # execs as GRAIN_KONTUR_SSH_USER, so that account has to be named
+      # too. One flag rather than two settings: konturctl puts it on the
+      # VM container as KONTUR_EXEC_USER, where `kontur run` reads it to
+      # authorize the account and `kontur exec` reads it to log in as, so
+      # the two cannot disagree.
+      -kontur-create-arg -guest-user -kontur-create-arg "$GRAIN_KONTUR_SSH_USER"
     )
     # Addressing and the forwarded guest port are NAT-mode concerns: flat
     # mode takes its address from docker, and konturctl rejects "-ip"
@@ -2467,12 +2315,6 @@ main() {
   # After ensure_user: the wrappers run the image as that account, so it
   # has to exist to have a uid to run as.
   install_cli_wrappers
-  # Before setup_data_dir, which seeds the key it finds or generates into
-  # the secrets directory (seed_kontur_ssh_key), and before
-  # ensure_kontur_images, whose guest build bakes its public half in.
-  # Reads and writes no store of its own -- ssh-keygen and a file, so it
-  # needs nothing that comes after it.
-  ensure_kontur_ssh_key
   setup_sandbox_dir
   # Ahead of every step below that runs the `grain` CLI: that CLI is a
   # `docker run` with $GRAIN_DATA_DIR bind-mounted (install_cli_wrappers),
@@ -2484,11 +2326,6 @@ main() {
   ensure_kontur_images
   ensure_kontur_kvm_access
   ensure_kontur_git_proxy_host
-  # After setup_data_dir: seed_kontur_ssh_key, which it calls, is what
-  # actually writes $GRAIN_DATA_DIR/secrets/kontur-ssh-key -- the key this
-  # then stages into the images directory for `kontur exec` to read from
-  # inside each VM container.
-  ensure_kontur_exec_key
   reformat_store_if_schema_changed
   format_target_repo_if_empty
   # After setup_data_dir: this writes into $GRAIN_DATA_DIR, and it has to

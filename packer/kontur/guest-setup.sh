@@ -29,15 +29,12 @@
 #
 # Inputs, both as environment variables rather than files (nothing here is
 # ever written into this repo):
-#   OPERATOR_SSH_PUBLIC_KEY  required. The public half of the deployment's
-#                            kontur keypair (v2/scripts/setup.sh's
-#                            ensure_kontur_ssh_key), authorized for the
-#                            "debian" account this creates. Its private
-#                            half is what -kontur-exec-key names inside a
-#                            VM's container.
 #   SANDBOX_SETUP_SCRIPT     optional. An operator's own extra
-#                            customization, run after everything below but
-#                            before the operator key is installed.
+#                            customization, run after everything below.
+#
+# Notably no SSH key: see "No SSH key is baked in" at the bottom. This
+# image is generic, and every VM booted from it authorizes a different
+# key that kontur generates at boot.
 #
 # What this deliberately does NOT do, because kontur's own guest stage
 # already does it: install openssh-server/systemd-sysv/iproute2/acpid,
@@ -293,9 +290,7 @@ PasswordAuthentication no
 EOF
 
 # --- Optional operator-supplied customization, run once everything above
-# has finished but before the operator key below -- so a custom script can
-# rely on all of it being in place, and cannot interfere with that
-# finalization by leaving its own stray authorized_keys entry.
+# has finished, so a custom script can rely on all of it being in place.
 if [ -n "${SANDBOX_SETUP_SCRIPT:-}" ]; then
   script="$(mktemp)"
   printf '%s\n' "${SANDBOX_SETUP_SCRIPT}" > "${script}"
@@ -304,17 +299,27 @@ if [ -n "${SANDBOX_SETUP_SCRIPT:-}" ]; then
   rm -f "${script}"
 fi
 
-# --- The operator's SSH key, baked in rather than injected. The public
-# half only; the private half is what the daemon hands `kontur exec`
-# inside a VM's container (-kontur-exec-key).
-[ -n "${OPERATOR_SSH_PUBLIC_KEY:-}" ] || {
-  echo "guest-setup.sh: OPERATOR_SSH_PUBLIC_KEY is empty -- refusing to ship an image no one can reach" >&2
-  exit 1
-}
+# --- No SSH key is baked in, and that is the point.
+#
+# This used to install OPERATOR_SSH_PUBLIC_KEY -- the public half of a
+# keypair v2/scripts/setup.sh generated per deployment -- as the debian
+# account's only authorized_keys entry. That is what made a guest image
+# deployment-specific, and so what stopped a published one from existing:
+# a generic disk would have carried either a private key everybody has or
+# no way in at all.
+#
+# kontur now generates a keypair in the VM's own container on every boot
+# and hands the guest the public half on the kernel command line, which
+# kontur-authorized-key installs before sshd starts (third_party/kontur's
+# internal/guestkey). The account it installs for is named by
+# `konturctl vm create -guest-user`, which setup.sh passes as "debian" --
+# the account created above. So nothing here has to know a key at all,
+# and every VM gets a different one that exists only while it runs.
+#
+# The .ssh directory is still created here: the guest-side installer
+# creates it too, but leaving it to that would mean an image whose only
+# correct permissions came from a script that had not run yet.
 install -d -m0700 -o debian -g debian /home/debian/.ssh
-printf '%s\n' "${OPERATOR_SSH_PUBLIC_KEY}" > /home/debian/.ssh/authorized_keys
-chmod 0600 /home/debian/.ssh/authorized_keys
-chown debian:debian /home/debian/.ssh/authorized_keys
 
 # initramfs-tools' hooks bake a snapshot of /etc/udev's rules and
 # /etc/modules-load.d into the initramfs when update-initramfs runs. The

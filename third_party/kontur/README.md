@@ -371,8 +371,8 @@ all, for the common case of an interactive shell or a single `-c
 | Variable                      | Required | Default                          | Description |
 |--------------------------------|:--------:|-----------------------------------|--------------|
 | `KONTUR_EXEC_ADDR`             | yes      | —                                 | The guest's own address, e.g. `169.254.100.2:22` -- the same address `CHV_CMDLINE`'s `ip=` configures on the guest, reachable directly since this container shares netshim's network namespace (see "Pod-local networking" below). `konturctl vm` sets this automatically. |
-| `KONTUR_EXEC_USER`             | no       | `root`                            | The guest account to log in as. |
-| `KONTUR_EXEC_KEY`              | no       | `/etc/kontur/exec_id_ed25519`     | Private key authorized on the guest for `KONTUR_EXEC_USER`. The default is a keypair generated at image build time (see the Dockerfile's `exec-keypair` stage) and authorized on the reference guest image regardless of `GUEST_SSH_AUTHORIZED_KEY`; a custom `CHV_DISK_IMAGE` needs to authorize the same public key itself (or point this at a key it does authorize) for `kontur exec` to work against it. |
+| `KONTUR_EXEC_USER`             | no       | `root`                            | The guest account to log in as. `konturctl vm create -guest-user` sets this, and does so on the VM container rather than only on the exec, because `kontur run` reads the same variable to tell the guest which account to authorize this boot's generated key for -- one setting for both halves, since a key authorized for an account nobody logs in as is as useless as a login with no key. |
+| `KONTUR_EXEC_KEY`              | no       | `/etc/kontur/exec_id_ed25519`     | Private key authorized on the guest for `KONTUR_EXEC_USER`. The default is written there by `kontur run`, which generates a fresh keypair for each guest it boots and passes the public half on the kernel command line (see `internal/guestkey`); the reference guest image installs it before sshd starts. A custom `CHV_DISK_IMAGE` either carries the same `kontur-authorized-key` service, or authorizes a key of its own and points this at its private half. |
 | `KONTUR_EXEC_CONNECT_TIMEOUT`  | no       | `30s` (Go duration syntax)        | How long to keep retrying the initial connection -- the guest's `sshd` may not be up yet immediately after the container starts. |
 
 This depends on `CHV_NET` actually giving the guest a reachable address
@@ -510,9 +510,9 @@ a separate log shipper inside it. See
 [`deploy/guest-image/README.md`](deploy/guest-image/README.md) for
 exactly how (the `ForceCommand`/`script` wrapper), how to get SSH access
 at all (root has no password; `GUEST_SSH_AUTHORIZED_KEY` bakes in a key
-at build time, alongside a keypair generated for `kontur exec`'s own use
--- see "Execing into a VM" above), and how host keys avoid being shared
-across every VM booted from the image.
+at build time, alongside the per-boot keypair `kontur run` generates for
+`kontur exec`'s own use -- see "Execing into a VM" above), and how host
+keys avoid being shared across every VM booted from the image.
 
 The kernel baked in alongside it, at `/var/lib/kontur/guest/vmlinux`
 (built by the `Dockerfile`'s `fetch-kernel` stage), is a pinned

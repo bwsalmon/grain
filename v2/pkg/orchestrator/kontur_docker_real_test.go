@@ -139,10 +139,17 @@ func buildKonturDockerImage(t *testing.T) (image string) {
 // `docker build` against third_party/kontur's Dockerfile, which
 // debootstraps the rootfs and packs it with `mke2fs -d` inside the build,
 // with packer/kontur/guest-setup.sh handed to its GUEST_SETUP_SCRIPT hook
-// to add git/build tooling/docker/gcloud/terraform and this test's own
-// throwaway SSH keypair -- and returns the directory holding the
-// kernel/initramfs/disk triple konturctl's own -kernel/-initramfs/-disk
-// flags point at directly, plus the matching private key's path.
+// to add git/build tooling/docker/gcloud/terraform -- and returns the
+// directory holding the kernel/initramfs/disk triple konturctl's own
+// -kernel/-initramfs/-disk flags point at directly.
+//
+// No SSH key goes into it. This helper used to generate a throwaway
+// keypair and hand build-guest.sh the public half as
+// OPERATOR_SSH_PUBLIC_KEY, because that was the only entry in the guest's
+// authorized_keys. kontur now generates a keypair inside each VM's own
+// container at boot and hands the guest the public half on the kernel
+// command line (bwsalmon/kontur#35), so the image this builds carries no
+// key and the callers below configure no ExecKeyPath.
 //
 // OUTPUT_DIR is what makes that directory this function's own to name:
 // build-guest.sh writes "vmlinuz"/"initrd.img"/"disk.img" straight into
@@ -154,38 +161,19 @@ func buildKonturDockerImage(t *testing.T) (image string) {
 // Cached under a stable directory beneath os.TempDir(), like
 // fetchTestKernel used to: the rootfs build plus ~120MB of package
 // downloads is the most expensive single step in this whole test, and
-// neither the packages nor the baked-in key need to change between runs
-// of an already-expensive, opt-in test. docker's own layer cache does not
-// replace this one -- guest-setup.sh's text carries a keypair regenerated
-// on every cache miss, so the stage running it re-runs whenever this
-// directory is cold.
-func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
+// nothing in it needs to change between runs of an already-expensive,
+// opt-in test. Now that no per-run key is baked in, docker's own layer
+// cache would mostly cover this too -- the guest-setup.sh text is the
+// same on every run -- but this directory is also what OUTPUT_DIR points
+// at, so it stays.
+func buildKonturGuestImage(t *testing.T) (imagesDir string) {
 	t.Helper()
 	imagesDir = filepath.Join(os.TempDir(), "grain-kontur-e2e-test-guest-image")
-	sshKeyPath = filepath.Join(imagesDir, "id_ed25519")
 	if _, err := os.Stat(filepath.Join(imagesDir, "disk.img")); err == nil {
-		return imagesDir, sshKeyPath
+		return imagesDir
 	}
 	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
 		t.Fatalf("creating guest image cache directory: %v", err)
-	}
-	// disk.img above is the only thing that marks this directory's cache
-	// as valid, so a run interrupted after the keypair below but before
-	// disk.img is written (a timeout, a panic, a killed process) leaves a
-	// stale keypair behind with nothing to show for it. Without removing
-	// it first, ssh-keygen finds a file already at sshKeyPath and prompts
-	// "Overwrite (y/n)?" on a stdin this test gives it none of, so it
-	// fails immediately -- and every run after the interrupted one fails
-	// the exact same way, forever, until someone clears os.TempDir() by
-	// hand.
-	_ = os.Remove(sshKeyPath)
-	_ = os.Remove(sshKeyPath + ".pub")
-	if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", sshKeyPath, "-q").CombinedOutput(); err != nil {
-		t.Fatalf("generating a throwaway SSH keypair: %v\n%s", err, out)
-	}
-	pub, err := os.ReadFile(sshKeyPath + ".pub")
-	if err != nil {
-		t.Fatalf("reading generated SSH public key: %v", err)
 	}
 
 	packerKonturDir, err := filepath.Abs("../../../packer/kontur")
@@ -201,7 +189,6 @@ func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
 	// the assertions below then run against. build-guest.sh treats both
 	// as unset when empty.
 	cmd.Env = append(os.Environ(),
-		"OPERATOR_SSH_PUBLIC_KEY="+string(pub),
 		"OUTPUT_DIR="+imagesDir,
 		"KONTUR_IMAGE_BUCKET=",
 		"SANDBOX_SETUP_SCRIPT=",
@@ -220,24 +207,7 @@ func buildKonturGuestImage(t *testing.T) (imagesDir, sshKeyPath string) {
 			t.Fatalf("build-guest.sh reported success but %s is not in OUTPUT_DIR (%s): %v\n%s", name, imagesDir, err, out)
 		}
 	}
-	return imagesDir, sshKeyPath
-}
-
-// execKeyPathIn renders where a key sitting in the host's images
-// directory shows up inside a VM's container: internal/dockervm mounts
-// that directory read-only at /images, so the private key
-// KonturConfig.ExecKeyPath names needs no copying and no extra mount --
-// buildKonturGuestImage already generates its throwaway keypair there.
-//
-// It fails the test rather than guessing if the two ever stop being the
-// same place: the failure that would otherwise produce is an
-// authentication error deep inside a guest, which says nothing about why.
-func execKeyPathIn(t *testing.T, imagesHostPath, sshKeyPath string) string {
-	t.Helper()
-	if got, want := filepath.Dir(sshKeyPath), imagesHostPath; got != want {
-		t.Fatalf("guest image helper put its SSH key in %s, want it inside the images directory %s that gets mounted at /images -- ExecKeyPath depends on those being the same place", got, want)
-	}
-	return "/images/" + filepath.Base(sshKeyPath)
+	return imagesDir
 }
 
 // TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently is the
@@ -270,7 +240,7 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 
 	konturctlDir := buildKonturctl(t)
 	image := buildKonturDockerImage(t)
-	imagesHostPath, sshKeyPath := buildKonturGuestImage(t)
+	imagesHostPath := buildKonturGuestImage(t)
 
 	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -284,6 +254,11 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 			"-kernel", "/images/vmlinuz",
 			"-initramfs", "/images/initrd.img",
 			"-guest-port", "22",
+			// kontur authorizes this boot's generated key for root; the
+			// account SSHUser names has to be named too, or `kontur exec`
+			// logs in as someone the guest never authorized. Same flag
+			// v2/scripts/setup.sh passes in a real deployment.
+			"-guest-user", "debian",
 			// -disk-readonly=false/-disk-hostpath give each VM its own
 			// private writable qcow2 overlay (one subdirectory per VM
 			// name under -disk-hostpath, so the two slots' VMs sharing
@@ -301,7 +276,6 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 			"-disk-hostpath", t.TempDir(),
 		},
 		SSHUser:           "debian",
-		ExecKeyPath:       execKeyPathIn(t, imagesHostPath, sshKeyPath),
 		Workspace:         "/home/debian",
 		ReadyTimeout:      3 * time.Minute,
 		ReadyPollInterval: time.Second,
@@ -455,18 +429,17 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 // this test exists for, all of which depends on code neither this repo
 // nor its fakes own:
 //
-//   - That `kontur exec` authenticates against *this* guest image at all.
-//     bwsalmon/kontur's own Dockerfile generates a dedicated keypair and
-//     authorizes it on the guest rootfs that same Dockerfile builds
-//     (its exec-keypair stage), but a grain deployment never boots that
-//     guest -- packer/kontur/build-guest.sh's output is what -disk points
-//     at, and there the operator key is the only authorized_keys entry on
-//     the "debian" account SSHUser names (guest-setup.sh writes it; the
-//     kontur exec keypair that stage authorizes lands on root instead).
-//     So this transport only works here because KONTUR_EXEC_KEY can be
-//     pointed at a key the guest does authorize, which is a claim about
-//     kontur's env handling and this image's authorized_keys that only a
-//     real run can settle.
+//   - That `kontur exec` authenticates against *this* guest image at all,
+//     with no key configured anywhere. Since bwsalmon/kontur#35 that
+//     rests on a chain nothing here owns and no fake can stand in for:
+//     `kontur run` generates a keypair in the VM's container, appends the
+//     public half to the guest's kernel command line, and the guest's own
+//     kontur-authorized-key service decodes it and installs it -- for
+//     root, and for the account "-guest-user debian" names, before sshd
+//     starts. Every link has to hold, and a break in any of them looks
+//     identical from here: a guest that never becomes reachable. This is
+//     the only test that can tell them apart from each other, or from a
+//     guest that simply booted slowly.
 //   - That KONTUR_EXEC_ADDR is really set, by the real internal/dockervm,
 //     to somewhere the guest really answers on. Everything else here
 //     rests on it, and nothing in this repo sets it.
@@ -486,20 +459,9 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 
 	konturctlDir := buildKonturctl(t)
 	image := buildKonturDockerImage(t)
-	imagesHostPath, sshKeyPath := buildKonturGuestImage(t)
+	imagesHostPath := buildKonturGuestImage(t)
 
 	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	// buildKonturGuestImage generates its throwaway keypair *into*
-	// imagesHostPath, and internal/dockervm mounts that same directory
-	// read-only at /images in every VM container it starts -- so the
-	// private key ExecKeyPath names is already somewhere the
-	// container can read it, with nothing to copy and no mount to add.
-	// That is the same arrangement KonturConfig.ExecKeyPath's own
-	// doc comment recommends to a real deployment, exercised here rather
-	// than only described.
-	//
-	execKey := execKeyPathIn(t, imagesHostPath, sshKeyPath)
 
 	stateDir := t.TempDir()
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
@@ -516,6 +478,11 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// installs the rule either way, so leaving it wrong would
 			// only mean building a VM whose forwarded port goes nowhere.
 			"-guest-port", "22",
+			// kontur authorizes this boot's generated key for root; the
+			// account SSHUser names has to be named too, or `kontur exec`
+			// logs in as someone the guest never authorized. Same flag
+			// v2/scripts/setup.sh passes in a real deployment.
+			"-guest-user", "debian",
 			// No -ip/-port: this VM is built in flat mode (KonturConfig's
 			// own default since 7a58bec), where the container runtime
 			// assigns the address the guest takes over and konturctl
@@ -547,7 +514,6 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			"-disk-hostpath", t.TempDir(),
 		},
 		SSHUser:           "debian",
-		ExecKeyPath:       execKey,
 		Workspace:         "/home/debian",
 		ReadyTimeout:      3 * time.Minute,
 		ReadyPollInterval: time.Second,

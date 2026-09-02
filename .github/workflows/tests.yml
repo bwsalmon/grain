@@ -1,13 +1,19 @@
 # The unit suite, on every pull request and every push to main.
 #
 # Runs the whole of `tests/` unscoped, which is safe here and only here:
-# the live suites gate themselves on `/dev/kvm`, `qemu:///system`, a
-# `br-grain` bridge and a reachable netfilter, none of which a hosted
-# runner has, so they skip rather than run. The README's warning that an
-# unscoped `pytest` will destroy a running cluster is about a host that
-# has one up -- a fresh runner has nothing to destroy. Scoping the run to
-# a hand-maintained file list instead would just mean a new unit suite
+# the live suites gate themselves on `qemu:///system`, a `br-grain`
+# bridge and a reachable netfilter, none of which a hosted runner has, so
+# they skip rather than run. The README's warning that an unscoped
+# `pytest` will destroy a running cluster is about a host that has one up
+# -- a fresh runner has nothing to destroy. Scoping the run to a
+# hand-maintained file list instead would just mean a new unit suite
 # silently going untested the day someone forgets to add it.
+#
+# `/dev/kvm` used to be on that list of things "a hosted runner has none
+# of". It is not: GitHub's Linux runners expose it (nested virtualization
+# on their Azure hosts), and the real-vm job below boots actual guests on
+# it. That mistaken belief is why v2/pkg/orchestrator's real-VM suite sat
+# skipping for its whole life while reading as coverage -- see that job.
 #
 # Nothing here holds a credential: `contents: read`, no secrets, no
 # environment. That is deliberate rather than incidental. `pull_request`
@@ -96,9 +102,15 @@ jobs:
         run: go vet ./...
 
       # gitproxy's live_test.go and e2e's live_test.go each gate themselves
-      # (missing `git`, unset GEMINI_API_KEY) the same way the pytest job's
-      # live suites gate on /dev/kvm and friends -- they skip on a runner
-      # that has none of that rather than failing.
+      # (missing `git`, unset GEMINI_API_KEY) the same way the pytest
+      # job's live suites gate on a libvirt connection and friends -- they
+      # skip on a runner that has none of that rather than failing.
+      #
+      # pkg/orchestrator's own real-VM tests gate on /dev/kvm and so skip
+      # here too, but only because this step gives them no docker daemon
+      # to build against in the time it has -- the real-vm job below runs
+      # them for real. Do not read this step's "ok" for that package as
+      # covering them.
       - name: Test
         working-directory: v2
         run: go test ./...
@@ -135,6 +147,87 @@ jobs:
       - name: Test e2e
         working-directory: v2
         run: make test-e2e
+
+  # Boots real cloud-hypervisor VMs under real KVM and drives them the way
+  # the daemon does -- v2/pkg/orchestrator/kontur_docker_real_test.go, the
+  # only test that covers the sandbox path end to end.
+  #
+  # It gates on /dev/kvm, and for its whole life nothing gave it one, so
+  # it never ran: `go test ./...` in go-test above reports "ok" for that
+  # package with both real tests skipped, which reads exactly like
+  # coverage and is not. What that cost, concretely: bwsalmon/kontur#35
+  # moved the guest's SSH keypair from build time to boot time, and left
+  # this test handing build-guest.sh an OPERATOR_SSH_PUBLIC_KEY that no
+  # longer existed and pointing ExecKeyPath at a key no guest would
+  # authorize. Every VM it built would have come up unreachable. Nothing
+  # reported it; it was found by reading the test. A silent skip is worse
+  # than no test, because it is mistaken for one.
+  #
+  # A separate job rather than a step in go-test, for the same reason
+  # ui-e2e is one: it wants a docker daemon and several minutes of guest
+  # build, and failing independently says which half broke. It is not
+  # path-filtered -- it costs about as long as go-test itself (~5.5
+  # minutes, most of it the guest rootfs), and a suite that only runs when
+  # someone predicted it was relevant is most of the way back to one that
+  # never runs.
+  real-vm:
+    name: v2 (real KVM sandboxes)
+    runs-on: ubuntu-latest
+    # The guest rootfs build dominates this: debootstrap plus the package
+    # set guest-setup.sh installs, before any VM boots at all.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: v2/go.mod
+
+      # The whole point of the job. konturDockerRealTestPrereqs skips on a
+      # missing /dev/kvm, so without this the suite would quietly do
+      # nothing and this job would pass -- the exact failure it exists to
+      # make impossible.
+      - name: Require KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is not present on this runner, so the suite below would skip rather than run. A green tick here would mean nothing." >&2
+            exit 1
+          fi
+          ls -l /dev/kvm
+          docker version
+          command -v ssh-keygen
+
+      # -count=1 so a cached "ok" from an earlier skip can never stand in
+      # for a real run. -v because when a guest fails to come up, the
+      # per-step log is the only account of how far it got.
+      - name: Real KVM sandbox suite
+        working-directory: v2
+        run: |
+          go test ./pkg/orchestrator/ \
+            -run 'TestKonturSandboxesAgainstARealDockerBackedVM|TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently' \
+            -count=1 -v -timeout 40m 2>&1 | tee /tmp/kontur-vm.log
+          # `go test` reports "ok" both for a package whose selected tests
+          # all skipped and for one where -run matched nothing at all, so
+          # neither shows up as a failure on its own. Assert the two tests
+          # actually ran, by name.
+          for t in TestKonturSandboxesAgainstARealDockerBackedVM \
+                   TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently; do
+            if ! grep -q -- "--- PASS: $t" /tmp/kontur-vm.log; then
+              echo "::error::$t did not run and pass; this job only means something when both do" >&2
+              exit 1
+            fi
+          done
+
+      # A guest that never becomes reachable says so only on its console,
+      # which the VM container's own logs carry.
+      - name: Guest consoles on failure
+        if: failure()
+        run: |
+          for c in $(docker ps -aq --filter 'name=kontur-vm-'); do
+            echo "===== $(docker inspect -f '{{.Name}}' "$c") ====="
+            docker logs "$c" 2>&1 | tail -100
+          done
 
   # The two Terraform modules -- v1's controller-plus-sandbox-pool
   # (terraform/gcp) and v2's staging environment (terraform/gcp-v2) --
