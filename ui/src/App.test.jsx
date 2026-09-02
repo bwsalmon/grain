@@ -56,17 +56,19 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
     if (path === "/api/schedules" && method === "GET") return Promise.resolve(schedulesState);
     if (path === "/api/schedules" && method === "POST") {
       const body = JSON.parse(opts.body);
-      // A templateId, given, drives title/repo/etc the same way
+      // A templateId, given, drives title/description/etc the same way
       // ui.Client.CreateSchedule does server-side (schedules.go's own
       // scheduleContentFromTemplate) -- the fake needs to reproduce that
       // so a test creating a template-backed schedule sees the same
-      // content a real server would hand back.
+      // content a real server would hand back. Repo and base are never
+      // among them (a template carries no target of its own), so they
+      // always come from body, template or not.
       const fromTemplate = body.templateId ? templatesState.find((t) => t.id === body.templateId) : null;
       const newSchedule = {
         id: "sched-2", enabled: true, nextRunAt: "2026-08-30T00:00:00Z",
         ...(fromTemplate && {
-          title: fromTemplate.title, description: fromTemplate.description, repo: fromTemplate.repo,
-          base: fromTemplate.base, autoMerge: fromTemplate.autoMerge, capabilities: fromTemplate.capabilities,
+          title: fromTemplate.title, description: fromTemplate.description,
+          autoMerge: fromTemplate.autoMerge, capabilities: fromTemplate.capabilities,
           templateId: fromTemplate.id, templateName: fromTemplate.name,
         }),
         ...body,
@@ -353,7 +355,7 @@ describe("App", () => {
   });
 
   it("switches to the templates pane, showing its own list and count in the sidebar", async () => {
-    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", repo: "acme/widgets", base: "", autoMerge: false, capabilities: [] };
+    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", autoMerge: false, capabilities: [] };
     setupApi(initialTasks, [], [template]);
     const user = userEvent.setup();
     render(<App />);
@@ -367,7 +369,7 @@ describe("App", () => {
   });
 
   it("creates a schedule from a template, hiding the content fields", async () => {
-    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", repo: "acme/widgets", base: "", autoMerge: false, capabilities: [] };
+    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", autoMerge: false, capabilities: [] };
     setupApi(initialTasks, [], [template]);
     const user = userEvent.setup();
     render(<App />);
@@ -382,6 +384,7 @@ describe("App", () => {
 
     expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
     expect(screen.getByText(/come from the selected template/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
 
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 

@@ -20,7 +20,6 @@ func template(id string) model.TaskTemplate {
 		Name:      "Dependency bump",
 		Title:     "Bump dependencies",
 		Body:      "Bump every dependency to its latest patch release.",
-		Target:    model.RepoRef{Owner: "owner", Name: "payments-api"},
 		CreatedAt: now,
 	}
 }
@@ -28,7 +27,6 @@ func template(id string) model.TaskTemplate {
 func TestTaskTemplateRoundTrips(t *testing.T) {
 	store, _, ctx := openStore(t)
 	want := template("template-1")
-	want.Base = "main"
 	want.AutoMerge = true
 	want.Reads = []model.RepoRef{{Owner: "owner", Name: "shared-lib"}}
 	want.Grants = []model.Grant{{Capability: "web-search", Via: model.GrantByLabel}}
@@ -43,10 +41,7 @@ func TestTaskTemplateRoundTrips(t *testing.T) {
 	if got.Name != want.Name || got.Title != want.Title || got.Body != want.Body {
 		t.Errorf("text did not survive: %+v", got)
 	}
-	if got.Target != want.Target {
-		t.Errorf("target = %+v, want %+v", got.Target, want.Target)
-	}
-	if got.Base != "main" || !got.AutoMerge {
+	if !got.AutoMerge {
 		t.Errorf("declared fields did not survive: %+v", got)
 	}
 	if len(got.Reads) != 1 || got.Reads[0] != want.Reads[0] {
@@ -252,5 +247,64 @@ func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
 	withTemplate.TemplateID = &id
 	if err := store.PutScheduledTask(ctx, withTemplate); err != nil {
 		t.Fatalf("put with a template id after migrating: %v", err)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns
+// simulates a database built while task_template still carried its own
+// target_owner/target_name/base (model.TaskTemplate's own doc comment on
+// why they moved out) directly rather than through Store, and checks
+// Store.Init's own migration step (ensureTaskTemplateNoTargetColumns)
+// drops those three columns without disturbing the rest of the row --
+// store_test.go's own TestInitMigratesAnExistingDatabaseWithNamedSlots
+// pattern, applied to a drop with no data to backfill anywhere else.
+func TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_template`"+` (
+  `+"`id`"+`           TEXT     NOT NULL,
+  `+"`name`"+`         TEXT     NOT NULL,
+  `+"`title`"+`        TEXT     NOT NULL,
+  `+"`body`"+`         TEXT     NOT NULL,
+  `+"`target_owner`"+` TEXT     NOT NULL,
+  `+"`target_name`"+`  TEXT     NOT NULL,
+  `+"`base`"+`         TEXT     NULL,
+  `+"`auto_merge`"+`   INTEGER  NOT NULL,
+  `+"`created_at`"+`   DATETIME NOT NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-target-removal task_template table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_template` (`id`,`name`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
+			"`auto_merge`,`created_at`) VALUES "+
+			"('template-1','Dependency bump','Bump dependencies','Bump every dependency.','owner','payments-api',NULL,0,?)",
+		now); err != nil {
+		t.Fatalf("seeding a pre-target-removal template row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database with task_template.target_owner: %v", err)
+	}
+
+	got, err := store.GetTaskTemplate(ctx, "template-1")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.Name != "Dependency bump" || got.Title != "Bump dependencies" {
+		t.Fatalf("got %+v, want the pre-existing row intact", got)
+	}
+
+	// The old columns are gone, not merely ignored -- PutTaskTemplate
+	// stops supplying them, so target_owner/target_name would otherwise
+	// fail every write with a NOT NULL constraint violation.
+	if err := store.PutTaskTemplate(ctx, template("template-2")); err != nil {
+		t.Fatalf("put after migrating: %v", err)
 	}
 }

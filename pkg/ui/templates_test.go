@@ -13,7 +13,7 @@ import (
 func TestCreateTemplateFilesATemplate(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
-		Name: "Dependency bump", Title: "Bump dependencies", Repo: "acme/widgets",
+		Name: "Dependency bump", Title: "Bump dependencies",
 	})
 	if err != nil {
 		t.Fatalf("creating a template: %v", err)
@@ -21,14 +21,14 @@ func TestCreateTemplateFilesATemplate(t *testing.T) {
 	if tmpl.ID == "" {
 		t.Fatal("want a non-empty id")
 	}
-	if tmpl.Name != "Dependency bump" || tmpl.Title != "Bump dependencies" || tmpl.Repo != "acme/widgets" {
+	if tmpl.Name != "Dependency bump" || tmpl.Title != "Bump dependencies" {
 		t.Errorf("template = %+v, want the fields just given", tmpl)
 	}
 }
 
 func TestCreateTemplateRejectsAMissingName(t *testing.T) {
 	c, _, ctx := testClient(t)
-	_, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Title: "x", Repo: "acme/widgets"})
+	_, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Title: "x"})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
@@ -37,16 +37,7 @@ func TestCreateTemplateRejectsAMissingName(t *testing.T) {
 
 func TestCreateTemplateRejectsAMissingTitle(t *testing.T) {
 	c, _, ctx := testClient(t)
-	_, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Repo: "acme/widgets"})
-	var ve *ui.ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("error = %v, want a ValidationError", err)
-	}
-}
-
-func TestCreateTemplateRejectsAMissingRepo(t *testing.T) {
-	c, _, ctx := testClient(t)
-	_, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
+	_, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x"})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
@@ -56,7 +47,7 @@ func TestCreateTemplateRejectsAMissingRepo(t *testing.T) {
 func TestCreateTemplateAcceptsCapabilitiesAndReads(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
-		Name: "x", Title: "x", Repo: "acme/widgets",
+		Name: "x", Title: "x",
 		Capabilities: []string{"gemini-key"},
 		Reads:        []string{"acme/shared-lib"},
 	})
@@ -74,7 +65,7 @@ func TestCreateTemplateAcceptsCapabilitiesAndReads(t *testing.T) {
 func TestCreateTemplateRejectsAnUnknownCapability(t *testing.T) {
 	c, _, ctx := testClient(t)
 	_, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
-		Name: "x", Title: "x", Repo: "acme/widgets", Capabilities: []string{"not-a-real-capability"},
+		Name: "x", Title: "x", Capabilities: []string{"not-a-real-capability"},
 	})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
@@ -84,11 +75,11 @@ func TestCreateTemplateRejectsAnUnknownCapability(t *testing.T) {
 
 func TestListTemplatesReturnsNewestFirst(t *testing.T) {
 	c, _, ctx := testClient(t)
-	first, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "first", Title: "x", Repo: "acme/widgets"})
+	first, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "first", Title: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "second", Title: "x", Repo: "acme/widgets"})
+	second, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "second", Title: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +94,7 @@ func TestListTemplatesReturnsNewestFirst(t *testing.T) {
 
 func TestUpdateTemplateAppliesOnlyGivenFields(t *testing.T) {
 	c, _, ctx := testClient(t)
-	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "old title", Repo: "acme/widgets"})
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "old title"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,8 +106,8 @@ func TestUpdateTemplateAppliesOnlyGivenFields(t *testing.T) {
 	if updated.Title != "new title" {
 		t.Errorf("title = %q, want %q", updated.Title, "new title")
 	}
-	if updated.Repo != "acme/widgets" {
-		t.Errorf("repo = %q, want it left alone", updated.Repo)
+	if updated.Name != "x" {
+		t.Errorf("name = %q, want it left alone", updated.Name)
 	}
 }
 
@@ -130,7 +121,7 @@ func TestUpdateTemplateOnAnUnknownIDIsNotFound(t *testing.T) {
 
 func TestDeleteTemplateRemovesIt(t *testing.T) {
 	c, _, ctx := testClient(t)
-	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x", Repo: "acme/widgets"})
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,12 +152,12 @@ func TestDeleteTemplateOnAnUnknownIDIsNotFound(t *testing.T) {
 // succeed and orphan it.
 func TestDeleteTemplateRefusesWhileASchedulePointsAtIt(t *testing.T) {
 	c, _, ctx := testClient(t)
-	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x", Repo: "acme/widgets"})
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
-		TemplateID: tmpl.ID, Recurrence: everyDay,
+		Repo: "acme/widgets", TemplateID: tmpl.ID, Recurrence: everyDay,
 	}); err != nil {
 		t.Fatalf("creating a template-backed schedule: %v", err)
 	}

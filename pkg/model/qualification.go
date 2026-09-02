@@ -20,11 +20,13 @@ var QualificationPrincipal = Principal{Kind: PrincipalAutomation, ID: "qualifica
 // rejects a duplicate), so its own id already identifies this item
 // uniquely within the plan.
 //
-// There is no per-item content here -- no Title, no Base, nothing a
-// TaskTemplate itself already carries -- because CreateQualificationRun
-// resolves each item's template fresh from the store at the moment a
-// candidate is qualified, the same "not a stale copy" discipline
-// fireScheduledTask already holds TemplateID to.
+// There is no per-item content here -- no Title, nothing a TaskTemplate
+// itself already carries -- because CreateQualificationRun resolves each
+// item's template fresh from the store at the moment a candidate is
+// qualified, the same "not a stale copy" discipline fireScheduledTask
+// already holds TemplateID to. Base is never among that content either
+// way (TaskTemplate's own doc comment on why): CreateQualificationRun
+// always targets the candidate's own branch.
 type QualificationItem struct {
 	TemplateID string
 	// Repeat is how many instances of this item's template one run

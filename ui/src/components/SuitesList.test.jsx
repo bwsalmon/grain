@@ -13,8 +13,8 @@ vi.mock("../api.js", () => ({ default: vi.fn() }));
 // SuiteRunOverlay.
 
 const templates = [
-  { id: "template-smoke", name: "Smoke", repo: "acme/widgets" },
-  { id: "template-lint", name: "Lint", repo: "acme/widgets" },
+  { id: "template-smoke", name: "Smoke", title: "Run the smoke suite" },
+  { id: "template-lint", name: "Lint", title: "Run the linter" },
 ];
 
 const suite = {
@@ -166,7 +166,6 @@ describe("SuitesList", () => {
 
     await user.type(within(templateDialog).getByLabelText(/Name/), "New template");
     await user.type(within(templateDialog).getByLabelText(/Task title/), "Bump dependencies");
-    await user.type(within(templateDialog).getByLabelText(/Target repo/), "acme/widgets");
     await user.click(within(templateDialog).getByRole("button", { name: "Add template" }));
 
     expect(api).toHaveBeenCalledWith("/api/templates", {
@@ -175,8 +174,6 @@ describe("SuitesList", () => {
         name: "New template",
         title: "Bump dependencies",
         description: "",
-        repo: "acme/widgets",
-        base: "",
         autoMerge: false,
         reads: [],
         capabilities: [],

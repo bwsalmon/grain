@@ -18,10 +18,10 @@ import (
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 )
 
-func suiteSmokeTemplate(repo model.RepoRef) model.TaskTemplate {
+func suiteSmokeTemplate() model.TaskTemplate {
 	return model.TaskTemplate{
 		ID: "template-suite-smoke", Name: "Smoke test", Title: "Smoke test", Body: "run the smoke suite",
-		Target: repo, CreatedAt: baseTime,
+		CreatedAt: baseTime,
 	}
 }
 
@@ -56,7 +56,7 @@ func onlyTask(t *testing.T, run model.TaskSuiteRun, pass int) string {
 func TestSyncTaskSuitesDoesNothingWhileThePassIsStillPending(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	suite := model.TaskSuite{
@@ -86,7 +86,7 @@ func TestSyncTaskSuitesDoesNothingWhileThePassIsStillPending(t *testing.T) {
 func TestSyncTaskSuitesInCountModeFiresEveryPassThenSucceeds(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	suite := model.TaskSuite{
@@ -136,7 +136,7 @@ func TestSyncTaskSuitesInCountModeFiresEveryPassThenSucceeds(t *testing.T) {
 func TestSyncTaskSuitesInUntilCleanModeStopsAtTheFirstCleanPass(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	suite := model.TaskSuite{
@@ -190,7 +190,7 @@ func TestSyncTaskSuitesInUntilCleanModeStopsAtTheFirstCleanPass(t *testing.T) {
 func TestSyncTaskSuitesInUntilCleanModeFailsAfterMaxPassesWithNoCleanPass(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	suite := model.TaskSuite{
@@ -230,7 +230,7 @@ func TestSyncTaskSuitesInUntilCleanModeFailsAfterMaxPassesWithNoCleanPass(t *tes
 func TestSyncTaskSuitesFailsTheRunWhenATaskClosesWithoutCompleting(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	suite := model.TaskSuite{
@@ -264,7 +264,7 @@ func TestSyncTaskSuitesFailsTheRunWhenATaskClosesWithoutCompleting(t *testing.T)
 func TestSyncTaskSuitesLeavesARequireApprovalRunActiveUntilApproved(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	suite := model.TaskSuite{
@@ -314,10 +314,10 @@ func TestSyncTaskSuitesLeavesARequireApprovalRunActiveUntilApproved(t *testing.T
 // different outcomes -- which is where the interesting decisions are, and
 // where nothing above reaches.
 
-func suiteLintTemplate(repo model.RepoRef) model.TaskTemplate {
+func suiteLintTemplate() model.TaskTemplate {
 	return model.TaskTemplate{
 		ID: "template-suite-lint", Name: "Lint", Title: "Lint", Body: "go vet ./...",
-		Target: repo, CreatedAt: baseTime,
+		CreatedAt: baseTime,
 	}
 }
 
@@ -325,10 +325,10 @@ func suiteLintTemplate(repo model.RepoRef) model.TaskTemplate {
 func twoItemRun(t *testing.T, ctx context.Context, store *model.Store, suite model.TaskSuite) model.TaskSuiteRun {
 	t.Helper()
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put smoke template: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, suiteLintTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteLintTemplate()); err != nil {
 		t.Fatalf("put lint template: %v", err)
 	}
 	suite.Items = []model.TaskSuiteItem{
@@ -452,7 +452,7 @@ func TestSyncTaskSuitesTreatsAPassAsChangedWhenAnyOneTaskChangedSomething(t *tes
 func TestSyncTaskSuitesAdvancesEveryActiveRunInOneCycle(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate(repo)); err != nil {
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
 	suite := model.TaskSuite{

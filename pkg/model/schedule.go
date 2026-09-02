@@ -211,17 +211,21 @@ type ScheduledTask struct {
 	Grants    []Grant
 
 	// TemplateID, if set, names the TaskTemplate (template.go) this
-	// schedule fires from instead of its own Title/Body/Target/Base/
-	// AutoMerge/Reads/Grants above (bwsalmon/agents#516). It is resolved
-	// fresh at firing time (orchestrator.fireScheduledTask), not copied in
-	// once, so editing the template changes what every schedule pointing
-	// at it files next -- the same way editing this schedule's own fields
+	// schedule fires from instead of its own Title/Body/AutoMerge/Reads/
+	// Grants above (bwsalmon/agents#516) -- Target and Base are never
+	// among them: a template carries no target of its own
+	// (TaskTemplate's own doc comment on why), so this schedule's own
+	// Target and Base always decide what every firing targets, whether
+	// or not TemplateID is set. TemplateID is resolved fresh at firing
+	// time (orchestrator.fireScheduledTask), not copied in once, so
+	// editing the template changes what every schedule pointing at it
+	// files next -- the same way editing this schedule's own fields
 	// already changes what it itself files next. The fields above still
 	// hold a value even when this is set: fireScheduledTask keeps them in
 	// sync as a display cache each time it fires, so ui.scheduleFrom can
-	// render a schedule's effective title, repo, and the rest with no
-	// extra lookup, but while TemplateID is set they are not what decides
-	// what gets filed.
+	// render a schedule's effective title and the rest with no extra
+	// lookup, but while TemplateID is set they are not what decides what
+	// gets filed.
 	TemplateID *string
 
 	// Recurrence is how often this schedule fires.

@@ -298,7 +298,7 @@ describe("SchedulesList", () => {
     expect(payload.repo).toBe("acme/other");
   });
 
-  it("hides the content fields and submits templateId when a template is chosen", async () => {
+  it("hides the content fields but keeps repo/base when a template is chosen", async () => {
     api.mockResolvedValueOnce({});
     const templates = [{ id: "template-1", name: "Dependency bump" }];
     const user = userEvent.setup();
@@ -309,13 +309,17 @@ describe("SchedulesList", () => {
     await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
 
     expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
+    // Repo and base are never among a template's own content (a
+    // template carries no target of its own), so they still render.
+    await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
 
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
     expect(payload).toEqual({
       templateId: "template-1",
+      repo: "acme/widgets",
+      base: "",
       recurrence: { kind: "everyNHours", everyNHours: 24 },
     });
   });

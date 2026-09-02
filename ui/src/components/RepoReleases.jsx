@@ -171,7 +171,6 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
   const canCut = current && current.status === "active" && (!currentCandidate || currentCandidate.status === "promoted");
   const canPromote = current && current.status === "active" && currentCandidate && currentCandidate.status === "active";
   const canRequestMerge = current && current.status === "active";
-  const ownTemplates = templates.filter((tmpl) => tmpl.repo === repo);
 
   return (
     <main>
@@ -272,10 +271,10 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
         <Typography variant="subtitle1" sx={{ mt: 3 }}>Qualification plan</Typography>
         <p className="hint">
           Task templates a fresh, active release candidate schedules automatically -- run this many
-          times each, in dependency order, against the candidate's own branch. Pick from the
-          templates already declared for {repo} under Templates.
+          times each, in dependency order, against the candidate's own branch. Pick from any
+          template declared under Templates.
         </p>
-        <QualificationPlanEditor plan={qualificationPlan} templates={ownTemplates} onSave={savePlan} />
+        <QualificationPlanEditor plan={qualificationPlan} templates={templates} onSave={savePlan} />
       </Box>
     </main>
   );
@@ -403,7 +402,7 @@ function QualificationPlanEditor({ plan, templates, onSave }) {
 
       {templates.length === 0 && (
         <Alert severity="info" sx={{ mt: 2 }}>
-          No task templates target this repo yet -- create one under Templates first.
+          No task templates exist yet -- create one under Templates first.
         </Alert>
       )}
 

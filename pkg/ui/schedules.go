@@ -124,11 +124,14 @@ type Schedule struct {
 	Reads []string `json:"reads,omitempty"`
 	// TemplateID and TemplateName are set when this schedule fires from a
 	// TaskTemplate (bwsalmon/agents#516) rather than its own inline
-	// content -- Title/Description/Repo/Base/AutoMerge/Reads/Capabilities
-	// above still reflect that template's content (kept in sync each time
-	// the schedule fires, or is itself saved), so a UI that only wants to
+	// content -- Title/Description/AutoMerge/Reads/Capabilities above
+	// still reflect that template's content (kept in sync each time the
+	// schedule fires, or is itself saved), so a UI that only wants to
 	// render a summary needs no separate template lookup; TemplateName is
 	// only for a UI that wants to say which template, e.g. to link to it.
+	// Repo and Base are never among them: a template carries no target of
+	// its own (model.TaskTemplate's own doc comment on why), so they are
+	// always this schedule's own fields, template-backed or not.
 	TemplateID   string     `json:"templateId,omitempty"`
 	TemplateName string     `json:"templateName,omitempty"`
 	Capabilities []string   `json:"capabilities"`
@@ -208,13 +211,19 @@ func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
 // two task-only concerns have no home here. Recurrence is always
 // required: a schedule with no cadence cannot ever fire.
 //
-// TemplateID, given, takes over Title/Description/Repo/Base/AutoMerge/
-// Capabilities/Reads entirely (bwsalmon/agents#516) -- CreateSchedule
-// copies the named TaskTemplate's own content in and ignores those seven
-// fields on this request outright, rather than letting a caller mix a
-// template with its own per-field overrides, a combination this API
-// deliberately does not support (see CreateSchedule's own doc comment).
-// Left blank, Repo and Title are required, exactly as they always were.
+// Repo and Base are always this request's own fields, template-backed or
+// not: a template carries no target of its own (model.TaskTemplate's own
+// doc comment on why), so which repo and branch this schedule fires
+// against is decided here, at the point of use, exactly as bwsalmon/
+// agents#516 asks. Repo is always required.
+//
+// TemplateID, given, takes over Title/Description/AutoMerge/Capabilities/
+// Reads entirely (bwsalmon/agents#516) -- CreateSchedule copies the named
+// TaskTemplate's own content in and ignores those five fields on this
+// request outright, rather than letting a caller mix a template with its
+// own per-field overrides, a combination this API deliberately does not
+// support (see CreateSchedule's own doc comment). Left blank, Title is
+// also required, exactly as it always was.
 type CreateScheduleRequest struct {
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`
@@ -236,15 +245,23 @@ type CreateScheduleRequest struct {
 // own "queued the moment it is written" immediacy, applied to a
 // schedule's own NextRunAt instead of a task's state.
 //
-// A template-backed schedule (req.TemplateID set) needs no Title or Repo
-// of its own: scheduleContentFromTemplate below reads them off the
-// template instead,
-// the same fields fireScheduledTask itself re-reads from the template on
+// Repo and Base always come from req, template-backed or not
+// (CreateScheduleRequest's own doc comment on why); a template-backed
+// schedule (req.TemplateID set) needs no Title of its own:
+// scheduleContentFromTemplate below reads it off the template instead,
+// the same field fireScheduledTask itself re-reads from the template on
 // every firing rather than trusting whatever this call snapshots.
 func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) (Schedule, error) {
 	recurrence, err := parseRecurrence(req.Recurrence)
 	if err != nil {
 		return Schedule{}, err
+	}
+	if strings.TrimSpace(req.Repo) == "" {
+		return Schedule{}, validationErrorf("repo is required")
+	}
+	target, err := model.ParseRepo(req.Repo)
+	if err != nil {
+		return Schedule{}, &ValidationError{err: err}
 	}
 
 	var sched model.ScheduledTask
@@ -263,13 +280,6 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 		if strings.TrimSpace(req.Title) == "" {
 			return Schedule{}, validationErrorf("title is required")
 		}
-		if strings.TrimSpace(req.Repo) == "" {
-			return Schedule{}, validationErrorf("repo is required")
-		}
-		target, err := model.ParseRepo(req.Repo)
-		if err != nil {
-			return Schedule{}, &ValidationError{err: err}
-		}
 		grants, err := c.grantsFor(req.Capabilities)
 		if err != nil {
 			return Schedule{}, err
@@ -281,13 +291,13 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 		sched = model.ScheduledTask{
 			Title:     req.Title,
 			Body:      req.Description,
-			Target:    target,
-			Base:      req.Base,
 			AutoMerge: req.AutoMerge,
 			Reads:     reads,
 			Grants:    grants,
 		}
 	}
+	sched.Target = target
+	sched.Base = req.Base
 
 	enabled := true
 	if req.Enabled != nil {
@@ -310,19 +320,19 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	return scheduleFrom(sched, templateName), nil
 }
 
-// scheduleContentFromTemplate is the content half of a ScheduledTask
-// (everything but identity, recurrence, and timing) copied from t --
+// scheduleContentFromTemplate is the content half of a ScheduledTask that
+// a template actually carries (everything but identity, recurrence,
+// timing, and Target/Base -- a template has no target of its own,
+// model.TaskTemplate's own doc comment on why) copied from t --
 // CreateSchedule's and UpdateSchedule's shared way of attaching a
 // schedule to a template, and also what fireScheduledTask itself calls
 // each time a template-backed schedule fires, so a schedule's own
 // inline copy never drifts from the template it names for longer than
-// one firing.
+// one firing. Callers still need to set Target and Base themselves.
 func scheduleContentFromTemplate(t model.TaskTemplate) model.ScheduledTask {
 	return model.ScheduledTask{
 		Title:      t.Title,
 		Body:       t.Body,
-		Target:     t.Target,
-		Base:       t.Base,
 		AutoMerge:  t.AutoMerge,
 		Reads:      t.Reads,
 		Grants:     t.Grants,
@@ -336,16 +346,21 @@ func scheduleContentFromTemplate(t model.TaskTemplate) model.ScheduledTask {
 // ever coming due without losing its NextRunAt, so resuming it later
 // picks up rather than firing every occurrence that elapsed while paused.
 //
+// Repo and Base follow the plain nil-means-leave-alone rule regardless
+// of TemplateID: a template carries no target of its own
+// (model.TaskTemplate's own doc comment on why), so attaching one never
+// touches this schedule's own Target/Base, and either can still be
+// edited on the same request that attaches or detaches a template.
+//
 // TemplateID follows the same nil-means-leave-alone rule, with two
 // non-nil cases of its own (bwsalmon/agents#516): a non-empty id
 // attaches this schedule to that template, overwriting Title/
-// Description/Repo/Base/AutoMerge/Reads/Capabilities from it and
-// ignoring those same seven fields on this request, exactly as
-// CreateScheduleRequest's own doc comment describes; an empty string
-// detaches it, leaving the schedule's current content (most recently
-// synced from whatever template it pointed at) in place as a
-// now-independent copy, editable through those same seven fields from
-// then on.
+// Description/AutoMerge/Reads/Capabilities from it and ignoring those
+// same five fields on this request, exactly as CreateScheduleRequest's
+// own doc comment describes; an empty string detaches it, leaving the
+// schedule's current content (most recently synced from whatever
+// template it pointed at) in place as a now-independent copy, editable
+// through those same five fields from then on.
 type UpdateScheduleRequest struct {
 	Title        *string     `json:"title,omitempty"`
 	Description  *string     `json:"description,omitempty"`
@@ -380,19 +395,19 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	}
 
 	var target *model.RepoRef
+	if req.Repo != nil {
+		if strings.TrimSpace(*req.Repo) == "" {
+			return Schedule{}, validationErrorf("repo cannot be empty: a schedule with no target cannot fire")
+		}
+		parsed, err := model.ParseRepo(*req.Repo)
+		if err != nil {
+			return Schedule{}, &ValidationError{err: err}
+		}
+		target = &parsed
+	}
 	var grants []model.Grant
 	var reads []model.RepoRef
 	if attaching == nil {
-		if req.Repo != nil {
-			if strings.TrimSpace(*req.Repo) == "" {
-				return Schedule{}, validationErrorf("repo cannot be empty: a schedule with no target cannot fire")
-			}
-			parsed, err := model.ParseRepo(*req.Repo)
-			if err != nil {
-				return Schedule{}, &ValidationError{err: err}
-			}
-			target = &parsed
-		}
 		if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
 			return Schedule{}, validationErrorf("title cannot be empty")
 		}
@@ -431,9 +446,8 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	if err := c.Store.UpdateScheduledTask(ctx, id, func(s *model.ScheduledTask) error {
 		if attaching != nil {
 			content := scheduleContentFromTemplate(*attaching)
-			s.Title, s.Body, s.Target, s.Base, s.AutoMerge, s.Reads, s.Grants, s.TemplateID =
-				content.Title, content.Body, content.Target, content.Base, content.AutoMerge,
-				content.Reads, content.Grants, content.TemplateID
+			s.Title, s.Body, s.AutoMerge, s.Reads, s.Grants, s.TemplateID =
+				content.Title, content.Body, content.AutoMerge, content.Reads, content.Grants, content.TemplateID
 		} else {
 			// req.TemplateID != nil here means the empty-string case:
 			// detach, keeping whatever content is already on the row and
@@ -448,12 +462,6 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 			if req.Description != nil {
 				s.Body = *req.Description
 			}
-			if target != nil {
-				s.Target = *target
-			}
-			if req.Base != nil {
-				s.Base = *req.Base
-			}
 			if req.AutoMerge != nil {
 				s.AutoMerge = *req.AutoMerge
 			}
@@ -463,6 +471,15 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 			if req.Reads != nil {
 				s.Reads = reads
 			}
+		}
+		// Target and Base are always applied on their own, template
+		// attached or not (UpdateScheduleRequest's own doc comment on
+		// why): a template carries no target of its own.
+		if target != nil {
+			s.Target = *target
+		}
+		if req.Base != nil {
+			s.Base = *req.Base
 		}
 		if recurrence != nil {
 			s.Recurrence = *recurrence

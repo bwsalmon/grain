@@ -58,15 +58,20 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // fileFixTask's own automatic fix needs none either.
 //
 // sched.TemplateID (bwsalmon/agents#516), if set, is resolved here --
-// fresh, against the store, not against whatever sched.Title/Body/Target/
-// Base/AutoMerge/Reads/Grants already say -- so a template edited since
-// this schedule last fired is what actually gets filed, not a stale copy.
-// A template deleted out from under a schedule (ui.Client.DeleteTemplate
+// fresh, against the store, not against whatever sched.Title/Body/
+// AutoMerge/Reads/Grants already say -- so a template edited since this
+// schedule last fired is what actually gets filed, not a stale copy. A
+// template deleted out from under a schedule (ui.Client.DeleteTemplate
 // tries to prevent this, but nothing stops a row from disappearing some
 // other way) fails this one firing with a plain error, retried next
 // cycle exactly like any other store error reconcileSchedule's own doc
 // comment already tolerates -- not treated as reason to disable the
 // schedule outright.
+//
+// sched.Target and sched.Base are never taken from the template, set or
+// not -- a template carries no target of its own (model.TaskTemplate's
+// own doc comment on why), so the schedule's own standing repo and
+// branch are what every firing targets, template-backed or not.
 func fireScheduledTask(ctx context.Context, store *model.Store, sched model.ScheduledTask, now time.Time) error {
 	tag := firingTag(sched.ID)
 	open, err := store.HasOpenTaskWithTag(ctx, tag)
@@ -86,8 +91,8 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		if tmpl == nil {
 			return fmt.Errorf("template %s no longer exists", *sched.TemplateID)
 		}
-		content.Title, content.Body, content.Target, content.Base, content.AutoMerge, content.Reads, content.Grants =
-			tmpl.Title, tmpl.Body, tmpl.Target, tmpl.Base, tmpl.AutoMerge, tmpl.Reads, tmpl.Grants
+		content.Title, content.Body, content.AutoMerge, content.Reads, content.Grants =
+			tmpl.Title, tmpl.Body, tmpl.AutoMerge, tmpl.Reads, tmpl.Grants
 	}
 
 	id, err := store.NewTaskID(ctx)
@@ -136,9 +141,8 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		// comment) -- a no-op assignment when TemplateID is nil, since
 		// content is just sched unchanged in that case.
 		if sched.TemplateID != nil {
-			s.Title, s.Body, s.Target, s.Base, s.AutoMerge, s.Reads, s.Grants =
-				content.Title, content.Body, content.Target, content.Base, content.AutoMerge,
-				content.Reads, content.Grants
+			s.Title, s.Body, s.AutoMerge, s.Reads, s.Grants =
+				content.Title, content.Body, content.AutoMerge, content.Reads, content.Grants
 		}
 		return nil
 	}); err != nil {

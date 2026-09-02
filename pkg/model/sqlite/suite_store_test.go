@@ -22,7 +22,7 @@ import (
 func smokeTemplate(id string) model.TaskTemplate {
 	return model.TaskTemplate{
 		ID: id, Name: "Smoke", Title: "Smoke test", Body: "run the smoke suite",
-		Target: widgets, Reads: []model.RepoRef{gadgets},
+		Reads:  []model.RepoRef{gadgets},
 		Grants: []model.Grant{{Capability: "run-tests", Via: model.GrantByLabel}}, CreatedAt: now,
 	}
 }
@@ -30,7 +30,7 @@ func smokeTemplate(id string) model.TaskTemplate {
 func lintTemplate(id string) model.TaskTemplate {
 	return model.TaskTemplate{
 		ID: id, Name: "Lint", Title: "Lint", Body: "go vet ./...",
-		Target: widgets, CreatedAt: now,
+		CreatedAt: now,
 	}
 }
 

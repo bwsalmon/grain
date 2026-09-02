@@ -244,14 +244,12 @@ func (s *Store) QualifiableActiveCandidates(ctx context.Context) ([]Candidate, e
 // run's creation with a plain error, retried next cycle exactly like any
 // other store error reconcileQualifications already tolerates.
 //
-// Every instance's Target is candidate.Repo and Base is candidate.Branch,
-// regardless of what the template itself says -- the entire point of a
-// qualification task is running against a branch that did not exist
-// until this candidate was cut, so Base can never be something a
-// template stored ahead of time. A template whose own Target has drifted
-// to name some other repo since the plan was saved is treated the same
-// as a missing one: this fails outright rather than silently filing a
-// task against a repo the plan was never configured for.
+// Every instance's Target is candidate.Repo and Base is candidate.Branch
+// -- a template carries no target of its own (model.TaskTemplate's own
+// doc comment on why), so there is nothing to reconcile it against: the
+// entire point of a qualification task is running against a branch that
+// did not exist until this candidate was cut, which only the plan's own
+// repo and this candidate's own branch can ever say.
 //
 // A dependency between two items becomes a depends-on link from every
 // instance of the dependent to every instance of the dependency, so the
@@ -287,10 +285,6 @@ func (s *Store) CreateQualificationRun(ctx context.Context, candidate Candidate,
 		}
 		if tmpl == nil {
 			return QualificationRun{}, fmt.Errorf("template %s no longer exists", it.TemplateID)
-		}
-		if tmpl.Target != candidate.Repo {
-			return QualificationRun{}, fmt.Errorf(
-				"template %s targets %s, not %s", it.TemplateID, tmpl.Target, candidate.Repo)
 		}
 		templates[it.TemplateID] = *tmpl
 	}
