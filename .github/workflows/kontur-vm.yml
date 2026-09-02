@@ -1,0 +1,122 @@
+# Boots real cloud-hypervisor VMs under real KVM and drives them the way
+# the daemon does.
+#
+# This exists because v2/pkg/orchestrator/kontur_docker_real_test.go --
+# the only test that exercises the whole sandbox path end to end -- gates
+# itself on /dev/kvm and so has never run anywhere. `go test ./...` in the
+# tests workflow reports "ok" for that package with both of its real tests
+# skipped, which reads exactly like coverage and is not.
+#
+# What that cost, concretely: bwsalmon/kontur#35 moved the guest's SSH
+# keypair from build time to boot time, and the change left this test
+# still handing build-guest.sh an OPERATOR_SSH_PUBLIC_KEY that no longer
+# existed and pointing ExecKeyPath at a key no guest would authorize.
+# Every VM it built would have come up unreachable. Nothing reported it;
+# it was found by reading the test. A silent skip is worse than no test,
+# because it is mistaken for one.
+#
+# GitHub's own Linux runners do expose /dev/kvm (nested virtualization on
+# their Azure hosts), so the only thing standing between this suite and a
+# real run was a workflow asking for it. The preflight below asserts the
+# device rather than letting the suite skip: a runner without KVM must
+# fail this job loudly, since the failure mode this guards against is
+# precisely a green tick over nothing having run.
+#
+# Not on every pull request: this builds konturctl, the kontur OCI image
+# and a full Debian guest rootfs (docker-ce, kind, gcloud, terraform --
+# several hundred MB of packages), then boots VMs and waits for sshd. It
+# runs when something it actually covers changes, and on demand.
+name: kontur VM (real KVM)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'third_party/kontur/**'
+      - 'packer/kontur/**'
+      - 'v2/pkg/orchestrator/**'
+      - 'v2/pkg/kontur/**'
+      - 'v2/pkg/mcp/**'
+      - '.github/workflows/kontur-vm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'third_party/kontur/**'
+      - 'packer/kontur/**'
+      - 'v2/pkg/orchestrator/**'
+      - 'v2/pkg/kontur/**'
+      - 'v2/pkg/mcp/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  real-vm:
+    name: real KVM sandbox suite
+    runs-on: ubuntu-latest
+    # The guest rootfs build dominates this: debootstrap plus the package
+    # set guest-setup.sh installs, before any VM boots at all.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: v2/go.mod
+
+      # The whole point of the job. konturDockerRealTestPrereqs skips on a
+      # missing /dev/kvm, so without this the suite would quietly do
+      # nothing and the job would pass -- the exact failure this workflow
+      # exists to make impossible.
+      - name: Require KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is not present on this runner, so the suite below would skip rather than run. A green tick here would mean nothing." >&2
+            exit 1
+          fi
+          ls -l /dev/kvm
+          # The test process itself only stats the device (the VM
+          # container reaches it as root via --device), but a runner that
+          # cannot read it at all is worth knowing about here rather than
+          # three cloud-hypervisor errors deep.
+          test -r /dev/kvm || echo "note: /dev/kvm not readable by $(id -un); the VM container reaches it as root, so this is usually fine"
+
+      # konturDockerRealTestPrereqs skips on any of these too, so the same
+      # silent-pass risk applies: prove them here where it is one line.
+      - name: Docker and tooling versions
+        run: |
+          docker version
+          command -v ssh-keygen
+
+      # -count=1 so a cached "ok" from an earlier skip can never stand in
+      # for a real run. -v because when a guest fails to come up, the
+      # per-step log is the only account of how far it got.
+      - name: Real KVM sandbox suite
+        working-directory: v2
+        run: |
+          go test ./pkg/orchestrator/ \
+            -run 'TestKonturSandboxesAgainstARealDockerBackedVM|TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently' \
+            -count=1 -v -timeout 55m 2>&1 | tee /tmp/kontur-vm.log
+          # `go test` reports "ok" for a package whose every selected test
+          # skipped, so a skip here has to be turned into a failure by
+          # hand -- the same trap the preflight above guards, caught again
+          # after the fact in case a prerequisite other than /dev/kvm
+          # (docker, ssh-keygen) is what goes missing.
+          if grep -q -- "--- SKIP" /tmp/kontur-vm.log; then
+            echo "::error::a real-VM test skipped; this job only means something when they all run" >&2
+            exit 1
+          fi
+
+      # A guest that never becomes reachable says so only in its console,
+      # which the VM container's own logs carry.
+      - name: Guest consoles on failure
+        if: failure()
+        run: |
+          for c in $(docker ps -aq --filter 'name=kontur-vm-'); do
+            echo "===== $(docker inspect -f '{{.Name}}' "$c") ====="
+            docker logs "$c" 2>&1 | tail -100
+          done
