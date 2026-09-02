@@ -1299,7 +1299,11 @@ ensure_kontur_images() {
 # host directories instead of failing to deploy at all.
 ensure_kontur_oci_image() {
   if [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
-    GRAIN_KONTUR_OCI_IMAGE="$(/usr/local/bin/grain sandbox-image 2>/dev/null | tr -d '\r' | head -n1)"
+    # `|| true` so the guard below is the thing that reports a CLI that
+    # could not answer -- without it `set -e` aborts the whole deploy on
+    # the assignment, and this deployment never learns it could have
+    # carried on with kontur simply switched off.
+    GRAIN_KONTUR_OCI_IMAGE="$(/usr/local/bin/grain sandbox-image 2>/dev/null | tr -d '\r' | head -n1 || true)"
     if [ -z "$GRAIN_KONTUR_OCI_IMAGE" ]; then
       log "could not ask $GRAIN_IMAGE_REF which sandbox image it expects, and GRAIN_KONTUR_OCI_IMAGE names none -- leaving kontur sandboxing off this run"
       GRAIN_KONTUR_ENABLE=0
@@ -1725,8 +1729,21 @@ seed_gcp_minter_key() {
   # operator-supplied path into the daemon's own container for the sake
   # of one read would be a far worse trade than a copy that lives for
   # one command.
+  # Staged as $GRAIN_USER, not as root. This script runs as root, so the
+  # obvious `umask 077 && cat >` writes a 0600 file owned by root -- and
+  # the `grain` that reads it is a `docker run --user` as $GRAIN_USER
+  # (install_cli_wrappers), which cannot read that. It failed there,
+  # under `set -e`, after the image had been pulled and before
+  # write_systemd_units ever ran: a deployment with a minter key got no
+  # grain-daemon.service at all, and the only trace was the CLI's own
+  # "permission denied" in the deploy log.
+  #
+  # `install` sets mode and ownership as it copies, so the file is never
+  # momentarily readable by anyone else the way a chown after the fact
+  # would leave it.
   local staged="$GRAIN_DATA_DIR/secrets/.minter-key.staged.json"
-  ( umask 077 && cat "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" > "$staged" )
+  install -m0600 -o "$GRAIN_USER" -g "$GRAIN_USER" \
+    "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" "$staged"
   /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" set \
     -value-file "$staged" gcp-key-minter key.json
   rm -f "$staged"
@@ -1811,7 +1828,18 @@ reformat_store_if_schema_changed() {
   local marker="$GRAIN_DATA_DIR/.schema_version"
   local store_dir="$GRAIN_DATA_DIR/store"
   local new_version
-  new_version="$(/usr/local/bin/grain schema-version)"
+  new_version="$(/usr/local/bin/grain schema-version 2>/dev/null || true)"
+  # An unanswerable CLI is reported and stepped over, never guessed at:
+  # writing an empty marker would make the *next* run read a schema
+  # change that never happened and move a live store aside for nothing,
+  # and aborting here would cost the deployment its service over a
+  # question that only decides whether to reformat.
+  if [ -z "$new_version" ]; then
+    log "WARNING: could not read a schema version out of $GRAIN_IMAGE_REF -- leaving"
+    log "         $store_dir and the marker exactly as they are. If the schema did change"
+    log "         in this image, the daemon will say so on its first start."
+    return
+  fi
 
   if [ ! -s "$marker" ]; then
     log "No schema-version marker yet -- recording schema $new_version, not touching any existing store"
@@ -1896,8 +1924,12 @@ format_target_repo_if_empty() {
 # uses is a live UI choice, a deployment may legitimately only ever use
 # one of them, and an image missing one still runs everything else. The
 # readiness summary says it again at the end.
+# `|| true` is load-bearing: `command -v` exits non-zero for a binary
+# that is not there, which is exactly the case every caller here exists
+# to report -- and a caller assigns this to a variable, where `set -e`
+# would turn that report into an aborted deploy.
 agent_cli_in_image() {
-  docker run --rm --entrypoint sh "$GRAIN_IMAGE_REF" -c "command -v $1" 2>/dev/null | head -n1
+  docker run --rm --entrypoint sh "$GRAIN_IMAGE_REF" -c "command -v $1" 2>/dev/null | head -n1 || true
 }
 
 # report_agent_cli renders one agent CLI's line for the readiness summary:
