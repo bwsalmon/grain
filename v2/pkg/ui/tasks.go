@@ -57,11 +57,17 @@ type Task struct {
 	// the JSON response the same way Base's own empty string is, since
 	// "no override" is the common case and worth not cluttering every
 	// task response with.
-	SandboxCPUs     int      `json:"sandboxCpus,omitempty"`
-	SandboxMemoryMB int      `json:"sandboxMemoryMb,omitempty"`
-	Capabilities    []string `json:"capabilities"`
-	PullRequest     string   `json:"pullRequest,omitempty"`
-	GeneratedFrom   string   `json:"generatedFrom,omitempty"`
+	SandboxCPUs     int `json:"sandboxCpus,omitempty"`
+	SandboxMemoryMB int `json:"sandboxMemoryMb,omitempty"`
+	// AgentFramework is this task's own override of the deployment's
+	// agent framework -- model.Task's own field of the same name.
+	// Omitted, like the two above, for the common "no override" case, so
+	// a frontend reading it back gets the same empty-means-default it
+	// sent.
+	AgentFramework string   `json:"agentFramework,omitempty"`
+	Capabilities   []string `json:"capabilities"`
+	PullRequest    string   `json:"pullRequest,omitempty"`
+	GeneratedFrom  string   `json:"generatedFrom,omitempty"`
 	// Stacked is true for a task the merge queue filed automatically to
 	// repair another task's own pull request (model.ReasonFix) -- built
 	// on that task's own branch and merged straight back into it once
@@ -75,7 +81,12 @@ type Task struct {
 	// (model.ReasonSchedule) -- a UI badge, the same treatment Stacked
 	// already gives model.ReasonFix, so a task that appeared with nobody
 	// having filed it by hand reads as expected rather than as a mystery.
-	Scheduled bool       `json:"scheduled,omitempty"`
+	Scheduled bool `json:"scheduled,omitempty"`
+	// SuiteRun is true for a task a task suite run filed automatically
+	// (model.ReasonSuite, bwsalmon/agents#642) -- Scheduled's own badge
+	// treatment, so a pass of tasks that appeared with nobody filing them
+	// by hand reads as expected rather than as a mystery.
+	SuiteRun  bool       `json:"suiteRun,omitempty"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	// DependsOn is every task this one has declared a depends-on link to,
 	// resolved or not -- the definition. Blocked and BlockedBy are the
@@ -233,9 +244,11 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		Configuration:       t.Configuration,
 		SandboxCPUs:         t.SandboxCPUs,
 		SandboxMemoryMB:     t.SandboxMemoryMB,
+		AgentFramework:      t.AgentFramework,
 		Capabilities:        []string{},
 		Stacked:             t.Origin.Reason == model.ReasonFix,
 		Scheduled:           t.Origin.Reason == model.ReasonSchedule,
+		SuiteRun:            t.Origin.Reason == model.ReasonSuite,
 		CreatedAt:           t.CreatedAt,
 		MergeQueueBlockedAt: mergeQueueBlockedAt,
 	}
@@ -354,6 +367,15 @@ type configResponse struct {
 	// rather than an operator having to notice tasks have stopped moving
 	// and go searching logs to learn why (bwsalmon/agents#576).
 	ReconcilerDown bool `json:"reconcilerDown,omitempty"`
+	// AgentFramework mirrors model.Config.AgentFramework -- this
+	// deployment's default -- read from the store the same way
+	// ShowClosedByDefault above is. NewTaskOverlay.jsx names it in the
+	// "deployment default" option of its own per-task framework picker,
+	// so whoever files a task can see which framework leaving that alone
+	// actually means. Never empty: an unset stored value reads back as
+	// model.AgentFrameworkAntigravity, the same defaulting ui.Settings
+	// does.
+	AgentFramework string `json:"agentFramework"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -369,10 +391,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		RebootEnabled: s.tasks.Config.Reboot != nil,
 		TargetRepos:   s.tasks.targetRepos(),
 	}
+	resp.AgentFramework = model.AgentFrameworkAntigravity
 	if cfg != nil {
 		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
+		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()
@@ -679,6 +703,16 @@ func writeClientError(w http.ResponseWriter, err error) {
 	}
 	var rnf *releaseNotFoundError
 	if errors.As(err, &rnf) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var snf2 *suiteNotFoundError
+	if errors.As(err, &snf2) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	var srnf *suiteRunNotFoundError
+	if errors.As(err, &srnf) {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}

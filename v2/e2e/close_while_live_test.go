@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
@@ -160,7 +160,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 			t.Fatalf("live runs before the run finishes = %d (%v), want the run still live", occ, err)
 		}
 
-		fw := gemini.NewForTest(&scriptedGenerator{responses: pushScript(remote, branch, task.ID)})
+		fw := antigravity.NewForTest(antigravity.Steps(pushScript(remote, branch, task.ID)...))
 		tools := mcp.NewSandboxTools(root)
 
 		start := time.Now()

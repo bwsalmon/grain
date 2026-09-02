@@ -23,7 +23,7 @@ describe("Sidebar", () => {
   it("counts tasks per state and lists only states that are present", () => {
     render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
 
-    expect(screen.getByRole("button", { name: /All issues 3/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /All tasks 3/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Queued 2/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Running 1/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Completed/ })).not.toBeInTheDocument();

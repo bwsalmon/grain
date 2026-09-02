@@ -124,6 +124,9 @@ UI_PORT="$(cfg ui_port)"
 SLOTS="$(cfg slots)"
 POLL_INTERVAL="$(cfg poll_interval)"
 GEMINI_MODEL="$(cfg gemini_model)"
+# Where the Antigravity CLI lives, if not on $PATH -- see setup.sh's own
+# GRAIN_AGY_PATH and verify_agent_cli.
+AGY_PATH="$(cfg agy_path)"
 MAX_AGENT_TURNS="$(cfg max_agent_turns)"
 GCP_PROJECT="$(cfg gcp_project)"
 GCP_AGENT_SERVICE_ACCOUNT="$(cfg gcp_agent_service_account)"
@@ -156,6 +159,7 @@ GITHUB_APP_ID="$(md_optional instance/attributes/grain-github-app-id)"
 GITHUB_APP_INSTALLATION_ID="$(md_optional instance/attributes/grain-github-app-installation-id)"
 GITHUB_APP_PRIVATE_KEY="$(md_optional instance/attributes/grain-github-app-private-key)"
 GEMINI_API_KEY="$(md_optional instance/attributes/grain-gemini-api-key)"
+CLAUDE_OAUTH_TOKEN="$(md_optional instance/attributes/grain-claude-oauth-token)"
 
 MINTER_KEY_FILE=""
 minter_key_json="$(md_optional instance/attributes/grain-gcp-minter-key)"
@@ -186,8 +190,8 @@ if [ -z "$GITHUB_TOKEN" ] && [ -z "$GITHUB_APP_ID" ]; then
 fi
 if [ -z "$GEMINI_API_KEY" ] && [ -n "$MINTER_KEY_FILE" ]; then
   log "no grain-gemini-api-key in instance metadata -- setup.sh will mint the daemon's own key with the minter credential (terraform/gcp-v2 README, \"The daemon's own Gemini key\")"
-elif [ -z "$GEMINI_API_KEY" ]; then
-  log "no grain-gemini-api-key in instance metadata and no minter key either -- grain-daemon.service will install but stay stopped; run push-secrets.sh once one of them is ready"
+elif [ -z "$GEMINI_API_KEY" ] && [ -z "$CLAUDE_OAUTH_TOKEN" ]; then
+  log "no grain-gemini-api-key or grain-claude-oauth-token in instance metadata and no minter key either -- grain-daemon.service will run and serve the UI, but no run can dispatch until an agent credential is set there (Settings -> Agent frameworks) or pushed with push-secrets.sh"
 fi
 
 # What this deploy is about to hand setup.sh, before handing it over.
@@ -206,6 +210,7 @@ log "  gcp_agent_service_account=${GCP_AGENT_SERVICE_ACCOUNT:-<empty>}"
 log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo absent)" \
     "| github app: $([ -n "$GITHUB_APP_ID" ] && echo present || echo absent)" \
     "| gemini key: $([ -n "$GEMINI_API_KEY" ] && echo present || echo 'absent, will mint')" \
+    "| claude token: $([ -n "$CLAUDE_OAUTH_TOKEN" ] && echo present || echo absent)" \
     "| minter key: $([ -n "$MINTER_KEY_FILE" ] && echo present || echo MISSING)"
 log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_image_bucket=${KONTUR_IMAGE_BUCKET:-<empty>} kontur_oci_image=${KONTUR_OCI_IMAGE:-<empty>}" \
     "| kontur ssh key: $([ -n "$KONTUR_SSH_KEY_FILE" ] && echo present || echo MISSING)"
@@ -240,6 +245,8 @@ env \
   GRAIN_GITHUB_APP_INSTALLATION_ID="$GITHUB_APP_INSTALLATION_ID" \
   GRAIN_GITHUB_APP_PRIVATE_KEY="$GITHUB_APP_PRIVATE_KEY" \
   GRAIN_GEMINI_API_KEY="$GEMINI_API_KEY" \
+  GRAIN_AGY_PATH="$AGY_PATH" \
+  GRAIN_CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_OAUTH_TOKEN" \
   GRAIN_GEMINI_MODEL="$GEMINI_MODEL" \
   GRAIN_MAX_AGENT_TURNS="$MAX_AGENT_TURNS" \
   GRAIN_GCP_PROJECT="$GCP_PROJECT" \

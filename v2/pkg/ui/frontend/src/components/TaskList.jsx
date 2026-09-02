@@ -5,7 +5,7 @@ import { STATE_LABELS, capabilityName, completionPhase } from "../state.js";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
-const FILTER_TITLES = { all: "All issues", blocked: "Blocked" };
+const FILTER_TITLES = { all: "All tasks", blocked: "Blocked" };
 
 // SORTS is every order the toolbar's own Select offers, keyed by what it
 // stores in sortBy. "manual" is the backlog order the store itself

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Checkbox, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
+import AgentKeysSection from "./AgentKeysSection.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
@@ -105,7 +106,7 @@ export default function SettingsOverlay({ onClose, showError }) {
     if (autoMergeByDefault !== !!settings.autoMergeByDefault) payload.autoMergeByDefault = autoMergeByDefault;
 
     const agentFramework = form.elements.agentFramework.value;
-    if (agentFramework !== (settings.agentFramework || "gemini")) payload.agentFramework = agentFramework;
+    if (agentFramework !== (settings.agentFramework || "antigravity")) payload.agentFramework = agentFramework;
 
     try {
       await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
@@ -150,15 +151,17 @@ export default function SettingsOverlay({ onClose, showError }) {
           <form onSubmit={submit}>
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
-            <Typography variant="subtitle2" sx={{ mt: 2 }}>Agent framework</Typography>
-            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "gemini"} sx={{ mb: 1 }}>
-              <FormControlLabel value="gemini" control={<Radio />} label="Gemini" />
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>Agent frameworks</Typography>
+            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "antigravity"} sx={{ mb: 1 }}>
+              <FormControlLabel value="antigravity" control={<Radio />} label="Antigravity" />
               <FormControlLabel value="claude" control={<Radio />} label="Claude" />
             </RadioGroup>
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              Which agent.Framework a run is driven by. Claude support is not yet wired into dispatch -- selecting it
-              here does not change what a run actually does.
+              Which agent drives a run by default &mdash; the Antigravity CLI (agy) or the Claude CLI, each run as a
+              subprocess on the controller. A task can override it for its own dispatch (New task &rarr;
+              Advanced options), so both frameworks want a credential below.
             </Typography>
+            <AgentKeysSection settings={settings} showError={showError} />
             <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = the agent framework's own default" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
             <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />

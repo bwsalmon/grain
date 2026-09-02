@@ -123,6 +123,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskConfigurationColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureTaskAgentFrameworkColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -389,6 +392,24 @@ func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
 	return err
 }
 
+// ensureTaskAgentFrameworkColumn adds task.agent_framework (schema.go's
+// own DDL comment on the table has the reasoning) to a database created
+// before this column existed, the same probe-then-ALTER approach every
+// other ensure*Column migration here uses. It defaults to ”,
+// Task.AgentFramework's own "unset, use the deployment default" zero
+// value -- so every task already in such a database reads back as
+// deferring to Config.AgentFramework, which is exactly what it did
+// before a task could carry a framework of its own.
+func (s *Store) ensureTaskAgentFrameworkColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `agent_framework` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `agent_framework` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
 // ensureTaskInteractiveColumn adds task.interactive (schema.go's own DDL
 // comment on the table has the reasoning -- bwsalmon/agents#539) to a
 // database created before this column existed, the same probe-then-ALTER
@@ -446,18 +467,24 @@ func (s *Store) ensureConfigShowClosedByDefaultColumn(ctx context.Context) error
 // ensureConfigAgentFrameworkColumn adds grain_config.agent_framework
 // (model.Config.AgentFramework's own doc comment has the reasoning) to a
 // database created before bwsalmon/agents#609, the same probe-then-ALTER
-// approach ensureConfigShowClosedByDefaultColumn already uses. Defaulting
-// to 'gemini' matches model.AgentFrameworkGemini -- the only framework
-// any deployment has ever actually run -- so an upgraded deployment reads
-// back exactly what it already ran before this column existed, rather
-// than an empty string no agent.Framework implementation is named by.
+// approach ensureConfigShowClosedByDefaultColumn already uses. It
+// defaults to model.AgentFrameworkAntigravity, the framework a
+// deployment that has never chosen one runs.
+//
+// A database that already has this column may well hold the legacy
+// 'gemini' spelling instead, from before agent/antigravity replaced the
+// home-grown Gemini runtime that word named. Nothing rewrites those rows
+// -- ReadConfig runs every value through model.NormalizeAgentFramework
+// on the way out, which is both cheaper than a data migration and the
+// same answer for a config file or a -agent-framework flag that also
+// still says "gemini".
 func (s *Store) ensureConfigAgentFrameworkColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `agent_framework` FROM `grain_config` WHERE 1 = 0")
 	if err == nil {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx,
-		"ALTER TABLE `grain_config` ADD COLUMN `agent_framework` TEXT NOT NULL DEFAULT 'gemini'")
+		"ALTER TABLE `grain_config` ADD COLUMN `agent_framework` TEXT NOT NULL DEFAULT 'antigravity'")
 	return err
 }
 
@@ -610,13 +637,14 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`, `agent_framework`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
 		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.Interactive, t.Configuration,
+		t.AgentFramework,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -891,7 +919,8 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`"
+	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`," +
+	"`agent_framework`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -907,7 +936,8 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration); err != nil {
+		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration,
+		&t.AgentFramework); err != nil {
 		return Task{}, err
 	}
 
@@ -2030,6 +2060,11 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
 	c.TargetRepos = splitCSV(targetRepos)
+	// A row written before agent/antigravity replaced the home-grown
+	// Gemini runtime still says "gemini"; folding that in here rather
+	// than migrating the row is what ensureConfigAgentFrameworkColumn's
+	// own doc comment describes.
+	c.AgentFramework = NormalizeAgentFramework(c.AgentFramework)
 	return c, nil
 }
 

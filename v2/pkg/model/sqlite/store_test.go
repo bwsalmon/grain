@@ -1402,7 +1402,14 @@ func TestGetConfigReturnsNilOnAFreshDatabase(t *testing.T) {
 func testConfig() model.Config {
 	return model.Config{
 		PollInterval: 30 * time.Second, MaxConcurrent: 2,
-		GeminiModel: "gemini-2.5-pro", MaxAgentTurns: 40,
+		// AgentFramework is named explicitly rather than left zero
+		// because it is the one Config field that never reads back
+		// exactly as written: GetConfig runs it through
+		// model.NormalizeAgentFramework, so "" and the legacy "gemini"
+		// both come back as AgentFrameworkAntigravity (see
+		// TestGetConfigNormalizesTheLegacyAgentFrameworkName below).
+		AgentFramework: model.AgentFrameworkAntigravity,
+		GeminiModel:    "gemini-2.5-pro", MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
 		TargetRepos:     []string{"acme/widgets", "acme/gadgets"},
@@ -2276,5 +2283,53 @@ func TestInitAcceptsAStoreAtThisBuildsOwnVersion(t *testing.T) {
 	}
 	if err := model.New(db).Init(ctx); err != nil {
 		t.Fatalf("re-opening a store this build created: %v", err)
+	}
+}
+
+// TestGetConfigNormalizesTheLegacyAgentFrameworkName is the upgrade path
+// for a deployment whose grain_config row still says "gemini" -- the name
+// the default framework had while it was a home-grown in-process Gemini
+// API loop, before agent/antigravity replaced it. Nothing rewrites those
+// rows (Store.ensureConfigAgentFrameworkColumn's own doc comment says
+// why), so the whole guarantee that such a deployment keeps running rests
+// on GetConfig folding the old spelling into the new one on the way out.
+//
+// The row is written straight through PutConfig rather than by hand:
+// storing a value the vocabulary no longer contains is exactly what an
+// older grain binary did, and the read is what has to cope.
+func TestGetConfigNormalizesTheLegacyAgentFrameworkName(t *testing.T) {
+	store, _, ctx := openStore(t)
+	legacy := testConfig()
+	legacy.AgentFramework = model.LegacyAgentFrameworkGemini
+	if err := store.PutConfig(ctx, legacy); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.AgentFramework != model.AgentFrameworkAntigravity {
+		t.Errorf("AgentFramework = %q for a row storing %q, want %q",
+			got.AgentFramework, model.LegacyAgentFrameworkGemini, model.AgentFrameworkAntigravity)
+	}
+}
+
+// TestGetConfigDefaultsAnEmptyAgentFrameworkToAntigravity is the same
+// normalization for the other value that names no framework: a row
+// written before the column existed at all, which reads back as "".
+func TestGetConfigDefaultsAnEmptyAgentFrameworkToAntigravity(t *testing.T) {
+	store, _, ctx := openStore(t)
+	unset := testConfig()
+	unset.AgentFramework = ""
+	if err := store.PutConfig(ctx, unset); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.AgentFramework != model.AgentFrameworkAntigravity {
+		t.Errorf("AgentFramework = %q for a row storing \"\", want %q",
+			got.AgentFramework, model.AgentFrameworkAntigravity)
 	}
 }

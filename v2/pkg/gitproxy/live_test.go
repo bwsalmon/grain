@@ -8,7 +8,7 @@ package gitproxy_test
 // model.Store, reached through a real HTTP server, from a real `git`
 // process running with credentials NewSandboxTools' local stand-in
 // (v2/mcp) configured via ConfigureGitCredentials, driven by a scripted
-// (not live-API) gemini.Framework.Run.
+// (not live-CLI) antigravity.Framework.Run.
 //
 // What each layer contributes to the proof:
 //   - model:    a task's Target and Reads are the only source of truth
@@ -16,7 +16,7 @@ package gitproxy_test
 //     in this test.
 //   - gitproxy: authenticates the sandbox token, asks the model, forwards
 //     through to the local git http-backend with the right credential.
-//   - mcp/gemini: an agent turn calling run_command with an ordinary
+//   - mcp/antigravity: an agent turn calling run_command with an ordinary
 //     `git clone`/`git push` succeeds without ever seeing the proxy
 //     token, because ConfigureGitCredentials already wrote it where
 //     git's own credential.helper picks it up.
@@ -37,43 +37,13 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
 	"github.com/bwsalmon/grain/v2/pkg/agent"
-	"github.com/bwsalmon/grain/v2/pkg/agent/gemini"
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/gitproxy"
 	"github.com/bwsalmon/grain/v2/pkg/mcp"
 	"github.com/bwsalmon/grain/v2/pkg/model"
 	"github.com/bwsalmon/grain/v2/pkg/model/sqlite"
 )
-
-// scriptedGenerator replays one response per call -- gemini_test.go's own
-// fakeGenerator, reimplemented here since that type is internal to the
-// gemini package's tests and this package needs the same shape to drive
-// gemini.NewForTest against a scripted tool-call sequence instead of a
-// live API key.
-type scriptedGenerator struct {
-	responses []*genai.GenerateContentResponse
-	calls     int
-}
-
-func (g *scriptedGenerator) GenerateContent(context.Context, string, []*genai.Content, *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-	resp := g.responses[g.calls]
-	g.calls++
-	return resp, nil
-}
-
-func finalText(text string) *genai.GenerateContentResponse {
-	return &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{Content: genai.NewContentFromText(text, genai.RoleModel)}},
-	}
-}
-
-func toolCall(name string, args map[string]any) *genai.GenerateContentResponse {
-	return &genai.GenerateContentResponse{
-		Candidates: []*genai.Candidate{{Content: genai.NewContentFromFunctionCall(name, args, genai.RoleModel)}},
-	}
-}
 
 // gitHTTPBackend serves projectRoot over the smart-HTTP CGI contract git
 // itself defines, by shelling out to `git http-backend` per request --
@@ -256,8 +226,8 @@ func TestLiveCloneAndPushThroughTheWholeStack(t *testing.T) {
 	// --- gemini, scripted rather than live: one turn that clones,
 	// commits, and pushes, proving an agent's ordinary tool calls reach
 	// the proxy without ever seeing its token.
-	script := []*genai.GenerateContentResponse{
-		toolCall("run_command", map[string]any{
+	script := []antigravity.Step{
+		antigravity.ToolStep("run_command", map[string]any{
 			"command": fmt.Sprintf(
 				"git clone %s work && cd work && "+
 					"echo 'agent was here' >> README.md && "+
@@ -265,10 +235,9 @@ func TestLiveCloneAndPushThroughTheWholeStack(t *testing.T) {
 					"git push origin main",
 				remote),
 		}),
-		finalText("done"),
+		antigravity.TextStep("done"),
 	}
-	fw := &scriptedGenerator{responses: script}
-	framework := gemini.NewForTest(fw)
+	framework := antigravity.NewForTest(antigravity.Steps(script...))
 
 	result, err := framework.Run(ctx, agent.RunConfig{Prompt: "clone, edit, push", SandboxRoot: root})
 	if err != nil {

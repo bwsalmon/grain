@@ -86,6 +86,7 @@ var Tables = []string{
   ` + "`sandbox_memory_mb`" + `     INTEGER  NOT NULL DEFAULT 0,
   ` + "`interactive`" + `           INTEGER  NOT NULL DEFAULT 0,
   ` + "`configuration`" + `         INTEGER  NOT NULL DEFAULT 0,
+  ` + "`agent_framework`" + `       TEXT     NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -410,13 +411,14 @@ var Tables = []string{
 	// that now-unused column.
 	//
 	// agent_framework (bwsalmon/agents#609) is Config.AgentFramework's own
-	// column -- DEFAULT 'gemini' both here and in
+	// column -- DEFAULT 'antigravity' both here and in
 	// Store.ensureConfigAgentFrameworkColumn (the same CREATE TABLE IF NOT
 	// EXISTS limitation means an already-created grain_config gets it from
-	// there instead) so an upgraded deployment reads back exactly the
-	// framework it already ran before this column existed, the same
-	// "upgrade changes nothing until an operator opts in" shape
-	// ensureConfigShowClosedByDefaultColumn gives show_closed_by_default.
+	// there instead), naming the framework a deployment that has never
+	// chosen one runs. A database written before agent/antigravity
+	// replaced the home-grown Gemini runtime may hold the legacy 'gemini'
+	// spelling instead; model.NormalizeAgentFramework folds that back in
+	// on read rather than a migration rewriting the row.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -432,7 +434,7 @@ var Tables = []string{
   ` + "`sandbox_cpus`" + `                INTEGER NOT NULL DEFAULT 0,
   ` + "`sandbox_memory_mb`" + `            INTEGER NOT NULL DEFAULT 0,
   ` + "`show_closed_by_default`" + `       INTEGER NOT NULL DEFAULT 0,
-  ` + "`agent_framework`" + `              TEXT    NOT NULL DEFAULT 'gemini',
+  ` + "`agent_framework`" + `              TEXT    NOT NULL DEFAULT 'antigravity',
   ` + "`approved_by_default`" + `          INTEGER NOT NULL DEFAULT 0,
   ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (` + "`id`" + `)
@@ -610,6 +612,113 @@ var Tables = []string{
 
 	`CREATE INDEX IF NOT EXISTS ` + "`qualification_task_run`" + ` ON ` + "`qualification_task`" + ` (` + "`run_id`" + `)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`qualification_task_task`" + ` ON ` + "`qualification_task`" + ` (` + "`task_id`" + `)`,
+
+	// A task suite template (bwsalmon/agents#642) -- a saved combination
+	// of task templates plus how to run them. INTEGER-free TEXT id, the
+	// same "own sequence, own prefix" shape task_template and
+	// scheduled_task already use (task_suite_sequence below), since a
+	// suite is created directly rather than cut like a release or a
+	// candidate. mode/count/max_passes are model.TaskSuite's own
+	// TaskSuiteMode/Count/MaxPasses -- which pair is meaningful depends
+	// on mode, model.TaskSuite.Validate's own job to check, not the
+	// schema's.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_suite`" + ` (
+  ` + "`id`" + `                TEXT     NOT NULL,
+  ` + "`name`" + `              TEXT     NOT NULL,
+  ` + "`mode`" + `              TEXT     NOT NULL,
+  ` + "`count`" + `             INTEGER  NOT NULL,
+  ` + "`max_passes`" + `        INTEGER  NOT NULL,
+  ` + "`require_approval`" + `  INTEGER  NOT NULL,
+  ` + "`auto_merge`" + `        INTEGER  NOT NULL,
+  ` + "`created_at`" + `        DATETIME NOT NULL,
+  PRIMARY KEY (` + "`id`" + `)
+)`,
+
+	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_sequence`" + ` (
+  ` + "`id`" + `         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`issued_at`" + `  DATETIME NOT NULL
+)`,
+
+	// One template a suite runs, in display and firing order (order_key)
+	// -- deliberately no uniqueness constraint on (suite_id, template_id)
+	// the way qualification_item has on (owner, name, template_id): a
+	// suite has no dependency graph to keep acyclic across its items, so
+	// nothing here stops the same template from appearing twice in one
+	// suite on purpose (e.g. running it once against each of two
+	// unrelated concerns a single pass covers).
+	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_item`" + ` (
+  ` + "`id`" + `           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`suite_id`" + `     TEXT    NOT NULL,
+  ` + "`template_id`" + `  TEXT    NOT NULL,
+  ` + "`order_key`" + `    REAL    NOT NULL
+)`,
+
+	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_item_suite`" + ` ON ` + "`task_suite_item`" + ` (` + "`suite_id`" + `, ` + "`order_key`" + `)`,
+
+	// One run of a suite against a repo and branch. Every field a run's
+	// own behaviour depends on is copied from the suite at creation
+	// (model.TaskSuiteRun's own doc comment on why), so this table
+	// carries its own mode/count/max_passes/require_approval/auto_merge
+	// rather than joining back to task_suite for them -- a suite edited
+	// after a run starts must not change how that run already in flight
+	// behaves. suite_id and suite_name are kept anyway, for display and
+	// for CreateTaskSuiteRun's own idempotency (a suite deleted after a
+	// run starts leaves the run's own history intact). INTEGER PRIMARY
+	// KEY AUTOINCREMENT for the same reason release/candidate/
+	// qualification_run all use it: starting a run has to stay correct
+	// with more than one writer.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run`" + ` (
+  ` + "`id`" + `                INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`suite_id`" + `          TEXT     NOT NULL,
+  ` + "`suite_name`" + `        TEXT     NOT NULL,
+  ` + "`owner`" + `             TEXT     NOT NULL,
+  ` + "`repo`" + `              TEXT     NOT NULL,
+  ` + "`base`" + `              TEXT     NOT NULL,
+  ` + "`mode`" + `              TEXT     NOT NULL,
+  ` + "`count`" + `             INTEGER  NOT NULL,
+  ` + "`max_passes`" + `        INTEGER  NOT NULL,
+  ` + "`require_approval`" + `  INTEGER  NOT NULL,
+  ` + "`auto_merge`" + `        INTEGER  NOT NULL,
+  ` + "`status`" + `            TEXT     NOT NULL,
+  ` + "`last_error`" + `        TEXT     NULL,
+  ` + "`created_at`" + `        DATETIME NOT NULL,
+  ` + "`completed_at`" + `      DATETIME NULL
+)`,
+
+	// What ListTaskSuiteRuns (newest first) and the reconciler's own
+	// ActiveTaskSuiteRuns (status only) both need.
+	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_run_status`" + ` ON ` + "`task_suite_run`" + ` (` + "`status`" + `)`,
+
+	// A run's own snapshot of its suite's items at the moment it was
+	// created -- CreateTaskSuiteRun's copy, read back by FireNextPass
+	// every time it files another pass, so a suite edited after a run
+	// starts cannot change which templates that run's later passes fire
+	// (model.TaskSuiteRun.Items's own doc comment).
+	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run_item`" + ` (
+  ` + "`id`" + `           INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`run_id`" + `       INTEGER NOT NULL,
+  ` + "`template_id`" + `  TEXT    NOT NULL,
+  ` + "`order_key`" + `    REAL    NOT NULL
+)`,
+
+	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_run_item_run`" + ` ON ` + "`task_suite_run_item`" + ` (` + "`run_id`" + `, ` + "`order_key`" + `)`,
+
+	// One task instance a run's pass instantiated. template_name is a
+	// snapshot of the resolved template's own Name at the moment this
+	// instance was created, qualification_task's own reasoning for the
+	// same column. task_id is unique: a task belongs to at most one
+	// suite run, ever.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run_task`" + ` (
+  ` + "`id`" + `             INTEGER PRIMARY KEY AUTOINCREMENT,
+  ` + "`run_id`" + `        INTEGER NOT NULL,
+  ` + "`task_id`" + `       TEXT    NOT NULL,
+  ` + "`template_id`" + `   TEXT    NOT NULL,
+  ` + "`template_name`" + ` TEXT    NOT NULL,
+  ` + "`pass_number`" + `   INTEGER NOT NULL
+)`,
+
+	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_run_task_run`" + ` ON ` + "`task_suite_run_task`" + ` (` + "`run_id`" + `)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`task_suite_run_task_task`" + ` ON ` + "`task_suite_run_task`" + ` (` + "`task_id`" + `)`,
 }
 
 // Views is the derivations, each a (name, DDL) pair so Init can drop and

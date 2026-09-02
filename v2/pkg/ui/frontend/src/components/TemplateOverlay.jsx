@@ -35,12 +35,10 @@ export default function TemplateOverlay({ template, config, onClose, onSaved, sh
       capabilities,
     };
     try {
-      if (isNew) {
-        await api("/api/templates", { method: "POST", body: JSON.stringify(payload) });
-      } else {
-        await api(`/api/templates/${template.id}`, { method: "PATCH", body: JSON.stringify(payload) });
-      }
-      await onSaved();
+      const saved = isNew
+        ? await api("/api/templates", { method: "POST", body: JSON.stringify(payload) })
+        : await api(`/api/templates/${template.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+      await onSaved(saved);
       onClose();
     } catch (err) {
       showError(err);

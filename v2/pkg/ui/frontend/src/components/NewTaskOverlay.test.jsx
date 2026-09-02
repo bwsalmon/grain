@@ -37,6 +37,7 @@ describe("NewTaskOverlay", () => {
         autoMerge: false,
         sandboxCpus: 0,
         sandboxMemoryMb: 0,
+        agentFramework: "",
         capabilities: [],
         dependsOn: [],
         reads: [],
@@ -169,6 +170,44 @@ describe("NewTaskOverlay", () => {
     expect(payload.base).toBe("release/2.0");
   });
 
+  // The failure this guards against is self-perpetuating: a base branch
+  // that merges and is deleted makes its task fail, that failed task is
+  // then the repo's most recent one carrying that base, so the dead
+  // branch is suggested again, and the next task fails the same way.
+  it("does not prefill Base branch from a task that failed", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [
+      { id: "1", title: "Good task", repo: "acme/widgets", base: "release/2.0", state: "completed", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "Died on a deleted base", repo: "acme/widgets", base: "grain/issue-642", state: "failed", createdAt: "2026-06-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("release/2.0");
+  });
+
+  it("prefills nothing when every task carrying a base for that repo failed", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [
+      { id: "1", title: "Died", repo: "acme/widgets", base: "grain/issue-642", state: "failed", createdAt: "2026-06-01T00:00:00Z" },
+      { id: "2", title: "Closed too", repo: "acme/widgets", base: "grain/issue-642", state: "closed", createdAt: "2026-06-02T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("");
+  });
+
   it("leaves a manually-typed Base branch alone when the picked repo has no task history", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/fresh"] };
     const tasks = [
@@ -210,6 +249,44 @@ describe("NewTaskOverlay", () => {
     expect(payload.interactive).toBe(true);
     expect(payload.approved).toBe(true);
     expect(onOpenTask).toHaveBeenCalledWith("42");
+  });
+
+  // A task can be driven by a framework other than the deployment's own
+  // (model.Task.AgentFramework) -- the picker for that sits with the
+  // other per-task overrides, behind "Advanced options".
+  it("files a task with its own agent framework when one is picked", async () => {
+    api.mockResolvedValueOnce({ id: "42" });
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay config={{ agentFramework: "gemini" }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Port the parser");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    await user.click(screen.getByLabelText("Agent framework"));
+    await user.click(screen.getByRole("option", { name: "Claude" }));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).agentFramework).toBe("claude");
+  });
+
+  // Leaving the picker alone must send "" and not the deployment's
+  // current framework: an empty override follows the deployment if its
+  // default changes later, a pinned one does not.
+  it("names the deployment default in the picker without pinning the task to it", async () => {
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay config={{ agentFramework: "claude" }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    expect(screen.getByText("Deployment default (Claude)")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).agentFramework).toBe("");
   });
 
   it("reports the error and leaves the overlay open when the request fails", async () => {

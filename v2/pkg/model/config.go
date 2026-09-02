@@ -37,23 +37,35 @@ type Config struct {
 	// and by nobody else at all.
 	MaxConcurrent int
 	// AgentFramework selects which agent.Framework a run is meant to be
-	// driven by -- AgentFrameworkGemini (agent/gemini, the in-process
-	// Gemini API loop) or AgentFrameworkClaude (agent/claude, the real
-	// `claude` CLI as a subprocess). Empty reads back as
-	// AgentFrameworkGemini (ui.UpdateSettings' own default), matching
-	// what every deployment has always run before this existed as a
-	// choice at all (bwsalmon/agents#609).
+	// driven by -- AgentFrameworkAntigravity (agent/antigravity, the
+	// Antigravity CLI's `agy` binary as a subprocess) or
+	// AgentFrameworkClaude (agent/claude, the real `claude` CLI as a
+	// subprocess). Empty reads back as AgentFrameworkAntigravity
+	// (ui.UpdateSettings' own default).
 	//
-	// Nothing dispatches against this yet: cmd/grain/daemon.go's
-	// runDaemon still unconditionally builds a gemini.Framework the same
-	// way it always has, so setting this to AgentFrameworkClaude changes
-	// nothing about what a run actually does until that wiring exists --
-	// see agent.go's own doc comment on agent/claude not being wired into
-	// any real deployment yet. TEXT rather than a constrained type,
+	// It is the deployment-wide default, not the last word: a task
+	// carries its own Task.AgentFramework, and a non-empty one overrides
+	// this for that task's dispatch alone. cmd/grain/daemon.go's
+	// agentFrameworks re-reads this row on every dispatch, so a change
+	// made here takes effect on the next run rather than at the next
+	// restart.
+	//
+	// The value "gemini" is this field's own legacy spelling, from when
+	// the default was a home-grown in-process Gemini API loop
+	// (pkg/agent/gemini, removed when agent/antigravity replaced it).
+	// NormalizeAgentFramework folds it into AgentFrameworkAntigravity so
+	// a deployment upgraded mid-flight -- a stored row, a config file or
+	// a -agent-framework flag still saying "gemini" -- keeps running
+	// rather than failing validation on a word that no longer names
+	// anything. TEXT rather than a constrained type,
 	// enum-vocabulary-in-Go rather than in the schema (schema.go's own
 	// doc comment on why), validated by ui.UpdateSettings instead.
 	AgentFramework string
-	// GeminiModel is the Gemini model the agent framework calls.
+	// GeminiModel is the model the agent framework calls -- named for
+	// the Gemini family agent/antigravity's own agy still runs, and kept
+	// under this name because it is a persisted column (schema.go's
+	// grain_config.gemini_model) that renaming would cost a migration
+	// for nothing.
 	GeminiModel string
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
 	// agent framework's own default in place.
@@ -138,11 +150,51 @@ type Config struct {
 }
 
 // AgentFramework's own vocabulary -- the two agent.Framework
-// implementations v2/pkg/agent has today (v2/pkg/agent/gemini,
+// implementations v2/pkg/agent has today (v2/pkg/agent/antigravity,
 // v2/pkg/agent/claude). Named here, not in either of those packages, so
 // this file can reference them without pkg/model depending on pkg/agent
 // or either of its implementations.
 const (
-	AgentFrameworkGemini = "gemini"
-	AgentFrameworkClaude = "claude"
+	AgentFrameworkAntigravity = "antigravity"
+	AgentFrameworkClaude      = "claude"
+
+	// LegacyAgentFrameworkGemini is what AgentFrameworkAntigravity used
+	// to be called, back when it named a home-grown in-process Gemini
+	// API loop rather than the Antigravity CLI that replaced it. It is
+	// not a framework anyone can select any more -- only a value
+	// NormalizeAgentFramework still recognizes on the way in, so an
+	// upgrade does not strand a deployment on a word with no
+	// implementation behind it.
+	LegacyAgentFrameworkGemini = "gemini"
 )
+
+// NormalizeAgentFrameworkName maps the legacy "gemini" spelling onto the
+// framework it now names, and leaves everything else -- including "" --
+// exactly as it found it. This is the form the per-task override wants
+// (model.Task.AgentFramework), where "" is a meaningful value in its own
+// right: "no override, use whatever the deployment is set to". Turning
+// that into a framework name would silently pin every task ever created
+// to one.
+func NormalizeAgentFrameworkName(v string) string {
+	if v == LegacyAgentFrameworkGemini {
+		return AgentFrameworkAntigravity
+	}
+	return v
+}
+
+// NormalizeAgentFramework is NormalizeAgentFrameworkName plus the
+// deployment-wide reading of "": there is no "no framework" for a
+// deployment, so an unset Config.AgentFramework is AgentFrameworkAntigravity.
+// Everything else is returned unchanged, including a value that names
+// nothing -- the caller (ui.UpdateSettings, or daemon.go's own flag
+// check) is the one to reject that.
+//
+// Every place that reads Config.AgentFramework goes through one of these
+// two, so "which spellings are accepted, and what does empty mean here"
+// is answered once rather than re-derived at each site.
+func NormalizeAgentFramework(v string) string {
+	if v == "" {
+		return AgentFrameworkAntigravity
+	}
+	return NormalizeAgentFrameworkName(v)
+}

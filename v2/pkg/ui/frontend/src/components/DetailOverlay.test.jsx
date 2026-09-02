@@ -46,6 +46,23 @@ describe("DetailOverlay", () => {
     expect(link).toHaveAttribute("href", "https://github.com/acme/widgets/pull/42");
   });
 
+  // A per-task agent framework override gets the same treatment: named
+  // only when this task overrides the deployment's own, since most do
+  // not and a row saying so on every task is noise.
+  it("shows the agent framework only when the task overrides it", () => {
+    const { rerender } = render(
+      <DetailOverlay
+        task={{ ...baseTask, agentFramework: "claude" }}
+        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Agent framework")).toBeInTheDocument();
+    expect(screen.getByText("Claude")).toBeInTheDocument();
+
+    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.queryByText("Agent framework")).not.toBeInTheDocument();
+  });
+
   // bwsalmon/agents#534: a per-task sandbox shape override.
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(

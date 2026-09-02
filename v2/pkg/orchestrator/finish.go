@@ -17,7 +17,7 @@ import (
 // firstToolCallArg returns the first argument named key from the first
 // non-error call to name in result, and whether one was found. Reading
 // straight off agent.Result.ToolCalls rather than a mcp.MockSink is
-// deliberate: gemini.Framework.Run constructs and discards its own
+// deliberate: a Framework.Run constructs and discards its own
 // MockSink internally (its own doc comment says so), so ToolCalls is the
 // only seam a caller outside that package has -- the same one
 // v2/e2e/harness_test.go's askedQuestion/pushedOK helpers already use.
@@ -131,7 +131,7 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	// Log what the run *did* do, because nothing else does. agent.Result
 	// carries FinalText and ToolCalls, neither of which is persisted --
 	// SetRunOutcome stores an outcome string and nothing more -- and
-	// neither this package nor pkg/agent/gemini logs them. So a run
+	// neither this package nor the agent framework logs them. So a run
 	// ending here left no record at all of the agent's behaviour, and
 	// "finished without pushing a branch, asking a question, or leaving a
 	// closing comment" was the entire evidence available for diagnosing

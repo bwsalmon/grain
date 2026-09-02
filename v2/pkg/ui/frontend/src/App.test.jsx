@@ -101,6 +101,15 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
       templatesState = templatesState.filter((t) => t.id !== templateMatch[1]);
       return Promise.resolve(null);
     }
+    // Task suites (bwsalmon/agents#642). Both endpoints are fetched on
+    // mount, and ui.Client.ListSuites/ListSuiteRuns both build their
+    // result with make([]T, 0, ...), so a deployment with no suites gets
+    // [] rather than null -- mirror that here. Falling through to this
+    // fake's own null default instead would set App's suites state to
+    // null, and Sidebar's `suites = []` parameter default only covers
+    // undefined, so `suites.length` would take the whole app down.
+    if (path === "/api/suites" && method === "GET") return Promise.resolve([]);
+    if (path === "/api/suite-runs" && method === "GET") return Promise.resolve([]);
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
     if (path === "/api/logs") return Promise.resolve({ enabled: false });
     if (path === "/api/sandboxes") return Promise.resolve({ enabled: false });

@@ -22,8 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/v2/pkg/model"
@@ -47,14 +46,14 @@ func (s *syncedSim) firstPullRequestBase() string {
 // default -- a scripted agent standing in for one told, via task.Base, to
 // build its change on top of a named base branch rather than the repo's
 // default.
-func releaseBranchPushScript(remote, branch, taskID string) []*genai.GenerateContentResponse {
+func releaseBranchPushScript(remote, branch, taskID string) []antigravity.Step {
 	cmd := "git clone " + remote + " work && cd work && " +
 		"git checkout release && " +
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		finalText("pushed " + branch),
 	}

@@ -7,11 +7,9 @@
 // tool roster emptied out, reaching the sandbox only through the MCP tools
 // grain's own "mcpserver" subcommand exposes (v2/cmd/grain/mcpserver.go).
 //
-// Unlike agent/gemini, there is no lightweight API this package can drive
-// in-process -- claude -p is the actual product bwsalmon/agents#255 asked
-// to add as an option, so Run spawns it directly over os/exec and lets it
-// manage its own MCP connection, rather than this package looping turns
-// itself the way agent/gemini's Run does. --mcp-config points that
+// claude -p is the actual product bwsalmon/agents#255 asked to add as an
+// option, so Run spawns it directly over os/exec and lets it manage its
+// own MCP connection rather than looping turns itself. --mcp-config points that
 // connection at grainBinaryPath (this same grain binary -- bwsalmon/
 // agents#313 combined what used to be a standalone cmd/mcpserver build
 // into a subcommand of the one binary everything else here runs as too)
@@ -104,7 +102,7 @@ func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []
 type Framework struct {
 	run             runner
 	grainBinaryPath string
-	oauthToken      string
+	oauthToken      func(context.Context) (string, error)
 	maxTurns        int
 	konturSSHUser   string
 	konturExecKey   string
@@ -125,7 +123,24 @@ func WithMaxTurns(n int) Option {
 // never lands in `ps` output (the same reasoning as v1's
 // CONTROLLER_AGENT_TOKEN_PATH; see dispatch.py's start_unit call site).
 func WithOAuthToken(token string) Option {
-	return func(f *Framework) { f.oauthToken = token }
+	return WithOAuthTokenFunc(func(context.Context) (string, error) { return token, nil })
+}
+
+// WithOAuthTokenFunc is WithOAuthToken for a deployment whose token is
+// not known once, at construction: fn is called on every Run instead, so
+// a token set (or replaced) while the daemon is running takes effect on
+// the next run rather than at the next restart. cmd/grain's daemon reads
+// it out of the secrets database the UI writes to, which is what makes
+// "paste the token into Settings" work at all (see that package's own
+// agentCredential).
+//
+// An error from fn fails the run: a token that cannot be read is not the
+// same as a deployment that deliberately configured none, which stays
+// what an empty string means here (Run then passes no
+// CLAUDE_CODE_OAUTH_TOKEN at all and lets the subprocess authenticate
+// from its own ambient environment, as it always could).
+func WithOAuthTokenFunc(fn func(context.Context) (string, error)) Option {
+	return func(f *Framework) { f.oauthToken = fn }
 }
 
 // WithKonturSSH gives a Framework what it needs to reach a
@@ -295,8 +310,14 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		"--max-turns", strconv.Itoa(maxTurns),
 	}
 	var env []string
-	if f.oauthToken != "" {
-		env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+f.oauthToken)
+	if f.oauthToken != nil {
+		token, err := f.oauthToken(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("claude: reading the Claude Code OAuth token: %w", err)
+		}
+		if token != "" {
+			env = append(env, "CLAUDE_CODE_OAUTH_TOKEN="+token)
+		}
 	}
 
 	// The prompt travels over stdin, never argv -- untrusted issue content

@@ -38,8 +38,7 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/genai"
-
+	"github.com/bwsalmon/grain/v2/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/v2/pkg/dispatch"
 	"github.com/bwsalmon/grain/v2/pkg/github"
 	"github.com/bwsalmon/grain/v2/pkg/github/githubsim"
@@ -54,13 +53,13 @@ import (
 // while also proposing a follow-up" looks like scripted through the real
 // mocked tool, rather than the hand-built agent.ToolCall
 // finish_test.go's own unit test uses.
-func pushAndProposeScript(remote, branch, taskID, title, body string) []*genai.GenerateContentResponse {
+func pushAndProposeScript(remote, branch, taskID, title, body string) []antigravity.Step {
 	cmd := "git clone " + remote + " work && cd work && " +
 		"git checkout -b " + branch + " && " +
 		"echo 'change for " + taskID + "' >> NOTES.md && " +
 		"git add NOTES.md && git commit -q -m 'agent commit for " + taskID + "' && " +
 		"git push origin " + branch
-	return []*genai.GenerateContentResponse{
+	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
 		toolCall("propose_task", map[string]any{"title": title, "body": body}),
 		finalText("pushed " + branch + " and proposed a follow-up"),

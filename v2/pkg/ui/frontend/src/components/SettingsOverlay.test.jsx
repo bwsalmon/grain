@@ -52,6 +52,22 @@ describe("SettingsOverlay", () => {
     expect(await screen.findByText(/Not configured yet/)).toBeInTheDocument();
   });
 
+  // bwsalmon/grain: the framework a run is driven by and the credential
+  // it runs as are the same decision, so the keys live in this pane
+  // rather than only in Secrets, seeded from the Settings response the
+  // pane already fetched (no second request).
+  it("offers a key field per agent framework, marked set or not", async () => {
+    api.mockResolvedValueOnce({ ...settings, agentKeysEnabled: true, claudeOAuthTokenSet: true });
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(screen.getByLabelText("Gemini API key")).toBeInTheDocument();
+    expect(screen.getByLabelText("Claude Code OAuth token")).toBeInTheDocument();
+    expect(screen.getByText("set")).toBeInTheDocument();
+    expect(screen.getByText("not set")).toBeInTheDocument();
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+
   it("only includes changed fields in the PUT payload", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const onClose = vi.fn();
@@ -222,7 +238,7 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    expect(screen.getByRole("radio", { name: "Gemini" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Antigravity" })).toBeChecked();
     await user.click(screen.getByRole("radio", { name: "Claude" }));
 
     await user.click(screen.getByRole("button", { name: "Save" }));
