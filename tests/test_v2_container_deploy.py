@@ -189,8 +189,25 @@ def test_the_workflow_publishes_the_image_on_every_branch():
     assert 'branch_tag="${GITHUB_REF_NAME//\\//-}"' in job
     assert "sha-${GITHUB_SHA:0:7}" in job
     # :latest is main's alone, like the two jobs above it.
-    latest = job[job.index('docker tag "${image}:sha-${GITHUB_SHA:0:7}" "${image}:latest"'):]
-    assert 'if [ "$GITHUB_REF" = "refs/heads/main" ]' in job[:job.index(latest)]
+    latest = job.index('docker tag "${image}:${sha_tag}" "${image}:latest"')
+    assert 'if [ "$GITHUB_REF" = "refs/heads/main" ]' in job[:latest]
+
+
+def test_the_image_is_driven_before_it_is_published():
+    """The e2e suite gates the push, and runs before the login.
+
+    An image that does not come up should never become a tag a
+    deployment might pull -- and the credential that could publish one is
+    held for the shortest span that gets it pushed, so the step that runs
+    a container built from the tree is not also a step holding
+    packages:write.
+    """
+    text = WORKFLOW.read_text()
+    job = text[text.index("grain-container:"):]
+    e2e = job.index("tests/test_v2_container_e2e.py")
+    assert e2e < job.index("Log in to GHCR"), "the e2e runs while holding a credential"
+    assert e2e < job.index("- name: Push"), "the e2e does not gate the push"
+    assert "GRAIN_TEST_IMAGE" in job
 
 
 def test_the_two_jobs_publishing_a_shared_name_stay_on_main():

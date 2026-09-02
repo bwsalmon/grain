@@ -45,6 +45,14 @@
 # that branch's tag, so a branch with no image published for it is a
 # branch nobody can upgrade onto.
 #
+# That job builds the image, *runs* it -- tests/test_v2_container_e2e.py
+# starts the daemon inside it the way v2/scripts/setup.sh's own unit
+# does and drives it through its API, its CLI, the reboot/restart control
+# files and a real image upgrade -- and only then logs in and pushes. A
+# commit whose container does not come up cannot become a tag a
+# deployment might pull, and the credential that could publish one is
+# never held while a container built from the tree is running.
+#
 # push, not pull_request: publishing needs a GITHUB_TOKEN with
 # contents:write and packages:write, and running that against an
 # unreviewed PR branch is exactly what ../tests.yml's own comment on
@@ -210,6 +218,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Built before logging in, and published only after the e2e suite
+      # below has driven it: a credential is held for the shortest span
+      # that gets the image pushed, and an image that does not come up is
+      # never a tag some deployment might pull. `make -C v2 image` is the
+      # same target a laptop runs (see that Makefile's own `image`
+      # comment), so what CI publishes and what a developer builds come
+      # from one copy of the build rules -- no marketplace build action.
+      - name: Build the image
+        id: build
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
+          make -C v2 image IMAGE="${image}:sha-${GITHUB_SHA:0:7}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check "pytest>=8,<9"
+
+      # tests/test_v2_container_e2e.py actually runs the image just
+      # built: it starts the daemon the way v2/scripts/setup.sh's own
+      # unit starts it, drives the API and the CLI against it, and
+      # exercises the two host-facing mechanisms that only exist because
+      # grain is in a container -- the control files behind the
+      # reboot/restart buttons, and an upgrade pulling a tag out of a
+      # throwaway local registry. The suite skips itself without
+      # GRAIN_TEST_IMAGE, which is why the repository-wide `pytest` job
+      # in ../tests.yml never runs it and this one does.
+      #
+      # A runner has what all of that needs and a hosted PR job does not
+      # have to be trusted with: a docker daemon, systemd, and passwordless
+      # sudo. Nothing here holds the GHCR credential yet -- the login
+      # below is deliberately after this step.
+      - name: Run the container e2e suite
+        env:
+          GRAIN_TEST_IMAGE: ${{ steps.build.outputs.image }}:${{ steps.build.outputs.tag }}
+        run: python -m pytest tests/test_v2_container_e2e.py -v
+
       - name: Log in to GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
@@ -228,22 +278,17 @@ jobs:
       #                down in both places rather than derived once
       #   latest       main's own branch tag under the name a human
       #                types, published on main alone
-      #
-      # No marketplace build action: `make -C v2 image` is the same
-      # target a laptop runs (see that Makefile's own `image` comment),
-      # so what CI publishes and what a developer builds come from one
-      # copy of the build rules.
-      - name: Build and push
+      - name: Push
         run: |
           set -euo pipefail
-          image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
+          image="${{ steps.build.outputs.image }}"
+          sha_tag="${{ steps.build.outputs.tag }}"
           branch_tag="${GITHUB_REF_NAME//\//-}"
-          make -C v2 image IMAGE="${image}:sha-${GITHUB_SHA:0:7}"
-          docker tag "${image}:sha-${GITHUB_SHA:0:7}" "${image}:${branch_tag}"
-          docker push "${image}:sha-${GITHUB_SHA:0:7}"
+          docker tag "${image}:${sha_tag}" "${image}:${branch_tag}"
+          docker push "${image}:${sha_tag}"
           docker push "${image}:${branch_tag}"
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-            docker tag "${image}:sha-${GITHUB_SHA:0:7}" "${image}:latest"
+            docker tag "${image}:${sha_tag}" "${image}:latest"
             docker push "${image}:latest"
           fi
-          echo "published ${image}:sha-${GITHUB_SHA:0:7} and ${image}:${branch_tag}"
+          echo "published ${image}:${sha_tag} and ${image}:${branch_tag}"

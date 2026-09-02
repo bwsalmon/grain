@@ -10,13 +10,14 @@ import (
 )
 
 // errUpgradeUnavailable is what every upgrade handler reports when
-// Config.Upgrader is nil -- this deployment was not started with
-// -upgrade-src-dir, which is the normal case for `grain demo`'s
-// throwaway UI and for any deployment that has not opted in yet.
-// Mapped to 404, matching errSecretsUnavailable's own reasoning: there
-// is no upgrade resource here to act on.
+// Config.Upgrader is nil -- this deployment was started with neither
+// -upgrade-image (the container path, pkg/upgrade/image.go) nor
+// -upgrade-src-dir (the build path), which is the normal case for
+// `grain demo`'s throwaway UI and for any deployment that has not opted
+// in yet. Mapped to 404, matching errSecretsUnavailable's own reasoning:
+// there is no upgrade resource here to act on.
 var errUpgradeUnavailable = errors.New(
-	"upgrading is not available: this deployment has no -upgrade-src-dir configured")
+	"upgrading is not available: this deployment has neither -upgrade-image nor -upgrade-src-dir configured")
 
 // upgradeStatusResponse is both GET /api/upgrade's whole body and what
 // POST /api/upgrade returns once it has kicked an upgrade off. Enabled
