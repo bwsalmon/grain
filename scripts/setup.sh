@@ -21,9 +21,12 @@
 #      update replaced this script itself, re-runs the new copy in place
 #      of this one (reexec_if_updated), so a run always deploys with the
 #      code it just pulled rather than the code it started with. The
-#      checkout is no longer what grain is built from (see 2), but it is
-#      still what this script, packer/kontur's own image builds and the
-#      self-debug capability's read of grain's own source all come from
+#      checkout is no longer what grain is built from (see 2), nor what
+#      the self-debug capability reads -- the image carries its own copy
+#      of the source it was built from, so the agent's view of the code
+#      cannot drift from the binary running it -- but it is still what
+#      this script re-execs out of and what packer/kontur's own guest
+#      image builds come from
 #   2. pulls the deployment image -- $GRAIN_IMAGE:$GRAIN_IMAGE_TAG,
 #      published to GHCR by ../.github/workflows/build-artifacts.yml
 #      on every commit -- instead of building a binary here
@@ -848,7 +851,6 @@ args=(
   --volume ${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}
 )
 [ -d "${GRAIN_SANDBOX_DIR}" ] && args+=(--volume ${GRAIN_SANDBOX_DIR}:${GRAIN_SANDBOX_DIR})
-[ -d "${GRAIN_SRC_DIR}" ] && args+=(--volume ${GRAIN_SRC_DIR}:${GRAIN_SRC_DIR}:ro)
 # konturctl talks to this host's docker daemon and keeps its VM records
 # out here; the image paths it hands docker are host paths, so each has
 # to be mounted at the very path it already has.
@@ -1039,18 +1041,6 @@ Type=oneshot
 ExecStart=/bin/rm -f ${CONTROL_DIR}/restart
 ExecStart=/usr/bin/systemctl restart grain-daemon.service
 UNIT
-}
-
-# ensure_src_dir_readable keeps $GRAIN_SRC_DIR readable by $GRAIN_USER.
-#
-# The checkout is no longer something the daemon writes to -- it is
-# mounted read-only into the container, and nothing in there builds
-# (bwsalmon/agents#645) -- but it is still what the self-debug capability
-# reads grain's own source out of, and sync_repo runs as root, so a
-# world-unreadable umask on this host would otherwise leave the daemon
-# looking at a tree it cannot open.
-ensure_src_dir_readable() {
-  chmod -R a+rX "$GRAIN_SRC_DIR" 2>/dev/null || true
 }
 
 # grant_docker_group adds $GRAIN_USER to the docker group if it exists.
@@ -1880,13 +1870,14 @@ write_systemd_units() {
   # upgrade repoints the service by writing one line and restarting, with
   # no unit to rewrite and no root anywhere in the path.
   #
-  # -upgrade-src-dir rides along, and no longer means "build here": with
-  # -upgrade-image set the daemon never builds, and this is only what
-  # grantTools (cmd/grain/daemon.go) reads grain's own source out of for
-  # the self-debug capability. It is passed only alongside the Upgrade
-  # button for the same reason it always was -- it is the same read-only
-  # mount either way, and a deployment that turned this feature off has
-  # said it wants nothing here wired up.
+  # -upgrade-src-dir is not passed at all. It used to ride along, not to
+  # build (with -upgrade-image set the daemon never does) but because
+  # grantTools read the checkout it named for the self-debug capability.
+  # The deployment image now carries the source it was built from
+  # (Dockerfile), and cmd/grain/daemon.go's sourceDir prefers that copy
+  # over any flag -- which is the point: this checkout tracks a branch and
+  # the image is a fixed tag, so the two drifted apart on every upgrade
+  # and the agent read source that was not what was running.
   #
   # Left unset entirely when GRAIN_ENABLE_UI_UPGRADE=0
   # (terraform/gcp's own deploy.sh sets exactly that): the daemon
@@ -1897,16 +1888,6 @@ write_systemd_units() {
     daemon_args+=(
       -upgrade-image "$GRAIN_IMAGE"
       -upgrade-image-ref-file "$IMAGE_REF_FILE"
-      # Not for upgrading -- pkg/upgrade ignores SrcDir entirely once
-      # Image is set (upgrade.go's own Config comment says so), and no
-      # -upgrade-install-path is passed for exactly that reason. It is
-      # here because cmd/grain/daemon.go reads this same flag for a
-      # second, unrelated purpose: grantTools hands the checkout it names
-      # to the self-debug capability, whose read_grain_source and
-      # list_grain_source tools are the agent's view of grain's own
-      # source. grantTools returns no tools at all when it is empty, so
-      # dropping this as dead weight costs the capability silently.
-      -upgrade-src-dir "$GRAIN_SRC_DIR"
       -upgrade-restart-cmd touch -upgrade-restart-cmd "$CONTROL_DIR/restart"
     )
   fi
@@ -2127,7 +2108,6 @@ docker_run_args() {
     --env "HOME=${GRAIN_DATA_DIR}/home"
     --volume "${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}"
     --volume "${GRAIN_SANDBOX_DIR}:${GRAIN_SANDBOX_DIR}"
-    --volume "${GRAIN_SRC_DIR}:${GRAIN_SRC_DIR}:ro"
   )
 
   case "${GRAIN_UI_ADDR##*:}" in
@@ -2351,7 +2331,6 @@ main() {
   sync_repo
   reexec_if_updated "$@"
   ensure_user
-  ensure_src_dir_readable
   grant_docker_group
   pull_image
   # After ensure_user: the wrappers run the image as that account, so it

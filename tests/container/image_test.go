@@ -76,6 +76,35 @@ func TestTheImageNamesTheSandboxContainerItExpects(t *testing.T) {
 	}
 }
 
+// The image carries the source it was built from.
+//
+// tests/deploy pins that the Dockerfile says so and that cmd/grain looks
+// there; this is the half that can only be asked of a real image -- that
+// the tree actually arrived, that it is grain's own and not some other
+// checkout, and that the three things deliberately left behind stayed
+// behind. .git is the one worth naming: it is 6MB of history no reader
+// wants (selfdebug is os.ReadFile and os.ReadDir), and a `cp -a` that
+// stopped excluding it would be invisible except in the image's size.
+func TestTheImageCarriesItsOwnSource(t *testing.T) {
+	requireImage(t)
+
+	const root = "/usr/local/share/grain/src"
+	script := `set -e
+test -f ` + root + `/go.mod
+grep -q "^module github.com/bwsalmon/grain$" ` + root + `/go.mod
+test -d ` + root + `/cmd/grain
+test -d ` + root + `/pkg/capability/selfdebug
+for excluded in .git bin pkg/ui/frontend/node_modules; do
+  if [ -e ` + root + `/$excluded ]; then echo "LEAKED $excluded"; exit 1; fi
+done
+echo source-present`
+
+	out := docker(t, "run", "--rm", "--entrypoint", "sh", image, "-c", script)
+	if !strings.Contains(out, "source-present") {
+		t.Fatalf("the image does not carry a usable copy of its own source: %s", out)
+	}
+}
+
 // The unit always passes --user with the host's own grain account.
 //
 // An image that only worked as root would leave every file it wrote into

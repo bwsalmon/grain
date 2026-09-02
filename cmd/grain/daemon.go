@@ -200,10 +200,10 @@ func daemon(args []string) {
 	// above entirely: there is no toolchain on a host that runs grain
 	// from an image, so "upgrade to branch X" means pulling the tag CI
 	// published for X and pointing the unit's own image ref file at it.
-	// -upgrade-src-dir may still be set alongside it -- image mode
-	// ignores it for upgrading, but grantTools reads the checkout it
-	// names for the self-debug capability -- and no -upgrade-install-path
-	// is needed then, since nothing installs a binary.
+	// Neither -upgrade-src-dir nor -upgrade-install-path is needed then,
+	// since nothing here builds or installs a binary: an image deployment
+	// passes neither, and the self-debug capability reads the source the
+	// image carries rather than a checkout a flag names (see sourceDir).
 	upgradeImage := fs.String("upgrade-image", "",
 		"image repository, with no tag, that CI publishes a tag per branch to (e.g. "+
 			"ghcr.io/bwsalmon/grain/grain); set, the UI's Upgrade button pulls a branch's image instead of "+
@@ -447,7 +447,9 @@ type config struct {
 	// upgradeSrcDir, upgradeInstallPath and upgradeRestartCmd configure
 	// pkg/upgrade.Upgrader (bwsalmon/agents#396); upgradeSrcDir empty
 	// disables it, the same "empty disables" shape gcpProject uses for
-	// gcp-key/gemini-key above.
+	// gcp-key/gemini-key above. upgradeSrcDir is also sourceDir's
+	// fallback for the self-debug capability on a deployment with no
+	// image to carry its own source.
 	upgradeSrcDir      string
 	upgradeInstallPath string
 	upgradeRestartCmd  []string
@@ -732,7 +734,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// checkout is cloned from (orchestrator.prepareCheckout).
 			// Nothing else ever told a sandbox where its repo lives.
 			GitRemoteBase: proxyURL,
-			GrantTools:    grantTools(cfg.upgradeSrcDir),
+			GrantTools:    grantTools(sourceDir(cfg.upgradeSrcDir)),
 		},
 		MintSandboxToken:   tokens.EnsureToken,
 		RevokeSandboxToken: tokens.Revoke,
@@ -1246,13 +1248,37 @@ func capabilityProviders(cfg config) []model.CapabilityProvider {
 	return providers
 }
 
+// defaultSourceDir is where the deployment image carries the source it
+// was built from (Dockerfile's own COPY --from=build /src-export). Keep
+// the two in step.
+const defaultSourceDir = "/usr/local/share/grain/src"
+
+// sourceDir is the tree the self-debug capability reads.
+//
+// The image's own copy wins over anything a flag names, which is the
+// opposite of the usual precedence and is the whole point: read_grain_source
+// answers "what is the binary I am running made of", and only the tree
+// baked in beside that binary is guaranteed to be the commit it was built
+// from. The flag names a host checkout that tracks a *branch* -- an
+// upgrade repoints the image without touching it, so it drifts, and a
+// rollback leaves it strictly newer than the code actually running.
+//
+// The flag remains the answer for a deployment that is not a container:
+// a source-built install has no /usr/local/share/grain/src, and its
+// checkout genuinely is what it is running.
+func sourceDir(flagged string) string {
+	if info, err := os.Stat(defaultSourceDir); err == nil && info.IsDir() {
+		return defaultSourceDir
+	}
+	return flagged
+}
+
 // grantTools wires selfdebug/selfrepair's own tool-building functions
 // into orchestrator.Config.GrantTools -- see that field's own doc
 // comment for why this indirection exists instead of a method on
-// model.CapabilityProvider. srcDir is cfg.upgradeSrcDir, reused rather
-// than asking for a second -source-dir flag: it already names a checkout
-// of grain's own source on every deployment scripts/setup.sh builds,
-// and self-debug wants read access to exactly that tree.
+// model.CapabilityProvider. srcDir is whatever sourceDir resolved: the
+// image's baked-in copy of grain's own source, or the checkout
+// -upgrade-src-dir names on a deployment that has no such image.
 func grantTools(srcDir string) map[string]func(store *model.Store, taskID string) []mcp.Tool {
 	return map[string]func(store *model.Store, taskID string) []mcp.Tool{
 		selfdebug.CapabilityName: func(*model.Store, string) []mcp.Tool {

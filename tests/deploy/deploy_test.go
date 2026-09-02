@@ -76,7 +76,13 @@ func TestTheUnitRunsTheImageAsTheUnprivilegedAccount(t *testing.T) {
 	args := dockerRunArgs(t, text)
 	contains(t, args, `--user "${uid}:${gid}"`)
 	contains(t, args, "--network host")
-	for _, mount := range []string{"GRAIN_DATA_DIR", "GRAIN_SANDBOX_DIR", "GRAIN_SRC_DIR"} {
+	// The store and the sandbox working trees, at the paths they have out
+	// here -- konturctl hands docker host paths, so a mount anywhere else
+	// would not resolve. GRAIN_SRC_DIR is deliberately not in this list
+	// any more: the only thing in the container that read it was the
+	// self-debug capability, and the image carries its own copy of the
+	// source now (TestTheImageCarriesTheSourceSelfDebugReads).
+	for _, mount := range []string{"GRAIN_DATA_DIR", "GRAIN_SANDBOX_DIR"} {
 		if !strings.Contains(args, "${"+mount+"}:${"+mount+"}") {
 			t.Errorf("%s is not mounted at its own path", mount)
 		}
@@ -230,23 +236,37 @@ func TestTheUpgradeButtonIsWiredToTheImagePath(t *testing.T) {
 	absent(t, setupCode(t), "-upgrade-install-path")
 }
 
-// -upgrade-src-dir looks like the pair of the flag above, and is not.
+// The source the self-debug capability reads travels inside the image.
 //
-// pkg/upgrade ignores SrcDir once Image is set -- its own Config comment
-// says as much -- so reading only that, this flag is dead weight next to
-// the -upgrade-install-path deliberately absent above, and deleting it is
-// the obvious tidy-up. It is not: cmd/grain/daemon.go passes this same
-// flag to grantTools, which hands the checkout it names to the self-debug
-// capability and returns no tools at all when it is empty. Removing it
-// would cost the agent read_grain_source and list_grain_source with
-// nothing failing to say so.
+// read_grain_source answers "what is the binary I am running made of", so
+// the source and the binary have to be the same commit. They were not: the
+// daemon read a host checkout bind-mounted in, and that checkout tracks a
+// *branch* while the image is a fixed tag -- an upgrade repointed one
+// without touching the other, so the agent read the old source while the
+// new binary ran, and a rollback left it reading source newer than the
+// code running. Both silent.
 //
-// Pinned here because the two halves are in different packages and
-// neither one's tests can see the other: pkg/upgrade's say SrcDir is
-// unused, cmd/grain's never run against this script, and only the flag
-// list in setup.sh joins them up.
-func TestTheSourceCheckoutIsStillHandedToTheDaemonForSelfDebug(t *testing.T) {
-	contains(t, setupCode(t), `-upgrade-src-dir "$GRAIN_SRC_DIR"`)
+// Three files have to agree for the fix to hold, and nothing else looks at
+// all three: the Dockerfile has to carry the tree, cmd/grain has to look
+// where it was put, and setup.sh must not reintroduce the mount or the
+// flag that used to win over it.
+func TestTheImageCarriesTheSourceSelfDebugReads(t *testing.T) {
+	// The runtime stage takes the staged copy, not /src -- which still has
+	// .git, this build's own bin/, and the node_modules `make build` just
+	// created in it.
+	dockerfile := read(t, "Dockerfile")
+	contains(t, dockerfile, "COPY --from=build /src-export /usr/local/share/grain/src")
+	contains(t, dockerfile, "rm -rf /src-export/.git")
+
+	// cmd/grain looks exactly there.
+	contains(t, read(t, "cmd", "grain", "daemon.go"),
+		`const defaultSourceDir = "/usr/local/share/grain/src"`)
+
+	// ...and the deployment no longer hands it a host checkout to prefer
+	// instead, nor mounts one for it to find.
+	code := setupCode(t)
+	absent(t, code, "-upgrade-src-dir")
+	absent(t, code, "${GRAIN_SRC_DIR}:${GRAIN_SRC_DIR}:ro")
 }
 
 func TestTheDockerfileCarriesEveryBinaryGrainShellsOutTo(t *testing.T) {
