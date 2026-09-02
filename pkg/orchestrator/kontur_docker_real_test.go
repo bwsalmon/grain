@@ -22,9 +22,9 @@ package orchestrator_test
 // own gate uses for v1's equivalent live suite (that file's own comment:
 // "none of which a hosted runner has, so they skip rather than run").
 // The guest image build below used to add passwordless sudo plus
-// debootstrap/mke2fs to that list; since packer/kontur converged on
+// debootstrap/mke2fs to that list; since scripts/kontur converged on
 // kontur's own guest build it needs nothing beyond the docker already
-// required here (packer/kontur/README.md, "Converged on kontur's own
+// required here (scripts/kontur/README.md, "Converged on kontur's own
 // guest build").
 // Neither of these is present on the hosted GitHub Actions runner
 // .github/workflows/tests.yml's go-test job runs on, so this never runs
@@ -40,9 +40,9 @@ package orchestrator_test
 // own benchmarks/kernel/build.sh fetches) panics with "Cannot open root
 // device vda" against any cloud-hypervisor guest, direct-kernel-booted or
 // not -- Firecracker uses virtio-mmio, cloud-hypervisor uses virtio-pci,
-// and that kernel only has a driver for the former -- and packer/kontur's
+// and that kernel only has a driver for the former -- and scripts/kontur's
 // own guest image had never actually been built. bwsalmon/agents#478
-// resolved both (packer/kontur/README.md, "Why no custom kernel": Debian's
+// resolved both (scripts/kontur/README.md, "Why no custom kernel": Debian's
 // own stock kernel already has everything a cloud-hypervisor direct-
 // kernel-boot guest needs, nothing built from source), so this test now
 // builds that real guest image and asserts a real dispatched tool call
@@ -93,7 +93,7 @@ func konturDockerRealTestPrereqs(t *testing.T) {
 		t.Skipf("/dev/kvm not present: %v", err)
 	}
 	// buildKonturGuestImage below needs no privilege check of its own:
-	// packer/kontur/build-guest.sh is one `docker build`, against the
+	// scripts/kontur/build-guest.sh is one `docker build`, against the
 	// same daemon already proven reachable above. It deliberately gets no
 	// skip of its own for a docker too old for BuildKit's --output --
 	// that is a broken host rather than a missing prerequisite, and a
@@ -135,10 +135,10 @@ func buildKonturDockerImage(t *testing.T) (image string) {
 	return image
 }
 
-// buildKonturGuestImage runs packer/kontur/build-guest.sh for real -- one
+// buildKonturGuestImage runs scripts/kontur/build-guest.sh for real -- one
 // `docker build` against third_party/kontur's Dockerfile, which
 // debootstraps the rootfs and packs it with `mke2fs -d` inside the build,
-// with packer/kontur/guest-setup.sh handed to its GUEST_SETUP_SCRIPT hook
+// with scripts/kontur/guest-setup.sh handed to its GUEST_SETUP_SCRIPT hook
 // to add git/build tooling/docker/gcloud/terraform -- and returns the
 // directory holding the kernel/initramfs/disk triple konturctl's own
 // -kernel/-initramfs/-disk flags point at directly.
@@ -176,12 +176,12 @@ func buildKonturGuestImage(t *testing.T) (imagesDir string) {
 		t.Fatalf("creating guest image cache directory: %v", err)
 	}
 
-	packerKonturDir, err := filepath.Abs("../../packer/kontur")
+	konturDir, err := filepath.Abs("../../scripts/kontur")
 	if err != nil {
-		t.Fatalf("resolving packer/kontur's absolute path: %v", err)
+		t.Fatalf("resolving scripts/kontur's absolute path: %v", err)
 	}
 	cmd := exec.Command("./build-guest.sh")
-	cmd.Dir = packerKonturDir
+	cmd.Dir = konturDir
 	// KONTUR_IMAGE_BUCKET and SANDBOX_SETUP_SCRIPT are pinned empty
 	// rather than inherited: set in the environment of whoever runs this
 	// test, the first would publish this throwaway image to a real GCS
@@ -195,7 +195,7 @@ func buildKonturGuestImage(t *testing.T) (imagesDir string) {
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("running packer/kontur/build-guest.sh: %v\n%s", err, out)
+		t.Fatalf("running scripts/kontur/build-guest.sh: %v\n%s", err, out)
 	}
 
 	// build-guest.sh already fails if any of the three is missing or

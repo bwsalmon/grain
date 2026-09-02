@@ -412,7 +412,7 @@ variable "grain_ref" {
   description = <<-EOT
     Branch of grain to deploy. Names two things that move together: the
     checkout files/deploy.sh keeps on the host (which is where
-    scripts/setup.sh itself, and packer/kontur's own image builds,
+    scripts/setup.sh itself, and scripts/kontur's own image builds,
     come from), and -- unless grain_image_tag overrides it -- which
     published image the daemon runs, since CI tags one per branch.
 
@@ -571,7 +571,7 @@ variable "poll_interval" {
 # Wires the daemon's -kontur-* flags (cmd/grain/daemon.go) through so
 # this deployment dispatches onto real bwsalmon/kontur-managed VMs
 # (orchestrator.KonturSandboxes) instead of plain host directories
-# (orchestrator.HostSandboxes) -- see packer/kontur/README.md for the
+# (orchestrator.HostSandboxes) -- see scripts/kontur/README.md for the
 # guest image, third_party/kontur/VENDORED.md for the vendored source, and
 # this module's own README, "Kontur sandboxing", for what
 # enable_kontur_sandboxes (on by default below) actually costs on a first
@@ -613,7 +613,7 @@ variable "kontur_image_bucket" {
     GCS bucket (name only, no gs:// prefix) to fetch a pre-built guest
     image from instead of building one on the host -- vmlinuz, initrd.img
     and disk.img, under a "latest" alias setup.sh always fetches (see
-    packer/kontur/build-guest.sh's own KONTUR_IMAGE_BUCKET, and its comment on
+    scripts/kontur/build-guest.sh's own KONTUR_IMAGE_BUCKET, and its comment on
     why the alias exists). Optional: left empty (the default),
     scripts/setup.sh's own ensure_kontur_images builds the guest disk
     itself instead (bwsalmon/agents#531) and this is never read.
@@ -665,7 +665,7 @@ variable "kontur_oci_image" {
 
 variable "kontur_ssh_user" {
   type        = string
-  description = "Username KonturSandboxes authenticates to each VM as -- matches packer/kontur/guest-setup.sh's own baked-in account. Only used when enable_kontur_sandboxes is true."
+  description = "Username KonturSandboxes authenticates to each VM as -- matches scripts/kontur/guest-setup.sh's own baked-in account. Only used when enable_kontur_sandboxes is true."
   default     = "debian"
 }
 

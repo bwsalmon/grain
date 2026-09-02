@@ -182,7 +182,7 @@ kontur's guest actively breaks something rather than merely not helping.
 
 ```sh
 docker build \
-  --build-arg GUEST_SETUP_SCRIPT="$(cat packer/kontur/guest-setup.sh)" \
+  --build-arg GUEST_SETUP_SCRIPT="$(cat scripts/kontur/guest-setup.sh)" \
   --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat <operator key>.pub)" \
   --target guest-artifacts --output type=local,dest=<dir> \
   third_party/kontur
@@ -562,7 +562,7 @@ v1 uses exactly one sandbox base image for every sandbox VM, with no
 per-task or per-target-repo variant -- whatever a task needs beyond the
 base image is either already on it (this directory's whole premise) or
 fetched by the task itself at dispatch time via `run_command`. This
-directory follows the same rule: `packer/kontur/` builds one image, and a
+directory follows the same rule: `scripts/kontur/` builds one image, and a
 deployment's `KonturConfig.CreateArgs` (once wired) points every dispatch
 slot at the same one. Varying it per task or repo would mean rebuilding
 and republishing an image on a per-dispatch cadence, for toolchain

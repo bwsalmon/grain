@@ -257,8 +257,8 @@ func daemon(args []string) {
 			"-kontur-create-arg=/images/current/disk.img -kontur-create-arg=-kernel "+
 			"-kontur-create-arg=/images/current/vmlinuz -kontur-create-arg=-initramfs "+
 			"-kontur-create-arg=/images/current/initrd.img -kontur-create-arg=-guest-port "+
-			"-kontur-create-arg=22 to point at packer/kontur/build-guest.sh's published output, already copied onto "+
-			"this host under -images-hostpath's directory (see packer/kontur/README.md, \"Building and "+
+			"-kontur-create-arg=22 to point at scripts/kontur/build-guest.sh's published output, already copied onto "+
+			"this host under -images-hostpath's directory (see scripts/kontur/README.md, \"Building and "+
 			"publishing\", and scripts/setup.sh's own ensure_kontur_images, which is what actually copies "+
 			"it there for terraform/gcp -- -guest-port 22 is not optional: konturctl's own default is 80, "+
 			"which silently refuses every connection to this image's actual sshd). Only used with "+
@@ -270,7 +270,7 @@ func daemon(args []string) {
 			"-kontur-base-port are unnecessary and ignored) or \"nat\" (kontur's original mode: a private "+
 			"subnet per namespace, with an -ip and a forwarded -port assigned per VM). Flat mode needs a guest "+
 			"image built from kontur's own guest overlays, for the control link \"kontur exec\" arrives on -- "+
-			"packer/kontur/build-guest.sh produces one.")
+			"scripts/kontur/build-guest.sh produces one.")
 	konturBaseIP := fs.String("kontur-base-ip", "",
 		"the -ip every kontur VM is created with under -kontur-net nat, passed verbatim. Each VM has its own "+
 			"network namespace under the docker backend (its own netns-holder container), so they do not "+

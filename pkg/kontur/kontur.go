@@ -81,7 +81,7 @@ const BackendDocker = "docker"
 // private control link instead. The guest has to configure its end of
 // that link, which kontur's own guest overlay does in its
 // kontur-control-net service; a guest image not built from that overlay
-// has no route in at all under this mode. packer/kontur/build-guest.sh
+// has no route in at all under this mode. scripts/kontur/build-guest.sh
 // builds on it for exactly this reason.
 const (
 	NetModeFlat = "flat"

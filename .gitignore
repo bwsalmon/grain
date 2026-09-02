@@ -3,10 +3,10 @@ __pycache__/
 .pytest_cache/
 .claude/settings.local.json
 /bin/
-# packer/kontur/build-guest.sh's own output -- a built kernel/initramfs/disk
+# scripts/kontur/build-guest.sh's own output -- a built kernel/initramfs/disk
 # triple, multiple GB once docker/gcloud/terraform are provisioned in, not
 # something to ever commit.
-packer/kontur/output/
+scripts/kontur/output/
 # The built binary `make build` leaves at the repository root when a
 # CMD is built without -o bin/. Anchored, so it cannot swallow cmd/grain/.
 /grain

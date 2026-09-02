@@ -30,7 +30,7 @@ md_optional() { curl -fsS -H "Metadata-Flavor: Google" "$MD/$1" 2>/dev/null || t
 # that used to drive it, are CI's problem rather than a deployed host's.
 #
 # What is left is what the deployment genuinely runs on: git (the
-# checkout this script keeps, which setup.sh and packer/kontur's image
+# checkout this script keeps, which setup.sh and scripts/kontur's image
 # builds come out of), docker (grain-daemon.service *is* a `docker run`
 # now, so this is a runtime dependency, not only a deploy-time one), and
 # python3 (the `cfg` helper below).

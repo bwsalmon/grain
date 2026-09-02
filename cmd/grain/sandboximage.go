@@ -1,7 +1,7 @@
 // The sandbox container this build of grain goes with.
 //
 // A kontur-backed deployment runs two images, not one: this one, and the
-// sandbox container each task's VM runs inside (packer/kontur/
+// sandbox container each task's VM runs inside (scripts/kontur/
 // build-oci-image.sh's own output, published as kontur-sandbox by
 // ../../.github/workflows/build-artifacts.yml). They are built from
 // the same commit -- pkg/kontur here and third_party/kontur there -- and

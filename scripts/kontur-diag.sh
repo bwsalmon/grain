@@ -328,7 +328,7 @@ diagnose() {
     else
       bad "guest does not answer ping at $ip -- its eth0 never got an address"
       info "the guest image configures eth0 from the ip= cmdline via the"
-      info "kontur-net-cmdline.service oneshot (packer/kontur/guest-setup.sh)."
+      info "kontur-net-cmdline.service oneshot (scripts/kontur/guest-setup.sh)."
       info "grep the console log for it:  docker logs $vm_c 2>&1 | grep -i -e ipconfig -e eth0 -e kontur-net"
     fi
 

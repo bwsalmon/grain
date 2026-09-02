@@ -10,7 +10,7 @@
 #     in one image scripts/setup.sh pulls instead of building anything on
 #     the deployed host.
 #   - the default sandbox container: the generic kontur OCI image
-#     (packer/kontur/build-oci-image.sh) a kontur-backed deployment runs
+#     (scripts/kontur/build-oci-image.sh) a kontur-backed deployment runs
 #     to get the kontur binaries and a pinned cloud-hypervisor release,
 #     built with no guest-specific customization -- see that script's own
 #     comment ("The image this produces is deliberately generic"). Its
@@ -30,7 +30,7 @@
 # could silently drift from the image everything actually runs.
 #
 # Deliberately not published here either: the guest VM disk
-# (packer/kontur/build-guest.sh's disk.img/vmlinuz/initrd.img) is a
+# (scripts/kontur/build-guest.sh's disk.img/vmlinuz/initrd.img) is a
 # per-deployment build (it bakes in an operator's own SSH key, and
 # optionally SANDBOX_SETUP_SCRIPT) rather than a single generic one this
 # workflow could publish for everybody, and that script's existing
@@ -111,7 +111,7 @@ jobs:
           short_sha="${GITHUB_SHA:0:7}"
           image="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${short_sha}"
           KONTUR_OCI_SOURCE_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            KONTUR_OCI_IMAGE="$image" ./packer/kontur/build-oci-image.sh
+            KONTUR_OCI_IMAGE="$image" ./scripts/kontur/build-oci-image.sh
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # The branch tag, and -- on main alone -- `latest`. Same split, and
