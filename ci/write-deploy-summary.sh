@@ -1,32 +1,56 @@
 #!/usr/bin/env bash
-# Write the rollout summary table into the Actions run summary.
-#
-# Runs with `if: always()`, so every `terraform output` here is null-safe:
-# the point is to say as much as can be said about a failed rollout, and a
-# deploy that failed before or during apply has no outputs to read.
+# Write the deploy's job summary. Runs with if: always(), so
+# it must never fail the job itself -- every value is read null-safe and
+# a missing one prints as empty rather than aborting.
 #
 # Required env:
-#   DEPLOY_GENERATION
 #   GITHUB_STEP_SUMMARY  set by the Actions runner
+# Optional env:
+#   DEPLOYMENT           which deployment this is, for the heading
+#                        (default "grain")
+#   URL, TUNNEL_COMMAND, INSTANCE, ZONE, PROJECT, DEPLOY_GENERATION
+#
+# Exactly one of URL and TUNNEL_COMMAND describes how to reach this
+# deployment: a public load balancer, or IAP's TCP tunnel when
+# expose_ui_publicly is off. Both empty means the apply did not get far
+# enough to have outputs at all.
 set -euo pipefail
 
-deploy_generation="${DEPLOY_GENERATION:?DEPLOY_GENERATION is not set}"
-step_summary="${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is not set: is this running outside Actions?}"
-
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$root/terraform/gcp"
-
-out() {  # a terraform output, or "unknown" if there is nothing to read
-  terraform output -raw "$1" 2>/dev/null || echo unknown
-}
+summary="${GITHUB_STEP_SUMMARY:?GITHUB_STEP_SUMMARY is not set (is this running outside Actions?)}"
 
 {
-  echo "### grain rollout"
+  echo "## ${DEPLOYMENT:-grain}"
   echo
   echo "| | |"
   echo "|---|---|"
-  echo "| generation | \`${deploy_generation}\` |"
-  echo "| instance | \`$(out instance_name)\` |"
-  echo "| host service account | \`$(out host_service_account)\` |"
-  echo "| ssh | \`$(out ssh_command)\` |"
-} >> "$step_summary"
+  if [ -n "${URL:-}" ]; then
+    echo "| URL | ${URL} |"
+  elif [ -n "${TUNNEL_COMMAND:-}" ]; then
+    echo "| URL | none -- tunnel-only (see below) |"
+  else
+    echo "| URL | <not applied> |"
+  fi
+  echo "| Instance | ${INSTANCE:-<not applied>} |"
+  echo "| Zone | ${ZONE:-<not applied>} |"
+  echo "| Project | ${PROJECT:-<not applied>} |"
+  echo "| Generation | ${DEPLOY_GENERATION:-<none>} |"
+  echo
+  if [ -n "${URL:-}" ]; then
+    echo "The URL is reachable only after signing in as one of \`iap_members\`."
+  elif [ -n "${TUNNEL_COMMAND:-}" ]; then
+    echo "This deployment has no public entry point. Forward the UI to your own"
+    echo "machine over IAP's TCP tunnel, then open http://localhost:8080 --"
+    echo "authenticated by \`roles/iap.tunnelResourceAccessor\`:"
+    echo
+    echo '```sh'
+    echo "${TUNNEL_COMMAND}"
+    echo '```'
+  fi
+  echo
+  echo "Host log:"
+  echo
+  echo '```sh'
+  echo "gcloud compute ssh ${INSTANCE:-INSTANCE} --zone ${ZONE:-ZONE} --project ${PROJECT:-PROJECT} \\"
+  echo "  --tunnel-through-iap --command 'sudo journalctl -u grain-config-sync -f'"
+  echo '```'
+} >> "$summary"

@@ -16,14 +16,14 @@ is the mark.
 
 | Path | What it is |
 |---|---|
-| `v2/pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. A verbatim copy of the design pack (v2) — see its header. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
-| `v2/pkg/ui/frontend/src/brand/mark-sheet.js` | The contract between the recorded animation and the component that plays it: which sizes have a sheet, how many frames, how long a loop. |
-| `v2/pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still, the recorded animation and the live one; see below. |
-| `v2/pkg/ui/frontend/scripts/export-mark-sheets.mjs` | `npm run brand:sheets`. Records the animation to the sprite sheets below, out of a real browser running the renderer. |
-| `v2/pkg/ui/frontend/public/grain-mark-{20,32}.png` | The recorded animation, one sprite sheet per size. Alpha masks, so one file serves both themes. |
-| `v2/pkg/ui/frontend/scripts/export-brand-assets.mjs` | `npm run brand` in `v2/pkg/ui/frontend`. Regenerates everything below out of the renderer. |
-| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.svg` | The static logo as a solid filled path. Scale-free: the favicon, and the still the app shows wherever the mark is not animating. |
-| `v2/pkg/ui/frontend/public/grain-mark-{light,dark}.png` | The same fill at 128px. Favicon fallback only, for browsers with no SVG-favicon support (Safari before 16.4). |
+| `pkg/ui/frontend/src/brand/grain-mark.js` | The renderer, and the one definition of the mark. A verbatim copy of the design pack (v2) — see its header. `createGrainMark()` animates it, `renderStatic()` draws a still. No dependencies. |
+| `pkg/ui/frontend/src/brand/mark-sheet.js` | The contract between the recorded animation and the component that plays it: which sizes have a sheet, how many frames, how long a loop. |
+| `pkg/ui/frontend/src/components/GrainMark.jsx` | The React component the app uses. Picks between the still, the recorded animation and the live one; see below. |
+| `pkg/ui/frontend/scripts/export-mark-sheets.mjs` | `npm run brand:sheets`. Records the animation to the sprite sheets below, out of a real browser running the renderer. |
+| `pkg/ui/frontend/public/grain-mark-{20,32}.png` | The recorded animation, one sprite sheet per size. Alpha masks, so one file serves both themes. |
+| `pkg/ui/frontend/scripts/export-brand-assets.mjs` | `npm run brand` in `pkg/ui/frontend`. Regenerates everything below out of the renderer. |
+| `pkg/ui/frontend/public/grain-mark-{light,dark}.svg` | The static logo as a solid filled path. Scale-free: the favicon, and the still the app shows wherever the mark is not animating. |
+| `pkg/ui/frontend/public/grain-mark-{light,dark}.png` | The same fill at 128px. Favicon fallback only, for browsers with no SVG-favicon support (Safari before 16.4). |
 | `docs/brand/grain-hero-2-3minus-{light,dark}.svg` | The static logo at hero scale, as grains. For a README, a slide, print. |
 
 The assets are committed rather than generated during `npm run build`, so
@@ -207,7 +207,7 @@ on the module, so all of this costs the vendoring no deviation.
 ## Colour
 
 The grain colour is the app's accent, and everything else in the palette
-is arranged under it (`v2/pkg/ui/frontend/src/style.css` for the custom
+is arranged under it (`pkg/ui/frontend/src/style.css` for the custom
 properties, `src/theme.js` for the MUI palette — the two carry the same
 values and are edited together).
 

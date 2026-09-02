@@ -118,10 +118,10 @@ usermod -aG docker debian
 # Docker's own default bridge subnet, 172.17.0.0/16, is not a guest-image
 # choice -- it is dockerd's hardcoded first entry in its default address
 # pool, so an operator host that also runs unconfigured Docker (the common
-# case: v2/scripts/setup.sh needs docker to build/run the OCI image and
+# case: scripts/setup.sh needs docker to build/run the OCI image and
 # to attach a kontur VM's own container to it) ends up with its docker0
 # gateway at that exact address too. GRAIN_KONTUR_GIT_PROXY_HOST
-# (v2/scripts/setup.sh's ensure_kontur_git_proxy_host) defaults a VM's
+# (scripts/setup.sh's ensure_kontur_git_proxy_host) defaults a VM's
 # route to the host's git proxy to be that same host-side gateway
 # address. Confirmed live: the moment this guest's own dockerd creates
 # its identically-addressed local bridge, the guest's routing table gains
@@ -302,7 +302,7 @@ fi
 # --- No SSH key is baked in, and that is the point.
 #
 # This used to install OPERATOR_SSH_PUBLIC_KEY -- the public half of a
-# keypair v2/scripts/setup.sh generated per deployment -- as the debian
+# keypair scripts/setup.sh generated per deployment -- as the debian
 # account's only authorized_keys entry. That is what made a guest image
 # deployment-specific, and so what stopped a published one from existing:
 # a generic disk would have carried either a private key everybody has or

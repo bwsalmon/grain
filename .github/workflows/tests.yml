@@ -1,26 +1,23 @@
-# The unit suite, on every pull request and every push to main.
+# Everything that can be checked without a credential, on every pull
+# request and every push to main: the Go suite, the frontend, the
+# Playwright UI suite, the real-KVM sandbox suite, and the Terraform
+# module.
 #
-# Runs the whole of `tests/` unscoped, which is safe here and only here:
-# the live suites gate themselves on `qemu:///system`, a `br-grain`
-# bridge and a reachable netfilter, none of which a hosted runner has, so
-# they skip rather than run. The README's warning that an unscoped
-# `pytest` will destroy a running cluster is about a host that has one up
-# -- a fresh runner has nothing to destroy. Scoping the run to a
-# hand-maintained file list instead would just mean a new unit suite
-# silently going untested the day someone forgets to add it.
-#
-# `/dev/kvm` used to be on that list of things "a hosted runner has none
-# of". It is not: GitHub's Linux runners expose it (nested virtualization
-# on their Azure hosts), and the real-vm job below boots actual guests on
-# it. That mistaken belief is why v2/pkg/orchestrator's real-VM suite sat
-# skipping for its whole life while reading as coverage -- see that job.
+# `/dev/kvm` was once assumed to be something "a hosted runner does not
+# have". It is not: GitHub's Linux runners expose it (nested
+# virtualization on their Azure hosts), and the real-vm job below boots
+# actual guests on it. That mistaken belief is why pkg/orchestrator's
+# real-VM suite sat skipping for its whole life while reading as
+# coverage -- see that job.
 #
 # Nothing here holds a credential: `contents: read`, no secrets, no
 # environment. That is deliberate rather than incidental. `pull_request`
 # runs code from the PR's own branch before any human has read it, so
 # this job is only safe to trigger that way for as long as it has nothing
 # worth stealing -- the same argument the config repo's plan.yml makes for
-# never authenticating a plan-on-PR job.
+# never authenticating a plan-on-PR job. The suites that need a built
+# image (tests/'s two e2e harnesses) skip here and run in
+# build-artifacts.yml on push instead.
 name: tests
 
 on:
@@ -38,42 +35,42 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # tests/ is three suites: the cross-file content checks
+  # (test_container_deploy.py), which need nothing but the tree and run
+  # here, and the two e2e harnesses, which drive a real container and a
+  # real installer and so gate themselves on GRAIN_TEST_IMAGE /
+  # GRAIN_INSTALLER_E2E. Those two skip on this runner and are run for
+  # real by build-artifacts.yml, which has an image to give them.
+  #
+  # The content checks are worth their own job because nothing else sees
+  # what they see: they assert agreements *between* files -- the
+  # Dockerfile, scripts/setup.sh, this workflow's sibling, the Makefile
+  # and terraform/gcp/files/deploy.sh all naming the same image, the same
+  # unit and the same paths -- which no single language's test suite can
+  # check.
   pytest:
-    name: unit tests (python ${{ matrix.python-version }})
+    name: python suites
     runs-on: ubuntu-latest
-    strategy:
-      # One version failing is a fact worth having about the other.
-      fail-fast: false
-      matrix:
-        # The floor `pyproject.toml` declares and the current release --
-        # the stock interpreters on Debian 12 and 13, which is what the
-        # host this deploys to actually is.
-        python-version: ["3.11", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
 
-      # grain declares no dependencies and means it -- stdlib only, so it
-      # runs on a stock Debian host with nothing installed. pytest is the
-      # single build-time exception, and pinning the major line keeps a
+      # These suites declare no dependencies beyond the standard library;
+      # pytest is the single exception, and pinning the major line keeps a
       # future release's collection changes from turning CI red on a
       # commit that touched nothing.
       - name: Install pytest
         run: python -m pip install --disable-pip-version-check "pytest>=8,<9"
 
-      # `python -m pytest`, not `pytest`: the module form puts the
-      # repository root on `sys.path`, which is how `import grain`
-      # resolves without installing the package first. The bare console
-      # script does not, and every test module fails to collect.
-      - name: Run the unit suite
+      - name: Run the python suites
         run: python -m pytest
 
   go-test:
-    name: v2 (go)
+    name: go
     runs-on: ubuntu-latest
 
     steps:
@@ -81,30 +78,26 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: v2/go.mod
+          go-version-file: go.mod
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: v2/pkg/ui/frontend/package-lock.json
+          cache-dependency-path: pkg/ui/frontend/package-lock.json
 
       - name: Build frontend
-        working-directory: v2
         run: make frontend
 
       - name: Build
-        working-directory: v2
         run: go build ./...
 
       - name: Vet
-        working-directory: v2
         run: go vet ./...
 
-      # gitproxy's live_test.go and e2e's live_test.go each gate themselves
-      # (missing `git`, unset GEMINI_API_KEY) the same way the pytest
-      # job's live suites gate on a libvirt connection and friends -- they
-      # skip on a runner that has none of that rather than failing.
+      # gitproxy's live_test.go and e2e's live_test.go each gate
+      # themselves (missing `git`, unset GEMINI_API_KEY) -- they skip on a
+      # runner that has none of that rather than failing.
       #
       # pkg/orchestrator's own real-VM tests gate on /dev/kvm and so skip
       # here too, but only because this step gives them no docker daemon
@@ -112,20 +105,19 @@ jobs:
       # them for real. Do not read this step's "ok" for that package as
       # covering them.
       - name: Test
-        working-directory: v2
         run: go test ./...
 
       - name: Test frontend
-        working-directory: v2/pkg/ui/frontend
+        working-directory: pkg/ui/frontend
         run: npm test
 
   # A separate job rather than a step in go-test above: this needs a real
   # browser and the apt packages `playwright install --with-deps` pulls
   # in for it, which would slow down and complicate the fast, browser-free
   # go-test job for no benefit to it (see test-e2e's own doc comment in
-  # v2/Makefile).
+  # Makefile).
   ui-e2e:
-    name: v2 (ui e2e)
+    name: ui e2e
     runs-on: ubuntu-latest
 
     steps:
@@ -133,23 +125,22 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: v2/go.mod
+          go-version-file: go.mod
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: v2/pkg/ui/frontend/package-lock.json
+          cache-dependency-path: pkg/ui/frontend/package-lock.json
 
       # Builds the frontend, installs Chromium and its apt dependencies,
       # then runs the Playwright suite against a real pkg/ui.Server
-      # (`grain demo`) -- see v2/Makefile's test-e2e target.
+      # (`grain demo`) -- see Makefile's test-e2e target.
       - name: Test e2e
-        working-directory: v2
         run: make test-e2e
 
   # Boots real cloud-hypervisor VMs under real KVM and drives them the way
-  # the daemon does -- v2/pkg/orchestrator/kontur_docker_real_test.go, the
+  # the daemon does -- pkg/orchestrator/kontur_docker_real_test.go, the
   # only test that covers the sandbox path end to end.
   #
   # It gates on /dev/kvm, and for its whole life nothing gave it one, so
@@ -171,7 +162,7 @@ jobs:
   # someone predicted it was relevant is most of the way back to one that
   # never runs.
   real-vm:
-    name: v2 (real KVM sandboxes)
+    name: real KVM sandboxes
     runs-on: ubuntu-latest
     # The guest rootfs build dominates this: debootstrap plus the package
     # set guest-setup.sh installs, before any VM boots at all.
@@ -182,7 +173,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: v2/go.mod
+          go-version-file: go.mod
 
       # The whole point of the job. konturDockerRealTestPrereqs skips on a
       # missing /dev/kvm, so without this the suite would quietly do
@@ -202,7 +193,6 @@ jobs:
       # for a real run. -v because when a guest fails to come up, the
       # per-step log is the only account of how far it got.
       - name: Real KVM sandbox suite
-        working-directory: v2
         run: |
           go test ./pkg/orchestrator/ \
             -run 'TestKonturSandboxesAgainstARealDockerBackedVM|TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently' \
@@ -229,17 +219,16 @@ jobs:
             docker logs "$c" 2>&1 | tail -100
           done
 
-  # The two Terraform modules -- v1's controller-plus-sandbox-pool
-  # (terraform/gcp) and v2's staging environment (terraform/gcp-v2) --
-  # had no machine check of any kind until this job. Nothing else in this
-  # workflow reads a .tf file, so a typo'd variable reference or an
-  # unformatted block could sit on main indefinitely and only surface at
-  # `terraform apply` time, in front of a real project. That is the worst
-  # possible place to find it: gcp-v2 in particular has never been
-  # applied, so every error it holds is still undiscovered.
+  # terraform/gcp had no machine check of any kind until this job.
+  # Nothing else in this workflow reads a .tf file, so a typo'd variable
+  # reference or an unformatted block could sit on main indefinitely and
+  # only surface at `terraform apply` time, in front of a real project --
+  # the worst possible place to find it, and now two deployments' worth
+  # of it, since bwsalmon/agents applies this one module for both its
+  # main and its staging install.
   #
   # `init -backend=false` is what keeps this job as credential-free as
-  # the two above it. Both modules declare `backend "gcs" {}` and expect
+  # the ones above it. The module declares `backend "gcs" {}` and expects
   # an operator to fill it in with -backend-config; -backend=false skips
   # backend initialization outright, so this installs the provider plugins
   # and nothing more -- no GCS bucket, no service account, no `contents:
@@ -247,31 +236,23 @@ jobs:
   # checks syntax, references and types against the provider schema
   # without contacting GCP or reading state.
   #
-  # Note that gcp-v2's `google_iap_brand` deprecation (see that module's
+  # Note that the module's `google_iap_brand` deprecation (see its
   # README, "Get an IAP OAuth client") surfaces here as a *warning*, which
   # `validate` does not fail on. It stays visible in the log rather than
   # becoming a red build for a resource `create_iap_brand = false` does
   # not even create by default.
   terraform:
-    name: terraform (${{ matrix.module }})
+    name: terraform
     runs-on: ubuntu-latest
-
-    strategy:
-      # Same reasoning as the pytest matrix: one module failing is a fact
-      # worth having about the other, especially while v2's module is the
-      # one under active development.
-      fail-fast: false
-      matrix:
-        module: [terraform/gcp, terraform/gcp-v2]
 
     steps:
       - uses: actions/checkout@v4
 
       # A constraint, not an exact version: this tracks the current 1.13
-      # patch release the way the pytest job pins a major line, so a
-      # patch release cannot turn CI red on a commit that touched
-      # nothing, and a deliberate bump moves the whole floor at once.
-      # Both modules' versions.tf already require >= 1.6.0.
+      # patch release the way the pytest-collect job pins a major line, so
+      # a patch release cannot turn CI red on a commit that touched
+      # nothing, and a deliberate bump moves the whole floor at once. The
+      # module's versions.tf already requires >= 1.6.0.
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "~1.13.0"
@@ -283,13 +264,13 @@ jobs:
       # -diff so a formatting failure shows what to change, rather than
       # just naming the file and leaving the reader to run fmt locally.
       - name: Format
-        working-directory: ${{ matrix.module }}
+        working-directory: terraform/gcp
         run: terraform fmt -check -recursive -diff
 
       - name: Init
-        working-directory: ${{ matrix.module }}
+        working-directory: terraform/gcp
         run: terraform init -backend=false -input=false
 
       - name: Validate
-        working-directory: ${{ matrix.module }}
+        working-directory: terraform/gcp
         run: terraform validate

@@ -114,15 +114,15 @@ limitation stops blocking work in this repo: a task that needs to confirm
 anything else about how it behaves can read the source here (e.g.
 `internal/cli/vm.go`) instead.
 
-It is a plain copy, not a git submodule or subtree. Nothing under `v2/`
-depends on it as *code* -- `v2/go.mod` does not require it and nothing
+It is a plain copy, not a git submodule or subtree. Nothing under this repository's own Go tree
+depends on it as *code* -- `go.mod` does not require it and nothing
 imports `github.com/bwsalmon/kontur`. Its Dockerfile, however, is built:
 `packer/kontur/build-oci-image.sh` builds the runtime image from this
 directory, and `packer/kontur/build-guest.sh` builds the sandbox guest
 from the same Dockerfile's `guest-artifacts` target. So a resync here
 changes what a deployment actually runs, not just what a task can read.
 
-The Go dependency is still deliberately absent, and `v2/pkg/kontur`'s own
+The Go dependency is still deliberately absent, and `pkg/kontur`'s own
 package doc comment explains why: reading kontur's on-disk state and
 shelling out to its CLI is a shallower dependency than importing its
 module graph would be, and that reasoning doesn't change just because the

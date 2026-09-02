@@ -8,9 +8,10 @@ terraform {
     }
   }
 
-  # Deliberately empty: CI fills it in with
+  # Deliberately empty, same as v1's versions.tf: CI (or an
+  # operator applying this by hand) fills it in with
   #   terraform init -backend-config=../config/backend.hcl
-  # so the bucket name lives in the repo as configuration, not here.
+  # so the bucket name lives in configuration, not here.
   backend "gcs" {}
 }
 

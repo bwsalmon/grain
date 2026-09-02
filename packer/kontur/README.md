@@ -1,9 +1,9 @@
 # The kontur guest image
 
-`v2/pkg/kontur`'s own package doc comment, and `v2/README.md`'s
+`pkg/kontur`'s own package doc comment, and `README.md`'s
 `grain mcpserver -kontur-vm` section, both state the same assumption: a
 kontur-managed VM's guest image already carries the operator's SSH key and
-a running sshd (and, per `v2/README.md`, git) before this repo ever tries
+a running sshd (and, per `README.md`, git) before this repo ever tries
 to reach it. Nothing in this repo built that image -- v1 has an equivalent
 job for its own libvirt-managed sandboxes (`provision/sandbox.sh`, run as
 cloud-init user-data against a shared base image on every VM's first boot);
@@ -50,7 +50,7 @@ had.
 What that buys: one build instead of two, no root/debootstrap requirement
 for a guest image build, and -- since bwsalmon/kontur#35 -- a guest image
 with no key in it at all, which retired `-kontur-exec-key` and the
-key-staging step `v2/scripts/setup.sh` used to do for it.
+key-staging step `scripts/setup.sh` used to do for it.
 
 ### Status: both the kernel and the hook have landed upstream
 
@@ -128,7 +128,7 @@ result under. What needed checking on a machine that can:
 
 **Verified live (bwsalmon/agents#577), for the Debian path.** A fresh
 n2-standard-4 GCE VM with nested virtualization, running nothing but
-`v2/scripts/setup.sh GRAIN_KONTUR_ENABLE=1`, built this image
+`scripts/setup.sh GRAIN_KONTUR_ENABLE=1`, built this image
 (`docker build --target guest-artifacts`) end to end with no patching,
 `konturctl vm create` booted it under real `cloud-hypervisor`/KVM, and a
 real `grain daemon` dispatch reached it through the full production path
@@ -137,7 +137,7 @@ whoami`, over the guest's own sshd) and got back `debian`. All four items
 above check out: the device nodes, the `RUN` stage, and the regenerated
 initramfs all worked without local changes. Only item 3 (the Alpine
 variant) remains unverified -- this run only ever exercised Debian, same
-as every other deployment. `v2/scripts/kontur-diag.sh` needed a real fix
+as every other deployment. `scripts/kontur-diag.sh` needed a real fix
 first (it predated `-net flat` becoming the default and misdiagnosed a
 healthy flat-mode guest as broken); see that script's own header for
 what changed.
@@ -190,7 +190,7 @@ docker build \
 
 -- which yields `disk.img`, `vmlinuz` and `initrd.img` in `<dir>`, the
 same three files, with the same names, the old `build.sh` produced.
-`v2/scripts/setup.sh`'s `ensure_kontur_images_build` calls
+`scripts/setup.sh`'s `ensure_kontur_images_build` calls
 `build-guest.sh` in its place, and no longer installs debootstrap or
 e2fsprogs, since the build needs neither (nor root).
 
@@ -207,7 +207,7 @@ VM's own container on every boot and hands the guest the public half on
 its kernel command line, and `konturctl vm create -guest-user` names the
 extra account to authorize it for -- which is what closed the last gap
 here, kontur authorizing **root** while this guest's sandbox account is
-`debian`. `-kontur-exec-key` and the key staging `v2/scripts/setup.sh`
+`debian`. `-kontur-exec-key` and the key staging `scripts/setup.sh`
 did for it are both gone.
 
 See "Verified live (bwsalmon/agents#577)" above -- the build has now been
@@ -321,7 +321,7 @@ service a NoCloud datasource would ride on):
 
 - **sshd is enabled**, and **the operator's public key is baked into the
   `debian` user's `authorized_keys`** at build time. This is the literal
-  thing `pkg/kontur`'s doc comment and `v2/README.md` both say a kontur
+  thing `pkg/kontur`'s doc comment and `README.md` both say a kontur
   guest image already has to satisfy on its own -- there is nothing
   downstream of `konturctl vm create` positioned to inject it the way
   `LibvirtAdapter.create()` injects a sandbox's authorized key today.
@@ -343,7 +343,7 @@ identity/credential helper. Per-dispatch git configuration (`credential.
 helper = store`, the `grain agent` identity, the proxy token) is set at
 runtime against a live sandbox the same way v1's `configure_git_credentials`
 (`grain/automation/dispatch.py`) and v2's `mcp.ConfigureGitCredentials`
-already do it -- "arrives with git already configured" (`v2/README.md`)
+already do it -- "arrives with git already configured" (`README.md`)
 turns out to mean only "the `git` binary is on `PATH`", confirmed against
 both functions: neither one assumes any baked-in `.gitconfig`.
 
@@ -448,7 +448,7 @@ to the rootfs plus 20% headroom and a 64MiB floor) and the `vmlinuz`/
 `initrd.img` that stage copies out of `/boot` alongside it. It writes all
 three under `output/kontur-guest-<git-sha>-<UTC timestamp>/`, or straight
 into `$OUTPUT_DIR` when that is set -- which is how a caller that already
-knows where it wants them (`v2/scripts/setup.sh`'s own
+knows where it wants them (`scripts/setup.sh`'s own
 `ensure_kontur_images`) skips parsing this script's output to find them.
 It needs docker and nothing else; in particular not root, and not
 `debootstrap` or `mke2fs` on the build host, both of which now only ever
@@ -457,7 +457,7 @@ is set, `gsutil cp`s all three to both
 `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/<same name>/` (a permanent,
 versioned copy) and `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/latest/` (a
 fixed alias overwritten by every build) -- the second is what
-`v2/scripts/setup.sh`'s own `ensure_kontur_images` always fetches
+`scripts/setup.sh`'s own `ensure_kontur_images` always fetches
 (bwsalmon/agents#504), so a fresh build actually reaches a deployment on
 its next `setup.sh` run without that script having to discover or
 hardcode today's `<git-sha>-<timestamp>` version string itself. No bucket
@@ -466,7 +466,7 @@ artifacts, and `terraform/gcp/versions.tf`'s own comment on its Terraform
 state bucket ("the bucket name lives in the repo as configuration, not
 here") is the precedent to follow rather than inventing a
 project-specific bucket name a deployment didn't choose; see
-`terraform/gcp-v2/variables.tf`'s own `kontur_image_bucket` for where that
+`terraform/gcp/variables.tf`'s own `kontur_image_bucket` for where that
 name is actually configured for that deployment shape.
 No SSH key is involved either way. The image this builds carries none
 (bwsalmon/kontur#35 -- kontur generates one per VM boot instead), so
@@ -478,7 +478,7 @@ binary and the cloud-hypervisor release bundled with it, not the guest
 disk this directory builds -- is `third_party/kontur`'s own Dockerfile, a
 plain `docker build`/`docker push` with no root and no debootstrap of its
 own needed; see this directory's sibling `build-oci-image.sh` for exactly
-that, and `v2/scripts/setup.sh`'s own `ensure_kontur_images` for how a
+that, and `scripts/setup.sh`'s own `ensure_kontur_images` for how a
 deployment pulls it back down and retags it to `konturctl`'s own default
 image reference.
 
@@ -492,7 +492,7 @@ container") are paths inside a host directory `-images-hostpath` (default
 `/var/lib/vm-images`, `internal/staticpod/spec.go`'s own default) mounts
 read-only at `/images` in the VM's container. So a deployment publishing
 this directory's `build-guest.sh` output has to land all three files on the
-kontur host's own local disk under that directory -- `v2/scripts/
+kontur host's own local disk under that directory -- `scripts/
 setup.sh`'s own `ensure_kontur_images` is that provisioning step
 (bwsalmon/agents#504: nothing downstream of `konturctl vm create` fetches
 them there on its own), always landing them at a fixed `<hostpath>/current/`
@@ -540,9 +540,9 @@ real `KonturSandboxes`/`KonturConfig` from it (bwsalmon/agents#274) via
 -kontur-create-arg=-guest-port -kontur-create-arg=22` (see "`-guest-port 22`
 is required" above -- easy to leave out, since a refused connection gives
 no hint that the guest is listening on the wrong port rather than still
-booting). `v2/scripts/setup.sh`'s own `write_systemd_units` builds exactly
+booting). `scripts/setup.sh`'s own `write_systemd_units` builds exactly
 this list whenever `GRAIN_KONTUR_ENABLE=1` (bwsalmon/agents#504) -- see
-`terraform/gcp-v2/README.md`, "Kontur sandboxing", rather than wiring it
+`terraform/gcp/README.md`, "Kontur sandboxing", rather than wiring it
 by hand.
 That vendored copy is a point-in-time snapshot with no automation keeping
 it current (see its own `VENDORED.md`), so a deployment wiring
