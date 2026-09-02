@@ -107,6 +107,37 @@ func TestAgentFrameworksSaysWhereToSetAMissingCredential(t *testing.T) {
 	}
 }
 
+// The counterpart to the test above, for the other thing the claude
+// framework needs and the Gemini one does not: a binary on the host.
+// Nothing in the v2 deployment path installed it until scripts/setup.sh's
+// own install_claude_cli, so this is the error a deployment that predates
+// that -- or one whose install was blocked -- actually hits, once per
+// dispatch, the moment someone selects "claude" in Settings.
+func TestAgentFrameworksSaysHowToInstallAMissingClaudeCLI(t *testing.T) {
+	// An empty $PATH, so this asserts the same thing whether or not the
+	// machine running it happens to have a claude binary -- the reverse
+	// of the -claude-path trick the credential test above uses.
+	t.Setenv("PATH", t.TempDir())
+	secretStore := testSecrets(t)
+	if err := secretStore.Set(secrets.ClaudeOAuthTokenSecret, secrets.AgentCredentialKey, []byte("sk-ant-oat01-fake")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := agentFrameworks(config{}, testStore(t), secretStore)(context.Background(), model.AgentFrameworkClaude)
+	if err == nil {
+		t.Fatal("building the claude framework with no claude binary succeeded")
+	}
+	// "executable file not found in $PATH" alone reads as grain being
+	// broken; an operator needs to be told this is a host missing a
+	// package, and what puts it there.
+	if !strings.Contains(err.Error(), "not installed") {
+		t.Errorf("error = %v; want it to name the CLI as not installed", err)
+	}
+	if !strings.Contains(err.Error(), "setup.sh") {
+		t.Errorf("error = %v; want it to point at the script that installs the CLI", err)
+	}
+}
+
 func TestAgentFrameworksRejectsAnUnknownName(t *testing.T) {
 	_, err := agentFrameworks(config{}, testStore(t), testSecrets(t))(context.Background(), "gpt")
 	if err == nil || !strings.Contains(err.Error(), "unknown agent framework") {

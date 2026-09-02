@@ -1480,6 +1480,32 @@ before `RunDispatch` takes over finishing the run), and
 Gemini key exists: a UI that is not running is a credential that can
 never be pasted in.
 
+The claude framework needs one thing the gemini one does not, and that
+gap outlived the wiring above: a `claude` binary on the host. `agent/
+claude` execs it per dispatch, resolving a bare `"claude"` against the
+daemon's own `$PATH` when `-claude-path` is unset -- and nothing in the
+v2 deployment path ever put one there. v1 did (`provision/controller.sh`
+installed it for the `grain-agent` account `claude -p` ran as), but when
+the framework became a stored setting, and then a live per-task choice,
+the binary was never brought along. A deployment could therefore offer
+"claude" in Settings, report its OAuth token as set, and fail every run
+it dispatched with `executable file not found in $PATH`.
+`scripts/setup.sh` installs it now (`install_claude_cli`, on every run
+and whichever framework is currently selected, since selecting the other
+one reaches the very next dispatch), symlinks it onto `/usr/local/bin`
+where systemd's own default `$PATH` finds it, and reports its presence
+in the readiness summary alongside the two credentials. A failed
+download is never fatal -- a gemini deployment does not need it -- so
+the error path is real, and says how to install the CLI by hand or name
+an existing copy with `GRAIN_CLAUDE_PATH`.
+
+`grain-daemon.service` also exports a `HOME` that exists now
+(`$GRAIN_DATA_DIR/home`). `$GRAIN_USER` is created `--no-create-home`,
+so systemd would otherwise hand the daemon the `/home/grain` its passwd
+entry names and nothing ever creates -- which the daemon itself never
+minded and the claude CLI, which writes its own state under `$HOME`,
+would.
+
 One consequence worth naming: two frameworks writing into one
 `TranscriptDir` means two transcript formats in it at once -- claude
 mirrors its own `--output-format stream-json`, gemini tees an
