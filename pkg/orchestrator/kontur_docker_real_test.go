@@ -498,15 +498,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		}
 	})
 
-	// A disk size the guest image does not already have, so that what the
-	// guest reports below can only have come from createArgs'
-	// -disk-size-mb. Derived from the image rather than written down:
-	// kontur refuses a size under the disk the overlay reads through to,
-	// and this repo's guest grows every time guest-setup.sh installs one
-	// more thing.
-	diskGB := guestImageGB(t, image) + 1
-
-	sb, err := k.Acquire(context.Background(), "e1-1", orchestrator.Shape{DiskGB: diskGB})
+	sb, err := k.Acquire(context.Background(), "e1-1", orchestrator.Shape{})
 	if err != nil {
 		t.Fatalf("Acquire over docker exec against a real konturctl/docker/cloud-hypervisor VM: %v", err)
 	}
@@ -564,7 +556,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 
 	assertGuestHasEgress(t, byName["run_command"], name)
-	assertGuestDiskSized(t, byName["run_command"], diskGB)
+	assertSandboxDiskSizeApplies(t, k, stateDir, byName["run_command"])
 
 	// A guest command's own exit status has to survive the guest's sshd
 	// -> `kontur exec` -> `docker exec` chain intact. 42 proves the
@@ -676,86 +668,113 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 // VM's own network namespace, rather than a literal, so this says "the
 // guest took over the namespace's default route" rather than "the runner
 // happened to use 172.17.0.1".
-// guestImageGB is an upper bound, in whole GiB, on the guest disk image
-// inside image -- which is the floor a sandbox's disk size has to clear
-// to mean anything, since kontur's overlay reads through to that image
-// and refuses a size below it outright.
+// assertSandboxDiskSizeApplies is the far end of the disk-size setting
+// (model.Config.SandboxDiskGB -> Shape.DiskGB ->
+// KonturConfig.createArgs' -disk-size-mb -> CHV_DISK_SIZE_MB -> the
+// qcow2 overlay kontur sizes before cloud-hypervisor opens it),
+// asserted from inside a guest. That whole chain is only visible at once
+// here, which is what makes it worth the extra VM: a fake konturctl can
+// prove the flag was passed and nothing beyond it.
 //
-// The image's own total size stands in for the disk inside it: the guest
-// travels in the image now, so disk.img is the bulk of it and everything
-// else (kontur's two static binaries and a kernel) is a rounding error
-// on top. Bounding it from above is what matters here, and this does.
-func guestImageGB(t *testing.T, image string) int {
-	t.Helper()
-	out, err := exec.Command("docker", "image", "inspect", "-f", "{{.Size}}", image).CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker image inspect on the guest image: %v\n%s", err, out)
-	}
-	size, err := strconv.ParseInt(string(bytes.TrimSpace(out)), 10, 64)
-	if err != nil {
-		t.Fatalf("parsing the guest image's size %q: %v", out, err)
-	}
-	const gib = 1024 * 1024 * 1024
-	return int((size + gib - 1) / gib)
-}
-
-// assertGuestDiskSized is the far end of the disk-size setting
-// (model.Config.SandboxDiskGB -> Shape.DiskGB -> createArgs'
-// -disk-size-mb -> CHV_DISK_SIZE_MB -> the qcow2 overlay kontur sizes
-// before cloud-hypervisor opens it), asserted from inside the guest --
-// the only place the whole chain is visible at once, and why it is worth
-// the minute a real VM costs. A fake konturctl can only ever prove the
-// flag was passed.
+// It builds a second sandbox rather than sizing the one the rest of this
+// test uses, because the size to ask for is not a number this test can
+// write down. kontur refuses a size below the disk image the overlay
+// reads through to, and that image is this repo's guest -- which grows
+// every time guest-setup.sh installs one more thing. So the size comes
+// from the unsized guest already running: one GiB more than the disk it
+// booted with, which is both certainly above kontur's floor and small
+// enough that growing the filesystem onto it costs a runner nothing.
 //
-// Two readings, because they fail for different reasons and mean
-// different things:
-//
-//   - The block device. /sys/block/vda/size is the virtual size kontur
-//     gave the overlay, in 512-byte sectors. Short means the size never
-//     reached kontur at all.
-//   - The filesystem. `df` reports what the guest can actually use, which
-//     stays the image's own until grain-growfs' resize2fs runs
-//     (scripts/kontur/guest-setup.sh). A device at the right size with a
-//     filesystem still at the image's is the failure that looks like the
-//     setting having done nothing, and is what this half catches.
-func assertGuestDiskSized(t *testing.T, runCommand *mcp.Tool, wantGB int) {
+// runCommand belongs to that first, unsized sandbox.
+func assertSandboxDiskSizeApplies(t *testing.T, k *orchestrator.KonturSandboxes, stateDir string, runCommand *mcp.Tool) {
 	t.Helper()
 
+	baseMB := guestRootDeviceMB(t, runCommand)
+	wantGB := baseMB/1024 + 1
 	wantMB := wantGB * 1024
-	result := runCommand.Handler(context.Background(), map[string]any{
-		"command": "cat /sys/block/vda/size; df -Pk / | tail -1",
-	})
-	if result.IsError {
-		t.Fatalf("reading the guest's disk size: %s", result.Text)
-	}
-	fields := strings.Fields(strings.TrimSpace(result.Text))
-	if len(fields) < 3 {
-		t.Fatalf("guest disk reading = %q, want the device's sector count followed by a df line", result.Text)
-	}
-	sectors, err := strconv.ParseInt(fields[0], 10, 64)
+
+	name, err := k.VMNameFor("e1-2")
 	if err != nil {
-		t.Fatalf("parsing /sys/block/vda/size %q out of %q: %v", fields[0], result.Text, err)
+		t.Fatal(err)
 	}
-	if deviceMB := int(sectors * 512 / (1024 * 1024)); deviceMB < wantMB {
-		t.Errorf("guest's /dev/vda is %d MiB, want at least the %d MiB the sandbox was created with -- the size never reached the overlay",
-			deviceMB, wantMB)
+	t.Cleanup(func() {
+		if err := kontur.Delete(context.Background(), stateDir, name); err != nil {
+			t.Logf("cleaning up the sized kontur VM %q: %v", name, err)
+		}
+	})
+	sb, err := k.Acquire(context.Background(), "e1-2", orchestrator.Shape{DiskGB: wantGB})
+	if err != nil {
+		t.Fatalf("Acquire of a sandbox asking for a %d GiB disk (the guest image's own %d MiB plus a GiB): %v", wantGB, baseMB, err)
+	}
+	t.Cleanup(func() { _ = sb.Release(context.Background()) })
+
+	tools, err := sb.Tools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sizedRunCommand *mcp.Tool
+	for i := range tools {
+		if tools[i].Name == "run_command" {
+			sizedRunCommand = &tools[i]
+		}
+	}
+	if sizedRunCommand == nil {
+		t.Fatalf("the sized sandbox returned no run_command tool (got %d tools)", len(tools))
 	}
 
+	// The block device first: this is the virtual size kontur gave the
+	// overlay, and it being unchanged from the unsized guest's means the
+	// size never reached kontur at all.
+	if gotMB := guestRootDeviceMB(t, sizedRunCommand); gotMB < wantMB {
+		t.Errorf("a sandbox created with -disk-size-mb %d has a %d MiB /dev/vda; the unsized one has %d MiB, so the size never reached the overlay",
+			wantMB, gotMB, baseMB)
+	}
+
+	// Then the filesystem, which is a separate claim: `df` reports what
+	// the guest can actually use, and that stays the image's own until
+	// grain-growfs' resize2fs runs (scripts/kontur/guest-setup.sh). A
+	// device at the right size with a filesystem still at the image's is
+	// the failure that looks like the setting having done nothing.
+	//
 	// Field 1 of `df -Pk` is the 1024-block total; -P is what guarantees
 	// one line per filesystem with the fields in that order, which is why
 	// this package's own health reading uses it too (health.go).
-	blocksKB, err := strconv.ParseInt(fields[2], 10, 64)
-	if err != nil {
-		t.Fatalf("parsing the guest's df total %q out of %q: %v", fields[2], result.Text, err)
+	result := sizedRunCommand.Handler(context.Background(), map[string]any{"command": "df -Pk / | tail -1"})
+	if result.IsError {
+		t.Fatalf("reading the sized guest's root filesystem: %s", result.Text)
 	}
-	// Not the full request: ext4's metadata and its reserved blocks mean
-	// a filesystem grown onto an N MiB device never reports N. Nine
-	// tenths is well under that overhead and well over what the unresized
-	// image would report, which is the distinction being drawn.
+	fields := strings.Fields(result.Text)
+	if len(fields) < 2 {
+		t.Fatalf("guest df line = %q, want at least a device and a block total", result.Text)
+	}
+	blocksKB, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		t.Fatalf("parsing the guest's df total %q out of %q: %v", fields[1], result.Text, err)
+	}
+	// Not the full request: ext4's metadata means a filesystem grown onto
+	// an N MiB device never reports N. Nine tenths is well under that
+	// overhead and well over the unresized image's own size, which is the
+	// distinction being drawn.
 	if grownMB := int(blocksKB / 1024); grownMB < wantMB*9/10 {
-		t.Errorf("guest's root filesystem is %d MiB on a %d MiB device, want it grown onto most of the disk -- grain-growfs' resize2fs never ran or failed (see the VM's console)",
+		t.Errorf("the sized guest's root filesystem is %d MiB on a %d MiB device, want it grown onto most of the disk -- grain-growfs' resize2fs never ran or failed (see the VM's console)",
 			grownMB, wantMB)
 	}
+}
+
+// guestRootDeviceMB is the size of /dev/vda as the guest sees it, in
+// MiB. /sys/block/vda/size is in 512-byte sectors and readable by any
+// account, unlike the device itself.
+func guestRootDeviceMB(t *testing.T, runCommand *mcp.Tool) int {
+	t.Helper()
+	result := runCommand.Handler(context.Background(), map[string]any{"command": "cat /sys/block/vda/size"})
+	if result.IsError {
+		t.Fatalf("reading the guest's root device size: %s", result.Text)
+	}
+	sectors, err := strconv.ParseInt(strings.TrimSpace(result.Text), 10, 64)
+	if err != nil {
+		t.Fatalf("parsing /sys/block/vda/size %q: %v", result.Text, err)
+	}
+	return int(sectors * 512 / (1024 * 1024))
 }
 
 func assertGuestHasEgress(t *testing.T, runCommand *mcp.Tool, vmName string) {
