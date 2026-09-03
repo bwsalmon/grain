@@ -30,8 +30,8 @@ const TABS = [
 //
 // onOpenTask is threaded through for the one link out of these panels:
 // the metrics backlog names the oldest queued task, and the useful thing
-// to do with that is go and look at it. App closes this overlay on the
-// way, since two stacked dialogs would put the task behind the one it
+// to do with that is go and look at it. App closes this pane on the
+// way, since two stacked panes would put the task behind the one it
 // was opened from.
 export default function DebugOverlay({ config, onClose, onOpenTask, showError }) {
   const [tab, setTab] = useState("logs");
@@ -61,17 +61,28 @@ export default function DebugOverlay({ config, onClose, onOpenTask, showError })
     }
   };
 
-  // wide: every panel in here is either a table too many columns across
-  // for the default width (sandbox health, metrics) or a <pre> of log
-  // lines that wraps badly without it.
-  return (
-    <Overlay onClose={onClose} wide>
+  // The title and the tab strip are the pane's fixed header, so they
+  // stay reachable while a long log tail or a wide sandbox table scrolls
+  // under them.
+  const header = (
+    <>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Debug</Typography>
-      <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
+      <Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" scrollButtons="auto">
         {TABS.map((t) => (
           <Tab key={t.id} value={t.id} label={t.label} />
         ))}
       </Tabs>
+    </>
+  );
+
+  // pane, and nothing capping the width inside it (grain/task-115):
+  // every panel in here is either a table too many columns across for a
+  // dialog (sandbox health, metrics) or a <pre> of log lines that wraps
+  // badly in one. This was the widest centered box Overlay draws and it
+  // was still the wrong shape -- what these panels want is the whole
+  // content area beside the sidebar, which is what a pane is.
+  return (
+    <Overlay onClose={onClose} pane header={header}>
       {tab === "logs" && <LogsPage showError={showError} />}
       {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
       {tab === "metrics" && <MetricsPage showError={showError} onOpenTask={onOpenTask} />}

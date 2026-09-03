@@ -46,6 +46,21 @@ describe("DebugOverlay", () => {
     expect(api).toHaveBeenCalledTimes(1);
   });
 
+  // grain/task-115: these panels fill the content area beside the
+  // sidebar now rather than the widest centered box Overlay draws -- a
+  // log tail and a sandbox table both wanted the room -- and the tab
+  // strip is the pane's fixed header, so it stays put while one scrolls.
+  it("fills the pane beside the sidebar, with its tabs in the fixed header", async () => {
+    api.mockResolvedValueOnce(noLogs);
+    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    await screen.findByText(/no log sources configured|not available/i);
+
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
+    const head = document.querySelector(".overlay-pane-header");
+    expect(head).toContainElement(screen.getByRole("tab", { name: "Metrics" }));
+    expect(head).toContainElement(screen.getByRole("heading", { name: "Debug" }));
+  });
+
   it("shows Sandbox health on its own tab", async () => {
     api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
     const user = userEvent.setup();

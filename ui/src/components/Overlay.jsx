@@ -15,10 +15,20 @@ import { SIDEBAR_WIDTH } from "../theme.js";
 // 900px porthole was the complaint. The three lists whose "+" button and
 // whose rows open the same component (schedules, templates, suites) get
 // it for both, so opening one item is the same gesture with the same
-// result everywhere. Dialogs that are an *action* rather than a thing --
-// New task, Run a suite, Settings, Debug, an attempt's transcript --
-// stay centered boxes.
-export default function Overlay({ onClose, wide = false, pane = false, children }) {
+// result everywhere. Settings and Debugging are panes too now
+// (grain/task-115): both are a whole destination behind a tab strip
+// rather than one form to fill in and dismiss, and a centered box was
+// making a log tail, a sandbox table and a six-tab settings form share
+// the same 600-900px porthole. What is left in a centered box is what
+// really is a single *action*: New task, Run a suite, an attempt's
+// transcript.
+//
+// `header` is the pane's own fixed chrome, above the part that scrolls:
+// a title and a tab strip that stay put while the tab's content moves
+// under them, so a pane the height of the screen never scrolls its own
+// tabs off the top. Panes without one (a task, a schedule) pass nothing
+// and scroll their whole body as before.
+export default function Overlay({ onClose, wide = false, pane = false, header = null, children }) {
   if (pane) {
     return (
       <Dialog
@@ -48,9 +58,11 @@ export default function Overlay({ onClose, wide = false, pane = false, children 
         >
           <CloseIcon fontSize="small" />
         </IconButton>
+        {header !== null && <div className="overlay-pane-header">{header}</div>}
         {/* The pane's own body scrolls, not the document: the paper is
             the viewport's full height and its content (a long timeline,
-            a long form) is what overflows. */}
+            a long form) is what overflows. With a header above it, this
+            is the only part that moves. */}
         <div className="overlay-pane">{children}</div>
       </Dialog>
     );
