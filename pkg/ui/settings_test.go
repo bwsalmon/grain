@@ -256,6 +256,55 @@ func TestUpdateSettingsRejectsUnknownDefaultCapability(t *testing.T) {
 	}
 }
 
+// grain/task-43: the other half of the rejection above -- a save that
+// *drops* a stored id this build no longer offers goes through, even
+// though one that *adds* an unknown id does not.
+//
+// That asymmetry is the whole recovery path. The set is reported as
+// stored, retired ids included, so that an operator can see one and
+// clear it (Settings.DefaultCapabilities); the picker offers a row for
+// it purely to be unticked (capabilityRows, ui/src/state.js). Both are
+// worth nothing unless the save that arrives with the id gone is
+// accepted, and it is, because what is validated is the set being
+// written rather than the set already there. A check that also ran over
+// what was stored would pin the whole Capabilities tab: every save of
+// it, of any field, would be refused for an id nothing could remove.
+func TestUpdateSettingsAcceptsDroppingARetiredDefaultCapability(t *testing.T) {
+	c, store, ctx := testClient(t)
+	// Written straight to the store, which is the only way this state
+	// arises: UpdateSettings itself would never have accepted the id, so
+	// it can only be one that had a row when it was chosen and lost it to
+	// an upgrade since (OfferedCapabilities' own "scratch-repo", now
+	// github-sandbox).
+	putDefaultCapabilities(t, ctx, store, "gcp-key", "scratch-repo")
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read.DefaultCapabilities, []string{"gcp-key", "scratch-repo"}) {
+		t.Fatalf("DefaultCapabilities = %v, want it reported as stored: an operator can only clear one they can see",
+			read.DefaultCapabilities)
+	}
+
+	kept := []string{"gcp-key"}
+	saved, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{DefaultCapabilities: &kept})
+	if err != nil {
+		t.Fatalf("dropping a retired default capability: %v", err)
+	}
+	if !reflect.DeepEqual(saved.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("DefaultCapabilities = %v, want [gcp-key] with the retired id gone", saved.DefaultCapabilities)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("DefaultCapabilities = %v after a re-read, want [gcp-key]: the retired id is gone for good",
+			read.DefaultCapabilities)
+	}
+}
+
 // grain/task-24: with a second layer, the Capabilities tab has to say
 // which one defaults a capability. Default stays deployment-wide --
 // "every task filed here" -- and DefaultRepos names the repos that add
@@ -471,7 +520,7 @@ func TestSettingsReportsWhichSettingsNeedARestart(t *testing.T) {
 	// deliberately absent: this list is what the UI annotates, so
 	// anything named here is a promise that it cannot be applied live.
 	for _, live := range []string{"pollInterval", "maxConcurrent", "geminiModel", "claudeModel",
-		"maxAgentTurns", "agentFramework", "gcpProject", "sandboxCpus", "sandboxMemoryMb"} {
+		"maxAgentTurns", "agentFramework", "gcpProject", "sandboxCpus", "sandboxMemoryMb", "sandboxDiskGb"} {
 		if contains(fresh.RestartRequired, live) {
 			t.Errorf("restartRequired names %q, which the daemon applies without a restart", live)
 		}

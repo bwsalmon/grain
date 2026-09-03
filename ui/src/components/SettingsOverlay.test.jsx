@@ -208,6 +208,47 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
   });
 
+  // grain/task-41: the same treatment for the third dimension of that
+  // shape. It has no placeholder default beside it, unlike vCPUs and
+  // memory -- an unset disk is however large the guest image behind it
+  // is, which is not a number the API can name (ui.Settings' own comment
+  // on why there is no sandboxDiskGbDefault).
+  it("sets sandboxDiskGb, with no placeholder default beside it", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    const diskInput = screen.getByLabelText(/Sandbox disk/);
+    expect(diskInput).toHaveValue(null);
+    expect(diskInput).not.toHaveAttribute("placeholder");
+    await user.type(diskInput, "40");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxDiskGb: 40 }),
+    });
+  });
+
+  it("sends an explicit 0 when sandboxDiskGb is cleared back to blank", async () => {
+    api.mockResolvedValueOnce({ ...settings, sandboxDiskGb: 40 }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    expect(screen.getByLabelText(/Sandbox disk/)).toHaveValue(40);
+    await user.clear(screen.getByLabelText(/Sandbox disk/));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxDiskGb: 0 }),
+    });
+  });
+
   // bwsalmon/agents#610: an unset override shows kontur's own default as a
   // placeholder -- fainter than a real value -- rather than a literal 0 that
   // reads as a deliberately zeroed-out sandbox.
@@ -393,6 +434,37 @@ describe("SettingsOverlay", () => {
     await user.click(screen.getByLabelText("Default capabilities"));
     expect(screen.queryByRole("option", { name: "Retired" })).not.toBeInTheDocument();
     await user.click(await screen.findByRole("option", { name: "GCP key" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+  });
+
+  // grain/task-43: settings.defaultCapabilities is reported as stored,
+  // retired ids included, so an id whose row this build has dropped
+  // arrives selected with nothing in the listing to untick it. Without a
+  // row of its own it sticks in the selection and every later save of
+  // this tab sends it back, which UpdateSettings refuses as "unknown
+  // capability" -- a pane nobody can save. The extra row is what clears
+  // it.
+  it("offers a row for a stored default capability this build no longer lists", async () => {
+    const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
+    api
+      .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key", "scratch-repo"] })
+      .mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.click(screen.getByLabelText("Default capabilities"));
+    const row = await screen.findByRole("option", { name: /scratch-repo/ });
+    expect(row).toHaveTextContent("No longer offered -- untick to remove it");
+
+    await user.click(row);
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Save" }));
 

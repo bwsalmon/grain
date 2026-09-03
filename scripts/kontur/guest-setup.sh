@@ -64,9 +64,15 @@ apt-get update
 # that changes how the kernel gets in (a copied-in kernel rather than the
 # Debian package, say) would silently take ipconfig with it and leave
 # every guest without an address.
+# e2fsprogs is named for the same reason klibc-utils is: resize2fs is what
+# the grain-growfs unit below execs, and while e2fsprogs is a
+# Priority: required package that debootstrap --variant=minbase does
+# install today, a guest that silently lost it would boot fine and simply
+# never grow onto the disk its VM was created with -- a failure that looks
+# like "-disk-size-gb did nothing" several layers away from its cause.
 apt-get install -y --no-install-recommends \
   linux-image-amd64 \
-  sudo libnss-myhostname klibc-utils \
+  sudo libnss-myhostname klibc-utils e2fsprogs \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
   pipx tmux unzip ca-certificates bubblewrap gnupg
 
@@ -248,6 +254,71 @@ mkdir -p /etc/systemd/system/sysinit.target.wants
 ln -sf /etc/systemd/system/kontur-net-cmdline.service \
   /etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service
 
+# --- Grow the root filesystem onto whatever disk this VM was actually
+# given (grain/task-41).
+#
+# `konturctl vm create -disk-size-gb` sizes the VM's own writable qcow2
+# overlay, and that is all it can do: the filesystem packed into the
+# backing guest image (kontur's `mke2fs -d`, sized to the rootfs plus 20%
+# headroom) still ends where it ended, so a VM asked for 40 GiB boots
+# with the image's few hundred megabytes and tens of gigabytes of
+# unallocated space past the end of it. Nothing but the guest can close
+# that gap -- the hypervisor has no idea what filesystem is on the device
+# -- so this is grain's half of the disk-size setting.
+#
+# Online, on every boot, rather than once at build time: the size is not
+# known when the image is built (it is a per-VM create-time argument, and
+# a per-task one at that), and it is the same VM's first boot either way
+# since a sandbox lives exactly as long as one run. On a VM whose disk was
+# not enlarged -- every VM on a deployment that never sets a disk size --
+# resize2fs finds nothing to do and exits 0, so this costs those a
+# fraction of a second and changes nothing.
+#
+# Failure is deliberately not fatal: a guest that boots with its original
+# filesystem is a run that may run out of disk, while a guest that fails
+# to boot is a run that cannot start at all. The message lands on the
+# console either way, which is where a VM's own boot is read from
+# (`docker logs` on its container).
+cat > /usr/local/sbin/grain-growfs <<'EOF'
+#!/bin/sh
+# Grows the root filesystem to fill its block device, if it does not
+# already. See guest-setup.sh's own "Grow the root filesystem" block.
+set -u
+root_dev=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+case "${root_dev}" in
+  /dev/*) ;;
+  # An overlay or anything else that is not a plain block device has
+  # nothing here to grow, and is not an error worth failing a boot over.
+  *) echo "grain-growfs: root is ${root_dev:-unknown}, not a block device -- nothing to grow"; exit 0 ;;
+esac
+if ! resize2fs "${root_dev}"; then
+  echo "grain-growfs: resize2fs ${root_dev} failed -- continuing with the filesystem as it is" >&2
+fi
+exit 0
+EOF
+chmod 0755 /usr/local/sbin/grain-growfs
+
+cat > /etc/systemd/system/grain-growfs.service <<'EOF'
+[Unit]
+Description=Grow the root filesystem onto the whole virtual disk (grain sandbox)
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=sysinit.target
+ConditionPathIsReadWrite=/
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/grain-growfs
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target
+EOF
+ln -sf /etc/systemd/system/grain-growfs.service \
+  /etc/systemd/system/sysinit.target.wants/grain-growfs.service
+
 # --- Stop forcing kontur's console wrapper on every SSH session.
 #
 # kontur's own guest overlay ships
@@ -346,6 +417,10 @@ Added on top of kontur's own guest image:
   guest needs (see guest-setup.sh's "Networking"). kontur's flat-mode
   control link (its own kontur-control-net service, from kontur's guest
   overlay) configures eth1 on top of that
+- a systemd unit (grain-growfs) that grows the root filesystem onto the
+  whole virtual disk on each boot, so a VM created with
+  `konturctl vm create -disk-size-gb` actually has that space rather than
+  just a larger empty device. A no-op on a VM whose disk was not enlarged
 - git curl jq ripgrep fd-find build-essential python3 python3-venv pipx
   tmux unzip ca-certificates bubblewrap gnupg
 - docker-ce plus kind (its node image is not pre-pulled -- see
