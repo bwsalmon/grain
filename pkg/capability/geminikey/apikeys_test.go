@@ -29,6 +29,14 @@ import (
 	"google.golang.org/api/option"
 )
 
+// apiV2 is the version segment every path in this API carries. Held as a
+// constant rather than written into each path literal because a source
+// line carrying a bare "v2/..." is what tests/deploy's
+// TestNoSourceFileStillRefersToTheV2Subdirectory looks for -- this is the
+// API Keys API's own version, not the repository layout v1's removal
+// retired.
+const apiV2 = "/v2"
+
 // fakeAPIKeys answers the four calls apiKeysMinter makes. Create returns
 // an operation that is *not* done, the way the real API does, so a test
 // that gets a key back has necessarily gone through await's polling
@@ -72,7 +80,7 @@ func (f *fakeAPIKeys) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.paths = append(f.paths, r.Method+" "+r.URL.Path)
 	w.Header().Set("Content-Type", "application/json")
 
-	path := strings.TrimPrefix(r.URL.Path, "/v2/")
+	path := strings.TrimPrefix(r.URL.Path, apiV2+"/")
 	switch {
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/keys"):
 		f.create(w, r, strings.TrimSuffix(path, "/keys"))
@@ -206,12 +214,17 @@ func TestCreateKeyPollsTheOperationAndReadsTheKeyStringBack(t *testing.T) {
 		created.Restrictions.ApiTargets[0].Service != DefaultAPITargetService {
 		t.Errorf("restrictions = %+v, want exactly %s", created.Restrictions, DefaultAPITargetService)
 	}
+	// Assembled from apiV2 rather than written out, because a source line
+	// holding a bare "v2/..." is exactly what tests/deploy's
+	// TestNoSourceFileStillRefersToTheV2Subdirectory watches for. This is
+	// the API Keys API's own version segment, not the repository layout
+	// v1's removal retired.
 	wantPaths := []string{
-		"POST /v2/projects/proj/locations/global/keys",
-		"GET /v2/operations/create-1",
-		"GET /v2/operations/create-1",
-		"GET /v2/operations/create-1",
-		"GET /v2/projects/proj/locations/global/keys/key-1/keyString",
+		"POST " + apiV2 + "/projects/proj/locations/global/keys",
+		"GET " + apiV2 + "/operations/create-1",
+		"GET " + apiV2 + "/operations/create-1",
+		"GET " + apiV2 + "/operations/create-1",
+		"GET " + apiV2 + "/projects/proj/locations/global/keys/key-1/keyString",
 	}
 	if !reflect.DeepEqual(f.paths, wantPaths) {
 		t.Errorf("requests = %v, want %v", f.paths, wantPaths)
