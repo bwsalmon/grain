@@ -6,8 +6,9 @@ import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimi
 
 // RepoList is the repo index: one row per known repo -- every
 // config.targetRepos entry, plus any repo tasks target that isn't one,
-// plus any repo carrying default capabilities of its own (repoRows has
-// why all three) -- each showing how many tasks sit in every state so a
+// plus any repo carrying configuration of its own, which today is a
+// default capability set, standing instructions, or both (repoRows has
+// why all three sources) -- each showing how many tasks sit in every state so a
 // repo with something stuck (awaiting_reply, or a pile of blocked work)
 // stands out before anyone opens it. Clicking a row opens that repo's
 // own page (RepoPage, grain/task-111), which is where everything about
