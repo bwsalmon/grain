@@ -244,17 +244,16 @@ func (c *Client) capabilitiesWithReadiness(cfg *model.Config, repoConfigs []mode
 		byID[s.ID] = s
 	}
 	out := make([]Capability, 0, len(c.Config.Capabilities))
-	for _, cap := range c.Config.Capabilities {
-		status, ok := byID[cap.ID]
-		if ok {
+	for _, row := range c.Config.Capabilities {
+		if status, ok := byID[row.ID]; ok {
 			ready := status.Ready
-			cap.Ready = &ready
-			cap.Needs = append(append([]string{}, status.MissingConfig...), status.MissingSecrets...)
-			if len(cap.Needs) == 0 {
-				cap.Needs = nil
+			row.Ready = &ready
+			row.Needs = append(append([]string{}, status.MissingConfig...), status.MissingSecrets...)
+			if len(row.Needs) == 0 {
+				row.Needs = nil
 			}
 		}
-		out = append(out, cap)
+		out = append(out, row)
 	}
 	return out
 }
