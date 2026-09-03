@@ -92,7 +92,7 @@ apt-get update
 # minbase does install this Priority: required package today, a guest
 # that silently lost it would boot fine and simply never grow onto the
 # disk its VM was created with -- a failure that looks like
-# "-disk-size-gb did nothing", several layers from its cause.
+# "-disk-size-mb did nothing", several layers from its cause.
 apt-get install -y --no-install-recommends \
   sudo libnss-myhostname e2fsprogs \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
@@ -378,7 +378,7 @@ chown -R debian:debian /home/debian
 # --- Grow the root filesystem onto whatever disk this VM was actually
 # given (grain/task-41).
 #
-# `konturctl vm create -disk-size-gb` sizes the VM's own writable qcow2
+# `konturctl vm create -disk-size-mb` sizes the VM's own writable qcow2
 # overlay, and that is all it can do: the filesystem packed into the
 # backing guest image (kontur's `mke2fs -d`, sized to the rootfs plus 20%
 # plus whatever GUEST_DISK_EXTRA_MB asked for) still ends where it ended,
@@ -453,7 +453,7 @@ Added on top of kontur's own guest image:
   boot and authorizes it for the account konturctl's -guest-user names
 - a systemd unit (grain-growfs) that grows the root filesystem onto the
   whole virtual disk on each boot, so a VM created with
-  `konturctl vm create -disk-size-gb` actually has that space rather than
+  `konturctl vm create -disk-size-mb` actually has that space rather than
   just a larger empty device. A no-op on a VM whose disk was not enlarged
 - git curl jq ripgrep fd-find build-essential python3 python3-venv pipx
   tmux unzip xz-utils ca-certificates bubblewrap gnupg

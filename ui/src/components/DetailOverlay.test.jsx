@@ -909,6 +909,20 @@ describe("DetailOverlay", () => {
     expect(textarea).toHaveValue("");
   });
 
+  // grain/task-91: the title and description above are only part of
+  // what a dispatch hands the agent, so the whole prompt is a click away
+  // from the task itself as well as from its row in the list.
+  it("opens the full prompt the agent was given", async () => {
+    const user = userEvent.setup();
+    api.mockResolvedValueOnce({ prompt: "Fix the login bug\n\nWork in acme/widgets.", attempt: 2 });
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Prompt" }));
+
+    expect(await screen.findByText(/Work in acme\/widgets\./)).toBeInTheDocument();
+    expect(api).toHaveBeenLastCalledWith("/api/tasks/12/prompt");
+  });
+
   // bwsalmon/agents#523: "After creating a task the user should be able
   // to edit it."
   it("edits the title and description via the PATCH endpoint", async () => {

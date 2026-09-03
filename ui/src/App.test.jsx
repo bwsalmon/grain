@@ -68,6 +68,14 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
     if (/^\/api\/tasks\/\w+\/(approve|submit|retry|close|reopen)$/.test(path)) return Promise.resolve({});
     if (path === "/api/secrets") return Promise.resolve({ enabled: false });
     if (path === "/api/settings") return Promise.resolve({ configured: false });
+    // A repo's own page (RepoPage, grain/task-111) reads both of these
+    // on landing.
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/branches$/.test(path) && method === "GET") return Promise.resolve([]);
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/capabilities$/.test(path) && method === "GET") {
+      return Promise.resolve({
+        repo: "", defaultCapabilities: [], deploymentDefaultCapabilities: [], effectiveDefaultCapabilities: [],
+      });
+    }
     if (/^\/api\/repos\/[^/]+\/[^/]+\/releases$/.test(path)) return Promise.resolve([]);
     if (/^\/api\/repos\/[^/]+\/[^/]+\/releases\/[^/]+\/candidates$/.test(path)) return Promise.resolve([]);
     if (/^\/api\/repos\/[^/]+\/[^/]+\/qualification-plan$/.test(path)) {
@@ -302,7 +310,9 @@ describe("App", () => {
     await waitFor(() => expect(titles()).toEqual(["Add feature", "Fix bug"]));
   });
 
-  it("switches to the repo view, scopes the task list from a repo click, and clears the scope", async () => {
+  // grain/task-111: a repo row opens that repo's own page, which is
+  // where its tasks are listed and where the URL lands.
+  it("opens a repo's own page from the repo list, listing only that repo's tasks, and back out of it", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
@@ -313,57 +323,54 @@ describe("App", () => {
 
     await user.click(screen.getByText("acme/other"));
 
-    expect(await screen.findByText("Add feature")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "acme/other" })).toBeInTheDocument();
+    expect(screen.getByText("Add feature")).toBeInTheDocument();
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
-    expect(screen.getByText(/Repo: acme\/other/)).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/repos/acme/other");
 
-    await user.click(screen.getByTitle("Clear repo filter"));
+    await user.click(screen.getByRole("button", { name: /Repos$/ }));
 
-    expect(await screen.findByText("Fix bug")).toBeInTheDocument();
-    expect(screen.queryByText(/Repo: acme\/other/)).not.toBeInTheDocument();
+    expect(await screen.findByText("acme/widgets")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/repos");
   });
 
-  it("folds a repo's tasks open from the repo view and files a new task against it", async () => {
+  it("files a new task against the repo whose page is open", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText("Fix bug");
 
     await user.click(screen.getByRole("button", { name: /^Repos/ }));
-    await screen.findByText("acme/other");
+    await user.click(await screen.findByText("acme/other"));
+    await screen.findByRole("heading", { name: "acme/other" });
 
-    await user.click(screen.getByRole("button", { name: "Show tasks for acme/other" }));
-    expect(await screen.findByText("Add feature")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Hide tasks for acme/other" }));
-    expect(screen.queryByText("Add feature")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "New task under acme/other" }));
+    await user.click(screen.getByRole("button", { name: "New task" }));
     expect(screen.getByLabelText(/Target repo/)).toHaveValue("acme/other");
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
-    await user.click(screen.getByRole("button", { name: "Show tasks for acme/other" }));
     expect(await screen.findByText("Ship it")).toBeInTheDocument();
   });
 
-  it("opens a repo's release pane from the repo view and back out of it", async () => {
+  it("opens a repo's release pane from its page and back out of it", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText("Fix bug");
 
     await user.click(screen.getByRole("button", { name: /^Repos/ }));
-    const row = (await screen.findByText("acme/other")).closest("li");
-    await user.click(within(row).getByRole("button", { name: "Releases" }));
+    await user.click(await screen.findByText("acme/other"));
+    await user.click(await screen.findByRole("button", { name: "Releases" }));
 
     expect(await screen.findByRole("heading", { name: "acme/other releases" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Releases" })).not.toBeInTheDocument();
+    expect(window.location.pathname).toBe("/repos/acme/other/releases");
 
-    await user.click(screen.getByRole("button", { name: /^Repos/ }));
+    await user.click(screen.getByRole("button", { name: /acme\/other$/ }));
 
-    expect(await screen.findByText("acme/other")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "acme/other" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/repos/acme/other");
   });
 
   it("switches to the schedules pane, showing its own list and count in the sidebar", async () => {
@@ -450,7 +457,12 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
   });
 
-  it("opens Secrets and Upgrade as tabs inside Settings rather than their own sidebar entries", async () => {
+  // Upgrade is a tab inside Settings rather than a sidebar entry
+  // (bwsalmon/agents#456). Secrets was one too until grain/task-110 gave
+  // each secret to whatever uses it: the agent credentials to Agents, a
+  // capability's own to the row beside it on Capabilities, and the
+  // remainder to "Other secrets" at the foot of that tab.
+  it("opens Upgrade as a tab inside Settings, and keeps secrets with what uses them", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
@@ -462,8 +474,11 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Secrets" }));
-    expect(await screen.findByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Secrets" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+    expect(await screen.findByText("Other secrets")).toBeInTheDocument();
+    expect(screen.getByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
     expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();

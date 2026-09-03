@@ -31,11 +31,37 @@ describe("SecretsPanel", () => {
     expect(screen.getByText("webhook-secret")).toBeInTheDocument();
   });
 
+  // grain/task-110: this panel is the remainder now -- a secret set from
+  // the Agents tab or from the capability that resolves it is shown
+  // there, not here as well.
+  it("leaves out the secrets a control elsewhere on the pane owns", async () => {
+    api.mockResolvedValueOnce({
+      enabled: true,
+      secrets: [
+        { name: "gemini-api-key", keys: ["value"] },
+        { name: "gcp-key-minter", keys: ["key.json"] },
+        { name: "buildkite", keys: ["token"] },
+      ],
+    });
+    render(<SecretsPanel showError={() => {}} claimed={["gemini-api-key", "gcp-key-minter"]} />);
+
+    expect(await screen.findByText("buildkite")).toBeInTheDocument();
+    expect(screen.queryByText("gemini-api-key")).not.toBeInTheDocument();
+    expect(screen.queryByText("gcp-key-minter")).not.toBeInTheDocument();
+  });
+
+  it("shows an empty message when every stored secret is owned elsewhere", async () => {
+    api.mockResolvedValueOnce({ enabled: true, secrets: [{ name: "gemini-api-key", keys: ["value"] }] });
+    render(<SecretsPanel showError={() => {}} claimed={["gemini-api-key"]} />);
+
+    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
+  });
+
   it("shows an empty message when enabled with no secrets", async () => {
     api.mockResolvedValueOnce({ enabled: true, secrets: [] });
     render(<SecretsPanel showError={() => {}} />);
 
-    expect(await screen.findByText("No secrets set.")).toBeInTheDocument();
+    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
   });
 
   it("sets a secret via the form and refreshes", async () => {
@@ -45,12 +71,12 @@ describe("SecretsPanel", () => {
       .mockResolvedValueOnce({ enabled: true, secrets: [{ name: "github", keys: ["token"] }] });
     const user = userEvent.setup();
     render(<SecretsPanel showError={() => {}} />);
-    await screen.findByText("No secrets set.");
+    await screen.findByText("No other secrets set.");
 
     await user.type(screen.getByLabelText("Secret"), "github");
     await user.type(screen.getByLabelText("Key"), "token");
     await user.type(screen.getByLabelText(/Value/), "secret-value");
-    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.click(screen.getByRole("button", { name: "Set secret" }));
 
     expect(api).toHaveBeenCalledWith("/api/secrets/github/token", {
       method: "PUT",
@@ -71,7 +97,7 @@ describe("SecretsPanel", () => {
     await user.click(screen.getByTitle("delete github/token"));
 
     expect(api).toHaveBeenCalledWith("/api/secrets/github/token", { method: "DELETE" });
-    expect(await screen.findByText("No secrets set.")).toBeInTheDocument();
+    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
   });
 
   it("deletes an entire secret", async () => {
@@ -86,7 +112,7 @@ describe("SecretsPanel", () => {
     await user.click(screen.getByRole("button", { name: "Delete secret" }));
 
     expect(api).toHaveBeenCalledWith("/api/secrets/github", { method: "DELETE" });
-    expect(await screen.findByText("No secrets set.")).toBeInTheDocument();
+    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
   });
 
   it("reports the error when setting a secret fails", async () => {
@@ -94,12 +120,12 @@ describe("SecretsPanel", () => {
     const showError = vi.fn();
     const user = userEvent.setup();
     render(<SecretsPanel showError={showError} />);
-    await screen.findByText("No secrets set.");
+    await screen.findByText("No other secrets set.");
 
     await user.type(screen.getByLabelText("Secret"), "github");
     await user.type(screen.getByLabelText("Key"), "token");
     await user.type(screen.getByLabelText(/Value/), "x");
-    await user.click(screen.getByRole("button", { name: "Set" }));
+    await user.click(screen.getByRole("button", { name: "Set secret" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "value is required" }));
   });

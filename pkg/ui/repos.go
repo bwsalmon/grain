@@ -321,7 +321,7 @@ type RepoSummary struct {
 	// Configured is whether Config.TargetRepos names this repo, as
 	// against it being known only because something else here mentions
 	// it -- repoRows' own `configured`, and the same distinction that
-	// decides whether the repos pane offers Remove on a row. Always
+	// decides whether a repo's own page offers Remove. Always
 	// false on an unrestricted deployment, whose allowlist is empty by
 	// definition.
 	Configured bool `json:"configured"`

@@ -219,7 +219,12 @@ func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("kontur was never invoked: %v", err)
 	}
-	want := "vm create " + orchestrator.VMNamePrefix + sandbox + " -state-dir " + cfg.konturStateDir + " -backend docker -net flat -image gs://bucket/kontur-guest-deadbeef.qcow2"
+	// The size flags are part of what this asserts: a deployment that
+	// configured no sandbox shape at all still creates its VM at grain's
+	// own default (kontur.DefaultCPUs/DefaultMemoryMB/DefaultDiskGB, the
+	// last in MiB), rather than leaving the size to konturctl.
+	want := "vm create " + orchestrator.VMNamePrefix + sandbox + " -state-dir " + cfg.konturStateDir +
+		" -backend docker -net flat -image gs://bucket/kontur-guest-deadbeef.qcow2 -cpus 2 -memory-mb 8192 -disk-size-mb 30720"
 	if !strings.Contains(string(data), want) {
 		t.Errorf("kontur invoked as %q, want a %q among the calls", data, want)
 	}

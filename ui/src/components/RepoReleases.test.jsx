@@ -189,6 +189,9 @@ describe("RepoReleases", () => {
     expect(await screen.findByText(/Merge requested/)).toBeInTheDocument();
   });
 
+  // The back button names the repo, not the repo list: this pane opens
+  // from that repo's own page now (grain/task-111), which is one step
+  // up rather than two.
   it("calls onBack when the back button is clicked", async () => {
     setupApi({ releases: [activeRelease], candidates: [activeCandidate] });
     const onBack = vi.fn();
@@ -196,7 +199,7 @@ describe("RepoReleases", () => {
     render(<RepoReleases repo="acme/widgets" onBack={onBack} showError={() => {}} />);
     await screen.findByRole("button", { name: "Promote current RC" });
 
-    await user.click(screen.getByRole("button", { name: /Repos/ }));
+    await user.click(screen.getByRole("button", { name: "← acme/widgets" }));
 
     expect(onBack).toHaveBeenCalledTimes(1);
   });

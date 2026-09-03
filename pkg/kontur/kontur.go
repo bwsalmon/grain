@@ -39,16 +39,42 @@ import (
 // flag defaults to.
 const DefaultStateDir = "/var/lib/kontur/vms"
 
-// DefaultCPUs and DefaultMemoryMB match bwsalmon/kontur's own default VM
-// shape -- internal/staticpod.Defaults()'s own CPUs/MemoryMB, duplicated
-// here for the same "read the shape, don't import the writer" reason
-// BackendDocker and DefaultStateDir are. This is the shape `konturctl vm
-// create` gives a VM whose caller passes neither -cpus nor -memory-mb,
-// which is exactly what grain's own zero-means-unset SandboxCPUs/
-// SandboxMemoryMB (model.Config, model.Task) leaves in place.
+// DefaultCPUs, DefaultMemoryMB and DefaultDiskGB are grain's own default
+// sandbox VM shape: the size a sandbox is built at when neither the task
+// nor the deployment asked for one (model.Config, model.Task, both
+// zero-means-unset). Every create passes all three verbatim
+// (orchestrator.KonturConfig.createArgs), so a sandbox's size is always a
+// number this repo chose.
+//
+// They used to be kontur's own defaults instead -- internal/staticpod.
+// Defaults()'s CPUs/MemoryMB, read off but never passed, so an unset
+// dimension meant "whatever `konturctl vm create` does when the flag is
+// missing" and disk had no default to name at all (an overlay is created
+// exactly as large as the guest image behind it, a few hundred megabytes
+// of slack for a build-heavy run). Naming the shape here instead makes
+// the VM a run gets a property of grain rather than of whichever kontur
+// is vendored and whichever guest image a deployment happens to have
+// built: 2 vCPU and 2048 MiB was a small VM for an agent that clones,
+// builds and tests a repo, and nothing chose it for that job.
+//
+// 8 GiB of memory and 30 GiB of disk against 2 vCPU is deliberate: an
+// agent run is bounded by what a build and a test suite need resident
+// and on disk far more often than by how fast it gets there, and a
+// deployment that wants a different trade sets it in Settings (or
+// per task) rather than living with these.
+//
+// DefaultDiskGB is a floor, not a ceiling, and kontur enforces that:
+// `konturctl vm create -disk-size-mb` refuses a size below the guest
+// image the overlay reads through to rather than truncating the guest's
+// filesystem (internal/config.PrepareOverlay). 30 GiB is far above the
+// image scripts/kontur/build-guest.sh produces, but a deployment booting
+// a guest image larger than this has to raise the setting to match it --
+// which fails loudly at create time, naming both sizes, rather than
+// building a smaller VM.
 const (
 	DefaultCPUs     = 2
-	DefaultMemoryMB = 2048
+	DefaultMemoryMB = 8192
+	DefaultDiskGB   = 30
 )
 
 // BackendDocker is the value `konturctl vm create -backend` takes to run a VM

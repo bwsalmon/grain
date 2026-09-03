@@ -74,6 +74,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -320,16 +321,19 @@ func daemon(args []string) {
 			"containers join) and read \"Gateway\" if unsure -- commonly 172.17.0.1.")
 	sandboxCPUs := fs.Int("sandbox-cpus", 0,
 		"deployment-wide default vCPU count for a kontur-managed sandbox VM, passed as `konturctl vm create`'s "+
-			"own -cpus (only used with -kontur-sandboxes); 0 leaves bwsalmon/kontur's own default in place. "+
+			"own -cpus (only used with -kontur-sandboxes); 0 uses grain's own default, "+
+			strconv.Itoa(kontur.DefaultCPUs)+". "+
 			"Overridable per task from the UI/API (model.Task.SandboxCPUs)"+seedOnly)
 	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
 		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM, passed as `konturctl vm "+
-			"create`'s own -memory-mb (only used with -kontur-sandboxes); 0 leaves bwsalmon/kontur's own "+
-			"default in place. Overridable per task from the UI/API (model.Task.SandboxMemoryMB)"+seedOnly)
+			"create`'s own -memory-mb (only used with -kontur-sandboxes); 0 uses grain's own default, "+
+			strconv.Itoa(kontur.DefaultMemoryMB)+". Overridable per task from the UI/API "+
+			"(model.Task.SandboxMemoryMB)"+seedOnly)
 	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
 		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM, passed as `konturctl "+
-			"vm create`'s own -disk-size-gb (only used with -kontur-sandboxes); 0 leaves the VM's disk as large "+
-			"as the guest image behind it, which is what every sandbox got before this flag existed. "+
+			"vm create`'s own -disk-size-mb (only used with -kontur-sandboxes); 0 uses grain's own default, "+
+			strconv.Itoa(kontur.DefaultDiskGB)+" -- every VM is sized explicitly, rather than being left as "+
+			"large as the guest image behind it the way it was before. "+
 			"Overridable per task from the UI/API (model.Task.SandboxDiskGB)"+seedOnly)
 	fs.Parse(args)
 

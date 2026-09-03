@@ -23,6 +23,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
+	"github.com/bwsalmon/grain/pkg/orchestrator"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -134,6 +135,17 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		StartedAt: ago(6 * time.Minute),
 	}, model.Limits{}); err != nil {
 		return fmt.Errorf("seeding a running task: %w", err)
+	}
+	// The prompt that run was "given", built by the same function a real
+	// dispatch builds one with (orchestrator.BuildPrompt) rather than
+	// written out here: what the UI's own prompt pane shows in the demo
+	// is then the real thing, and stays the real thing as that function
+	// changes, instead of a paraphrase of it that quietly goes stale.
+	if seeded, err := store.GetTask(ctx, running.ID); err == nil && seeded != nil {
+		if err := store.SetRunPrompt(ctx, "demo-run-"+running.ID,
+			orchestrator.BuildPrompt(*seeded, orchestrator.CheckoutDir, true)); err != nil {
+			return fmt.Errorf("seeding a running task's prompt: %w", err)
+		}
 	}
 
 	awaiting, err := create(ago(2*time.Hour), ui.CreateTaskRequest{

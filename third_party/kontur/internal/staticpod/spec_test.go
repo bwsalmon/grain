@@ -376,3 +376,40 @@ func TestExecAddr(t *testing.T) {
 		t.Errorf("ExecAddr() = %q, want empty with no control link: there is no path to the guest", got)
 	}
 }
+
+func TestValidate_DiskSizeNeedsOverlayMode(t *testing.T) {
+	// The overlay is the only disk kontur creates for a VM. In the other
+	// two modes the guest boots the image itself, which is shared with
+	// every other VM using it and never resized -- so a disk size asked
+	// for there is a mistake worth reporting at "vm create" time rather
+	// than a container crash loop later.
+	for _, mode := range []string{config.DiskModePersistent, config.DiskModeReadOnly} {
+		t.Run(mode, func(t *testing.T) {
+			s := baseSpec()
+			s.DiskReadOnly = false
+			s.DiskMode = mode
+			s.DiskSizeMB = 8192
+			err := s.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want an error for a disk size in %q mode", mode)
+			}
+			if !strings.Contains(err.Error(), config.DiskModeOverlay) {
+				t.Errorf("Validate() error = %v, want it to name %q as the mode that can be sized", err, config.DiskModeOverlay)
+			}
+		})
+	}
+
+	s := baseSpec()
+	s.DiskMode = config.DiskModeOverlay
+	s.DiskSizeMB = 8192
+	if err := s.Validate(); err != nil {
+		t.Errorf("Validate() error = %v, want a disk size accepted in %q mode", err, config.DiskModeOverlay)
+	}
+
+	s = baseSpec()
+	s.DiskMode = config.DiskModeOverlay
+	s.DiskSizeMB = -1
+	if err := s.Validate(); err == nil {
+		t.Error("Validate() = nil for a negative disk size, want an error")
+	}
+}

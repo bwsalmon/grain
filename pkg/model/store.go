@@ -106,6 +106,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskRunAgentStartedAtColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_run: %w", err)
 	}
+	if err := s.ensureTaskRunPromptColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_run: %w", err)
+	}
 	if err := s.ensureScheduleRecurrenceColumns(ctx); err != nil {
 		return fmt.Errorf("migrating schedule: %w", err)
 	}
@@ -381,6 +384,28 @@ func (s *Store) ensureTaskRunAgentStartedAtColumn(ctx context.Context) error {
 	return err
 }
 
+// ensureTaskRunPromptColumn adds task_run.prompt (schema.go's own DDL
+// comment on the table has the reasoning) to a database created before
+// it existed, the same probe-then-ALTER approach
+// ensureTaskRunAgentStartedAtColumn already uses for the same reason:
+// CREATE TABLE IF NOT EXISTS never alters a table that is already there.
+//
+// No SchemaVersion bump goes with it, for the same reason that one takes
+// none: the column is nullable and added here, so an existing database
+// migrates into the new shape rather than being one this build "cannot
+// simply be re-created into" (SchemaVersion's own doc comment). Every run
+// recorded before it existed reads back with no prompt, which is what
+// ui.Client.TaskPrompt already has to handle for a task that has never
+// been dispatched at all.
+func (s *Store) ensureTaskRunPromptColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `prompt` FROM `task_run` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `prompt` TEXT NULL")
+	return err
+}
+
 // ensureTaskObservationRefreshedColumn adds
 // task_observation.merge_queue_refreshed_at (Observation's own field has
 // the reasoning) to a database created before it existed, the same
@@ -620,8 +645,8 @@ func (s *Store) ensureConfigNewestFirstColumn(ctx context.Context) error {
 // reasoning -- bwsalmon/agents#534) to a database created before these
 // columns existed, the same probe-then-ALTER approach every other
 // ensure*Column migration here uses. Both default to 0, Config.
-// SandboxCPUs/SandboxMemoryMB's own "unset, use bwsalmon/kontur's own
-// default" zero value, so a database migrated from before this setting
+// SandboxCPUs/SandboxMemoryMB's own "unset, use grain's own default
+// shape" zero value, so a database migrated from before this setting
 // existed reads back exactly as if nobody had ever configured either.
 func (s *Store) ensureConfigSandboxShapeColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_cpus`, `sandbox_memory_mb` FROM `grain_config` WHERE 1 = 0")
@@ -666,8 +691,8 @@ func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
 // sandbox_cpus/sandbox_memory_mb already present on every database
 // migrated by an earlier build and returns without adding anything, so a
 // column appended to it would only ever reach a database that had none
-// of the three. Defaults to 0, SandboxDiskGB's own "unset, take whatever
-// size the guest image gives it" zero value.
+// of the three. Defaults to 0, SandboxDiskGB's own "unset, take grain's
+// own default disk size" zero value.
 func (s *Store) ensureConfigSandboxDiskColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `grain_config` WHERE 1 = 0")
 	if err == nil {
@@ -1939,6 +1964,48 @@ func (s *Store) RunTranscript(ctx context.Context, taskID string, attempt int) (
 		return "", false, err
 	}
 	return t.String, true, nil
+}
+
+// SetRunPrompt records the whole prompt a run's agent was handed --
+// everything orchestrator.RunDispatch assembled for it, not just the
+// task's own title and body (schema.go's own DDL comment on the column).
+// It is its own write, after StartRun, for the same reason
+// SetRunAgentStarted is: the prompt only exists once the run's setup is
+// over, and it is written immediately before the agent gets its first
+// turn so that a run still in flight can already be asked what it was
+// told.
+//
+// Recording it must never cost a run, the same as SetRunAgentStarted:
+// its caller logs a failure here and dispatches anyway.
+func (s *Store) SetRunPrompt(ctx context.Context, runID, prompt string) error {
+	return s.write(ctx, "set run "+runID+" prompt", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `prompt` = ? WHERE `id` = ?", nullable(prompt), runID)
+		return err
+	})
+}
+
+// RunPrompt returns the prompt recorded for taskID's numbered attempt,
+// and whether such an attempt exists at all -- keyed by taskID+attempt
+// rather than a bare run ID for the same reason RunTranscript is: that
+// pair is the only handle on a run the wire's own Attempt shape ever
+// gives a caller. The prompt itself may be "" because the attempt never
+// reached its agent (a checkout or a capability that failed first), or
+// because it ran before this column existed; both look the same here,
+// and ui.Client.TaskPrompt says as much rather than guessing between
+// them.
+func (s *Store) RunPrompt(ctx context.Context, taskID string, attempt int) (prompt string, found bool, err error) {
+	var p sql.NullString
+	err = s.db.QueryRowContext(ctx,
+		"SELECT `prompt` FROM `task_run` WHERE `task_id` = ? AND `attempt` = ?",
+		taskID, attempt).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return p.String, true, nil
 }
 
 // DropLease forgets a lease once its resource is actually revoked.

@@ -401,6 +401,87 @@ func TestProcessResultFilesAProposedTaskIntoTheStore(t *testing.T) {
 	}
 }
 
+// A proposal joins the backlog at the end of it, the same place a task a
+// human files joins by default -- not at OrderKey's zero value, which is
+// a position too (ahead of everything filed since the backlog started)
+// rather than the absence of one, and which used to put an agent's
+// afterthought in front of work already waiting.
+func TestProcessResultFilesProposedTasksAtTheEndOfTheBacklog(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := placeInBacklog(t, ctx, store, filedTask(t, ctx, store, "t1", repo), 0)
+	waiting := placeInBacklog(t, ctx, store, filedTask(t, ctx, store, "t2", repo), 100)
+
+	result := toolResult(
+		agent.ToolCall{
+			Name:      "propose_task",
+			Arguments: map[string]any{"title": "first", "body": "the spec"},
+		},
+		agent.ToolCall{
+			Name:      "propose_task",
+			Arguments: map[string]any{"title": "second", "body": "then the thing"},
+		},
+	)
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposals := proposalsByTitle(t, ctx, store, task.ID)
+	first, ok := proposals["first"]
+	if !ok {
+		t.Fatalf("the first proposal was never filed: %v", proposals)
+	}
+	second, ok := proposals["second"]
+	if !ok {
+		t.Fatalf("the second proposal was never filed: %v", proposals)
+	}
+	if first.OrderKey <= waiting.OrderKey {
+		t.Errorf("first proposal's order key = %v, want past the task already queued (%v)",
+			first.OrderKey, waiting.OrderKey)
+	}
+	// Behind each other in call order, not sharing one key with the id
+	// left to break the tie.
+	if second.OrderKey <= first.OrderKey {
+		t.Errorf("second proposal's order key = %v, want past the first (%v)",
+			second.OrderKey, first.OrderKey)
+	}
+	want := []string{task.ID, waiting.ID, first.ID, second.ID}
+	if got := backlogIDs(t, ctx, store); !slices.Equal(got, want) {
+		t.Errorf("backlog = %v, want the proposals at the end of it: %v", got, want)
+	}
+}
+
+// NewestFirst is where new work joins the backlog, not where a human's
+// own new work joins: a deployment that has asked for new tasks at the
+// front gets its proposals there too, the same as ui.CreateTask.
+func TestProcessResultFilesProposedTasksAtTheFrontUnderNewestFirst(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := placeInBacklog(t, ctx, store, filedTask(t, ctx, store, "t1", repo), 0)
+	if err := store.PutConfig(ctx, model.Config{NewestFirst: true}); err != nil {
+		t.Fatalf("PutConfig: %v", err)
+	}
+
+	result := toolResult(agent.ToolCall{
+		Name:      "propose_task",
+		Arguments: map[string]any{"title": "follow-up work", "body": "do more of this"},
+	})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposal, ok := proposalsByTitle(t, ctx, store, task.ID)["follow-up work"]
+	if !ok {
+		t.Fatal("the proposed task was never filed")
+	}
+	if proposal.OrderKey >= task.OrderKey {
+		t.Errorf("proposal's order key = %v, want ahead of the task that proposed it (%v)",
+			proposal.OrderKey, task.OrderKey)
+	}
+}
+
 // TestProcessResultProposedTaskInheritsAutoMergeFromItsParent covers
 // bwsalmon/agents#345: a task proposed by an auto-merge job should
 // itself be an auto-merge job, since propose_task's own input schema has

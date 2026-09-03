@@ -479,6 +479,60 @@ func (c *Client) AttemptTranscript(ctx context.Context, taskID string, number in
 	return transcript, nil
 }
 
+// TaskPrompt is a task's own prompt, as one attempt was actually given
+// it: the whole text orchestrator.RunDispatch assembled and handed the
+// agent, plus which attempt it belongs to so a reader knows how old the
+// answer is (a redispatched task's prompt grows with its conversation,
+// so attempt 3's is not attempt 1's).
+//
+// Attempt is 0 and Prompt "" for a task nothing has recorded a prompt
+// for -- one never dispatched, one whose every attempt died in setup
+// before its agent got a turn, and one that ran before the column
+// existed all land here. They are one case on the wire on purpose: none
+// of them has a prompt to show, and the frontend says exactly that
+// rather than inventing one by re-deriving what a dispatch *would*
+// build, which would differ from the real thing in the details (the
+// checkout, the capability sections) that make it worth reading.
+type TaskPrompt struct {
+	Prompt  string `json:"prompt"`
+	Attempt int    `json:"attempt,omitempty"`
+}
+
+// TaskPrompt returns the prompt taskID's most recent attempt was given
+// -- the read behind GET /api/tasks/{id}/prompt, and the answer to "what
+// was the agent actually told?" that a task's own title and description
+// only partly are.
+//
+// Most recent rather than every attempt: the question is what this task
+// looks like to an agent now, and the newest prompt is the one that
+// includes everything said on the task since. An attempt that never
+// reached its agent recorded no prompt, so this walks back from the
+// newest until it finds one rather than reporting "no prompt" for a task
+// whose latest attempt merely failed to clone.
+func (c *Client) TaskPrompt(ctx context.Context, taskID string) (TaskPrompt, error) {
+	t, err := c.Store.GetTask(ctx, taskID)
+	if err != nil {
+		return TaskPrompt{}, err
+	}
+	if t == nil {
+		return TaskPrompt{}, &NotFoundError{ID: taskID}
+	}
+	runs, err := c.Store.Runs(ctx, taskID)
+	if err != nil {
+		return TaskPrompt{}, err
+	}
+	for i := len(runs) - 1; i >= 0; i-- {
+		prompt, found, err := c.Store.RunPrompt(ctx, taskID, runs[i].Attempt)
+		if err != nil {
+			return TaskPrompt{}, err
+		}
+		if found && prompt != "" {
+			return TaskPrompt{Prompt: prompt, Attempt: runs[i].Attempt}, nil
+		}
+	}
+	return TaskPrompt{}, nil
+}
+
 // Attachment returns one attachment's full content, scoped to taskID so
 // one task's attachment id can never be used to read another's file --
 // the read behind GET /api/tasks/{id}/attachments/{attachmentId}
@@ -917,9 +971,9 @@ func validateAgentFramework(framework string) error {
 // override" here rather than a literal request for a zero-vCPU or
 // zero-memory VM.
 //
-// Disk has no Validate bound to mirror (konturctl has no disk-size
-// default of its own -- a VM's disk is as large as the guest image
-// behind it), so the only value rejected there is a negative one.
+// Disk has no Validate bound to mirror (konturctl checks a disk size
+// against the guest image it reads through to rather than against a
+// floor of its own), so the only value rejected there is a negative one.
 func validateSandboxShape(cpus, memoryMB, diskGB int) error {
 	if cpus != 0 && cpus < 1 {
 		return validationErrorf("sandboxCpus must be 0 (no override) or at least 1")

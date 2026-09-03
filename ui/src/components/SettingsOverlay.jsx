@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Radio, RadioGroup, Select, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import AgentKeysSection from "./AgentKeysSection.jsx";
+import AgentKeysSection, { AGENT_KEY_SECRETS } from "./AgentKeysSection.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
@@ -29,13 +29,21 @@ import { capabilityRows } from "../state.js";
 // next to the read-only view of whether that config is actually enough.
 // Each tab is its own <form>, submitting only the fields it owns, so
 // saving one never has to know or care about the others' values.
+//
+// Secrets had a tab of its own here until grain/task-110, listing every
+// secret in the store with a secret/key/value form under it. A secret is
+// only ever meaningful to whatever resolves it, though, and that tab said
+// nothing about which name belonged to which framework or capability --
+// so each one now sits with what uses it: the agent credentials on
+// Agents (AgentKeysSection), every capability's own beside it on
+// Capabilities (CapabilitiesPanel), and whatever neither of those claims
+// under "Other secrets" at the foot of that same tab (SecretsPanel).
 const TABS = [
   { id: "general", label: "General" },
   { id: "agents", label: "Agents" },
   { id: "github", label: "GitHub" },
   { id: "sandbox", label: "Sandbox" },
   { id: "capabilities", label: "Capabilities" },
-  { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
 ];
 
@@ -81,6 +89,23 @@ export default function SettingsOverlay({ onClose, showError }) {
         showError(err);
       }
     })();
+  }, [showError]);
+
+  // Re-reads settings after something on the pane changed what they
+  // would say without going through save() -- setting or clearing a
+  // capability's own secret (CapabilitiesPanel), which moves that
+  // capability's readiness and the "set" chip on the field itself.
+  //
+  // Deliberately does not re-seed defaultCapabilities the initial load
+  // does: a secret written on this tab has nothing to say about a
+  // capability selection ticked here but not yet saved, and re-seeding
+  // would quietly throw it away.
+  const reloadSettings = useCallback(async () => {
+    try {
+      setSettings(await api("/api/settings"));
+    } catch (err) {
+      showError(err);
+    }
   }, [showError]);
 
   // save only puts a field in the request when it differs from what was
@@ -276,6 +301,17 @@ export default function SettingsOverlay({ onClose, showError }) {
     (settings.capabilities || []).filter((c) => c.grantable !== false),
     defaultCapabilities,
   );
+
+  // Every secret a control on this pane already owns: the two agent
+  // credentials on the Agents tab, and each capability's own, set beside
+  // it in CapabilitiesPanel. "Other secrets" is the remainder -- what is
+  // in the store with nothing here claiming it -- so this list is what
+  // keeps a secret from being offered twice, in two places, with two
+  // different explanations of what it is for.
+  const claimedSecrets = [
+    ...AGENT_KEY_SECRETS,
+    ...(settings.capabilities || []).flatMap((c) => (c.secrets || []).map((s) => s.secret)),
+  ];
 
   // restartHint annotates one field: "this one needs a restart" always,
   // and "you have already changed it, and it isn't running yet" once the
@@ -531,19 +567,21 @@ export default function SettingsOverlay({ onClose, showError }) {
             margin="normal"
           />
           {/*
-            No faint placeholder default here, unlike the two above: a VM's
-            disk is as large as the guest image behind it when nothing is set,
-            which is a property of the image this deployment built rather than
-            a number the API could report (ui.Settings' own comment on why
-            there is no sandboxDiskGbDefault). The helper text says so instead.
+            Disk shows a faint placeholder default like the two above now.
+            It used to have none, because an empty box meant "as large as
+            the guest image behind the VM" -- a property of the image this
+            deployment built rather than a number the API could report.
+            grain names all three sizes itself and passes all three on
+            every create, so sandboxDiskGbDefault is a real number here.
           */}
           <TextField
             name="sandboxDiskGb"
             label="Sandbox disk (GiB)"
-            helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Empty leaves it as large as the guest image. Overridable per task."
+            helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Overridable per task."
             type="number"
             inputProps={{ min: 0, step: 1 }}
             defaultValue={settings.sandboxDiskGb ? String(settings.sandboxDiskGb) : ""}
+            placeholder={settings.sandboxDiskGbDefault ? String(settings.sandboxDiskGbDefault) : undefined}
             fullWidth
             margin="normal"
           />
@@ -558,7 +596,10 @@ export default function SettingsOverlay({ onClose, showError }) {
           <form onSubmit={submitCapabilities}>
             <Typography variant="subtitle2">GCP</Typography>
             <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
-            <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
+            {/* The credential those two capabilities mint *through* is
+                not a setting and is not here: it is a secret, set on the
+                gcp-key row further down this tab (grain/task-110). */}
+            <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional -- the minter's own key is set with the gcp-key capability below" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
 
             <Typography variant="subtitle2" sx={{ mt: 2 }}>New tasks</Typography>
             {/* Only grantable capabilities are offered: the set is
@@ -604,10 +645,14 @@ export default function SettingsOverlay({ onClose, showError }) {
               <Button type="submit" variant="contained">Save</Button>
             </Stack>
           </form>
-          <CapabilitiesPanel capabilities={settings.capabilities} />
+          <CapabilitiesPanel
+            capabilities={settings.capabilities}
+            showError={showError}
+            onSecretsChanged={reloadSettings}
+          />
+          <SecretsPanel showError={showError} claimed={claimedSecrets} />
         </>
       )}
-      {tab === "secrets" && <SecretsPanel showError={showError} />}
       {tab === "upgrade" && <UpgradePanel showError={showError} />}
     </Overlay>
   );

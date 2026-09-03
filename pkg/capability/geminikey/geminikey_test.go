@@ -196,6 +196,38 @@ func TestResolveRefusesWithoutCredential(t *testing.T) {
 	}
 }
 
+// A deployment with a project set and the minter secret never pasted in
+// is the half-wired case Resolve exists to park rather than let
+// Materialize discover: the reason is posted to the task verbatim, so it
+// has to name the secret an operator is meant to set.
+func TestResolveRefusesWhenTheCredentialIsUnset(t *testing.T) {
+	c := New("test-project", model.CredentialRef{Name: "gcp-key-minter"})
+	cc := testContext("r1") // its resolver knows only "test-gcp-credential"
+	res, err := c.Resolve(context.Background(), cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Refused {
+		t.Fatal("expected a refusal when the standing credential resolves to nothing")
+	}
+	if !strings.Contains(res.Reason, "gcp-key-minter") {
+		t.Errorf("reason %q does not name the credential an operator has to set", res.Reason)
+	}
+}
+
+func TestResolveRefusesWithNoResolverAtAll(t *testing.T) {
+	c := New("test-project", model.CredentialRef{Name: "gcp-key-minter"})
+	cc := testContext("r1")
+	cc.Credentials = nil
+	res, err := c.Resolve(context.Background(), cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Refused {
+		t.Fatal("expected a refusal rather than a panic when no resolver was wired up")
+	}
+}
+
 // --- Materialize -----------------------------------------------------------
 
 func TestMaterializePlacesTheKeyOutsideTheWorkspace(t *testing.T) {

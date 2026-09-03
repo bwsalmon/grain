@@ -92,7 +92,7 @@ func TestCmdSettingsSetsAndClearsTheSandboxShape(t *testing.T) {
 			settings.SandboxCPUs, settings.SandboxMemoryMB, settings.SandboxDiskGB)
 	}
 
-	// 0 is a real value here -- "leave bwsalmon/kontur's own default in
+	// 0 is a real value here -- "leave grain's own default shape in
 	// place" -- so a flag set to it must be applied rather than read as
 	// an omitted flag, which is what the fs.Visit convention buys.
 	captureStdout(t, func() {
@@ -114,9 +114,9 @@ func TestCmdSettingsSetsAndClearsTheSandboxShape(t *testing.T) {
 		t.Errorf("SandboxDiskGB = %d, want the untouched 40", settings.SandboxDiskGB)
 	}
 
-	// Disk clears back to its own default the same way, which for disk
-	// means "as large as the guest image behind the VM" rather than a
-	// number kontur names.
+	// Disk clears back to its own default the same way, which is a number
+	// grain names (kontur.DefaultDiskGB) like the other two -- it used to
+	// mean "as large as the guest image behind the VM" instead.
 	captureStdout(t, func() {
 		if err := cmdSettings(ctx, c, &printer{}, []string{"-sandbox-disk-gb", "0"}); err != nil {
 			t.Errorf("cmdSettings clearing sandbox-disk-gb: %v", err)
@@ -139,17 +139,21 @@ func TestCmdSettingsPrintsTheSandboxShape(t *testing.T) {
 	srv := settingsTestServer(t)
 	c := ui.NewHTTPClient(srv.URL)
 
-	// Unset: what prints is the shape actually in effect (kontur's own
-	// default, ui.Settings.SandboxCPUsDefault), not the stored 0.
+	// Unset: what prints is the shape actually in effect (grain's own
+	// default, ui.Settings.SandboxCPUsDefault), not the stored 0. Disk is
+	// no longer the exception it was: it has a default of its own now
+	// (SandboxDiskGBDefault), so all three lines name the size a sandbox
+	// would really be built at.
 	out := captureStdout(t, func() {
 		if err := cmdSettings(ctx, c, &printer{}, nil); err != nil {
 			t.Errorf("cmdSettings: %v", err)
 		}
 	})
-	// Disk is the exception: ui.Settings names no default for it (there
-	// is no SandboxDiskGBDefault -- a VM's disk is however large its
-	// guest image is), so an unset disk can only say that it is unset.
-	for _, want := range []string{"sandbox cpus:", "sandbox memory mb:", "kontur default", "sandbox disk gb: unset"} {
+	for _, want := range []string{
+		"sandbox cpus:   2 (grain default, unset)",
+		"sandbox memory mb: 8192 (grain default, unset)",
+		"sandbox disk gb: 30 (grain default, unset)",
+	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("`grain settings` printed %q, which does not contain %q", out, want)
 		}
@@ -170,7 +174,7 @@ func TestCmdSettingsPrintsTheSandboxShape(t *testing.T) {
 			t.Errorf("`grain settings` printed %q, which does not contain %q", out, want)
 		}
 	}
-	if strings.Contains(out, "kontur default") {
+	if strings.Contains(out, "grain default") {
 		t.Errorf("`grain settings` printed %q, which still calls a set shape a default", out)
 	}
 }
@@ -213,7 +217,7 @@ func TestSandboxShapeValue(t *testing.T) {
 		t.Errorf("sandboxShapeValue(4, 2) = %q, want %q", got, "4")
 	}
 	if got := sandboxShapeValue(0, 2); !strings.Contains(got, "2") || !strings.Contains(got, "default") {
-		t.Errorf("sandboxShapeValue(0, 2) = %q, want kontur's own default named", got)
+		t.Errorf("sandboxShapeValue(0, 2) = %q, want grain's own default named", got)
 	}
 	if got := sandboxShapeValue(0, 0); got != "unset" {
 		t.Errorf("sandboxShapeValue(0, 0) = %q, want %q", got, "unset")

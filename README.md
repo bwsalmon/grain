@@ -479,7 +479,12 @@ and become grain's, which means grain has to render them. That is what
   `proposeTaskTool`'s "a human must accept it first" contract is enforced
   by the state machine rather than by withholding a label, and
   `model.LinkProposedBy` records which task proposed it — something the
-  issue version had no way to say.
+  issue version had no way to say. It joins the backlog where a task a
+  human files joins it, `Store.OrderKeyForNewTask` at whichever end
+  `model.Config.NewestFirst` names: by default the end of it, behind
+  everything already queued, rather than at `OrderKey`'s zero value —
+  which is not "no position" but a position ahead of every task filed
+  since the backlog started.
 - The merge queue's own two voices moved too: `fileFixTask` files a store
   task instead of an issue, and both it and `escalateToUser` comment
   through `Store.AddComment` as the `merge-queue` principal, so a human
@@ -1781,6 +1786,30 @@ starts exactly where the list you opened it from started. Dialogs that
 are an *action* rather than a thing you opened — New task, Run a suite,
 Settings, Debugging, an attempt's transcript — stay centered boxes.
 
+**A repo is a page of its own, the way a task is (grain/task-111).**
+Everything grain knew about one repo used to hang off that repo's row in
+the repo list: a chevron that folded its tasks out in place, a "+" that
+filed one against it, and New branch, Capabilities, Releases and Remove
+buttons -- two of which folded a form out between rows, and every one of
+which needed its own `stopPropagation` so it wouldn't also fire the row's
+navigation. Five controls per row is a toolbar, not a list, and there was
+nowhere for the sixth thing a repo grows to go. So a repo opens the way a
+task does. A row is a name and its per-state counts; clicking it lands on
+`/repos/{owner}/{name}` (`RepoPage.jsx`, `paths.js` parsing the two
+segments a repo name takes), and everything about that repo is on that
+page -- its branches and its default capabilities as plain forms rather
+than fold-outs behind a button, the way into its releases
+(`/repos/{owner}/{name}/releases`), Remove, filing a task against it, and
+the repo's own tasks. Adding a repo is the one control that stays on the
+list, since it is the only one that isn't about a repo already listed.
+
+The repo's task list is `TaskList` itself, scoped to the repo and passed
+in as children by `App.jsx` rather than reimplemented on the page, so a
+repo's tasks get the same search, sort, multi-select and drag-reorder the
+flat list has instead of a poorer second list. That is also what retired
+the task view's `repoFilter` chip: "the tasks of one repo" is a place to
+go now, not a filter left standing on another place.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to
@@ -1884,16 +1913,12 @@ shape (`-sandbox-cpus`/`-sandbox-memory-mb`/`-sandbox-disk-gb`) included:
 a setting reachable only
 from the Settings pane would be one a deployment could not be configured
 from a shell, which is where `grain sync` and every scripted setup
-already live. Unset, vCPUs and memory print as the shape actually in
-effect — `bwsalmon/kontur`'s own default, carried alongside the stored
-value as `sandboxCpusDefault`/`sandboxMemoryMbDefault` — rather than as
-the bare `0` that is stored, since a literal `0` reads as a deliberately
-empty VM. Disk has no such default to print beside it, deliberately (see
-`Settings`' own doc comment): a VM's disk is however large the guest
-image behind it happens to be, which is a property of the image a
-deployment built rather than a constant this build could name, so unset
-disk prints as `unset` instead of a number that would be wrong for
-anyone who rebuilt their guest.
+already live. Unset, all three print as the shape actually in effect —
+grain's own default, carried alongside the stored value as
+`sandboxCpusDefault`/`sandboxMemoryMbDefault`/`sandboxDiskGbDefault` —
+rather than as the bare `0` that is stored, since a literal `0` reads as
+a deliberately empty VM (see "Every sandbox is built at a size grain
+chose", which is where disk got a default to print).
 
 `ui/` (bwsalmon/agents#333) now has a settings panel too — the topbar's
 "Settings" button opens a form reading `GET /api/settings`,
@@ -2095,6 +2120,122 @@ set a new task starts with, which is a different thing from
 docs/data-model.md's folder `offers`, those being floors a task cannot
 drop rather than a seed it can.
 
+### Debugging `gemini-key`: the picker didn't know what Settings knew
+
+"The gemini key capability fails when I attempt to add it to a task."
+Attaching it is not what fails — `POST /api/tasks/{id}/capabilities`
+writes the grant and returns the task, exactly as it should. What fails
+is the task, at its next dispatch, and the reason it fails is one of
+three things that were each invisible from where the mistake was made.
+
+`gemini-key` needs a GCP project (`capabilityProviders` registers no
+provider without one, and a grant nothing answers to is refused as `no
+provider is registered for capability "gemini-key"`), a
+`gcp-key-minter` secret to mint under, and a minter holding
+`roles/serviceusage.apiKeysAdmin` in a project with
+`apikeys.googleapis.com` enabled. Settings' Capabilities tab already
+reported the first two, as **Not ready** with a `Needs:` line. The
+capability picker on a task — the pane where somebody actually ticks the
+box — was built from `ui.OfferedCapabilities`, a static listing with no
+deployment behind it, and offered the row regardless. Two panes, two
+independent answers, and the disagreement only surfaced minutes later as
+a failed run.
+
+`GET /api/config` now carries `ready` and `needs` per picker row, joined
+to the same `capabilityStatuses` Settings is built from rather than
+re-derived, so the two cannot drift into saying different things again.
+The row warns and stays tickable: filing the task first and pasting the
+secret second is an ordinary order to do things in, and a picker that
+refused would also leave a capability already attached with no row to
+untick it from.
+
+The third gap is the one no configuration pane can see, because it lives
+in GCP. `grain setup gcp` defaults `-enable-gemini-key` to *off* while
+`terraform/gcp`'s own `enable_gemini_key` defaults to *on*, so a
+deployment installed by script rather than by that module has a project,
+a minter credential, a **Ready** badge — and a minter that cannot
+administer API keys. The API answers both that and "this API was never
+enabled" with an indistinguishable 403, whose message (`Permission
+'apikeys.keys.create' denied on resource ... (or it may not exist)`)
+reads like a bug in grain rather than like one unrun setup flag.
+`geminikey.advise` now names which of the two it is — from the error's
+own `SERVICE_DISABLED` reason — and names the command that fixes either.
+
+Two smaller things fell out of writing a fake API Keys server to test
+that. `apiKeysMinter`, the code that actually runs the moment somebody
+attaches this capability, was covered by nothing but the live test that
+skips without a real GCP project; it has real tests now, for the
+long-running-operation polling, the request paths and the cleanup after
+a key that is created but unreadable. And an empty key string coming
+back from `GetKeyString` was being placed at `KeyPath` and described to
+the agent as a working key — the one failure here that looks like
+success, now a failed mint like any other.
+
+`Resolve` also refuses when the standing credential resolves to nothing,
+rather than leaving `Materialize` to discover it a moment later. Nothing
+new is caught: what changes is that a refusal's `Reason` is posted to
+the task verbatim, so an operator reads a sentence naming the secret to
+set, where a failed materialize reads as `materializing capabilities:
+geminikey: resolving credential ...` — grain describing its own
+internals.
+
+### Debugging `gcp-key`: a diagnosis that was confidently wrong
+
+"Attempting to add a gcp key fails tasks." Same shape as `gemini-key`
+above, and the picker half of that fix already covers this capability —
+`GET /api/config` carries `ready` and `needs` for every row, and
+`gcp-key` needs one thing more than `gemini-key` does, an agent service
+account for keys to be minted *for*, which `capabilityProviders` also
+gates on. What was left was everything this capability says once it has
+been ticked, and each of those sentences was wrong in a different way.
+
+`Resolve`'s refusal — the text posted to the task verbatim, which is the
+whole reason a refusal carries prose rather than a code — told an
+operator to run `grain controller configure
+--gcp-agent-service-account-email <email> --gcp-project-id <project>`.
+No build of grain has ever had that command or those flags; the real
+ones are `grain settings -gcp-project -gcp-agent-service-account`, and
+the same pair of fields sits on Settings → Capabilities. It opened by
+telling them their *issue* carries a label, from a version of grain with
+neither issues nor labels left in it. And it never fired for the missing
+`gcp-key-minter` secret at all: that arrived a moment later as
+`materializing capabilities: gcpkey: resolving minter credential ...`,
+grain describing its own internals in the place a task's own comment
+should have named the secret to paste and the pane to paste it into.
+`Resolve` now refuses for that too, the way `geminikey.Resolve` already
+did.
+
+The one no configuration pane can see is in GCP, and here grain was not
+merely unhelpful but confidently wrong. Creating a service-account key
+can fail as a `FAILED_PRECONDITION`, and `explainCreateFailure` answered
+*every* one of those with the key-quota explanation
+(bwsalmon/agents#140, where a per-retry leak really did fill a project's
+10-key cap in minutes). The far more likely cause on a project set up
+since is the organization policy
+`constraints/iam.disableServiceAccountKeyCreation`, which forbids
+user-managed service-account keys outright and is enforced by default in
+organizations created since 2024. An operator whose org forbids keys was
+being told — with a count of **0** in the same sentence — that keys were
+being created faster than grain releases them, and sent looking for a
+leak that does not exist, in the one case where nothing about grain can
+help. The key count decides it now: the quota explanation is given only
+when the account is actually at the cap, and otherwise the constraint is
+named. The three other ways a half-set-up project refuses a mint get
+their own sentence too — `iam.googleapis.com` never enabled, a minter
+holding no `roles/iam.serviceAccountKeyAdmin` on the agent account, and
+a service account email that names nothing in this project — each with
+the command or the pane that fixes that one, and each wrapping GCP's own
+message rather than replacing it.
+
+`iamMinter`, like `apiKeysMinter` before it, is the code that runs the
+moment somebody attaches this capability and was covered by nothing at
+all; it has tests now, against a fake IAM API. They found the same
+looks-like-success failure the Gemini side had: a key created with no
+private key material was base64-decoded to nothing, placed at
+`SandboxKeyPath`, and described to the agent as a working key. It is a
+failed mint now, and the useless key is deleted rather than left to
+count against the very cap above.
+
 ### The same set, per repo
 
 The ask task-14 came from also said "we will also want this to be
@@ -2283,11 +2424,12 @@ already live, whose prompt was built when it began.
 
 **Where each is edited is where the thing being edited lives**: the
 deployment's on Settings → Agents (beside which agent and which model,
-since it is the same question of what the agent is told), a repo's on the
-repos page next to that repo (`GET`/`PUT /api/repos/{owner}/{name}/
-prompt-extension`, reporting the same whole-defaults document the
-capabilities route answers with, so a pane editing one field can show
-what the other holds), and a task's on the new-task form under Advanced
+since it is the same question of what the agent is told), a repo's on
+that repo's own page beside its default capabilities (`RepoPage.jsx`,
+grain/task-111; `GET`/`PUT /api/repos/{owner}/{name}/prompt-extension`,
+reporting the same whole-defaults document the capabilities route answers
+with, so a page showing one field can show what the other holds), and a
+task's on the new-task form under Advanced
 options, beside the deployment text it would replace. `grain settings
 -prompt-extension` and `grain repo prompt-extension [-set text]
 <owner/name>` are the same two from a shell, printing all three layers
@@ -2333,8 +2475,9 @@ cross-process case where it would not, and no flag to set. `grain demo`'s
 own throwaway UI is the one caller that still leaves it nil, on purpose:
 a fake store seeded with fake tasks has no real secrets to manage either.
 `GET /api/secrets` reports `{enabled, secrets}` either way, so the
-frontend's secrets pane can hide its controls behind a note rather than
-show ones that would only ever 404; `PUT`/`DELETE
+frontend's "Other secrets" list (below, "Secrets sit with what uses
+them") can hide its controls behind a note rather than show ones that
+would only ever 404; `PUT`/`DELETE
 /api/secrets/{secret}/{key}` and `DELETE /api/secrets/{secret}` are the
 set/delete-one-key/delete-the-whole-secret surface, each answering with
 the refreshed `{enabled, secrets}` the same way a mutating task route
@@ -2368,6 +2511,49 @@ command line, the same narrow-as-possible sudoers shape
 that would only ever 404 -- the case for `grain demo`'s throwaway UI,
 which leaves `Config.Reboot` nil since there is no real machine behind it
 worth rebooting.
+
+### Secrets sit with what uses them, not in a pane of their own
+
+The endpoints above gave the UI a Secrets tab: every secret in the store,
+each key a deletable chip, and a secret/key/value form under it. That is
+the whole store faithfully rendered, and it is nearly useless as an
+operator surface — a value is only ever meaningful to whatever resolves
+it, and nothing on that tab said which name belonged to what. Knowing
+that `gcp-key-minter` is the credential `gcp-key` mints *through*, or
+that `github-app/private-key` is half of what `github-sandbox`
+authenticates as, was knowledge you brought to the pane rather than
+anything it told you. Meanwhile the pane that *did* know — the
+Capabilities tab, which already reported "Missing secrets:
+`gcp-key-minter`" — could only point somewhere else.
+
+grain/task-110 puts each one where it is used. `CapabilityStatus.Secrets`
+reports every `CapabilitySpec.Requires` entry, set or not, resolved into
+the `{secret, key}` a write would address it by, and the Capabilities tab
+renders a write-only field per entry on the capability's own row: the
+pane that says what is missing is the pane that fills it in. The agent
+credentials were already this shape, on the Agents tab beside the choice
+of framework (below, "Two agent frameworks"), which is where the argument
+came from.
+
+Two details are worth naming. `Requires` comes in the two forms
+`Store.Resolve` accepts, and the bare `<secret>` one names no key at all
+— so for that form the reported key is whichever key the secret already
+holds, when it holds exactly one, and `secrets.AgentCredentialKey`
+otherwise. Writing to the key already there is what keeps a value set
+from the UI from *adding* a second key to a secret seeded under some
+other name (`scripts/setup.sh` writes the minter key as
+`gcp-key-minter/key.json`), which is precisely the two-key state the bare
+form can no longer be resolved out of. And nothing is offered at all when
+`Config.Secrets` is nil: no store, no field, the same
+nil-means-unavailable reading `missingSecrets` already took.
+
+What is left is the remainder — a secret in the store that no capability
+requires and no framework runs as, which is a state a renamed
+`gcpkey.Config.MinterCredential` or a future capability can put a
+deployment in. That keeps the old flat list and its form, under "Other
+secrets" at the foot of the Capabilities tab, filtered to exactly what
+nothing above claims. It is deliberately not a tab: it is the leftovers,
+and nothing grain itself resolves should ever appear in it.
 
 ## Two agent frameworks, either per task
 
@@ -2957,7 +3143,7 @@ hand.
 
 Every flag is empty by default, which disables the feature entirely (the
 UI's own Upgrade pane reports itself unavailable, the same convention the
-Secrets pane already uses for its own optional `-server-data-dir`
+secrets endpoints already use for their own optional `-server-data-dir`
 wiring).
 
 Since bwsalmon/agents#645 there are two pipelines behind that one button,
@@ -3240,38 +3426,50 @@ disk-full error, on a VM that had CPUs and memory to spare.
 `model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
 tab in Settings and the shape override under New task -> Advanced
 options, `orchestrator.Shape.DiskGB` resolved per dimension against the
-deployment default, and `konturctl vm create -disk-size-gb` at the one
-moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
-is left off the create entirely, so a deployment that never sets one
-passes exactly the arguments it passed before.
+deployment default, and `konturctl vm create -disk-size-mb` at the one
+moment a sandbox's size is decided. Zero kept meaning "unset" — the flag
+was left off the create entirely, so a deployment that never set one
+passed exactly the arguments it passed before. (It no longer is: see
+"Every sandbox is built at a size grain chose".)
 
-Two things about it are genuinely unlike CPUs and memory, and both are
-visible in the code:
+Two things about it were genuinely unlike CPUs and memory when it landed,
+and both were visible in the code:
 
-- **There is no default to show.** `ui.Settings` reports
+- **There was no default to show.** `ui.Settings` reports
   `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
-  what is really in effect rather than a misleading literal 0. Disk has
-  no such constant: an unset disk is however large *this deployment's*
+  what is really in effect rather than a misleading literal 0. Disk had
+  no such constant: an unset disk was however large *this deployment's*
   guest image is, which is a property of an image somebody built, not a
-  number this build can name. The field has no placeholder, and says so
-  in words instead.
+  number this build can name. The field had no placeholder, and said so
+  in words instead — until grain started naming that number too.
 - **A bigger disk is not by itself more space.** The image's filesystem
   ends where it ended; the extra is unallocated until something grows it.
   `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
   runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
   disk was not enlarged and a one-line grow on one whose was.
 
-**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
-snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
-disk-size field, and `writeQcow2Overlay` — which already takes the
-virtual size as an argument — is called with the source image's size
-unconditionally. Passing the flag against a `konturctl` without it fails
-the create, which is why zero omits it rather than sending an explicit
-size: a deployment that has not set one is unaffected either way, and a
-deployment that sets one has said out loud that it expects the flag to
-work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
-the other half of this, and belongs there rather than as a local patch
-here — see `third_party/kontur/VENDORED.md`.
+**The `konturctl` half of it exists now, and is vendored here.** For a
+while it did not: this setting reached a flag no `konturctl` had, so a
+deployment that set one got a failed create and one that left it at zero
+passed the arguments it always did, which is why nothing noticed.
+`konturctl vm create -disk-size-mb` (bwsalmon/kontur#39) is that flag —
+the VM's own container sizes the qcow2 overlay to it before
+cloud-hypervisor opens it, growing one an earlier boot left behind rather
+than only sizing a fresh one, and refusing to shrink it or to go below
+the guest image it reads through to. It landed on `bwsalmon/kontur`'s
+`main` and reached this repo by a resync rather than as a local patch,
+which is what `third_party/kontur/VENDORED.md` asks for.
+
+It is MiB where this setting is GiB, so
+`orchestrator.KonturConfig.createArgs` converts at that one point, and it
+is `-disk-mode=overlay` only — the guest image underneath is shared with
+every other VM booting it, so nothing ever resizes that. grain's VMs are
+in that mode already: `scripts/setup.sh` asks for it by name.
+
+The real-KVM suite asserts the whole chain from inside a guest: a VM
+created a gigabyte larger than the image it boots comes up with a
+`/dev/vda` that size and a root filesystem grown onto it. A fake
+`konturctl` can only ever prove the flag was passed.
 
 ### Monitoring it
 
@@ -3663,3 +3861,62 @@ restarted inside a paused window dispatches one run, meets the same
 limit, and pauses again: one wasted attempt, against a durable row that
 would have to be reconciled with a credential that may by then have been
 changed by the very operator doing the restarting.
+
+## Every sandbox is built at a size grain chose
+
+All three dimensions of a sandbox VM were opt-in: `sandbox-cpus`,
+`sandbox-memory-mb` and `sandbox-disk-gb` each defaulted to zero, and
+zero meant "leave the flag off the create". A deployment that configured
+none of them — which is every deployment until somebody opens the
+Sandbox tab — got whatever `konturctl vm create` decides on its own: 2
+vCPU and 2048 MiB from `internal/staticpod.Defaults`, and a root disk
+exactly as large as the guest image behind it, which
+`scripts/kontur/build-guest.sh` packs to the rootfs plus 20% headroom.
+
+Those are real numbers a run lives inside, and nothing chose them for the
+job an agent's sandbox actually does. 2 GiB of memory is a small VM for
+something that clones a repo, installs a toolchain, builds it and runs
+its tests; a few hundred megabytes of disk slack is what a build-heavy
+checkout spends before failing part way through with no space left,
+on a VM with CPUs and memory to spare. Worse, two of the three were not
+grain's answers at all — one belonged to whichever `konturctl` is
+vendored under `third_party/`, the other to whichever guest image a
+deployment last built — so the size of a sandbox could move under a
+resync or an image rebuild without anything in this repo changing.
+
+`pkg/kontur`'s `DefaultCPUs`/`DefaultMemoryMB`/`DefaultDiskGB` are
+grain's own answer now — 2 vCPU, 8 GiB of memory, 30 GiB of disk — and
+`orchestrator.KonturConfig.createArgs` passes all three on every create,
+unconditionally. The resolution order is unchanged and still per
+dimension: the task's own `SandboxCPUs`/`SandboxMemoryMB`/`SandboxDiskGB`
+first, then the deployment-wide setting
+(`KonturSandboxes.SetDefaultShape`, re-read each reconcile tick), then
+`orchestrator.DefaultShape()`. What changed is the bottom of that chain:
+it is a number rather than a missing flag, so `konturctl` is never asked
+to pick a size and no VM's shape depends on which image or which vendored
+kontur a host happens to have.
+
+The 30 GiB is a floor rather than a ceiling, and `konturctl` is the one
+enforcing that: it refuses a `-disk-size-mb` below the guest image the
+overlay reads through to instead of truncating the guest's filesystem.
+This repo's own guest is nowhere near it, but a deployment booting an
+image larger than 30 GiB has to raise the setting to match — which fails
+at create time, naming both sizes, rather than quietly building a VM the
+guest does not fit in.
+
+Zero still means "unset" everywhere it is stored and typed — in
+`model.Config`, in `model.Task`, in the CLI flags and in an empty box on
+the Sandbox tab — it just resolves to grain's default rather than to
+kontur's. The visible consequence is that disk finally has a default to
+show: `ui.Settings.SandboxDiskGBDefault` sits beside the two that already
+existed, so the pane's disk field gets the same faint placeholder as
+vCPUs and memory instead of a sentence explaining why it could not have
+one, and `grain settings` prints `sandbox disk gb: 30 (grain default,
+unset)` where it used to print `unset`. The memory placeholder moved with
+the constant behind it, from 2048 to 8192.
+
+A deployment that wants something else sets it, exactly as before: 8 GiB
+and 30 GiB are a default chosen for a build-and-test agent, not a claim
+about anyone's host. A per-task override is still the escape hatch for
+the one job that needs more, and still the only way to ask for *less*
+than the deployment's own shape.
