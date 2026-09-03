@@ -1,9 +1,9 @@
 import { useRef, useState } from "react";
-import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STALE_BASE_STATES, frameworkLabel, knownRepos, lastBaseForRepo } from "../state.js";
+import { frameworkLabel, knownRepos, lastBaseForRepo, suggestsBase } from "../state.js";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
@@ -65,15 +65,15 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // repo's own last task used (bwsalmon/agents#641), rather than
   // clobbering something the human already typed (baseEdited.current) or
   // a repo with no history to prefill from. That "no history" check is
-  // gated on whether the repo has any (non-stale) task at all, not on
-  // lastBaseForRepo's return value -- that value is "" both when there is
-  // no history and when the most recent task deliberately used the
-  // default branch, and only the former should leave a manually-typed
-  // base alone.
+  // gated on whether the repo has any task suggestsBase counts at all,
+  // not on lastBaseForRepo's return value -- that value is "" both when
+  // there is no history and when the most recent task deliberately used
+  // the default branch, and only the former should leave a
+  // manually-typed base alone.
   const handleRepoChange = (r) => {
     setRepo(r);
     if (baseEdited.current) return;
-    const hasHistory = (tasks || []).some((t) => t.repo === r && !STALE_BASE_STATES.includes(t.state));
+    const hasHistory = (tasks || []).some((t) => t.repo === r && suggestsBase(t));
     if (hasHistory) setBase(lastBaseForRepo(tasks, r));
   };
 
@@ -241,17 +241,22 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
         <fieldset>
           <legend>Depends on <span className="hint">optional</span></legend>
           {dependsOn.length > 0 && (
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mb: 1 }}>
+            // One full-width chip per line, the shape DetailOverlay's
+            // dependency list uses: a picked task then reads as a row,
+            // rather than a bubble sized by however long its title
+            // happens to be, wrapped in beside the others.
+            <Stack spacing={0.6} sx={{ mb: 1 }}>
               {dependsOn.map((t) => (
-                <Chip
-                  key={t.id}
-                  size="small"
-                  label={`${t.id} ${t.title}`}
-                  onDelete={() => removeDependency(t.id)}
-                  deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
-                />
+                <Tooltip key={t.id} title={`${t.id} ${t.title}`} placement="left">
+                  <Chip
+                    label={`${t.id} ${t.title}`}
+                    onDelete={() => removeDependency(t.id)}
+                    deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
+                    sx={{ width: "100%", justifyContent: "space-between", "& .MuiChip-label": { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } }}
+                  />
+                </Tooltip>
               ))}
-            </Box>
+            </Stack>
           )}
           <TaskPicker
             tasks={tasks || []}

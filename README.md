@@ -942,7 +942,25 @@ anything about them. Pending outranks failing on purpose, so a red job
 alongside a still-running one waits too: the queue files exactly one
 automatic fix per pull request, and it is worth a cycle to file that one
 against CI's whole verdict rather than against whichever job went red
-first. A conflicted or failing head gets a fix task filed straight
+first. Nor does it merge before CI has said *anything*: an empty check
+list is read `PENDING` too, until the head commit has carried it for
+`defaultCheckRegistrationWindow` (two minutes). GitHub creates a
+workflow run's check runs asynchronously after processing a push, so a
+sync landing in the gap between the push and that sees nothing — and
+nothing is also what a repo with no CI configured answers, forever, with
+no way to tell the two apart from the Checks API. The window is the only
+thing that can, and a deployment with genuinely no CI pays it once per
+head commit. Nor does it wait for CI that is never coming: a head that
+has read `PENDING` for longer than `defaultCheckStallDeadline` (two
+hours, timed per head commit over one unbroken run of pending reads) is
+given up on — a comment naming the checks that never finished,
+`Observation.MergeQueueBlockedAt` set, the queue moved on — since a
+workflow waiting on an approval nobody gives, or a provider that posted
+"queued" and went away, would otherwise hold its repo's whole queue for
+the life of the deployment with nothing said to anyone. No fix task is
+filed for that one: nothing has failed, and a check that never finishes
+is usually waiting on something outside the pull request, so there may
+be nothing in it to repair. A conflicted or failing head gets a fix task filed straight
 into the store already approved (`Task.Approval` set by
 `PrincipalAutomation`, `LinkFixTask` recording which one) rather than
 `core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`

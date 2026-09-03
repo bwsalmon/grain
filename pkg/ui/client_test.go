@@ -1708,6 +1708,47 @@ func TestReorderValidatesIDsIsNotEmpty(t *testing.T) {
 	}
 }
 
+// AuthorKind is what lets the frontend tell a task somebody filed by
+// hand from one grain or a dispatched run filed for itself -- Author
+// alone cannot, since a login, a run ID and a deployment name are all
+// just strings. state.js's lastBaseForRepo reads it to keep a
+// system-generated task's base branch out of the human's own "Base
+// branch" default.
+func TestAuthorKindCarriesTheFilingPrincipalsKind(t *testing.T) {
+	c, store, ctx := testClient(t)
+	filed := create(t, c, ctx)
+	if filed.AuthorKind != string(model.PrincipalHuman) {
+		t.Fatalf("AuthorKind of a task filed through the client = %q, want human", filed.AuthorKind)
+	}
+
+	id, err := store.NewTaskID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduled := model.Task{
+		ID:     id,
+		Intent: model.IntentImplement,
+		Title:  "nightly sweep",
+		Body:   "filed by a schedule",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+			Reason:      model.ReasonSchedule,
+		},
+		CreatedAt: &baseTime,
+	}
+	if err := store.PutTask(ctx, scheduled); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.Task(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AuthorKind != string(model.PrincipalAutomation) {
+		t.Fatalf("AuthorKind of a scheduled task = %q, want automation", got.AuthorKind)
+	}
+}
+
 // GeneratedFrom is read off the task's own LinkProposedBy link -- the
 // same provenance relayProposedTasks (pkg/orchestrator/finish.go) sets
 // automatically on every task a propose_task call files, surfaced here
