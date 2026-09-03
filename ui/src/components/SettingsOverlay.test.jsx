@@ -439,4 +439,54 @@ describe("SettingsOverlay", () => {
       expect(screen.getByRole("radio", { name: "Light" })).toBeChecked();
     });
   });
+  // Almost every setting here reaches the running daemon within a poll
+  // interval; the handful that cannot come back as restartRequired, and
+  // the ones already changed and waiting on a restart as pendingRestart.
+  describe("settings that need a restart", () => {
+    const restartRequired = ["githubHost", "githubInsecureHttp"];
+
+    it("annotates a restart-only field before anything has been changed", async () => {
+      api.mockResolvedValueOnce({ ...settings, restartRequired, pendingRestart: [] });
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+
+      await user.click(screen.getByRole("tab", { name: "GitHub" }));
+
+      expect(screen.getAllByText("needs restart").length).toBe(2);
+      expect(screen.getAllByText(/Takes effect when the daemon restarts/).length).toBe(2);
+      expect(screen.queryByText(/Saved, but not applied yet/)).not.toBeInTheDocument();
+    });
+
+    it("says which settings are saved but not applied yet", async () => {
+      api.mockResolvedValueOnce({ ...settings, restartRequired, pendingRestart: ["githubHost"] });
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+
+      // The banner is on the overlay itself, so it is visible from
+      // whichever tab happens to be open.
+      expect(screen.getByText(/Saved, but not applied yet: GitHub host/)).toBeInTheDocument();
+
+      await user.click(screen.getByRole("tab", { name: "GitHub" }));
+
+      expect(screen.getByText("restart to apply")).toBeInTheDocument();
+      expect(screen.getByText(/Changed, but not applied/)).toBeInTheDocument();
+      // The other restart-only field has not been changed, so it keeps
+      // the plain annotation rather than the warning.
+      expect(screen.getByText("needs restart")).toBeInTheDocument();
+    });
+
+    it("annotates nothing when the deployment reports no restart-only settings", async () => {
+      api.mockResolvedValueOnce({ ...settings, restartRequired: [], pendingRestart: [] });
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+
+      await user.click(screen.getByRole("tab", { name: "GitHub" }));
+
+      expect(screen.queryByText("needs restart")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Takes effect when the daemon restarts/)).not.toBeInTheDocument();
+    });
+  });
 });

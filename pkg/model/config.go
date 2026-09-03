@@ -22,7 +22,10 @@ import "time"
 // "the row says every field is a zero value" this way, where a bare
 // zero-value Config could not.
 type Config struct {
-	// PollInterval is how often pkg/orchestrator's RunCycle runs.
+	// PollInterval is how often pkg/orchestrator's RunCycle runs. Read
+	// back out of this row once per tick, so changing it retimes the
+	// loop that is already running rather than the next one
+	// (cmd/grain/daemon.go's liveConfig).
 	PollInterval time.Duration
 	// MaxConcurrent is how many runs dispatch.Cycle lets be in flight at
 	// once -- the same count -max-concurrent parses.
@@ -65,30 +68,50 @@ type Config struct {
 	// named for the Gemini family it still runs, and kept under this name
 	// because it is a persisted column (schema.go's grain_config.
 	// gemini_model) that renaming would cost a migration for nothing.
+	//
+	// Read when a run's framework is built, which is once per dispatch
+	// (cmd/grain/daemon.go's dispatchConfig, alongside AgentFramework
+	// above), so a model changed here is the one the next run calls.
 	GeminiModel string
 	// ClaudeModel is agent/claude's own counterpart to GeminiModel: the
 	// model the real `claude` CLI is asked for, required the same way and
 	// for the same reason (ui.UpdateSettings). Read by whichever
-	// framework a run is actually dispatched onto
-	// (cmd/grain/daemon.go's agentFrameworks); a deployment that never
-	// runs agent/claude simply leaves this unread.
+	// framework a run is actually dispatched onto, per dispatch
+	// (cmd/grain/daemon.go's agentFrameworks/dispatchConfig); a
+	// deployment that never runs agent/claude simply leaves this unread.
 	ClaudeModel string
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
 	// agent framework's own default in place, which for both frameworks
 	// is no cap at all (agent/claude's defaultMaxTurns has why). A run's
-	// real ceiling is orchestrator.Config.MaxRunRuntime.
+	// real ceiling is orchestrator.Config.MaxRunRuntime. Re-read by
+	// orchestrator.RunCycle every cycle, the same as MaxConcurrent, so a
+	// changed cap reaches the next run dispatched.
 	MaxAgentTurns int
 	// GitHubHost is the GitHub API host -- overridable to point at a mock
 	// for local testing.
+	//
+	// This, and GitHubInsecureHTTP below, are the only two settings here
+	// that a running daemon cannot adopt: both are baked into the git
+	// proxy's forwarder, the GitHub REST transport and the
+	// github-sandbox capability provider at startup, each read
+	// unsynchronised by requests already in flight. ui.Settings reports
+	// them as restartRequired for exactly that reason, and reports a
+	// change to one as pending until the daemon is restarted --
+	// ui.restartOnlySettings is the list, cmd/grain/daemon.go's
+	// liveConfig the other end of it.
 	GitHubHost string
 	// GitHubInsecureHTTP speaks plain HTTP to GitHubHost instead of
-	// HTTPS -- mock servers only.
+	// HTTPS -- mock servers only. Needs a restart, like GitHubHost above.
 	GitHubInsecureHTTP bool
 	// GCPProject is the GCP project the gcp-key/gemini-key capabilities
-	// mint into; empty disables both.
+	// mint into; empty disables both. Changing it rebuilds the
+	// model.CapabilityRegistry the next cycle resolves a task's grants
+	// against (cmd/grain/daemon.go's liveConfig), so configuring a
+	// project is what enables those two capabilities -- not the restart
+	// that used to be needed after it.
 	GCPProject string
 	// GCPServiceAccountEmail is the narrow agent service account gcp-key
-	// mints keys for.
+	// mints keys for. Applied with GCPProject above, and the same way.
 	GCPServiceAccountEmail string
 	// TargetRepos restricts which repos a task's Repo may name, mirroring
 	// v1's terraform/gcp/variables.tf target_repos -- "the allowlist the
@@ -123,6 +146,13 @@ type Config struct {
 	// meaningless under the default orchestrator.HostSandboxes backend
 	// (local directories have no CPU/memory shape of their own) and
 	// simply go unread there, the same way the kontur* daemon flags do.
+	//
+	// A change to either reaches the backend while the daemon runs
+	// (orchestrator.KonturSandboxes.SetDefaultShape, called by
+	// cmd/grain/daemon.go's liveConfig), so it applies to the next
+	// sandbox built rather than to the next process. Sandboxes already
+	// running keep the size they were created at -- a VM's shape is
+	// decided once, when it is created.
 	SandboxCPUs int
 	// SandboxMemoryMB is SandboxCPUs' memory counterpart, in MiB.
 	SandboxMemoryMB int

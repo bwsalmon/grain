@@ -40,8 +40,14 @@
 // (bwsalmon/agents#320):
 // loadConfig writes them into model.Store's grain_config row the first
 // time a deployment's store has none, and reads them back out of it on
-// every start after that, so a UI or a CLI editing model.Config changes
-// what the next restart runs with. What stays flags-only either has to
+// every start after that, so a UI or a CLI editing model.Config is what
+// changes them from then on. Almost all of them change what this process
+// is doing without waiting for a restart at all: liveConfig re-reads that
+// row once per reconcile tick and hands each change to whatever it
+// configures -- see its own doc comment for the full list, and for the
+// two settings (-github-host, -github-insecure-http) that genuinely
+// cannot be swapped under a live deployment and so are reported to the
+// UI as needing a restart. What stays flags-only either has to
 // be known before there is a store to read it from (-data-dir) or names
 // secret material rather than being configuration itself
 // (-gemini-api-key-file, -kontur-ssh-key, -claude-oauth-token-file) --
@@ -69,6 +75,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -419,7 +426,7 @@ type config struct {
 	// store-backed (model.Config.AgentFramework) the same way geminiModel
 	// is: -agent-framework only seeds it the first time a deployment's
 	// store has none; `grain settings` (or the Settings UI) is what
-	// changes it after that. Only a fallback here: defaultAgentFramework
+	// changes it after that. Only a fallback here: dispatchConfig
 	// re-reads that stored row per dispatch, so a default changed in the
 	// UI takes effect on the next run rather than the next restart, and
 	// a task naming a framework of its own never consults either.
@@ -552,6 +559,14 @@ func run(ctx context.Context, cfg config) error {
 		sandboxes = orchestrator.NewHostSandboxes(cfg.sandboxDir)
 	}
 
+	// One liveConfig, shared by the two halves of this process: the
+	// reconcile loop refreshes it once per tick and applies what changed
+	// (its own doc comment), and the UI server reads it back to report
+	// what this deployment is actually running with, as opposed to what
+	// is merely stored. Built here because it needs both the config
+	// loadConfig just resolved and the sandbox backend above.
+	live := newLiveConfig(store, sandboxes, cfg)
+
 	// transcriptDir is where a run's own agent.Framework may mirror its
 	// transcript-in-progress live, and where the UI server below reads one
 	// back from for a still-running attempt -- the two sides of
@@ -585,7 +600,7 @@ func run(ctx context.Context, cfg config) error {
 	// longer happens: runDaemon's own failure is logged, not fatal, and
 	// run() itself only returns once ctx is actually cancelled.
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes)
+		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes, live)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -594,7 +609,7 @@ func run(ctx context.Context, cfg config) error {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			if err := runDaemon(ctx, cfg, store, sandboxes, transcriptDir); err != nil {
+			if err := runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live); err != nil {
 				// reconcilerDown is what turns this log line into
 				// something GET /api/config (and, through it, the UI
 				// itself) can also see -- bwsalmon/agents#576: before
@@ -622,7 +637,7 @@ func run(ctx context.Context, cfg config) error {
 		return nil
 	}
 
-	return runDaemon(ctx, cfg, store, sandboxes, transcriptDir)
+	return runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live)
 }
 
 // orphanReaper is the startup sweep both sandbox backends implement:
@@ -653,7 +668,7 @@ type orphanReaper interface {
 // take the UI server run() already started down with it
 // (bwsalmon/agents#550). It returns once ctx is cancelled, the same as
 // reconcile itself does; a non-nil error means it never got that far.
-func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, transcriptDir string) (err error) {
+func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, transcriptDir string, live *liveConfig) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
@@ -764,8 +779,9 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 		// pull request -- until every agent a cycle started had finished.
 		Runs: inFlight,
 	}
-	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s)", cfg.pollInterval, cfg.maxConcurrent)
-	reconcile(ctx, deps, cfg.pollInterval)
+	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s) -- both re-read from the store "+
+		"each tick, so changing either in Settings needs no restart", cfg.pollInterval, cfg.maxConcurrent)
+	reconcile(ctx, deps, live)
 	// reconcile only returns once ctx is done, which is also what tells
 	// every live run to wind up -- so this is the shutdown drain, not a
 	// wait for work still to be done.
@@ -829,17 +845,23 @@ func drainInFlight(runs *orchestrator.InFlight) {
 // resolve a binary and a credential and build a struct.
 func agentFrameworks(cfg config, store *model.Store, secretStore *secrets.Store) func(context.Context, string) (agent.Framework, error) {
 	return func(ctx context.Context, framework string) (agent.Framework, error) {
+		// Re-read here, not closed over from startup: which framework a
+		// run is driven by *and* which model that framework is asked for
+		// are both live choices an operator makes in Settings, and both
+		// are consumed right here, one row read before a run that will
+		// cost minutes.
+		live := dispatchConfig(ctx, store, cfg)
 		if framework == "" {
-			framework = defaultAgentFramework(ctx, store, cfg)
+			framework = live.defaultAgentFramework()
 		}
 		// Normalized so a task or a config row still carrying the legacy
 		// "gemini" spelling dispatches onto the framework that name now
 		// means, rather than falling into the error below.
 		switch model.NormalizeAgentFrameworkName(framework) {
 		case model.AgentFrameworkClaude:
-			return buildClaudeFramework(ctx, cfg, secretStore)
+			return buildClaudeFramework(ctx, live, secretStore)
 		case model.AgentFrameworkAntigravity:
-			return buildAntigravityFramework(ctx, cfg, secretStore)
+			return buildAntigravityFramework(ctx, live, secretStore)
 		default:
 			// Unreachable through the UI (ui.UpdateSettings and
 			// ui.CreateTask both validate against the same two names),
@@ -851,21 +873,35 @@ func agentFrameworks(cfg config, store *model.Store, secretStore *secrets.Store)
 	}
 }
 
-// defaultAgentFramework is the deployment-wide setting a task that named
-// no framework of its own is dispatched with. Read from the store on
-// every dispatch, not from cfg: unlike the seed-only settings loadConfig
-// folds in at startup, this one is a live choice an operator makes in
-// Settings and expects the next run to honour, and re-reading one row
-// per dispatch is far cheaper than the run it precedes. cfg's own value
-// (the -agent-framework flag, seeded into that row the first time) is
-// the fallback for a store that cannot be read or has no config row yet.
-func defaultAgentFramework(ctx context.Context, store *model.Store, cfg config) string {
-	if store != nil {
-		if stored, err := store.GetConfig(ctx); err == nil && stored != nil && stored.AgentFramework != "" {
-			return model.NormalizeAgentFramework(stored.AgentFramework)
-		}
+// dispatchConfig is cfg with every store-backed setting a dispatch
+// actually consults folded in from grain_config as it stands right now
+// -- which agent.Framework to drive a run with, and which model that
+// framework is asked for.
+//
+// Read per dispatch rather than cached at startup for the same reason
+// the framework itself is built per dispatch (agentFrameworks' own doc
+// comment): these are live choices an operator makes in Settings and
+// expects the next run to honour. A store that cannot be read, or has no
+// row yet, leaves cfg exactly as the flags parsed it -- which is the
+// value that seeded that row in the first place.
+func dispatchConfig(ctx context.Context, store *model.Store, cfg config) config {
+	if store == nil {
+		return cfg
 	}
-	return model.NormalizeAgentFramework(cfg.agentFramework)
+	stored, err := store.GetConfig(ctx)
+	if err != nil || stored == nil {
+		return cfg
+	}
+	return cfg.withLiveModelConfig(*stored)
+}
+
+// defaultAgentFramework is the deployment-wide setting a task that named
+// no framework of its own is dispatched with: this config's own agent
+// framework with model.Config.AgentFramework's "empty means antigravity"
+// applied. Called on a dispatchConfig result, so what it answers is the
+// setting as it stands now rather than as it stood at startup.
+func (c config) defaultAgentFramework() string {
+	return model.NormalizeAgentFramework(c.agentFramework)
 }
 
 // buildAntigravityFramework builds the framework a run driven by
@@ -1086,7 +1122,7 @@ func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, c
 	}
 }
 
-// reconcile calls orchestrator.RunCycle every interval, and
+// reconcile calls orchestrator.RunCycle every poll interval, and
 // reapCapabilities every reapInterval, until ctx is done, logging (never
 // panicking on) whatever either returns -- one bad cycle must not take
 // the whole daemon down, since the next tick gets another chance at
@@ -1104,7 +1140,16 @@ func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, c
 // own Reconciler.Run (bwsalmon/agents#254) when that package merged into
 // pkg/orchestrator, which -- being "a library, not a binary" (its own
 // doc comment) -- has no timer loop of its own.
-func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Duration) {
+//
+// The interval, and everything else in live, is re-read from the store
+// once per tick rather than fixed for the life of the process: this loop
+// is the deployment's own heartbeat, so it is also the natural place to
+// notice a setting has changed and hand the change to whatever it
+// configures (liveConfig.refresh). deps is the loop's own copy, mutated
+// in place by that refresh -- each cycle and each dispatch goroutine
+// takes its own copy of it, so nothing already running sees it change
+// underneath.
+func reconcile(ctx context.Context, deps orchestrator.Deps, live *liveConfig) {
 	tick := func() {
 		if err := orchestrator.RunCycle(ctx, deps, time.Now().UTC()); err != nil {
 			log.Printf("grain daemon: reconcile cycle: %v", err)
@@ -1115,7 +1160,7 @@ func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Durati
 	}
 	tick()
 	reap()
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(live.current().pollInterval)
 	defer ticker.Stop()
 	reapTicker := time.NewTicker(reapInterval)
 	defer reapTicker.Stop()
@@ -1124,11 +1169,172 @@ func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Durati
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Before the cycle, so a settings change made since the last
+			// tick is in effect for the dispatches this one decides on
+			// rather than for the one after it.
+			if live.refresh(ctx, &deps) {
+				ticker.Reset(live.current().pollInterval)
+			}
 			tick()
 		case <-reapTicker.C:
 			reap()
 		}
 	}
+}
+
+// defaultShaper is the sandbox-backend half of a changed sandbox-cpus or
+// sandbox-memory-mb: orchestrator.KonturSandboxes implements it, and
+// orchestrator.HostSandboxes deliberately does not -- a local directory
+// has no CPU or memory shape to default, which is the same reason those
+// two settings are documented as meaningless under it. Declared here,
+// where it is consumed, rather than in pkg/orchestrator, exactly as
+// orphanReaper above is.
+type defaultShaper interface {
+	SetDefaultShape(orchestrator.Shape)
+}
+
+// liveConfig is the store-backed configuration this process actually has
+// in effect: what loadConfig read at startup, plus every later change to
+// it that a *running* daemon can apply on its own.
+//
+// bwsalmon/agents#320 left every setting but max-concurrent needing a
+// restart -- loadConfig read grain_config once and nothing ever re-read
+// it -- which is the wrong shape for a pane whose whole promise is that
+// changing a value changes what the deployment does. refresh is called
+// once per reconcile tick and either applies a change itself or leaves
+// it to whichever piece already re-reads the store for it:
+//
+//	poll-interval                     this loop's own ticker (refresh)
+//	gcp-project, gcp-agent-service-account
+//	                                  the capability registry the next cycle
+//	                                  resolves a task's grants against (refresh)
+//	sandbox-cpus, sandbox-memory-mb   the default shape the next sandbox is
+//	                                  built at (refresh, via defaultShaper)
+//	max-concurrent, max-agent-turns   orchestrator.RunCycle's own per-cycle re-read
+//	agent-framework, gemini-model, claude-model
+//	                                  dispatchConfig's own per-dispatch re-read
+//	target-repos, newest-first, show-closed-by-default,
+//	approved-by-default, auto-merge-by-default
+//	                                  pkg/ui, which reads grain_config per request
+//
+// What is left is github-host and github-insecure-http, which are baked
+// into the git proxy's forwarder, the GitHub REST transport and the
+// github-sandbox capability provider when this process starts -- each of
+// them read without synchronisation by whatever request is already in
+// flight, so swapping one under a live deployment would be a data race
+// rather than a setting change. Those two keep their startup value here
+// (config.withLiveModelConfig), which is what makes current() an honest
+// answer to "what is this process running with" rather than a copy of
+// what is merely stored -- the comparison the Settings pane makes to say
+// a change has been saved but not yet applied (ui.Settings.PendingRestart,
+// whose own restartOnlySettings list is the other end of this one).
+type liveConfig struct {
+	store *model.Store
+	// sandboxes is this deployment's sandbox backend, asked to adopt a
+	// changed default VM shape when it is one that can (defaultShaper).
+	// nil, or a backend that is not one, simply means that pair of
+	// settings has nothing to apply to.
+	sandboxes orchestrator.Sandboxes
+
+	mu      sync.Mutex
+	applied config
+}
+
+// newLiveConfig starts a liveConfig off at what loadConfig resolved --
+// the configuration this process is about to run with.
+func newLiveConfig(store *model.Store, sandboxes orchestrator.Sandboxes, cfg config) *liveConfig {
+	return &liveConfig{store: store, sandboxes: sandboxes, applied: cfg}
+}
+
+// current is the configuration in effect right now. Safe to call from
+// any goroutine -- the UI server calls it to answer GET /api/settings
+// while the reconcile loop is refreshing it.
+func (l *liveConfig) current() config {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.applied
+}
+
+// modelConfig is current() in the shape pkg/ui compares the stored row
+// against (ui.Config.RunningConfig).
+func (l *liveConfig) modelConfig() model.Config { return l.current().toModelConfig() }
+
+// refresh re-reads grain_config and applies whatever changed to the
+// pieces of this running daemon that can take it, mutating deps in place
+// for the ones a cycle carries. It reports whether the poll interval
+// itself changed, which is the one thing its caller has to act on rather
+// than something applied here.
+//
+// A store that cannot be read is logged and otherwise ignored: keeping
+// the configuration already in effect is the right answer to a momentary
+// read failure, and the next tick tries again.
+func (l *liveConfig) refresh(ctx context.Context, deps *orchestrator.Deps) (pollIntervalChanged bool) {
+	if l.store == nil {
+		return false
+	}
+	stored, err := l.store.GetConfig(ctx)
+	if err != nil {
+		log.Printf("grain daemon: re-reading stored configuration: %v", err)
+		return false
+	}
+	if stored == nil {
+		return false
+	}
+
+	l.mu.Lock()
+	was := l.applied
+	now := was.withLiveModelConfig(*stored)
+	l.applied = now
+	l.mu.Unlock()
+
+	changes := now.changesFrom(was)
+	if len(changes) == 0 {
+		return false
+	}
+	log.Printf("grain daemon: applying changed settings without a restart: %s", strings.Join(changes, ", "))
+
+	if now.gcpProject != was.gcpProject || now.gcpServiceAccountEmail != was.gcpServiceAccountEmail {
+		// Rebuilt rather than edited: capabilityProviders is the one
+		// place that decides which providers a given configuration has,
+		// and a dispatch goroutine still holding the old registry keeps
+		// resolving against it (deps is copied per cycle and per
+		// dispatch) rather than seeing one change underneath it.
+		deps.Config.Capabilities = model.NewCapabilityRegistry(capabilityProviders(now)...)
+	}
+	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB {
+		if shaper, ok := l.sandboxes.(defaultShaper); ok {
+			shaper.SetDefaultShape(orchestrator.Shape{CPUs: now.sandboxCPUs, MemoryMB: now.sandboxMemoryMB})
+		}
+	}
+	return now.pollInterval != was.pollInterval
+}
+
+// changesFrom names every store-backed setting that differs between this
+// config and the one previously in effect, in the same "-flag: old ->
+// new" vocabulary logStoreOverrides uses -- so one log line matches what
+// an operator just changed in Settings.
+//
+// github-host and github-insecure-http are deliberately absent: they can
+// never differ here, since withLiveModelConfig never adopts them.
+func (c config) changesFrom(prev config) []string {
+	var changes []string
+	note := func(name string, from, to any) {
+		if fmt.Sprint(from) != fmt.Sprint(to) {
+			changes = append(changes, fmt.Sprintf("%s %v -> %v", name, from, to))
+		}
+	}
+	note("poll-interval", prev.pollInterval, c.pollInterval)
+	note("max-concurrent", prev.maxConcurrent, c.maxConcurrent)
+	note("agent-framework", prev.agentFramework, c.agentFramework)
+	note("gemini-model", prev.geminiModel, c.geminiModel)
+	note("claude-model", prev.claudeModel, c.claudeModel)
+	note("max-agent-turns", prev.maxAgentTurns, c.maxAgentTurns)
+	note("gcp-project", prev.gcpProject, c.gcpProject)
+	note("gcp-agent-service-account", prev.gcpServiceAccountEmail, c.gcpServiceAccountEmail)
+	note("target-repos", prev.targetRepos, c.targetRepos)
+	note("sandbox-cpus", prev.sandboxCPUs, c.sandboxCPUs)
+	note("sandbox-memory-mb", prev.sandboxMemoryMB, c.sandboxMemoryMB)
+	return changes
 }
 
 // loadConfig resolves cfg's store-backed fields (bwsalmon/agents#320)
@@ -1144,14 +1350,13 @@ func reconcile(ctx context.Context, deps orchestrator.Deps, interval time.Durati
 // depended on how many times the daemon had already started would be a
 // worse surprise than one that is simply ignored after the first.
 //
-// Picking up a change made through the store still needs a restart for
-// every field but one -- this reads grain_config exactly once, at
-// startup, applying no update while RunCycle is running.
-// bwsalmon/agents#320 explicitly did not ask for graceful in-flight
-// reloading, so run() does not attempt it. MaxConcurrent is the
-// exception: RunCycle itself re-reads grain_config every cycle (its own
-// doc comment), so cfg.maxConcurrent below only ever matters as the
-// value a fresh database is seeded with.
+// This reads grain_config exactly once, at startup, and is only the
+// starting point: liveConfig re-reads the same row once per reconcile
+// tick and applies whatever a running daemon can apply (its own doc
+// comment lists which settings that is, and which two are left needing a
+// restart), so almost every field below now matters only as the value a
+// fresh database is seeded with, or as the fallback for a row that has
+// no value of its own for it.
 //
 // Only the fields with no bearing on reaching the store in the first
 // place move through here: -data-dir and -gemini-api-key-file (a
@@ -1214,6 +1419,40 @@ func (c config) toModelConfig() model.Config {
 		TargetRepos: c.targetRepos,
 		SandboxCPUs: c.sandboxCPUs, SandboxMemoryMB: c.sandboxMemoryMB,
 	}
+}
+
+// withLiveModelConfig is withModelConfig restricted to what a *running*
+// daemon can adopt: github-host and github-insecure-http keep the value
+// this process started with (liveConfig's own doc comment for why they
+// cannot change under a live deployment), so what this returns stays a
+// true description of what the process is running rather than of what is
+// merely stored.
+//
+// A stored field with no usable value is skipped rather than adopted: a
+// row written before a field existed reads back as that field's zero
+// value, and "" is not a model to call, nor is a zero poll interval one
+// a ticker can be built from. ui.UpdateSettings refuses to store such a
+// value in the first place, so this only ever guards a row written by
+// hand, by an older build, or by a migration that added a column.
+func (c config) withLiveModelConfig(mc model.Config) config {
+	live := c.withModelConfig(mc)
+	live.githubHost, live.githubInsecureHTTP = c.githubHost, c.githubInsecureHTTP
+	if mc.PollInterval <= 0 {
+		live.pollInterval = c.pollInterval
+	}
+	if mc.MaxConcurrent < 1 {
+		live.maxConcurrent = c.maxConcurrent
+	}
+	if mc.AgentFramework == "" {
+		live.agentFramework = c.agentFramework
+	}
+	if strings.TrimSpace(mc.GeminiModel) == "" {
+		live.geminiModel = c.geminiModel
+	}
+	if strings.TrimSpace(mc.ClaudeModel) == "" {
+		live.claudeModel = c.claudeModel
+	}
+	return live
 }
 
 // withModelConfig returns c with every store-backed field replaced by
@@ -1500,7 +1739,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // mode is gone -- see this file's own doc comment), it always has that
 // directory to hand; there is no longer a cross-process case where it
 // would not.
-func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes) (stop func(context.Context) error, err error) {
+func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes, live *liveConfig) (stop func(context.Context) error, err error) {
 	// A second CredentialSet, loaded the same way BuildProxy (above) and
 	// run's own githubClient each load their own: not hot-reloaded,
 	// cheap to load again, and this is the one Settings checks
@@ -1566,6 +1805,11 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
 		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
 		ReconcilerDown: func() bool { return reconcilerDown.Load() },
+		// RunningConfig is what this process actually has in effect right
+		// now (liveConfig's own doc comment), which the Settings pane
+		// compares the stored row against to say which of the two
+		// restart-only settings have been saved but not yet applied.
+		RunningConfig: live.modelConfig,
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

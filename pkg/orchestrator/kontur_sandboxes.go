@@ -109,15 +109,21 @@ type KonturConfig struct {
 	// ignores both fields entirely.
 	IP   string
 	Port int
-	// DefaultCPUs and DefaultMemoryMB (bwsalmon/agents#534), if set, are
-	// appended to createArgs' own result as "-cpus"/"-memory-mb" -- the
+	// DefaultCPUs and DefaultMemoryMB (bwsalmon/agents#534) seed the
 	// deployment-wide default VM shape (model.Config.SandboxCPUs/
-	// SandboxMemoryMB), applied last so it wins out over anything
-	// CreateArgs also happens to set. They are the fallback for a run
-	// that requested no shape of its own; a run that did overrides them
-	// per dimension (createArgs). Zero, the default for both, omits the
-	// corresponding flag entirely and leaves
+	// SandboxMemoryMB) a run that requested no shape of its own falls
+	// back to -- appended to createArgs' own result as
+	// "-cpus"/"-memory-mb", last, so they win out over anything
+	// CreateArgs also happens to set; a run that did request a shape
+	// overrides them per dimension (Shape.orDefault). Zero, the default
+	// for both, omits the corresponding flag entirely and leaves
 	// bwsalmon/kontur's own `konturctl vm create` default in place.
+	//
+	// They are only the *starting* value: the shape actually applied to
+	// each create lives on KonturSandboxes itself, where
+	// SetDefaultShape replaces it while the daemon runs, so changing it
+	// in Settings reaches the next sandbox built rather than only the
+	// next restart.
 	DefaultCPUs     int
 	DefaultMemoryMB int
 }
@@ -166,28 +172,23 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 // applied consistently rather than overridden by a CreateArgs list that
 // is otherwise identical across every create call.
 //
-// shape is the run's own requested size (model.Task's SandboxCPUs/
-// SandboxMemoryMB), falling back per-dimension to the deployment default
-// in cfg. This is where a per-task override takes effect now: a sandbox
-// is built for one run, so the moment it is created is the one moment its
-// size is decided. It used to be applied afterwards, by a `konturctl vm
-// update` against a slot's already-created VM, and undone by the recreate
-// that followed the run -- both of which existed only because the VM
-// outlived the task.
+// shape is the size this VM is actually to be created at -- the run's
+// own requested size (model.Task's SandboxCPUs/SandboxMemoryMB) already
+// resolved per dimension against the deployment default
+// (Shape.orDefault, in create, against whatever default the sandboxes
+// currently carry). This is where a per-task override takes effect now:
+// a sandbox is built for one run, so the moment it is created is the one
+// moment its size is decided. It used to be applied afterwards, by a
+// `konturctl vm update` against a slot's already-created VM, and undone
+// by the recreate that followed the run -- both of which existed only
+// because the VM outlived the task.
 func (c KonturConfig) createArgs(shape Shape) []string {
 	args := append([]string{"-backend", kontur.BackendDocker, "-net", c.netMode()}, c.CreateArgs...)
-	cpus, memoryMB := shape.CPUs, shape.MemoryMB
-	if cpus == 0 {
-		cpus = c.DefaultCPUs
+	if shape.CPUs != 0 {
+		args = append(args, "-cpus", strconv.Itoa(shape.CPUs))
 	}
-	if memoryMB == 0 {
-		memoryMB = c.DefaultMemoryMB
-	}
-	if cpus != 0 {
-		args = append(args, "-cpus", strconv.Itoa(cpus))
-	}
-	if memoryMB != 0 {
-		args = append(args, "-memory-mb", strconv.Itoa(memoryMB))
+	if shape.MemoryMB != 0 {
+		args = append(args, "-memory-mb", strconv.Itoa(shape.MemoryMB))
 	}
 	// Flat mode takes its address from the container runtime, and
 	// konturctl rejects "-ip" outright under it rather than ignoring it.
@@ -224,11 +225,47 @@ type KonturSandboxes struct {
 
 	mu   sync.Mutex
 	live map[string]*konturSandbox
+	// defaults is the deployment-wide default VM shape the next Acquire
+	// falls back to, seeded from cfg's own DefaultCPUs/DefaultMemoryMB
+	// and replaceable while the daemon runs (SetDefaultShape). It lives
+	// here rather than in cfg because cfg is read unsynchronised by
+	// every live sandbox's own goroutine; this one field is the only
+	// piece of a KonturSandboxes' configuration that changes after
+	// construction, so it is the only one that needs mu.
+	defaults Shape
 }
 
 // NewKonturSandboxes returns a KonturSandboxes configured by cfg.
 func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
-	return &KonturSandboxes{cfg: cfg, live: map[string]*konturSandbox{}}
+	return &KonturSandboxes{
+		cfg:      cfg,
+		live:     map[string]*konturSandbox{},
+		defaults: Shape{CPUs: cfg.DefaultCPUs, MemoryMB: cfg.DefaultMemoryMB},
+	}
+}
+
+// SetDefaultShape replaces the deployment-wide default VM shape every
+// later Acquire resolves a run's own request against -- what
+// model.Config.SandboxCPUs/SandboxMemoryMB mean once they have been
+// changed in Settings, applied to the next sandbox built rather than
+// only to the next process (cmd/grain/daemon.go's liveConfig, which
+// calls this once per reconcile tick when either has changed).
+//
+// A zero dimension means "no deployment default", exactly as it does at
+// construction: the corresponding flag is left off the create entirely
+// and bwsalmon/kontur's own default stands. Sandboxes already built are
+// untouched -- a VM's size is decided when it is created.
+func (k *KonturSandboxes) SetDefaultShape(shape Shape) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.defaults = shape
+}
+
+// defaultShape reads back whatever default SetDefaultShape last set.
+func (k *KonturSandboxes) defaultShape() Shape {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.defaults
 }
 
 // maxVMNameLen is how long a kontur VM name may be under the docker
@@ -353,7 +390,7 @@ func (k *KonturSandboxes) create(ctx context.Context, name string, shape Shape) 
 			return fmt.Errorf("orchestrator: deleting stale kontur VM %q before rebuilding it: %w", name, err)
 		}
 	}
-	if err := kontur.Create(ctx, k.cfg.stateDir(), name, k.cfg.createArgs(shape)...); err != nil {
+	if err := kontur.Create(ctx, k.cfg.stateDir(), name, k.cfg.createArgs(shape.orDefault(k.defaultShape()))...); err != nil {
 		return fmt.Errorf("orchestrator: creating kontur VM %q: %w", name, err)
 	}
 	return nil

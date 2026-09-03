@@ -1526,9 +1526,9 @@ somehow.
 are the store-backed answer: one row in `grain_config`, the same
 one-row-per-deployment shape `grain_schema` already uses. `cmd/grain`'s
 "daemon" subcommand's own `loadConfig` (`daemon.go`)
-reads it once at startup — before `RunCycle` starts, never again while
-running, since bwsalmon/agents#320 explicitly did not ask for graceful
-in-flight reloading — and writes those flags into it as a one-time seed
+reads it at startup — and re-reads it on every reconcile tick, see
+"Changing a setting doesn't mean restarting the daemon" below — and
+writes those flags into it as a one-time seed
 the first time a deployment's store has no row yet, so a fresh
 `-data-dir` still starts from a real command line and a UI or a CLI
 always has something to read from its very first request. Every start
@@ -1564,6 +1564,55 @@ partial-update contract `UpdateSettingsRequest`'s pointer fields already
 give a CLI caller. A 400's `ValidationError` message (a bad duration
 string, an empty required field the first time) surfaces through the
 same error banner task creation's own validation errors already use.
+
+### Changing a setting doesn't mean restarting the daemon
+
+Storing the configuration was only half of it. `loadConfig` read
+`grain_config` exactly once, at startup, so *saving* a setting and
+*applying* one had come apart: the Settings pane wrote a row and then
+showed it back as though something were now running that way, when in
+fact nothing but `-max-concurrent` (re-read by `RunCycle` itself) would
+change until someone restarted the process. An operator raising the turn
+cap, switching models, or widening a sandbox saw a saved value and no
+different behaviour, with nothing on screen to say why.
+
+`cmd/grain/daemon.go`'s `liveConfig` closes that gap. The reconcile loop
+is the deployment's own heartbeat, so it is also where a settings change
+is noticed: once per tick, before the cycle, `liveConfig.refresh`
+re-reads `grain_config` and hands each change to whatever it configures
+— its own ticker for `poll-interval`, a rebuilt `model.CapabilityRegistry`
+for `gcp-project`/`gcp-agent-service-account`, and
+`KonturSandboxes.SetDefaultShape` for `sandbox-cpus`/`sandbox-memory-mb`.
+The rest were already read per cycle or per dispatch, or gained it here:
+`RunCycle` re-reads `max-concurrent` *and* `max-agent-turns`;
+`dispatchConfig` re-reads `agent-framework`, `gemini-model` and
+`claude-model` when a run's framework is built (which is per dispatch,
+for the same reason the credential is); and `target-repos`,
+`newest-first` and the three "by default" toggles are read out of the
+store by `pkg/ui` on the request that needs them. What a change costs is
+therefore at most one poll interval, and nothing already in flight is
+disturbed: `Deps` is copied per cycle and per dispatch, so a run keeps
+the registry and the caps it started under.
+
+Two settings genuinely cannot be swapped under a live deployment:
+`github-host` and `github-insecure-http`. They are baked into the git
+proxy's forwarder, the GitHub REST transport and the `github-sandbox`
+capability provider when the process starts, each of them read without
+synchronisation by requests already in flight, so changing one *is* a
+data race rather than a setting change. `liveConfig` deliberately keeps
+this process's own startup value for those, which is what makes
+"what is running" a different question from "what is stored" — and lets
+the answer be reported rather than guessed at. `pkg/ui.Settings` carries
+`restartRequired` (the constant list, so the field can be annotated
+before anyone touches it) and `pendingRestart` (the subset whose stored
+value has actually diverged from `Config.RunningConfig`, the running
+daemon's own view of itself). The Settings pane annotates those fields
+with a "needs restart" badge, turns it into a warning-coloured "restart
+to apply" once one has been changed, and raises a banner naming what is
+saved but not yet running; `grain settings` prints the same thing as a
+closing line. `restartOnlySettings` in `pkg/ui/settings.go` is the one
+list both ends read, so a setting cannot be applied live *and* annotated,
+nor left needing a restart in silence.
 
 ## Write-only secrets access when colocated
 

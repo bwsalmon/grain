@@ -499,6 +499,93 @@ func TestKonturSandboxesCreateAppendsDefaultCPUsAndMemoryMB(t *testing.T) {
 	}
 }
 
+// SetDefaultShape is the same setting, changed while the daemon runs:
+// model.Config.SandboxCPUs/SandboxMemoryMB edited in Settings reach the
+// next sandbox built rather than only the next process
+// (cmd/grain/daemon.go's liveConfig calls this once per reconcile tick
+// when either has moved). A run that asked for a shape of its own still
+// wins, per dimension, exactly as it does over the constructor's value.
+func TestKonturSandboxesSetDefaultShapeAppliesToTheNextCreate(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		ExecKeyPath:       "/images/key",
+		Workspace:         "/workspace",
+		DefaultCPUs:       2,
+		DefaultMemoryMB:   2048,
+		ReadyPollInterval: time.Millisecond,
+	})
+	k.SetDefaultShape(orchestrator.Shape{CPUs: 8, MemoryMB: 16384})
+
+	if _, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{}); err != nil {
+		t.Fatal(err)
+	}
+	// And a run with its own request, to prove the new default is still
+	// only a fallback: the task's CPUs win, the deployment's memory
+	// fills in the dimension it left alone.
+	if _, err := k.Acquire(context.Background(), "t2-1", orchestrator.Shape{CPUs: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 8 -memory-mb 16384",
+		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 1 -memory-mb 16384",
+	}
+	got := splitNonEmptyLines(string(data))
+	if len(got) != len(want) {
+		t.Fatalf("kontur invocations = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("invocation %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Clearing both settings back to "unset" has to reach the backend too --
+// otherwise a deployment that went back to kontur's own default VM size
+// would keep building the size it had been told to forget.
+func TestKonturSandboxesSetDefaultShapeCanClearTheDefault(t *testing.T) {
+	stateDir := t.TempDir()
+	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
+	writeFakeKontur(t, argvLog, 30080)
+	writeFakeDockerGuest(t, filepath.Join(t.TempDir(), "docker-argv.log"), filepath.Join(t.TempDir(), "counter"), 0, "")
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		ExecKeyPath:       "/images/key",
+		Workspace:         "/workspace",
+		DefaultCPUs:       4,
+		DefaultMemoryMB:   8192,
+		ReadyPollInterval: time.Millisecond,
+	})
+	k.SetDefaultShape(orchestrator.Shape{})
+
+	if _, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat"
+	got := splitNonEmptyLines(string(data))
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("kontur invocations = %v, want [%q]", got, want)
+	}
+}
+
 func TestKonturSandboxesVMNameForUsesPrefix(t *testing.T) {
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{})
 	got, err := k.VMNameFor("t1-1")

@@ -239,3 +239,133 @@ func TestSettingsSkipsTheCredentialCheckWithNoCredentialsConfigured(t *testing.T
 		t.Fatalf("targetReposMissingCredentials = %v, want none reported with no ladder to check", got.TargetReposMissingCredentials)
 	}
 }
+
+// The restart-only settings and the pending-restart report they exist
+// for: every other setting on this pane reaches the running daemon
+// within a poll interval (cmd/grain/daemon.go's liveConfig), so the two
+// that do not have to say so -- both up front, as an annotation on the
+// field, and afterwards, once one has been changed and is sitting saved
+// but not applied.
+
+// contains reports whether keys names key -- Settings.RestartRequired
+// and PendingRestart are small, unordered lists, so this reads better at
+// the call sites below than a sorted reflect.DeepEqual would.
+func contains(keys []string, key string) bool {
+	for _, k := range keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// runningConfig points a test client's Config.RunningConfig at a fixed
+// model.Config -- standing in for the daemon liveConfig would otherwise
+// be answering for.
+func runningConfig(c *ui.Client, running model.Config) {
+	c.Config.RunningConfig = func() model.Config { return running }
+}
+
+func TestSettingsReportsWhichSettingsNeedARestart(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	// Before anything has ever been saved: the annotation belongs on the
+	// field from the first look at it, not only once a value exists.
+	fresh, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(fresh.RestartRequired, "githubHost") || !contains(fresh.RestartRequired, "githubInsecureHttp") {
+		t.Fatalf("restartRequired = %v on an unconfigured deployment, want both GitHub host settings", fresh.RestartRequired)
+	}
+	if len(fresh.PendingRestart) != 0 {
+		t.Fatalf("pendingRestart = %v with nothing stored, want none", fresh.PendingRestart)
+	}
+
+	// And the settings a running daemon does pick up on its own are
+	// deliberately absent: this list is what the UI annotates, so
+	// anything named here is a promise that it cannot be applied live.
+	for _, live := range []string{"pollInterval", "maxConcurrent", "geminiModel", "claudeModel",
+		"maxAgentTurns", "agentFramework", "gcpProject", "sandboxCpus", "sandboxMemoryMb"} {
+		if contains(fresh.RestartRequired, live) {
+			t.Errorf("restartRequired names %q, which the daemon applies without a restart", live)
+		}
+	}
+
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(saved.RestartRequired, "githubHost") {
+		t.Fatalf("restartRequired = %v once configured, want githubHost", saved.RestartRequired)
+	}
+}
+
+func TestSettingsReportsARestartOnlyChangeAsPending(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	// What the daemon is actually running with: what firstSettings just
+	// stored, which is the state right after a restart.
+	runningConfig(c, model.Config{GitHubHost: "github.com"})
+
+	settings, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.PendingRestart) != 0 {
+		t.Fatalf("pendingRestart = %v with stored and running agreeing, want none", settings.PendingRestart)
+	}
+
+	// Now change one, the way an operator does. The update's own
+	// response has to carry it: this is the moment the UI puts the
+	// "saved, but not applied" warning up.
+	host := "github.internal"
+	updated, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{GitHubHost: &host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(updated.PendingRestart, "githubHost") {
+		t.Fatalf("pendingRestart = %v right after changing githubHost, want it named", updated.PendingRestart)
+	}
+	if contains(updated.PendingRestart, "githubInsecureHttp") {
+		t.Fatalf("pendingRestart = %v, want only the setting that actually changed", updated.PendingRestart)
+	}
+
+	// And changing it back clears it again -- a pending restart is a
+	// comparison, not a flag something has to remember to unset.
+	back := "github.com"
+	restored, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{GitHubHost: &back})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.PendingRestart) != 0 {
+		t.Fatalf("pendingRestart = %v after putting githubHost back, want none", restored.PendingRestart)
+	}
+}
+
+// A UI with no daemon to speak for (`grain demo`, or any client built
+// without Config.RunningConfig) reports nothing pending rather than
+// comparing against a zero model.Config, which would call every setting
+// changed.
+func TestSettingsReportsNoPendingRestartWithoutARunningConfig(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	settings, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.PendingRestart) != 0 {
+		t.Fatalf("pendingRestart = %v with no RunningConfig configured, want none", settings.PendingRestart)
+	}
+	if len(settings.RestartRequired) == 0 {
+		t.Fatal("restartRequired is empty; the annotation does not depend on having a running config to compare with")
+	}
+}
