@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bwsalmon/grain/pkg/secrets"
 )
 
 // deployment is one real setup.sh run, and everything it left behind.
@@ -29,6 +32,13 @@ type deployment struct {
 	user    string
 	port    int
 	image   string
+	// What this deploy was told about its own state: the key it was
+	// handed (GRAIN_SECRETS_KEY) and the repository it was pointed at
+	// (GRAIN_STATE_REPO_URL), so the tests below can ask whether the host
+	// ended up holding exactly those rather than something it minted or
+	// invented for itself.
+	secretsKey  secrets.Key
+	stateRemote string
 }
 
 var deployOnce struct {
@@ -106,6 +116,38 @@ func install() (*deployment, error) {
 		return nil, err
 	}
 
+	// A state repository this deploy is pointed at, the way terraform/gcp
+	// points a real one at a repository on GitHub. A bare repository on
+	// this host does everything a remote has to do here -- it is cloned,
+	// committed to and pushed to -- and needs no credential to reach.
+	//
+	// Under the sandbox root because that is a directory the CLI's own
+	// container has mounted: `grain` is a `docker run` now, so a remote
+	// path anywhere else simply does not exist inside it. Left
+	// world-writable because the daemon pushes to it as $GRAIN_USER,
+	// which is not the account that created it.
+	d.stateRemote = filepath.Join(d.sandbox, "state-remote.git")
+	if err := os.MkdirAll(d.sandbox, 0o755); err != nil {
+		return nil, err
+	}
+	if out, err := exec.Command("git", "init", "--quiet", "--bare",
+		"--initial-branch=main", d.stateRemote).CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("creating the state remote: %w: %s", err, out)
+	}
+	if res := sudo("chmod", "-R", "a+rwX", d.stateRemote); res.exitCode != 0 {
+		return nil, fmt.Errorf("opening the state remote up to the service account: %v", res)
+	}
+
+	// The key a rebuilt host is handed. Generated here rather than
+	// hardcoded so nothing in this repository is a real key's shape with
+	// a real key's value, and kept on the fixture so the assertions can
+	// compare against it.
+	key, err := secrets.GenerateKey()
+	if err != nil {
+		return nil, err
+	}
+	d.secretsKey = key
+
 	repo, tag, ok := splitImage(image)
 	if !ok {
 		return nil, fmt.Errorf("GRAIN_TEST_IMAGE=%q names no tag to deploy", image)
@@ -129,6 +171,12 @@ func install() (*deployment, error) {
 		// mint_gemini_operating_key at the real GCP API.
 		{"GRAIN_GCP_PROJECT", ""},
 		{"GRAIN_GITHUB_TOKEN", "ghp_fake_token_for_the_installer_e2e"},
+		// The two the deploy is supposed to settle without anyone opening
+		// the UI: where this deployment's state lives, and the key that
+		// decrypts the secrets inside it.
+		{"GRAIN_STATE_REPO_URL", d.stateRemote},
+		{"GRAIN_STATE_REPO_BRANCH", "main"},
+		{"GRAIN_SECRETS_KEY", key.String()},
 		// Empty: format_target_repo_if_empty would otherwise `git
 		// ls-remote` (in the deployment image, but against the real
 		// GitHub) with that fake token.
@@ -262,6 +310,79 @@ func TestTheMinterCredentialReachedTheSecretsDatabase(t *testing.T) {
 	staged := filepath.Join(d.data, "secrets", ".minter-key.staged.json")
 	if sudoTest("-e", staged) {
 		t.Errorf("%s outlived the command that needed it", staged)
+	}
+}
+
+// A rebuilt host has to end up holding the key it was given, not one it
+// minted a moment earlier.
+//
+// That is the whole of GRAIN_SECRETS_KEY, and it is an ordering claim
+// about setup.sh rather than a claim about writing a file: opening the
+// secrets store mints a key when there is none, and this deploy opens it
+// twice (seed_gcp_minter_key, and the readiness summary's own
+// `grain secrets list`). Seeded after either of those, the key on disk
+// would be the host's own -- and the secrets file its state repository
+// carries would be unreadable for the rest of the deployment's life.
+func TestTheDeploymentKeptTheSecretsKeyItWasSeededWith(t *testing.T) {
+	requireInstaller(t)
+	d := deployed(t)
+
+	// Compared, never printed: the private half is the one value here
+	// that a failure message must not put in a CI log.
+	path := filepath.Join(d.data, "secrets", "secrets.key")
+	if strings.TrimSpace(sudoRead(path)) != d.secretsKey.String() {
+		t.Fatalf("%s does not hold the key this deploy seeded "+
+			"(the host minted its own, or seeded after something else had)", path)
+	}
+
+	// And what reads it agrees, through the same containerised CLI an
+	// operator would use -- which is what makes the file on disk a key
+	// this deployment can actually decrypt with.
+	shown := sudo("/usr/local/bin/grain", "state", "-data-dir", d.data, "key", "show")
+	if !strings.Contains(shown.stdout, d.secretsKey.Public()) {
+		t.Fatalf("`grain state key show` does not report the seeded key:\n%v", shown)
+	}
+}
+
+// The other half: a host that knows where its own state lives without
+// anyone opening the UI's bootstrap pane.
+func TestTheDeployPointedTheHostAtItsStateRepository(t *testing.T) {
+	requireInstaller(t)
+	d := deployed(t)
+
+	settings := sudoRead(filepath.Join(d.data, "state-repo.json"))
+	if !strings.Contains(settings, d.stateRemote) {
+		t.Fatalf("state-repo.json does not name the repository this deploy was given: %s", settings)
+	}
+
+	// Materialised during the deploy rather than left to the daemon:
+	// setup.sh writes the encrypted secrets file into this working tree
+	// (the minter-key seed), so it has to be the real one -- a clone of
+	// the remote -- before anything writes into it.
+	gitDir := filepath.Join(d.data, "state-repo", ".git")
+	if !sudoTest("-d", gitDir) {
+		t.Fatalf("%s was never cloned:\n--- last 4000 chars of the deploy ---\n%s",
+			filepath.Join(d.data, "state-repo"), tail(d.setup.stdout, 4000))
+	}
+	// Owned by the account the daemon reads it as. A git working tree
+	// with root-owned files in it is one git refuses to touch at all
+	// ("dubious ownership"), which would take the daemon down rather than
+	// merely costing it a push.
+	account, err := user.Lookup(d.user)
+	if err != nil {
+		t.Fatalf("setup.sh did not create %s: %v", d.user, err)
+	}
+	uid, err := strconv.Atoi(account.Uid)
+	if err != nil {
+		t.Fatalf("%s has uid %q: %v", d.user, account.Uid, err)
+	}
+	if got := sudoUID(t, gitDir); got != uid {
+		t.Errorf("%s is owned by uid %d, not %s (%d)", gitDir, got, d.user, uid)
+	}
+
+	status := sudo("/usr/local/bin/grain", "state", "-data-dir", d.data, "status")
+	if !strings.Contains(status.stdout, d.stateRemote) {
+		t.Errorf("`grain state status` does not report the repository state lives in:\n%v", status)
 	}
 }
 
