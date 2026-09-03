@@ -611,8 +611,8 @@ func (s *Store) ensureConfigNewestFirstColumn(ctx context.Context) error {
 // reasoning -- bwsalmon/agents#534) to a database created before these
 // columns existed, the same probe-then-ALTER approach every other
 // ensure*Column migration here uses. Both default to 0, Config.
-// SandboxCPUs/SandboxMemoryMB's own "unset, use bwsalmon/kontur's own
-// default" zero value, so a database migrated from before this setting
+// SandboxCPUs/SandboxMemoryMB's own "unset, use grain's own default
+// shape" zero value, so a database migrated from before this setting
 // existed reads back exactly as if nobody had ever configured either.
 func (s *Store) ensureConfigSandboxShapeColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_cpus`, `sandbox_memory_mb` FROM `grain_config` WHERE 1 = 0")
@@ -657,8 +657,8 @@ func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
 // sandbox_cpus/sandbox_memory_mb already present on every database
 // migrated by an earlier build and returns without adding anything, so a
 // column appended to it would only ever reach a database that had none
-// of the three. Defaults to 0, SandboxDiskGB's own "unset, take whatever
-// size the guest image gives it" zero value.
+// of the three. Defaults to 0, SandboxDiskGB's own "unset, take grain's
+// own default disk size" zero value.
 func (s *Store) ensureConfigSandboxDiskColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `grain_config` WHERE 1 = 0")
 	if err == nil {

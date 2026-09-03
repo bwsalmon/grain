@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
+	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -491,6 +492,49 @@ func TestGetSettingsReportsTaskDefaultsBeforeAnythingIsSaved(t *testing.T) {
 	}
 	if !read.AutoMergeByDefault {
 		t.Fatalf("AutoMergeByDefault = false with nothing saved, want true")
+	}
+}
+
+// TestGetSettingsReportsGrainsOwnSandboxDefaults covers the other half of
+// what a Settings pane shows for an unset sandbox shape: the three
+// *Default fields, which are the size a sandbox is really built at when
+// the stored value is 0 (kontur.DefaultCPUs/DefaultMemoryMB/
+// DefaultDiskGB, passed on every create). They are reported on both
+// paths, since a deployment with no grain_config row is exactly the one
+// whose shape is entirely these numbers.
+//
+// Disk is the one worth pinning: it reported no default at all until
+// grain started naming every dimension itself, so a build that quietly
+// dropped it would put the pane back to explaining why the box has no
+// placeholder.
+func TestGetSettingsReportsGrainsOwnSandboxDefaults(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	fresh, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		s    ui.Settings
+	}{{"fresh store", fresh}, {"saved settings", saved}} {
+		if tc.s.SandboxCPUsDefault != kontur.DefaultCPUs {
+			t.Errorf("%s: SandboxCPUsDefault = %d, want %d", tc.name, tc.s.SandboxCPUsDefault, kontur.DefaultCPUs)
+		}
+		if tc.s.SandboxMemoryMBDefault != kontur.DefaultMemoryMB {
+			t.Errorf("%s: SandboxMemoryMBDefault = %d, want %d", tc.name, tc.s.SandboxMemoryMBDefault, kontur.DefaultMemoryMB)
+		}
+		if tc.s.SandboxDiskGBDefault != kontur.DefaultDiskGB {
+			t.Errorf("%s: SandboxDiskGBDefault = %d, want %d", tc.name, tc.s.SandboxDiskGBDefault, kontur.DefaultDiskGB)
+		}
 	}
 }
 

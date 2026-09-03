@@ -2294,7 +2294,7 @@ func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
 // SandboxDiskGB (the deployment-wide
 // default sandbox shape) round-trip through UpdateSettings/GetSettings
 // the same as every other store-backed field, and 0 -- the "unset, use
-// bwsalmon/kontur's own default" zero value -- is valid, unlike
+// grain's own default shape" zero value -- is valid, unlike
 // MaxWorkers's own "must be at least 1".
 func TestUpdateSettingsSandboxShapeRoundTrips(t *testing.T) {
 	c, _, ctx := testClient(t)

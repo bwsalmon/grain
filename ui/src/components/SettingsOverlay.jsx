@@ -507,19 +507,21 @@ export default function SettingsOverlay({ onClose, showError }) {
             margin="normal"
           />
           {/*
-            No faint placeholder default here, unlike the two above: a VM's
-            disk is as large as the guest image behind it when nothing is set,
-            which is a property of the image this deployment built rather than
-            a number the API could report (ui.Settings' own comment on why
-            there is no sandboxDiskGbDefault). The helper text says so instead.
+            Disk shows a faint placeholder default like the two above now.
+            It used to have none, because an empty box meant "as large as
+            the guest image behind the VM" -- a property of the image this
+            deployment built rather than a number the API could report.
+            grain names all three sizes itself and passes all three on
+            every create, so sandboxDiskGbDefault is a real number here.
           */}
           <TextField
             name="sandboxDiskGb"
             label="Sandbox disk (GiB)"
-            helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Empty leaves it as large as the guest image. Overridable per task."
+            helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Overridable per task."
             type="number"
             inputProps={{ min: 0, step: 1 }}
             defaultValue={settings.sandboxDiskGb ? String(settings.sandboxDiskGb) : ""}
+            placeholder={settings.sandboxDiskGbDefault ? String(settings.sandboxDiskGbDefault) : undefined}
             fullWidth
             margin="normal"
           />

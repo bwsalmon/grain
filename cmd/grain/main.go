@@ -85,6 +85,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -629,20 +630,20 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
 	// The deployment-wide sandbox VM shape (ui.Settings.SandboxCPUs/
 	// SandboxMemoryMB/SandboxDiskGB, bwsalmon/agents#534,
-	// grain/task-41). 0 is a real value for all three -- "leave the
-	// default in place" -- so an operator shrinking a deployment back to
-	// that default sets the flag to 0 rather than omitting it, the same
-	// way an empty -target-repos clears the allowlist. What that default
-	// is differs for disk: kontur names its own vCPU and memory
-	// defaults, but a VM's disk is however large the guest image behind
-	// it happens to be, which is a property of the image a deployment
-	// built rather than a constant this build could print.
+	// grain/task-41). 0 is a real value for all three -- "leave grain's
+	// own default in place" -- so an operator putting a deployment back
+	// on that default sets the flag to 0 rather than omitting it, the
+	// same way an empty -target-repos clears the allowlist. All three
+	// name a number now: a sandbox is always created at a size this repo
+	// chose (kontur.DefaultCPUs/DefaultMemoryMB/DefaultDiskGB), rather
+	// than at whatever `konturctl vm create` or the deployment's own
+	// guest image would otherwise decide.
 	sandboxCPUs := fs.Int("sandbox-cpus", 0,
-		"deployment-wide default vCPU count for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+		"deployment-wide default vCPU count for a kontur-managed sandbox VM; 0 uses grain's own default, "+strconv.Itoa(kontur.DefaultCPUs))
 	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
-		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM; 0 uses grain's own default, "+strconv.Itoa(kontur.DefaultMemoryMB))
 	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
-		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM; 0 leaves the VM's disk as large as the guest image behind it")
+		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM; 0 uses grain's own default, "+strconv.Itoa(kontur.DefaultDiskGB))
 	// No back quotes in this usage string, here or on any flag below:
 	// flag.PrintDefaults reads the first back-quoted word as the name of
 	// the flag's operand, so "`grain repo add`" would print as
@@ -854,21 +855,17 @@ func (p *printer) settings(s ui.Settings) {
 		fmt.Printf("gcp agent service account: %s\n", s.GCPServiceAccountEmail)
 	}
 	// The sandbox shape prints what is actually in effect, not the bare
-	// stored value: 0 means "whatever bwsalmon/kontur defaults to", and
+	// stored value: 0 means "whatever grain's own default shape is", and
 	// printing that literal 0 would read as a deliberately empty VM.
-	// ui.Settings carries kontur's own defaults alongside the stored
-	// values (SandboxCPUsDefault/SandboxMemoryMBDefault) for exactly
-	// this.
-	//
-	// Disk has no such default to name, deliberately: there is no
-	// ui.Settings.SandboxDiskGBDefault because a VM's disk is however
-	// large the guest image behind it happens to be, a property of the
-	// image a deployment built rather than a constant this build could
-	// print. Passing 0 makes an unset disk print as "unset", which is
-	// all that can honestly be said about it here.
+	// ui.Settings carries those defaults alongside the stored values
+	// (SandboxCPUsDefault/SandboxMemoryMBDefault/SandboxDiskGBDefault)
+	// for exactly this. Disk has one like the other two now -- every
+	// dimension of a sandbox is a size grain names and passes, rather
+	// than disk being left to however large a deployment's guest image
+	// happens to be.
 	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault))
 	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault))
-	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, 0))
+	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, s.SandboxDiskGBDefault))
 	if len(s.TargetRepos) > 0 {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {
@@ -899,17 +896,19 @@ func (p *printer) settings(s ui.Settings) {
 
 // sandboxShapeValue renders one dimension of the deployment-wide sandbox
 // VM shape: the stored value when there is one, and otherwise the shape
-// actually in effect -- bwsalmon/kontur's own default -- named as the
-// default rather than printed as the bare 0 that is stored, so that
-// "unset" and "in effect" are both legible from one line. A build whose
-// ui.Settings reports no default to fall back on (0) says only that the
-// setting is unset, which is all it can honestly say.
-func sandboxShapeValue(stored, konturDefault int) string {
+// actually in effect -- grain's own default for that dimension -- named
+// as the default rather than printed as the bare 0 that is stored, so
+// that "unset" and "in effect" are both legible from one line. A build
+// whose ui.Settings reports no default to fall back on (0) says only
+// that the setting is unset, which is all it can honestly say; nothing
+// this binary talks to reports one now that disk has a default too, but
+// an older daemon on the other end of the API still can.
+func sandboxShapeValue(stored, grainDefault int) string {
 	if stored != 0 {
 		return strconv.Itoa(stored)
 	}
-	if konturDefault != 0 {
-		return fmt.Sprintf("%d (kontur default, unset)", konturDefault)
+	if grainDefault != 0 {
+		return fmt.Sprintf("%d (grain default, unset)", grainDefault)
 	}
 	return "unset"
 }

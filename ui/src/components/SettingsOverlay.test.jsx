@@ -21,7 +21,8 @@ const settings = {
   gcpServiceAccountEmail: "",
   targetRepos: ["acme/widgets"],
   sandboxCpusDefault: 2,
-  sandboxMemoryMbDefault: 2048,
+  sandboxMemoryMbDefault: 8192,
+  sandboxDiskGbDefault: 30,
 };
 
 describe("SettingsOverlay", () => {
@@ -230,11 +231,11 @@ describe("SettingsOverlay", () => {
   });
 
   // grain/task-41: the same treatment for the third dimension of that
-  // shape. It has no placeholder default beside it, unlike vCPUs and
-  // memory -- an unset disk is however large the guest image behind it
-  // is, which is not a number the API can name (ui.Settings' own comment
-  // on why there is no sandboxDiskGbDefault).
-  it("sets sandboxDiskGb, with no placeholder default beside it", async () => {
+  // shape -- including the faint placeholder default it used to lack,
+  // back when an unset disk meant "however large the guest image behind
+  // it is" rather than a size grain names and passes itself
+  // (sandboxDiskGbDefault).
+  it("sets sandboxDiskGb, showing grain's own default as its placeholder", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
@@ -243,7 +244,7 @@ describe("SettingsOverlay", () => {
 
     const diskInput = screen.getByLabelText(/Sandbox disk/);
     expect(diskInput).toHaveValue(null);
-    expect(diskInput).not.toHaveAttribute("placeholder");
+    expect(diskInput).toHaveAttribute("placeholder", "30");
     await user.type(diskInput, "40");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -270,10 +271,10 @@ describe("SettingsOverlay", () => {
     });
   });
 
-  // bwsalmon/agents#610: an unset override shows kontur's own default as a
+  // bwsalmon/agents#610: an unset override shows grain's own default as a
   // placeholder -- fainter than a real value -- rather than a literal 0 that
   // reads as a deliberately zeroed-out sandbox.
-  it("shows kontur's default shape as a placeholder, not a literal 0, when unset", async () => {
+  it("shows grain's default shape as a placeholder, not a literal 0, when unset", async () => {
     api.mockResolvedValueOnce(settings);
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
@@ -285,7 +286,7 @@ describe("SettingsOverlay", () => {
     expect(cpusInput).toHaveValue(null);
     expect(cpusInput).toHaveAttribute("placeholder", "2");
     expect(memoryInput).toHaveValue(null);
-    expect(memoryInput).toHaveAttribute("placeholder", "2048");
+    expect(memoryInput).toHaveAttribute("placeholder", "8192");
   });
 
   // bwsalmon/agents#610: clearing a real override back to blank is how an

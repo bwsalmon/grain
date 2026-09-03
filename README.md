@@ -1884,16 +1884,12 @@ shape (`-sandbox-cpus`/`-sandbox-memory-mb`/`-sandbox-disk-gb`) included:
 a setting reachable only
 from the Settings pane would be one a deployment could not be configured
 from a shell, which is where `grain sync` and every scripted setup
-already live. Unset, vCPUs and memory print as the shape actually in
-effect — `bwsalmon/kontur`'s own default, carried alongside the stored
-value as `sandboxCpusDefault`/`sandboxMemoryMbDefault` — rather than as
-the bare `0` that is stored, since a literal `0` reads as a deliberately
-empty VM. Disk has no such default to print beside it, deliberately (see
-`Settings`' own doc comment): a VM's disk is however large the guest
-image behind it happens to be, which is a property of the image a
-deployment built rather than a constant this build could name, so unset
-disk prints as `unset` instead of a number that would be wrong for
-anyone who rebuilt their guest.
+already live. Unset, all three print as the shape actually in effect —
+grain's own default, carried alongside the stored value as
+`sandboxCpusDefault`/`sandboxMemoryMbDefault`/`sandboxDiskGbDefault` —
+rather than as the bare `0` that is stored, since a literal `0` reads as
+a deliberately empty VM (see "Every sandbox is built at a size grain
+chose", which is where disk got a default to print).
 
 `ui/` (bwsalmon/agents#333) now has a settings panel too — the topbar's
 "Settings" button opens a form reading `GET /api/settings`,
@@ -3224,20 +3220,21 @@ disk-full error, on a VM that had CPUs and memory to spare.
 tab in Settings and the shape override under New task -> Advanced
 options, `orchestrator.Shape.DiskGB` resolved per dimension against the
 deployment default, and `konturctl vm create -disk-size-mb` at the one
-moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
-is left off the create entirely, so a deployment that never sets one
-passes exactly the arguments it passed before.
+moment a sandbox's size is decided. Zero kept meaning "unset" — the flag
+was left off the create entirely, so a deployment that never set one
+passed exactly the arguments it passed before. (It no longer is: see
+"Every sandbox is built at a size grain chose".)
 
-Two things about it are genuinely unlike CPUs and memory, and both are
-visible in the code:
+Two things about it were genuinely unlike CPUs and memory when it landed,
+and both were visible in the code:
 
-- **There is no default to show.** `ui.Settings` reports
+- **There was no default to show.** `ui.Settings` reports
   `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
-  what is really in effect rather than a misleading literal 0. Disk has
-  no such constant: an unset disk is however large *this deployment's*
+  what is really in effect rather than a misleading literal 0. Disk had
+  no such constant: an unset disk was however large *this deployment's*
   guest image is, which is a property of an image somebody built, not a
-  number this build can name. The field has no placeholder, and says so
-  in words instead.
+  number this build can name. The field had no placeholder, and said so
+  in words instead — until grain started naming that number too.
 - **A bigger disk is not by itself more space.** The image's filesystem
   ends where it ended; the extra is unallocated until something grows it.
   `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
@@ -3260,8 +3257,7 @@ It is MiB where this setting is GiB, so
 `orchestrator.KonturConfig.createArgs` converts at that one point, and it
 is `-disk-mode=overlay` only — the guest image underneath is shared with
 every other VM booting it, so nothing ever resizes that. grain's VMs are
-in that mode already: `scripts/setup.sh` asks for it by name. Zero still
-omits the flag entirely.
+in that mode already: `scripts/setup.sh` asks for it by name.
 
 The real-KVM suite asserts the whole chain from inside a guest: a VM
 created a gigabyte larger than the image it boots comes up with a
@@ -3658,3 +3654,62 @@ restarted inside a paused window dispatches one run, meets the same
 limit, and pauses again: one wasted attempt, against a durable row that
 would have to be reconciled with a credential that may by then have been
 changed by the very operator doing the restarting.
+
+## Every sandbox is built at a size grain chose
+
+All three dimensions of a sandbox VM were opt-in: `sandbox-cpus`,
+`sandbox-memory-mb` and `sandbox-disk-gb` each defaulted to zero, and
+zero meant "leave the flag off the create". A deployment that configured
+none of them — which is every deployment until somebody opens the
+Sandbox tab — got whatever `konturctl vm create` decides on its own: 2
+vCPU and 2048 MiB from `internal/staticpod.Defaults`, and a root disk
+exactly as large as the guest image behind it, which
+`scripts/kontur/build-guest.sh` packs to the rootfs plus 20% headroom.
+
+Those are real numbers a run lives inside, and nothing chose them for the
+job an agent's sandbox actually does. 2 GiB of memory is a small VM for
+something that clones a repo, installs a toolchain, builds it and runs
+its tests; a few hundred megabytes of disk slack is what a build-heavy
+checkout spends before failing part way through with no space left,
+on a VM with CPUs and memory to spare. Worse, two of the three were not
+grain's answers at all — one belonged to whichever `konturctl` is
+vendored under `third_party/`, the other to whichever guest image a
+deployment last built — so the size of a sandbox could move under a
+resync or an image rebuild without anything in this repo changing.
+
+`pkg/kontur`'s `DefaultCPUs`/`DefaultMemoryMB`/`DefaultDiskGB` are
+grain's own answer now — 2 vCPU, 8 GiB of memory, 30 GiB of disk — and
+`orchestrator.KonturConfig.createArgs` passes all three on every create,
+unconditionally. The resolution order is unchanged and still per
+dimension: the task's own `SandboxCPUs`/`SandboxMemoryMB`/`SandboxDiskGB`
+first, then the deployment-wide setting
+(`KonturSandboxes.SetDefaultShape`, re-read each reconcile tick), then
+`orchestrator.DefaultShape()`. What changed is the bottom of that chain:
+it is a number rather than a missing flag, so `konturctl` is never asked
+to pick a size and no VM's shape depends on which image or which vendored
+kontur a host happens to have.
+
+The 30 GiB is a floor rather than a ceiling, and `konturctl` is the one
+enforcing that: it refuses a `-disk-size-mb` below the guest image the
+overlay reads through to instead of truncating the guest's filesystem.
+This repo's own guest is nowhere near it, but a deployment booting an
+image larger than 30 GiB has to raise the setting to match — which fails
+at create time, naming both sizes, rather than quietly building a VM the
+guest does not fit in.
+
+Zero still means "unset" everywhere it is stored and typed — in
+`model.Config`, in `model.Task`, in the CLI flags and in an empty box on
+the Sandbox tab — it just resolves to grain's default rather than to
+kontur's. The visible consequence is that disk finally has a default to
+show: `ui.Settings.SandboxDiskGBDefault` sits beside the two that already
+existed, so the pane's disk field gets the same faint placeholder as
+vCPUs and memory instead of a sentence explaining why it could not have
+one, and `grain settings` prints `sandbox disk gb: 30 (grain default,
+unset)` where it used to print `unset`. The memory placeholder moved with
+the constant behind it, from 2048 to 8192.
+
+A deployment that wants something else sets it, exactly as before: 8 GiB
+and 30 GiB are a default chosen for a build-and-test agent, not a claim
+about anyone's host. A per-task override is still the escape hatch for
+the one job that needs more, and still the only way to ask for *less*
+than the deployment's own shape.
