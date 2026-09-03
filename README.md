@@ -3007,6 +3007,57 @@ puts up a row for a repo whose only configuration is standing
 instructions, so text that reaches every run against it is not text with
 nowhere to read it.
 
+### Setting a repo up before the first turn
+
+Standing instructions are the wrong shape for one thing a repo often
+needs to say: *run this before you do anything*. `make deps`, an `npm
+ci`, a virtualenv, a generated file the tests will not build without —
+written as prose in the prompt extension, that is an instruction every
+run has to spend a turn obeying, and a run that obeys it second has
+already read the wrong failure out of a tree that does not build. So
+`model.RepoConfig.SetupCommand` (grain/task-154) is a command grain runs
+rather than an instruction grain relays.
+
+**It runs where the checkout is made.** `orchestrator.prepareCheckout`
+runs it after the clone and before the agent's first turn, through the
+same `run_command` tool the clone itself goes through — which is what
+makes it work on either sandbox backend, a local directory or a kontur
+VM, with no second route into the sandbox to keep in step with the first.
+`recreate_sandbox` runs it again on the way back (`restoreCheckout`): a
+rebuild takes the `node_modules` and the virtualenv with it, and handing
+a run back a checkout in exactly the state this field exists to prevent
+is worse the second time, because the run was told at turn 1 that setup
+was done for it.
+
+**What it did goes in the prompt**, which is the whole point of running
+it here rather than hiding it: the command, its exit status, and the tail
+of what it printed, plus — for a failure — the sentence that separates a
+broken checkout from a broken change ("a build or test failing for that
+reason is this, not your change"). A run told nothing debugs the repo's
+toolchain from a failure it has no context for, or "fixes" the code until
+the broken tree stops complaining.
+
+**A setup that fails is the run's problem; a setup that never finishes is
+grain's.** Non-zero exit does not fail the dispatch — grain cannot know
+whether a broken `make deps` is fatal to the task in hand, and the run
+can find out in one command, or may be the very task filed to fix it. But
+a command still running at `setupCommandTimeout` (ten minutes, which is
+`mcp`'s own ceiling for any sandbox tool call) has told nobody anything
+and would otherwise spend the run's whole wall-clock budget inside a
+single tool call the agent never sees, ending with the sandbox destroyed
+and nothing to show. That one fails the dispatch, which leaves a human a
+run whose detail names the timeout.
+
+It is edited where the other two per-repo settings are — that repo's own
+page, `GET`/`PUT /api/repos/{owner}/{name}/setup-command` answering with
+the same whole-defaults document, `grain repo setup-command [-set
+command] <owner/name>` from a shell — and `GET /api/config` names the
+repos that have one (`reposWithSetupCommand`, names only) for the same
+reason it names the ones with standing instructions. Nothing validates
+the shell: it is an arbitrary command for an arbitrary toolchain, and the
+only thing that can say whether it works is running it in a checkout,
+which every run then reports on.
+
 ## Write-only secrets access when colocated
 
 `pkg/secrets.Store` (above, "no secret store in the model") was

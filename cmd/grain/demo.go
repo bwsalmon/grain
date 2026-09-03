@@ -167,7 +167,7 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 			// carry an outcome, and nothing has been said on the task,
 			// so orchestrator.History{} is what a real dispatch of it
 			// would have assembled too.
-			orchestrator.History{Attempt: 1})); err != nil {
+			orchestrator.History{Attempt: 1}, nil)); err != nil {
 		return fmt.Errorf("seeding a running task's prompt: %w", err)
 	}
 
