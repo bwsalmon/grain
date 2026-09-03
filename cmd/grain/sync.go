@@ -184,6 +184,7 @@ func printSettingsDiff(before, after ui.Settings) {
 		// as "nothing changed".
 		{"sandbox cpus", fmt.Sprint(before.SandboxCPUs), fmt.Sprint(after.SandboxCPUs)},
 		{"sandbox memory mb", fmt.Sprint(before.SandboxMemoryMB), fmt.Sprint(after.SandboxMemoryMB)},
+		{"sandbox disk gb", fmt.Sprint(before.SandboxDiskGB), fmt.Sprint(after.SandboxDiskGB)},
 	}
 	changed := false
 	for _, f := range fields {

@@ -603,15 +603,21 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
 	// The deployment-wide sandbox VM shape (ui.Settings.SandboxCPUs/
-	// SandboxMemoryMB, bwsalmon/agents#534). 0 is a real value for both
-	// -- "leave bwsalmon/kontur's own default in place" -- so an
-	// operator shrinking a deployment back to that default sets the flag
-	// to 0 rather than omitting it, the same way an empty -target-repos
-	// clears the allowlist.
+	// SandboxMemoryMB/SandboxDiskGB, bwsalmon/agents#534,
+	// grain/task-41). 0 is a real value for all three -- "leave the
+	// default in place" -- so an operator shrinking a deployment back to
+	// that default sets the flag to 0 rather than omitting it, the same
+	// way an empty -target-repos clears the allowlist. What that default
+	// is differs for disk: kontur names its own vCPU and memory
+	// defaults, but a VM's disk is however large the guest image behind
+	// it happens to be, which is a property of the image a deployment
+	// built rather than a constant this build could print.
 	sandboxCPUs := fs.Int("sandbox-cpus", 0,
 		"deployment-wide default vCPU count for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
 	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
 		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
+		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM; 0 leaves the VM's disk as large as the guest image behind it")
 	// No back quotes in this usage string, here or on any flag below:
 	// flag.PrintDefaults reads the first back-quoted word as the name of
 	// the flag's operand, so "`grain repo add`" would print as
@@ -660,6 +666,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "sandbox-memory-mb":
 			v := *sandboxMemoryMB
 			req.SandboxMemoryMB = &v
+		case "sandbox-disk-gb":
+			v := *sandboxDiskGB
+			req.SandboxDiskGB = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -800,8 +809,16 @@ func (p *printer) settings(s ui.Settings) {
 	// ui.Settings carries kontur's own defaults alongside the stored
 	// values (SandboxCPUsDefault/SandboxMemoryMBDefault) for exactly
 	// this.
+	//
+	// Disk has no such default to name, deliberately: there is no
+	// ui.Settings.SandboxDiskGBDefault because a VM's disk is however
+	// large the guest image behind it happens to be, a property of the
+	// image a deployment built rather than a constant this build could
+	// print. Passing 0 makes an unset disk print as "unset", which is
+	// all that can honestly be said about it here.
 	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault))
 	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault))
+	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, 0))
 	if len(s.TargetRepos) > 0 {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {

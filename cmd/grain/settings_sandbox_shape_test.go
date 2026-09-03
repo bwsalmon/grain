@@ -79,7 +79,7 @@ func TestCmdSettingsSetsAndClearsTheSandboxShape(t *testing.T) {
 	c := ui.NewHTTPClient(srv.URL)
 
 	captureStdout(t, func() {
-		if err := cmdSettings(ctx, c, &printer{}, []string{"-sandbox-cpus", "4", "-sandbox-memory-mb", "8192"}); err != nil {
+		if err := cmdSettings(ctx, c, &printer{}, []string{"-sandbox-cpus", "4", "-sandbox-memory-mb", "8192", "-sandbox-disk-gb", "40"}); err != nil {
 			t.Errorf("cmdSettings: %v", err)
 		}
 	})
@@ -87,8 +87,9 @@ func TestCmdSettingsSetsAndClearsTheSandboxShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}
-	if settings.SandboxCPUs != 4 || settings.SandboxMemoryMB != 8192 {
-		t.Fatalf("sandbox shape = %d cpus/%d MiB, want 4/8192", settings.SandboxCPUs, settings.SandboxMemoryMB)
+	if settings.SandboxCPUs != 4 || settings.SandboxMemoryMB != 8192 || settings.SandboxDiskGB != 40 {
+		t.Fatalf("sandbox shape = %d cpus/%d MiB/%d GiB, want 4/8192/40",
+			settings.SandboxCPUs, settings.SandboxMemoryMB, settings.SandboxDiskGB)
 	}
 
 	// 0 is a real value here -- "leave bwsalmon/kontur's own default in
@@ -109,6 +110,28 @@ func TestCmdSettingsSetsAndClearsTheSandboxShape(t *testing.T) {
 	if settings.SandboxMemoryMB != 8192 {
 		t.Errorf("SandboxMemoryMB = %d, want the untouched 8192", settings.SandboxMemoryMB)
 	}
+	if settings.SandboxDiskGB != 40 {
+		t.Errorf("SandboxDiskGB = %d, want the untouched 40", settings.SandboxDiskGB)
+	}
+
+	// Disk clears back to its own default the same way, which for disk
+	// means "as large as the guest image behind the VM" rather than a
+	// number kontur names.
+	captureStdout(t, func() {
+		if err := cmdSettings(ctx, c, &printer{}, []string{"-sandbox-disk-gb", "0"}); err != nil {
+			t.Errorf("cmdSettings clearing sandbox-disk-gb: %v", err)
+		}
+	})
+	settings, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if settings.SandboxDiskGB != 0 {
+		t.Errorf("SandboxDiskGB after -sandbox-disk-gb=0 = %d, want 0", settings.SandboxDiskGB)
+	}
+	if settings.SandboxMemoryMB != 8192 {
+		t.Errorf("SandboxMemoryMB = %d, want the untouched 8192", settings.SandboxMemoryMB)
+	}
 }
 
 func TestCmdSettingsPrintsTheSandboxShape(t *testing.T) {
@@ -123,14 +146,17 @@ func TestCmdSettingsPrintsTheSandboxShape(t *testing.T) {
 			t.Errorf("cmdSettings: %v", err)
 		}
 	})
-	for _, want := range []string{"sandbox cpus:", "sandbox memory mb:", "kontur default"} {
+	// Disk is the exception: ui.Settings names no default for it (there
+	// is no SandboxDiskGBDefault -- a VM's disk is however large its
+	// guest image is), so an unset disk can only say that it is unset.
+	for _, want := range []string{"sandbox cpus:", "sandbox memory mb:", "kontur default", "sandbox disk gb: unset"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("`grain settings` printed %q, which does not contain %q", out, want)
 		}
 	}
 
 	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
-		SandboxCPUs: intPtr(4), SandboxMemoryMB: intPtr(8192),
+		SandboxCPUs: intPtr(4), SandboxMemoryMB: intPtr(8192), SandboxDiskGB: intPtr(40),
 	}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
@@ -139,7 +165,7 @@ func TestCmdSettingsPrintsTheSandboxShape(t *testing.T) {
 			t.Errorf("cmdSettings: %v", err)
 		}
 	})
-	for _, want := range []string{"sandbox cpus:   4", "sandbox memory mb: 8192"} {
+	for _, want := range []string{"sandbox cpus:   4", "sandbox memory mb: 8192", "sandbox disk gb: 40"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("`grain settings` printed %q, which does not contain %q", out, want)
 		}
@@ -167,6 +193,18 @@ func TestPrintSettingsDiffReportsTheSandboxShape(t *testing.T) {
 	out = captureStdout(t, func() { printSettingsDiff(before, before) })
 	if !strings.Contains(out, "nothing changed") {
 		t.Errorf("printSettingsDiff printed %q for an unchanged settings row, want \"nothing changed\"", out)
+	}
+
+	// Disk on its own, since it is the dimension a config file could
+	// move with neither of the other two: before this row existed, such
+	// a sync applied the change and then reported "nothing changed".
+	disked := ui.Settings{SandboxCPUs: 2, SandboxMemoryMB: 2048, SandboxDiskGB: 40}
+	out = captureStdout(t, func() { printSettingsDiff(before, disked) })
+	if !strings.Contains(out, "sandbox disk gb") || !strings.Contains(out, "\"40\"") {
+		t.Errorf("printSettingsDiff printed %q, want the sandbox disk gb change", out)
+	}
+	if strings.Contains(out, "nothing changed") {
+		t.Errorf("printSettingsDiff printed %q for a real disk change", out)
 	}
 }
 
