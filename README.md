@@ -479,7 +479,12 @@ and become grain's, which means grain has to render them. That is what
   `proposeTaskTool`'s "a human must accept it first" contract is enforced
   by the state machine rather than by withholding a label, and
   `model.LinkProposedBy` records which task proposed it — something the
-  issue version had no way to say.
+  issue version had no way to say. It joins the backlog where a task a
+  human files joins it, `Store.OrderKeyForNewTask` at whichever end
+  `model.Config.NewestFirst` names: by default the end of it, behind
+  everything already queued, rather than at `OrderKey`'s zero value —
+  which is not "no position" but a position ahead of every task filed
+  since the backlog started.
 - The merge queue's own two voices moved too: `fileFixTask` files a store
   task instead of an issue, and both it and `escalateToUser` comment
   through `Store.AddComment` as the `merge-queue` principal, so a human
@@ -2094,6 +2099,65 @@ set a new task starts with, which is a different thing from
 docs/data-model.md's folder `offers`, those being floors a task cannot
 drop rather than a seed it can.
 
+### Debugging `gemini-key`: the picker didn't know what Settings knew
+
+"The gemini key capability fails when I attempt to add it to a task."
+Attaching it is not what fails — `POST /api/tasks/{id}/capabilities`
+writes the grant and returns the task, exactly as it should. What fails
+is the task, at its next dispatch, and the reason it fails is one of
+three things that were each invisible from where the mistake was made.
+
+`gemini-key` needs a GCP project (`capabilityProviders` registers no
+provider without one, and a grant nothing answers to is refused as `no
+provider is registered for capability "gemini-key"`), a
+`gcp-key-minter` secret to mint under, and a minter holding
+`roles/serviceusage.apiKeysAdmin` in a project with
+`apikeys.googleapis.com` enabled. Settings' Capabilities tab already
+reported the first two, as **Not ready** with a `Needs:` line. The
+capability picker on a task — the pane where somebody actually ticks the
+box — was built from `ui.OfferedCapabilities`, a static listing with no
+deployment behind it, and offered the row regardless. Two panes, two
+independent answers, and the disagreement only surfaced minutes later as
+a failed run.
+
+`GET /api/config` now carries `ready` and `needs` per picker row, joined
+to the same `capabilityStatuses` Settings is built from rather than
+re-derived, so the two cannot drift into saying different things again.
+The row warns and stays tickable: filing the task first and pasting the
+secret second is an ordinary order to do things in, and a picker that
+refused would also leave a capability already attached with no row to
+untick it from.
+
+The third gap is the one no configuration pane can see, because it lives
+in GCP. `grain setup gcp` defaults `-enable-gemini-key` to *off* while
+`terraform/gcp`'s own `enable_gemini_key` defaults to *on*, so a
+deployment installed by script rather than by that module has a project,
+a minter credential, a **Ready** badge — and a minter that cannot
+administer API keys. The API answers both that and "this API was never
+enabled" with an indistinguishable 403, whose message (`Permission
+'apikeys.keys.create' denied on resource ... (or it may not exist)`)
+reads like a bug in grain rather than like one unrun setup flag.
+`geminikey.advise` now names which of the two it is — from the error's
+own `SERVICE_DISABLED` reason — and names the command that fixes either.
+
+Two smaller things fell out of writing a fake API Keys server to test
+that. `apiKeysMinter`, the code that actually runs the moment somebody
+attaches this capability, was covered by nothing but the live test that
+skips without a real GCP project; it has real tests now, for the
+long-running-operation polling, the request paths and the cleanup after
+a key that is created but unreadable. And an empty key string coming
+back from `GetKeyString` was being placed at `KeyPath` and described to
+the agent as a working key — the one failure here that looks like
+success, now a failed mint like any other.
+
+`Resolve` also refuses when the standing credential resolves to nothing,
+rather than leaving `Materialize` to discover it a moment later. Nothing
+new is caught: what changes is that a refusal's `Reason` is posted to
+the task verbatim, so an operator reads a sentence naming the secret to
+set, where a failed materialize reads as `materializing capabilities:
+geminikey: resolving credential ...` — grain describing its own
+internals.
+
 ### The same set, per repo
 
 The ask task-14 came from also said "we will also want this to be
@@ -3208,7 +3272,7 @@ disk-full error, on a VM that had CPUs and memory to spare.
 `model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
 tab in Settings and the shape override under New task -> Advanced
 options, `orchestrator.Shape.DiskGB` resolved per dimension against the
-deployment default, and `konturctl vm create -disk-size-gb` at the one
+deployment default, and `konturctl vm create -disk-size-mb` at the one
 moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
 is left off the create entirely, so a deployment that never sets one
 passes exactly the arguments it passed before.
@@ -3229,17 +3293,29 @@ visible in the code:
   runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
   disk was not enlarged and a one-line grow on one whose was.
 
-**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
-snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
-disk-size field, and `writeQcow2Overlay` — which already takes the
-virtual size as an argument — is called with the source image's size
-unconditionally. Passing the flag against a `konturctl` without it fails
-the create, which is why zero omits it rather than sending an explicit
-size: a deployment that has not set one is unaffected either way, and a
-deployment that sets one has said out loud that it expects the flag to
-work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
-the other half of this, and belongs there rather than as a local patch
-here — see `third_party/kontur/VENDORED.md`.
+**The `konturctl` half of it exists now, and is vendored here.** For a
+while it did not: this setting reached a flag no `konturctl` had, so a
+deployment that set one got a failed create and one that left it at zero
+passed the arguments it always did, which is why nothing noticed.
+`konturctl vm create -disk-size-mb` (bwsalmon/kontur#39) is that flag —
+the VM's own container sizes the qcow2 overlay to it before
+cloud-hypervisor opens it, growing one an earlier boot left behind rather
+than only sizing a fresh one, and refusing to shrink it or to go below
+the guest image it reads through to. It landed on `bwsalmon/kontur`'s
+`main` and reached this repo by a resync rather than as a local patch,
+which is what `third_party/kontur/VENDORED.md` asks for.
+
+It is MiB where this setting is GiB, so
+`orchestrator.KonturConfig.createArgs` converts at that one point, and it
+is `-disk-mode=overlay` only — the guest image underneath is shared with
+every other VM booting it, so nothing ever resizes that. grain's VMs are
+in that mode already: `scripts/setup.sh` asks for it by name. Zero still
+omits the flag entirely.
+
+The real-KVM suite asserts the whole chain from inside a guest: a VM
+created a gigabyte larger than the image it boots comes up with a
+`/dev/vda` that size and a root filesystem grown onto it. A fake
+`konturctl` can only ever prove the flag was passed.
 
 ### Monitoring it
 

@@ -180,7 +180,8 @@ type Config struct {
 	SandboxMemoryMB int
 	// SandboxDiskGB is the third dimension of that same shape, in GiB:
 	// how large a root disk `konturctl vm create` gives the VM, passed as
-	// `-disk-size-gb`. Zero means the same thing the other two mean --
+	// `-disk-size-mb` (in MiB: orchestrator.KonturConfig.createArgs
+	// converts). Zero means the same thing the other two mean --
 	// pass no flag, and take whatever a VM would get anyway, which for
 	// disk is the size of the guest image the overlay is backed by
 	// (scripts/kontur/README.md: kontur's own `guest-image` stage sizes

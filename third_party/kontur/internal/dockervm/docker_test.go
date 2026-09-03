@@ -443,3 +443,32 @@ func TestCreate_NoGuestUser(t *testing.T) {
 		}
 	}
 }
+
+func TestCreate_DiskSizeMB(t *testing.T) {
+	d, calls := testDocker(t)
+	spec := testSpec()
+	spec.DiskReadOnly = false
+	spec.DiskSizeMB = 8192
+
+	if err := Create(context.Background(), d, spec, &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	vmCall := calls()[4]
+	if !containsArg(vmCall, "CHV_DISK_SIZE_MB=8192") {
+		t.Errorf("VM call = %v, missing expected CHV_DISK_SIZE_MB", vmCall)
+	}
+}
+
+func TestCreate_OmitsDiskSizeWhenUnset(t *testing.T) {
+	d, calls := testDocker(t)
+
+	if err := Create(context.Background(), d, testSpec(), &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	vmCall := calls()[4]
+	for _, a := range vmCall {
+		if strings.HasPrefix(a, "CHV_DISK_SIZE_MB=") {
+			t.Errorf("VM call = %v, unexpectedly sets CHV_DISK_SIZE_MB for a VM that asked for no size", vmCall)
+		}
+	}
+}

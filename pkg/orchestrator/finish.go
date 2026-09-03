@@ -465,8 +465,27 @@ func relayComment(ctx context.Context, store *model.Store, task model.Task,
 // propose_task call in the same run. Earlier, not any: a batch resolved
 // in call order cannot contain a cycle, and a cycle in LinkDependsOn is
 // two tasks neither of which is ever dispatchable again.
+//
+// Each proposal joins the backlog at whichever end model.Config.NewestFirst
+// says new work joins -- Store.OrderKeyForNewTask, the same call
+// ui.CreateTask makes for a task a human files -- so by default (that
+// setting's own false) a proposal is filed at the end of the backlog,
+// behind everything already queued. It used to be filed with no OrderKey
+// at all, which is not "no position" but position zero: ahead of every
+// task filed since the backlog started, so a proposal an agent split out
+// as an afterthought was dispatched, once approved, before work that had
+// been waiting for it.
 func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task,
 	result *agent.Result, now time.Time) error {
+
+	proposals := proposedTaskCalls(result)
+	if len(proposals) == 0 {
+		return nil
+	}
+	atFront, err := newestFirst(ctx, store)
+	if err != nil {
+		return err
+	}
 
 	// Local `id` of a propose_task call -> the task id it was filed
 	// under, filled in as each proposal lands so only earlier calls are
@@ -475,7 +494,7 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 	// keeps this pass order-dependent in only one direction.
 	filed := map[string]string{}
 
-	for _, p := range proposedTaskCalls(result) {
+	for _, p := range proposals {
 		title, _ := p["title"].(string)
 		body, _ := p["body"].(string)
 		if title == "" || body == "" {
@@ -494,6 +513,14 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 		if len(unresolved) > 0 {
 			body += unresolvedDependencyNote(unresolved)
 		}
+		// Once per proposal rather than once for the batch: each one is
+		// past the previous one's key by then, so a run that proposes
+		// several files them in call order behind each other rather than
+		// all on the same key with the id left to break the tie.
+		orderKey, err := store.OrderKeyForNewTask(ctx, atFront)
+		if err != nil {
+			return fmt.Errorf("orchestrator: placing proposed task %q in the backlog: %w", title, err)
+		}
 		proposal := model.Task{
 			ID:     id,
 			Intent: model.IntentImplement,
@@ -510,6 +537,7 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 			Binding:   model.BindingDirective,
 			Links:     links,
 			CreatedAt: &now,
+			OrderKey:  orderKey,
 		}
 		proposal.AutoMerge = proposedAutoMerge(p, task) &&
 			model.GrantsSubsetOf(proposal.Grants, task.Grants)
@@ -523,6 +551,20 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 		}
 	}
 	return nil
+}
+
+// newestFirst is model.Config.NewestFirst, read fresh from the store --
+// ui.Client's own method of the same name, for the same reason it reads
+// it per call there: a setting the settings pane toggles is expected to
+// decide where the very next task lands, not where the next process's
+// first one does. A fresh deployment with no config row (nil) reads as
+// false, the backlog order grain has always defaulted to.
+func newestFirst(ctx context.Context, store *model.Store) (bool, error) {
+	cfg, err := store.GetConfig(ctx)
+	if err != nil {
+		return false, fmt.Errorf("orchestrator: reading the backlog order: %w", err)
+	}
+	return cfg != nil && cfg.NewestFirst, nil
 }
 
 // proposedAutoMerge reads one propose_task call's auto_merge argument

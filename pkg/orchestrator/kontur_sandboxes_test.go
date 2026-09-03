@@ -462,7 +462,8 @@ func TestKonturSandboxesPassesIPAndPortVerbatimUnderNAT(t *testing.T) {
 // TestKonturSandboxesCreateAppendsDefaultShape confirms
 // KonturConfig.DefaultCPUs/DefaultMemoryMB/DefaultDiskGB
 // (bwsalmon/agents#534, grain/task-41) reach "konturctl vm create" as
-// -cpus/-memory-mb/-disk-size-gb, after CreateArgs -- so an
+// -cpus/-memory-mb/-disk-size-mb, after CreateArgs (the last in MiB:
+// see createArgs' own mibPerGiB) -- so an
 // operator's own -kontur-create-arg=-cpus (if not set here too) is never
 // silently overridden by leaving DefaultCPUs at its zero "unset" value,
 // but the deployment-wide setting wins when both are configured, the
@@ -494,7 +495,7 @@ func TestKonturSandboxesCreateAppendsDefaultShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -disk /images/current/disk.img -cpus 4 -memory-mb 8192 -disk-size-gb 40"
+	want := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -disk /images/current/disk.img -cpus 4 -memory-mb 8192 -disk-size-mb 40960"
 	got := splitNonEmptyLines(string(data))
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("kontur invocations = %v, want [%q]", got, want)
@@ -540,8 +541,8 @@ func TestKonturSandboxesSetDefaultShapeAppliesToTheNextCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 8 -memory-mb 16384 -disk-size-gb 40",
-		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 1 -memory-mb 16384 -disk-size-gb 40",
+		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 8 -memory-mb 16384 -disk-size-mb 40960",
+		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 1 -memory-mb 16384 -disk-size-mb 40960",
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {

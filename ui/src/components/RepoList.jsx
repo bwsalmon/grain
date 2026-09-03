@@ -4,7 +4,7 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, FormHelperText, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, repoRows, unionCapabilities } from "../state.js";
+import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, capabilityUnavailableHint, repoRows, unionCapabilities } from "../state.js";
 import { TaskRow } from "./TaskList.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
 
@@ -459,9 +459,18 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                                 primary={c.name}
                                 secondary={c.retired
                                   ? c.description
-                                  : (caps.deploymentDefaultCapabilities || []).includes(c.id)
-                                    ? "already a deployment default -- on here either way"
-                                    : null}
+                                  /* A default this deployment cannot honour is worth
+                                     more warning here than on one task, not less: it
+                                     fails every task filed against this repo, and the
+                                     person who set it is not the one who sees them
+                                     fail. */
+                                  : capabilityUnavailableHint(c)
+                                    || ((caps.deploymentDefaultCapabilities || []).includes(c.id)
+                                      ? "already a deployment default -- on here either way"
+                                      : null)}
+                                secondaryTypographyProps={capabilityUnavailableHint(c)
+                                  ? { color: "warning.main" }
+                                  : undefined}
                               />
                             </MenuItem>
                           ))}

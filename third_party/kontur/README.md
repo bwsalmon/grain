@@ -156,6 +156,7 @@ even if the process is killed mid-snapshot.
 | `CHV_DISK_IMAGE`       | no       | the guest image baked into this image (`/var/lib/kontur/guest/disk.img`) | Path to the primary disk image. |
 | `CHV_DISK_MODE`        | no       | `overlay`                         | How the primary disk is attached: `overlay` (the guest writes into a thin qcow2 of its own, created in this container, leaving the image untouched), `persistent` (the guest writes through to the image itself) or `readonly`. |
 | `CHV_DISK_OVERLAY_PATH`| no       | `/var/lib/kontur/overlay/disk.qcow2` | Where `overlay` mode puts that qcow2. Inside the container's own writable layer, so a restart keeps it and only removing the container discards it. |
+| `CHV_DISK_SIZE_MB`     | no       | the disk image's own size         | How large a disk the guest gets, in MiB: the overlay is created at (or grown to) this size before the VM starts. Growing only, and `CHV_DISK_MODE=overlay` only. See "Disk size" below. |
 | `CHV_DISK_READONLY`    | no       | —                                 | Deprecated, replaced by `CHV_DISK_MODE`: `true` means `readonly`, `false` means `persistent`. Setting both is an error. |
 | `CHV_EXTRA_DISKS`      | no       | —                                 | Comma-separated additional disks: `path[:ro\|rw]`. |
 | `CHV_KERNEL`           | no       | the kernel baked into this image (`/var/lib/kontur/guest/vmlinux`), unless `CHV_FIRMWARE` is set | Path to a kernel for direct boot (PVH/`vmlinux`). Mutually exclusive with `CHV_FIRMWARE`. |
@@ -185,6 +186,56 @@ their defaults) and, if set, `CHV_INITRAMFS`/`CHV_FIRMWARE` -- must
 already exist on disk: `kontur run` checks this at startup and fails fast
 with a clear error rather than letting cloud-hypervisor fail deeper into
 boot.
+
+## Disk size
+
+Left alone, a guest's disk is exactly as big as the disk image it boots
+-- which, for the reference guest baked into this image, is the rootfs
+plus a little headroom (see the Dockerfile's `guest-image` stage) and
+nothing more. `CHV_DISK_SIZE_MB` is how a VM gets a bigger one:
+
+```
+docker run --rm --privileged --device /dev/kvm \
+  -e CHV_DISK_SIZE_MB=8192 kontur
+```
+
+`kontur run` applies it before cloud-hypervisor is started, to the qcow2
+overlay the guest writes into (`CHV_DISK_MODE=overlay`, the default; see
+"How it works" above): a fresh overlay is created at that size, and an
+overlay that is already there -- a restarted container, or a volume
+mounted at `CHV_DISK_OVERLAY_PATH` so it outlives one -- is grown to it
+in place, so raising the value on such a VM enlarges the disk it comes
+back with instead of being ignored. Growing a qcow2's virtual size
+allocates no clusters and rewrites no data (it is a header field and an
+L1 table sized to cover it), so this costs nothing at boot however large
+the number is, and everything the guest had already written is still
+there afterwards.
+
+Three things it deliberately will not do:
+
+- **Shrink.** A smaller value than the disk already has is an error, not
+  a truncation: the clusters past the new end would become unreachable,
+  and a guest filesystem spanning them would be corrupt.
+- **Go below the disk image.** The overlay reads through to the image for
+  everything the guest hasn't written yet, so a size below the image's
+  own would cut the guest's root filesystem off partway.
+- **Touch the image itself.** `CHV_DISK_SIZE_MB` requires
+  `CHV_DISK_MODE=overlay` and is an error in the other two modes: the
+  overlay is the only disk `kontur` creates, and `persistent`/`readonly`
+  both put the guest on a disk image that is shared with every other VM
+  booting it.
+
+What it changes is the size of the block device the guest is offered, and
+only that. Growing the partition table and filesystem inside it is the
+guest's own job -- the reference guest image puts ext4 directly on
+`/dev/vda` with no partition table, so `resize2fs /dev/vda` in the guest
+is all it takes there, and a guest that never does it simply sees a
+larger disk with the same amount of free space in its filesystem.
+
+`konturctl vm create -disk-size-mb` (see "Operating a node" below) is the
+same setting for a VM managed by `konturctl`; `konturctl vm update
+-disk-size-mb` raises it, and the VM's container resizes its overlay on
+the boot that update triggers.
 
 ## Memory hotplug
 
@@ -772,6 +823,22 @@ image's size, so booting a VM never copies a multi-gigabyte disk, and
 several VMs on a node share one copy of it. The overlay is made once and
 reused, so restarting a container keeps whatever the guest wrote;
 removing the container discards it.
+
+`-disk-size-mb` sizes that overlay, for a VM that needs a bigger disk
+than the image it boots. `konturctl` passes it through as
+`CHV_DISK_SIZE_MB` and the VM's own container applies it before boot (see
+"Disk size" above), so `konturctl vm create -disk-size-mb 8192` gives the
+guest an 8GiB disk from the start. It is `-disk-mode=overlay` only, never
+smaller than `-disk`'s own image, and the guest still has to grow its
+filesystem into the extra space itself.
+
+`konturctl vm update -disk-size-mb 16384` raises it for an existing VM,
+with the same caveat every other flag on `vm update` carries: the update
+recreates the VM's container, and the overlay lives in that container's
+writable layer, so the guest comes back from its image at the new size
+rather than keeping what it had written. Growing an overlay *in place*,
+writes intact, is what `kontur run` does for an overlay that outlived the
+change (see "Disk size" above) -- not what an `update` does.
 
 `-disk-mode=persistent` instead lets the guest write through to `-disk`
 itself, which only makes sense for a VM that is the only one using that

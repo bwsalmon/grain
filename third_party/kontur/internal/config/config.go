@@ -19,6 +19,7 @@ const (
 	envDiskReadonly     = "CHV_DISK_READONLY"
 	envDiskMode         = "CHV_DISK_MODE"
 	envDiskOverlayPath  = "CHV_DISK_OVERLAY_PATH"
+	envDiskSizeMB       = "CHV_DISK_SIZE_MB"
 	envExtraDisks       = "CHV_EXTRA_DISKS"
 	envKernel           = "CHV_KERNEL"
 	envInitramfs        = "CHV_INITRAMFS"
@@ -157,6 +158,23 @@ type Config struct {
 	// OverlayPath is where DiskModeOverlay writes the guest's qcow2.
 	OverlayPath string
 
+	// DiskSizeMB is the size of the writable disk the guest boots from,
+	// in MiB -- the qcow2 overlay DiskModeOverlay gives it (see
+	// PrepareOverlay), which is created at this size and grown to it on
+	// a later boot if it already exists at a smaller one. Growing only,
+	// and only ever the overlay: the source image itself is never
+	// touched, so it must be at least as large as that image.
+	//
+	// Zero (the default) means the source image's own size, which is what
+	// an overlay has always been given. Only meaningful in
+	// DiskModeOverlay: the other two modes write to (or refuse to write
+	// to) the image itself, and there is no overlay to size.
+	//
+	// This sizes the block device the guest sees and nothing else --
+	// growing the partition table and filesystem inside it is the guest's
+	// own job.
+	DiskSizeMB int
+
 	// Direct kernel boot. Kernel is mutually exclusive with Firmware:
 	// setting both is an error, but leaving both unset is not -- Kernel
 	// then defaults to defaultKernel, the kernel baked into the image
@@ -289,6 +307,23 @@ func FromEnv() (Config, error) {
 	cfg.DiskMode = mode
 	cfg.OverlayPath = getEnvDefault(envDiskOverlayPath, defaultOverlayPath)
 	cfg.Disks = append(cfg.Disks, Disk{Path: diskPath, ReadOnly: mode == DiskModeReadOnly})
+
+	cfg.DiskSizeMB, err = getEnvInt(envDiskSizeMB, 0)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.DiskSizeMB < 0 {
+		return Config{}, fmt.Errorf("%s must not be negative, got %d", envDiskSizeMB, cfg.DiskSizeMB)
+	}
+	// Rejected rather than ignored in the other two modes: the only
+	// writable disk kontur creates for itself is the overlay, so a
+	// request to size a disk it doesn't create can't be honoured, and
+	// silently booting a guest at a size the operator didn't ask for is
+	// the worse of the two answers.
+	if cfg.DiskSizeMB > 0 && mode != DiskModeOverlay {
+		return Config{}, fmt.Errorf("%s requires %s=%s: only the guest's own overlay is resized, never the disk image itself (got %s=%s)",
+			envDiskSizeMB, envDiskMode, DiskModeOverlay, envDiskMode, mode)
+	}
 
 	for _, spec := range splitNonEmpty(os.Getenv(envExtraDisks), ",") {
 		path, ro, err := parseExtraDisk(spec)
@@ -623,13 +658,25 @@ func diskModeFromEnv() (string, error) {
 // The backing file is recorded as the path Disks[0] already holds, which
 // is a path inside this container -- the same place cloud-hypervisor will
 // open it from, since it runs here too.
+//
+// DiskSizeMB, when set, is applied here too -- to a fresh overlay by
+// creating it at that size, and to one that already exists by growing it
+// (see qcow2.Resize) -- so it takes effect before the VM is started
+// either way, and raising it on an already-running VM's next boot enlarges
+// the disk it comes back with instead of being ignored.
 func (c *Config) PrepareOverlay() error {
 	if c.DiskMode != DiskModeOverlay || len(c.Disks) == 0 {
 		return nil
 	}
 	source := c.Disks[0].Path
+	wantBytes := int64(c.DiskSizeMB) * 1024 * 1024
 
 	if _, err := os.Stat(c.OverlayPath); err == nil {
+		if wantBytes > 0 {
+			if err := qcow2.Resize(c.OverlayPath, wantBytes); err != nil {
+				return fmt.Errorf("resizing the existing overlay %s to %s=%d: %w", c.OverlayPath, envDiskSizeMB, c.DiskSizeMB, err)
+			}
+		}
 		c.Disks[0] = Disk{Path: c.OverlayPath}
 		return nil
 	} else if !os.IsNotExist(err) {
@@ -640,10 +687,22 @@ func (c *Config) PrepareOverlay() error {
 	if err != nil {
 		return fmt.Errorf("statting the source disk %s: %w", source, err)
 	}
+	// The overlay reads through to the source image for everything the
+	// guest hasn't written, so presenting it as smaller than that image
+	// would cut the guest's own filesystem off at the new end. Refuse
+	// instead of quietly booting a truncated root disk.
+	size := info.Size()
+	if wantBytes > 0 {
+		if wantBytes < size {
+			return fmt.Errorf("%s=%d is smaller than the source disk %s (%d bytes): the guest's filesystem would be truncated",
+				envDiskSizeMB, c.DiskSizeMB, source, size)
+		}
+		size = wantBytes
+	}
 	if err := os.MkdirAll(filepath.Dir(c.OverlayPath), 0o755); err != nil {
 		return fmt.Errorf("creating the overlay directory: %w", err)
 	}
-	if err := qcow2.WriteOverlay(c.OverlayPath, source, info.Size()); err != nil {
+	if err := qcow2.WriteOverlay(c.OverlayPath, source, size); err != nil {
 		return fmt.Errorf("creating the qcow2 overlay %s backed by %s: %w", c.OverlayPath, source, err)
 	}
 

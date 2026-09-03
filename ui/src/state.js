@@ -85,6 +85,37 @@ export function capabilityRows(offered, selected) {
   );
 }
 
+// capabilityUnavailableHint is what a picker row says about a capability
+// this deployment is not currently configured to honour -- the
+// `ready`/`needs` pair GET /api/config carries per row
+// (ui.Capability.Ready), turned into the sentence a human ticking the
+// box needs to read.
+//
+// It exists because the readiness of a capability and the act of
+// attaching one used to live on opposite sides of the app: Settings'
+// Capabilities tab knew that gemini-key on a deployment with no GCP
+// project could not work, and the picker offered it anyway. The first
+// symptom was the task itself failing to dispatch, minutes later, with a
+// message about a refused capability and no hint that the fix was two
+// panes away in Settings.
+//
+// Only `ready === false` counts, never a falsy one: a row from a build
+// or an endpoint that computes no readiness at all leaves the field
+// absent, and "unknown" must read as no hint rather than as a warning
+// against every capability on the list.
+//
+// It warns and does not disable. A row that cannot work today is still
+// one an operator may deliberately tick -- filing the task first and
+// pasting the secret second is an ordinary order to do things in -- and
+// a picker that refused would also leave a capability already attached
+// with no row to untick it from (capabilityRows' own reasoning).
+export function capabilityUnavailableHint(c) {
+  if (!c || c.ready !== false) return "";
+  const needs = c.needs || [];
+  const gap = needs.length > 0 ? ` -- needs ${needs.join(", ")}` : " on this deployment";
+  return `Not ready${gap}. A task holding this will fail to dispatch until that is set (Settings > Capabilities).`;
+}
+
 // unionCapabilities composes the two layers of default capabilities the
 // way ui.(*Client).defaultCapabilities does server-side: base (the
 // deployment's own set) with extra (one repo's) appended, deduped,
