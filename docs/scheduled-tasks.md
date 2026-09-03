@@ -613,12 +613,12 @@ merge tasks are pinned ahead of it -- the same interval
 same `frontOfBacklogBounds`. Without it a task dropped at the top would
 take a key at or under the fix task's own, and the list would go on
 showing the repair first while `Store.Ready` dispatched the dropped task
-first. `TaskRow`'s new
-`reserveDragSpace` holds the handle's column open (`.task-drag-spacer`)
-on those rows, so a pinned row's checkbox, badge and title line up with
-the draggable rows below. Every stacked row carries the `merge fix` chip
-now -- there is no nesting left to explain it -- and its tooltip still
-names the task being repaired when `GeneratedFrom` has one.
+first. `TaskRow`'s new `reserveDragSpace` holds the handle's column open
+(`.task-drag-spacer`) on those rows, so a pinned row's checkbox, badge
+and title line up with the draggable rows below. Every stacked row
+carries the `merge fix` chip now -- there is no nesting left to explain
+it -- and its tooltip still names the task being repaired when
+`GeneratedFrom` has one.
 
 Tests: `pkg/orchestrator/mergequeue_test.go` (a filed fix leads the
 backlog, ahead of both the task it repairs and work already queued),
