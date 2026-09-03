@@ -51,24 +51,32 @@ func TestTheImageCarriesEveryBinaryTheDaemonShellsOutTo(t *testing.T) {
 	}
 }
 
-// A kontur deployment runs two images, and is told about neither.
+// A kontur deployment runs a second image, and is told about it by this
+// one.
 //
-// `grain sandbox-image` prints the sandbox container reference stamped
-// into this build at build time (cmd/grain/sandboximage.go). That is what
+// `grain sandbox-image` prints the sandbox reference stamped into this
+// build at build time (cmd/grain/sandboximage.go). That is what
 // scripts/setup.sh pulls when GRAIN_KONTUR_OCI_IMAGE names nothing, and
 // what an upgrade asks a newly pulled grain for so it can pull the
 // matching sandbox alongside it -- so an image that cannot answer is a
 // deployment that has to be configured by hand, and one that answers with
 // the wrong thing is a deployment running two commits' worth of itself.
+//
+// The name it must print is `guest`, and that is the whole of the
+// rename: what this used to call kontur-sandbox was a generic kontur
+// container that a deployment then built a guest disk to run inside it.
+// A guest is derived by booting a kontur image and committing the
+// result now, so what comes out is itself runnable -- one artifact that
+// is both the container and the guest, and so one reference to stamp.
 func TestTheImageNamesTheSandboxContainerItExpects(t *testing.T) {
 	requireImage(t)
 	out := strings.TrimSpace(docker(t, "run", "--rm", image, "sandbox-image"))
 
-	if !strings.Contains(out, "/kontur-sandbox:") {
+	if !strings.Contains(out, "/guest:") {
 		t.Fatalf("sandbox-image printed %q", out)
 	}
 	// A bare `make image` leaves the source default (the tag CI keeps
-	// pointed at main); CI stamps the immutable tag of the sandbox built
+	// pointed at main); CI stamps the immutable tag of the guest built
 	// from the same commit. Either is a real reference -- what must never
 	// happen is an empty or malformed one.
 	if strings.HasSuffix(out, ":") || strings.Contains(out, " ") {

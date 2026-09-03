@@ -116,8 +116,9 @@ RUN make build BUILDVCS=${BUILDVCS} SANDBOX_IMAGE=${SANDBOX_IMAGE}
 
 # konturctl only -- not `kontur` or `kontur-mem-agent`, which run inside
 # each sandbox VM's own container (the image
-# ../.github/workflows/build-artifacts.yml publishes as kontur-sandbox)
-# rather than next to the daemon. pkg/kontur shells out to exactly this
+# ../.github/workflows/build-artifacts.yml publishes as `guest`, which is
+# both that container and the guest disk it boots) rather than next to
+# the daemon. pkg/kontur shells out to exactly this
 # one binary. CGO_ENABLED=0 for the same reason Makefile forces it:
 # a genuinely static binary, with no libc coupling to the stage it was
 # built in.
