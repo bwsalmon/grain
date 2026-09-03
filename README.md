@@ -3942,3 +3942,52 @@ and 30 GiB are a default chosen for a build-and-test agent, not a claim
 about anyone's host. A per-task override is still the escape hatch for
 the one job that needs more, and still the only way to ask for *less*
 than the deployment's own shape.
+
+## `top`, in the Debugging pane
+
+Sandbox health can say the daemon's machine is under pressure. It has
+never been able to say by what. Load average, memory and disk are
+aggregates by construction — `pkg/sysstat` reads `/proc/loadavg` and
+`/proc/meminfo`, neither of which knows a process from another — so the
+pane could show a load of 12 and leave the only question anybody actually
+has at that point ("which process?") to an SSH session and a terminal.
+
+The Debugging pane has a Top tab now: `GET /api/host/top`, `pkg/hosttop`,
+`top` itself. Shelling out rather than walking `/proc/[pid]/stat` and
+reimplementing its accounting is the same call `pkg/systemlog.Journalctl`
+already made for `journalctl` — `procps` is a package, the output is what
+an operator already knows how to read, and there is nothing to keep in
+step with the kernel. `Dockerfile` lists it among the binaries the image
+carries for exactly this reason, and `tests/container` fails the image if
+it is missing.
+
+Three details that are not the obvious spelling:
+
+- **Two iterations, not one.** `top -b -n 1` prints, for every process, its
+  share of CPU time *since that process started* — there is no earlier
+  sample to difference against. For a daemon up for a week that is a
+  number about the week, and the busiest thing on the machine right now
+  can sit at the bottom of it. `pkg/hosttop` asks for two samples half a
+  second apart and returns only the second, which is a real delta;
+  `lastSample` finds it by the `top - ` header that opens each iteration.
+- **Cut from the end.** The sort is `%CPU`, descending, so truncating to
+  the requested line count drops the idle processes and keeps the summary
+  block and the rows worth reading. A caller that asks for nothing gets
+  `hosttop.DefaultLines`; `?lines=` is capped at 500, the same guard
+  `GET /api/logs` gives its own.
+- **Auto-refresh is a checkbox.** Logs needs no such thing: a log is
+  append-only, and a poll only adds lines below whatever is being read.
+  Every poll here re-sorts the whole table under the cursor, which is
+  exactly what one does not want while reading a row — and it costs a
+  `top` run on the daemon's machine each time. So the poll can be stopped
+  without leaving the tab, and stops on its own when the tab is not open.
+
+What it lists is the daemon's own PID namespace, which in a container
+deployment is the container's: `scripts/setup.sh` passes no `--pid=host`,
+so this is `grain` and everything it forked, which is where daemon-side
+load comes from. A sandbox's processes live in that sandbox's own VM and
+are not here — the per-sandbox rows in the panel next door are what
+report those. A deployment with no reader wired in (`grain demo`, an
+image without `procps`) gets the same "not available" note every other
+optional panel already shows, rather than a pane that could only ever
+error.
