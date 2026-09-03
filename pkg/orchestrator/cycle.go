@@ -436,10 +436,12 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	// cycle it belonged to is long over -- so it is logged, the same way
 	// cmd/grain's own loop logs whatever a cycle returns. Nothing else is
 	// lost by that: the run's own outcome and diagnosis are already in
-	// the store (RunDispatch finishes the row on every path it takes,
-	// and runOne's setup guard finishes one whose sandbox never came up),
-	// which is where a UI or a retry reads them from rather than from a
-	// cycle's error.
+	// the store, on all three of the paths there are to get them there --
+	// RunDispatch finishes the row for anything the agent's own run did,
+	// runOne's setup guard finishes one whose sandbox never came up, and
+	// noteFinishFailure records what went wrong after the run, once
+	// RunDispatch has already finished the row. That is where a UI or a
+	// retry reads them from, rather than from a cycle's error.
 	if deps.Runs != nil {
 		for _, d := range dispatches {
 			deps.Runs.Go(d.RunID, d.TaskID, func() {
@@ -763,7 +765,71 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 				salvageErr = err
 			}
 		}
-		return errors.Join(runErr, salvageErr)
+		if salvageErr != nil {
+			// Joined, so the overwrite noteFinishFailure is about to make
+			// carries the framework's own diagnosis too: a run that ran
+			// out of turns *and* could not have its branch salvaged has
+			// two things wrong with it, and the row has one detail.
+			return noteFinishFailure(ctx, deps.Store, d.RunID, errors.Join(runErr, salvageErr))
+		}
+		return runErr
 	}
-	return ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now)
+	return noteFinishFailure(ctx, deps.Store, d.RunID,
+		ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now))
+}
+
+// noteFinishFailure records, on the run's own row, that turning a
+// finished agent run into the effects it implies is what failed -- then
+// hands err back unchanged for its caller to return.
+//
+// It closes the one hole in reconcileDispatch's claim that "the run's own
+// outcome and diagnosis are already in the store". They are for
+// everything RunDispatch owns: it finishes the row on every path it can
+// take. They are not for anything after it. ProcessResult runs once
+// FinishRun has already written this run's outcome, and every way it can
+// fail is a GitHub call -- reading whether the branch is there
+// (branchExistsSettled), finding or opening its pull request
+// (EnsurePullRequest) -- so an error here means the agent's work is on
+// the remote and nothing points at it. The task is left un-completed and
+// dispatch retries it, which is the right thing to do about a transient
+// GitHub failure and the wrong thing to do about a persistent one; either
+// way the row still says whatever outcomeOf guessed, the error reaches
+// only the daemon's journal, and a human reading the task sees an attempt
+// whose detail describes a run that went fine, repeated, with no reason
+// given anywhere for why it is being repeated. That is precisely the
+// question `grain get` exists to answer.
+//
+// "finish-failed" rather than a correction of the outcome already there:
+// the run itself is not what failed, the same distinction runOne's own
+// setup guard draws with "setup-failed" at the other end. The vocabulary
+// is open (metrics.Runs.Outcomes' own doc comment), and task_streak
+// counts it the way it counts any other non-"succeeded" ending, so the
+// retry this failure earns still backs off rather than spinning.
+//
+// The salvage half of a run that had already failed on its own goes
+// through here too, with both errors joined, so overwriting the row does
+// not throw the framework's own diagnosis away. A salvage that worked
+// never reaches this at all, which is what leaves a run that ran out of
+// turns after pushing reading "failed" with the reason it failed --
+// salvaging its branch was never a claim that the run went well.
+//
+// A failure to record the failure is joined on rather than replacing it:
+// the original error is the one worth reporting, and a store that cannot
+// take this write is its own separate problem.
+func noteFinishFailure(ctx context.Context, store *model.Store, runID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Detached from ctx's own cancellation, and bounded, for the same
+	// reason the sandbox release above is: a daemon shutting down or a
+	// task closed mid-run is exactly when this row would otherwise keep
+	// an outcome that does not explain itself.
+	noteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runCleanupTimeout)
+	defer cancel()
+	if serr := store.SetRunOutcome(noteCtx, runID, "finish-failed",
+		"this run's result could not be turned into a pull request or a comment: "+
+			err.Error()); serr != nil {
+		return errors.Join(err, fmt.Errorf("orchestrator: recording run %s's finishing failure: %w", runID, serr))
+	}
+	return err
 }

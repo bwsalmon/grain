@@ -42,24 +42,40 @@ func TestOutcomeOfRecordsWhatASuccessfulRunCalled(t *testing.T) {
 	}
 }
 
-// A run whose tool call errored still says what it reached for first.
-// Without this, a run that opened its pull request and then tripped over
-// an unrelated tool error counts as never having opened one at all.
-func TestOutcomeOfNamesTheToolsBehindAFailingCall(t *testing.T) {
+// An errored tool call is a result the agent reads and works around, not
+// a broken run -- pkg/mcp's run_command sets IsError for any non-zero
+// exit status, so a grep that matched nothing used to fail a run that
+// went on to open its pull request. See outcomeOf's own doc comment for
+// what that cost: task_streak counts anything other than "succeeded", so
+// those bogus failures backed a healthy task off and eventually stopped
+// dispatching it altogether.
+func TestOutcomeOfDoesNotFailARunOverAnErroringToolCall(t *testing.T) {
 	outcome, detail := outcomeOf(&agent.Result{ToolCalls: []agent.ToolCall{
 		{Name: "open_pull_request"},
-		{Name: "run_command", Text: "no such file", IsError: true},
+		{Name: "run_command", Text: "exit=1\nstdout:\n\nstderr:\n", IsError: true},
 	}})
-	if outcome != "failed" {
-		t.Fatalf("outcome = %q, want %q", outcome, "failed")
+	if outcome != "succeeded" {
+		t.Fatalf("outcome = %q, want %q", outcome, "succeeded")
 	}
-	// The failure itself is still the headline -- that is what a human
-	// reading `grain get` came for.
-	if !strings.Contains(detail, "no such file") {
-		t.Errorf("detail = %q, want it to still lead with the tool error", detail)
+	// The errors are still on the record -- both which tool they came
+	// from and how many of the run's calls did not land.
+	if !strings.Contains(detail, "run_command(error) x1") {
+		t.Errorf("detail = %q, want it to name the tool that errored", detail)
+	}
+	if !strings.Contains(detail, "1 of them returned an error") {
+		t.Errorf("detail = %q, want it to count the errored calls", detail)
 	}
 	if !strings.Contains(detail, "open_pull_request x1") {
-		t.Errorf("detail = %q, want it to name the call the run made before failing", detail)
+		t.Errorf("detail = %q, want it to name every call the run made", detail)
+	}
+}
+
+// The counterpart: a run with nothing wrong says nothing about errors,
+// rather than reporting zero of them.
+func TestOutcomeOfSaysNothingAboutErrorsWhenThereWereNone(t *testing.T) {
+	_, detail := outcomeOf(&agent.Result{ToolCalls: []agent.ToolCall{{Name: "run_command"}}})
+	if strings.Contains(detail, "returned an error") {
+		t.Errorf("detail = %q, want no mention of errors on a run that had none", detail)
 	}
 }
 

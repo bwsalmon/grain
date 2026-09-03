@@ -1733,9 +1733,9 @@ func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outco
 // SetRunOutcome overrides a run's outcome and detail after FinishRun has
 // already recorded one -- the one case FinishRun's own caller cannot yet
 // know: RunDispatch judges outcome purely from whether the agent made a
-// harmless tool call at all (outcomeOf), before ProcessResult has checked
+// tool call at all (outcomeOf), before ProcessResult has checked
 // whether that tool call amounted to anything -- a push, a question, a
-// closing comment. A run that made only harmless calls but produced none
+// closing comment. A run that made calls but produced none
 // of those would otherwise read "succeeded" forever, which both
 // misreports what happened and would let it dodge FailureStreak's own
 // cap indefinitely (bwsalmon/agents#403).

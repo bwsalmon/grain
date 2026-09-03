@@ -241,20 +241,27 @@ function Actions({ t, config, act }) {
 // added on the backend later still shows up here before this map catches
 // up with it.
 //
-// Both of the non-obvious two are runs that ended without an agent ever
-// finishing: "setup-failed" is one whose sandbox could not be built (a VM
-// that never booted, a token that could not be minted -- dispatch retries
-// the task after its backoff), and "orphaned" is one whose process died
-// mid-run and which the next startup finished on its behalf
-// (RecoverOrphanedRuns). Both take the "failed" badge rather than the
-// fallback's "queued", which would read as "hasn't run yet" for a run
-// that did.
+// The non-obvious ones are all runs that failed somewhere other than the
+// agent's own work, which is exactly why each needs a word of its own:
+// "setup-failed" is one whose sandbox could not be built (a VM that never
+// booted, a token that could not be minted -- dispatch retries the task
+// after its backoff), "orphaned" is one whose process died mid-run and
+// which the next startup finished on its behalf (RecoverOrphanedRuns),
+// "finish-failed" is one whose agent worked but whose result could not be
+// turned into a pull request or a comment (orchestrator.noteFinishFailure
+// -- the branch is pushed and nothing points at it), and "no_action" is
+// one that ran fine and produced nothing to act on at all
+// (orchestrator.ProcessResult). Every one of them takes the "failed"
+// badge rather than the fallback's "queued", which would read as "hasn't
+// run yet" for a run that did.
 const OUTCOME_LABELS = {
   "": "Running",
   succeeded: "Succeeded",
   failed: "Failed",
   cancelled: "Cancelled",
   "setup-failed": "Setup failed",
+  "finish-failed": "Finish failed",
+  no_action: "No action",
   orphaned: "Orphaned",
 };
 const OUTCOME_BADGES = {
@@ -263,6 +270,8 @@ const OUTCOME_BADGES = {
   failed: "failed",
   cancelled: "closed",
   "setup-failed": "failed",
+  "finish-failed": "failed",
+  no_action: "failed",
   orphaned: "failed",
 };
 
