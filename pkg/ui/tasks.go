@@ -655,6 +655,18 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	s.respondWithTask(w, r, id)
 }
 
+// handleWithdrawApproval is handleApprove's own undo: the button that
+// takes a queued task back out of the queue and leaves it a proposal
+// again, without closing it.
+func (s *Server) handleWithdrawApproval(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.tasks.WithdrawApproval(r.Context(), id); err != nil {
+		writeClientError(w, err)
+		return
+	}
+	s.respondWithTask(w, r, id)
+}
+
 // handleSubmit is the UI's own "submit" button docs/data-model.md's UI
 // direction asks for, alongside the approve button handleApprove already
 // is: once a task's run has produced a pull request, this is what queues

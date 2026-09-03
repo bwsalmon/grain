@@ -229,7 +229,9 @@ cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 is a CLI over pkg/ui.HTTPClient -- a REST client of
                 whichever "grain daemon" -server names, driven from a
                 terminal instead of a browser: list/get/create/update a
-                task, approve, attach or detach a capability, comment
+                task, approve (and withdraw that approval again, which
+                puts a queued task back among the proposals rather than
+                closing it), attach or detach a capability, comment
                 (which also answers a parked question), close ("delete"
                 -- a task that ran is a record of a dispatch that
                 happened) or reopen one (bwsalmon/agents#271). "daemon"
@@ -1609,7 +1611,11 @@ which is worth revisiting separately.
 folded in by #363 -- it used to be its own "ui" subcommand), is
 [`docs/data-model.md`'s "first-party UI"
 direction](docs/data-model.md#direction-a-first-party-ui): create a
-task, approve a proposed one, attach or remove a capability, comment,
+task, approve a proposed one (or withdraw that approval, which is what
+[`docs/data-model.md`](docs/data-model.md#taskstate-is-derived-not-stored)
+calls taking a queued task back out of the queue: the approval is a
+declaration, and removing it leaves the task a proposal again), attach or
+remove a capability, comment,
 close/reopen — everything a human used to do by hand to a task issue,
 from a form instead of a body of directive lines and a label picker.
 

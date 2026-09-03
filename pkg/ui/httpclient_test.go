@@ -172,6 +172,19 @@ func TestHTTPClientApproveOnAProposal(t *testing.T) {
 	if approved.State != model.StateQueued {
 		t.Fatalf("state after approve = %q, want queued", approved.State)
 	}
+
+	// And back again, over the same wire: `grain withdraw`'s own round
+	// trip, which is the only thing this client is for.
+	if err := c.WithdrawApproval(ctx, created.ID); err != nil {
+		t.Fatalf("WithdrawApproval: %v", err)
+	}
+	withdrawn, err := c.Task(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Task: %v", err)
+	}
+	if withdrawn.State != model.StateProposed {
+		t.Fatalf("state after withdrawing approval = %q, want proposed", withdrawn.State)
+	}
 }
 
 func TestHTTPClientTaskNotFoundIsNotFoundError(t *testing.T) {

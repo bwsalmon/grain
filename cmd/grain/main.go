@@ -4,9 +4,10 @@
 // client of the same JSON API (`grain daemon`'s own embedded `pkg/ui.Server`)
 // the browser frontend speaks, driven straight from a terminal instead.
 // It lets the caller do what a human does to a task: create one, edit its
-// fields, attach or detach a capability, accept (approve) a proposal,
-// comment, and close (grain's own stand-in for "delete" -- see
-// Client.Close's own doc comment for why) or reopen one.
+// fields, attach or detach a capability, accept (approve) a proposal or
+// withdraw that approval again, comment, and close (grain's own stand-in
+// for "delete" -- see Client.Close's own doc comment for why) or reopen
+// one.
 //
 // This used to open the task store directly -- embedded, or a Dolt SQL
 // server via -store-addr -- and call pkg/ui.Client's methods in-process,
@@ -157,6 +158,7 @@ Commands:
   create -title T [flags]              file a new task
   update <id> [flags]                  edit a task's title or fields
   approve <id>                         accept a proposed task (proposed -> queued)
+  withdraw <id>                        withdraw a queued task's approval (queued -> proposed)
   capability <id> <cap> attach|detach  attach or detach a capability
   comment <id> <body...>               post a comment (and answer a parked question)
   close <id>                           close a task (grain's "delete" -- see the package doc comment)
@@ -225,6 +227,8 @@ func runCLI(args []string) error {
 		return cmdUpdate(ctx, c, out, cmdArgs)
 	case "approve":
 		return cmdApprove(ctx, c, out, cmdArgs)
+	case "withdraw":
+		return cmdWithdrawApproval(ctx, c, out, cmdArgs)
 	case "capability":
 		return cmdCapability(ctx, c, out, cmdArgs)
 	case "comment":
@@ -437,6 +441,23 @@ func cmdApprove(ctx context.Context, c *ui.HTTPClient, out *printer, args []stri
 		return err
 	}
 	if err := c.Approve(ctx, id); err != nil {
+		return err
+	}
+	return respond(ctx, c, out, id)
+}
+
+// cmdWithdrawApproval is cmdApprove's undo -- Client.WithdrawApproval's
+// own doc comment for what it does and what it refuses.
+func cmdWithdrawApproval(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
+	fs := flag.NewFlagSet("grain withdraw", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := taskID(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if err := c.WithdrawApproval(ctx, id); err != nil {
 		return err
 	}
 	return respond(ctx, c, out, id)

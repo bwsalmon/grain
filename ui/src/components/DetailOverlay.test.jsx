@@ -167,6 +167,33 @@ describe("DetailOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/tasks/12/approve", { method: "POST" });
   });
 
+  it("shows a Withdraw approval button for a queued task, wired to the withdraw endpoint", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+
+    await user.click(screen.getByRole("button", { name: "Withdraw approval" }));
+
+    expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/withdraw-approval", { method: "POST" });
+  });
+
+  // The states Client.WithdrawApproval refuses never get the button:
+  // a proposed task has no approval to withdraw, and a running one is
+  // stopped with Cancel instead.
+  it("offers no Withdraw approval button on a task that is not queued", () => {
+    const { rerender } = render(
+      <DetailOverlay task={{ ...baseTask, state: "proposed" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />
+    );
+    expect(screen.queryByRole("button", { name: "Withdraw approval" })).not.toBeInTheDocument();
+
+    rerender(
+      <DetailOverlay task={{ ...baseTask, state: "running" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />
+    );
+    expect(screen.queryByRole("button", { name: "Withdraw approval" })).not.toBeInTheDocument();
+  });
+
   it("shows a Submit button once a pull request exists and auto-merge is off", async () => {
     const act = vi.fn();
     const user = userEvent.setup();

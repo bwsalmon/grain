@@ -1172,6 +1172,86 @@ func TestApproveMakesAProposalDispatchable(t *testing.T) {
 	}
 }
 
+// The inverse of TestApproveMakesAProposalDispatchable: a queued task
+// goes back to being a proposal, keeping everything else about it, and
+// approving it a second time queues it again.
+func TestWithdrawApprovalTakesAQueuedTaskBackOutOfTheQueue(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := c.WithdrawApproval(ctx, task.ID); err != nil {
+		t.Fatalf("withdrawing approval: %v", err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != model.StateProposed {
+		t.Fatalf("state = %q, want proposed", got.State)
+	}
+	if got.Title != task.Title {
+		t.Fatalf("title = %q, want it untouched at %q", got.Title, task.Title)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Approval != nil || stored.ApprovedAt != nil {
+		t.Fatalf("approval = %+v, approvedAt = %v, want both cleared", stored.Approval, stored.ApprovedAt)
+	}
+
+	// Withdrawing from a task that carries no approval is a no-op rather
+	// than an error, mirroring Approve on an already-approved one.
+	if err := c.WithdrawApproval(ctx, task.ID); err != nil {
+		t.Fatalf("withdrawing twice: %v", err)
+	}
+	if err := c.Approve(ctx, task.ID); err != nil {
+		t.Fatalf("re-approving: %v", err)
+	}
+	if got, err = c.Task(ctx, task.ID); err != nil || got.State != model.StateQueued {
+		t.Fatalf("state after re-approval = %q (err %v), want queued", got.State, err)
+	}
+}
+
+// The states where the approval has already been spent on work that
+// happened: clearing it there would erase a real queue wait and stop
+// nothing, so it is refused rather than quietly rewriting the record.
+func TestWithdrawApprovalRefusesATaskThatHasStarted(t *testing.T) {
+	c, store, ctx := testClient(t)
+	var ve *ui.ValidationError
+
+	running := create(t, c, ctx)
+	if err := store.StartRun(ctx, model.Run{
+		ID: "r1", TaskID: running.ID, Sandbox: "s1", Attempt: 1, StartedAt: baseTime,
+	}, model.Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WithdrawApproval(ctx, running.ID); !errors.As(err, &ve) {
+		t.Fatalf("withdrawing from a running task: error = %v, want a ValidationError", err)
+	}
+
+	completed := create(t, c, ctx)
+	done := baseTime.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{TaskID: completed.ID, CompletedAt: &done}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WithdrawApproval(ctx, completed.ID); !errors.As(err, &ve) {
+		t.Fatalf("withdrawing from a completed task: error = %v, want a ValidationError", err)
+	}
+	stored, err := store.GetTask(ctx, completed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Approval == nil {
+		t.Fatal("a refused withdrawal cleared the approval anyway")
+	}
+
+	var nf *ui.NotFoundError
+	if err := c.WithdrawApproval(ctx, "404"); !errors.As(err, &nf) {
+		t.Fatalf("withdrawing from an unknown task: error = %v, want a NotFoundError", err)
+	}
+}
+
 func TestSubmitOptsIntoTheMergeQueue(t *testing.T) {
 	c, store, ctx := testClient(t)
 	task := create(t, c, ctx)
