@@ -193,10 +193,13 @@ func TestClosingATaskLeavesThePullRequestItsRunAlreadyOpenedAlone(t *testing.T) 
 		t.Fatalf("links to %s = %d, want 1", ref, n)
 	}
 
-	// The decision, stated: the pull request is left open. Nothing in
-	// grain closes a pull request, and the work on the branch is real
-	// whatever the human decided about the task -- so it is left where a
-	// human can see it, merge it by hand, or close it by hand.
+	// The decision, stated: the pull request is left open. grain closes
+	// one only where a human asked for that at the moment they closed
+	// the task (ui.CloseOptions.ClosePullRequest) -- never here, on a
+	// path that has no human in front of it and is only discovering a
+	// close that already happened. The work on the branch is real
+	// whatever the human decided about the task, so it is left where
+	// they can see it, merge it by hand, or close it by hand.
 	if got := prByHead(t, sim, branch); got.State != "open" || got.Merged {
 		t.Fatalf("pull request = %+v, want it left open and unmerged", got)
 	}

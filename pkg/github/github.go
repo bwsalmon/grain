@@ -663,6 +663,7 @@ type Client interface {
 	UpdateBranch(owner, repo, branch, sha string, force bool) error
 	CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error)
 	UpdatePullRequestBody(owner, repo string, number int, body string) error
+	ClosePullRequest(owner, repo string, number int) error
 	FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error)
 	CreateIssue(owner, repo, title, body string, labels []string) (Issue, error)
 	MergePullRequest(owner, repo string, number int, headSHA string) error
@@ -1125,6 +1126,42 @@ func (c *RESTClient) CreatePullRequest(owner, repo, head, base, title, body stri
 // commits are the ones a reviewer needs to read about.
 func (c *RESTClient) UpdatePullRequestBody(owner, repo string, number int, body string) error {
 	payload, _ := json.Marshal(map[string]string{"body": body})
+	resp, err := c.Transport.Request(
+		"PATCH", fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number),
+		c.headers(owner, repo, true), payload,
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 200 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
+}
+
+// ClosePullRequest closes a pull request without merging it -- PATCH
+// .../pulls/{n} with GitHub's own `state`, the same field CloseIssue
+// sets on an issue, on the endpoint that owns a pull request's state.
+//
+// The one call in grain that throws work away rather than making it, so
+// it is worth being exact about what it does and does not do: closing a
+// pull request on GitHub leaves the branch and every commit on it
+// untouched, and reopening the pull request restores it whole. Nothing
+// here deletes a branch.
+//
+// It is called on exactly one path -- a human closing a task who asked,
+// in the same breath, for its pull request to be closed with it
+// (ui.CloseOptions.ClosePullRequest). Nothing grain decides for itself
+// ever reaches this: a task whose work landed has a pull request that
+// merged, and a task closed without that explicit ask leaves its pull
+// request open for a human (model.OrphanedPullRequestNote).
+//
+// A pull request that is already closed is not an error: GitHub accepts
+// the PATCH and answers 200 with the state it already had, which is the
+// caller's intent already satisfied -- the same tolerance CloseIssue
+// relies on when a close is retried.
+func (c *RESTClient) ClosePullRequest(owner, repo string, number int) error {
+	payload, _ := json.Marshal(map[string]string{"state": "closed"})
 	resp, err := c.Transport.Request(
 		"PATCH", fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number),
 		c.headers(owner, repo, true), payload,
@@ -1816,6 +1853,11 @@ func (d DryRunClient) CompareCommits(owner, repo, base, head string) ([]Commit, 
 
 func (d DryRunClient) UpdatePullRequestBody(owner, repo string, number int, body string) error {
 	fmt.Printf("+ rewrite the description of PR %s/%s#%d (%d bytes)\n", owner, repo, number, len(body))
+	return nil
+}
+
+func (d DryRunClient) ClosePullRequest(owner, repo string, number int) error {
+	fmt.Printf("+ close PR %s/%s#%d without merging it\n", owner, repo, number)
 	return nil
 }
 

@@ -162,7 +162,8 @@ Commands:
   withdraw <id>                        withdraw a queued task's approval (queued -> proposed)
   capability <id> <cap> attach|detach  attach or detach a capability
   comment <id> <body...>               post a comment (and answer a parked question)
-  close <id>                           close a task (grain's "delete" -- see the package doc comment)
+  close [-close-pull-request] <id>     close a task (grain's "delete" -- see the package doc comment),
+                                       and with the flag its open pull request too
   delete <id>                          alias for close
   reopen <id>                          reopen a closed task
   retry <id>                           clear a failed task's retry cap so it dispatches again
@@ -550,6 +551,13 @@ func loadAttachments(paths []string) ([]ui.AttachmentUpload, error) {
 
 func cmdClose(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain close", flag.ContinueOnError)
+	// The same choice the UI puts in a checkbox beside its own Close
+	// button, and the same default: off. A task's pull request is real
+	// work, so closing it happens because somebody typed this and not
+	// because they closed a task (ui.CloseOptions).
+	closePR := fs.Bool("close-pull-request", false,
+		"close the task's pull request on GitHub too, without merging it "+
+			"(the branch and its commits are left untouched)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -557,7 +565,7 @@ func cmdClose(ctx context.Context, c *ui.HTTPClient, out *printer, args []string
 	if err != nil {
 		return err
 	}
-	if err := c.Close(ctx, id); err != nil {
+	if err := c.Close(ctx, id, ui.CloseOptions{ClosePullRequest: *closePR}); err != nil {
 		return err
 	}
 	return respond(ctx, c, out, id)
