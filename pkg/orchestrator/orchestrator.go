@@ -271,7 +271,7 @@ type Config struct {
 	// running task's sandbox process on cancel"), through
 	// exec.CommandContext/procgroup.
 	//
-	// Zero uses defaultMaxRunRuntime. There is no "uncapped" value the
+	// Zero uses DefaultMaxRunRuntime. There is no "uncapped" value the
 	// way MaxAgentTurns' own zero means "no turn cap": an uncapped run
 	// is exactly the gap this field exists to close -- all the more so
 	// now that it is the only ceiling a default deployment has -- so a
@@ -378,17 +378,24 @@ func (c Config) cancelPollInterval() time.Duration {
 	return 2 * time.Second
 }
 
-// defaultMaxRunRuntime is Config.maxRunRuntime's fallback -- the same
+// DefaultMaxRunRuntime is Config.maxRunRuntime's fallback -- the same
 // 120-minute value v1's own AutomationConfig.max_runtime_minutes
 // defaulted to, so a deployment moving from v1 gets back the ceiling it
 // already had rather than a new, differently-tuned one.
-const defaultMaxRunRuntime = 120 * time.Minute
+//
+// Exported because a run is now told this number (BuildPrompt's
+// wall-clock paragraph), which makes it a fact about grain rather than a
+// private tuning knob: anything that has to state the budget without a
+// live Config in hand -- `grain demo`'s seeded prompt, a test -- names
+// this rather than writing "two hours" out again somewhere it can go
+// stale.
+const DefaultMaxRunRuntime = 120 * time.Minute
 
 func (c Config) maxRunRuntime() time.Duration {
 	if c.MaxRunRuntime > 0 {
 		return c.MaxRunRuntime
 	}
-	return defaultMaxRunRuntime
+	return DefaultMaxRunRuntime
 }
 
 // now reads Config.Now, or the wall clock when a caller set none.

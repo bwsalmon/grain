@@ -349,6 +349,43 @@ func TestRunPassesTheRunsOwnRepoAndBranchToTheMCPServer(t *testing.T) {
 	})
 }
 
+// The run's own wall-clock deadline reaches its tools the same way its
+// repo does: through the forked mcpserver's arguments. Without it a
+// server has no way to tell the run how long it has left, and the prompt
+// -- read once, at turn 1 -- is the only warning it ever gets.
+func TestRunPassesTheRunsDeadlineToTheMCPServer(t *testing.T) {
+	mcpArgs := func(t *testing.T, ctx context.Context) []string {
+		t.Helper()
+		fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+		f := newFramework(fake, "/path/to/grain")
+		if _, err := f.Run(ctx, agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+			t.Fatal(err)
+		}
+		var parsed struct {
+			MCPServers map[string]struct {
+				Args []string `json:"args"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(fake.gotMCPConfig, &parsed); err != nil {
+			t.Fatalf("mcp-config was not valid JSON: %v (%s)", err, fake.gotMCPConfig)
+		}
+		return parsed.MCPServers["grain-sandbox"].Args
+	}
+
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	ctx, cancel := context.WithDeadline(context.Background(), at)
+	defer cancel()
+	if args := mcpArgs(t, ctx); !argsHave(args, "-run-deadline", "2026-03-04T05:06:07Z") {
+		t.Errorf("args = %v, want -run-deadline carrying the ctx's own deadline", args)
+	}
+
+	// A caller that bounds the run some other way, or not at all, passes
+	// no flag rather than a made-up deadline.
+	if args := mcpArgs(t, context.Background()); slices.Contains(args, "-run-deadline") {
+		t.Errorf("args = %v, want no -run-deadline for a ctx that has none", args)
+	}
+}
+
 // argsHave reports whether args carries name followed by value.
 func argsHave(args []string, name, value string) bool {
 	for i, a := range args {

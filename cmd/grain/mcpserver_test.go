@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/mcp"
 )
@@ -76,5 +77,29 @@ func TestPullRequestReaderTreatsNoRepoAsNoError(t *testing.T) {
 	}
 	if scope != (mcp.PullRequestScope{}) {
 		t.Errorf("scope = %+v, want the zero scope", scope)
+	}
+}
+
+// -run-deadline is how a run's wall-clock deadline reaches the tools it
+// calls (agent.RunDeadlineArgs on the way in,
+// mcp.Registry.AnnounceDeadline on the way out), so it has to survive
+// the round trip through the command line as the same instant.
+func TestParsedRunDeadlineReadsTheFlagBack(t *testing.T) {
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	if got := parsedRunDeadline(at.Format(time.RFC3339)); !got.Equal(at) {
+		t.Errorf("parsedRunDeadline = %s, want %s", got, at)
+	}
+}
+
+// Unset is every caller with no deadline to give -- pkg/mcp's own tests,
+// tests/e2e, a `grain mcpserver` run by hand -- and a malformed value is
+// an operator's problem, not the run's: neither may cost a run the tools
+// that are its only way to touch its sandbox, so both come back as "say
+// nothing about time" rather than as a failure.
+func TestParsedRunDeadlineIsZeroWithoutAUsableValue(t *testing.T) {
+	for _, value := range []string{"", "not-a-time", "2026-03-04 05:06:07"} {
+		if got := parsedRunDeadline(value); !got.IsZero() {
+			t.Errorf("parsedRunDeadline(%q) = %s, want the zero time", value, got)
+		}
 	}
 }

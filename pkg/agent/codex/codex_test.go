@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
 )
@@ -339,6 +340,38 @@ func TestRunPassesThePullRequestAndDaemonArgsOnlyWhenComplete(t *testing.T) {
 		if strings.Contains(r2.configAtRun, unwanted) {
 			t.Errorf("config = %q, want no %s for a task with no repo and no id", r2.configAtRun, unwanted)
 		}
+	}
+}
+
+// The run's own wall-clock deadline reaches the forked mcpserver too,
+// which is what lets its tool results tell the run how long it has left
+// (mcp.Registry.AnnounceDeadline). Asserted here as well as in
+// agent/claude's own test, since each framework builds these arguments
+// separately.
+func TestRunPassesTheRunsDeadlineToTheMCPServer(t *testing.T) {
+	root := t.TempDir()
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	ctx, cancel := context.WithDeadline(context.Background(),
+		time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+	defer cancel()
+	if _, err := f.Run(ctx, agent.RunConfig{Prompt: "go", SandboxRoot: root}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(r.configAtRun, `"-run-deadline","2026-03-04T05:06:07Z"`) {
+		t.Errorf("config = %q, want the ctx's own deadline passed on", r.configAtRun)
+	}
+
+	// No deadline on the ctx, no flag: a run bounded some other way is
+	// not told a moment nobody set.
+	r2 := &recordingRunner{stdout: okStream()}
+	f2 := newFramework(r2, "/usr/local/bin/grain")
+	if _, err := f2.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: root}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if strings.Contains(r2.configAtRun, "-run-deadline") {
+		t.Errorf("config = %q, want no -run-deadline for a ctx that has none", r2.configAtRun)
 	}
 }
 

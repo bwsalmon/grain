@@ -1,7 +1,8 @@
 # Agent ergonomics: what a run actually hits, and what to do about it
 
-**Status: proposal.** Nothing here is implemented. This is a review of
-grain's agent-facing surface — the tools a dispatched run holds, the
+**Status: proposal**, except where a finding is marked **Done** with the
+task that landed it. This is a review of grain's agent-facing
+surface — the tools a dispatched run holds, the
 prompt it is given, and what grain records about how it went — written
 from the code as it stands, with a proposal per finding. The follow-up
 tasks filed alongside it are named at the bottom.
@@ -210,6 +211,19 @@ in a sandbox that is about to be destroyed.
   prompt again at turn 200, and the deadline matters most exactly when
   the prompt is furthest away.
 
+**Done** (grain/task-151), both halves, and both say what to do about the
+deadline rather than only what it is: `BuildPrompt` takes
+`cfg.maxRunRuntime()` and states it with the "push each piece as it
+works" instruction that follows from it, and
+`mcp.Registry.AnnounceDeadline` puts the time remaining on every tool
+result — failed ones included — once the run is within
+`mcp.RunDeadlineNoticeWindow` (20 minutes) of the wall, escalating in the
+last five. The deadline reaches the forked mcpserver as `-run-deadline`,
+read off the very ctx `framework.Run` is given
+(`agent.RunDeadlineArgs`), so there is no second copy of the number to
+drift from the one that actually cancels the run. See README.md's
+"Telling a run how long it has".
+
 ## 8. Attempt N is told nothing about attempt N−1
 
 A redispatch gets the task, the conversation (`commentThreadSection`),
@@ -337,7 +351,8 @@ Filed as separate proposals, each depending on this document:
    and 2).
 2. `run_command`: say when a command timed out, and bound result size
    (findings 3, 4, and the check in 5).
-3. Tell a run its wall-clock budget (finding 7).
+3. Tell a run its wall-clock budget (finding 7) — **done**,
+   grain/task-151.
 4. Tell a redispatched run what its previous attempts did (finding 8).
 5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13).
 6. A per-repo setup command (finding 9).

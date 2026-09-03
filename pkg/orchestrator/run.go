@@ -157,7 +157,26 @@ func frameworkOpensPullRequests(framework agent.Framework) bool {
 // task. False leaves the paragraph naming only pull_request_status, so a
 // deployment without that route never sends a run after a tool that is
 // not on its roster.
-func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) string {
+//
+// maxRuntime is the wall-clock budget RunDispatch will cancel this run
+// at (cfg.maxRunRuntime(), the deadline on the very ctx framework.Run
+// receives), and it is here for the reason everything else here is: it
+// is grain's own fact and there is no way at all to discover it from
+// inside the sandbox. A run that does not know a deadline exists has no
+// reason to push before reaching for one more refactor and no basis for
+// choosing between waiting on CI and finishing -- and salvagePushedBranch
+// rescues only what was *pushed* when the clock runs out, so a run that
+// guesses wrong loses everything it merely committed. Zero omits the
+// paragraph, for a caller with no budget to state rather than for one
+// that means "uncapped": no dispatch passes zero (Config.maxRunRuntime
+// substitutes DefaultMaxRunRuntime), and a run really is always capped.
+//
+// The prompt is read once, at turn 1, so it is only half the answer; the
+// other half is mcp.Registry.AnnounceDeadline, which puts the time
+// remaining on every tool result once the budget runs low. The paragraph
+// says so, since a run that expects the reminder can spend its early
+// turns working rather than counting.
+func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, maxRuntime time.Duration) string {
 	branch := model.BranchName(task.ID)
 	var prompt string
 	if task.Target == nil {
@@ -267,6 +286,7 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 			base, base, branch,
 		)
 	}
+	prompt += runtimeSection(task, maxRuntime)
 	if len(task.Reads) > 0 {
 		names := make([]string, len(task.Reads))
 		for i, r := range task.Reads {
@@ -280,6 +300,54 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 	}
 	prompt += proposalSection(task)
 	return prompt
+}
+
+// runtimeSection is the wall-clock budget paragraph, and the one piece
+// of advice that follows from it: work in pushable pieces, because the
+// only thing that outlives this run's sandbox is what reached the
+// remote.
+//
+// It is worded as a deadline plus what to do about it rather than as a
+// number alone, because a number alone is the half a run cannot act on:
+// "you have 2h0m" and "commit and push each piece as it works" are the
+// same fact, and only the second one changes what a run does at the turn
+// where it has a working change and an idea for a better one.
+//
+// A task with no target gets the same deadline and a different
+// instruction, since it has no branch to push: its work product is the
+// closing note comment_on_issue relays (ProcessResult), and a note never
+// written is a run that produced nothing at all. It is told to keep time
+// back for that note rather than to write it early and add to it --
+// ProcessResult relays the *first* such call (firstToolCallArg), so
+// "add to it" would be advice grain then drops on the floor.
+//
+// "" for a zero budget, which BuildPrompt's own doc comment covers.
+func runtimeSection(task model.Task, maxRuntime time.Duration) string {
+	if maxRuntime <= 0 {
+		return ""
+	}
+	s := fmt.Sprintf(
+		"\n\ngrain cancels this run after %s of wall-clock time and destroys the "+
+			"sandbox with it, so treat that as your budget rather than as a limit you "+
+			"will never reach.",
+		humanDuration(maxRuntime),
+	)
+	if task.Target != nil {
+		s += " Only what you have pushed survives that: a commit you never pushed, and " +
+			"an edit you never committed, go with the sandbox. Commit and push each " +
+			"piece of the work as it starts working rather than saving one push for " +
+			"the end, and if the time runs short, push what already works and say what " +
+			"is left in a comment_on_issue note instead of starting something you " +
+			"cannot finish."
+	} else {
+		s += " Nothing in the sandbox survives it, and this task has no branch to push: " +
+			"your answer reaches anybody only through the comment_on_issue note that " +
+			"closes this run, so keep back enough time to write it. An answer still in " +
+			"the sandbox when the clock runs out reaches nobody."
+	}
+	s += " You will be told how much time is left, on every tool result, once it " +
+		"runs low -- until then, work rather than counting."
+	return s
 }
 
 // resolvePromptExtension is the three layers of standing instructions
@@ -580,7 +648,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prepErr error
 	if checkoutErr == nil {
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
-			attachments, checkoutDir, frameworkOpensPullRequests(framework), promptExtension)
+			attachments, checkoutDir, frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
 	}
 	// Told to the recreate path, which is registered one level up in
 	// runOne and so never sees this: what a rebuilt sandbox needs is
@@ -980,9 +1048,10 @@ func erroredCallSuffix(result *agent.Result) string {
 // Silently running an agent without a capability its task is recorded as
 // holding would trade that for a run that quietly does the wrong work.
 //
-// checkoutDir and canOpenPullRequest are passed straight through to
-// BuildPrompt, which is where both are explained: nothing here reads
-// either, this being the one path that assembles a dispatch's prompt.
+// checkoutDir, canOpenPullRequest and maxRuntime are passed straight
+// through to BuildPrompt, which is where all three are explained:
+// nothing here reads any of them, this being the one path that assembles
+// a dispatch's prompt.
 //
 // promptExtension is the standing instructions for this
 // run, already resolved across the three layers that can carry them
@@ -996,10 +1065,10 @@ func erroredCallSuffix(result *agent.Result) string {
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
 	attachments []model.Attachment, checkoutDir string,
-	canOpenPullRequest bool, promptExtension string) (materialized []model.Materialized, prompt string, err error) {
+	canOpenPullRequest bool, promptExtension string, maxRuntime time.Duration) (materialized []model.Materialized, prompt string, err error) {
 
 	extension := promptExtensionSection(promptExtension)
-	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest)
+	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest, maxRuntime)
 	if thread := commentThreadSection(comments); thread != "" {
 		prompt += "\n\n" + thread
 	}
