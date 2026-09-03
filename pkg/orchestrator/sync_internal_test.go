@@ -345,6 +345,128 @@ func TestSetCheckRegistrationWindowRestores(t *testing.T) {
 	}
 }
 
+// --- the deadline on PENDING -------------------------------------------
+
+// The clock the merge queue gives up on: PENDING is right for CI that
+// finishes and unbounded for CI that does not, so an unfinished check is
+// waited on for the deadline and no longer.
+func TestChecksStalledWaitsOutTheDeadline(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	if stalled, _ := checksStalled(ref, "sha1", start); stalled {
+		t.Fatal("the first pending read was stalled immediately -- every pull request would escalate")
+	}
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(119*time.Minute)); stalled {
+		t.Error("stalled inside the deadline, on CI that is merely slow")
+	}
+	stalled, deadline := checksStalled(ref, "sha1", start.Add(2*time.Hour))
+	if !stalled {
+		t.Error("never stalled -- an unfinished check would hold its queue head forever")
+	}
+	if deadline != 2*time.Hour {
+		t.Errorf("deadline = %s, want the one in effect: it is what the comment tells the task", deadline)
+	}
+}
+
+// A push restarts CI, so it restarts the clock: the new commit's checks
+// have not been unfinished for the old commit's however-long.
+func TestChecksStalledRestartsTheClockOnANewHeadCommit(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	if stalled, _ := checksStalled(ref, "sha2", start.Add(3*time.Hour)); stalled {
+		t.Error("a freshly pushed commit inherited the previous commit's elapsed deadline")
+	}
+	if stalled, _ := checksStalled(ref, "sha2", start.Add(5*time.Hour)); !stalled {
+		t.Error("the new commit's own deadline never elapsed")
+	}
+}
+
+// Forgetting is what makes the clock measure one unbroken run of pending
+// reads rather than the span between two of them: syncEntry drops the
+// sighting on every cycle that reads anything else, so a check re-run
+// hours later is timed from the re-run.
+func TestForgetPendingChecksStartsTheClockAgain(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	forgetPendingChecks(ref)
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(3*time.Hour)); stalled {
+		t.Error("a re-run was timed from the commit's first ever pending read")
+	}
+}
+
+// Unlike the registration window, a missing head sha is timed rather than
+// excused. There the sha is the thing being reasoned about; here the pull
+// request is stuck whatever GitHub is calling its head, and a sha that
+// never arrives is one more way for PENDING to last forever.
+func TestChecksStalledTimesAPullRequestWithNoHeadSHA(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	if stalled, _ := checksStalled(ref, "", start); stalled {
+		t.Fatal("stalled on the first read")
+	}
+	if stalled, _ := checksStalled(ref, "", start.Add(2*time.Hour)); !stalled {
+		t.Error("a pull request with no head sha waited forever")
+	}
+}
+
+// Zero is off, and off here means the opposite direction to off on the
+// registration window: never give up, which is what this package did
+// before the deadline existed.
+func TestSetCheckStallDeadlineZeroNeverGivesUp(t *testing.T) {
+	defer SetCheckStallDeadline(0)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(30*24*time.Hour)); stalled {
+		t.Error("a disabled deadline still gave up, a month later")
+	}
+}
+
+// The two clocks are separate, and setting one must not disturb the
+// other: tests/e2e and cmd/grain switch the registration window off for
+// every one of their runs.
+func TestSetCheckRegistrationWindowLeavesTheStallDeadlineAlone(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	defer SetCheckRegistrationWindow(0)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(2*time.Hour)); !stalled {
+		t.Error("switching the registration window off switched the stall deadline off too")
+	}
+}
+
+// The deadline goes into a comment a person reads, and Duration's own
+// String spells two hours "2h0m0s".
+func TestHumanDuration(t *testing.T) {
+	for _, tc := range []struct {
+		in   time.Duration
+		want string
+	}{
+		{2 * time.Hour, "2h"},
+		{90 * time.Minute, "1h30m"},
+		{45 * time.Minute, "45m"},
+		{30 * time.Second, "30s"},
+		{2*time.Hour + 30*time.Second, "2h0m30s"},
+	} {
+		if got := humanDuration(tc.in); got != tc.want {
+			t.Errorf("humanDuration(%s) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // --- closing a PR whose head branch is already gone --------------------
 
 // A merged PR's head branch is routinely deleted by the time this runs

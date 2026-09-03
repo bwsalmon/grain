@@ -107,9 +107,10 @@ type Task struct {
 	Blocked   bool     `json:"blocked"`
 	BlockedBy []string `json:"blockedBy,omitempty"`
 	// MergeQueueBlockedAt mirrors model.Observation's own field: non-nil
-	// once the merge queue has tried and failed to fix this task's pull
-	// request automatically, so it needs a human rather than another
-	// automatic attempt. Alongside PullRequest and AutoMerge, this is
+	// once the merge queue has stopped driving this task's pull request
+	// -- an automatic fix that did not take, or checks that never
+	// finished -- so it needs a human rather than another automatic
+	// attempt. Alongside PullRequest and AutoMerge, this is
 	// what lets the frontend tell a completed task that is merely
 	// waiting on a human's Submit click apart from one already on the
 	// merge queue, or one the queue has given up on -- the distinction

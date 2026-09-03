@@ -472,15 +472,18 @@ type Observation struct {
 	// a fresh read is compared. Losing one degrades rather than corrupts.
 	PendingQuestionCommentID *int64
 	BaselineCommentID        *int64
-	// MergeQueueBlockedAt is set once the merge queue has tried and failed
-	// to fix this task's own PR automatically (a LinkFixTask task ran and
-	// closed, but the PR is still conflicted or failing) -- see
-	// orchestrator.SyncPullRequests. A non-nil value means the merge queue
-	// has stopped driving this task: it no longer counts as any repo's
-	// queue head (so a stuck PR cannot block the ones behind it) and gets
-	// no second automatic fix, but it is still merged the moment it reads
-	// clean, the same as a fix task itself, in case a human pushes the
-	// fix by hand.
+	// MergeQueueBlockedAt is set once the merge queue has stopped driving
+	// this task, for either of the two reasons it ever does: the
+	// automatic fix it filed ran and closed and the PR is still
+	// conflicted or failing, or the PR's checks stayed unfinished for
+	// longer than the queue is willing to wait on CI that may never
+	// report (orchestrator.defaultCheckStallDeadline). The task's own
+	// thread says which -- see orchestrator.SyncPullRequests. Either way
+	// it no longer counts as any repo's queue head (so a stuck PR cannot
+	// block the ones behind it) and gets no automatic fix from here on,
+	// but it is still merged the moment it reads clean, the same as a fix
+	// task itself, in case a human pushes the fix by hand or the checks
+	// it was waiting on turn up green after all.
 	MergeQueueBlockedAt *time.Time
 	ObservedAt          *time.Time
 	// RetryRequestedAt is a human's "clear the failure streak and let it
