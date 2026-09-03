@@ -99,7 +99,15 @@ type parsedEvents struct {
 	// rendered text so a caller can branch on the machine-readable name
 	// rather than by matching on a message (claude.go's runFailure).
 	resultSubtype string
-	transcript    strings.Builder
+	// resultText is the terminal result event's own "result" field
+	// verbatim, whether that event reported a failure or an ordinary
+	// final answer -- kept separately from FinalText (which only a
+	// successful result fills in) and from resultErr (which wraps it in
+	// a sentence of this package's own) so usagelimit.go can read what
+	// the CLI actually said without matching against text this file
+	// wrote. Empty for a capture with no result event at all.
+	resultText string
+	transcript strings.Builder
 }
 
 // maxTurnsSubtype is the result-event subtype claude reports when its own
@@ -164,6 +172,7 @@ func parseEvents(stdout string) *parsedEvents {
 			}
 		case "result":
 			p.sawResult = true
+			p.resultText = ev.Result
 			if ev.IsError {
 				p.resultSubtype = ev.Subtype
 				p.resultErr = fmt.Errorf("claude: run ended in error (subtype=%s): %s", ev.Subtype, ev.Result)

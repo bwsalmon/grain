@@ -334,6 +334,24 @@ type Config struct {
 	// `grain demo`) that has no UI/API route for such a request to arrive
 	// over in the first place.
 	SandboxRecreations *SandboxRecreations
+	// Pause, when non-nil, is the deployment-wide gate a run that meets
+	// its agent's own usage limit closes: every run in flight is
+	// cancelled and nothing else is dispatched until the provider's
+	// window resets. See Pause for why that is the right response to a
+	// limit rather than letting each task discover it in turn.
+	//
+	// Both halves of it are read from here -- RunDispatch registers each
+	// run's own cancellation with it and reports a limit to it,
+	// reconcileDispatch asks it whether to dispatch at all -- because
+	// Config is what both already have in hand, the same way
+	// SandboxRecreations above is reached from two places.
+	//
+	// nil means a usage limit is reported on the run that met it (its
+	// outcome is model.PausedOutcome either way) and pauses nothing,
+	// which is what a caller with no loop to pause wants: a test, a
+	// one-shot cycle. A deployment always sets one -- without it the
+	// next tick dispatches the next task straight into the same refusal.
+	Pause *Pause
 }
 
 func (c Config) cancelPollInterval() time.Duration {

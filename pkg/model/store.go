@@ -1889,6 +1889,13 @@ func (s *Store) Runs(ctx context.Context, taskID string) ([]Run, error) {
 // nil, with no error, means taskID has never finished a run at all --
 // dispatch.Cycle's own retry backoff and Client.GetTask's own display
 // both treat that the same as "not currently failing".
+//
+// A PausedOutcome run is passed over rather than counted, exactly as
+// task_streak's own WHERE clause passes over it: it is neither a failure
+// of this task nor a success that clears the failures before it. Its
+// LastFinishedAt/LastOutcome still describe it where it is the most
+// recent run, since those two fields answer "what happened last", not
+// "how badly is this task going".
 func (s *Store) FailureStreak(ctx context.Context, taskID string) (*FailureStreak, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT `outcome`,`started_at`,`finished_at`,`detail` FROM `task_run` "+
@@ -1918,6 +1925,15 @@ func (s *Store) FailureStreak(ctx context.Context, taskID string) (*FailureStrea
 		}
 		if outcome == "succeeded" || !since.IsZero() && !startedAt.After(since) {
 			break
+		}
+		if outcome == PausedOutcome {
+			// Skipped, not counted and not a boundary: a run stopped
+			// because the deployment had no agent budget left is
+			// evidence about the deployment and none at all about this
+			// task (PausedOutcome's own doc comment), so it neither adds
+			// to the streak behind it nor clears it. task_streak
+			// excludes the same word with the same WHERE clause.
+			continue
 		}
 		streak.Count++
 	}

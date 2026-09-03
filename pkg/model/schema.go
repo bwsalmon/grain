@@ -867,6 +867,13 @@ var Views = []View{
 	// date no real row predates is what makes "never happened" fall out
 	// of the same comparison as "happened, but a while ago" rather than
 	// needing its own branch.
+	//
+	// PausedOutcome is excluded alongside 'succeeded', for a different
+	// reason than either boundary above: a run stopped because the
+	// deployment's agent had no budget left says nothing at all about the
+	// task it was given -- see that constant's own doc comment.
+	// Store.FailureStreak skips the same word, and state_test.go holds
+	// the two to one answer the way it does for every other rule here.
 	{"task_streak", `
 SELECT
   ` + "`tr`.`task_id`" + ` AS ` + "`task_id`" + `,
@@ -875,6 +882,7 @@ FROM ` + "`task_run`" + ` AS ` + "`tr`" + `
 LEFT JOIN ` + "`task_observation`" + ` AS ` + "`o`" + ` ON ` + "`o`.`task_id`" + ` = ` + "`tr`.`task_id`" + `
 WHERE ` + "`tr`.`finished_at`" + ` IS NOT NULL
   AND ` + "`tr`.`outcome`" + ` != 'succeeded'
+  AND ` + "`tr`.`outcome`" + ` != '` + PausedOutcome + `'
   AND ` + "`tr`.`started_at`" + ` > COALESCE((
         SELECT MAX(` + "`started_at`" + `) FROM ` + "`task_run`" + ` AS ` + "`tr2`" + `
         WHERE ` + "`tr2`.`task_id`" + ` = ` + "`tr`.`task_id`" + ` AND ` + "`tr2`.`outcome`" + ` = 'succeeded'

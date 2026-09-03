@@ -537,6 +537,21 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		// whatever it did get done still comes back.
 		return partialResult(result, stdout), parseErr
 	}
+	// A run claude ended by reporting the account's own usage limit --
+	// exit 0, is_error unset, the refusal delivered as the run's final
+	// answer like any other. Nothing above notices that: the parse
+	// succeeded and the "result" is a sentence. It is an
+	// agent.UsageLimitError all the same, so that the deployment pauses
+	// rather than sending the next task at the same wall -- see
+	// usagelimit.go for why this path matches strictly and runFailure's
+	// does not.
+	//
+	// result travels back alongside it, never instead of it: a run that
+	// worked for an hour and met the limit on its last turn has already
+	// pushed its branch.
+	if limit := usageLimitFromResult(parseEvents(stdout).resultText); limit != nil {
+		return result, limit
+	}
 	return result, nil
 }
 
@@ -550,6 +565,7 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 // anything (a missing binary, a signal, a cancelled context).
 func runFailure(stdout string, maxTurns int, runErr error) error {
 	p := parseEvents(stdout)
+	limit := usageLimitFromFailure(p.resultText, runErr)
 	switch {
 	case p.resultSubtype == maxTurnsSubtype && maxTurns > 0:
 		// Named in plain words rather than passed through as a subtype:
@@ -563,6 +579,15 @@ func runFailure(stdout string, maxTurns int, runErr error) error {
 		// a number grain never set would send an operator looking for a
 		// setting that is already unlimited.
 		return fmt.Errorf("claude: the CLI stopped the run at its own turn limit without a final answer")
+	case limit != nil:
+		// Before p.resultErr below, which would otherwise render this as
+		// a generic "run ended in error (subtype=...)" and lose the one
+		// thing about it a deployment can act on: this run did not fail,
+		// the account it ran as has no budget left until its window
+		// resets. orchestrator.RunDispatch reads the type
+		// (agent.UsageLimit) and pauses dispatch rather than retrying
+		// into the same refusal.
+		return limit
 	case p.resultErr != nil:
 		return p.resultErr
 	}

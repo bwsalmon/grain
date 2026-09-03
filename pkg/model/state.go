@@ -19,6 +19,27 @@ import (
 // actually needs a different one.
 const MaxConsecutiveFailures = 5
 
+// PausedOutcome is the task_run.outcome of a run grain itself stopped
+// because the agent's own usage limit was reached -- the credential it
+// runs as having no budget left in its current window
+// (agent.UsageLimitError, orchestrator.Pause). One word, named here
+// rather than in the package that writes it, because two readers have to
+// agree on it: task_streak (schema.go) and Store.FailureStreak, both of
+// which skip it.
+//
+// Skipping is the whole reason it is not simply "cancelled". Every other
+// non-"succeeded" ending is evidence about the task -- its agent failed,
+// its sandbox would not build, its result could not be turned into a
+// pull request -- and counting those toward MaxConsecutiveFailures is
+// what stops a task being retried forever. A usage limit is evidence
+// about the deployment: it says nothing whatsoever about the task, it
+// arrives at whatever tasks happen to be running when the window runs
+// out, and it would otherwise spend the retry budget of every one of
+// them on an outage none of them caused. The same argument
+// orchestrator.outcomeOf makes for no longer reading an errored tool
+// call as a failed run.
+const PausedOutcome = "paused"
+
 // StateOf computes a task's state. Never stored, never written.
 //
 // Order is precedence, not preference: a completed task whose issue was

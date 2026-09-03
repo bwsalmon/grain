@@ -146,7 +146,11 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 long recent ticks took and how far into each one the
                 dispatch decision was reached, which is the one thing a
                 deployment measures about itself rather than derives from
-                a row -- see "Measuring the daemon's own tick" below
+                a row -- see "Measuring the daemon's own tick" below. And
+                it stops dispatching entirely while the agent's own
+                provider has refused for want of budget
+                (orchestrator.Pause) -- see "Pausing when the agent runs
+                out of budget" below
 pkg/metrics/    what the deployment actually delivers: tasks completed per
                 day (throughput) and where a task's wall-clock time goes
                 (latency), computed from rows that already exist -- filed,
@@ -3406,3 +3410,74 @@ ordinary concurrency it had and gains a single slot the merge queue
 cannot be shut out of. Setting it to 0 puts a deployment back exactly
 where it was: fix tasks contending for worker capacity like anything
 else.
+
+## Pausing when the agent runs out of budget
+
+A coding agent's credential has a budget, and it runs out: Claude Code
+reports `Claude AI usage limit reached|<epoch>` for an OAuth account
+whose five-hour window is spent, the Anthropic API answers `429` with a
+`rate_limit_error`, and Gemini answers `RESOURCE_EXHAUSTED` with a
+`retryDelay`. None of that is a fact about the run that met it.
+
+Read as an ordinary framework failure, though, that is exactly what it
+became. The run was recorded `failed`, with the provider's refusal as its
+diagnosis; the task took a place in its own failure streak for it and
+backed off; every other run in flight kept going until it met the same
+wall and did the same; and the next tick dispatched the next queued task
+straight into it. A single window's exhaustion could walk the whole
+backlog — each task spending an attempt, a sandbox and a VM boot to
+discover something the deployment already knew — and take tasks to
+`model.MaxConsecutiveFailures` and out of the queue for good, on the
+strength of an outage none of them caused.
+
+So a limit is now its own kind of failure, end to end.
+
+`agent.UsageLimitError` is the type. Both frameworks recognise their own
+provider's refusal and return one instead of a plain error
+(`pkg/agent/claude/usagelimit.go`, `pkg/agent/antigravity/usagelimit.go`),
+carrying what the provider said and, where it named one, when it will
+serve again — an absolute instant (Claude's epoch) or a delay (Gemini's
+`retryDelay`). What each package matches on is deliberately narrow, and
+narrower still where a *successful* run is being read: `claude` reports
+an account limit as readily in a run's final answer as in a failure, and
+an agent that greps its own sandbox for the phrase must not be able to
+put the deployment to sleep, so the successful path insists on the CLI's
+own machine-readable `|<epoch>` form and reads only the terminal result
+event, never tool output.
+
+`orchestrator.Pause` is what the deployment does about it. The run that
+meets a limit closes the gate until the window resets, and every run in
+flight is cancelled on the spot rather than left to grind through the
+same refusal — that is what the registry of live runs in there is for,
+each `RunDispatch` parking its own cancel func for as long as its agent
+is running. `reconcileDispatch` asks the gate before it dispatches
+anything and does nothing while it is shut; every other reconciler runs
+as usual, since syncing pull requests, advancing the merge queue and
+cutting releases cost no agent tokens and are exactly what should keep
+working. The gate opens again on its own: it is level-triggered like
+everything else in a cycle, so the first tick to find the instant passed
+clears it and dispatches. If the window has not really reopened, the run
+that finds out pauses it again, and no further traffic follows.
+
+What the provider says is bounded rather than trusted: a refusal naming
+no reset waits 15 minutes, one naming seconds waits a minute, and one
+naming a reset days out (or an epoch this code misread) waits at most six
+hours. A deployment idling for a wrong quarter of an hour is recoverable;
+one idling until 2286 is not something anybody would think to look for.
+
+Runs ended either way record `model.PausedOutcome` — "paused", its own
+word beside "setup-failed" and "finish-failed", with the provider's own
+sentence and the resume time in the run's detail. Both implementations of
+the failure streak skip that word (`Store.FailureStreak` in Go,
+`task_streak` in SQL), so an outage costs a task nothing: no backoff, no
+progress toward `MaxConsecutiveFailures`, and dispatch offers it again
+the moment the gate opens. Whatever such a run pushed before it was cut
+off is still salvaged into a pull request the way any other interrupted
+run's branch is.
+
+The gate is in-process state, not a row — the same reasoning
+`CycleTimes` is (see "Why this one measurement is in memory"). A daemon
+restarted inside a paused window dispatches one run, meets the same
+limit, and pauses again: one wasted attempt, against a durable row that
+would have to be reconciled with a credential that may by then have been
+changed by the very operator doing the restarting.

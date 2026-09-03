@@ -824,6 +824,14 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// UI, so a run that registers itself here is one
 			// POST /api/tasks/{id}/sandbox/recreate can actually find.
 			SandboxRecreations: sandboxRecreations,
+			// One gate for the whole deployment: the first run to meet
+			// the agent's own usage limit cancels the rest and stops
+			// this loop dispatching until the provider's window resets
+			// (orchestrator.Pause). Built here rather than package-level
+			// because, unlike sandboxRecreations above, nothing outside
+			// the reconcile loop reaches it -- the UI/API server has no
+			// request that touches it.
+			Pause: &orchestrator.Pause{},
 		},
 		MintSandboxToken:   tokens.EnsureToken,
 		RevokeSandboxToken: tokens.Revoke,
