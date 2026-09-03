@@ -149,6 +149,17 @@ export default function App() {
     setDetail(null);
   }, []);
 
+  // openTaskFromDebug is the one link out of the Debug overlay: the
+  // metrics panel names the oldest queued task, and clicking it should
+  // land on that task. It closes the debug overlay on the way -- both
+  // are dialogs, and DebugOverlay is mounted after DetailOverlay here,
+  // so leaving it open would put the task the click asked for behind
+  // the pane it was clicked in.
+  const openTaskFromDebug = useCallback((id) => {
+    setShowDebug(false);
+    openTask(id);
+  }, [openTask]);
+
   // openRepo is the repo page's row click: scope the task list to that
   // repo and switch back to it, the same as clicking a repo chip
   // anywhere else would.
@@ -447,7 +458,7 @@ export default function App() {
         />
       )}
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
-      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} showError={showError} />}
+      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} onOpenTask={openTaskFromDebug} showError={showError} />}
     </div>
   );
 }

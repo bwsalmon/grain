@@ -2851,7 +2851,23 @@ deep queue is a scheduling problem; saturated capacity next to a deep
 queue is a capacity one. They are the first two numbers any optimization
 here should have to move.
 
-What this does not have yet is a pane in the UI — the report is API and
-CLI only for now — and no history of its own: because nothing is stored,
-a report can only ever be computed from rows that still exist, so a task
-deleted from the store takes its own past contribution with it.
+**The UI reads the same report,** as the Metrics tab of the Debugging
+pane — alongside Logs and Sandbox health, since all three are read-only
+views of how the deployment is behaving rather than knobs on it. The
+window picker sends the same strings `-window` takes, the throughput
+buckets are drawn as sparklines, and the two presentation rules above
+are enforced rather than described: the latency stages are a table of
+independent distributions and never a stacked bar, which would draw a
+claim about them adding up that the numbers do not make, and the backlog
+is a section of its own headed "right now, not over the window". Each
+stage's `n` sits beside its percentiles, and a percentile with too few
+samples behind it to mean what its name says — fewer than 10 for a p90,
+100 for a p99 — is dimmed and footnoted rather than shown as if it were
+one. Unlike the panels beside it there is no poll: a report costs a full
+scan every time it is asked for, so it loads once and reloads when the
+window changes or Refresh is clicked.
+
+What this still does not have is a history of its own: because nothing
+is stored, a report can only ever be computed from rows that still
+exist, so a task deleted from the store takes its own past contribution
+with it.
