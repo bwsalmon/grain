@@ -42,11 +42,11 @@ export default function CapabilitiesPanel({ capabilities, showError, onSecretsCh
         deployment has configured beyond its default one, which a task can be given to push and
         pull through that token instead -- and whether this deployment is currently
         configured for it to work. Each one&apos;s own credentials are set here too, beneath it;
-        the agent frameworks&apos; keys live on the Agents tab, beside the choice of framework. A
-        capability marked "not
-        grantable" is one no task can ask for at all, however this deployment is configured; one
-        marked "default" is attached to every new task as it is filed, and one marked "default in"
-        only to tasks filed against the repos named (set on the repos page, per repo).
+        the agent frameworks&apos; keys live on the Agents tab, beside the choice of framework.
+        A capability marked "not grantable" is one no task can ask for at all, however this
+        deployment is configured; one marked "default" is attached to every new task as it is
+        filed, and one marked "default in" only to tasks filed against the repos named (set on
+        the repos page, per repo).
       </Typography>
       {list.length === 0 && <Alert severity="info">No capabilities known.</Alert>}
       <Stack spacing={1.5}>
