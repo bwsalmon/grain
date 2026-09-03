@@ -260,6 +260,11 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   white-space: nowrap;
 }
 .chips { display: flex; gap: 0.35rem; flex-wrap: nowrap; flex: none; }
+/* The per-row "show the full prompt" button (grain/task-91). Muted like
+   the drag handle beside it: it is an affordance on a row whose own
+   click target is the task, not something to draw the eye away from the
+   title. */
+.task-prompt-button { flex: none; color: var(--text-tertiary); }
 .badge {
   display: inline-flex;
   align-items: center;
