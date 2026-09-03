@@ -16,6 +16,13 @@ const HISTORY_LENGTH = 60;
 
 const emptySeries = { cpu: [], mem: [], disk: [] };
 
+// emptyHostSeries is emptySeries' own shape for the host, whose disk
+// history is one series per filesystem rather than one series -- the host
+// section reports two or three of them now (grain/task-148: the store's
+// disk, the sandbox volume, docker's data root), where a sandbox still
+// has the one root filesystem.
+const emptyHostSeries = { cpu: [], mem: [], disks: {} };
+
 function formatMemory(usedMB, totalMB) {
   if (!totalMB) return "—";
   return `${usedMB} / ${totalMB} MB`;
@@ -42,6 +49,24 @@ function pushSample(series, value) {
   return [...series, value].slice(-HISTORY_LENGTH);
 }
 
+// appendDiskHistory folds one poll's host disk figures into the running
+// per-filesystem history, keyed by the path each reading was taken
+// through -- not by array position, so a chart follows the same
+// filesystem across polls even as docker's data root appears in the list
+// or drops out of it. A filesystem the host has stopped reporting drops
+// its series with it, which is what keeps this from growing without
+// bound.
+function appendDiskHistory(prev, disks) {
+  const next = {};
+  for (const d of disks || []) {
+    // 0/0 is how both ends spell "no reading available" for one disk (an
+    // unreadable path, and see the disk's own `error`), and plotting the
+    // 0 would read as an empty disk rather than as a missing sample.
+    next[d.path] = pushSample(prev[d.path] || [], d.totalMB ? d.usedMB : null);
+  }
+  return next;
+}
+
 // appendHistory folds one GET /api/sandboxes response into the running
 // per-host and per-sandbox history SandboxHealthPage charts from. Load
 // average, not a CPU percentage, is what SandboxHealth/HostPressure
@@ -54,10 +79,7 @@ export function appendHistory(prev, result) {
     ? {
       cpu: pushSample(prev.host.cpu, result.host.loadAverage1),
       mem: pushSample(prev.host.mem, result.host.memoryUsedMB),
-      // 0/0 is how both ends spell "no disk reading available" (a
-      // non-Linux host, an unreadable data directory), and plotting the
-      // 0 would read as an empty disk rather than as a missing sample.
-      disk: pushSample(prev.host.disk, result.host.diskTotalMB ? result.host.diskUsedMB : null),
+      disks: appendDiskHistory(prev.host.disks, result.host.disks),
     }
     : prev.host;
 
@@ -72,6 +94,59 @@ export function appendHistory(prev, result) {
     };
   }
   return { host, sandboxes };
+}
+
+// HostDisks is the host section's disk figures: one row per filesystem
+// the daemon's own state sits on, rather than the single "Disk: x / y GB"
+// this showed while that state was assumed to be one volume.
+//
+// It is a table rather than another entry in the text line above because
+// there is now more than one number and each needs saying which disk it
+// is: a deployment sized the way terraform/gcp is has a small store disk
+// that stays near-empty beside a large sandbox volume that a runaway
+// build fills, and it was the store's figure alone the pane used to show
+// (grain/task-148). The "Holds" column is what of grain's own state
+// lives there -- two words in one row when the daemon found them to be
+// the same filesystem, which is the ordinary case on a single-disk host.
+function HostDisks({ disks, history }) {
+  if (!disks || disks.length === 0) {
+    return (
+      <Typography variant="body2" color="text.secondary" sx={{ mb: "1rem" }}>
+        No disk figures available.
+      </Typography>
+    );
+  }
+  return (
+    <Table size="small" sx={{ mb: "1.5rem", maxWidth: "44rem" }}>
+      <TableHead>
+        <TableRow>
+          <TableCell>Holds</TableCell>
+          <TableCell>Path</TableCell>
+          <TableCell>Usage</TableCell>
+          <TableCell>Trend</TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {disks.map((d) => (
+          <TableRow key={d.path}>
+            <TableCell>{(d.holds || []).join(", ")}</TableCell>
+            <TableCell sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}>{d.path}</TableCell>
+            <TableCell>
+              {/* A filesystem that has stopped answering says why rather
+                  than showing a bare dash. This is the reading an
+                  operator is here for, and "the sandbox volume is no
+                  longer mounted" is the answer they want -- not a row
+                  that has simply gone quiet. */}
+              {d.error
+                ? <Chip size="small" color="warning" label={d.error} />
+                : formatDisk(d.usedMB, d.totalMB)}
+            </TableCell>
+            <TableCell><Sparkline data={history[d.path] || []} width={80} height={24} color="#2e7d32" /></TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
 }
 
 // SandboxHealthPage is the Sandbox health panel of DebugOverlay.jsx -- it
@@ -90,7 +165,7 @@ export function appendHistory(prev, result) {
 // the Debug overlay this panel sits alongside.
 export default function SandboxHealthPage({ showError }) {
   const [data, setData] = useState(null);
-  const [history, setHistory] = useState({ host: emptySeries, sandboxes: {} });
+  const [history, setHistory] = useState({ host: emptyHostSeries, sandboxes: {} });
 
   const refresh = useCallback(async () => {
     try {
@@ -137,8 +212,6 @@ export default function SandboxHealthPage({ showError }) {
                 Load average (1/5/15 min): {data.host.loadAverage1.toFixed(2)} / {data.host.loadAverage5.toFixed(2)} / {data.host.loadAverage15.toFixed(2)}
                 {" · "}
                 Memory: {formatMemory(data.host.memoryUsedMB, data.host.memoryTotalMB)}
-                {" · "}
-                Disk: {formatDisk(data.host.diskUsedMB, data.host.diskTotalMB)}
               </Typography>
               <div style={{ display: "flex", gap: "2.5rem", marginBottom: "1.5rem" }}>
                 <div>
@@ -149,11 +222,8 @@ export default function SandboxHealthPage({ showError }) {
                   <Typography variant="caption" color="text.secondary" component="div">Memory (MB)</Typography>
                   <Sparkline data={history.host.mem} color="#9c27b0" />
                 </div>
-                <div>
-                  <Typography variant="caption" color="text.secondary" component="div">Disk (MB)</Typography>
-                  <Sparkline data={history.host.disk} color="#2e7d32" />
-                </div>
               </div>
+              <HostDisks disks={data.host.disks} history={history.host.disks} />
             </>
           )}
           {!data.host && !data.hostError && (
