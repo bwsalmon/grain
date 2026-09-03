@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/secrets"
+	"github.com/bwsalmon/grain/pkg/ui"
 )
 
 // bareRemote creates an empty repository, which is what "create one on
@@ -190,5 +191,71 @@ func TestAdoptRejectsARubbishKeyBeforeTouchingAnything(t *testing.T) {
 	}
 	if string(after) != string(before) {
 		t.Fatal("the secrets file changed under a failed adopt")
+	}
+}
+
+// The same restore through the manager the UI's bootstrap pane talks to,
+// rather than through the CLI: the pane is where an operator who has
+// never opened a terminal on this host does this, so the path it uses is
+// worth exercising as itself.
+func TestTheBootstrapPaneCanRestoreAnInstallation(t *testing.T) {
+	ctx := context.Background()
+	remote := bareRemote(t)
+
+	origin := t.TempDir()
+	if err := secrets.Open(secretsConfig(origin)).Set("db", "password", []byte("hunter2")); err != nil {
+		t.Fatalf("setting a secret: %v", err)
+	}
+	if err := stateAdopt(ctx, origin, []string{"-remote", remote}); err != nil {
+		t.Fatalf("seeding the remote: %v", err)
+	}
+	originKey, err := os.ReadFile(secretsConfig(origin).KeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A running grain, local-only, being pointed at that repository.
+	host := t.TempDir()
+	_, db, err := openStore(host)
+	if err != nil {
+		t.Fatalf("opening the store: %v", err)
+	}
+	defer db.Close()
+	repo, err := openStateRepo(ctx, host)
+	if err != nil {
+		t.Fatalf("opening the state repository: %v", err)
+	}
+	manager := newStateManager(host, db, repo, openSecrets(host))
+
+	status, err := manager.Adopt(ctx, ui.AdoptRequest{Remote: remote})
+	if err != nil {
+		t.Fatalf("adopting: %v", err)
+	}
+	// Adopted without the key, the pane has to say the secrets are
+	// unreadable and which key would read them -- not report success and
+	// leave it to a run to discover.
+	if status.SecretsError == "" {
+		t.Fatalf("the pane reports nothing wrong about secrets it cannot read: %+v", status)
+	}
+	if status.SecretsFileRecipient == "" {
+		t.Fatalf("the pane does not say which key the repository wants: %+v", status)
+	}
+
+	if _, err := manager.ImportSecretsKey(ctx, "not a key"); err == nil {
+		t.Fatal("rubbish was accepted as a key")
+	}
+	status, err = manager.ImportSecretsKey(ctx, string(originKey))
+	if err != nil {
+		t.Fatalf("importing the key: %v", err)
+	}
+	if status.SecretsError != "" {
+		t.Fatalf("the store is still unreadable after its key arrived: %+v", status)
+	}
+	got, err := secrets.Open(secretsConfig(host)).Resolve(ctx, "db/password")
+	if err != nil {
+		t.Fatalf("resolving: %v", err)
+	}
+	if got != "hunter2" {
+		t.Fatalf("got %q", got)
 	}
 }

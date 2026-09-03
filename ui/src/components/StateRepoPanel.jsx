@@ -131,8 +131,10 @@ export default function StateRepoPanel({ showError }) {
 
       <Typography variant="subtitle2" sx={{ mt: 3 }}>Point grain at a repository</Typography>
       <Typography variant="body2" color="text.secondary">
-        An existing grain state repository replaces this installation&apos;s database with its contents. An empty
-        one is seeded from what grain has now. Either way the previous working tree is kept on disk, not deleted.
+        An existing grain state repository replaces this installation&apos;s database with its contents &mdash; give it
+        the secrets key below as well, or its secrets stay unreadable here. To start from scratch, create an empty
+        repository on GitHub and paste its URL: grain seeds that one from what it has now, secrets and all. Either
+        way the previous working tree is kept on disk, not deleted.
       </Typography>
       <TextField label="Repository URL" value={remote} onChange={(e) => setRemote(e.target.value)}
         placeholder="https://github.com/owner/grain-state.git" autoComplete="off" fullWidth margin="normal" size="small" />
