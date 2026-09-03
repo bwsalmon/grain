@@ -241,6 +241,48 @@ describe("NewTaskOverlay", () => {
     expect(payload.base).toBe("");
   });
 
+  // A system-generated task -- a schedule firing, a suite pass, a
+  // stacked fix, an agent's own propose_task -- picks a base for its own
+  // reasons, and that choice is not a suggestion for the human filing
+  // the next one.
+  it("does not prefill Base branch from a task an agent or automation filed", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [
+      { id: "1", title: "Filed by hand", repo: "acme/widgets", base: "release/2.0", authorKind: "human", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "A suite pass", repo: "acme/widgets", base: "suite/run-7", authorKind: "automation", createdAt: "2026-06-01T00:00:00Z" },
+      { id: "3", title: "An agent's proposal", repo: "acme/widgets", base: "grain/task-3", authorKind: "agent", createdAt: "2026-07-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("release/2.0");
+  });
+
+  // The counterpart to the "no history" case below: a repo whose only
+  // tasks are system-generated has nothing to prefill from either, so
+  // picking it is the no-history case rather than the "most recent task
+  // used the default branch" one, and must not clear the field.
+  it("treats a repo whose only tasks are system-generated as having no history", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/robots"] };
+    const tasks = [
+      { id: "1", title: "Filed by hand", repo: "acme/widgets", base: "release/2.0", authorKind: "human", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "A schedule fired", repo: "acme/robots", base: "nightly", authorKind: "automation", createdAt: "2026-06-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/robots");
+    expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
+  });
+
   it("leaves a manually-typed Base branch alone when the picked repo has no task history", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/fresh"] };
     const tasks = [
