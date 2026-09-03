@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,7 +35,7 @@ func TestManifestSubmissionFormEscapesTheManifest(t *testing.T) {
 // write-then-resolve round trip bwsalmon/agents#495 found missing:
 // bootstrapGitHubApp used to write plain files under <secrets-dir>/
 // github-app/, which githubsandbox.Provider.Resolve -- backed by
-// pkg/secrets.Store, a SQLite database -- never read. This asserts the
+// pkg/secrets.Store, one encrypted file -- never read. This asserts the
 // credentials writeAppCredentials stores are the exact ones
 // DefaultAppIDCredential and DefaultPrivateKeyCredential resolve back to.
 func TestWriteAppCredentialsRoundTripsThroughTheSecretsStore(t *testing.T) {
@@ -48,7 +47,10 @@ func TestWriteAppCredentialsRoundTripsThroughTheSecretsStore(t *testing.T) {
 		t.Fatalf("writeAppCredentials: %v", err)
 	}
 
-	store := secrets.New(filepath.Join(dataDir, "secrets"))
+	// Opened through secretsConfig, the same two paths the daemon, the UI
+	// and `grain secrets` all resolve -- which is the property this test
+	// exists to hold: a credential written by one is readable by the rest.
+	store := secrets.Open(secretsConfig(dataDir))
 	ctx := context.Background()
 
 	gotAppID, err := store.Resolve(ctx, githubsandbox.DefaultAppIDCredential)

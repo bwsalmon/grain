@@ -1,0 +1,91 @@
+package staterepo
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+// Settings is the one piece of grain's configuration that cannot live in
+// the state repository, because it is what says where the state
+// repository is.
+//
+// It is a small JSON file in the data directory rather than a row in the
+// database for exactly that reason: everything else grain is configured
+// with is now downstream of a repository this names. Keeping it to three
+// fields is deliberate -- an operator editing it by hand should be able
+// to read the whole thing at once, and a bootstrap that writes it is
+// writing something a human can check.
+type Settings struct {
+	// Remote is the repository grain pushes state to, or "" for a
+	// local-only install. The zero value is therefore the local-only
+	// deployment, which is what makes "no configuration at all" a working
+	// grain rather than a broken one.
+	Remote string `json:"remote,omitempty"`
+	// Branch is the branch state lives on; DefaultBranch when empty.
+	Branch string `json:"branch,omitempty"`
+	// TokenFile names a file holding the credential to push with, for a
+	// deployment whose state repository is not covered by the GitHub
+	// credential ladder under <data-dir>/secrets/github. Left empty, that
+	// ladder is what authenticates the push.
+	//
+	// A path rather than the token itself: this file is not encrypted,
+	// and a credential written into it would be a credential in
+	// plaintext in the data directory with nothing marking it as one.
+	TokenFile string `json:"tokenFile,omitempty"`
+}
+
+// SettingsFileName is what the file is called in the data directory.
+const SettingsFileName = "state-repo.json"
+
+// LoadSettings reads the settings beside dataDir. A file that is not
+// there is not an error and not a prompt: it is the local-only
+// deployment, and returning the zero value is what lets `grain daemon`
+// start on a machine nobody has configured.
+func LoadSettings(dataDir string) (Settings, error) {
+	path := filepath.Join(dataDir, SettingsFileName)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return Settings{}, nil
+	}
+	if err != nil {
+		return Settings{}, fmt.Errorf("staterepo: reading %s: %w", path, err)
+	}
+	var s Settings
+	if err := json.Unmarshal(data, &s); err != nil {
+		return Settings{}, fmt.Errorf("staterepo: %s is not valid JSON: %w", path, err)
+	}
+	return s, nil
+}
+
+// SaveSettings writes the settings, atomically so a daemon reading them
+// at the same moment sees one version or the other and never half a
+// file.
+func SaveSettings(dataDir string, s Settings) error {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("staterepo: preparing %s: %w", dataDir, err)
+	}
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	path := filepath.Join(dataDir, SettingsFileName)
+	tmp, err := os.CreateTemp(dataDir, ".state-repo-*")
+	if err != nil {
+		return fmt.Errorf("staterepo: creating a temporary file next to %s: %w", path, err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}

@@ -113,6 +113,9 @@ func main() {
 		case "secrets":
 			secretsCmd(args[1:])
 			return
+		case "state":
+			stateCmd(args[1:])
+			return
 		case "controller":
 			controller(args[1:])
 			return
@@ -141,6 +144,7 @@ const usage = `usage: grain [global flags] <command> [args]
        grain demo [flags]      serve the task UI on localhost over a throwaway store of fake tasks (see demo.go)
        grain mcpserver [flags] speak MCP over stdin/stdout against the sandbox tools (see mcpserver.go)
        grain secrets [flags]   set/delete/list a colocated server's secrets on disk (see secrets.go)
+       grain state [flags]     where this installation's state repository lives, and what it holds (see state.go)
        grain controller bootstrap-github-app [flags]  one-time interactive setup for the github-sandbox capability (see controller.go)
        grain setup gcp [flags] bootstrap external GCP infrastructure for a new installation (see setup.go)
        grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
