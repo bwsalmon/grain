@@ -100,7 +100,20 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.email", "agent@example.com")
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "checkout", "-q", "-b", branch)
-	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit")
+	// The message names the branch so that two branches pushed by one
+	// test are two different commits. Everything else about these commits
+	// is fixed -- same parent, same (empty) tree, same author and
+	// committer -- so the only thing left to tell two of them apart is the
+	// commit timestamp, and on a machine quick enough to push both inside
+	// one second there is nothing: git hands back one sha for both
+	// branches. Sim.checkRunsFor resolves a sha to whichever branch sits
+	// on it, so under that collision a check seeded against one branch is
+	// answered for the other one's pull request too, and a test that holds
+	// one queue head's checks unfinished silently holds the whole queue.
+	// That is a real second's-worth of luck deciding whether the suite
+	// passes; naming the branch removes the coincidence rather than
+	// waiting on it.
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit on "+branch)
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 
