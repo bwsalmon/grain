@@ -345,6 +345,71 @@ func TestVerifyToolRosterAcceptsExactlyWhatGrainPublishes(t *testing.T) {
 	}
 }
 
+// The daemon's address and the run's task id are what the forked
+// mcpserver needs to offer open_pull_request at all, and they only travel
+// as its own arguments -- the same pair agent/claude passes, since both
+// fork the identical server.
+func TestRunPassesTheGrainServerAndTaskToTheMCPServer(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithGrainServer("http://127.0.0.1:8420"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "x", SandboxRoot: t.TempDir(), TaskID: "t1",
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	args := settingsArgs(t, r.homeAtRun)
+	if !argsHave(args, "-server", "http://127.0.0.1:8420") || !argsHave(args, "-task", "t1") {
+		t.Errorf("mcpserver args = %v, want -server and -task among them", args)
+	}
+}
+
+// Both or neither: one without the other names a question with nowhere
+// to send it, and mcpserver rejects either half on its own.
+func TestRunOmitsTheGrainServerWithoutATaskID(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithGrainServer("http://127.0.0.1:8420"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "x", SandboxRoot: t.TempDir(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	args := settingsArgs(t, r.homeAtRun)
+	if argsHave(args, "-server", "") || argsHave(args, "-task", "") {
+		t.Errorf("mcpserver args = %v, want neither -server nor -task", args)
+	}
+}
+
+// open_pull_request is published like every other tool: agy has no
+// --allowedTools of its own, so this list is what verifyToolRoster
+// measures a run's reported roster against, and a tool missing from it
+// would be reported as one grain never published.
+func TestAllowedToolsNamesOpenPullRequest(t *testing.T) {
+	names := allowedTools()
+	for _, n := range names {
+		if n == "mcp__grain-sandbox__open_pull_request" {
+			return
+		}
+	}
+	t.Errorf("allowedTools() = %v, want open_pull_request among them", names)
+}
+
+// settingsArgs pulls the grain-sandbox server's own argument list out of
+// the settings file a run's private HOME was given.
+func settingsArgs(t *testing.T, settingsJSON string) []string {
+	t.Helper()
+	var settings struct {
+		MCPServers map[string]struct {
+			Args []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
+		t.Fatalf("settings file was not JSON: %v (%s)", err, settingsJSON)
+	}
+	return settings.MCPServers[mcpServerName].Args
+}
+
 func argsHave(args []string, name, value string) bool {
 	for i, a := range args {
 		if a == name && i+1 < len(args) && (value == "" || args[i+1] == value) {
@@ -376,5 +441,22 @@ func TestRunOmitsExecKeyWhenUnset(t *testing.T) {
 		if arg == "-exec-key" {
 			t.Errorf("args = %v, want no -exec-key when none is configured", settings.MCPServers[mcpServerName].Args)
 		}
+	}
+}
+
+// The prompt's half of open_pull_request: orchestrator.BuildPrompt names
+// the tool only for a run that really has it, and this is the answer it
+// asks for (agent.PullRequestFramework). It tracks WithGrainServer alone,
+// since that is the half of -server/-task a Framework holds -- the other
+// half, a task id, comes with every dispatch.
+func TestCanOpenPullRequestTracksWithGrainServer(t *testing.T) {
+	with := New("agy", "/usr/local/bin/grain", WithGrainServer("http://127.0.0.1:8420"))
+	if !with.CanOpenPullRequest() {
+		t.Error("CanOpenPullRequest() = false for a Framework built WithGrainServer")
+	}
+	without := New("agy", "/usr/local/bin/grain")
+	if without.CanOpenPullRequest() {
+		t.Error("CanOpenPullRequest() = true for a Framework with no daemon to ask -- " +
+			"its runs' mcpserver registers no open_pull_request at all")
 	}
 }

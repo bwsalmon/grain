@@ -51,11 +51,21 @@
 // file one; a task is a store row now, and creating one is a write to
 // the store (README, "Input is a model update, not a GitHub issue").
 //
-// Folder and repo *management* (docs/data-model.md's Folder tree, the
-// containment structure a capability's `offers` are attached to) is
-// deliberately absent: README.md already states folders are unbuilt,
-// so there is no store-backed concept yet for a command here to manage.
-// -repo on `create`/`update` only ever sets one task's own target.
+// Folder management (docs/data-model.md's Folder tree, the containment
+// structure a capability's `offers` are attached to) is deliberately
+// absent: README.md already states folders are unbuilt, so there is no
+// store-backed concept yet for a command here to manage. What a repo
+// *does* have stored -- its own default capability set, and whether the
+// deployment's allowlist names it -- is `grain repo` (repo.go, grain/
+// task-36), which is deployment configuration in the same sense `grain
+// settings` and `grain secrets` are, not the containment tree. -repo on
+// `create`/`update` still only ever sets one task's own target.
+//
+// Schedules, templates, suites and qualification plans remain UI-only,
+// and repo.go's own doc comment has why that is not the same question:
+// they are authored content rather than deployment configuration, and
+// docs/scheduled-tasks.md records their absence here as an open gap
+// waiting on somebody who needs it.
 package main
 
 import (
@@ -154,6 +164,7 @@ Commands:
   retry <id>                           clear a failed task's retry cap so it dispatches again
   config                               show the capabilities this deployment offers
   settings [flags]                     show, or change, the daemon's stored configuration (bwsalmon/agents#320)
+  repo <subcommand> [args]             list repos, and read or change one repo's own settings (see repo.go)
 `
 
 const defaultServerURL = "http://127.0.0.1:8420"
@@ -226,6 +237,8 @@ func runCLI(args []string) error {
 		return cmdConfig(ctx, c, out, cmdArgs)
 	case "settings":
 		return cmdSettings(ctx, c, out, cmdArgs)
+	case "repo":
+		return cmdRepo(ctx, c, out, cmdArgs)
 	default:
 		fs.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -588,7 +601,12 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (needs a daemon restart to take effect)")
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
-	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any")
+	// No back quotes in this usage string, here or on any flag below:
+	// flag.PrintDefaults reads the first back-quoted word as the name of
+	// the flag's operand, so "`grain repo add`" would print as
+	// "-target-repos grain repo add".
+	targetRepos := fs.String("target-repos", "",
+		"comma-separated owner/name list a task's repo may name -- empty allows any; replaces the whole list, where \"grain repo add\"/\"remove\" change one entry")
 	defaultCapabilities := fs.String("default-capabilities", "",
 		"comma-separated capability IDs every new task is filed holding -- empty files each task with only what it asks for")
 	if err := fs.Parse(args); err != nil {
