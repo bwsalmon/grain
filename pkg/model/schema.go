@@ -571,6 +571,29 @@ var Tables = []string{
 	// requested for one repo, newest first.
 	`CREATE INDEX IF NOT EXISTS ` + "`branch_repo`" + ` ON ` + "`branch`" + ` (` + "`owner`" + `, ` + "`repo`" + `, ` + "`id`" + `)`,
 
+	// A repo's own configuration -- model.RepoConfig, the per-repo layer
+	// of what grain_config already says for the whole deployment
+	// (grain/task-24). One row per repo, the same (owner, name) key
+	// qualification_config below uses, and a row exists only while the
+	// repo has something of its own to say: PutRepoConfig deletes rather
+	// than writing a row that says nothing.
+	//
+	// default_capabilities is stored the comma-separated way
+	// grain_config.default_capabilities and target_repos already are
+	// (store.go's joinCSV/splitCSV), for the same reason -- a capability
+	// id is a bare word with no room for a comma in it. No DEFAULT and no
+	// migration: this table is new rather than a column added to one that
+	// already exists, so Init's own CREATE TABLE IF NOT EXISTS creates it
+	// on an existing database the same as on a fresh one, and a
+	// deployment that upgrades across it starts with no repo saying
+	// anything -- exactly what every deployment did before it existed.
+	`CREATE TABLE IF NOT EXISTS ` + "`repo_config`" + ` (
+  ` + "`owner`" + `                TEXT NOT NULL,
+  ` + "`name`" + `                 TEXT NOT NULL,
+  ` + "`default_capabilities`" + ` TEXT NOT NULL,
+  PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
+)`,
+
 	// A repo's qualification setup -- bwsalmon/agents#518's two switches:
 	// require_approval gates every task a run instantiates behind a
 	// human's own bulk approval (Store.ApproveQualificationRun) rather

@@ -492,9 +492,10 @@ export default function SettingsOverlay({ onClose, showError }) {
                 ))}
               </Select>
               <FormHelperText>
-                attached to every new task as it is filed -- whoever files one can untick any of these on the
-                new-task form, and any of them can be detached from a task afterwards. Tasks already filed
-                keep what they were filed with.
+                attached to every new task as it is filed, whichever repo it targets -- whoever files one can
+                untick any of these on the new-task form, and any of them can be detached from a task
+                afterwards. Tasks already filed keep what they were filed with. An individual repo can add
+                more of its own, on the repos page.
               </FormHelperText>
             </FormControl>
 

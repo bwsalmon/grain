@@ -814,6 +814,16 @@ func capabilityStatusLine(cp ui.CapabilityStatus) string {
 	if cp.Default {
 		notes = append(notes, "default -- every new task is filed with this")
 	}
+	// The per-repo layer, named as the repos it applies to rather than
+	// as a second bare "default": with two layers, a line that only said
+	// "default" would describe a deployment-wide default that only some
+	// tasks actually get (ui.CapabilityStatus.DefaultRepos). Listed even
+	// alongside the deployment-wide note above, since a repo can restate
+	// one the deployment already gives and dropping it deployment-wide
+	// leaves the repo's own entry standing.
+	if len(cp.DefaultRepos) > 0 {
+		notes = append(notes, "default in: "+strings.Join(cp.DefaultRepos, ", "))
+	}
 	if !cp.Grantable {
 		notes = append(notes, "NOT GRANTABLE -- grain registers a provider for this, but no task can ask for it")
 	}

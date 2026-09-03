@@ -180,6 +180,56 @@ func TestRunPointsAKonturRunAtItsVMInsteadOfALocalRoot(t *testing.T) {
 	}
 }
 
+// The forked mcpserver has to be told which repo and branch it may read
+// CI for, or pull_request_status has nothing to answer with -- the same
+// contract agent/claude's own test of this asserts, since the two
+// frameworks build these arguments separately.
+func TestRunPassesTheRunsOwnRepoAndBranchToTheMCPServer(t *testing.T) {
+	mcpArgs := func(t *testing.T, f *Framework, cfg agent.RunConfig, r *recordingRunner) []string {
+		t.Helper()
+		if _, err := f.Run(context.Background(), cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		var settings struct {
+			MCPServers map[string]struct {
+				Args []string `json:"args"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal([]byte(r.homeAtRun), &settings); err != nil {
+			t.Fatalf("settings file was not JSON: %v", err)
+		}
+		return settings.MCPServers[mcpServerName].Args
+	}
+
+	t.Run("configured", func(t *testing.T) {
+		r := &recordingRunner{stdout: okStream()}
+		f := newFramework(r, "/usr/local/bin/grain", WithGitHubAccess("/data", "github.example", true))
+		args := mcpArgs(t, f, agent.RunConfig{
+			Prompt: "go", SandboxRoot: t.TempDir(),
+			Repo: "acme/widgets", Branch: "grain/task-9",
+		}, r)
+		for _, want := range [][2]string{
+			{"-data-dir", "/data"}, {"-pr-repo", "acme/widgets"},
+			{"-pr-branch", "grain/task-9"}, {"-github-host", "github.example"},
+		} {
+			if !argsHave(args, want[0], want[1]) {
+				t.Errorf("mcp args = %v, want %s %s", args, want[0], want[1])
+			}
+		}
+	})
+
+	// A task with no repo attached is a real case, and half the flags
+	// would make mcpserver warn about a misconfiguration that is not one.
+	t.Run("no repo on the run", func(t *testing.T) {
+		r := &recordingRunner{stdout: okStream()}
+		f := newFramework(r, "/usr/local/bin/grain", WithGitHubAccess("/data", "github.com", false))
+		args := mcpArgs(t, f, agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}, r)
+		if argsHave(args, "-pr-repo", "") || argsHave(args, "-data-dir", "") {
+			t.Errorf("mcp args = %v, want none of the pull-request flags for a run with no repo", args)
+		}
+	})
+}
+
 // TestRunRejectsAKonturVMWithoutSSHConfig keeps the failure at
 // construction time rather than letting a forked mcpserver fail to reach
 // anything.

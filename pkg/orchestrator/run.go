@@ -115,6 +115,13 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // task.Target (gitproxy/authorize.go), so this line is purely
 // informational -- it tells the agent those repos exist and are safe to
 // clone, rather than granting anything itself.
+//
+// The last paragraph, for a task that has a target at all, is the
+// push/check/repair loop pkg/mcp's pull_request_status exists for. It is
+// informational in the same way: nothing here grants a second push, the
+// proxy already allowed every push to task.Target -- what it grants is
+// the knowledge that the loop is available, which no tool description
+// on its own can convey (see the comment at that paragraph).
 func BuildPrompt(task model.Task, checkoutDir string) string {
 	branch := model.BranchName(task.ID)
 	var prompt string
@@ -139,6 +146,26 @@ func BuildPrompt(task model.Task, checkoutDir string) string {
 				"work in that directory rather than cloning anything yourself, and "+
 				"push with `git push origin %s`.",
 			checkoutDir, branch, branch,
+		)
+	}
+	// Said out loud because neither half is discoverable from the tools
+	// alone. Nothing stops a run pushing repeatedly -- the branch is its
+	// own and the proxy authorizes every push to it (gitproxy/authorize.go)
+	// -- but the sentences above read as one final act, and a run that
+	// treats them that way has no reason to ever call pull_request_status,
+	// whose whole value is being called again after the next push. Leaving
+	// that loop implicit is what left a red build to the merge queue's
+	// separate fix task (sync.go's fileFixTask) even when the run that
+	// caused it was still running.
+	if task.Target != nil {
+		prompt += fmt.Sprintf(
+			"\n\nPush as often as you like: %q is your branch, and each push reruns CI "+
+				"against the new commit. After a push, call `pull_request_status` to "+
+				"see what GitHub's checks made of it -- that is how you find out "+
+				"whether tests you cannot run in the sandbox actually pass. If any "+
+				"check fails, fix it, push again and check again, rather than "+
+				"finishing on a red build.",
+			branch,
 		)
 	}
 	if len(task.Reads) > 0 {
@@ -421,8 +448,18 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			watchForTaskClosed(runCtx, ctx, store, task.ID, cfg.cancelPollInterval(), cancelRun)
 		}()
 
+		// Repo/Branch are the same pair BuildPrompt names in the prompt,
+		// passed structurally as well so a Framework can scope its
+		// forked mcpserver's pull_request_status to exactly this run's
+		// branch. Empty for a task with no target, which
+		// agent.RunConfig.Repo's own doc comment covers.
+		var repo string
+		if task.Target != nil {
+			repo = task.Target.String()
+		}
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
+			Repo: repo, Branch: model.BranchName(task.ID),
 			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
@@ -558,8 +595,9 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // pkg/orchestrate's own prepare (bwsalmon/agents#254).
 //
 // That rule holds for every grant, including one a task was filed with
-// because the deployment attaches it to everything
-// (model.Config.DefaultCapabilities, model.GrantByDefault). There is no
+// because the deployment attaches it to everything, or because the repo
+// it targets adds it (model.Config.DefaultCapabilities,
+// model.RepoConfig.DefaultCapabilities, model.GrantByDefault). There is no
 // "degrade rather than fail" tier here, and it is not an oversight: v1
 // needed one because it minted a GCP key per dispatch for every sandbox,
 // with no task holding the request and nowhere to record that it had
