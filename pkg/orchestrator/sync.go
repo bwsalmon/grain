@@ -455,12 +455,31 @@ func ChecksUnavailable() bool {
 // below never clears within a process). github.IsPermissionDenied draws
 // that line by message, not by status.
 //
-// headSHA may be empty on a PR read before GitHub filled it in; the
-// Actions fallback needs a commit to scope to, so it is skipped rather
-// than widened to a branch-scoped read that could return an older
-// commit's runs.
+// Both endpoints are scoped to headSHA -- the commit the caller read off
+// the pull request a moment ago, and the commit whose health it is about
+// to decide. The Checks API takes any ref, including the head branch's
+// name, and a branch-scoped read is a read of whatever that branch points
+// at *now*: a push landing between the caller's GetPullRequest and this
+// call answers for a commit the caller never saw, so the check list, the
+// verdict computed from it and the registration-window sighting keyed on
+// the caller's headSHA would each describe a different commit. Naming the
+// commit costs nothing and keeps all three talking about one (a push
+// during the cycle then simply makes the *next* cycle start that new
+// commit's window afresh, which is what sighting.headSHA is for).
+//
+// head, the branch name, is the fallback for the one case there is no sha
+// to name: headSHA may be empty on a PR read before GitHub filled it in.
+// A branch-scoped read is then better than no CI signal at all, since the
+// caller's own headSHA is empty too and emptyChecksSettled already
+// refuses to conclude anything from an empty list without one. The
+// Actions fallback below has no such fallback of its own -- it takes a
+// commit and nothing else -- so it is skipped rather than widened.
 func checkRunsFor(client github.Client, ref model.PullRequestRef, head, headSHA string) ([]github.CheckRun, bool, error) {
-	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, head)
+	commit := headSHA
+	if commit == "" {
+		commit = head
+	}
+	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, commit)
 	if err == nil {
 		return checks, true, nil
 	}
@@ -667,8 +686,18 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		// is what keeps the sighting map to pull requests that are
 		// actually in that state (emptyChecksSettled starts a commit's
 		// window on the first call for it).
-		if checksKnown && len(checks) == 0 {
-			checksSettled = emptyChecksSettled(ref, detail.HeadSHA, now)
+		//
+		// A list that is *not* empty drops the sighting, the same way
+		// forgetPendingChecks below drops the other clock the moment its
+		// own state stops holding: checks have registered, so there is
+		// nothing left to time, and a sighting left lying around is one
+		// that could outlive the state it was timing.
+		if checksKnown {
+			if len(checks) == 0 {
+				checksSettled = emptyChecksSettled(ref, detail.HeadSHA, now)
+			} else {
+				forgetEmptyChecks(ref)
+			}
 		}
 	}
 	health := healthFrom(detail, checks, checksKnown, checksSettled)
@@ -730,8 +759,28 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// pull requests it would otherwise comment on individually.
 	switch {
 	case health == model.PrClean && task.AutoMerge && (isFixTask || isHead || blocked):
-		if err := client.MergePullRequest(ref.Repo.Owner, ref.Repo.Name, ref.Number); err != nil {
-			return fmt.Errorf("orchestrator: auto-merging %s: %w", ref, err)
+		// Pinned to the commit the verdict above was computed for, not
+		// left to land on whatever the head branch points at by the time
+		// GitHub processes this. The two are the same commit right up
+		// until they are not: a push arriving between the reads above and
+		// this call -- a fix task merging into this branch, a human's own
+		// "push a fix by hand" that escalateToUser asked for, a
+		// redispatched task pushing again -- would otherwise merge code
+		// whose CI this cycle never read, which is the one thing waiting
+		// for CI at all exists to prevent.
+		//
+		// GitHub refuses that with 409 (MergePullRequest's own doc
+		// comment), and refusing is the whole point: the error goes back
+		// to SyncPullRequests, which is already built to have one entry
+		// fail without disturbing the others, and the next cycle reads
+		// the commit that is there now and judges it on its own CI.
+		//
+		// An empty HeadSHA merges unpinned, as before. There is nothing
+		// to pin to, and it is very nearly unreachable anyway: a PR
+		// GitHub has not filled the sha in for reads PENDING on an empty
+		// check list (emptyChecksSettled) rather than clean.
+		if err := client.MergePullRequest(ref.Repo.Owner, ref.Repo.Name, ref.Number, detail.HeadSHA); err != nil {
+			return fmt.Errorf("orchestrator: auto-merging %s (head %q): %w", ref, detail.HeadSHA, err)
 		}
 		// The merge above may have already settled the PR; re-read rather
 		// than assume, since GitHub applies it asynchronously the same way

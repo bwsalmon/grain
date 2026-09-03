@@ -151,7 +151,7 @@ func (r *proposalRig) mergeOnGitHub(branch string, prNumber int) {
 	userTransport := github.NewRealTransport(r.githubHost)
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
-	if err := userClient.MergePullRequest(r.owner, r.repoName, prNumber); err != nil {
+	if err := userClient.MergePullRequest(r.owner, r.repoName, prNumber, ""); err != nil {
 		r.t.Fatalf("submitting (merging) pull request %d: %v", prNumber, err)
 	}
 }

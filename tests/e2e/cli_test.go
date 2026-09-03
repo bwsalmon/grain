@@ -310,7 +310,7 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	userTransport := github.NewRealTransport(githubHost)
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
-	if err := userClient.MergePullRequest(owner, repoName, prNumber); err != nil {
+	if err := userClient.MergePullRequest(owner, repoName, prNumber, ""); err != nil {
 		t.Fatalf("submitting (merging) the pull request: %v", err)
 	}
 

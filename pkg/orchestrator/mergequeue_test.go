@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -933,6 +934,86 @@ func TestSyncPullRequestsTimesStalledChecksBehindTheQueueHeadToo(t *testing.T) {
 	if obs == nil || obs.MergeQueueBlockedAt == nil {
 		t.Fatal("the second task waited out a second deadline of its own after being promoted")
 	}
+}
+
+// Reading clean is a verdict about one commit, and the merge that acts on
+// it is a second request: a push landing in between -- a human's own "push
+// a fix by hand", a fix task merging into this branch, a redispatched task
+// pushing again -- moves the branch after the verdict and before the
+// merge. Merging then lands a commit whose CI this cycle never read, which
+// is the one thing waiting for CI exists to prevent, so the merge names
+// the commit it was passed and GitHub refuses it if the branch has moved.
+//
+// Refusing is cheap: the task keeps its place at the head of the queue and
+// the next cycle judges whatever is there now on its own checks.
+func TestSyncPullRequestsRefusesToMergeACommitThatLandedAfterTheVerdict(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, rest := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task, branch := queuedTaskWithPullRequest(t, ctx, store, sim, rest, "t1", repo)
+
+	setMergeable(sim, true)
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "tests", Status: "completed", Conclusion: strPtr("success")},
+	}
+
+	client := &pushBeforeMerge{Client: rest, t: t, bare: sim.BareRepo, branch: branch}
+	err := orchestrator.SyncPullRequests(ctx, store, client, baseTime)
+	if err == nil {
+		t.Fatal("the merge of a moved head was not refused")
+	}
+	var ghErr *github.Error
+	if !errors.As(err, &ghErr) || ghErr.Status != 409 {
+		t.Fatalf("SyncPullRequests: %v, want a 409 from the pinned merge", err)
+	}
+	if !client.pushed {
+		t.Fatal("the test never landed its racing commit")
+	}
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("merged a commit that landed after the health read")
+		}
+	}
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateCompleted {
+		t.Fatalf("state = %q, want still completed and still queued", st)
+	}
+
+	// Next cycle, with nothing else landing: the commit that arrived is
+	// read, judged on the checks that are there for it, and merged.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests on the cycle after the race: %v", err)
+	}
+	st, err = store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed once the new commit was judged and merged", st)
+	}
+}
+
+// pushBeforeMerge is a real client with one instant wedged into it: a
+// commit lands on the head branch just as the queue asks for the merge,
+// which is the window between syncEntry's health read and its merge
+// request. Once, so the cycle after it is an ordinary one.
+type pushBeforeMerge struct {
+	github.Client
+	t      *testing.T
+	bare   string
+	branch string
+	pushed bool
+}
+
+func (c *pushBeforeMerge) MergePullRequest(owner, repo string, number int, headSHA string) error {
+	if !c.pushed {
+		c.pushed = true
+		pushAnotherCommit(c.t, c.bare, c.branch)
+	}
+	return c.Client.MergePullRequest(owner, repo, number, headSHA)
 }
 
 func strPtr(s string) *string { return &s }

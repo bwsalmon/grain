@@ -489,7 +489,7 @@ type Client interface {
 	CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error)
 	FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error)
 	CreateIssue(owner, repo, title, body string, labels []string) (Issue, error)
-	MergePullRequest(owner, repo string, number int) error
+	MergePullRequest(owner, repo string, number int, headSHA string) error
 	GetPullRequest(owner, repo string, number int) (PullRequestDetail, error)
 	DefaultBranch(owner, repo string) (string, error)
 	ListReviewComments(owner, repo string, number int) ([]ReviewComment, error)
@@ -945,13 +945,33 @@ func (c *RESTClient) CreateIssue(owner, repo, title, body string, labels []strin
 // MergePullRequest merges a PR directly, rather than leaving it for a
 // human to click. A 405 (not mergeable -- GitHub's own answer if
 // Mergeable went stale between the read and this call) or 409 (base
-// branch moved underneath it) is left for the caller to decide whether to
-// retry next cycle via the returned *Error's Status; only a genuinely
-// unexpected status is a surprise here.
-func (c *RESTClient) MergePullRequest(owner, repo string, number int) error {
+// branch moved underneath it, or headSHA no longer matches) is left for
+// the caller to decide whether to retry next cycle via the returned
+// *Error's Status; only a genuinely unexpected status is a surprise here.
+//
+// headSHA, when non-empty, goes in the body as GitHub's own `sha` field
+// -- "SHA that pull request head must match to allow merge" -- and makes
+// this a merge of one named commit rather than of whatever the head
+// branch points at by the time the request lands. A caller that decided
+// to merge by reading a commit's CI wants exactly that: without it, a
+// push landing in the gap between the read and this call is merged
+// untested, and no answer the caller got back could have told it so.
+// GitHub answers 409 when the branch has moved, which is the caller's cue
+// to look again at the commit that is there now.
+//
+// Empty means unpinned, the old behaviour: for a caller merging on a
+// human's say-so rather than on a verdict it computed itself, there is no
+// commit the merge has to match, and pinning one would only refuse a
+// merge the human asked for.
+func (c *RESTClient) MergePullRequest(owner, repo string, number int, headSHA string) error {
+	payload := map[string]any{}
+	if headSHA != "" {
+		payload["sha"] = headSHA
+	}
+	data, _ := json.Marshal(payload)
 	resp, err := c.Transport.Request(
 		"PUT", fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", owner, repo, number),
-		c.headers(owner, repo, true), []byte("{}"),
+		c.headers(owner, repo, true), data,
 	)
 	if err != nil {
 		return err
@@ -1333,7 +1353,11 @@ func (d DryRunClient) CreateIssue(owner, repo, title, body string, labels []stri
 	return Issue{Number: 0, Title: title, Body: body, HTMLURL: fmt.Sprintf("(dry run) %s/%s", owner, repo), Labels: labelSet(labels...)}, nil
 }
 
-func (d DryRunClient) MergePullRequest(owner, repo string, number int) error {
+func (d DryRunClient) MergePullRequest(owner, repo string, number int, headSHA string) error {
+	if headSHA != "" {
+		fmt.Printf("+ merge PR %s/%s#%d (only if its head is still %s)\n", owner, repo, number, headSHA)
+		return nil
+	}
 	fmt.Printf("+ merge PR %s/%s#%d\n", owner, repo, number)
 	return nil
 }
