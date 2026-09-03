@@ -285,8 +285,8 @@ func (c *CredentialSet) PatternsFor(name string) []string {
 // its own (no Authorization header at all); a file of that name would be
 // written, listed, and then never used.
 func ValidCredentialName(name string) error {
-	if name == "" {
-		return fmt.Errorf("a credential name is required")
+	if err := namesOneFile(name); err != nil {
+		return err
 	}
 	if name == "anonymous" {
 		return fmt.Errorf("%q is reserved: it already names the no-credential-at-all case", name)
@@ -299,6 +299,24 @@ func ValidCredentialName(name string) error {
 			return fmt.Errorf(
 				"%q is not a usable credential name: letters, digits, %q and %q only", name, "-", "_")
 		}
+	}
+	return nil
+}
+
+// namesOneFile is the weaker check Remove holds to: enough that
+// name+suffix cannot escape the secrets directory or address something
+// other than a file in it, and nothing more. Removing is not writing --
+// a credential already on disk under a name ValidCredentialName would
+// refuse today (a dot in it, say, from before this package wrote any of
+// these files itself) is still a credential an operator must be able to
+// delete from the same list it appears in.
+func namesOneFile(name string) error {
+	if name == "" {
+		return fmt.Errorf("a credential name is required")
+	}
+	if name == "." || name == ".." || strings.HasPrefix(name, ".") ||
+		strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("%q is not a usable credential name: it must name one file in the secrets directory", name)
 	}
 	return nil
 }
@@ -369,7 +387,7 @@ func (c *CredentialSet) SetToken(name, token string) error {
 // (Select's own fail-closed "no credential configured"). PatternsFor
 // above is how a caller checks before asking for this.
 func (c *CredentialSet) Remove(name string) error {
-	if err := ValidCredentialName(name); err != nil {
+	if err := namesOneFile(name); err != nil {
 		return err
 	}
 	var removed bool

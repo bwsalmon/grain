@@ -220,3 +220,45 @@ func TestDirIsWhereTheLadderWasLoadedFrom(t *testing.T) {
 		t.Errorf("Dir() = %q, want %q", set.Dir(), dir)
 	}
 }
+
+// A credential named before this package wrote any of these files
+// itself -- with a dot in it, which SetToken would refuse today -- is
+// still listed, and so must still be removable from the same listing.
+func TestRemoveWorksForANameSetTokenWouldNotAccept(t *testing.T) {
+	dir := writeCredentialSet(t, nil, map[string]string{"legacy.bot": "legacy-token"})
+	set, err := LoadCredentialSet(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(set.Names(), "legacy.bot") {
+		t.Fatalf("Names() = %v, want it to list legacy.bot", set.Names())
+	}
+	if err := set.Remove("legacy.bot"); err != nil {
+		t.Fatalf("Remove(legacy.bot): %v", err)
+	}
+	if len(set.Names()) != 0 {
+		t.Errorf("Names() = %v after removing the only credential", set.Names())
+	}
+}
+
+// What Remove will not do is address anything but a file in its own
+// directory.
+func TestRemoveRefusesANameThatIsNotOneFileHere(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim.token")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	set, err := LoadCredentialSet(filepath.Join(dir, "github"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", ".", "..", "../victim", `..\victim`} {
+		if err := set.Remove(name); err == nil {
+			t.Errorf("Remove(%q) reported success", name)
+		}
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("a file outside the secrets directory was removed: %v", err)
+	}
+}
