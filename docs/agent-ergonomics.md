@@ -367,6 +367,88 @@ would ever show that.
 
 ---
 
+## 14. A run cannot see grain, and tasks keep being filed as though it can
+
+This is not a finding about a tool. It is the one above all of them: the
+queue keeps dispatching investigations whose evidence lives on the far
+side of the sandbox boundary, and the run only finds that out by
+spending itself against it. Four tasks — grain/task-95, grain/task-99,
+grain/task-142 and grain/task-157 — have now been dispatched to answer
+the same question about grain/task-17 (why its four runs never produced
+a pull request), and every one of them needed either the task row out of
+the store or the daemon's journal to answer it. Neither is reachable.
+
+Measured from inside a `-kontur-sandboxes` sandbox on the live
+deployment, rather than argued from the code:
+
+- The sandbox is a microVM with two interfaces: `eth1` at
+  `169.254.100.2/24`, the controller link, and `eth0` at `172.17.0.3/16`
+  with the default route.
+- The controller (`kontur_base_ip`, `169.254.100.10`) refuses
+  connections on `8080` (this deployment's `ui_port`), on `8420`
+  (`serverDefault` in `cmd/grain/main.go`) and on `12000`
+  (`kontur_base_port`). `GRAIN_SERVER` is unset, so a `grain` binary
+  built in the sandbox would aim at `http://127.0.0.1:8420`, where
+  nothing listens — the only bound port in the guest is sshd.
+- `https://github.com` and `https://api.github.com` are unroutable.
+- The one thing reachable is the git proxy, and `gitproxy.ParsePath`
+  serves `/owner/repo.git/...` and nothing else; `/` is a 404. The
+  credential in `~/.git-credentials` is for the proxy's own
+  host:port, not a GitHub token.
+- The store is a SQLite file on the controller's data disk, which only
+  the daemon ever opens, and the journal needs a shell on that host.
+
+All of that is the design doing exactly what it says: "Sandbox →
+controller is permitted to the git proxy, and nothing else"
+(`docs/design.md`, Networking), and the split-surface rule that gives
+sandboxes git transport and keeps the GitHub API on the orchestrator.
+Nothing here should change. What should change is that a run is never
+told any of it, so "read the task's `Base` out of the store" and "read
+the daemon journal" look, on turn one, like ordinary work.
+
+What is knowable from a sandbox is worth stating, because it is what
+this run could establish about grain/task-17 without any of the above:
+
+- `git ls-remote --heads origin` shows no `refs/heads/grain/task-17` on
+  bwsalmon/grain, and no merge commit in the whole history names that
+  branch, while its neighbours merged normally on 2026-09-02 (51e60090
+  for #540/`grain/task-16`, c667ba65 for #542/`grain/task-19`, ecc99893
+  for #543/`grain/task-20`). So the next run of task 17 takes
+  `prepareCheckout`'s fresh-clone arm, where a base that is gone is
+  fatal and named in the error.
+- A task based on *another task's branch* is ordinary here, not exotic,
+  which is the premise the stale-base hypothesis needs. The merge
+  topology shows it directly: 1089a67d, "Merge pull request #569 from
+  bwsalmon/grain/task-50", is not on `main`'s first-parent chain — it
+  reaches `main` only through 5b50b914 (#554, `grain/task-26`), so #569
+  was opened against `grain/task-26`, not `main`. #505 under #497, #507
+  under #490 and #589 under #567 have the same shape.
+- What none of it gives is task 17's actual `Base`. That value exists in
+  one place, and a sandbox is not in it.
+
+**Proposal.** Two halves, and the cheap one is the second.
+
+Tell every run what it cannot reach, in `BuildPrompt`, in a few lines:
+git to the task's own repo through the proxy, the MCP tools, and general
+egress — no grain API, no store, no controller shell, no GitHub API. A
+run that is handed an impossible read then says so on its first turn
+through `comment_on_issue` instead of its thirtieth, which is the whole
+of what the four tasks above cost. This is finding 1's species of fix:
+the sandbox is fine, the description of it is missing.
+
+And on the filing side, which no code change reaches: if the evidence a
+task needs is in the store, in the daemon's journal, or behind the
+GitHub API, the task belongs to a human at the controller, not to a run.
+For grain/task-17 that human action is a single command — `grain retry
+17` (`cmd/grain/main.go`'s `retry <id>`, which clears the failure streak
+via `ui.Client.Retry` so dispatch offers the task again), or the same
+button in the UI. Its next run then diagnoses itself with no journal
+involved: a stale base ends as `noteBaseRetarget`'s comment naming the
+branch that went missing, and anything else ends as a `finish-failed`
+run row quoting GitHub's own status and message (`noteFinishFailure`).
+
+---
+
 ## Follow-up tasks
 
 Filed as separate proposals, each depending on this document:
@@ -380,10 +462,12 @@ Filed as separate proposals, each depending on this document:
 4. Tell a redispatched run what its previous attempts did (finding 8).
 5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13).
 6. A per-repo setup command (finding 9).
+7. Tell a run what it cannot reach (finding 14). Its other half is a
+   filing habit, not a change.
 
 Findings 6 and 10 are small enough to fold into whichever of those
 touches the same file first.
 
-Each is proposed for human review rather than auto-merge: all six change
-what every dispatched run sees or how its behaviour is recorded, and that
-is not a surface to change unread.
+Each is proposed for human review rather than auto-merge: all seven
+change what every dispatched run sees or how its behaviour is recorded,
+and that is not a surface to change unread.
