@@ -8,10 +8,11 @@ to reach it. Nothing in this repo built that image -- v1 has an equivalent
 job for its own libvirt-managed sandboxes (v1's own sandbox provisioning script, run as
 cloud-init user-data against a shared base image on every VM's first boot);
 v2 had no successor, kontur-backed or otherwise. This directory is that
-successor: `build-guest.sh` drives `third_party/kontur`'s own guest build
-with `guest-setup.sh` as its `GUEST_SETUP_SCRIPT`, producing a kernel, an
-initramfs and a disk image cloud-hypervisor direct-kernel-boots, with no
-bootloader, firmware, or partition table anywhere in the picture.
+successor: `build-guest.sh` derives a grain sandbox guest from a
+published kontur image -- booting it, running `guest-setup.sh` inside,
+scrubbing and committing -- and what comes out is itself a runnable
+kontur image, carrying a guest cloud-hypervisor direct-kernel-boots with
+no bootloader, firmware, or partition table anywhere in the picture.
 
 bwsalmon/agents#267 first answered "decide, don't just wire" for what the
 image needs beyond sshd+key, how it gets built and published, and whether
@@ -176,43 +177,34 @@ So `guest-setup.sh` replaces that drop-in, keeping its two hardening lines
 and dropping the `ForceCommand`. This is the one place where building on
 kontur's guest actively breaks something rather than merely not helping.
 
-### Wiring: done
+### Wiring: done, then superseded
 
-`build-guest.sh` runs exactly this:
+For a while `build-guest.sh` ran exactly one `docker build` against
+`third_party/kontur`, handing `guest-setup.sh` to its
+`GUEST_SETUP_SCRIPT` build arg and exporting `disk.img`/`vmlinuz`/
+`initrd.img` through `--target guest-artifacts --output type=local`. That
+is no longer what happens here, but it is still how the *base* image this
+directory derives from gets built -- kontur's CI runs it, with
+`GUEST_KERNEL_PACKAGE=linux-image-amd64` and `GUEST_CONSOLE_WRAP=0`, and
+publishes the result. See "How the image gets built and published" below
+for what this directory does on top of it.
 
-```sh
-docker build \
-  --build-arg GUEST_SETUP_SCRIPT="$(cat scripts/kontur/guest-setup.sh)" \
-  --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat <operator key>.pub)" \
-  --target guest-artifacts --output type=local,dest=<dir> \
-  third_party/kontur
-```
-
--- which yields `disk.img`, `vmlinuz` and `initrd.img` in `<dir>`, the
-same three files, with the same names, the old `build.sh` produced.
-`scripts/setup.sh`'s `ensure_kontur_images_build` calls
-`build-guest.sh` in its place, and no longer installs debootstrap or
-e2fsprogs, since the build needs neither (nor root).
-
-`guest-setup.sh` reads one variable (`SANDBOX_SETUP_SCRIPT`, if set).
-kontur's hook execs the script with only its own build stage's
-environment, so `build-guest.sh` inserts it as an assignment immediately
-after the script's shebang -- which has to stay on line 1 for the exec to
-work -- rather than passing it as a build arg of its own.
-
-It used to read a second, `OPERATOR_SSH_PUBLIC_KEY`, and that was what
-made the image deployment-specific. Resolved upstream in
-bwsalmon/kontur#35: kontur now generates the `kontur exec` keypair in the
-VM's own container on every boot and hands the guest the public half on
-its kernel command line, and `konturctl vm create -guest-user` names the
-extra account to authorize it for -- which is what closed the last gap
-here, kontur authorizing **root** while this guest's sandbox account is
-`debian`. `-kontur-exec-key` and the key staging `scripts/setup.sh`
-did for it are both gone.
+Two variables that shaped this directory's history are worth recording
+because both are gone. `SANDBOX_SETUP_SCRIPT` was a pass-through for a
+caller wanting to add to `guest-setup.sh`, spliced into that script's own
+text; deriving from a published image replaced it (see "Customizing this
+guest"). `OPERATOR_SSH_PUBLIC_KEY` was what made the image
+deployment-specific at all, and its removal is what made everything since
+possible: bwsalmon/kontur#35 moved the `kontur exec` keypair to one
+generated in the VM's own container on every boot, handed to the guest on
+its kernel command line, with `konturctl vm create -guest-user` naming
+the account to authorize it for -- which closed the last gap here, kontur
+authorizing **root** while this guest's sandbox account is `debian`.
+`-kontur-exec-key` and the key staging `scripts/setup.sh` did for it are
+both gone.
 
 See "Verified live (bwsalmon/agents#577)" above -- the build has now been
 run and the result booted, for the Debian path.
-
 
 ## Why no custom kernel
 
@@ -231,10 +223,12 @@ a real cloud-hypervisor binary:
   above lacks, and the reason that kernel panics on this VMM specifically.
 
 So the "kernel" this image ships is just `/boot/vmlinuz-*` and
-`/boot/initrd.img-*` out of a normal `apt-get install linux-image-amd64`
-(`guest-setup.sh` runs that install), copied out of the built rootfs as
-`vmlinuz`/`initrd.img` by kontur's own `guest-image` stage and exported by
-its `guest-artifacts` target.
+`/boot/initrd.img-*` out of a normal `apt-get install linux-image-amd64`.
+`guest-setup.sh` used to run that install itself; kontur's own
+`GUEST_KERNEL_PACKAGE` does it now (bwsalmon/kontur#36), which is what
+lets the base image carry the kernel, the initramfs and the boot-time
+`ip=` handling that depends on it -- so nothing in this directory installs
+a kernel or regenerates an initramfs any more.
 There is no from-source kernel build anywhere in this pipeline, and no
 firmware/GRUB/UEFI boot path either (cloud-hypervisor's other option,
 `CHV_FIRMWARE` -- see below for why that path was ruled out, not just left
@@ -242,7 +236,9 @@ unexplored).
 
 Two gaps still had to be closed by hand, both confirmed by booting the
 actual built image under real KVM before this pipeline was considered
-done:
+done. Both live in kontur's own Debian guest overlay now
+(bwsalmon/kontur#36) rather than in `guest-setup.sh`, since both are
+consequences of kontur's addressing rather than anything grain wants:
 
 - **The guest's one NIC needs to be named `eth0`.** `konturctl` itself
   (`internal/staticpod/spec.go`) derives each VM's static-addressing
@@ -353,43 +349,36 @@ VM's SSH-exposed sandbox tools from the controller/orchestrator side, not
 on the guest, so there is nothing here worth a credential leak protecting
 in the first place.
 
-## Running a custom setup script
+## Customizing this guest
 
-To customize the image beyond `guest-setup.sh`'s own fixed package list --
-installing extra packages, dropping in config files, enabling services,
-etc -- without forking this directory, set `SANDBOX_SETUP_SCRIPT` to a
-script's contents (not a path) before running `build-guest.sh`:
+There is no environment variable for it any more, and that is a
+simplification rather than a removal. `SANDBOX_SETUP_SCRIPT` existed
+because the only way to add to this guest was to get a second script into
+a `docker build` that could not otherwise reach one -- `build-guest.sh`
+spliced its text into `guest-setup.sh` before handing that to kontur's
+`GUEST_SETUP_SCRIPT` build arg, which is as awkward as it sounds.
+
+Customizing is now the same operation that built this image in the first
+place: derive from it.
 
 ```sh
-export SANDBOX_SETUP_SCRIPT="$(cat my-setup.sh)"
-./build-guest.sh
+konturctl guest build \
+  -from ghcr.io/bwsalmon/grain/guest:latest \
+  -setup ./my-setup.sh \
+  -t my-guest:dev
 ```
 
-`guest-setup.sh` runs it, as root, once the built-in provisioning above
-has finished but before the operator-key finalization below -- see that
-script's own comment on the section for exactly where and why.
-`build-guest.sh` carries it in by splicing it into the text of
-`guest-setup.sh` it hands kontur, since kontur's hook execs that script
-with only its own build stage's environment; nothing about that is visible
-to the script being customized.
+What comes out is another runnable kontur image, which can itself be the
+`-from` of the next one. So the extension point is the tool, the
+customization is an ordinary script rather than a variable holding a
+script's text, and nothing here has to know it happened.
 
-This is bwsalmon/kontur's own `GUEST_SETUP_SCRIPT` build arg's idiom
-(`third_party/kontur/deploy/guest-image/README.md`, "Running a custom
-setup script") -- and since the convergence above it sits directly on top
-of that hook rather than beside it: `GUEST_SETUP_SCRIPT` is how
-`build-guest.sh` gets `guest-setup.sh` into the build at all, and
-`SANDBOX_SETUP_SCRIPT` is this directory's own pass-through for a caller
-who wants to add to that script without editing it. Both keep the same
-"an env var holds the script's contents, not a path" shape, so neither
-needs any extra context-wrangling.
-
-The environment a custom script gets is whatever kontur's
-`guest-customized` stage gives an ordinary `RUN`: the guest rootfs as `/`,
-a real `/proc` and `/dev`, and working network access. `apt-get install`,
-`systemctl enable` and the like work normally; there is no *running*
-service manager, so `systemctl start` does not. Leave
-`SANDBOX_SETUP_SCRIPT` unset (the default) to build exactly what
-`guest-setup.sh` already bakes in on its own.
+The environment such a script gets is a *booted* guest: systemd is
+running, so `systemctl start` works and dockerd can actually run --
+unlike the container build the old hook ran in, where anything that
+needed a running service manager was simply unavailable. It needs
+`/dev/kvm` on the machine doing the derivation, which is the trade "It
+boots a VM now" below spells out.
 
 Like everything else in this image, the rule from "What's in the image,
 and why" above still applies: no secret belongs in a script baked in at
@@ -398,157 +387,105 @@ image to read back out.
 
 ## How the image gets built and published
 
-### Why no VM boot to build this
+### It boots a VM now, and that is the point
 
-This directory previously used [Packer](https://www.packer.io/)'s `qemu`
-builder: boot a stock Debian cloud image under QEMU, reach it over SSH via
-a throwaway NoCloud cloud-init seed, and run `provision.sh` against the
-live, booted VM. That pipeline needed KVM and a full VM boot just to *build*
-the image (on top of the KVM a deployment separately needs to *run* it),
-had no way to pre-pull the kind node image without a running dockerd
-anyway (booting a VM doesn't help there either, since Packer's build step
-was still just a provisioner script over SSH -- no different in that
-respect from a chroot), and could not produce anything with the file
-shape a direct-kernel-booting guest actually needs (a stock Debian cloud
-image only ever ships as one bootloader-dependent, GRUB/UEFI qcow2, not a
-separate kernel/initramfs/disk triple).
+Two earlier answers to "how does this get built" both avoided booting
+anything, and the reasoning that ruled a VM boot out is worth keeping
+straight from the reasoning that brought one back.
 
-A `docker build` needs neither. `third_party/kontur`'s own Dockerfile
-already assembles the whole triple without booting anything: its
-`guest-rootfs-debian` stage debootstraps a `--variant=minbase` rootfs, its
-`guest-customized` stage runs `guest-setup.sh` in it as an ordinary `RUN`
-(so `apt-get`/`curl` just work, and `update-initramfs`/`systemctl enable`
-behave normally, with no chroot and so no `CAP_SYS_ADMIN`), and its
-`guest-image` stage packs the result with `mke2fs -d` -- straight into an
-ext4 image with no loop-mount at all -- and copies `/boot/vmlinuz-*` and
-`/boot/initrd.img-*` out beside it. `build-guest.sh` drives exactly that,
-so nothing in this directory needs root, `debootstrap` or `mke2fs` any
-more; docker is the whole prerequisite list.
+The original pipeline used [Packer](https://www.packer.io/)'s `qemu`
+builder: boot a stock Debian cloud image, reach it over SSH via a
+throwaway NoCloud seed, provision the live VM. That was ruled out because
+it could not produce the file shape a direct-kernel-booting guest needs --
+a stock cloud image ships as one bootloader-dependent GRUB/UEFI qcow2,
+not a kernel/initramfs/disk triple -- and because its provisioning step
+was a shell script over SSH, no more capable than a chroot for the one
+thing anyone wanted a boot for (pre-pulling the kind node image, which
+needs a running dockerd).
 
-This is the same reasoning that ruled the Packer builder out, applied one
-step further: the earlier `build.sh`/`provision.sh` pipeline reached the
-right file shape without a VM boot, but paid root for `debootstrap`, for
-the `/dev`/`/dev/pts`/`/proc`/`/sys` bind-mounts a useful `chroot` needs,
-and for `mke2fs -d` -- all three to redo work kontur's Dockerfile was
-already doing unprivileged. See "Converged on kontur's own guest build"
-above.
+A `docker build` against `third_party/kontur`'s own Dockerfile replaced
+it and needed neither root nor a VM: `debootstrap` in one stage,
+`guest-setup.sh` as an ordinary `RUN` in the next, `mke2fs -d` in the
+third. That is still how the *base* image is built, and it is still
+unprivileged.
+
+What changed is what this directory builds on top of it. A guest is now
+derived from a published kontur image by `konturctl guest build`: boot
+it, run `guest-setup.sh` inside over `kontur exec`, scrub per-boot
+identity, power it off, commit the container. So a build here does boot a
+VM, and the trade is deliberate:
+
+- **It costs `/dev/kvm` on whoever builds.** CI has it; a machine without
+  it cannot build this image at all. That is the property the docker
+  build had and this one spends.
+- **It buys a setup script that runs against the real thing.** systemd is
+  up, so `systemctl start` works and dockerd actually runs. The
+  install-only restrictions a container build imposes -- and the ordering
+  hazards that come with them -- are gone. It is also, finally, where the
+  kind node image could be pre-pulled.
+- **It is not something a deployment pays.** The point of deriving from a
+  *published* image is that this happens once, in CI, and every host
+  pulls the result. A deployment used to run this build itself, on every
+  host, on every deploy generation.
+
+The reason it could not work this way before was not the boot. It was the
+key: `guest-setup.sh` baked the deployment's own SSH public key into
+`authorized_keys`, so no generic published image could exist. kontur
+generates that keypair per VM boot now, and nothing deployment-specific
+reaches the disk.
+
+### What comes out is another kontur image
+
+Not a disk to hand somewhere. `konturctl guest build` commits the
+container it provisioned, and that container was a kontur image -- so the
+result carries `kontur`, `cloud-hypervisor` and the guest disk, and
+`docker run` on it boots a VM exactly as the base does. Three
+consequences worth naming:
+
+- The sandbox container and the guest are one artifact. `scripts/setup.sh`
+  pulls one image and passes `konturctl` one `-kontur-image`; there is no
+  `-disk`/`-kernel`/`-initramfs` and no host directory to resolve them
+  against.
+- It can be the input to another build. Customizing this guest is
+  `konturctl guest build --from` it, which is the same mechanism that
+  produced it -- so the extension point is the tool rather than an
+  environment variable spliced into a script.
+- `docker commit` carries the base's config forward, including
+  `org.opencontainers.image.source`. On a kontur base that names
+  *kontur's* repository, and GHCR uses that label alone to decide which
+  repository a package belongs to -- so `build-guest.sh` relabels when
+  `GUEST_SOURCE_REPO` is set. Without it the build is green, the push is
+  green, and the package lands in someone else's namespace.
 
 ### Building and publishing
 
 ```sh
-export KONTUR_IMAGE_BUCKET="<a GCS bucket this deployment's operator controls>"
-./build-guest.sh
+IMAGE=ghcr.io/bwsalmon/grain/guest:dev ./build-guest.sh
 ```
 
-`build-guest.sh` runs one `docker build` against `third_party/kontur`,
-with `guest-setup.sh` handed to its `GUEST_SETUP_SCRIPT` build arg and
-`--target guest-artifacts --output type=local` exporting the result: a
-`disk.img` packed by kontur's own `guest-image` stage (`mke2fs -d`, sized
-to the rootfs plus 20% headroom and a 64MiB floor) and the `vmlinuz`/
-`initrd.img` that stage copies out of `/boot` alongside it. It writes all
-three under `output/kontur-guest-<git-sha>-<UTC timestamp>/`, or straight
-into `$OUTPUT_DIR` when that is set -- which is how a caller that already
-knows where it wants them (`scripts/setup.sh`'s own
-`ensure_kontur_images`) skips parsing this script's output to find them.
-It needs docker and nothing else; in particular not root, and not
-`debootstrap` or `mke2fs` on the build host, both of which now only ever
-run inside the build. If `KONTUR_IMAGE_BUCKET`
-is set, `gsutil cp`s all three to both
-`gs://$KONTUR_IMAGE_BUCKET/kontur-guest/<same name>/` (a permanent,
-versioned copy) and `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/latest/` (a
-fixed alias overwritten by every build) -- the second is what
-`scripts/setup.sh`'s own `ensure_kontur_images` always fetches
-(bwsalmon/agents#504), so a fresh build actually reaches a deployment on
-its next `setup.sh` run without that script having to discover or
-hardcode today's `<git-sha>-<timestamp>` version string itself. No bucket
-name is hardcoded here -- this repo doesn't otherwise touch GCS for
-artifacts, and `terraform/gcp/versions.tf`'s own comment on its Terraform
-state bucket ("the bucket name lives in the repo as configuration, not
-here") is the precedent to follow rather than inventing a
-project-specific bucket name a deployment didn't choose; see
-`terraform/gcp/variables.tf`'s own `kontur_image_bucket` for where that
-name is actually configured for that deployment shape.
-No SSH key is involved either way. The image this builds carries none
-(bwsalmon/kontur#35 -- kontur generates one per VM boot instead), so
-there is nothing here for `push-secrets.sh` to carry and no keypair for a
-deployment and its guest image to keep in sync.
+`build-guest.sh` builds `konturctl` out of `third_party/kontur` -- not
+from `PATH`, because the base below is pinned to the exact commit that
+tree is vendored from and a konturctl that happened to be installed here
+is not that -- and runs `konturctl guest build` with `guest-setup.sh` as
+the setup script. It needs docker, `/dev/kvm` and Go.
 
-The other half of what a deployment needs published -- the `kontur`
-binary and the cloud-hypervisor release bundled with it, not the guest
-disk this directory builds -- is `third_party/kontur`'s own Dockerfile, a
-plain `docker build`/`docker push` with no root and no debootstrap of its
-own needed; see this directory's sibling `build-oci-image.sh` for exactly
-that, and `scripts/setup.sh`'s own `ensure_kontur_images` for how a
-deployment pulls it back down and retags it to `konturctl`'s own default
-image reference.
+`KONTUR_GUEST_BASE` is the base, defaulting to the immutable per-commit
+tag kontur's CI publishes for the SHA `third_party/kontur/VENDORED.md`
+records. The pairing is the invariant, not a convention: `konturctl` is
+built from the vendored tree and drives a guest built from that image,
+and the two agree on the guest-side contract -- the authorized-key
+installer, the control-net overlay, the mem-agent, the disk modes -- only
+because they are one commit. Re-vendoring moves both, and the SHA
+appearing in two places is what makes a mismatch visible rather than a
+runtime mystery.
 
-**The flags `konturctl vm create` takes to point at a built image**,
-resolved by reading bwsalmon/kontur's own source directly
-(`../../third_party/kontur/`, bwsalmon/agents#351): per
-`internal/cli/vm.go`'s `registerVMFlags` and `internal/dockervm/docker.go`'s
-`Create`, `konturctl` never fetches an image itself -- `-disk`, `-kernel`
-and `-initramfs` (`internal/cli/vm.go`: paths "as seen inside the
-container") are paths inside a host directory `-images-hostpath` (default
-`/var/lib/vm-images`, `internal/staticpod/spec.go`'s own default) mounts
-read-only at `/images` in the VM's container. So a deployment publishing
-this directory's `build-guest.sh` output has to land all three files on the
-kontur host's own local disk under that directory -- `scripts/
-setup.sh`'s own `ensure_kontur_images` is that provisioning step
-(bwsalmon/agents#504: nothing downstream of `konturctl vm create` fetches
-them there on its own), always landing them at a fixed `<hostpath>/current/`
-regardless of the version string `build-guest.sh` gave them in GCS, so
-`write_systemd_units`'s own `-kontur-create-arg` construction never has to
-discover or hardcode one either:
-
-```sh
-konturctl vm create <name> -backend docker \
-  -images-hostpath /var/lib/vm-images \
-  -disk /images/current/disk.img \
-  -kernel /images/current/vmlinuz \
-  -initramfs /images/current/initrd.img \
-  -guest-port 22
-```
-
-**`-guest-port 22` is required**, not optional, for this image specifically:
-`konturctl`'s own default (`internal/netshim/config.go`'s `defaultGuestPort`)
-is 80, on the assumption a guest is serving HTTP -- netshim's DNAT rule
-forwards `-port`'s external port straight to `-guest-port` inside the
-guest, so leaving it at 80 against this image (whose only listener is
-sshd on 22) means every connection is refused, no matter how long a
-caller waits for the guest to finish booting. Confirmed by hand: this was
-the single largest time sink in validating this whole pipeline, since a
-refused connection looks identical whether the guest hasn't finished
-booting yet or is listening on a port nothing is forwarded to.
-
-**A `kontur`/`konturctl` built from bwsalmon/kontur's `main` boots the
-`-disk` path above with no patching**, as of bwsalmon/kontur#28. The
-fixes that makes true (chiefly `internal/hypervisor/args.go` passing
-`image_type` on every `--disk`) spent a while as local patches to the
-vendored `third_party/kontur` copy; they are now upstream commits
-`84f683d`, `1c7ac13` and `694b3d1`, and this repo carries no local
-patches to that copy at all -- see `third_party/kontur/VENDORED.md`.
-Anything earlier than that merge still needs them applied by hand.
-
-`orchestrator.KonturConfig.CreateArgs` (bwsalmon/agents#262) is the
-passthrough a deployment sets this through -- `grain daemon` constructs a
-real `KonturSandboxes`/`KonturConfig` from it (bwsalmon/agents#274) via
-`-kontur-sandboxes` and a repeatable `-kontur-create-arg` flag, e.g.
-`-kontur-create-arg=-images-hostpath -kontur-create-arg=/var/lib/vm-images
--kontur-create-arg=-disk -kontur-create-arg=/images/current/disk.img
--kontur-create-arg=-kernel -kontur-create-arg=/images/current/vmlinuz
--kontur-create-arg=-initramfs -kontur-create-arg=/images/current/initrd.img
--kontur-create-arg=-guest-port -kontur-create-arg=22` (see "`-guest-port 22`
-is required" above -- easy to leave out, since a refused connection gives
-no hint that the guest is listening on the wrong port rather than still
-booting). `scripts/setup.sh`'s own `write_systemd_units` builds exactly
-this list whenever `GRAIN_KONTUR_ENABLE=1` (bwsalmon/agents#504) -- see
-`terraform/gcp/README.md`, "Kontur sandboxing", rather than wiring it
-by hand.
-That vendored copy is a point-in-time snapshot with no automation keeping
-it current (see its own `VENDORED.md`), so a deployment wiring
-`-kontur-create-arg` for the first time should still treat bwsalmon/
-kontur's own `konturctl vm create -h` as authoritative if the two ever
-disagree.
+`.github/workflows/build-artifacts.yml` runs exactly this on every
+branch, publishes the result as `guest`, and stamps its per-commit tag
+into the grain image built from the same commit
+(`cmd/grain/sandboximage.go`). A deployment resolves it by asking its own
+binary, so grain and its sandbox are always one commit's worth of each
+other -- including after a rollback, which asks for its own older sandbox
+rather than whatever is newest.
 
 ## Networking
 

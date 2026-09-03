@@ -152,7 +152,6 @@ GCP_PROJECT="$(cfg gcp_project)"
 GCP_AGENT_SERVICE_ACCOUNT="$(cfg gcp_agent_service_account)"
 
 ENABLE_KONTUR_SANDBOXES="$(cfg enable_kontur_sandboxes)"
-KONTUR_IMAGE_BUCKET="$(cfg kontur_image_bucket)"
 KONTUR_OCI_IMAGE="$(cfg kontur_oci_image)"
 KONTUR_SSH_USER="$(cfg kontur_ssh_user)"
 KONTUR_WORKSPACE="$(cfg kontur_workspace)"
@@ -250,7 +249,7 @@ log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo absent)" \
     "| gemini key: $([ -n "$GEMINI_API_KEY" ] && echo present || echo 'absent, will mint')" \
     "| claude token: $([ -n "$CLAUDE_OAUTH_TOKEN" ] && echo present || echo absent)" \
     "| minter key: $([ -n "$MINTER_KEY_FILE" ] && echo present || echo MISSING)"
-log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_image_bucket=${KONTUR_IMAGE_BUCKET:-<empty>} kontur_oci_image=${KONTUR_OCI_IMAGE:-<empty>}"
+log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_oci_image=${KONTUR_OCI_IMAGE:-<empty>}"
 
 # --- run scripts/setup.sh, which does everything else --------------
 #
@@ -295,7 +294,6 @@ env \
   GRAIN_TARGET_REPO="$DEFAULT_TARGET_REPO" \
   GRAIN_TARGET_REPOS="$TARGET_REPOS" \
   GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "true" ] && echo 1 || echo 0)" \
-  GRAIN_KONTUR_IMAGE_BUCKET="$KONTUR_IMAGE_BUCKET" \
   GRAIN_KONTUR_OCI_IMAGE="$KONTUR_OCI_IMAGE" \
   GRAIN_KONTUR_SSH_USER="$KONTUR_SSH_USER" \
   GRAIN_KONTUR_WORKSPACE="$KONTUR_WORKSPACE" \

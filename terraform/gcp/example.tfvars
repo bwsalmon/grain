@@ -51,16 +51,12 @@ grain_ref = "main" # pin a tag or SHA for a reproducible staging build
 
 # -- Kontur sandboxing --------------------------------------------------
 #
-# enable_kontur_sandboxes defaults to true (variables.tf), but needs a
-# guest image and an OCI image published somewhere first. Neither is
-# required any more: the sandbox container is pulled (the grain image
-# names the one it was built against), and the guest disk is built on the
-# host on first use -- see this directory's README, "Kontur sandboxing".
-# Both overrides below stay available, and are independent of each other:
-# the first fetches a pre-built guest disk, the second runs a sandbox
-# container of your own choosing. Or set enable_kontur_sandboxes = false
-# to keep this deployment on host-directory sandboxing
-# (bwsalmon/agents#504) instead.
-# kontur_image_bucket = "CHANGE-ME-kontur-images"
+# enable_kontur_sandboxes defaults to true (variables.tf) and needs
+# nothing published first: the sandbox image is pulled, and the grain
+# image names the one it was built against. The guest is inside that same
+# image, so there is no second artifact -- see this directory's README,
+# "Kontur sandboxing". The override below runs a sandbox image of your
+# own choosing. Or set enable_kontur_sandboxes = false to keep this
+# deployment on host-directory sandboxing (bwsalmon/agents#504) instead.
 # kontur_oci_image    = "us-central1-docker.pkg.dev/CHANGE-ME-gcp-project/CHANGE-ME-repo/kontur:latest"
 # enable_kontur_sandboxes = false

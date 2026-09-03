@@ -588,14 +588,10 @@ variable "enable_kontur_sandboxes" {
     default", now that build.sh/setup.sh actually wire the rest of this
     section through.
 
-    On by default, and needs no other setup: left with kontur_image_bucket
-    and kontur_oci_image both at their empty defaults,
-    scripts/setup.sh's own ensure_kontur_images builds the guest image
-    and the OCI image itself, on the host, the first time it runs
-    (bwsalmon/agents#531) -- see this module's own README, "Kontur
-    sandboxing", for what that costs and how the result is cached. Set
-    kontur_image_bucket/kontur_oci_image together instead to fetch a
-    pre-built pair from somewhere shared, or set this false to keep
+    On by default, and needs no other setup: left with kontur_oci_image
+    at its empty default, scripts/setup.sh pulls the sandbox image this
+    build of grain was built against and builds nothing at all. Set
+    kontur_oci_image to run a different one, or set this false to keep
     dispatching into host directories the way every deployment before
     bwsalmon/agents#504 did.
 
@@ -605,35 +601,6 @@ variable "enable_kontur_sandboxes" {
     boot at all.
   EOT
   default     = true
-}
-
-variable "kontur_image_bucket" {
-  type        = string
-  description = <<-EOT
-    GCS bucket (name only, no gs:// prefix) to fetch a pre-built guest
-    image from instead of building one on the host -- vmlinuz, initrd.img
-    and disk.img, under a "latest" alias setup.sh always fetches (see
-    scripts/kontur/build-guest.sh's own KONTUR_IMAGE_BUCKET, and its comment on
-    why the alias exists). Optional: left empty (the default),
-    scripts/setup.sh's own ensure_kontur_images builds the guest disk
-    itself instead (bwsalmon/agents#531) and this is never read.
-
-    The guest disk is the one thing a deployment still builds rather than
-    pulls. Nothing deployment-specific goes into it any more -- kontur
-    generates an SSH keypair per VM boot and hands the guest the public
-    half on its kernel command line, where guest-setup.sh used to bake
-    one in -- so a disk built anywhere works anywhere, and this needs no
-    matching secret pushed alongside it. Set it for an operator who would
-    rather build once, centrally, and share the result across a fleet.
-    Unrelated to kontur_oci_image above, which
-    is a container and is always pulled; this module does not create the bucket for you,
-    so create one by hand (`gsutil mb`) and grant the host service account
-    read access to it yourself, or via a `google_storage_bucket_iam_member`
-    alongside this module referencing google_service_account.host.email --
-    see iam.tf's own host_reads_kontur_images for exactly that grant,
-    conditioned on this variable being non-empty.
-  EOT
-  default     = ""
 }
 
 variable "kontur_oci_image" {
@@ -656,7 +623,7 @@ variable "kontur_oci_image" {
     this is set (iam.tf's host_reads_kontur_registry), though this module
     does not create the repository itself.
 
-    Unrelated to kontur_image_bucket below, which is about the guest
+    Unrelated to the guest disk, which is now part of this same image
     disk. The two used to be set together or not at all; they are
     independent now.
   EOT

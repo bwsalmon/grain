@@ -145,15 +145,18 @@ jobs:
   # A separate job rather than a step in go-test, for the same reason
   # ui-e2e is one: it wants a docker daemon and several minutes of guest
   # build, and failing independently says which half broke. It is not
-  # path-filtered -- it costs about as long as go-test itself (~5.5
-  # minutes, most of it the guest rootfs), and a suite that only runs when
-  # someone predicted it was relevant is most of the way back to one that
-  # never runs.
+  # path-filtered -- a suite that only runs when someone predicted it was
+  # relevant is most of the way back to one that never runs.
   real-vm:
     name: real KVM sandboxes
     runs-on: ubuntu-latest
-    # The guest rootfs build dominates this: debootstrap plus the package
-    # set guest-setup.sh installs, before any VM boots at all.
+    # Building the guest dominates this, in two stages: the kontur base
+    # image out of the vendored tree (debootstrap plus a distro kernel),
+    # then a VM booted from it and provisioned by guest-setup.sh. The
+    # second stage is what a deployment no longer pays -- it pulls the
+    # image CI publishes -- and what this job still does, because the
+    # point here is to prove the vendored kontur works against pkg/kontur
+    # rather than to trust an image built from some other commit.
     timeout-minutes: 45
 
     steps:

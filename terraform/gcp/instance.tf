@@ -39,7 +39,6 @@ locals {
     # it tells scripts/setup.sh's own ensure_kontur_images to build both
     # images itself rather than fetch a pair published elsewhere.
     enable_kontur_sandboxes = var.enable_kontur_sandboxes
-    kontur_image_bucket     = var.kontur_image_bucket
     kontur_oci_image        = var.kontur_oci_image
     kontur_ssh_user         = var.kontur_ssh_user
     kontur_workspace        = var.kontur_workspace
@@ -197,17 +196,14 @@ resource "google_compute_instance" "host" {
     # neither had a project-independent default this module could supply
     # -- so this precondition used to fail loudly here rather than
     # applying a host that could never actually create one. That is no
-    # longer true (bwsalmon/agents#531, #645): with both left at their
-    # empty defaults, scripts/setup.sh's own ensure_kontur_images
-    # *pulls* the sandbox container -- the one the grain image it is
-    # deploying was built against, stamped in at build time, so nothing
-    # names it here -- and builds the guest disk itself on the host the
-    # first time it runs. See this module's README, "Kontur sandboxing",
-    # and that script's own kontur_image_tag for how the disk is named
-    # and cached so a later apply does not rebuild it for nothing.
-    # kontur_oci_image overrides the sandbox container; kontur_image_bucket
-    # fetches a pre-built guest disk instead of building one. They are
-    # independent, and each is optional on its own.
+    # longer true (bwsalmon/agents#531, #645): left at its empty
+    # default, scripts/setup.sh's own ensure_kontur_images *pulls* the
+    # sandbox image -- the one the grain image it is deploying was built
+    # against, stamped in at build time, so nothing names it here -- and
+    # builds nothing at all. The guest travels inside that same image, so
+    # there is no second artifact to publish or fetch. See this module's
+    # README, "Kontur sandboxing". kontur_oci_image overrides which image
+    # is pulled, and is optional.
 
     # A kontur VM is a nested cloud-hypervisor guest -- no /dev/kvm, no
     # boot, regardless of anything else here.
