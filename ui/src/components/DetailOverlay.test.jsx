@@ -35,6 +35,16 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("Queued")).toBeInTheDocument();
   });
 
+  // grain/task-94: a task fills the whole pane beside the sidebar, not a
+  // box floating in the middle of it -- an agent's own answer runs long,
+  // and reading one through a 900px porthole was the complaint.
+  it("opens as a full pane rather than a centered dialog", () => {
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
+    expect(document.querySelector(".overlay-pane .detail-layout")).toBeInTheDocument();
+  });
+
   it("shows a placeholder when there is no description", () => {
     render(<DetailOverlay task={{ ...baseTask, description: "" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.getByText("(no description)")).toBeInTheDocument();

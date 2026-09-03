@@ -1750,6 +1750,37 @@ it is deliberately *not* used for an attempt's transcript
 calls whose alignment is the whole of its legibility — that stays in its
 `<pre>`.
 
+**Opening a thing fills the pane beside the sidebar (grain/task-94).**
+That markdown made a long agent answer legible; it did not make it fit.
+A task's detail opened as a 900px box floating in the middle of the
+screen, so an answer with headings, a fenced diff and a list in it was
+still read through a porthole with the page's own margins on either side
+of it. `Overlay.jsx` grows a third shape for that — `pane`, a full-height
+`Dialog` sized to `100% - SIDEBAR_WIDTH` and pushed to the right edge, so
+it covers exactly the content area and leaves the sidebar showing beside
+it. The paper is the viewport's full height and `.overlay-pane` scrolls
+its own content, the same split `.main-column` already draws for a list
+page, and the property column beside the task (state, actions,
+capabilities, dependencies) is `position: sticky` so a long timeline
+scrolls past it rather than carrying the buttons off screen. The one
+number the two pieces of chrome have to agree on, `SIDEBAR_WIDTH`, moved
+into `theme.js` so neither the sidebar nor the pane owns the other's
+width.
+
+Schedules, templates and suites open the same way, which is the other
+half of the ask: those three pages had already been split into a list
+plus a sub-page overlay (bwsalmon/agents#545, #547, #642), so making
+their overlays panes means one gesture — click a row — has one result
+everywhere, rather than a task opening one shape and a schedule another.
+What each pane puts *in* that room is capped, because a line of prose
+running the width of a widescreen, or a one-word "Name" input an arm's
+length wide, is no more readable than the porthole was: a form stops at
+`.pane-form`'s 44rem, the task detail's two columns at 1200px. Both are
+left-aligned rather than centered, so the content of an item you open
+starts exactly where the list you opened it from started. Dialogs that
+are an *action* rather than a thing you opened — New task, Run a suite,
+Settings, Debugging, an attempt's transcript — stay centered boxes.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to

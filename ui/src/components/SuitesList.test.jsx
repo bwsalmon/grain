@@ -220,6 +220,18 @@ describe("SuitesList", () => {
     expect(payload).not.toHaveProperty("maxPasses");
   });
 
+  // grain/task-94: opening a suite fills the pane beside the sidebar,
+  // the same as opening a task, a schedule or a template.
+  it("opens a suite as a full pane", async () => {
+    const user = userEvent.setup();
+    renderList({});
+
+    await user.click(suiteRow("Nightly sweep"));
+
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
+    expect(document.querySelector(".overlay-pane .pane-form")).toBeInTheDocument();
+  });
+
   it("opens a row's overlay pre-filled and saves changes via PATCH", async () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();

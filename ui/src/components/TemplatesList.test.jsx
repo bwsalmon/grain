@@ -100,6 +100,19 @@ describe("TemplatesList", () => {
     expect(screen.queryByRole("heading", { name: "New template" })).not.toBeInTheDocument();
   });
 
+  // grain/task-94: opening a template fills the pane beside the sidebar,
+  // the same as opening a task, a schedule or a suite -- one gesture with
+  // one result across all four lists.
+  it("opens a template as a full pane", async () => {
+    const user = userEvent.setup();
+    render(<TemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByText("Dependency bump"));
+
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
+    expect(document.querySelector(".overlay-pane .pane-form")).toBeInTheDocument();
+  });
+
   it("opens a row's overlay pre-filled and saves changes via PATCH", async () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();

@@ -1,8 +1,7 @@
 import { Box, Button, Chip, Divider, List, ListItemButton, ListItemText, Typography } from "@mui/material";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
+import { SIDEBAR_WIDTH } from "../theme.js";
 import GrainMark from "./GrainMark.jsx";
-
-const SIDEBAR_WIDTH = 232;
 
 // Sidebar replaces TopBar and Filters with the one nav Plane builds every
 // view around: a fixed rail with the workspace identity up top, a state

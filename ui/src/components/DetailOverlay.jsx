@@ -14,7 +14,10 @@ import TaskPicker from "./TaskPicker.jsx";
 // The panel splits like Plane's own issue peek: title, description and
 // the conversation in a main column, everything about the task's current
 // state and its declared shape (repo, capabilities, dependencies) in a
-// narrow property column beside it.
+// narrow property column beside it. It fills the whole pane beside the
+// sidebar rather than floating in the middle of it (grain/task-94, see
+// Overlay's own `pane`): a task is mostly an agent's own prose, and a
+// long answer wants the room.
 export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act, showError }) {
   const phase = completionPhase(t);
   // editing is local to DetailOverlay, not lifted to App.jsx, the same
@@ -23,7 +26,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
   // the overlay (which unmounts it) is itself "cancel" for free.
   const [editing, setEditing] = useState(false);
   return (
-    <Overlay onClose={onClose} wide>
+    <Overlay onClose={onClose} pane>
       <div className="detail-layout">
         <div className="detail-main">
           {editing ? (

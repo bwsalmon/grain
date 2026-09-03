@@ -67,9 +67,9 @@ export default function SuiteOverlay({ suite, templates = [], config, onClose, o
   };
 
   return (
-    <Overlay onClose={onClose}>
+    <Overlay onClose={onClose} pane>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New task suite" : "Edit task suite"}</Typography>
-      <form onSubmit={submit}>
+      <form className="pane-form" onSubmit={submit}>
         <TextField name="name" label="Name" defaultValue={suite?.name} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
 
         <FormControl fullWidth margin="normal" size="small">

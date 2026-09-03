@@ -51,6 +51,30 @@ test("files a new task through the New task overlay", async ({ page }) => {
   await expect(row.locator(".badge-proposed")).toBeVisible();
 });
 
+// grain/task-94: a task opens into the whole content area beside the
+// sidebar rather than a box floating in the middle of it. Layout is the
+// one thing jsdom cannot answer for -- Overlay.test.jsx can only check
+// which classes MUI put on the paper -- so where the pane actually lands
+// on screen is measured here, against a real browser.
+test("opens a task into the pane beside the sidebar", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".task-row").first().click();
+
+  const pane = page.locator(".MuiDialog-paper");
+  await expect(pane).toBeVisible();
+
+  const sidebar = await page.locator("aside").boundingBox();
+  const box = await pane.boundingBox();
+  const viewport = page.viewportSize();
+
+  // Flush against the sidebar on the left, the viewport's edge on the
+  // right, and its full height -- one pixel of tolerance for a fractional
+  // device pixel ratio, not for a pane that landed somewhere else.
+  expect(Math.abs(box.x - (sidebar.x + sidebar.width))).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.x + box.width - viewport.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(box.height - viewport.height)).toBeLessThanOrEqual(1);
+});
+
 test("approves a proposed task from its detail view", async ({ page }) => {
   await page.goto("/");
   const title = `E2E approve me ${Date.now()}`;

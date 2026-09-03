@@ -13,6 +13,13 @@ import { createTheme } from "@mui/material/styles";
 // which is the split the mark itself is drawn with because the gold
 // disappears against white; the greys are warmed to match. See
 // docs/brand.md.
+// SIDEBAR_WIDTH is the one layout number two pieces of chrome have to
+// agree on: the sidebar itself (Sidebar.jsx) and the pane anything you
+// open fills (Overlay.jsx's own `pane`), which starts exactly where the
+// sidebar ends. It lives here rather than in either of them so neither
+// owns the other's width.
+export const SIDEBAR_WIDTH = 232;
+
 const shared = {
   shape: { borderRadius: 6 },
   typography: {
