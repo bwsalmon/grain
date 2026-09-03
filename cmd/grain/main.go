@@ -682,8 +682,18 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	// Empty clears it, the same as every other whole-value flag here.
 	promptExtension := fs.String("prompt-extension", "",
 		"standing instructions appended to every run's prompt on this deployment -- empty adds nothing")
+	// Not a setting: the one flag here that changes nothing and asks a
+	// question instead. It belongs on this command anyway, because the
+	// answer it gives is about the same capability listing this command
+	// already prints, and because "ready" on that listing means
+	// configured -- see cmdCheckCapability below.
+	checkCapability := fs.String("check-capability", "",
+		"test one capability's standing credential against the service that issued it, and print what came back -- changes nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *checkCapability != "" {
+		return checkCapabilityCredential(ctx, c, out, *checkCapability)
 	}
 
 	var req ui.UpdateSettingsRequest
@@ -972,6 +982,34 @@ func sandboxShapeValue(stored, grainDefault int) string {
 	return "unset"
 }
 
+// checkCapabilityCredential is `grain settings -check-capability <id>`:
+// it asks the daemon to authenticate as that capability's standing
+// credential and make one cheap, harmless call with it, then prints what
+// came back.
+//
+// The line above it -- `grain settings`' own capability listing -- can
+// only ever say "ready", meaning this deployment has the settings and
+// the secrets for it. Whether the key inside one of those secrets is
+// still one GCP (or GitHub) will accept is a question no stored
+// configuration can answer, and the whole of README.md's "Debugging
+// `gcp-key` again" is what it costs to find out from a failed task
+// instead. This is that question, asked from the host, where whoever is
+// reading the failed task's error is usually already standing.
+//
+// A refused credential is a successful call that prints a bad answer,
+// not a non-zero exit: nothing about the *command* failed, and the
+// sentence it prints names the secret to replace. The exit code stays
+// for the calls that could not be made at all -- an unknown capability,
+// a daemon that does not offer this.
+func checkCapabilityCredential(ctx context.Context, c *ui.HTTPClient, out *printer, id string) error {
+	check, err := c.CheckCapability(ctx, id)
+	if err != nil {
+		return err
+	}
+	out.capabilityCheck(check)
+	return nil
+}
+
 // capabilityStatusLine renders one ui.CapabilityStatus as a line of
 // `grain settings` -- the CLI's half of the Settings pane's own
 // Capabilities tab, printed here because "why did a task never get the
@@ -1023,6 +1061,29 @@ func capabilityStatusLine(cp ui.CapabilityStatus) string {
 		line += " " + strings.Join(notes, "; ")
 	}
 	return strings.TrimRight(line, " ")
+}
+
+// capabilityCheck prints one ui.CapabilityCheck: the verdict, what was
+// authenticated as, and the sentence saying what the far end actually
+// said -- which on a failure is the whole point and is printed in full
+// rather than summarised.
+func (p *printer) capabilityCheck(check ui.CapabilityCheck) {
+	if p.json {
+		p.encode(check)
+		return
+	}
+	verdict := "REFUSED"
+	if check.OK {
+		verdict = "ok"
+	}
+	fmt.Printf("%s: %s\n", check.ID, verdict)
+	if len(check.Credentials) > 0 {
+		fmt.Printf("checked as:  %s\n", strings.Join(check.Credentials, ", "))
+	}
+	fmt.Printf("checked at:  %s\n", check.CheckedAt.Format(time.RFC3339))
+	if check.Detail != "" {
+		fmt.Println(check.Detail)
+	}
 }
 
 func (p *printer) encode(v any) {
