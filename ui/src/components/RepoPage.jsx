@@ -166,11 +166,18 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   };
 
   // savePromptExtension replaces this repo's own text wholesale (PUT's
-  // whole body is the new text, ui.SetRepoPromptExtensionRequest). No
-  // onRefreshConfig after it, unlike saveCapabilities: nothing the
-  // new-task form seeds itself from changes here -- a repo's own text is
-  // read at dispatch, not written onto the task -- so there is nothing
-  // cached to go stale.
+  // whole body is the new text, ui.SetRepoPromptExtensionRequest), then
+  // refreshes the config, for the same reason saveCapabilities does.
+  // Nothing the new-task form seeds itself from changes here -- a repo's
+  // own text is read at dispatch, not written onto the task -- but
+  // config.reposWithPromptExtension is one of the three things that make
+  // a repo appear on the list page at all (repoRows, state.js). Writing
+  // the first standing instructions for a repo with no tasks and no
+  // allowlist entry is what puts it on that list, and clearing its last
+  // ones is what takes it off; without this the list keeps whichever
+  // answer it was given at mount until the page is reloaded, and the
+  // repo whose text is the only thing keeping it reachable is the one
+  // that would go missing.
   const savePromptExtension = async (evt) => {
     evt.preventDefault();
     try {
@@ -180,6 +187,7 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
       });
       setPrompt(updated);
       setPromptText(updated.promptExtension || "");
+      await onRefreshConfig();
     } catch (err) {
       showError(err);
     }

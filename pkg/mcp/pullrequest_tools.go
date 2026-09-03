@@ -69,17 +69,25 @@ type PullRequestReader interface {
 }
 
 // NewPullRequestTools returns the tools a run gets for watching its own
-// pull request: pull_request_status, and nothing else.
+// pull request: pull_request_status, which answers what CI says now, and
+// wait_for_checks, which blocks until CI has an actual verdict
+// (wait_for_checks_tool.go). The two are one vocabulary -- a run that
+// has the first and not the second has no way to wait except by spending
+// turns on it -- so they are registered together rather than left to
+// each call site to remember, which is also how agent/claude's and
+// agent/antigravity's allowedTools learn the new name without being
+// edited.
 //
 // client may be nil and scope may be incomplete -- a deployment that
-// configured no GitHub access, or a task with no repo attached. The tool
-// is registered either way, so tools/list does not change shape with a
-// deployment's configuration and an agent that calls it gets a sentence
-// explaining why there is nothing to report instead of "unknown tool
-// pull_request_status", which reads like a bug in grain rather than a
-// fact about this run.
+// configured no GitHub access, or a task with no repo attached. Both
+// tools are registered either way, so tools/list does not change shape
+// with a deployment's configuration and an agent that calls one gets a
+// sentence explaining why there is nothing to report instead of "unknown
+// tool pull_request_status", which reads like a bug in grain rather than
+// a fact about this run.
 func NewPullRequestTools(client PullRequestReader, scope PullRequestScope) []Tool {
-	return []Tool{pullRequestStatusTool(client, scope)}
+	tools := []Tool{pullRequestStatusTool(client, scope)}
+	return append(tools, NewWaitForChecksTools(client, scope)...)
 }
 
 func pullRequestStatusTool(client PullRequestReader, scope PullRequestScope) Tool {
@@ -240,21 +248,60 @@ func checkFailed(c github.CheckRun) bool {
 }
 
 // renderChecks lists every check against the pushed commit and says what
-// to do about them. The per-check lines carry GitHub's own status and
-// conclusion words verbatim, since narrowing them is exactly how an agent
-// ends up told that a "skipped" job passed.
+// to do about them -- and, wherever the honest answer is "not yet",
+// points at wait_for_checks rather than at calling this again on a timer.
+// Both of those cases are a snapshot of something still in motion, which
+// is precisely what the blocking tool exists to spare an agent a turn on
+// (wait_for_checks_tool.go's own doc comment).
 func renderChecks(checks []github.CheckRun, branch, sha string) string {
 	if len(checks) == 0 {
 		return fmt.Sprintf(
 			"GitHub reports no checks at all against %s. Either CI has not registered them "+
 				"yet -- they usually appear within a minute or two of a push -- or this "+
-				"repo has no CI configured. Call this again shortly to tell the two apart.",
+				"repo has no CI configured. Call wait_for_checks to tell the two apart: it "+
+				"blocks until checks appear and finish, and says so if none ever arrive.",
 			sha)
 	}
 
+	tally := tallyChecks(checks)
 	var b strings.Builder
-	var failing, pending, passed int
 	fmt.Fprintf(&b, "Checks against %s:\n", sha)
+	b.WriteString(tally.lines)
+
+	fmt.Fprintf(&b, "\n%d failing, %d not finished, %d otherwise done.\n", tally.failing, tally.pending, tally.passed)
+	switch {
+	case tally.failing > 0:
+		fmt.Fprintf(&b, "Reproduce those failures in your checkout, fix them, commit, and "+
+			"`git push origin %s` -- each push reruns CI against the new commit, and "+
+			"calling this again afterwards tells you whether the fix took.", branch)
+	case tally.pending > 0:
+		b.WriteString("Nothing has failed, but the unfinished checks carry no verdict yet. " +
+			"Rather than calling this again on a timer, call wait_for_checks, which blocks " +
+			"until they have an actual verdict and costs you one turn instead of several.")
+	default:
+		fmt.Fprintf(&b, "Every check that reported against %s is done and none of them failed.", sha)
+	}
+	return b.String()
+}
+
+// checkTally is one commit's checks counted by verdict, with the line
+// each of them gets. Shared by pull_request_status and wait_for_checks
+// so that a check can never be described one way by the tool that polls
+// and another by the tool that waits -- the counts are the same numbers
+// both of them then reason about.
+type checkTally struct {
+	lines   string
+	failing int
+	pending int
+	passed  int
+}
+
+// tallyChecks classifies each check and renders its line. GitHub's own
+// status and conclusion words are carried verbatim, since narrowing them
+// is exactly how an agent ends up told that a "skipped" job passed.
+func tallyChecks(checks []github.CheckRun) checkTally {
+	var tally checkTally
+	var b strings.Builder
 	for _, c := range checks {
 		name := c.Name
 		if name == "" {
@@ -262,13 +309,13 @@ func renderChecks(checks []github.CheckRun, branch, sha string) string {
 		}
 		switch {
 		case c.Status != "completed":
-			pending++
+			tally.pending++
 			fmt.Fprintf(&b, "  %-8s %s (%s)\n", "running", name, c.Status)
 		case checkFailed(c):
-			failing++
+			tally.failing++
 			fmt.Fprintf(&b, "  %-8s %s (%s)\n", "FAILING", name, *c.Conclusion)
 		default:
-			passed++
+			tally.passed++
 			conclusion := "no conclusion reported"
 			if c.Conclusion != nil {
 				conclusion = *c.Conclusion
@@ -276,20 +323,8 @@ func renderChecks(checks []github.CheckRun, branch, sha string) string {
 			fmt.Fprintf(&b, "  %-8s %s (%s)\n", "ok", name, conclusion)
 		}
 	}
-
-	fmt.Fprintf(&b, "\n%d failing, %d not finished, %d otherwise done.\n", failing, pending, passed)
-	switch {
-	case failing > 0:
-		fmt.Fprintf(&b, "Reproduce those failures in your checkout, fix them, commit, and "+
-			"`git push origin %s` -- each push reruns CI against the new commit, and "+
-			"calling this again afterwards tells you whether the fix took.", branch)
-	case pending > 0:
-		b.WriteString("Nothing has failed, but the unfinished checks carry no verdict yet. " +
-			"Call this again in a minute or two rather than treating them as passing.")
-	default:
-		fmt.Fprintf(&b, "Every check that reported against %s is done and none of them failed.", sha)
-	}
-	return b.String()
+	tally.lines = b.String()
+	return tally
 }
 
 // mergeableClause renders GitHub's tri-state Mergeable as a clause to

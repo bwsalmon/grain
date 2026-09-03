@@ -116,7 +116,16 @@ export default function App() {
   // can offer to remove. It reads config.repoDefaultCapabilities for the
   // same reason, which is why saving a repo's own defaults refreshes
   // this too: a repo listed only because it carries a set stops being
-  // listed the moment that set is emptied.
+  // listed the moment that set is emptied. A repo's standing
+  // instructions are the third thing that can put it on that list
+  // (config.reposWithPromptExtension), so saving those refreshes it as
+  // well.
+  //
+  // And every save on the Settings pane (SettingsOverlay's onSaved),
+  // since half of what that pane writes is read back out of this
+  // response: the target repo allowlist, the deployment-wide default
+  // capabilities and task defaults the new-task form starts from, and
+  // the deployment's own prompt extension.
   const refreshConfig = useCallback(async () => {
     setConfig(await api("/api/config"));
   }, []);
@@ -497,7 +506,13 @@ export default function App() {
           showError={showError}
         />
       )}
-      {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
+      {showSettings && (
+        <SettingsOverlay
+          onClose={() => setShowSettings(false)}
+          onSaved={refreshConfig}
+          showError={showError}
+        />
+      )}
       {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} onOpenTask={openTaskFromDebug} showError={showError} />}
     </div>
   );

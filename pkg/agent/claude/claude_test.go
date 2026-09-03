@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
 	"github.com/bwsalmon/grain/pkg/mcp"
@@ -463,16 +465,16 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	}
 }
 
-// Eleven now: the four sandbox tools, the four escape hatches,
-// pull_request_status, open_pull_request and recreate_sandbox. The last
-// three are named here for every run even though only a run whose
-// mcpserver was given the flags for them actually gets them, since
-// --allowedTools filters what the server advertises rather than adding
-// to it (allowedTools' own comment).
+// Twelve now: the four sandbox tools, the four escape hatches,
+// pull_request_status, wait_for_checks, open_pull_request and
+// recreate_sandbox. The last three are named here for every run even
+// though only a run whose mcpserver was given the flags for them
+// actually gets them, since --allowedTools filters what the server
+// advertises rather than adding to it (allowedTools' own comment).
 func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	names := allowedTools()
-	if len(names) != 11 {
-		t.Fatalf("allowedTools() = %v, want 11 entries", names)
+	if len(names) != 12 {
+		t.Fatalf("allowedTools() = %v, want 12 entries", names)
 	}
 	for _, n := range names {
 		if !strings.HasPrefix(n, "mcp__grain-sandbox__") {
@@ -482,7 +484,7 @@ func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	// --strict-mcp-config refuses any tool this list omits, so a tool the
 	// server may advertise and this list may not name is a run that dies
 	// on its first call to it.
-	for _, tool := range []string{"pull_request_status", "open_pull_request", "recreate_sandbox"} {
+	for _, tool := range []string{"pull_request_status", "wait_for_checks", "open_pull_request", "recreate_sandbox"} {
 		if !slices.Contains(names, mcp.QualifiedToolName(tool)) {
 			t.Errorf("allowedTools() = %v, want %s admitted", names, tool)
 		}
@@ -622,6 +624,54 @@ func TestWithOAuthTokenSetsTheEnvironmentNotArgv(t *testing.T) {
 	for _, a := range fake.gotArgs {
 		if strings.Contains(a, "secret-token") {
 			t.Errorf("token leaked into argv: %v", fake.gotArgs)
+		}
+	}
+}
+
+// wait_for_checks blocks for as long as CI takes, so claude's own cap on
+// a tool call has to be moved out past the longest wait that tool will
+// ever do -- otherwise a run that asked to wait out a slow build has the
+// call killed under it and is told the tool failed.
+func TestRunRaisesTheMCPToolTimeoutPastTheLongestWait(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "mcpserver-path")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, e := range fake.gotEnv {
+		if value, ok := strings.CutPrefix(e, "MCP_TOOL_TIMEOUT="); ok {
+			got = value
+		}
+	}
+	if got == "" {
+		t.Fatalf("gotEnv = %v, want an MCP_TOOL_TIMEOUT in it", fake.gotEnv)
+	}
+	ms, err := strconv.ParseInt(got, 10, 64)
+	if err != nil {
+		t.Fatalf("MCP_TOOL_TIMEOUT = %q, want milliseconds: %v", got, err)
+	}
+	if limit := time.Duration(ms) * time.Millisecond; limit <= mcp.MaxWaitForChecksTimeout {
+		t.Errorf("MCP_TOOL_TIMEOUT = %v, want more than wait_for_checks' own %v maximum",
+			limit, mcp.MaxWaitForChecksTimeout)
+	}
+}
+
+// An operator who set the cap themselves outranks that default: env
+// entries are appended after os.Environ(), so setting it unconditionally
+// would quietly win over theirs.
+func TestRunLeavesAnOperatorsOwnMCPToolTimeoutAlone(t *testing.T) {
+	t.Setenv("MCP_TOOL_TIMEOUT", "1234")
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "mcpserver-path")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range fake.gotEnv {
+		if strings.HasPrefix(e, "MCP_TOOL_TIMEOUT=") {
+			t.Errorf("gotEnv = %v, want no MCP_TOOL_TIMEOUT of grain's own over the operator's", fake.gotEnv)
 		}
 	}
 }

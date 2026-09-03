@@ -34,13 +34,14 @@ describe("DebugOverlay", () => {
     api.mockReset();
   });
 
-  it("shows Logs by default, with Sandbox health, Metrics and Restart as other tabs", async () => {
+  it("shows Logs by default, with Sandbox health, Top, Metrics and Restart as other tabs", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByText(/no log sources configured|not available/i)).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Logs" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Sandbox health" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Top" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Metrics" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Restart" })).toBeInTheDocument();
     expect(api).toHaveBeenCalledTimes(1);
@@ -70,6 +71,24 @@ describe("DebugOverlay", () => {
     await user.click(screen.getByRole("tab", { name: "Sandbox health" }));
 
     expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
+  });
+
+  // grain/task-120: `top` on the daemon's own machine, next to the
+  // aggregate host reading it explains -- and, like every panel here,
+  // fetching only once its own tab is the active one.
+  it("shows Top on its own tab, over GET /api/host/top", async () => {
+    api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce({
+      enabled: true,
+      lines: ["top - 12:00:00 up 3 days,  load average: 1.10, 0.90, 0.75"],
+    });
+    const user = userEvent.setup();
+    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    await screen.findByText(/no log sources configured/i);
+
+    await user.click(screen.getByRole("tab", { name: "Top" }));
+
+    expect(await screen.findByText(/load average: 1.10/)).toBeInTheDocument();
+    expect(api).toHaveBeenLastCalledWith("/api/host/top?lines=60");
   });
 
   // The throughput and latency report joined these rather than taking a

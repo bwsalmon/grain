@@ -75,11 +75,23 @@ var testScope = PullRequestScope{Owner: "acme", Repo: "widgets", Branch: "grain/
 // single Result.
 func call(t *testing.T, client PullRequestReader, scope PullRequestScope) Result {
 	t.Helper()
-	tools := NewPullRequestTools(client, scope)
-	if len(tools) != 1 || tools[0].Name != "pull_request_status" {
-		t.Fatalf("NewPullRequestTools returned %+v, want exactly pull_request_status", tools)
+	return namedTool(t, NewPullRequestTools(client, scope), "pull_request_status").
+		Handler(context.Background(), map[string]any{})
+}
+
+// namedTool picks one tool out of a constructor's roster by name, since
+// NewPullRequestTools returns the whole watching-your-own-pull-request
+// vocabulary rather than one tool -- and fails the test if the name is
+// not there at all, which is the failure worth catching.
+func namedTool(t *testing.T, tools []Tool, name string) Tool {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.Name == name {
+			return tool
+		}
 	}
-	return tools[0].Handler(context.Background(), map[string]any{})
+	t.Fatalf("no %s among %+v", name, tools)
+	return Tool{}
 }
 
 // A failing check has to be named, and named as failing: the whole point
@@ -295,8 +307,8 @@ func TestPullRequestStatusReportsOrdinaryGitHubErrors(t *testing.T) {
 // reads CI for its own branch or nothing (the tool's own doc comment).
 func TestPullRequestStatusOnlyEverReadsItsOwnScope(t *testing.T) {
 	client := &fakePullRequests{head: &github.BranchHead{SHA: "0011223344556677", Message: "x"}}
-	tools := NewPullRequestTools(client, testScope)
-	res := tools[0].Handler(context.Background(), map[string]any{
+	status := namedTool(t, NewPullRequestTools(client, testScope), "pull_request_status")
+	res := status.Handler(context.Background(), map[string]any{
 		"owner": "attacker", "repo": "secrets", "branch": "main",
 	})
 	if res.IsError {

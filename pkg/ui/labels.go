@@ -282,6 +282,19 @@ type Config struct {
 	// reading is available, the same nil-means-unavailable contract every
 	// other optional field here already gives (bwsalmon/agents#536).
 	HostStats func() (HostPressure, error)
+	// HostTop, when set, is what GET /api/host/top calls for a `top`
+	// snapshot of the processes on that same machine -- pkg/hosttop.Read,
+	// in a real deployment. It is the per-process half of HostStats
+	// above: a load average says the machine is starved, and the next
+	// question is always which process is doing it, which no aggregate
+	// reading can answer. Given as a func rather than read here so this
+	// package keeps shelling out to nothing itself, the same way
+	// Logs' own LogSource keeps journalctl out of it. nil means no
+	// snapshot is available (`grain demo`'s throwaway UI, a deployment
+	// whose image has no procps) and the Top tab says so rather than
+	// erroring on every poll, the same nil-means-unavailable contract
+	// every other optional field here already gives.
+	HostTop func(ctx context.Context, lines int) ([]string, error)
 	// AutoMergeDegraded, when set, is polled by GET /api/config to report
 	// whether this deployment's GitHub credential can read pull request
 	// check runs at all -- orchestrator.ChecksUnavailable's own doc

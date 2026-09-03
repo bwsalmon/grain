@@ -32,16 +32,16 @@ func TestTheImageRunsTheCLIAndReportsASchemaVersion(t *testing.T) {
 // Dockerfile's header lists these and says why each is there.
 //
 // A missing one does not fail a build or a startup -- it fails the first
-// dispatch, the first kontur VM, or the first look at the Logs pane, which
-// is exactly the class of failure putting them in an image was meant to
-// end.
+// dispatch, the first kontur VM, or the first look at the Logs or Top
+// pane, which is exactly the class of failure putting them in an image
+// was meant to end.
 //
 // Every agent CLI is in that list on purpose: which framework a run uses
 // is a live per-task choice, so an image carrying some of them is an
 // image that fails every run choosing another.
 func TestTheImageCarriesEveryBinaryTheDaemonShellsOutTo(t *testing.T) {
 	requireImage(t)
-	script := `for b in git bash konturctl docker claude agy codex journalctl ssh curl; do ` +
+	script := `for b in git bash konturctl docker claude agy codex journalctl top ssh curl; do ` +
 		`command -v "$b" >/dev/null || { echo "MISSING $b"; exit 1; }; ` +
 		`done; echo all-present`
 

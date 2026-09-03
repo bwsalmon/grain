@@ -318,6 +318,30 @@ func TestHTTPClientRepoFamilyRoundTrip(t *testing.T) {
 		t.Fatalf("RepoDefaults = %+v, want what the write returned %+v", read, defaults)
 	}
 
+	// The other half of the same row (grain/task-114), written through
+	// its own route: the text comes back, and the capabilities set just
+	// above it survives -- PutRepoConfig replaces the row wholesale, so
+	// "saving one pane wipes the other's work" is what this pins over the
+	// wire as well as in Client's own tests.
+	prompt, err := c.SetRepoPromptExtension(ctx, "acme/widgets", "Migrations live in db/.")
+	if err != nil {
+		t.Fatalf("SetRepoPromptExtension: %v", err)
+	}
+	if prompt.PromptExtension != "Migrations live in db/." {
+		t.Fatalf("own prompt extension after set = %q, want the text just written", prompt.PromptExtension)
+	}
+	if !reflect.DeepEqual(prompt.DefaultCapabilities, []string{"self-debug"}) {
+		t.Fatalf("own defaults after setting the prompt extension = %v, want [self-debug] still",
+			prompt.DefaultCapabilities)
+	}
+	read, err = c.RepoDefaults(ctx, "acme/widgets")
+	if err != nil {
+		t.Fatalf("RepoDefaults: %v", err)
+	}
+	if !reflect.DeepEqual(read, prompt) {
+		t.Fatalf("RepoDefaults = %+v, want what the write returned %+v", read, prompt)
+	}
+
 	if _, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "fix it", Repo: "acme/widgets", Approved: true}); err != nil {
 		t.Fatalf("CreateTask: %v", err)
 	}
@@ -332,6 +356,9 @@ func TestHTTPClientRepoFamilyRoundTrip(t *testing.T) {
 		Repo: "acme/widgets", Configured: true, Tasks: 1,
 		States:              map[model.State]int{model.StateQueued: 1},
 		DefaultCapabilities: []string{"self-debug"},
+		// Whether, not what: a row per repo is no place for a paragraph,
+		// so the listing only points at `grain repo prompt-extension`.
+		PromptExtension: true,
 	}
 	if !reflect.DeepEqual(repos[0], want) {
 		t.Fatalf("ListRepos row = %+v, want %+v", repos[0], want)
@@ -384,6 +411,9 @@ func TestHTTPClientRepoMethodsRejectAMalformedRepoLocally(t *testing.T) {
 	}
 	if _, err := c.SetRepoDefaultCapabilities(ctx, "widgets", nil); !errors.As(err, &ve) {
 		t.Errorf("SetRepoDefaultCapabilities(\"widgets\"): error = %v, want a ValidationError", err)
+	}
+	if _, err := c.SetRepoPromptExtension(ctx, "widgets", "text"); !errors.As(err, &ve) {
+		t.Errorf("SetRepoPromptExtension(\"widgets\"): error = %v, want a ValidationError", err)
 	}
 	if _, err := c.RemoveTargetRepo(ctx, "widgets"); !errors.As(err, &ve) {
 		t.Errorf("RemoveTargetRepo(\"widgets\"): error = %v, want a ValidationError", err)

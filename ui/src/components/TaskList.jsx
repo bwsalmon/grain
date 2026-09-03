@@ -184,7 +184,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
                 {children.get(t.id).map((c) => (
                   <li key={c.id}>
                     <TaskRow t={c} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
-                      nested />
+                      dragPlaceholder={reorderEnabled} nested />
                   </li>
                 ))}
               </ul>
@@ -225,18 +225,25 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // "merge fix" chip below is worth its space. Callers that list tasks
 // flat (groupByStack's own fallback for a stacked task whose parent is
 // filtered out or gone) leave it off and get the chip.
-export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, nested }) {
+//
+// dragPlaceholder is for a row with no handle of its own in a list where
+// the other rows have one -- a stacked merge fix, which is never
+// reordered because the merge queue always runs it ahead of the backlog.
+// Without it that row's badge, number and title would each sit a handle's
+// width left of every other row's, so the column the handle occupies is
+// held open and empty instead.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, dragPlaceholder, nested }) {
   const phase = completionPhase(t);
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
-      {draggable && (
+      {draggable ? (
         <DragIndicatorIcon
           className="task-drag-handle"
           fontSize="small"
           titleAccess="Drag to reorder"
           onClick={(e) => e.stopPropagation()}
         />
-      )}
+      ) : dragPlaceholder && <span className="task-drag-placeholder" aria-hidden="true" />}
       {onToggleSelect && (
         <Checkbox
           size="small"

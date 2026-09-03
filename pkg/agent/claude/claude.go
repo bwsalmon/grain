@@ -34,6 +34,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
 	"github.com/bwsalmon/grain/pkg/mcp"
@@ -327,6 +328,41 @@ func allowedTools() []string {
 	return names
 }
 
+// mcpToolTimeoutVar is claude's own cap on how long it will let a single
+// MCP tool call run before it abandons it, in milliseconds.
+const mcpToolTimeoutVar = "MCP_TOOL_TIMEOUT"
+
+// mcpToolTimeoutSlack is how far past the longest wait wait_for_checks
+// can do the cap above is set. Enough for the round trips either side of
+// the wait itself, and no more: the point is that the tool's own clock
+// runs out first, not that claude stops capping tool calls.
+const mcpToolTimeoutSlack = 2 * time.Minute
+
+// mcpToolTimeout is the environment claude needs for wait_for_checks to
+// be able to finish waiting.
+//
+// That tool blocks for as long as CI takes, up to an hour
+// (mcp.MaxWaitForChecksTimeout), which is far past claude's own default
+// cap on a tool call. Leaving the cap where it is would kill the call
+// part-way through a wait the agent deliberately asked for and report it
+// as a tool failure -- the one answer that is neither true nor useful,
+// since the build it was waiting on is still running and the run now has
+// no idea how it ended. Raising it to just past the tool's own maximum
+// puts the deadline back where it belongs: on grain's side, where
+// running out of time produces a report saying so.
+//
+// An MCP_TOOL_TIMEOUT already in the environment is left alone. An
+// operator who set one deliberately outranks this default, and env
+// entries here are appended after os.Environ() (execRunner.Run), so
+// setting it unconditionally would silently override theirs.
+func mcpToolTimeout() []string {
+	if _, set := os.LookupEnv(mcpToolTimeoutVar); set {
+		return nil
+	}
+	limit := mcp.MaxWaitForChecksTimeout + mcpToolTimeoutSlack
+	return []string{fmt.Sprintf("%s=%d", mcpToolTimeoutVar, limit.Milliseconds())}
+}
+
 // mcpConfigJSON is the --mcp-config file content: grainBinaryPath spawned
 // with mcpArgs (built by mcpServerArgs below) -- the "mcpserver" argument
 // selects the same subcommand mcpserver.go implements, so claude forking
@@ -503,7 +539,7 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	if f.model != "" {
 		args = append(args, "--model", f.model)
 	}
-	var env []string
+	env := mcpToolTimeout()
 	if f.oauthToken != nil {
 		token, err := f.oauthToken(ctx)
 		if err != nil {
