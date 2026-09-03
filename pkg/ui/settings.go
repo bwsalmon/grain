@@ -69,10 +69,11 @@ type Settings struct {
 	// nothing actionable to tell those two cases apart on.
 	TargetReposMissingCredentials []string `json:"targetReposMissingCredentials,omitempty"`
 	// NewestFirst is model.Config's own field of the same name
-	// (bwsalmon/agents#476): false, the default, keeps a new task's
-	// place at the back of the dispatch queue even though it always
-	// shows up first in the task list; true moves it to the front of
-	// both instead.
+	// (bwsalmon/agents#476): false, the default, files a new task at the
+	// back of the dispatch queue, which is the bottom of the task list;
+	// true files it at the front instead, which is the top of the same
+	// list -- the list being dispatch order, not a second ordering of its
+	// own (ui.Client.ListTasks).
 	NewestFirst bool `json:"newestFirst"`
 	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
 	// (bwsalmon/agents#534, grain/task-41) are the deployment-wide

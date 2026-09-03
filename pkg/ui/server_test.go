@@ -170,11 +170,11 @@ func TestReorderRoute(t *testing.T) {
 	if len(listed) != 3 {
 		t.Fatalf("reorder returned %d tasks, want 3", len(listed))
 	}
-	// The default display order is still newest first; the third task
-	// moving to the front of the backlog does not change that it was
-	// created last.
-	if listed[0].ID != ids[1] {
-		t.Fatalf("listed[0] = %q, want %q (still newest first)", listed[0].ID, ids[1])
+	// The list the route hands back is backlog order, so the move is
+	// visible in it directly: the third task, dropped before the first,
+	// is now at the top.
+	if listed[0].ID != ids[2] {
+		t.Fatalf("listed[0] = %q, want %q (moved to the front of the backlog)", listed[0].ID, ids[2])
 	}
 }
 

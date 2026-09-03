@@ -72,6 +72,24 @@ describe("TaskPicker", () => {
     expect(onPick).toHaveBeenCalledWith(tasks[2]);
   });
 
+  // The task list this is handed is backlog order (next to run first),
+  // so a picker that took matches in that order would offer the oldest
+  // work rather than the work somebody has just been looking at.
+  it("orders matches newest first, whatever order the tasks arrive in", async () => {
+    const user = userEvent.setup();
+    const dated = [
+      { id: "12", title: "Login one", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "20", title: "Login three", createdAt: "2026-03-01T00:00:00Z" },
+      { id: "15", title: "Login two", createdAt: "2026-02-01T00:00:00Z" },
+    ];
+    render(<TaskPicker tasks={dated} onPick={() => {}} />);
+
+    await user.type(screen.getByRole("textbox"), "login");
+
+    const shown = screen.getAllByRole("menuitem").map((el) => el.textContent);
+    expect(shown.map((t) => t.replace(/\D/g, ""))).toEqual(["20", "15", "12"]);
+  });
+
   it("closes the results on Escape", async () => {
     const user = userEvent.setup();
     render(<TaskPicker tasks={tasks} onPick={() => {}} />);
