@@ -31,6 +31,17 @@ export default function StateRepoPanel({ showError }) {
   const [remote, setRemote] = useState("");
   const [branch, setBranch] = useState("main");
   const [token, setToken] = useState("");
+  // The private key this host's secrets file is sealed to. It is the
+  // third input "point grain at an existing repository" needs, for a
+  // deployment moved here from somewhere else: the tables arrive through
+  // the clone, the sealed file through a restore of the data directory,
+  // and the key by hand or not at all.
+  const [secretsKey, setSecretsKey] = useState("");
+  // The same key, arriving later: a repository can be adopted before
+  // whoever runs it has fetched their key out of wherever they keep it,
+  // so importing one is its own action and its own field rather than
+  // something only an adopt can carry.
+  const [importKey, setImportKey] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -45,9 +56,12 @@ export default function StateRepoPanel({ showError }) {
     setBusy(true);
     try {
       setStatus(await api(path, { method: "POST", body: JSON.stringify(body || {}) }));
-      // The token has reached the daemon and is written to a file only it
-      // reads; keeping it in a form field afterwards serves nobody.
+      // Both credentials have reached the daemon and are written to files
+      // only it reads; keeping either in a form field afterwards serves
+      // nobody.
       setToken("");
+      setSecretsKey("");
+      setImportKey("");
     } catch (e) {
       showError(e.message);
     } finally {
@@ -95,6 +109,14 @@ export default function StateRepoPanel({ showError }) {
         working tree: {status.dir}
       </Typography>
 
+      {status.remoteAhead && (
+        <Alert severity="info" sx={{ mt: 2 }}>
+          This repository holds a commit grain has not been able to take up &mdash; somebody merged a change that a
+          tick could not apply on its own. grain loads what is waiting when it starts, so restart it to load this
+          one. Until then it stops exporting rather than committing over the merge, so the database keeps running
+          as it is and nothing here is lost.
+        </Alert>
+      )}
       {status.error && <Alert severity="warning" sx={{ mt: 2 }}>{status.error}</Alert>}
       {schemaMismatch && (
         <Alert severity="error" sx={{ mt: 2 }}>
@@ -118,8 +140,10 @@ export default function StateRepoPanel({ showError }) {
 
       <Typography variant="subtitle2" sx={{ mt: 3 }}>Point grain at a repository</Typography>
       <Typography variant="body2" color="text.secondary">
-        An existing grain state repository replaces this installation&apos;s database with its contents. An empty
-        one is seeded from what grain has now. Either way the previous working tree is kept on disk, not deleted.
+        An existing grain state repository replaces this installation&apos;s database with its contents. To start from
+        scratch, create an empty repository on GitHub and paste its URL: grain seeds that one from what it has now.
+        Either way the previous working tree is kept on disk, not deleted, and this host&apos;s secrets stay where they
+        are &mdash; they live beside their key under the data directory, not in the repository.
       </Typography>
       <TextField label="Repository URL" value={remote} onChange={(e) => setRemote(e.target.value)}
         placeholder="https://github.com/owner/grain-state.git" autoComplete="off" fullWidth margin="normal" size="small" />
@@ -128,8 +152,14 @@ export default function StateRepoPanel({ showError }) {
       <TextField label="Push token (optional)" value={token} onChange={(e) => setToken(e.target.value)}
         helperText="Leave empty to push with this deployment's own GitHub credential. Stored on the host, never shown again."
         type="password" autoComplete="off" fullWidth margin="normal" size="small" />
+      <TextField label="Secrets key (optional)" value={secretsKey} onChange={(e) => setSecretsKey(e.target.value)}
+        helperText={"The private key this host's secrets file is encrypted to. Needed only when the data " +
+          "directory was restored from an installation this host has not run before; otherwise the key below stays."}
+        type="password" autoComplete="off" fullWidth margin="normal" size="small" />
       <Button type="button" variant="contained" size="small" disabled={busy || !remote.trim()}
-        onClick={() => act("/api/state-repo", { mode: "remote", remote: remote.trim(), branch: branch.trim(), token })}>
+        onClick={() => act("/api/state-repo", {
+          mode: "remote", remote: remote.trim(), branch: branch.trim(), token, secretsKey,
+        })}>
         Adopt repository
       </Button>
 
@@ -142,6 +172,26 @@ export default function StateRepoPanel({ showError }) {
       <Typography variant="caption" component="pre" sx={{ mt: 1, overflowX: "auto" }}>
         {status.secretsPublicKey || "(no key yet)"}
       </Typography>
+
+      {status.secretsError && (
+        <Alert severity="error" sx={{ mt: 2 }}>
+          grain cannot read this host&apos;s secrets file: {status.secretsError}
+          {status.secretsFileRecipient && (
+            <>
+              {" "}They are encrypted to <code>{status.secretsFileRecipient}</code>; paste that key&apos;s private
+              half below to install it.
+            </>
+          )}
+        </Alert>
+      )}
+      <TextField label="Import a private key" value={importKey} onChange={(e) => setImportKey(e.target.value)}
+        helperText={"Installs a key you already hold, so a secrets file sealed by another installation becomes " +
+          "readable here. A key that cannot open the file is refused, and the key it replaces is kept on disk."}
+        type="password" autoComplete="off" fullWidth margin="normal" size="small" />
+      <Button type="button" size="small" variant="outlined" disabled={busy || !importKey.trim()}
+        onClick={() => act("/api/state-repo/secrets-key", { key: importKey.trim() })}>
+        Import key
+      </Button>
     </Box>
   );
 }

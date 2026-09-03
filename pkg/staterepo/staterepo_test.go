@@ -667,3 +667,65 @@ func git(t *testing.T, dir string, args ...string) string {
 	}
 	return string(out)
 }
+
+// What a merged pull request does to a daemon that is still running.
+//
+// This is the whole loop the repository exists for, seen from the side
+// that used to break: grain goes on exporting on its timer while a
+// change waits on the remote, and committing its own dump on top of that
+// change would strand the deployment -- every push rejected from then
+// on, and a next start that finds the two diverged and refuses to load
+// at all.
+func TestSyncRefusesToCommitOverAMergedChange(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// An agent's pull request, merged while this daemon runs.
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	path := filepath.Join(work, staterepo.TablesDir, "task.json")
+	if err := os.WriteFile(path, []byte(read(t, path)), 0o644); err != nil {
+		t.Fatalf("rewriting the dump: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "NOTES.md"), []byte("merged\n"), 0o644); err != nil {
+		t.Fatalf("adding a file: %v", err)
+	}
+	git(t, work, "add", "--all", ".")
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-m", "A merged pull request")
+	git(t, work, "push", "--quiet", "origin", "main")
+
+	// The daemon carries on doing what it does: a row changes, and the
+	// timer comes round.
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	changed, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion)
+	if !errors.Is(err, staterepo.ErrRemoteAhead) {
+		t.Fatalf("sync did not notice the merge: changed=%v err=%v", changed, err)
+	}
+	if changed {
+		t.Fatal("sync committed over a merged change")
+	}
+	// Nothing was committed locally, so the two have not diverged and the
+	// next start can still fast-forward -- which is what makes the merged
+	// change reach the database at all.
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading after the merge: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "NOTES.md")); err != nil {
+		t.Fatalf("the merged change never arrived: %v", err)
+	}
+	// And with it loaded, exporting works again.
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after loading the merge: %v", err)
+	}
+}

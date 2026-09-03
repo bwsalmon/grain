@@ -174,3 +174,123 @@ func TestDecryptRejectsATamperedFile(t *testing.T) {
 		t.Fatal("a tampered file decrypted")
 	}
 }
+
+// The restore path: a file restored onto a new host arrives encrypted
+// and without its key, which is the correct security property and
+// useless unless the operator can put their key back.
+func TestImportingTheKeyMakesARestoredFileReadable(t *testing.T) {
+	origin := t.TempDir()
+	store := New(origin)
+	if err := store.Set("db", "password", []byte("hunter2")); err != nil {
+		t.Fatalf("setting: %v", err)
+	}
+	held, err := ReadKeyFile(filepath.Join(origin, DefaultKeyFileName))
+	if err != nil {
+		t.Fatalf("reading the operator's key: %v", err)
+	}
+
+	// The restore: the encrypted file travels, the key does not.
+	host := t.TempDir()
+	sealed, err := os.ReadFile(filepath.Join(origin, DefaultFileName))
+	if err != nil {
+		t.Fatalf("reading the sealed file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(host, DefaultFileName), sealed, 0o600); err != nil {
+		t.Fatalf("placing the sealed file: %v", err)
+	}
+	fresh := New(host)
+	if fresh.KeyCreated() {
+		t.Fatal("a key was minted over a file it could not have encrypted")
+	}
+	if err := fresh.Check(); err == nil {
+		t.Fatal("a host with no key claimed it could read the file")
+	}
+	// And it says which key it needs, since that is the question the
+	// operator has to answer.
+	recipient, err := fresh.FileRecipient()
+	if err != nil {
+		t.Fatalf("reading the recipient: %v", err)
+	}
+	if recipient != held.Public() {
+		t.Fatalf("recipient %q, want %q", recipient, held.Public())
+	}
+
+	if err := fresh.ImportKey(held); err != nil {
+		t.Fatalf("importing the key: %v", err)
+	}
+	if err := fresh.Check(); err != nil {
+		t.Fatalf("the store is still unreadable after importing its key: %v", err)
+	}
+	got, err := fresh.Resolve(context.Background(), "db/password")
+	if err != nil {
+		t.Fatalf("resolving: %v", err)
+	}
+	if got != "hunter2" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestImportingTheWrongKeyIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	store := New(dir)
+	if err := store.Set("db", "password", []byte("hunter2")); err != nil {
+		t.Fatalf("setting: %v", err)
+	}
+	wrong, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("generating: %v", err)
+	}
+	err = store.ImportKey(wrong)
+	if err == nil {
+		t.Fatal("a key that cannot read the file was installed anyway")
+	}
+	// Both keys are named: an operator holding several has to be able to
+	// tell which one this file wants.
+	if !strings.Contains(err.Error(), wrong.Public()) {
+		t.Fatalf("the error does not name the key offered: %v", err)
+	}
+	// And the key that does work is untouched.
+	if err := store.Check(); err != nil {
+		t.Fatalf("the working key was replaced by the refused one: %v", err)
+	}
+}
+
+// A key an import replaces is kept: it is the one thing in this package
+// that cannot be regenerated, and an operator who pastes the wrong one
+// over the right one must be able to get the right one back.
+func TestImportKeepsTheKeyItReplaces(t *testing.T) {
+	dir := t.TempDir()
+	store := New(dir)
+	before, err := ReadKeyFile(filepath.Join(dir, DefaultKeyFileName))
+	if err != nil {
+		t.Fatalf("reading the minted key: %v", err)
+	}
+	other, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("generating: %v", err)
+	}
+	// Nothing is encrypted yet, so this is allowed.
+	if err := store.ImportKey(other); err != nil {
+		t.Fatalf("importing: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := ""
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), DefaultKeyFileName+".replaced-") {
+			kept = filepath.Join(dir, e.Name())
+		}
+	}
+	if kept == "" {
+		t.Fatalf("the replaced key was deleted rather than kept: %v", entries)
+	}
+	back, err := ReadKeyFile(kept)
+	if err != nil {
+		t.Fatalf("reading the kept key: %v", err)
+	}
+	if back.String() != before.String() {
+		t.Fatal("what was kept is not the key that was replaced")
+	}
+}

@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -139,12 +140,27 @@ func (m *stateManager) status(ctx context.Context) ui.StateRepoStatus {
 		out.SecretsKeyFile = m.secrets.KeyFile()
 		if pub, err := m.secrets.PublicKey(); err == nil {
 			out.SecretsPublicKey = pub
-		} else {
-			out.Error = err.Error()
+		}
+		if recipient, err := m.secrets.FileRecipient(); err == nil {
+			out.SecretsFileRecipient = recipient
+		}
+		// Reported whether or not the key is merely absent: "this host
+		// cannot read its own secrets file" is one condition with one fix,
+		// and splitting it into a missing-key case and a wrong-key case
+		// would only make the pane say it twice.
+		if err := m.secrets.Check(); err != nil {
+			out.SecretsError = err.Error()
 		}
 	}
 	if m.lastErr != nil {
-		out.Error = m.lastErr.Error()
+		// A merge waiting to be loaded is a state, not a failure, and the
+		// pane says a different thing about it -- so it is reported as
+		// itself rather than as the last error to have come out of git.
+		if errors.Is(m.lastErr, staterepo.ErrRemoteAhead) {
+			out.RemoteAhead = true
+		} else {
+			out.Error = m.lastErr.Error()
+		}
 	}
 	return out
 }
@@ -182,15 +198,26 @@ func (m *stateManager) UseLocal(ctx context.Context) (ui.StateRepoStatus, error)
 // runs a live reconcile loop is holding ids from. Nothing here tries to
 // make that safe -- the pane says as much, and bwsalmon/grain#174 accepts
 // it outright.
-func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) (ui.StateRepoStatus, error) {
+func (m *stateManager) Adopt(ctx context.Context, req ui.AdoptRequest) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if strings.TrimSpace(remote) == "" {
+	remote := strings.TrimSpace(req.Remote)
+	if remote == "" {
 		return ui.StateRepoStatus{}, errors.New("a remote is required")
 	}
-	settings := staterepo.Settings{Remote: strings.TrimSpace(remote), Branch: strings.TrimSpace(branch)}
-	if token != "" {
-		path, err := writeStateRepoToken(m.dataDir, token)
+	// Parsed before anything moves. A key that is not a key should be
+	// rejected with the installation untouched, rather than partway
+	// through adopting a repository it then cannot read.
+	var secretsKey secrets.Key
+	if req.SecretsKey != "" {
+		var err error
+		if secretsKey, err = secrets.ParseKey(req.SecretsKey); err != nil {
+			return ui.StateRepoStatus{}, err
+		}
+	}
+	settings := staterepo.Settings{Remote: remote, Branch: strings.TrimSpace(req.Branch)}
+	if req.Token != "" {
+		path, err := writeStateRepoToken(m.dataDir, req.Token)
 		if err != nil {
 			return ui.StateRepoStatus{}, err
 		}
@@ -202,8 +229,12 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 	// nothing. The secrets file is not in there to be archived with it
 	// any more (secretsConfig), so adopting no longer moves the one
 	// unregenerable thing this deployment has out from under itself.
-	if err := archiveStateRepo(m.dataDir); err != nil {
+	archived, err := archiveStateRepo(m.dataDir)
+	if err != nil {
 		return ui.StateRepoStatus{}, err
+	}
+	if archived != "" {
+		log.Printf("grain: moved the previous state repository to %s", archived)
 	}
 	if err := staterepo.SaveSettings(m.dataDir, settings); err != nil {
 		return ui.StateRepoStatus{}, err
@@ -213,10 +244,36 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 		return ui.StateRepoStatus{}, fmt.Errorf("opening %s: %w", remote, err)
 	}
 	m.repo = repo
+	if req.SecretsKey != "" && m.secrets != nil {
+		if err := m.secrets.ImportKey(secretsKey); err != nil {
+			return ui.StateRepoStatus{}, err
+		}
+	}
 	if err := staterepo.Load(ctx, repo, m.db, model.SchemaVersion); err != nil {
 		return ui.StateRepoStatus{}, fmt.Errorf("loading %s: %w", remote, err)
 	}
 	m.lastErr = nil
+	return m.status(ctx), nil
+}
+
+// ImportSecretsKey installs the operator's own key, on its own rather
+// than as part of an adopt: a deployment can be moved onto this host
+// before whoever runs it has gone and fetched the key out of wherever
+// they keep it, and until it arrives the secrets file it was restored
+// with is ciphertext this host cannot open.
+func (m *stateManager) ImportSecretsKey(ctx context.Context, key string) (ui.StateRepoStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.secrets == nil {
+		return ui.StateRepoStatus{}, errors.New("this deployment has no secret store to import a key into")
+	}
+	parsed, err := secrets.ParseKey(key)
+	if err != nil {
+		return ui.StateRepoStatus{}, err
+	}
+	if err := m.secrets.ImportKey(parsed); err != nil {
+		return ui.StateRepoStatus{}, err
+	}
 	return m.status(ctx), nil
 }
 
@@ -230,7 +287,11 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 func (m *stateManager) Sync(ctx context.Context) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, err := m.cycle(ctx, true); err != nil {
+	// "The remote holds a commit this deployment has not taken up" is an
+	// answer to "sync now", not a failure of it: the pane gets a status
+	// saying so rather than an error banner, since what it asks for next
+	// is a restart and not another sync.
+	if _, err := m.cycle(ctx, true); err != nil && !errors.Is(err, staterepo.ErrRemoteAhead) {
 		return ui.StateRepoStatus{}, err
 	}
 	return m.status(ctx), nil

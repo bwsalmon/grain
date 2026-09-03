@@ -2607,15 +2607,31 @@ undecryptable file behind and look like it had worked.
 Which makes that key the one file a redeploy has to carry, and the one
 thing about a fresh install that is urgent: nothing else can stand in for
 it, and a host restored onto a fresh data directory that mints itself a
-new key cannot read a line of the secrets file put back beside it. So it
-is seeded the way every other credential a
-deployment needs is -- `GRAIN_SECRETS_KEY`, through `scripts/setup.sh`'s
-own seed-once contract, pushed into instance metadata on the GCP path
-alongside the GitHub PAT and the minter's key -- and reported where an
-operator is already looking: `grain state status` prints the file and its
-public half, and the installer's readiness summary names it on every run.
-Seed-once rather than converging, because a key already on the host is
-the key that host's own secrets were encrypted to.
+new key cannot read a line of the secrets file put back beside it.
+`<data-dir>/secrets` restored onto a new host without its key is every
+secret grain has in a form nothing on that host can open.
+
+So there are two ways to hand it back, and every deployment uses one of
+them. A deploy seeds it the way it seeds every other credential it needs
+-- `GRAIN_SECRETS_KEY`, through `scripts/setup.sh`'s own seed-once
+contract, pushed into instance metadata on the GCP path alongside the
+GitHub PAT and the minter's key. Seed-once rather than converging,
+because a key already on the host is the key that host's own secrets were
+encrypted to. An operator carrying the key themselves puts it back by
+hand instead -- `grain state key import`, `grain state adopt
+-secrets-key-file`, or the field in the pane, each reading it from a file
+or a form and never from a command line anyone with `ps` can read.
+
+A key that cannot open the file is refused rather than installed, naming
+both public halves so an operator holding several knows which one this
+deployment wants; a key it replaces is kept beside it with a timestamped
+name, because key material is the one thing here that cannot be
+regenerated. And where the key is, and whether this host can read its own
+secrets with it, is reported where an operator is already looking rather
+than left to surface later as a run that could not resolve a credential:
+at startup, in the pane, in the installer's readiness summary on every
+run, and by `grain state status`, which prints the file and its public
+half.
 
 ### The bootstrap
 
@@ -2629,6 +2645,15 @@ Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
 previous working tree is moved aside with a timestamped name rather than
 deleted, and the pane says as much before you press the button.
+
+Nothing has to be carried out of that archived tree. Everything in it is
+a materialisation of a database that is still right here, and the one
+file that was not -- `secrets.enc` -- lives under `<data-dir>/secrets`
+now rather than in the repository, so adopting leaves this installation's
+secrets exactly where they were. What an adopted repository can still
+need is the key: a deployment restored onto this host from somewhere else
+has its secrets sealed to a key that did not come with the tables, which
+is what `-secrets-key-file` and the pane's own field are for.
 
 A deployment answers the same question without anyone opening the pane:
 `GRAIN_STATE_REPO_URL` (`terraform/gcp`'s `state_repo_url`) writes
@@ -2677,6 +2702,30 @@ instead.
 And the encrypted secrets file is not in there any more, for the reason
 the section above gives: a repository a sandbox may clone is a
 repository a sandbox may read whole.
+
+### A merged change is not something to commit over
+
+The export runs on a timer, so the daemon is writing to the repository
+while a pull request against it is open. A tick pulls before it exports,
+and that is usually the whole story: the merge arrives, its settings go
+live, and the export commits on top of it. This is about the tick where
+the pull does not get that far -- a history that will not fast-forward,
+or a merge that lands in the seconds between the pull and the push. The
+remote then holds a commit this deployment does not, and grain committing
+its own dump on top of that used to strand the installation: the push
+rejected as a non-fast-forward on that tick and on every tick afterwards,
+and a next start that finds the two diverged and refuses to load at all.
+A grain that will not come up because somebody merged the change it asked
+for is a bad answer to the mechanism this whole repository exists to
+allow.
+
+So the export asks the remote first, which costs one `ls-remote`, and
+declines to run at all while something is waiting. The database is still
+the live state and grain goes on running against it, unaffected; what is
+waiting is loaded at the next start, whole, the way every other thing a
+tick could not apply is. The pane says so in those terms -- a merge to
+load and a restart to load it with -- rather than showing a git error,
+and the journal says it once rather than every thirty seconds.
 
 ## Deployment configuration lives in the store too
 

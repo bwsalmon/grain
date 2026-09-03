@@ -50,6 +50,7 @@ describe("StateRepoPanel", () => {
 
     await user.type(screen.getByLabelText("Repository URL"), "https://github.com/owner/grain-state.git");
     await user.type(screen.getByLabelText(/Push token/), "ghp_x");
+    await user.type(screen.getByLabelText(/Secrets key/), "grain-secret-key-v1:AAAA");
     api.mockResolvedValueOnce({ ...local, mode: "remote", remote: "https://github.com/owner/grain-state.git" });
     await user.click(screen.getByRole("button", { name: "Adopt repository" }));
 
@@ -60,10 +61,49 @@ describe("StateRepoPanel", () => {
         remote: "https://github.com/owner/grain-state.git",
         branch: "main",
         token: "ghp_x",
+        secretsKey: "grain-secret-key-v1:AAAA",
       }),
     }));
     expect(await screen.findByText("https://github.com/owner/grain-state.git")).toBeInTheDocument();
+    // Neither pasted credential is kept in the form once the daemon has it.
     expect(screen.getByLabelText(/Push token/)).toHaveValue("");
+    expect(screen.getByLabelText(/Secrets key/)).toHaveValue("");
+  });
+
+  it("says when this host's secrets file is sealed to a key it lacks", async () => {
+    api.mockResolvedValueOnce({
+      ...local,
+      secretsError: "secrets: this file is encrypted to a different key",
+      secretsFileRecipient: "grain-secret-pub-v1:BBBB",
+    });
+    render(<StateRepoPanel showError={() => {}} />);
+
+    expect(await screen.findByText(/cannot read this host's secrets file/i)).toBeInTheDocument();
+    // Which key it wants is the question the operator has to answer, so
+    // the pane answers it rather than leaving them to guess.
+    expect(screen.getByText("grain-secret-pub-v1:BBBB")).toBeInTheDocument();
+  });
+
+  it("imports a private key, and does not keep it", async () => {
+    api.mockResolvedValueOnce({
+      ...local,
+      secretsError: "secrets: this file is encrypted to a different key",
+      secretsFileRecipient: "grain-secret-pub-v1:BBBB",
+    });
+    const user = userEvent.setup();
+    render(<StateRepoPanel showError={() => {}} />);
+    await screen.findByText(/cannot read this host's secrets file/i);
+
+    await user.type(screen.getByLabelText(/Import a private key/), "grain-secret-key-v1:BBBB");
+    api.mockResolvedValueOnce({ ...local, secretsPublicKey: "grain-secret-pub-v1:BBBB" });
+    await user.click(screen.getByRole("button", { name: "Import key" }));
+
+    await waitFor(() => expect(api).toHaveBeenLastCalledWith("/api/state-repo/secrets-key", {
+      method: "POST",
+      body: JSON.stringify({ key: "grain-secret-key-v1:BBBB" }),
+    }));
+    expect(screen.getByLabelText(/Import a private key/)).toHaveValue("");
+    expect(screen.queryByText(/cannot read this host's secrets file/i)).not.toBeInTheDocument();
   });
 
   it("offers dropping the remote only when there is one", async () => {
@@ -81,6 +121,13 @@ describe("StateRepoPanel", () => {
     }));
     expect(await screen.findByText("local only")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop using the remote" })).not.toBeInTheDocument();
+  });
+
+  it("says a merged change is waiting, and what to do about it", async () => {
+    api.mockResolvedValueOnce({ ...local, mode: "remote", remote: "https://example.invalid/x.git", remoteAhead: true });
+    render(<StateRepoPanel showError={() => {}} />);
+
+    expect(await screen.findByText(/restart it to load this one/i)).toBeInTheDocument();
   });
 
   it("warns when the repository was written by a different schema", async () => {

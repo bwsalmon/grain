@@ -44,6 +44,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The well-known names an agent framework's own credential is stored
@@ -196,6 +197,94 @@ func (s *Store) PublicKey() (string, error) {
 		return "", err
 	}
 	return key.Public(), nil
+}
+
+// ImportKey installs a private key the operator already holds, which is
+// the other half of restoring an installation: a backup carries the
+// encrypted file, and this carries the key, which travels by hand and is
+// deliberately in no backup of anything else. Without it, that file on a
+// new host is every secret grain has in a form nothing on that host can
+// open -- which is the correct security property and a dead end as a
+// restore path.
+//
+// It refuses a key that does not match the file it would have to read,
+// naming both public keys, rather than installing it and leaving the
+// mismatch to surface later as a run that could not resolve a
+// credential. A key it replaces is moved aside with a timestamped name
+// and never deleted: key material is the one thing here that cannot be
+// regenerated, and an operator who pastes yesterday's key over today's
+// must be able to get today's back.
+func (s *Store) ImportKey(k Key) error {
+	if k.priv == nil {
+		return errors.New("secrets: no key to import")
+	}
+	if s.cfg.KeyFile == "" {
+		return errors.New("secrets: no key file configured to import into")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := os.ReadFile(s.cfg.File)
+	switch {
+	case err == nil && len(strings.TrimSpace(string(data))) > 0:
+		if _, err := Decrypt(k, data); err != nil {
+			if errors.Is(err, ErrWrongKey) {
+				want, _ := Recipient(data)
+				return fmt.Errorf("%w: %s is encrypted to %s, and this key is %s",
+					ErrWrongKey, s.cfg.File, want, k.Public())
+			}
+			return err
+		}
+	case err != nil && !os.IsNotExist(err):
+		return fmt.Errorf("secrets: reading %s: %w", s.cfg.File, err)
+	}
+	if existing, err := ReadKeyFile(s.cfg.KeyFile); err == nil && existing.String() != k.String() {
+		archived := s.cfg.KeyFile + ".replaced-" + time.Now().UTC().Format("20060102-150405")
+		if err := os.Rename(s.cfg.KeyFile, archived); err != nil {
+			return fmt.Errorf("secrets: keeping the key %s replaces: %w", s.cfg.KeyFile, err)
+		}
+	}
+	if err := WriteKeyFile(s.cfg.KeyFile, k); err != nil {
+		return err
+	}
+	// Whatever Open could not do -- and the one thing it refuses to do is
+	// mint a key over an encrypted file it cannot read -- it can do now.
+	s.openErr, s.created = nil, false
+	return nil
+}
+
+// Check reports whether this host can actually read its own secrets
+// file: the key is there, and it is the key the file was sealed to. A
+// store with nothing stored yet passes, because an absent file is an
+// empty store rather than a broken one.
+//
+// The bootstrap asks this, so that "the secrets on this host are
+// encrypted to a key it does not have" is something an operator is told
+// where they can fix it, rather than something they discover when a run
+// fails to resolve a credential.
+func (s *Store) Check() error {
+	_, err := s.load()
+	return err
+}
+
+// FileRecipient reports the public key the secrets file is encrypted to,
+// or "" when there is no file yet. Shown beside PublicKey in the
+// bootstrap: seeing the two differ is what tells an operator holding
+// several keys which one this deployment needs.
+func (s *Store) FileRecipient() (string, error) {
+	if s.cfg.File == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(s.cfg.File)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("secrets: reading %s: %w", s.cfg.File, err)
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return "", nil
+	}
+	return Recipient(data)
 }
 
 func (s *Store) ready() error {

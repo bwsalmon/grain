@@ -285,6 +285,25 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	return r.Push(ctx)
 }
 
+// ErrRemoteAhead is returned by Sync and SyncAll when the remote holds
+// commits this deployment has not taken up -- a merged pull request against grain's
+// own settings, which is the mechanism this whole package exists to
+// allow.
+//
+// Apply, above, is what handles that in the ordinary case: a tick pulls
+// the merge down and makes its settings live. This is the tick where
+// that did not happen -- a history that will not fast-forward, or a
+// merge that landed between the pull and the push -- and it is a refusal
+// to export rather than a failure to push, which is the whole point:
+// exporting would commit this deployment's dump on top of the merge, and
+// no amount of retrying afterwards could get that commit onto a remote
+// that has moved past it. The database is still the live state and grain
+// goes on running against it; what is waiting is loaded at the next
+// start, whole, because that import replaces every row and is not
+// something to do underneath runs holding ids (Load, above).
+var ErrRemoteAhead = errors.New("the state repository has changes this deployment has not loaded; " +
+	"restart grain to apply them")
+
 // Sync writes the database out and commits and pushes anything that
 // changed, reporting whether there was anything to commit.
 //
@@ -314,6 +333,15 @@ func SyncAll(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error
 }
 
 func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool) (bool, error) {
+	// Asked before anything is written, so that a merged change is never
+	// committed over -- see ErrRemoteAhead. An unreachable remote answers
+	// "not ahead" and the push below reports the network in its own
+	// words. It guards both entry points: asking for a sync explicitly
+	// (SyncAll) is no more a reason to commit over a merge than the
+	// timer's own tick is.
+	if ahead, err := r.RemoteAhead(ctx); err == nil && ahead {
+		return false, ErrRemoteAhead
+	}
 	// Rewritten on every sync, not only at Seed: a repository an operator
 	// adopted, or one whose README a merge dropped, still has to explain
 	// itself to whoever opens it next, and this is the cheapest place to

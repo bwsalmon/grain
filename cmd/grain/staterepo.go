@@ -91,6 +91,18 @@ func openSecrets(dataDir string) *secrets.Store {
 			"without it, %s cannot be decrypted by anyone, grain included",
 			store.KeyFile(), store.File())
 	}
+	// A repository adopted from another installation arrives sealed to
+	// that installation's key, and every secret in it is unreadable here
+	// until the operator imports theirs. Said once at startup, where it
+	// is a line about the deployment, rather than only later as a run
+	// that could not resolve a credential.
+	if err := store.Check(); err != nil {
+		log.Printf("grain: this host cannot read %s: %v", store.File(), err)
+		if recipient, rerr := store.FileRecipient(); rerr == nil && recipient != "" {
+			log.Printf("grain: it is encrypted to %s -- install that key with "+
+				"`grain state key import` or the Settings pane's State tab", recipient)
+		}
+	}
 	return store
 }
 
@@ -316,6 +328,11 @@ const stateSyncInterval = 30 * time.Second
 func stateSyncLoop(ctx context.Context, sync, syncAll func(context.Context) (bool, error)) {
 	ticker := time.NewTicker(stateSyncInterval)
 	defer ticker.Stop()
+	// The last thing logged, so a condition that persists -- an expired
+	// credential, or a merged change waiting for a restart, which can
+	// wait days -- is one line in the journal rather than one every
+	// thirty seconds drowning everything else in it.
+	var last string
 	for {
 		select {
 		case <-ctx.Done():
@@ -328,7 +345,12 @@ func stateSyncLoop(ctx context.Context, sync, syncAll func(context.Context) (boo
 			}
 			return
 		case <-ticker.C:
-			if _, err := sync(ctx); err != nil {
+			_, err := sync(ctx)
+			switch {
+			case err == nil:
+				last = ""
+			case err.Error() != last:
+				last = err.Error()
 				log.Printf("grain: state sync failed: %v", err)
 			}
 		}
