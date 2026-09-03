@@ -110,7 +110,9 @@ pkg/agent/codex/  Framework via OpenAI's `codex` CLI, run as a subprocess
                 (sandbox_mode read-only, approvals never, code mode off)
 pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
                 and revokes a Gemini API key, direct against the API Keys
-                API
+                API, plus Reap, the hourly project-wide sweep that deletes
+                grain-prefixed keys older than 24h whether or not a Lease
+                survived to name them
 pkg/capability/gcpkey/  the gcp-key capability: a real MINT
                 model.CapabilityProvider that mints/revokes a per-task GCP
                 service-account key against the IAM API directly
@@ -1203,9 +1205,9 @@ Generative Language API, places it at `/home/debian/.gemini-api-key`,
 and revokes it, calling the API Keys API directly through its Go client
 library rather than shelling out to `gcloud` the way the Python version
 has to — one of the two things `google.golang.org/api` was expected to
-correct, per "Two things the port corrected" above. `DeleteExpired` is
-the "clean up after 24 hours if leaked" safety net, mirroring
-`delete_expired_keys`.
+correct, per "Two things the port corrected" above. `Reap` (and
+`DeleteExpired` beneath it) is the "clean up after 24 hours if leaked"
+safety net, mirroring `delete_expired_keys`.
 
 `gcpkey.Provider` (`pkg/capability/gcpkey/`) is now a real `MINT` provider too —
 `gcp-key`, ported from `grain/automation/gcp_keys.py` but talking to the
@@ -1217,11 +1219,26 @@ resource can outlive the `Lease` that recorded it, matching
 `docs/data-model.md`'s description of `gcp_keys.py`'s own
 `delete_expired_keys` as a backstop independent of any task record —
 `gcpkey.Provider.Reap` implements it by asking GCP's own key listing for
-the answer, not grain's store. `geminikey.DeleteExpired` plays the same
-backstop role for Gemini keys but stays a free function rather than a
-`model.Reaper` implementation, since an API key carries no service
-account of its own for a `ListKeys` call to scope to the way
-`gcpkey.Provider.Reap`'s does.
+the answer, not grain's store. `geminikey.Capability.Reap` plays the same
+backstop role for Gemini keys, and is a `model.Reaper` too as of
+grain/task-140 — it was a free function (`DeleteExpired`, still there for
+a caller-chosen cutoff) that no binary called until then, which meant a
+Gemini key minted for a run whose controller died between the mint and
+the store write was never deleted by anything: `revokeAll` covers only
+the leases grain still has a record of, and a lost record is precisely
+what the backstop exists for.
+
+Its one asymmetry with `gcpkey.Provider.Reap` is worth an operator
+knowing: an API key carries no service account of its own for a
+`ListKeys` call to scope to, so the sweep is **project-wide** and the
+`grain-` display-name prefix is all that separates grain's keys from
+anyone else's. Two grain deployments minting into one GCP project reap
+each other's *leaked* keys — never each other's live ones (nothing under
+24 hours old is touched) and never either daemon's own operating key
+(`geminikey.OperatingKeyDisplayName`, exempted by exact name). Give each
+deployment its own GCP project if that matters, the same way deployments
+that must not reap each other's VMs get separate `-kontur-state-dir`
+values.
 
 Both providers can now point at the same standing credential —
 `geminikey.Capability.Credential` and `gcpkey.Provider.Config.
@@ -1234,10 +1251,13 @@ now driving `pkg/orchestrator.RunDispatch` rather than the original
 `pkg/orchestrate` package it shipped against, per bwsalmon/agents#263):
 it constructs a real `CapabilityContext` per dispatch, applies every
 `SideSandbox` `Placement` under the dispatch's sandbox root, and calls
-`Revoke` once the run finishes. `Reap` is still uncalled from any binary
-here — a standalone sweep independent of any one dispatch, matching
-`gcp_keys.py`'s own `delete_expired_keys` cron job rather than something
-a reconcile cycle runs itself, and is still open.
+`Revoke` once the run finishes. `Reap` is called too, now: `cmd/grain`'s
+`reapCapabilities` sweeps every registered provider implementing
+`model.Reaper` once an hour from the same reconcile loop, which is what
+makes "clean up after 24 hours if leaked" hold within roughly that bound
+rather than "eventually" — a standalone sweep independent of any one
+dispatch, matching `gcp_keys.py`'s own `delete_expired_keys` cron job,
+just on grain's own timer rather than cron's.
 
 `CapabilityContext.Credentials` (`model.CredentialResolver`) had no
 production implementation until `pkg/secrets/`: a `Store` reading a

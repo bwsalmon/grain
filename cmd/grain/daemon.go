@@ -1471,10 +1471,11 @@ func (pullRequestGate) Comment(ctx context.Context, ref, body string) error {
 // reapInterval is how often reconcile calls reapCapabilities -- not
 // configurable, since nothing about it needs to race a deployment's own
 // -poll-interval: it only has to run comfortably more often than the
-// shortest ReapAfter/DeleteExpired cutoff any registered
-// model.Reaper carries (24 hours, for both gcpkey.Reap and
-// githubsandbox.Provider.Reap) for "clean up after N hours if leaked" to
-// actually hold within roughly that bound, not "eventually".
+// shortest ReapAfter/maxLease cutoff any registered
+// model.Reaper carries (24 hours, for all three of gcpkey.Reap,
+// githubsandbox.Provider.Reap and geminikey.Capability.Reap) for "clean
+// up after N hours if leaked" to actually hold within roughly that
+// bound, not "eventually".
 const reapInterval = time.Hour
 
 // reapCapabilities calls Reap on every registered capability provider
@@ -1486,10 +1487,20 @@ const reapInterval = time.Hour
 // exists on gcpkey.Provider and githubsandbox.Provider today, but until
 // something calls it periodically it is dead code, reachable only from a
 // test -- this closes that gap for both, not just the capability
-// bwsalmon/agents#354 asked for it on. geminikey's own DeleteExpired
-// plays the same role but is a package-level function, not a
-// model.Reaper, so it is not reached here; wiring it in is a separate,
-// smaller follow-up (bwsalmon/agents#354's PR notes this explicitly).
+// bwsalmon/agents#354 asked for it on.
+//
+// geminikey.Capability is the third, and joined the sweep later
+// (grain/task-140): its backstop was a package-level DeleteExpired no
+// binary called, so a Gemini key minted for a run whose controller died
+// between the mint and the store write was never deleted by anything --
+// revokeAll covers only the leases grain still has a record of, which is
+// exactly what that case has lost. Its Reap is project-wide rather than
+// scoped to one resource's owner the way the other two are, because an
+// API key hangs off no service account for a listing to scope to: two
+// deployments minting into one GCP project reap each other's leaked keys
+// (never each other's live ones, and never the daemon's own operating
+// key). See geminikey.Capability.Reap for why that is the accepted
+// trade and what avoids it.
 func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, creds model.CredentialResolver, now time.Time) {
 	if registry == nil {
 		return
