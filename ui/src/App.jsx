@@ -109,7 +109,10 @@ export default function App() {
   // bwsalmon/agents#473) since config is otherwise only ever fetched
   // once, at mount, and the repos pane's own list (repoRows) reads
   // config.targetRepos to decide which repos to show and which ones it
-  // can offer to remove.
+  // can offer to remove. It reads config.repoDefaultCapabilities for the
+  // same reason, which is why saving a repo's own defaults refreshes
+  // this too: a repo listed only because it carries a set stops being
+  // listed the moment that set is emptied.
   const refreshConfig = useCallback(async () => {
     setConfig(await api("/api/config"));
   }, []);
