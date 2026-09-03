@@ -62,7 +62,7 @@ func TestMetricsReportsAWholeTaskLifeAsStages(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1", Attempt: 1,
 		StartedAt: baseTime.Add(30 * time.Minute),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetRunAgentStarted(ctx, "r1", baseTime.Add(35*time.Minute)); err != nil {

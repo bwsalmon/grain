@@ -69,7 +69,7 @@ func TestRunCycleRecoversFromAPanickingReconciler(t *testing.T) {
 		Client:        panickingClient{Client: client, panicOn: pullRequestNumber(t, watched)},
 		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -105,7 +105,7 @@ func TestRunCycleRecoversFromAPanickingDispatch(t *testing.T) {
 		Client:        client,
 		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     orchestrator.StaticFramework(panickingFramework{}),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)

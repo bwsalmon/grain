@@ -84,6 +84,13 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigMaxConcurrentColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	// After ensureConfigMaxConcurrentColumn, not before: the two are one
+	// chain -- slots became max_concurrent, and max_concurrent became
+	// max_workers -- and a database old enough to still hold slots has to
+	// walk both steps in order.
+	if err := s.ensureConfigWorkerMergerColumns(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureTaskApprovedAtColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
@@ -216,6 +223,15 @@ func (s *Store) ensureConfigTargetReposColumn(ctx context.Context) error {
 // still NOT NULL with no default, would break every later PutConfig,
 // which stops supplying it.
 func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
+	// max_workers means this database is already past the step *after*
+	// this one (ensureConfigWorkerMergerColumns, which renamed
+	// max_concurrent to it) -- including every database created fresh
+	// from schema.go's own DDL, which has never had a max_concurrent
+	// column at all. Re-adding one here would leave a column nothing
+	// reads and every later migration has to step around.
+	if rows, err := s.db.QueryContext(ctx, "SELECT `max_workers` FROM `grain_config` WHERE 1 = 0"); err == nil {
+		return rows.Close()
+	}
 	if rows, err := s.db.QueryContext(ctx, "SELECT `max_concurrent` FROM `grain_config` WHERE 1 = 0"); err == nil {
 		return rows.Close()
 	}
@@ -237,6 +253,62 @@ func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `slots`")
+	return err
+}
+
+// ensureConfigWorkerMergerColumns splits grain_config's single
+// max_concurrent count into the pair model.Limits is now made of
+// (grain/task-63): max_workers, the ordinary-run ceiling max_concurrent
+// already was, and max_mergers, the extra capacity only a merge-queue fix
+// task may reach. Same probe-then-ALTER shape as every migration above,
+// and for the same reason: CREATE TABLE IF NOT EXISTS never alters a
+// table that is already there.
+//
+// max_workers is backfilled from max_concurrent, so a deployment keeps
+// exactly the ordinary concurrency it was already running -- a rename in
+// everything but SQL's inability to do one portably. The old column is
+// then dropped for the reason its own predecessor's was: leaving a NOT
+// NULL column with no default behind would break every later PutConfig,
+// which stops supplying it.
+//
+// max_mergers is not backfilled from anything, because there is nothing
+// it could be backfilled from: no deployment has ever expressed a merge
+// capacity. It takes DefaultMaxMergers, the same value a fresh database
+// gets from the DDL and a fresh Config from DefaultConfig -- so an
+// upgraded deployment gains that one merger slot rather than silently
+// keeping the "mergers contend for worker capacity" behaviour its stored
+// row predates.
+func (s *Store) ensureConfigWorkerMergerColumns(ctx context.Context) error {
+	mergers, err := s.db.QueryContext(ctx, "SELECT `max_mergers` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		if err := mergers.Close(); err != nil {
+			return err
+		}
+	} else if _, err := s.db.ExecContext(ctx,
+		fmt.Sprintf("ALTER TABLE `grain_config` ADD COLUMN `max_mergers` INTEGER NOT NULL DEFAULT %d",
+			DefaultMaxMergers)); err != nil {
+		return err
+	}
+	if rows, err := s.db.QueryContext(ctx, "SELECT `max_workers` FROM `grain_config` WHERE 1 = 0"); err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `max_workers` INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT `max_concurrent` FROM `grain_config` WHERE 1 = 0")
+	if err != nil {
+		// No max_concurrent to carry over -- a database whose
+		// grain_config was created after the split -- so the DEFAULT
+		// above already leaves max_workers where it belongs.
+		return nil
+	}
+	rows.Close()
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE `grain_config` SET `max_workers` = `max_concurrent`"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `max_concurrent`")
 	return err
 }
 
@@ -1474,42 +1546,73 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 }
 
 // ErrAtCapacity is what StartRun returns instead of recording a run when
-// maxConcurrent runs are already live. It is an ordinary outcome, not a
-// fault: dispatch.Cycle counts live runs before it decides what to start,
-// so seeing this means another caller started one in between -- the race
-// this exists to lose safely. A caller treats it as "no free capacity
-// this tick" and tries again on the next one.
+// the limits it was given already admit no run of this one's kind. It is
+// an ordinary outcome, not a fault: dispatch.Cycle counts live runs
+// before it decides what to start, so seeing this means another caller
+// started one in between -- the race this exists to lose safely. A caller
+// treats it as "no free capacity this tick" and tries again on the next
+// one.
 var ErrAtCapacity = errors.New("model: the concurrency limit is already reached")
 
-// StartRun records a run and its leases together, so long as fewer than
-// maxConcurrent runs are already live.
+// StartRun records a run and its leases together, so long as limits still
+// admit one more run of this one's kind -- worker or merger, decided from
+// the task's own origin reason (OriginReason.Merger). Limits' own doc
+// comment is the rule the two numbers make; Limits.Admits is the one
+// implementation of it, shared with the caller's own look-before-you-leap
+// check so the two cannot drift.
 //
 // The capacity check happens here, inside the same transaction as the
 // insert, rather than in the caller that decided to start this run --
-// which is the whole reason it takes a limit at all. dispatch.Cycle reads
-// the live-run count and task_ready outside any single transaction and
+// which is the whole reason it takes limits at all. dispatch.Cycle reads
+// the live-run counts and task_ready outside any single transaction and
 // then issues a StartRun per unit of headroom it found, so nothing in Go
 // stops two overlapping Cycle calls from both seeing the same headroom
 // and both spending it. Under slots, a unique index on the slot each run
 // claimed caught that after the fact (bwsalmon/agents#434); with nothing
-// left to claim, the count and the insert simply happen together
-// instead, which rules the race out rather than detecting it. A maxConcurrent of 0 or less disables the check --
-// for a caller with no limit of its own to enforce, such as a test
-// starting a run directly.
-func (s *Store) StartRun(ctx context.Context, r Run, maxConcurrent int) error {
+// left to claim, the counts and the insert simply happen together
+// instead, which rules the race out rather than detecting it. Limits that
+// bound nothing (Limits.Unlimited, which the zero value is) disable the
+// check -- for a caller with no limit of its own to enforce, such as a
+// test starting a run directly, or dispatch's own configuration agent.
+func (s *Store) StartRun(ctx context.Context, r Run, limits Limits) error {
 	return s.write(ctx, "start run "+r.ID+" for task "+r.TaskID, func(tx *sql.Tx) error {
-		if maxConcurrent > 0 {
-			var live int
-			if err := tx.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM `task_run` WHERE `finished_at` IS NULL").Scan(&live); err != nil {
-				return fmt.Errorf("counting live runs: %w", err)
+		if !limits.Unlimited() {
+			live, err := liveRunCounts(ctx, tx)
+			if err != nil {
+				return err
 			}
-			if live >= maxConcurrent {
+			merger, err := taskIsMerger(ctx, tx, r.TaskID)
+			if err != nil {
+				return err
+			}
+			if !limits.Admits(live, merger) {
 				return ErrAtCapacity
 			}
 		}
 		return startRun(ctx, tx, r)
 	})
+}
+
+// taskIsMerger answers OriginReason.Merger for one task id, from the
+// column rather than from a whole Task: this runs inside StartRun's own
+// transaction, where the only thing worth reading is the one field the
+// capacity check turns on.
+//
+// A task id with no row is not a merger. StartRun has no business being
+// called for one, and a foreign key on task_run.task_id is what actually
+// rejects it a statement later -- guessing "merger" for a task nobody can
+// see would be the one reading that spends the reserved capacity.
+func taskIsMerger(ctx context.Context, tx *sql.Tx, taskID string) (bool, error) {
+	var reason string
+	err := tx.QueryRowContext(ctx,
+		"SELECT `origin_reason` FROM `task` WHERE `id` = ?", taskID).Scan(&reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading task %s's origin reason: %w", taskID, err)
+	}
+	return OriginReason(reason).Merger(), nil
 }
 
 // startRun uses INSERT rather than REPLACE, unlike most writes in this
@@ -1845,6 +1948,37 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 	return out, err
 }
 
+// ReadyMergers is Ready narrowed to the merge queue's own fix tasks
+// (Origin.Reason == ReasonFix, OriginReason.Merger) -- the ready tasks
+// whose runs are mergers, and so bounded by Limits.Mergers on top of
+// Limits.Workers rather than by the worker ceiling alone.
+//
+// It is a second, narrower query rather than a kind returned alongside
+// each entry of Ready because that is all its caller needs: dispatch.
+// Cycle walks Ready in Ready's order and asks of each candidate only
+// "which of the two limits does this one spend", which membership of this
+// set answers. Ready keeps its own shape, and the order the two agree on
+// stays the one order task_ready and the backlog already define -- there
+// is no second ordering here to disagree with it.
+func (s *Store) ReadyMergers(ctx context.Context) ([]string, error) {
+	var out []string
+	err := each(ctx, s.db,
+		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
+			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
+			"WHERE `t`.`origin_reason` = ? "+
+			"ORDER BY `t`.`order_key`, `r`.`task_id`",
+		[]any{string(ReasonFix)},
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out = append(out, id)
+			return nil
+		})
+	return out, err
+}
+
 // ReadyConfiguration is Ready narrowed to the configuration agent
 // (Task.Configuration, bwsalmon/agents#621): every such task
 // dispatchable right now, in the same backlog order Ready itself uses
@@ -1852,7 +1986,7 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 // its own for the same reason Ready has none: position in the backlog is
 // the whole of the order, here as there.
 //
-// dispatch.Cycle calls this before it ever looks at MaxConcurrent, and
+// dispatch.Cycle calls this before it ever looks at any limit, and
 // starts every task it returns unconditionally: the configuration agent
 // exists precisely for a person to reach for when something -- possibly
 // the deployment's own concurrency limit having no headroom left -- is
@@ -2246,7 +2380,7 @@ func rebalanceOrderKeys(ctx context.Context, tx *sql.Tx) error {
 // needed was the difference between a fixed pool and the part of it in
 // use. There is no pool to difference against any more: a sandbox is
 // created for a run and destroyed with it, so the only question left is
-// how many are in flight against MaxConcurrent.
+// how many are in flight against model.Limits.
 //
 // It is deliberately not what StartRun enforces the limit with -- see
 // that method's own doc comment on why the check has to happen inside the
@@ -2259,6 +2393,42 @@ func (s *Store) LiveRunCount(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("counting live runs: %w", err)
 	}
 	return n, nil
+}
+
+// LiveRunCounts is LiveRunCount split the way Limits is (grain/task-63):
+// the same live rows, counted as mergers (a run of a merge-queue fix
+// task) and workers (everything else) separately, since the two are
+// bounded differently and a caller deciding what to dispatch has to know
+// which of the two it has room for.
+//
+// Everything LiveRunCount's own doc comment says about re-reading rather
+// than remembering applies here unchanged; this is that count with the
+// one distinction the limits draw, not a second notion of what is live.
+func (s *Store) LiveRunCounts(ctx context.Context) (RunCounts, error) {
+	return liveRunCounts(ctx, s.db)
+}
+
+// liveRunCounts is LiveRunCounts against either the store's own handle or
+// one transaction -- StartRun needs exactly this count inside the same
+// transaction as its insert, which is the only way the limit is enforced
+// at all rather than merely checked.
+//
+// LEFT JOIN, not JOIN: a live run whose task row has somehow gone still
+// occupies a sandbox and still has to be counted against the total. It
+// counts as a worker, which is the same "don't spend the merge queue's
+// reserved capacity on a task nobody can see" reading taskIsMerger takes.
+func liveRunCounts(ctx context.Context, q querier) (RunCounts, error) {
+	var c RunCounts
+	var mergers, total int
+	if err := q.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(CASE WHEN `t`.`origin_reason` = ? THEN 1 ELSE 0 END), 0), COUNT(*) "+
+			"FROM `task_run` AS `r` LEFT JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
+			"WHERE `r`.`finished_at` IS NULL",
+		string(ReasonFix)).Scan(&mergers, &total); err != nil {
+		return RunCounts{}, fmt.Errorf("counting live runs: %w", err)
+	}
+	c.Mergers, c.Workers = mergers, total-mergers
+	return c, nil
 }
 
 // LiveRuns is every task_run row with no `finished_at` -- the same rows
@@ -2454,7 +2624,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 	return &c, nil
 }
 
-const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
+const configColumns = "`poll_interval_ms`,`max_workers`,`max_mergers`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
 	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`,`environment_name`"
@@ -2464,7 +2634,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var pollMS int64
 	var targetRepos string
 	var defaultCapabilities string
-	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
+	if err := scan(&pollMS, &c.MaxWorkers, &c.MaxMergers, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
 		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
@@ -2489,8 +2659,8 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			c.PollInterval.Milliseconds(), c.MaxWorkers, c.MaxMergers, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
 			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,

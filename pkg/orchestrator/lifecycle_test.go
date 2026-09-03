@@ -84,7 +84,7 @@ func TestRunCycleReleasesTheSandboxAfterASuccessfulDispatch(t *testing.T) {
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -116,7 +116,7 @@ func TestRunCycleReleasesTheSandboxAfterAFailedDispatch(t *testing.T) {
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
 		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err == nil {
@@ -153,7 +153,7 @@ func TestRunCycleDispatchesAGrantWithNoPlacementOntoANonRootedSandbox(t *testing
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
 		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(selfdebug.New())},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -183,7 +183,7 @@ func TestRunCycleFailsAGrantThatPlacesSomethingOntoANonRootedSandbox(t *testing.
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
 		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
@@ -302,7 +302,7 @@ func TestRunCyclePlacesIntoASandboxThatCanOnlyBeReachedRemotely(t *testing.T) {
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
 		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -343,7 +343,7 @@ func TestRunCyclePrefersARemotePlacementOverALocalRoot(t *testing.T) {
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
 		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -384,7 +384,7 @@ func TestRunCycleAcquiresTheSandboxWithTheTasksOwnShape(t *testing.T) {
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -410,7 +410,7 @@ func TestRunCycleAcquiresWithNoShapeForATaskThatSetsNeitherField(t *testing.T) {
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -458,7 +458,7 @@ func (s unbuildableSandboxes) Acquire(ctx context.Context, name string, shape or
 // a run -- is never reached, so without this the row stays live forever:
 // task_state reads it as 'running' so the task never returns to 'queued',
 // LiveRunCount keeps counting it so the deployment loses a unit of
-// -max-concurrent, and retryEligible reads finished runs so the backoff
+// -max-workers, and retryEligible reads finished runs so the backoff
 // never retries. Nothing sweeps it: MaxRunRuntime lives inside
 // RunDispatch, and RecoverOrphanedRuns only runs at startup.
 func TestRunCycleFinishesARunWhoseSandboxCouldNotBeAcquired(t *testing.T) {
@@ -471,7 +471,7 @@ func TestRunCycleFinishesARunWhoseSandboxCouldNotBeAcquired(t *testing.T) {
 		Store: store, Client: client,
 		Sandboxes:     unbuildableSandboxes{err: errors.New("guest never became reachable")},
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err == nil {
@@ -484,7 +484,7 @@ func TestRunCycleFinishesARunWhoseSandboxCouldNotBeAcquired(t *testing.T) {
 	}
 	if live != 0 {
 		t.Fatalf("live runs = %d, want 0 -- a run whose sandbox failed still holds its share of "+
-			"-max-concurrent, and nothing but a daemon restart would free it", live)
+			"-max-workers, and nothing but a daemon restart would free it", live)
 	}
 
 	runs, err := store.Runs(ctx, "t1")
@@ -528,7 +528,7 @@ func TestATaskWhoseSandboxFailedIsDispatchedAgainAfterItsBackoff(t *testing.T) {
 		Store: store, Client: client,
 		Sandboxes:     unbuildableSandboxes{err: errors.New("docker daemon is down")},
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 	if err := orchestrator.RunCycle(ctx, failing, baseTime); err == nil {
 		t.Fatal("expected the first cycle to report the failed acquisition")
@@ -540,7 +540,7 @@ func TestATaskWhoseSandboxFailedIsDispatchedAgainAfterItsBackoff(t *testing.T) {
 	working := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 	if err := orchestrator.RunCycle(ctx, working, later); err != nil {
 		t.Fatalf("second RunCycle: %v", err)
@@ -566,7 +566,7 @@ func TestRunCycleFinishesAndReleasesWhenMintingTheSandboxTokenFails(t *testing.T
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:        completesWithAComment(),
-		MaxConcurrent:    1,
+		MaxWorkers:       1,
 		MintSandboxToken: func(string) (string, error) { return "", errors.New("token file is unreadable") },
 	}
 
@@ -597,7 +597,7 @@ func TestRunCycleRevokesTheSandboxTokenAfterReleasingTheSandbox(t *testing.T) {
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 		// An absolute base, because runOne points the sandbox's git at
 		// GitRemoteBase+"/placeholder/placeholder.git" as soon as a token
 		// is minted, and a credential-store line needs a real URL.
@@ -652,7 +652,7 @@ func TestRunCycleFinishesARunWhoseShapeTheBackendRefuses(t *testing.T) {
 		Store: store, Client: client,
 		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err == nil {

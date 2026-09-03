@@ -1197,6 +1197,13 @@ func fixTaskTitle(task model.Task, ref model.PullRequestRef) string {
 // version needed an issue created for the fix and a comment posted on the
 // original task's own issue.
 //
+// Origin.Reason is ReasonFix, which is more than provenance: a run of a
+// task filed here is a *merger* (model.OriginReason.Merger), so it draws
+// on the capacity model.Limits.Mergers keeps back for exactly this --
+// capacity ordinary work cannot reach, so a repair does not have to wait
+// out whatever else the deployment is running. Filing at the head of the
+// backlog decides when it runs; that decides whether there is room to.
+//
 // Its body carries the failure itself, not just the verdict: healthReason
 // names the jobs that went red, and for a failing pull request
 // failingJobLogs appends what those jobs printed. The comment on the

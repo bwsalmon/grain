@@ -114,7 +114,7 @@
 # GRAIN_TARGET_REPO/GRAIN_TARGET_BRANCH and GRAIN_ENABLE_UI_UPGRADE) are
 # only *seeded* from these variables, the first time a deployment's store
 # has none (cmd/grain/daemon.go's loadConfig, bwsalmon/agents#320) --
-# passing this script a new GRAIN_GITHUB_HOST or GRAIN_MAX_CONCURRENT on
+# passing this script a new GRAIN_GITHUB_HOST or GRAIN_MAX_WORKERS on
 # a later re-run has no effect on a deployment that already has one, and
 # loadConfig now logs a line saying so on every start it happens. Change
 # an already-seeded value with `grain settings` (or the UI's Settings
@@ -208,7 +208,12 @@ GRAIN_IMAGE_PULL_TOKEN="${GRAIN_IMAGE_PULL_TOKEN:-}"
 GRAIN_EXTRA_DOCKER_ARGS="${GRAIN_EXTRA_DOCKER_ARGS:-}"
 
 GRAIN_UI_ADDR="${GRAIN_UI_ADDR:-127.0.0.1:80}"
-GRAIN_MAX_CONCURRENT="${GRAIN_MAX_CONCURRENT:-1}"
+# GRAIN_MAX_CONCURRENT is GRAIN_MAX_WORKERS' former name, from before a
+# deployment's concurrency was split into workers and mergers
+# (model.Limits): still honoured so a re-run of this script on a host
+# whose environment still sets it keeps the same worker count.
+GRAIN_MAX_WORKERS="${GRAIN_MAX_WORKERS:-${GRAIN_MAX_CONCURRENT:-1}}"
+GRAIN_MAX_MERGERS="${GRAIN_MAX_MERGERS:-1}"
 GRAIN_POLL_INTERVAL="${GRAIN_POLL_INTERVAL:-30s}"
 
 GRAIN_GITHUB_HOST="${GRAIN_GITHUB_HOST:-github.com}"
@@ -379,9 +384,14 @@ Recognized variables:
   GRAIN_UI_ADDR             UI/API bind address (default: 127.0.0.1:80 -- loopback
                              only; reach it with `ssh -L 8080:localhost:80 host`,
                              or put it behind Tailscale/IAP instead)
-  GRAIN_MAX_CONCURRENT      maximum number of tasks dispatched at once (default: 1).
-                             Seeded once, like every setting below marked the same
-                             way -- see this file's own header comment
+  GRAIN_MAX_WORKERS         maximum number of ordinary tasks dispatched at once
+                             (default: 1; GRAIN_MAX_CONCURRENT is its former name and
+                             is still honoured). Seeded once, like every setting below
+                             marked the same way -- see this file's own header comment
+  GRAIN_MAX_MERGERS         agents on top of GRAIN_MAX_WORKERS that only the merge
+                             queue may dispatch, to repair a pull request that will
+                             not land (default: 1; 0 makes them wait for a worker slot
+                             like anything else). Seeded once
   GRAIN_POLL_INTERVAL       daemon reconcile-cycle interval (default: 30s). Seeded once
 
   GRAIN_GITHUB_HOST         GitHub API host (default: github.com). Seeded once
@@ -1949,7 +1959,8 @@ write_systemd_units() {
     daemon
     -data-dir "$GRAIN_DATA_DIR"
     -sandbox-dir "$GRAIN_SANDBOX_DIR"
-    -max-concurrent "$GRAIN_MAX_CONCURRENT"
+    -max-workers "$GRAIN_MAX_WORKERS"
+    -max-mergers "$GRAIN_MAX_MERGERS"
     -poll-interval "$GRAIN_POLL_INTERVAL"
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
     -claude-oauth-token-file "$GRAIN_DATA_DIR/secrets/claude-oauth-token"
@@ -2351,7 +2362,8 @@ report_readiness() {
   echo "    GCP minter key:    $minter"
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: unrestricted -- any repo a task names is allowed>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
-  echo "    max concurrent:    ${GRAIN_MAX_CONCURRENT:-<default>}"
+  echo "    max workers:       ${GRAIN_MAX_WORKERS:-<default>}"
+  echo "    max mergers:       ${GRAIN_MAX_MERGERS:-<default>}"
   if [ "$GRAIN_KONTUR_ENABLE" = "1" ]; then
     echo "    sandboxing:        kontur VMs (one per run, over SSH as ${GRAIN_KONTUR_SSH_USER})"
   else

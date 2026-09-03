@@ -256,7 +256,7 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 // grain has always defaulted to.
 //
 // Every other setting earns the same "no restart" treatment wherever its
-// own consumer is: orchestrator.RunCycle re-reads MaxConcurrent and
+// own consumer is: orchestrator.RunCycle re-reads MaxWorkers/MaxMergers and
 // MaxAgentTurns every cycle, cmd/grain's dispatchConfig re-reads the
 // agent framework and its model per dispatch, and its liveConfig
 // re-applies the rest once per reconcile tick (that type's own doc
@@ -536,7 +536,7 @@ type CreateTaskRequest struct {
 	// (Interactive forced true, configurationCapabilities merged in, a
 	// default Title/Description) rather than a caller assembling that by
 	// hand, and dispatch.Cycle lets a task carrying it start even with
-	// the deployment already at MaxConcurrent.
+	// the deployment already at its worker limit.
 	Configuration bool `json:"configuration"`
 	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
 	// (bwsalmon/agents#534, grain/task-41) set model.Task's own fields of

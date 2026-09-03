@@ -197,7 +197,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(capabilityPushScript(remote, branch, task.ID, placementPath, placementContent)),
 		Config:    orchestrator.Config{Capabilities: model.NewCapabilityRegistry(provider)},
 	}
@@ -297,7 +297,7 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	}
 	assertState(w, "iss-cap", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(dispatches) != 1 || dispatches[0].TaskID != "iss-cap" {
 		t.Fatalf("Cycle: %v, %+v", err, dispatches)
 	}
@@ -356,7 +356,7 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	// capability leaving the task requeueable, not about how soon after
 	// the refusal that requeue is allowed to happen.
 	clock = clock.Add(time.Minute)
-	second, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("retry Cycle: %v, %+v, want attempt 2", err, second)
 	}

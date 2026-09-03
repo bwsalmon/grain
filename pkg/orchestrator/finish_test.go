@@ -304,7 +304,7 @@ func TestProcessResultCorrectsARunThatProducedNothingToActOn(t *testing.T) {
 	runID := "t1-1"
 	if err := store.StartRun(ctx, model.Run{
 		ID: runID, TaskID: task.ID, Sandbox: "s1", Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatalf("StartRun: %v", err)
 	}
 	if err := store.FinishRun(ctx, runID, baseTime, "succeeded", ""); err != nil {
@@ -735,7 +735,7 @@ func TestRunCycleOpensAPullRequestForABranchAFailedRunAlreadyPushed(t *testing.T
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     orchestrator.StaticFramework(ranOutOfTurns),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	err := orchestrator.RunCycle(ctx, deps, baseTime)

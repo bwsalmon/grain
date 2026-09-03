@@ -45,7 +45,7 @@ func TestLiveRunSalvagedAfterExceedingMaxTurnsReportsNoStaleFailure(t *testing.T
 	framework := liveFramework(t)
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxWorkers: 1,
 		Framework: orchestrator.StaticFramework(framework),
 		// The real repro: a budget so tight the model cannot possibly
 		// also reply with a final answer once it has spent its one turn

@@ -33,7 +33,7 @@ func TestCmdSettingsSetsAndClearsTheEnvironmentName(t *testing.T) {
 
 	// An unrelated flag leaves it alone -- the same fs.Visit
 	// nil-means-unchanged contract every other setting here gets.
-	if err := cmdSettings(ctx, c, &printer{}, []string{"-max-concurrent", "3"}); err != nil {
+	if err := cmdSettings(ctx, c, &printer{}, []string{"-max-workers", "3"}); err != nil {
 		t.Fatalf("cmdSettings: %v", err)
 	}
 	settings, err = c.GetSettings(ctx)

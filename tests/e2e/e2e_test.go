@@ -100,7 +100,7 @@ func TestIssueCompletesEndToEnd(t *testing.T) {
 	fileIssue(w, "iss-1", human("alice"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	assertState(w, "iss-1", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestCycleDispatchesTwoRunsAtOnceAgainstDifferentRepos(t *testing.T) {
 	assertState(w, "iss-a", model.StateQueued, false)
 	assertState(w, "iss-b", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 2}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	clock := baseTime
 	fileIssue(w, "iss-2", human("bob"), model.RepoRef{Owner: "acme", Name: "gadgets"})
 
-	first, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	first, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first Cycle: %v, %+v", err, first)
 	}
@@ -277,7 +277,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 
 	// Parked means not dispatchable, even with a free slot sitting right
 	// there.
-	stillParked, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	stillParked, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestAgentQuestionParksTaskThenReplyResumesAndItCompletes(t *testing.T) {
 	}
 	assertState(w, "iss-2", model.StateQueued, false)
 
-	second, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("second Cycle: %v, %+v, want attempt 2", err, second)
 	}
@@ -370,7 +370,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	)
 	assertState(w, "par", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 2}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	// Completed is not closed -- task_blocked reads closed_at, not
 	// completed_at, so the parent must still be excluded from every
 	// cycle with both children merely completed.
-	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
+	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 2}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	}
 	assertState(w, "kid-a", model.StateClosed, false)
 
-	oneOpen, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
+	oneOpen, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 2}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +444,7 @@ func TestParentBlockedUntilChildrenClose(t *testing.T) {
 	// offered here: slotA and slotB each already hold a child's cloned
 	// "work" directory from pushScript above, and the parent's own push
 	// below needs a clean slot to clone into.
-	freed, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	freed, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,7 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	fileIssue(w, "iss-3", human("carol"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	branch := model.BranchName("iss-3")
 
-	first, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	first, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first Cycle: %v, %+v", err, first)
 	}
@@ -510,7 +510,7 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 	// eventually succeeding once it targets the right repo, not about how
 	// soon after a failure that retry is allowed to happen.
 	clock = clock.Add(time.Minute)
-	second, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("retry Cycle: %v, %+v, want attempt 2", err, second)
 	}
@@ -545,7 +545,7 @@ func TestFailedRunReturnsTaskToQueueForRetry(t *testing.T) {
 // as long as A is merely running or completed, and only becomes
 // dispatchable the moment A reads closed.
 func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) {
-	const maxConcurrent = 2
+	const maxWorkers = 2
 	w := newWorld(t)
 	w.newRepo("acme", "widgets")
 
@@ -558,7 +558,7 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 
 	// B stays out of the dispatch even though there is capacity for it
 	// right alongside A.
-	first, err := dispatch.Cycle(w.ctx, w.store, maxConcurrent, clock)
+	first, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: maxWorkers}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +590,7 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 	// clears once the dependency's own row reads closed, so B must still
 	// sit out this cycle, even with both slots free now that A's run has
 	// finished.
-	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, maxConcurrent, clock)
+	stillBlocked, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: maxWorkers}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,7 +613,7 @@ func TestDependsOnTaskWaitsForRealPushMergeAndCloseBeforeDispatch(t *testing.T) 
 	// narrowing needed: B gets its own sandbox, so it cannot collide with
 	// the "work" clone A's own successful push left behind. This used to
 	// have to restrict the cycle to a second slot for exactly that reason.
-	second, err := dispatch.Cycle(w.ctx, w.store, maxConcurrent, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: maxWorkers}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestConcurrentRunsDenyCrossRepoPushWithoutTouchingTheOtherRun(t *testing.T)
 	fileIssue(w, "iss-4a", human("dave"), model.RepoRef{Owner: "acme", Name: "widgets"})
 	fileIssue(w, "iss-4b", human("erin"), model.RepoRef{Owner: "acme", Name: "gadgets"})
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, 2, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 2}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
