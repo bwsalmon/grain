@@ -265,6 +265,28 @@ describe("TaskList", () => {
       });
     });
 
+    // The same task with nothing to nest under -- its parent filtered
+    // out of this view, or gone -- falls back to a row of its own, and
+    // with it to a backlog position of its own. Its handle means the
+    // ordinary thing there, so it says the ordinary thing: it is only
+    // the nested row that moves by moving something else.
+    it("gives an unnested stacked task a handle that drags it alone", () => {
+      const onReorder = vi.fn();
+      renderList({
+        tasks: [...threeTasks.slice(0, 2), { id: 4, title: "Fix a vanished task's PR", state: "queued", capabilities: [], blocked: false, stacked: true, generatedFrom: 99 }],
+        onReorder,
+      });
+      const orphan = screen.getByText("Fix a vanished task's PR").closest(".task-row");
+
+      expect(orphan.closest(".task-sublist")).toBeNull();
+      expect(orphan.querySelector(".task-drag-handle title")).toHaveTextContent(/^Drag to reorder$/);
+
+      fireEvent.dragStart(rowFor("Fix a vanished task's PR"));
+      fireEvent.drop(rowFor("First"));
+
+      expect(onReorder).toHaveBeenCalledWith([4], null, 1);
+    });
+
     it("never starts a drag, and shows no drag handle, without an onReorder prop", () => {
       const { container } = render(
         <TaskList tasks={threeTasks} stateFilter="all" config={null} onOpenTask={vi.fn()}
