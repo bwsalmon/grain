@@ -236,6 +236,12 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
    the drag affordance; the row itself stays draggable so grabbing
    anywhere on it still works, the handle just signals that it can be. */
 .task-drag-handle { flex: none; color: var(--text-tertiary); cursor: grab; }
+/* A row inside a reorderable list that has no handle of its own -- a
+   stacked task, which follows the task it fixes rather than holding a
+   backlog position -- holds the handle's column open instead, so its
+   contents stay indented under the parent row rather than sitting a
+   handle's width to the left of it. The width is a small MUI icon's. */
+.task-drag-spacer { flex: none; width: 1.25rem; }
 .task-row-dragging { opacity: 0.4; }
 /* .task-drop-target marks whichever <li> (a task row, or the trailing
    .task-drop-end sentinel for "drop at the very end of the list") the

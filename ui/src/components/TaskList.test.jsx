@@ -215,6 +215,35 @@ describe("TaskList", () => {
       expect(onOpenTask).not.toHaveBeenCalled();
     });
 
+    // A stacked task renders nested under the task it fixes, so it has
+    // no backlog position to drag it to and gets no handle. The column
+    // it would occupy stays open all the same: without it the nested row
+    // rendered a handle's width left of the parent's own contents, the
+    // opposite of the indent the nesting is meant to read as.
+    describe("a stacked task nested under its parent", () => {
+      const stacked = [
+        threeTasks[0],
+        { id: 4, title: "Fix First's PR", state: "queued", capabilities: [], blocked: false, stacked: true, generatedFrom: 1 },
+      ];
+
+      it("holds the drag handle's column open, without a handle of its own", () => {
+        renderList({ tasks: stacked, onReorder: vi.fn() });
+        const child = screen.getByText("Fix First's PR").closest(".task-row");
+
+        expect(child.closest(".task-sublist")).toBeInTheDocument();
+        expect(child.querySelector(".task-drag-handle")).not.toBeInTheDocument();
+        expect(child.querySelector(".task-drag-spacer")).toBeInTheDocument();
+        expect(rowFor("First").querySelector(".task-drag-handle")).toBeInTheDocument();
+      });
+
+      it("leaves the column out when the list is not reorderable at all", () => {
+        renderList({ tasks: stacked });
+        const child = screen.getByText("Fix First's PR").closest(".task-row");
+
+        expect(child.querySelector(".task-drag-spacer")).not.toBeInTheDocument();
+      });
+    });
+
     it("never starts a drag, and shows no drag handle, without an onReorder prop", () => {
       const { container } = render(
         <TaskList tasks={threeTasks} stateFilter="all" config={null} onOpenTask={vi.fn()}

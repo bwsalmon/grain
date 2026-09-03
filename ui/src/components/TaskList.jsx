@@ -181,7 +181,8 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
               <ul className="task-sublist">
                 {children.get(t.id).map((c) => (
                   <li key={c.id}>
-                    <TaskRow t={c} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect} />
+                    <TaskRow t={c} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
+                      reserveDragSpace={reorderEnabled} />
                   </li>
                 ))}
               </ul>
@@ -216,18 +217,28 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // nowhere to put a batch-actions bar or a reorderable list (the repo
 // pane, again) just omits onToggleSelect/draggable and gets a plain row
 // with no checkbox or drag handle rather than a dead one.
-export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging }) {
+//
+// reserveDragSpace is for the third case: a row that sits *inside* a
+// reorderable list but has no backlog position to drag it to -- a
+// stacked task, which always renders under the task it fixes. Dropping
+// the handle entirely would slide such a row's contents a handle's width
+// to the left of every draggable row around it, so the nested rows ended
+// up hanging left of their own parent instead of indented under it. It
+// keeps the handle's column, empty.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, reserveDragSpace }) {
   const phase = completionPhase(t);
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
-      {draggable && (
+      {draggable ? (
         <DragIndicatorIcon
           className="task-drag-handle"
           fontSize="small"
           titleAccess="Drag to reorder"
           onClick={(e) => e.stopPropagation()}
         />
-      )}
+      ) : reserveDragSpace ? (
+        <span className="task-drag-spacer" aria-hidden="true" />
+      ) : null}
       {onToggleSelect && (
         <Checkbox
           size="small"
