@@ -479,7 +479,12 @@ and become grain's, which means grain has to render them. That is what
   `proposeTaskTool`'s "a human must accept it first" contract is enforced
   by the state machine rather than by withholding a label, and
   `model.LinkProposedBy` records which task proposed it — something the
-  issue version had no way to say.
+  issue version had no way to say. It joins the backlog where a task a
+  human files joins it, `Store.OrderKeyForNewTask` at whichever end
+  `model.Config.NewestFirst` names: by default the end of it, behind
+  everything already queued, rather than at `OrderKey`'s zero value —
+  which is not "no position" but a position ahead of every task filed
+  since the backlog started.
 - The merge queue's own two voices moved too: `fileFixTask` files a store
   task instead of an issue, and both it and `escalateToUser` comment
   through `Store.AddComment` as the `merge-queue` principal, so a human
