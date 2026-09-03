@@ -1409,11 +1409,13 @@ registration cannot express what grain needs, which is a per-*run*
 binding: two runs dispatched concurrently against two different sandboxes
 would share one registration, and whichever wrote it last would decide
 where both runs' tools landed. So `Framework.Run` gives each run its own
-private `HOME` -- a temp directory holding nothing but the settings file
-naming that run's own `mcpserver` server -- and deletes it as the run
-returns. That has the same effect `claude`'s `--strict-mcp-config` has
-there: the only MCP server a run can see is its own, because there is no
-other settings file in the `HOME` it was given to find one in.
+private `HOME` -- a temp directory holding nothing but the config file
+naming that run's own `mcpserver` server, at the
+`.gemini/config/mcp_config.json` agy actually reads it from -- and
+deletes it as the run returns. That has the same effect `claude`'s
+`--strict-mcp-config` has there: the only MCP server a run can see is its
+own, because there is no other config file in the `HOME` it was given to
+find one in.
 
 **It has no `--max-turns`.** `RunConfig.MaxTurns` is therefore enforced
 here rather than by the binary, and enforced on the live stream rather
@@ -1480,6 +1482,26 @@ upgrading across this change needs `agy` installed on the controller and
 otherwise keeps its existing `-gemini-api-key-file`, which `agy`
 authenticates with as `GEMINI_API_KEY` in the subprocess environment
 (never in argv).
+
+Authenticating that way is two things, not one, and grain does both. agy
+reads `GEMINI_API_KEY` only for a session whose settings ask it to --
+`"modelProvider": "gemini"` in `.gemini/antigravity-cli/settings.json` --
+so `Framework.Run` writes that file into the private `HOME` beside the
+MCP config whenever it has a key to pass. Without it agy ignores the
+variable, falls through to the interactive browser login its OAuth
+sessions come from, and, with a prompt on stdin rather than a terminal,
+exits 1 with `authentication required. Run 'agy' to log in, then retry`.
+The credential a run uses is grain's own either way: `GOOGLE_API_KEY` is
+cleared in the same environment, because agy prefers it when both are
+set and the subprocess inherits the controller's.
+
+The model name carries its reasoning effort: agy's catalog is
+`gemini-3.1-pro-high`, `gemini-3.1-pro-low`, `gemini-3.8-flash-medium`
+and so on (`agy models` lists them), and it refuses both a bare family
+name (`--model gemini-3.1-pro requires --effort`) and a suffixed name
+passed alongside `--effort`. `antigravity.DefaultModel` is one of the
+catalog names, and a deployment overriding it in Settings or with
+`-gemini-model` should name one too.
 
 ## Letting a run watch its own CI
 
