@@ -1614,6 +1614,49 @@ closing line. `restartOnlySettings` in `pkg/ui/settings.go` is the one
 list both ends read, so a setting cannot be applied live *and* annotated,
 nor left needing a restart in silence.
 
+### A capability can be ready and still ungrantable
+
+The Settings pane's Capabilities tab answers "would this capability work
+if a task were granted it": which deployment settings it still needs
+(`missingConfig`), which secrets are unset (`missingSecrets`), and
+`ready` when neither list has anything in it. That turns out not to be
+the whole question, and the half it left out is the one that is harder to
+see.
+
+Which capabilities a task can be granted at all is decided somewhere
+else entirely: `ui.DefaultCapabilities` (`pkg/ui/labels.go`) is the
+picker's listing, and `grantsFor`/`SetCapability` reject any id it has no
+row for as "unknown capability" before a `model.Grant` is ever written.
+The set of capabilities `cmd/grain/daemon.go`'s `capabilityProviders`
+*registers* is a different list, maintained by hand in a different file,
+and the two have drifted: `gcp-key` and `github-sandbox` are registered
+by the daemon and absent from the picker. A deployment can therefore
+have `gcp-key` fully configured — a project, an agent service account, a
+`gcp-key-minter` secret, the tab showing **Ready** — and still never mint
+a key, because no task has ever been able to ask for one. Nothing failed:
+`ResolveGrants` was never reached, so there is no refusal in a run's
+output, no error in the daemon's log, and nothing at all in the sandbox
+where `/home/debian/.gcp-service-account.json` should be. This is the
+second distinct way `grain-gcp-key` has failed to reach a sandbox — see
+`konturSandbox.PlaceFile` above for the first, which was fixed — and
+unlike that one it is invisible from every surface an operator had.
+
+`CapabilityStatus.Grantable` is that missing half, reported alongside
+`Ready` rather than folded into it, because the two name gaps that are
+fixed in opposite places: an unready capability is this deployment's
+configuration, while an ungrantable one is grain's own code and no amount
+of configuring will move it. The Capabilities tab badges it "Not
+grantable" with a line saying configuration cannot fix it, and `grain
+settings` — which until now printed no capability information at all,
+leaving a shell on the host with no way to ask this question — prints the
+whole table, both gaps named separately.
+
+Reporting the drift is not repairing it. Whether `gcp-key` should join
+the picker, or be granted to every dispatch the way v1 minted one
+unconditionally per sandbox (`gcp_keys.py`: "every sandbox, every
+dispatch... rather than a task label"), is a design question this leaves
+open; what changes here is that a deployment in that state now says so.
+
 ## Write-only secrets access when colocated
 
 `pkg/secrets.Store` (above, "no secret store in the model") was

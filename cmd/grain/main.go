@@ -754,6 +754,48 @@ func (p *printer) settings(s ui.Settings) {
 		fmt.Printf("\nsaved, but not running yet -- restart the daemon to apply: %s\n",
 			strings.Join(s.PendingRestart, ", "))
 	}
+	if len(s.Capabilities) > 0 {
+		fmt.Println("\ncapabilities:")
+		for _, cp := range s.Capabilities {
+			fmt.Println(capabilityStatusLine(cp))
+		}
+	}
+}
+
+// capabilityStatusLine renders one ui.CapabilityStatus as a line of
+// `grain settings` -- the CLI's half of the Settings pane's own
+// Capabilities tab, printed here because "why did a task never get the
+// thing it was granted" is a question asked from a shell on the host at
+// least as often as from a browser, and until now the only answer
+// available there was the two GCP fields above, which say nothing about
+// secrets and nothing at all about the two gaps below.
+//
+// Both gaps are named, not just the configuration one, because they are
+// fixed in different places and confusing them costs a debugging
+// session: "needs"/"missing secrets" is this deployment (set it in
+// Settings, or `grain secrets set`), while "NOT GRANTABLE" is grain's
+// own code and cannot be configured around -- see
+// ui.CapabilityStatus.Grantable.
+func capabilityStatusLine(cp ui.CapabilityStatus) string {
+	state := "not ready"
+	if cp.Ready {
+		state = "ready"
+	}
+	var notes []string
+	if !cp.Grantable {
+		notes = append(notes, "NOT GRANTABLE -- grain registers a provider for this, but no task can ask for it")
+	}
+	if len(cp.MissingConfig) > 0 {
+		notes = append(notes, "needs: "+strings.Join(cp.MissingConfig, ", "))
+	}
+	if len(cp.MissingSecrets) > 0 {
+		notes = append(notes, "missing secrets: "+strings.Join(cp.MissingSecrets, ", "))
+	}
+	line := fmt.Sprintf("  %-20s %-9s", cp.ID, state)
+	if len(notes) > 0 {
+		line += " " + strings.Join(notes, "; ")
+	}
+	return strings.TrimRight(line, " ")
 }
 
 func (p *printer) encode(v any) {
