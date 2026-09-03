@@ -355,8 +355,8 @@ these values. Two consequences:
   PAT, the OAuth token and the minter's key.
 - **A replacement of the host prints them.** `lifecycle.ignore_changes`
   (instance.tf) suppresses in-place diffs, not the prior state a destroy
-  is rendered from -- so an apply that replaces the instance (a bigger
-  `boot_disk_gb`, a new `boot_image`, a new `machine_type`) renders every
+  is rendered from -- so an apply that replaces the instance (any change
+  to `boot_disk_gb`, a new `boot_image`, a new `machine_type`) renders every
   one of these values in full. In bwsalmon/agents#653 that put the minter
   account's private key in a deploy workflow's log. `deploy/terraform-apply.sh`
   now filters the apply's output for exactly this, so the plan stays

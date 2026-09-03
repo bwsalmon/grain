@@ -136,15 +136,24 @@ variable "boot_disk_gb" {
     grows with the work done on this host is here any more. Sandboxes --
     the images, the per-VM disk overlays and the per-run checkouts --
     have a volume of their own (sandbox_disk_gb), so this one holds a
-    Debian install and a few hundred megabytes of grain. What it buys is
-    the thing a shared disk cannot: a task that fills its disk stops
+    Debian install and a few hundred megabytes of grain, which is why
+    20 GB is plenty and the same figure the data disk gets. What it buys
+    is the thing a shared disk cannot: a task that fills its disk stops
     tasks, not the OS, the journal, config-sync or the daemon.
+
+    Changing this at all -- down as much as up -- replaces the host
+    instance, since the size is an initialize_params on its boot disk and
+    GCE cannot shrink one in place anyway. The data disk is untouched by
+    that (prevent_destroy, instance.tf), so no state is lost, but the
+    apply renders the instance's prior metadata in full; see
+    deploy/terraform-apply.sh's redact and README's "A replacement of the
+    host prints them".
 
     Set sandbox_disk_gb = 0 and all of that comes back here, at which
     point this needs to be far larger -- a single kontur sandbox image is
     several gigabytes before any VM has written a byte.
   EOT
-  default     = 40
+  default     = 20
 }
 
 variable "data_disk_gb" {
