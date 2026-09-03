@@ -19,9 +19,37 @@ package gitproxy
 // once": what's on disk is loaded once same as a *.token file, but its
 // Token is re-minted from that App's own private key roughly every hour
 // rather than read as-is -- see apptoken.go and load below.
+//
+// grain/task-137 asked whether this ladder should also resolve a
+// credential out of the SQLite secrets store pkg/secrets keeps (secret
+// "github", key <name>) -- the store the UI's own Secrets pane writes --
+// so that "where secrets live" had one answer. It deliberately does not,
+// and SetToken/Remove below are the other half of that decision: the UI
+// writes *these files*, rather than the proxy learning to read a second
+// store. Three reasons, recorded here because the question will come
+// back:
+//
+//   - A GitHub App credential is three values with their own file shape
+//     (*.app.json, loadAppCredential below). Backing it with a secrets
+//     row would mean inventing a second encoding of the same thing, and
+//     then keeping the two in step forever.
+//   - This ladder is loaded by more than the daemon: `grain mcp-server`
+//     builds one too. Reading credentials out of the secrets database
+//     would put a second process on that SQLite file, for material a
+//     0600 file already holds just as well.
+//   - Two stores that can both answer "what is credential X" is a state
+//     an operator has to reason about the moment they disagree. One
+//     store cannot.
+//
+// So the file tree is the mechanism, everywhere: scripts/setup.sh seeds
+// it, terraform/gcp/deploy/push-secrets.sh feeds that, the bootstrap
+// playbook (pkg/capability/bootstrap/playbooks/github-connections.md)
+// walks a human through it, and pkg/ui's Settings pane now writes it
+// through SetToken instead of asking an operator for shell access.
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -108,6 +136,12 @@ func LoadCredentialSet(secretsDir string) (*CredentialSet, error) {
 	}
 	return &CredentialSet{dir: secretsDir, patterns: patterns, cache: map[string]cacheEntry{}}, nil
 }
+
+// Dir is the secrets directory this ladder was loaded from -- for a
+// caller that has to *name* it to a human (pkg/ui's Settings pane,
+// explaining where the token it just wrote landed). It is a path, and
+// says nothing about what is in it.
+func (c *CredentialSet) Dir() string { return c.dir }
 
 // Select returns the narrowest pattern covering (owner, repo): exact,
 // then owner/*, then the global * fallback. The second return is false if
@@ -206,6 +240,166 @@ func (c *CredentialSet) ExtraNames() []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+// IsApp reports whether name is backed by a <name>.app.json file -- a
+// GitHub App installation whose token load re-mints, rather than a
+// *.token file read as-is. Callers that offer to *edit* a credential
+// need this: SetToken below refuses to write over an App credential, and
+// a UI is better off saying so up front than after the fact.
+func (c *CredentialSet) IsApp(name string) bool {
+	_, err := os.Stat(filepath.Join(c.dir, name+".app.json"))
+	return err == nil
+}
+
+// PatternsFor is every credentials.json pattern that names this
+// credential, sorted -- empty for a token no pattern mentions, which is
+// the ordinary shape of an extra named token (ExtraNames' own doc
+// comment: the ladder and the capability set are two independent choices
+// about the same credential).
+//
+// This is what makes "is anything relying on this credential" answerable
+// before deleting one: a caller that removes a credential some pattern
+// still names leaves every repo that pattern covers failing closed with
+// "no credential configured" on its next push.
+func (c *CredentialSet) PatternsFor(name string) []string {
+	var out []string
+	for pattern, credential := range c.patterns {
+		if credential == name {
+			out = append(out, pattern)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ValidCredentialName reports whether name may be used for a credential
+// written through SetToken: it becomes a filename in the secrets
+// directory, and it becomes half of a capability id
+// (model.GitCredentialCapability), so it is held to a conservative shape
+// rather than to whatever the filesystem happens to tolerate. A name
+// already on disk that does not match this is still read as it always
+// was -- this gates writing, not loading.
+//
+// "anonymous" is refused because load reads it as a credential shape of
+// its own (no Authorization header at all); a file of that name would be
+// written, listed, and then never used.
+func ValidCredentialName(name string) error {
+	if name == "" {
+		return fmt.Errorf("a credential name is required")
+	}
+	if name == "anonymous" {
+		return fmt.Errorf("%q is reserved: it already names the no-credential-at-all case", name)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_':
+		default:
+			return fmt.Errorf(
+				"%q is not a usable credential name: letters, digits, %q and %q only", name, "-", "_")
+		}
+	}
+	return nil
+}
+
+// SetToken writes token as name's credential material -- name.token in
+// the secrets directory, mode 0600, replacing whatever was there.
+//
+// Written to a temporary file and renamed into place, so a reader that
+// catches this mid-write (the git proxy in another process, serving a
+// push right now) sees either the old token or the new one, never half
+// of one. The temporary file's own name deliberately does not end in
+// .token, so a crash between create and rename cannot leave something
+// Names would report as a credential.
+//
+// Refused for a name already backed by name.app.json: load prefers the
+// App credential, so the file this would write would be loaded by
+// nothing, and silently doing nothing is the worst answer available.
+//
+// The value takes effect for a process that has not loaded it yet;
+// everything already running keeps what it cached (this file's own doc
+// comment on why the ladder is not hot-reloaded). Callers that offer
+// this to a human should say so.
+func (c *CredentialSet) SetToken(name, token string) error {
+	if err := ValidCredentialName(name); err != nil {
+		return err
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("a token value is required")
+	}
+	if c.IsApp(name) {
+		return fmt.Errorf(
+			"%q is a GitHub App credential (%s.app.json): replace that file to change it", name, name)
+	}
+	if err := os.MkdirAll(c.dir, 0o700); err != nil {
+		return fmt.Errorf("creating the GitHub secrets directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(c.dir, "."+name+".token.tmp")
+	if err != nil {
+		return fmt.Errorf("writing credential %q: %w", name, err)
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing credential %q: %w", name, err)
+	}
+	if _, err := tmp.WriteString(token + "\n"); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing credential %q: %w", name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("writing credential %q: %w", name, err)
+	}
+	if err := os.Rename(tmp.Name(), filepath.Join(c.dir, name+".token")); err != nil {
+		return fmt.Errorf("writing credential %q: %w", name, err)
+	}
+	c.forget(name)
+	return nil
+}
+
+// Remove deletes the files backing name -- both forms, since a name with
+// a *.token and a *.app.json is one credential either way (Names' own
+// doc comment). It reports an error when nothing of that name is
+// configured, so a caller can tell "removed" from "was never there."
+//
+// It says nothing about credentials.json: a pattern naming a credential
+// that no longer exists is a real, and deliberately visible, failure
+// (Select's own fail-closed "no credential configured"). PatternsFor
+// above is how a caller checks before asking for this.
+func (c *CredentialSet) Remove(name string) error {
+	if err := ValidCredentialName(name); err != nil {
+		return err
+	}
+	var removed bool
+	for _, suffix := range []string{".token", ".app.json"} {
+		err := os.Remove(filepath.Join(c.dir, name+suffix))
+		switch {
+		case err == nil:
+			removed = true
+		case os.IsNotExist(err):
+		default:
+			return fmt.Errorf("removing credential %q: %w", name, err)
+		}
+	}
+	if !removed {
+		return fmt.Errorf("no credential named %q is configured", name)
+	}
+	c.forget(name)
+	return nil
+}
+
+// forget drops name from load's cache, so this CredentialSet's own next
+// read of it goes back to the files SetToken/Remove just changed. It
+// does nothing for the *other* CredentialSets a deployment has loaded
+// (the git proxy's, the REST client's, the MCP server's) -- those are in
+// other processes or were built separately, and the restart this file's
+// doc comment describes is still what makes a change reach them.
+func (c *CredentialSet) forget(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.cache, name)
 }
 
 // credentialFileName maps a file in the secrets directory back to the

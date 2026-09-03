@@ -111,6 +111,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/agent-keys/{framework}", s.handleSetAgentKey)
 	s.mux.HandleFunc("DELETE /api/agent-keys/{framework}", s.handleDeleteAgentKey)
 
+	s.mux.HandleFunc("GET /api/github-tokens", s.handleListGitHubTokens)
+	s.mux.HandleFunc("PUT /api/github-tokens/{name}", s.handleSetGitHubToken)
+	s.mux.HandleFunc("DELETE /api/github-tokens/{name}", s.handleDeleteGitHubToken)
+
 	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
