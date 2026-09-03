@@ -223,6 +223,35 @@ describe("TaskList", () => {
       expect(onOpenTask).not.toHaveBeenCalled();
     });
 
+    // A stacked merge fix (bwsalmon/agents#378) is nested under the task
+    // it repairs and never draggable -- the merge queue runs it ahead of
+    // the backlog whatever the backlog says -- so it keeps the column the
+    // handle sits in rather than letting its own contents slide a handle's
+    // width left of every other row's.
+    describe("the handle column on a nested merge fix", () => {
+      const parent = { id: 1, title: "First", state: "queued", capabilities: [], blocked: false };
+      const fix = {
+        id: 4, title: "Repair the pull request", state: "queued", capabilities: [], blocked: false,
+        stacked: true, generatedFrom: 1,
+      };
+      const rowOf = (title) => screen.getByText(title).closest(".task-row");
+
+      it("holds the column open, and empty, while the rows around it are draggable", () => {
+        renderList({ tasks: [parent, fix], onReorder: vi.fn() });
+
+        expect(rowOf("Repair the pull request").querySelector(".task-drag-placeholder")).toBeInTheDocument();
+        expect(rowOf("Repair the pull request").querySelector(".task-drag-handle")).not.toBeInTheDocument();
+        // The task it is nested under still gets a handle of its own.
+        expect(rowOf("First").querySelector(".task-drag-handle")).toBeInTheDocument();
+      });
+
+      it("holds no column open when no row in the list has a handle either", () => {
+        renderList({ tasks: [parent, fix] });
+
+        expect(document.querySelector(".task-drag-placeholder")).not.toBeInTheDocument();
+      });
+    });
+
     it("never starts a drag, and shows no drag handle, without an onReorder prop", () => {
       const { container } = render(
         <TaskList tasks={threeTasks} stateFilter="all" config={null} onOpenTask={vi.fn()}
