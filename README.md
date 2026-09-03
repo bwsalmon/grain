@@ -932,14 +932,24 @@ gap this paragraph used to describe.
 
 The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
 `propose_task`, `add_review_comment`) a run's own MCP server wires
-internally are still discarded rather than posted anywhere real while a
-run is live — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
+internally are still discarded rather than acted on *while a run is
+live* — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
 after a run finishes, and relays `ask_question`/`comment_on_issue`/
 `propose_task` for real at that point (see the package tree entry
 above); giving `Framework.Run` (or its caller) a way to inject a live
 sink instead is still open, and `add_review_comment` calls are still
 just recorded and nothing more, since nothing yet dispatches with review
-intent for one to attach to. Neither sandbox stand-in carries any real
+intent for one to attach to. What the *agent* is told about all four is
+that relay rather than that sink: the tools' descriptions and
+confirmations used to answer every production run with "mocked — no
+GitHub comment was posted", and describe v1's issue, trigger label and
+issue-per-proposal, none of which has been true since tasks became rows
+(docs/agent-ergonomics.md, findings 1 and 2). They now say where the
+words really land — the task's own conversation, when the run
+finishes — and `add_review_comment` says the one true thing about
+itself, that nothing relays it anywhere and `comment_on_issue` is the
+call to make for feedback a human needs to read.
+`pkg/mcp/mock_tools_test.go` is what holds them to it. Neither sandbox stand-in carries any real
 isolation: a real deployment still needs the actual host adapter
 (creating a real VM/container per task and running commands in it over
 something better than "this process's own filesystem," or an SSH hop to
@@ -1298,11 +1308,13 @@ every call `pkg/orchestrator` makes (issue listing/labelling, branch and
 pull-request state, check runs, comments) — but not the agent's own
 `ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
 calls: a run's own MCP server still wires those to a `mcp.MockSink` it
-builds and discards internally on every call, so they still just record
-what they were asked to do rather than posting it anywhere real.
-`ProcessResult` only sees them after the fact, through the `agent.Result`
-`Run` returns, not while the run is live. Giving `Framework.Run` (or its
-caller) a way to inject a real sink is still open.
+builds and discards internally on every call, so nothing happens at the
+moment the agent makes one. `ProcessResult` only sees them after the
+fact, through the `agent.Result` `Run` returns, not while the run is
+live — and then relays a question, a closing comment and a proposal into
+the store for real (`add_review_comment` alone goes nowhere). Giving
+`Framework.Run` (or its caller) a way to inject a real sink, so the
+effect could happen while the run is still going, is still open.
 
 `tests/e2e/` is that whole chain driven by hand, in a test, rather than
 by `dispatch.Cycle` itself: it calls `dispatch.Cycle` to decide what runs,

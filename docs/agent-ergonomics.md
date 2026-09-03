@@ -62,6 +62,20 @@ your turn" contract on `ask_question`, which is real. `MockSink` stays
 exactly as it is; it is a test seam, and the fix is to stop narrating the
 seam to the agent.
 
+**Done** (grain/task-149). All four texts now describe the relay: a
+question is relayed into the task's own conversation when the run
+finishes and parks the task there until a human replies, whose reply
+requeues it; a comment lands in the same conversation and is the closing
+note when nothing was pushed and nothing asked; a proposal is filed as a
+real task, unapproved, that a human approves in grain's UI. Each of the
+three also says that only the *first* such call in a run is relayed
+(`firstToolCallArg`), which nothing said before. `MockSink` is unchanged
+and is no longer mentioned to the agent at all;
+`pkg/mcp/mock_tools_test.go` pins both the wording that has to be there
+and the v1 vocabulary that must not come back, because nothing else in
+the repo fails when this drifts — the cost lands only on a run that
+believes it.
+
 ## 2. `add_review_comment` is registered on every run and relayed by nothing
 
 Its description promises "a draft code review ... posted once you finish
@@ -82,6 +96,16 @@ gets that feedback counted in its outcome detail and discarded.
 - Until review dispatches exist, have its confirmation text say where the
   feedback really lands (this run's outcome, and nowhere else), so an
   agent can decide to put it in a `comment_on_issue` call instead.
+
+**Done** (grain/task-149), the second half. Both its description and its
+confirmation now say that nothing relays these — no draft review, no
+pull request, no comment on the task — and name `comment_on_issue` as
+the call to make for feedback that has to be read. The first half is
+deliberately not done: there is no review dispatch to set such a flag,
+so today it could only gate the tool off every run, and a run that is
+going to write review feedback anyway is better served by being told
+where it goes. `addReviewCommentTool`'s own doc comment says so, and the
+flag is worth adding the day something can set it.
 
 ## 3. A `run_command` that timed out does not say so
 
@@ -348,7 +372,7 @@ would ever show that.
 Filed as separate proposals, each depending on this document:
 
 1. Truthful escape-hatch tool descriptions and confirmations (findings 1
-   and 2).
+   and 2) — **done**, grain/task-149.
 2. `run_command`: say when a command timed out, and bound result size
    (findings 3, 4, and the check in 5).
 3. Tell a run its wall-clock budget (finding 7) — **done**,
