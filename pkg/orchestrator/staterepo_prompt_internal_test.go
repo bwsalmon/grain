@@ -19,6 +19,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/staterepo"
 )
 
 // seedStateRemote makes the remote look like a state repository: the
@@ -98,10 +99,7 @@ func TestStateRepoSectionSaysWhatTheLayoutIs(t *testing.T) {
 		"tables/<name>.json",
 		"one object per row",
 		"declared order",
-		"task_template",
-		"task_suite",
 		"repo_config",
-		"schedule",
 		"grain_config",
 		"task_run",
 		"task_observation",
@@ -110,6 +108,13 @@ func TestStateRepoSectionSaysWhatTheLayoutIs(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the state-repository section never mentions %q:\n%s", want, got)
+		}
+	}
+	// Named from the list grain itself acts on, so the prompt cannot
+	// call a table settings that Apply will not import.
+	for _, table := range staterepo.SettingsTables {
+		if !strings.Contains(got, table) {
+			t.Errorf("the section does not name the settings table %q:\n%s", table, got)
 		}
 	}
 }

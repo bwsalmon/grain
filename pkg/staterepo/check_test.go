@@ -62,6 +62,25 @@ func writeTable(t *testing.T, dir, table string, rows any) {
 	}
 }
 
+// Every name on SettingsTables has to be a table this build actually
+// has, or Apply silently imports nothing from a file it was the whole
+// point of that list to import. A rename in pkg/model is exactly how
+// that goes wrong, and nothing else notices: Import skips a table it
+// does not have on purpose, so the daemon comes up, applies nothing,
+// and says nothing.
+func TestSettingsTablesAllExist(t *testing.T) {
+	ctx := context.Background()
+	_, db := openDB(t)
+	for _, name := range staterepo.SettingsTables {
+		var found string
+		err := db.QueryRowContext(ctx,
+			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", name).Scan(&found)
+		if err != nil {
+			t.Errorf("SettingsTables names %q, which this build's schema does not have: %v", name, err)
+		}
+	}
+}
+
 func TestCheckAcceptsADumpGrainWrote(t *testing.T) {
 	ctx := context.Background()
 	dir := dumpOf(t)

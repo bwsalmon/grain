@@ -16,6 +16,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/dispatch"
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/staterepo"
 )
 
 // errTaskClosed is what context.Cause(runCtx) reads once
@@ -517,6 +518,14 @@ func setupSection(r *SetupResult) string {
 // (cmd/grain/state.go): staterepo.Import is the only real answer to "is
 // this loadable", and a run that never runs it finds out through a
 // deployment that will not start after the merge.
+//
+// The settings tables are named from staterepo.SettingsTables rather
+// than written out here, and that is not only to save keeping two lists
+// in step. That list is the one grain acts on -- it decides what Apply
+// imports into a running daemon -- so naming it here means the prompt
+// cannot tell a run that a table is settings when grain will not treat
+// it as such. A rename in pkg/model would otherwise leave this
+// paragraph confidently naming tables that no longer exist.
 func stateRepoSection(prepared checkout) string {
 	if !prepared.StateRepo {
 		return ""
@@ -530,25 +539,26 @@ func stateRepoSection(prepared checkout) string {
 		"`schema-version` stamps the schema the dump was written by; leave it alone, " +
 		"and never touch `secrets.enc`, which is grain's encrypted secret store and " +
 		"nothing a task has business editing.\n\n" +
-		"The tables that are settings -- the ones a task is normally asked to change " +
-		"-- are `task_template` (templates), `task_suite` with `task_suite_item` " +
-		"(suites), `repo_config` (per-repo configuration, including a repo's prompt " +
-		"extension and setup command), `schedule` (scheduled tasks) and `grain_config` " +
-		"(deployment-wide settings, including the prompt extension every run is given). " +
-		"The `_read`, `_grant` and `_sequence` tables beside a template, suite or " +
-		"schedule belong to it and are edited with it.\n\n" +
+		"The tables that are settings -- the ones a task is normally asked to change, " +
+		"and the only ones a merge applies to a running grain -- are exactly these: " +
+		strings.Join(staterepo.SettingsTables, ", ") + ". They are templates, suites, " +
+		"schedules, per-repo configuration, qualification plans and the deployment's " +
+		"own config row (`grain_config`, which carries the prompt extension every run " +
+		"is given), together with the `_read`, `_grant` and `_sequence` tables that " +
+		"belong to them.\n\n" +
 		"Everything else is grain's own record of what it has already done -- `task`, " +
 		"`task_run`, `task_comment`, `task_observation`, `task_attachment`, `lease`, " +
-		"`branch`, `release`, `qualification_run`, the `task_suite_run` tables and " +
-		"their like. Leave those alone: they are observations, not settings, and " +
-		"editing one either loses to grain's next export or, worse, survives as a " +
-		"record of something that never happened.\n\n" +
+		"`branch`, `release`, `qualification_run`, the `suite_run` tables and their " +
+		"like. Leave those alone: they are observations, not settings, and editing one " +
+		"either loses to grain's next export or, worse, survives as a record of " +
+		"something that never happened.\n\n" +
 		"Check what you propose before it merges: `grain state check .` loads the whole " +
 		"directory into a throwaway database and reports what breaks. A malformed file, " +
-		"or a row missing a column the schema requires, otherwise fails when the daemon " +
-		"next starts, which is the worst place to find out. A merged change takes " +
-		"effect at that next start, when grain imports the repository and replaces " +
-		"every row -- so a row you delete is a row that is gone."
+		"or a row missing a column the schema requires, otherwise fails when grain next " +
+		"reads the repository, which is the worst place to find out. A merged change to " +
+		"a settings table is pulled in and applied within the minute, without a restart; " +
+		"everything else waits for one. Either way the import is a replacement, so a row " +
+		"you delete is a row that is gone."
 }
 
 // promptExtensionSection is how that text is handed to the agent: named

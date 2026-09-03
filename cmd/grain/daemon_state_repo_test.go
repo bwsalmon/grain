@@ -240,7 +240,7 @@ func TestAMergedSettingsChangeTakesEffectWithoutARestart(t *testing.T) {
 	if out, err := exec.Command("git", "clone", "--quiet", remote, work).CombinedOutput(); err != nil {
 		t.Fatalf("cloning the remote: %v: %s", err, out)
 	}
-	path := filepath.Join(work, staterepo.TablesDir, "task_template.json")
+	path := filepath.Join(work, staterepo.TablesDir, "template.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the dump: %v", err)

@@ -2563,8 +2563,11 @@ one, so a dispatch into it carries a paragraph naming the layout (one
 file per table, one object per row, columns in the table's declared
 order, rows by primary key), and -- the part no file in there states --
 which tables are settings and which are grain's own record of what it
-did. `task_template`, `task_suite`, `repo_config`, `schedule` and
-`grain_config` are settings. `task`, `task_run`, `task_comment`,
+did. The settings list is `staterepo.SettingsTables` itself, not a copy
+of it: `template`, `suite`, `schedule`, `repo_config`, the qualification
+plan tables and `grain_config`, which is the same list `Apply` imports
+into a running daemon, so the prompt cannot call a table settings that
+grain will not treat as such. `task`, `task_run`, `task_comment`,
 `task_observation`, `lease`, `branch` and `release` are observations, and
 a run that edits one produces a diff that is either overwritten by the
 next export or merged into a history that then disagrees with what

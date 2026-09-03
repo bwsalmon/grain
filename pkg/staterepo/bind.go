@@ -68,15 +68,15 @@ var SettingsTables = []string{
 	"qualification_item_depends_on",
 	// Templates, with the repos they read and the capabilities they
 	// grant.
-	"task_template",
-	"task_template_read",
-	"task_template_grant",
-	"task_template_sequence",
-	// Suites and the templates they run, but not task_suite_run and its
+	"template",
+	"template_read",
+	"template_grant",
+	"template_sequence",
+	// Suites and the templates they run, but not suite_run and its
 	// own tables: a suite is settings, a run of one is not.
-	"task_suite",
-	"task_suite_item",
-	"task_suite_sequence",
+	"suite",
+	"suite_item",
+	"suite_sequence",
 	// Schedules, likewise with their reads and grants. next_run_at and
 	// last_run_at live on this row and are written by the firing loop,
 	// which is the one place a settings table is also grain's own record
@@ -325,7 +325,7 @@ that an unchanged database always produces byte-identical files.
 
 Which tables are settings, and which are grain's own record of what it
 did, is the distinction to hold on to before changing anything.
-` + "`" + `task_template` + "`" + `, ` + "`" + `task_suite` + "`" + ` (with ` + "`" + `task_suite_item` + "`" + `), ` + "`" + `repo_config` + "`" + `,
+` + "`" + `template` + "`" + `, ` + "`" + `suite` + "`" + ` (with ` + "`" + `suite_item` + "`" + `), ` + "`" + `repo_config` + "`" + `,
 ` + "`" + `schedule` + "`" + ` and ` + "`" + `grain_config` + "`" + `, plus the ` + "`" + `_read` + "`" + `/` + "`" + `_grant` + "`" + `/` + "`" + `_sequence` + "`" + `
 tables belonging to them, are settings. ` + "`" + `task` + "`" + `, ` + "`" + `task_run` + "`" + `,
 ` + "`" + `task_comment` + "`" + `, ` + "`" + `task_observation` + "`" + `, ` + "`" + `lease` + "`" + `, ` + "`" + `branch` + "`" + `, ` + "`" + `release` + "`" + ` and
@@ -341,7 +341,7 @@ restart -- and the merged files replace what is in its database, so a
 deleted row is a deleted row.
 
 That applies live to the settings tables: ` + "`" + `grain_config` + "`" + `,
-` + "`" + `repo_config` + "`" + `, the ` + "`" + `task_template` + "`" + `, ` + "`" + `task_suite` + "`" + `, ` + "`" + `schedule` + "`" + ` and
+` + "`" + `repo_config` + "`" + `, the ` + "`" + `template` + "`" + `, ` + "`" + `suite` + "`" + `, ` + "`" + `schedule` + "`" + ` and
 ` + "`" + `qualification` + "`" + ` tables. The rest -- tasks, runs, metrics: grain's own
 record of what it did -- is replaced only when grain starts, because
 replacing it underneath a run that is in flight would delete the very
