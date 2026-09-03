@@ -53,6 +53,17 @@ func (m *stateManager) sync(ctx context.Context) (bool, error) {
 	return changed, err
 }
 
+// syncAll is sync with grain's own churn written out whether or not its
+// slower clock says it is due -- what a human asking for a sync means,
+// and what the loop owes the repository on the way out.
+func (m *stateManager) syncAll(ctx context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed, err := staterepo.SyncAll(ctx, m.repo, m.db, model.SchemaVersion)
+	m.lastErr = err
+	return changed, err
+}
+
 func (m *stateManager) Status(ctx context.Context) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -163,10 +174,13 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 	return m.status(ctx), nil
 }
 
+// Sync is the pane's own button, so it writes everything out: a human
+// who presses Sync is asking for the repository to match the database
+// now, not for the half of it that is due.
 func (m *stateManager) Sync(ctx context.Context) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, err := staterepo.Sync(ctx, m.repo, m.db, model.SchemaVersion)
+	_, err := staterepo.SyncAll(ctx, m.repo, m.db, model.SchemaVersion)
 	m.lastErr = err
 	if err != nil {
 		return ui.StateRepoStatus{}, err
