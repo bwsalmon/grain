@@ -12,8 +12,9 @@ egress depends on -- so a resync has to re-apply it until it lands
 upstream. "Local patches" at the bottom is the whole account.
 
 This snapshot is kontur's `main` at
-`e475be0e24f4c08217bdce2e80383d4daf9a82b3` (2026-09-03), the merge of
-[bwsalmon/kontur#38](https://github.com/bwsalmon/kontur/pull/38) on top of
+`dc9230b44c7a582b25d6e73992c6495ef0b532d3` (2026-09-03), the merge of
+[bwsalmon/kontur#39](https://github.com/bwsalmon/kontur/pull/39) on top of
+[#38](https://github.com/bwsalmon/kontur/pull/38),
 [#37](https://github.com/bwsalmon/kontur/pull/37) and
 [#36](https://github.com/bwsalmon/kontur/pull/36).
 
@@ -48,9 +49,42 @@ bwsalmon/agents#562, CPU hotplug and a baked-in guest kernel), fully
 re-synced to `5ed4e0017f5337bc3fde3ab8c29ef42dd1dac848` (2026-08-31, the
 three local patches going upstream plus the build-time guest setup hook),
 and fully re-synced to `9a43152b09807814ba1a364fab313a72183f9bac`
-(2026-08-31, flat networking mode and CI, bwsalmon/kontur#29 and #30).
+(2026-08-31, flat networking mode and CI, bwsalmon/kontur#29 and #30),
+fully re-synced to `384e91a750402a31e5b733ae805617cb30181683`
+(2026-09-02, a per-boot guest exec keypair, bwsalmon/kontur#35), and
+fully re-synced to `e475be0e24f4c08217bdce2e80383d4daf9a82b3`
+(2026-09-03, container-capable guests built by booting one,
+bwsalmon/kontur#36, #37 and #38).
 
-## This resync: container-capable guests, built by booting one
+## This resync: a VM can be given the disk size it needs
+
+One upstream commit on top of the previous snapshot, `652c32c`
+(bwsalmon/kontur#39), and the one this repo asked for: `konturctl vm
+create -disk-size-mb`.
+
+grain has had the setting for a while --
+`model.Config.SandboxDiskGB`/`model.Task.SandboxDiskGB`, in GiB -- and
+`orchestrator.KonturConfig.createArgs` had nowhere real to send it. It
+sends `-disk-size-mb` now, converting at that one point. konturctl passes
+it through as `CHV_DISK_SIZE_MB`, and `kontur run` sizes the qcow2
+overlay the guest writes into before cloud-hypervisor opens it: a fresh
+overlay is created that large, and one an earlier boot left behind is
+grown in place, which allocates no clusters and leaves everything the
+guest wrote where it was.
+
+Three things it refuses rather than does, all of which would cost a guest
+its filesystem: shrinking, a size below the disk image the overlay reads
+through to, and being used outside `-disk-mode=overlay`, where the disk
+is the shared image itself and kontur has no overlay of its own to size.
+grain's VMs are in overlay mode (`-disk-readonly=false`, which still
+derives it), so only the first two are reachable from here.
+
+What it sizes is the block device the guest is offered. Growing the
+filesystem onto it is the guest's own job, which grain's guest already
+does on every boot -- `scripts/kontur/guest-setup.sh`'s `grain-growfs`
+unit, `resize2fs /dev/vda`, a no-op on a VM whose disk was not enlarged.
+
+## Previous resync: container-capable guests, built by booting one
 
 Three changes, all driven by grain needing a guest that runs docker and
 `kind` and a deployment that pulls one rather than building it.

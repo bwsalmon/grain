@@ -114,7 +114,7 @@ type KonturConfig struct {
 	// default VM shape (model.Config.SandboxCPUs/SandboxMemoryMB/
 	// SandboxDiskGB) a run that requested no shape of its own falls
 	// back to -- appended to createArgs' own result as
-	// "-cpus"/"-memory-mb"/"-disk-size-gb", last, so they win out over
+	// "-cpus"/"-memory-mb"/"-disk-size-mb", last, so they win out over
 	// anything CreateArgs also happens to set; a run that did request a
 	// shape overrides them per dimension (Shape.orDefault). Zero, the
 	// default for all three, omits the corresponding flag entirely and
@@ -161,6 +161,13 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 	return 2 * time.Second
 }
 
+// mibPerGiB converts Shape.DiskGB into the MiB `konturctl vm create
+// -disk-size-mb` takes. grain's own knob is in GiB because a sandbox's
+// disk is chosen in whole gigabytes; kontur's is in MiB because that is
+// the granularity CHV_DISK_SIZE_MB sizes a qcow2 at. Neither is wrong,
+// so the conversion lives at the one place they meet (createArgs).
+const mibPerGiB = 1024
+
 // createArgs returns the full argument list Acquire passes to
 // kontur.Create for a sandbox's VM beyond a name and -state-dir:
 // -backend docker first, the only backend this package supports (its
@@ -194,24 +201,25 @@ func (c KonturConfig) createArgs(shape Shape) []string {
 	if shape.MemoryMB != 0 {
 		args = append(args, "-memory-mb", strconv.Itoa(shape.MemoryMB))
 	}
-	// -disk-size-gb sizes the writable qcow2 overlay konturctl creates
-	// for this VM (bwsalmon/kontur's staticpod.PrepareWritableDisk),
+	// -disk-size-mb sizes the writable qcow2 overlay the VM's own
+	// container creates for it (bwsalmon/kontur's config.PrepareOverlay),
 	// which is otherwise made exactly as large as the guest image it is
-	// backed by.
+	// backed by. kontur takes MiB and grain's own knob is in GiB
+	// (model.Config.SandboxDiskGB, Shape.DiskGB), so the conversion
+	// happens here, at the single point the two vocabularies meet.
 	//
-	// It needs a konturctl that takes the flag, which the snapshot under
-	// third_party/kontur does not yet: staticpod.VMSpec has no disk-size
-	// field, and writeQcow2Overlay -- which already takes the virtual
-	// size as an argument -- is called with the source image's size
-	// unconditionally. That flag belongs on bwsalmon/kontur's own main
-	// and reaches here by a resync, never as a local patch
-	// (third_party/kontur/VENDORED.md). Which is exactly why an unset
-	// disk size omits the flag rather than passing a 0: a deployment
-	// that has never chosen one passes the argument list it always did,
-	// and only a deployment that deliberately sets a size depends on the
-	// flag existing.
+	// Only the overlay is ever resized, never the guest image every other
+	// VM booting it shares, so this needs the VM to be in kontur's
+	// overlay disk mode -- which is what scripts/setup.sh's own
+	// -disk-readonly=false derives (staticpod.VMSpec.DiskModeOrDerived),
+	// and which a create rejects outright rather than ignoring if it is
+	// not.
+	//
+	// An unset disk size omits the flag rather than passing a 0, the same
+	// way -cpus and -memory-mb above do: a deployment that has never
+	// chosen one gets kontur's own answer, the guest image's own size.
 	if shape.DiskGB != 0 {
-		args = append(args, "-disk-size-gb", strconv.Itoa(shape.DiskGB))
+		args = append(args, "-disk-size-mb", strconv.Itoa(shape.DiskGB*mibPerGiB))
 	}
 	// Flat mode takes its address from the container runtime, and
 	// konturctl rejects "-ip" outright under it rather than ignoring it.

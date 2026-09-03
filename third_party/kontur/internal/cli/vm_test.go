@@ -397,3 +397,87 @@ func TestVMLifecycle_FlatMode(t *testing.T) {
 		t.Fatalf("delete error = %v, stderr = %s", err, stderr)
 	}
 }
+
+// TestVMLifecycle_DiskSize covers -disk-size-mb the way every other
+// per-VM setting is covered: it reaches the rendered manifest, it
+// survives an update that doesn't mention it, a later update can raise
+// it, and "list" reports it.
+func TestVMLifecycle_DiskSize(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	podDir := filepath.Join(t.TempDir(), "manifests")
+
+	if _, stderr, err := runVMArgs(t, "create", "web",
+		"--disk", "/images/disk.img",
+		"--disk-mode", "overlay",
+		"--disk-size-mb", "8192",
+		"--ip", "169.254.100.2",
+		"--port", "30080",
+		"--state-dir", stateDir,
+		"--static-pod-path", podDir,
+	); err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+
+	manifestPath := filepath.Join(podDir, "kontur-vm-web.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("manifest not written: %v", err)
+	}
+	if !strings.Contains(string(data), "CHV_DISK_SIZE_MB") || !strings.Contains(string(data), `value: "8192"`) {
+		t.Errorf("manifest missing CHV_DISK_SIZE_MB=8192:\n%s", data)
+	}
+
+	out, _, err := runVMArgs(t, "list", "--state-dir", stateDir)
+	if err != nil {
+		t.Fatalf("list error = %v", err)
+	}
+	if !strings.Contains(out, "DISK_MB") || !strings.Contains(out, "8192") {
+		t.Errorf("list output missing the VM's disk size:\n%s", out)
+	}
+
+	// An update about something else keeps it, like every other flag.
+	if _, stderr, err := runVMArgs(t, "update", "web", "--cpus", "4", "--state-dir", stateDir); err != nil {
+		t.Fatalf("update error = %v, stderr = %s", err, stderr)
+	}
+	data, err = os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("manifest not re-written: %v", err)
+	}
+	if !strings.Contains(string(data), `value: "8192"`) {
+		t.Errorf("update lost the preserved -disk-size-mb value:\n%s", data)
+	}
+
+	// Raising it is how a VM's disk grows: the VM container resizes its
+	// overlay on the next boot (see config.PrepareOverlay).
+	if _, stderr, err := runVMArgs(t, "update", "web", "--disk-size-mb", "16384", "--state-dir", stateDir); err != nil {
+		t.Fatalf("update error = %v, stderr = %s", err, stderr)
+	}
+	data, err = os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("manifest not re-written: %v", err)
+	}
+	if !strings.Contains(string(data), `value: "16384"`) {
+		t.Errorf("manifest missing the raised disk size:\n%s", data)
+	}
+}
+
+func TestVMCreate_DiskSizeRejectedWithoutOverlayMode(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	podDir := filepath.Join(t.TempDir(), "manifests")
+
+	_, _, err := runVMArgs(t, "create", "web",
+		"--disk", "/images/disk.img",
+		"--disk-mode", "persistent",
+		"--disk-size-mb", "8192",
+		"--ip", "169.254.100.2",
+		"--port", "30080",
+		"--state-dir", stateDir,
+		"--static-pod-path", podDir,
+	)
+	if err == nil {
+		t.Fatal("create = nil error, want -disk-size-mb rejected outside overlay mode")
+	}
+	if _, statErr := os.Stat(filepath.Join(podDir, "kontur-vm-web.yaml")); !os.IsNotExist(statErr) {
+		t.Error("a manifest was written despite the rejected flags")
+	}
+}

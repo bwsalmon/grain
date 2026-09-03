@@ -210,6 +210,11 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 		"--device", "/dev/kvm",
 		"-e", "CHV_DISK_MODE=" + spec.DiskModeOrDerived(),
 	}
+	// Left unset when the VM asked for no particular size, so its overlay
+	// keeps taking the disk image's own. See VMSpec.DiskSizeMB.
+	if spec.DiskSizeMB > 0 {
+		vmArgs = append(vmArgs, "-e", "CHV_DISK_SIZE_MB="+strconv.Itoa(spec.DiskSizeMB))
+	}
 	// A spec with no disk of its own boots the one baked into the kontur
 	// image: nothing to mount, and CHV_DISK_IMAGE left unset so "kontur
 	// run"'s own default applies. See VMSpec.Validate.

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -73,6 +74,7 @@ type vmFlags struct {
 	diskImage                     *string
 	diskReadOnly                  *bool
 	diskMode                      *string
+	diskSizeMB                    *int
 	kernel                        *string
 	initramfs                     *string
 	firmware                      *string
@@ -108,6 +110,7 @@ func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v.diskImage = fs.String("disk", d.DiskImage, "path to the VM's disk image under -images-hostpath, as seen inside the kontur container (e.g. /images/disk.img)")
 	v.diskMode = fs.String("disk-mode", d.DiskMode, `how the VM attaches its disk: "overlay" (the default -- the guest writes into a thin qcow2 of its own, created in its container, leaving the image untouched and shared), "persistent" (the guest writes through to the image itself) or "readonly"`)
 	v.diskReadOnly = fs.Bool("disk-readonly", d.DiskReadOnly, "deprecated, use -disk-mode: true means -disk-mode=readonly, false means -disk-mode=overlay (which is what it always did: a private writable disk per VM)")
+	v.diskSizeMB = fs.Int("disk-size-mb", d.DiskSizeMB, "size of the VM's own writable overlay, in MiB; 0 means the disk image's own size, and a larger value grows an overlay an earlier boot already created (-disk-mode=overlay only, and the guest still has to grow its filesystem into the space)")
 	v.kernel = fs.String("kernel", d.Kernel, "path to a kernel for direct boot, as seen inside the container (mutually exclusive with -firmware)")
 	v.initramfs = fs.String("initramfs", d.Initramfs, "path to an initramfs, used with -kernel")
 	v.firmware = fs.String("firmware", d.Firmware, "path to firmware for firmware boot, as seen inside the container (mutually exclusive with -kernel)")
@@ -143,6 +146,7 @@ func (v *vmFlags) toSpec(name string) staticpod.VMSpec {
 		DiskImage:                     *v.diskImage,
 		DiskReadOnly:                  *v.diskReadOnly,
 		DiskMode:                      *v.diskMode,
+		DiskSizeMB:                    *v.diskSizeMB,
 		Kernel:                        *v.kernel,
 		Initramfs:                     *v.initramfs,
 		Firmware:                      *v.firmware,
@@ -379,9 +383,16 @@ func runVMList(args []string, stdout, stderr io.Writer) error {
 	}
 
 	w := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tIP\tPORT\tCPUS\tMEMORY_MB\tIMAGE")
+	fmt.Fprintln(w, "NAME\tIP\tPORT\tCPUS\tMEMORY_MB\tDISK_MB\tIMAGE")
 	for _, s := range specs {
-		fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\t%s\n", s.Name, s.IP, s.Port, s.CPUs, s.MemoryMB, s.KonturImage)
+		// A VM that asked for no particular disk size takes the image's
+		// own, which isn't a number konturctl knows out here (it's a file
+		// inside the VM's container), so say so rather than print "0".
+		diskMB := "image"
+		if s.DiskSizeMB > 0 {
+			diskMB = strconv.Itoa(s.DiskSizeMB)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\t%s\t%s\n", s.Name, s.IP, s.Port, s.CPUs, s.MemoryMB, diskMB, s.KonturImage)
 	}
 	return w.Flush()
 }

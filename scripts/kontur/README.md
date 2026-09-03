@@ -547,7 +547,7 @@ The disk that comes out is the rootfs plus 20% plus whatever
 sandbox's disk unless something says otherwise, since `konturctl` gives
 each VM an overlay at exactly its backing image's size. `sandbox-disk-gb`
 (Settings -> Sandbox, or a per-task override) is what says otherwise,
-reaching `konturctl vm create` as `-disk-size-gb`; the guest's own half
+reaching `konturctl vm create` as `-disk-size-mb`; the guest's own half
 of it is the `grain-growfs` unit `guest-setup.sh` installs, which grows
 the root filesystem onto the larger device on each boot. Nothing about
 the image build changes for it -- a bigger disk is a create-time
