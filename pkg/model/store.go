@@ -90,6 +90,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskRunTranscriptColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_run: %w", err)
 	}
+	if err := s.ensureTaskRunAgentStartedAtColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_run: %w", err)
+	}
 	if err := s.ensureScheduledTaskRecurrenceColumns(ctx); err != nil {
 		return fmt.Errorf("migrating scheduled_task: %w", err)
 	}
@@ -260,6 +263,28 @@ func (s *Store) ensureTaskRunTranscriptColumn(ctx context.Context) error {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `transcript` TEXT NULL")
+	return err
+}
+
+// ensureTaskRunAgentStartedAtColumn adds task_run.agent_started_at
+// (schema.go's own DDL comment on the table has the reasoning) to a
+// database created before this build, the same probe-then-ALTER approach
+// ensureTaskRunTranscriptColumn already uses for the same reason: CREATE
+// TABLE IF NOT EXISTS never alters a table that is already there.
+//
+// No SchemaVersion bump goes with it: the column is nullable and added
+// here, so an existing database migrates into the new shape rather than
+// being one this build "cannot simply be re-created into" (SchemaVersion's
+// own doc comment). Every run recorded before it existed reads back with
+// no agent_started_at, which pkg/metrics already has to handle for a run
+// that never reached its agent at all -- such a run contributes to no
+// setup or agent latency rather than to a wrong one.
+func (s *Store) ensureTaskRunAgentStartedAtColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `agent_started_at` FROM `task_run` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `agent_started_at` DATETIME NULL")
 	return err
 }
 
@@ -1544,6 +1569,26 @@ func (s *Store) SetRunSandbox(ctx context.Context, runID, sandbox string) error 
 	return s.write(ctx, "set run "+runID+" sandbox", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE `task_run` SET `sandbox` = ? WHERE `id` = ?", sandbox, runID)
+		return err
+	})
+}
+
+// SetRunAgentStarted records the moment a run's agent actually got its
+// first turn -- everything before it (a sandbox built, a repo cloned, a
+// capability minted) is this run's setup, and everything after it is the
+// agent's own work. It is its own write, after StartRun, for the same
+// reason SetRunSandbox is: the two moments are genuinely different, and
+// how far apart they are is the measurement (schema.go's own DDL comment
+// on agent_started_at, and pkg/metrics).
+//
+// Recording it must never cost a run: the caller (orchestrator.
+// RunDispatch) logs a failure here and dispatches anyway, since a
+// measurement that cannot be taken is not a reason to refuse the work
+// being measured.
+func (s *Store) SetRunAgentStarted(ctx context.Context, runID string, at time.Time) error {
+	return s.write(ctx, "set run "+runID+" agent start", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `agent_started_at` = ? WHERE `id` = ?", at.UTC(), runID)
 		return err
 	})
 }

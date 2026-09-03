@@ -165,6 +165,7 @@ Commands:
   config                               show the capabilities this deployment offers
   settings [flags]                     show, or change, the daemon's stored configuration (bwsalmon/agents#320)
   repo <subcommand> [args]             list repos, and read or change one repo's own settings (see repo.go)
+  metrics [-window 7d]                 throughput and latency over a window (see metrics.go)
 `
 
 const defaultServerURL = "http://127.0.0.1:8420"
@@ -235,6 +236,8 @@ func runCLI(args []string) error {
 		return cmdRetry(ctx, c, out, cmdArgs)
 	case "config":
 		return cmdConfig(ctx, c, out, cmdArgs)
+	case "metrics":
+		return cmdMetrics(ctx, c, out, cmdArgs)
 	case "settings":
 		return cmdSettings(ctx, c, out, cmdArgs)
 	case "repo":

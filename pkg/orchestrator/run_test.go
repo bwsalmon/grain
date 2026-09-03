@@ -496,6 +496,78 @@ func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T)
 	}
 }
 
+// The line pkg/metrics splits a run's own duration at: everything before
+// the agent's first turn is setup this deployment could speed up (a
+// sandbox, a clone, a capability mint), and everything after it is the
+// agent framework's own. Recorded by RunDispatch, because it is the only
+// thing that knows the moment it hands the run over.
+func TestRunDispatchRecordsWhenItsAgentStarted(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	// The run is dispatched at baseTime and its agent only gets going
+	// four minutes later, which is exactly the gap worth measuring.
+	agentStarted := baseTime.Add(4 * time.Minute)
+	cfg := orchestrator.Config{Now: func() time.Time { return agentStarted }}
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return pushed(), nil
+	})
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), "", nil, baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+
+	runs, err := store.RunTimings(ctx)
+	if err != nil {
+		t.Fatalf("RunTimings: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("read %d run timings, want 1", len(runs))
+	}
+	if runs[0].AgentStartedAt == nil || !runs[0].AgentStartedAt.Equal(agentStarted) {
+		t.Errorf("AgentStartedAt = %v, want %v", runs[0].AgentStartedAt, agentStarted)
+	}
+}
+
+// A run whose capability is refused never reaches an agent at all, so
+// there is no agent start to record -- and recording one anyway would
+// report setup latency for a run that never finished setting up.
+func TestRunDispatchRecordsNoAgentStartWhenTheAgentNeverRan(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "locked", Via: model.GrantByLabel})
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		return pushed(), nil
+	})
+	cfg := orchestrator.Config{
+		Capabilities: model.NewCapabilityRegistry(&fakeCapability{name: "locked", refuse: "not for you"}),
+	}
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, cfg, *task, d, nil, t.TempDir(), "", nil, baseTime); err == nil {
+		t.Fatal("RunDispatch succeeded, want the refused capability to fail the run")
+	}
+
+	runs, err := store.RunTimings(ctx)
+	if err != nil {
+		t.Fatalf("RunTimings: %v", err)
+	}
+	if len(runs) != 1 || runs[0].AgentStartedAt != nil {
+		t.Fatalf("runs = %+v, want one attempt with no agent start", runs)
+	}
+}
+
 func TestRunDispatchFailsARunThatMadeNoToolCall(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1")
