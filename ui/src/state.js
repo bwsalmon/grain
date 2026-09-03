@@ -47,6 +47,44 @@ export function capabilityName(config, id) {
   return c ? c.name : id;
 }
 
+// RETIRED_CAPABILITY_HINT labels a capability that is selected somewhere
+// but no longer offered -- worded as an instruction because turning it
+// off is the only thing its row is there for (capabilityRows below).
+export const RETIRED_CAPABILITY_HINT = "No longer offered -- untick to remove it";
+
+// capabilityRows is the listing any capability picker has to be built
+// from: the rows this build offers, plus a row of its own for each
+// selected id that has none.
+//
+// Every stored capability set -- a task's own grants, the deployment's
+// defaults (model.Config.DefaultCapabilities) and a repo's
+// (model.RepoConfig.DefaultCapabilities) -- is reported as stored, so an
+// id retired since somebody chose it stays in the set an operator is
+// looking at (ui.OfferedCapabilities' own "scratch-repo", now
+// github-sandbox). That is deliberate: ui.Settings.DefaultCapabilities
+// says as much, "an operator can only clear one they can see". But a MUI
+// multiple Select only ever deselects a value through that value's own
+// MenuItem, so an id with no row is a chip nothing can untick, and it is
+// sent straight back on the next save -- which ui.UpdateSettings and
+// ui.SetRepoDefaultCapabilities both refuse outright as "unknown
+// capability", pinning the whole pane until the id goes away. The extra
+// row exists purely to be turned off, which is what makes that save
+// possible again.
+//
+// `retired` is set on those rows so a picker can label one as something
+// to switch off rather than something to switch on. It is a function of
+// its own because all three pickers need the same rows for the same
+// reason, and one that quietly stopped adding them would be a pane
+// nobody could save.
+export function capabilityRows(offered, selected) {
+  const rows = offered || [];
+  return rows.concat(
+    (selected || [])
+      .filter((id) => !rows.some((c) => c.id === id))
+      .map((id) => ({ id, name: id, description: RETIRED_CAPABILITY_HINT, retired: true })),
+  );
+}
+
 // unionCapabilities composes the two layers of default capabilities the
 // way ui.(*Client).defaultCapabilities does server-side: base (the
 // deployment's own set) with extra (one repo's) appended, deduped,

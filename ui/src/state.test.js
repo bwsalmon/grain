@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityName, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -48,6 +48,32 @@ describe("capabilityName", () => {
 
   it("falls back to the id when config has no capabilities", () => {
     expect(capabilityName({}, "web-search")).toBe("web-search");
+  });
+});
+
+describe("capabilityRows", () => {
+  const offered = [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }];
+
+  it("is the offered listing untouched when everything selected has a row", () => {
+    expect(capabilityRows(offered, ["gcp-key"])).toEqual(offered);
+  });
+
+  it("appends a row for a selected id with none, so it can be unticked", () => {
+    expect(capabilityRows(offered, ["gcp-key", "scratch-repo"])).toEqual([
+      ...offered,
+      { id: "scratch-repo", name: "scratch-repo", description: RETIRED_CAPABILITY_HINT, retired: true },
+    ]);
+  });
+
+  it("appends nothing for an id that is offered but not selected", () => {
+    expect(capabilityRows(offered, [])).toEqual(offered);
+  });
+
+  it("tolerates a missing listing or selection", () => {
+    expect(capabilityRows(undefined, undefined)).toEqual([]);
+    expect(capabilityRows(null, ["scratch-repo"])).toEqual([
+      { id: "scratch-repo", name: "scratch-repo", description: RETIRED_CAPABILITY_HINT, retired: true },
+    ]);
   });
 });
 
