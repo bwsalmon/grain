@@ -93,6 +93,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/mcp"
+	"github.com/bwsalmon/grain/pkg/metrics"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
@@ -785,6 +786,10 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 		// not dispatch into the rest of -max-concurrent, nor sync a single
 		// pull request -- until every agent a cycle started had finished.
 		Runs: inFlight,
+		// The same ring startUIServer above already handed the UI, so
+		// what GET /api/metrics reports about this deployment's tick is
+		// what this loop actually measured (cycleTimes' own doc comment).
+		CycleTimes: cycleTimes,
 	}
 	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s) -- both re-read from the store "+
 		"each tick, so changing either in Settings needs no restart", cfg.pollInterval, cfg.maxConcurrent)
@@ -1149,6 +1154,23 @@ var reconcilerDown atomic.Bool
 // already going.
 var livePullRequests atomic.Pointer[pullRequestOpener]
 
+// cycleTimes is this process's record of its own RunCycle ticks -- how
+// long each took, and how far into each one the dispatch decision was
+// reached (orchestrator.CycleTimes). GET /api/metrics serves it as the
+// "cycles" section beside the runs one, which is where it answers the
+// question that report otherwise only raises: a queue wait looks
+// identical whether the deployment was at max_concurrent or whether
+// there was room all along and the tick was slow to get to dispatch.
+//
+// Package-level for the same reason reconcilerDown and livePullRequests
+// above are: the UI/API server starts before runDaemon builds its Deps,
+// so the two halves need one thing they can both name. Unlike those two
+// it needs no gate -- it is a value, allocated at process start, and
+// reading it before the reconcile loop has ticked reports no ticks,
+// which is exactly true of a deployment whose loop has not started (or
+// has died: see reconcilerDown).
+var cycleTimes = orchestrator.NewCycleTimes(orchestrator.DefaultCycleHistory)
+
 // pullRequestOpener is ui.Config.PullRequests over
 // orchestrator.OpenPullRequestForTask: the one place this deployment's
 // store and its GitHub client are both in scope for a request that
@@ -1271,6 +1293,12 @@ func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, c
 // own Reconciler.Run (bwsalmon/agents#254) when that package merged into
 // pkg/orchestrator, which -- being "a library, not a binary" (its own
 // doc comment) -- has no timer loop of its own.
+//
+// Each tick measures itself into deps.CycleTimes (the package-level
+// cycleTimes ring, which GET /api/metrics reads back): "waits for one to
+// return before the next interval starts" is exactly why a tick's own
+// duration is part of how long a queued task waits, and nothing outside
+// a test could see it.
 //
 // The interval, and everything else in live, is re-read from the store
 // once per tick rather than fixed for the life of the process: this loop
@@ -1956,6 +1984,11 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// UI survives a reconcile loop that never comes up at all -- and
 		// livePullRequests is what closes that gap once it does.
 		PullRequests: pullRequestGate{},
+		// The reconcile loop's own tick, for GET /api/metrics' "cycles"
+		// section. No gate needed, unlike PullRequests above: cycleTimes
+		// is allocated at process start and runDaemon writes into that
+		// same ring once it gets there (cycleTimes' own doc comment).
+		Cycles: cycleTimesAdapter{cycleTimes},
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)
@@ -2096,6 +2129,46 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 			MemoryUsedMB:  s.MemoryUsedMB,
 			MemoryTotalMB: s.MemoryTotalMB,
 		}
+	}
+	return out
+}
+
+// cycleTimesAdapter adapts orchestrator's own CycleTiming (what a cycle
+// measured about itself) onto metrics.CycleSample (what pkg/metrics
+// summarises), field for field -- the one place both types are ever in
+// scope, so neither package needs to import the other, exactly as
+// sandboxHealthAdapter above does for the sandbox pane.
+//
+// It converts eagerly rather than handing over the ring: a report is a
+// read of a bounded slice a few hundred entries long, taken once per
+// GET /api/metrics, and copying it is what keeps the reconcile loop's
+// own record out of reach of everything downstream of it.
+type cycleTimesAdapter struct {
+	inner *orchestrator.CycleTimes
+}
+
+func (a cycleTimesAdapter) CycleTimes() metrics.CycleHistory {
+	recent, observed := a.inner.History()
+	out := metrics.CycleHistory{
+		Observed: observed,
+		Samples:  make([]metrics.CycleSample, 0, len(recent)),
+	}
+	for _, c := range recent {
+		sample := metrics.CycleSample{
+			Start:        c.Start,
+			Duration:     c.Duration,
+			DispatchWait: c.DispatchWait,
+			Reconcilers:  make([]metrics.ReconcilerSample, 0, len(c.Reconcilers)),
+		}
+		for _, r := range c.Reconcilers {
+			sample.Reconcilers = append(sample.Reconcilers, metrics.ReconcilerSample{
+				Name:     r.Name,
+				Wait:     r.Wait,
+				Duration: r.Duration,
+				Failed:   r.Failed,
+			})
+		}
+		out.Samples = append(out.Samples, sample)
 	}
 	return out
 }
