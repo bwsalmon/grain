@@ -92,18 +92,6 @@ func newSim(t *testing.T, owner, repo, branch string) (*githubsim.Sim, *github.R
 // pushBranch pushes an empty commit on branch straight to bare, standing
 // in for a real dispatch's own git push -- this package's own tests care
 // about what happens once a branch is real, not about how it got there.
-//
-// The commit message names the branch, and has to. Two empty commits off
-// the same base, by the same author, with the same message, in the same
-// second are the same commit: git hashes exactly those inputs, so two
-// branches pushed back to back here used to land on one identical sha.
-// That was harmless while a pull request's checks were read by branch
-// name, and stopped being harmless when they started being read by head
-// sha (checkRunsFor, "Pin the check read and the merge to one commit"):
-// a test seeding CheckRuns for one branch was seeding them for the other
-// too, so a second task queued behind a stuck one inherited the stuck
-// one's pending check and never merged. Making the message differ makes
-// the shas differ, which is what every caller here already assumed.
 func pushBranch(t *testing.T, bare, branch string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -112,6 +100,17 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.email", "agent@example.com")
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "checkout", "-q", "-b", branch)
+	// Named after the branch, so two branches pushed off the same base in
+	// the same test never share a commit sha. They used to: both are an
+	// empty commit with the same message, the same author and -- inside
+	// one second, which is all git's timestamps resolve -- the same
+	// timestamp, so git hashed them to the same object. That was harmless
+	// until the merge queue started reading checks by head sha rather
+	// than by branch, at which point one branch's check runs
+	// (Sim.CheckRuns, keyed by sha) were served for the other branch's
+	// pull request too, and a test holding one pull request's CI queued
+	// silently held every other pull request in the same sim queued with
+	// it.
 	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit on "+branch)
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
