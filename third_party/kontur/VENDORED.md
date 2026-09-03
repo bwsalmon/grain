@@ -11,15 +11,21 @@ This snapshot is kontur's `main` at
 [bwsalmon/kontur#37](https://github.com/bwsalmon/kontur/pull/37) on top of
 [#36](https://github.com/bwsalmon/kontur/pull/36).
 
-The guest base image grain builds on comes from this same commit:
-`ghcr.io/bwsalmon/kontur:debian12-e2b8b4506babe9c787f6b3943d8a20cfd549eeb1`,
-published by kontur's own CI for exactly this SHA. That pairing is not a
-convention, it is the invariant: `konturctl` is built from the tree here
-and talks to a guest built from that image, and the two agree on the
-guest-side contract (`kontur-authorized-key`, the control-net overlay,
-the mem-agent, the disk modes) only because they are the same commit.
-Re-vendoring means moving both, and the SHA appearing in two places is
-what makes a mismatch visible rather than a runtime mystery.
+The guest base image grain builds on comes from this same tree:
+`scripts/kontur/build-guest.sh` builds it out of the Dockerfile here,
+with the two args kontur's CI publishes its "debian12" variant with, and
+derives grain's guest from that. It is built rather than pulled for a
+reason worth knowing before "just pin the published one" suggests itself
+again: a GitHub Actions GITHUB_TOKEN is scoped to its own repository, so
+grain's CI can push grain's packages and cannot read kontur's private
+ones, whatever the login says.
+
+Building it here is also what makes the invariant hold by construction.
+`konturctl` is built from this tree and talks to a guest built from this
+tree, and the two agree on the guest-side contract
+(`kontur-authorized-key`, the control-net overlay, the mem-agent, the
+disk modes) because they are the same files -- rather than because
+someone remembered to move a pinned tag and a vendored SHA together.
 
 The snapshot history: it was first vendored at commit `a13a8cc` (2026-08-28, bwsalmon/agents#351), then
 partially re-synced to `3cf4f9286402753add8390302cfb7c1fa82e4f81`

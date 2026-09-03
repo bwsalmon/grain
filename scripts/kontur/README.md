@@ -464,20 +464,25 @@ IMAGE=ghcr.io/bwsalmon/grain/guest:dev ./build-guest.sh
 ```
 
 `build-guest.sh` builds `konturctl` out of `third_party/kontur` -- not
-from `PATH`, because the base below is pinned to the exact commit that
-tree is vendored from and a konturctl that happened to be installed here
-is not that -- and runs `konturctl guest build` with `guest-setup.sh` as
+from `PATH`, because a konturctl that happened to be installed here is
+not the one this guest is built to match -- then builds the base out of
+that same tree and runs `konturctl guest build` with `guest-setup.sh` as
 the setup script. It needs docker, `/dev/kvm` and Go.
 
-`KONTUR_GUEST_BASE` is the base, defaulting to the immutable per-commit
-tag kontur's CI publishes for the SHA `third_party/kontur/VENDORED.md`
-records. The pairing is the invariant, not a convention: `konturctl` is
-built from the vendored tree and drives a guest built from that image,
-and the two agree on the guest-side contract -- the authorized-key
-installer, the control-net overlay, the mem-agent, the disk modes -- only
-because they are one commit. Re-vendoring moves both, and the SHA
-appearing in two places is what makes a mismatch visible rather than a
-runtime mystery.
+The base is built too, out of `third_party/kontur`, with the two args
+kontur's CI publishes its `debian12` variant with. It was pulled at
+first, by the immutable per-commit tag kontur's CI writes -- which does
+not work from grain's CI at all, for a reason worth recording rather than
+rediscovering: a GitHub Actions `GITHUB_TOKEN` is scoped to its own
+repository, so grain's can push grain's packages and cannot read
+kontur's, and the pull is denied however the login went.
+
+Building it is the better answer regardless of that. `konturctl` is built
+from the vendored tree and drives a guest built from the vendored tree,
+so "they are one commit" holds by construction -- rather than by a pinned
+tag someone has to remember to move alongside the vendored SHA.
+`KONTUR_GUEST_BASE` overrides it with an image of your own, published or
+local, and skips the build.
 
 `.github/workflows/build-artifacts.yml` runs exactly this on every
 branch, publishes the result as `guest`, and stamps its per-commit tag

@@ -133,34 +133,6 @@ func buildKonturctl(t *testing.T) string {
 	return dir
 }
 
-// buildKonturBaseImage builds the kontur image grain's guest is derived
-// from, out of the vendored Dockerfile, with the same two build args CI
-// publishes the "debian12" variant with: a distro kernel (docker and kind
-// inside the guest need overlayfs, cgroup v2, bridge netfilter and veth,
-// which a kernel built for cloud-hypervisor's CI does not promise) and no
-// console wrapper (it runs every session under a pty, which rewrites
-// newlines and merges stderr into stdout -- and this test asserts on
-// exactly that output).
-//
-// Built here rather than pulled by the digest scripts/kontur/build-guest.sh
-// pins, on purpose: this test exists to prove the *vendored* kontur works
-// against pkg/kontur, so it should exercise this tree rather than an
-// image published from some other commit. buildKonturGuestImage below
-// points build-guest.sh at it.
-func buildKonturBaseImage(t *testing.T) (image string) {
-	t.Helper()
-	image = "grain-kontur-e2e-test:latest"
-	cmd := exec.Command("docker", "build",
-		"--build-arg", "GUEST_KERNEL_PACKAGE=linux-image-amd64",
-		"--build-arg", "GUEST_CONSOLE_WRAP=0",
-		"-t", image, ".")
-	cmd.Dir = "../../third_party/kontur"
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the kontur base image from third_party/kontur/Dockerfile: %v\n%s", err, out)
-	}
-	return image
-}
-
 // buildKonturGuestImage runs scripts/kontur/build-guest.sh for real and
 // returns the image reference it produced: kontur's published guest,
 // booted, provisioned by scripts/kontur/guest-setup.sh with
@@ -186,10 +158,10 @@ func buildKonturBaseImage(t *testing.T) (image string) {
 // already-expensive, opt-in test, and nothing in it changes between runs.
 // A rebuild is one `docker rmi` away.
 //
-// base is what it derives from -- buildKonturBaseImage's local build of
-// the vendored tree, rather than the published image build-guest.sh
-// pins by default.
-func buildKonturGuestImage(t *testing.T, base string) (image string) {
+// The base it derives from is built by that script out of
+// third_party/kontur, so this exercises the vendored tree end to end --
+// konturctl, the base image and the guest all from the same source.
+func buildKonturGuestImage(t *testing.T) (image string) {
 	t.Helper()
 	image = "grain-guest:e2e-test"
 	if err := exec.Command("docker", "image", "inspect", image).Run(); err == nil {
@@ -202,14 +174,14 @@ func buildKonturGuestImage(t *testing.T, base string) (image string) {
 	}
 	cmd := exec.Command("./build-guest.sh")
 	cmd.Dir = konturDir
-	// GUEST_SOURCE_REPO is pinned empty rather than inherited: set in the
-	// environment of whoever runs this test, it would relabel a throwaway
-	// image as if it were a published one. KONTUR_GUEST_BASE is set
-	// inherited on purpose so the caller decides which base to derive
-	// from.
+	// Both pinned empty rather than inherited. Set in the environment of
+	// whoever runs this test, GUEST_SOURCE_REPO would relabel a throwaway
+	// image as if it were a published one, and KONTUR_GUEST_BASE would
+	// derive from some other image entirely -- defeating the point of
+	// building everything here from the vendored tree.
 	cmd.Env = append(os.Environ(),
 		"IMAGE="+image,
-		"KONTUR_GUEST_BASE="+base,
+		"KONTUR_GUEST_BASE=",
 		"GUEST_SOURCE_REPO=",
 	)
 	out, err := cmd.CombinedOutput()
@@ -251,8 +223,7 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
 	konturctlDir := buildKonturctl(t)
-	base := buildKonturBaseImage(t)
-	image := buildKonturGuestImage(t, base)
+	image := buildKonturGuestImage(t)
 
 	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -465,8 +436,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
 	konturctlDir := buildKonturctl(t)
-	base := buildKonturBaseImage(t)
-	image := buildKonturGuestImage(t, base)
+	image := buildKonturGuestImage(t)
 
 	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 

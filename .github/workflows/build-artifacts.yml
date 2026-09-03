@@ -104,12 +104,20 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      # One image, not two. It is derived from the kontur base pinned in
-      # build-guest.sh -- booted, provisioned by guest-setup.sh, scrubbed
-      # and committed -- and what comes out is itself a runnable kontur
-      # image: the guest a task gets and the container a deployment runs
-      # are the same artifact now, so there is one reference to publish
-      # and one to stamp.
+      # One image, not two. build-guest.sh builds the kontur base out of
+      # third_party/kontur, boots it, provisions it with guest-setup.sh,
+      # scrubs and commits -- and what comes out is itself a runnable
+      # kontur image: the guest a task gets and the container a
+      # deployment runs are the same artifact now, so there is one
+      # reference to publish and one to stamp.
+      #
+      # The base is built rather than pulled because a GITHUB_TOKEN is
+      # scoped to its own repository: this one can push grain's packages
+      # and cannot read kontur's, so pulling a private kontur package
+      # here is denied however the login went. Building it from the
+      # vendored tree also makes "konturctl and the guest are one commit"
+      # true by construction rather than by a pin someone has to remember
+      # to move.
       #
       # Every branch, not main only (bwsalmon/agents#645): the grain image
       # built from this same commit has *this* reference stamped into it,
@@ -126,18 +134,6 @@ jobs:
             IMAGE="$image" ./scripts/kontur/build-guest.sh
           docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
-
-      # Records what the pinned base tag actually resolved to. The pin in
-      # build-guest.sh is an immutable per-commit tag rather than a
-      # digest, so this is how a build says, in its own log, exactly which
-      # bytes it derived from -- and what to substitute if the pin is ever
-      # tightened to a digest.
-      - name: Report the base image digest
-        run: |
-          base=$(sed -n 's/^KONTUR_GUEST_BASE="${KONTUR_GUEST_BASE:-\(.*\)}"$/\1/p' ./scripts/kontur/build-guest.sh)
-          echo "base tag: $base"
-          docker buildx imagetools inspect "$base" --format '{{.Manifest.Digest}}' \
-            | sed "s|^|base digest: |"
 
       # The branch tag, and -- on main alone -- `latest`. Same split, and
       # the same reasoning, as grain-container's own three names: a

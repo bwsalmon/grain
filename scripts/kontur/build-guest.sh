@@ -30,14 +30,36 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# The base is pinned to the exact kontur commit third_party/kontur is
-# vendored from, by the immutable per-commit tag kontur's CI writes once
-# for that SHA. konturctl below is built from that same tree, and the two
-# only agree on the guest-side contract -- the authorized-key installer,
-# the control-net overlay, the mem-agent, the disk modes -- because they
-# are one commit. Re-vendoring moves both, and this SHA appearing in
-# VENDORED.md too is what makes a mismatch visible.
-KONTUR_GUEST_BASE="${KONTUR_GUEST_BASE:-ghcr.io/bwsalmon/kontur:debian12-e2b8b4506babe9c787f6b3943d8a20cfd549eeb1}"
+# The base is built from third_party/kontur, not pulled.
+#
+# It was pulled at first, by the immutable per-commit tag kontur's CI
+# publishes -- which fails for a reason worth recording, because it is
+# not a permissions bug to work around. A GitHub Actions GITHUB_TOKEN is
+# scoped to its own repository: grain's can push grain's packages and
+# cannot read kontur's, so `docker pull` of a private kontur package from
+# grain's CI is denied however the login went. Granting grain read on
+# that package would fix it, and building the base here is better anyway.
+#
+# Better because of what the pin was for. konturctl below is built from
+# the vendored tree, and it only agrees with the guest on the guest-side
+# contract -- the authorized-key installer, the control-net overlay, the
+# mem-agent, the disk modes -- if the two come from one commit. A pinned
+# tag asserts that by convention, kept true by remembering to move two
+# things at once. Building the base from the same tree makes it true by
+# construction: there is no second version to keep in step, and a resync
+# moves both because they are the same files.
+#
+# The two build args are the ones kontur's CI publishes its "debian12"
+# variant with. A distro kernel, because docker and kind inside the guest
+# need overlayfs, cgroup v2, bridge netfilter and veth, which a kernel
+# built for cloud-hypervisor's own CI does not promise; and no console
+# wrapper, because it runs every SSH session under a pty, which rewrites
+# newlines and merges stderr into stdout -- corrupting every file grain's
+# sandbox tools read back.
+#
+# KONTUR_GUEST_BASE overrides it with an image of your own, published or
+# local, and skips the build.
+KONTUR_GUEST_BASE="${KONTUR_GUEST_BASE:-}"
 IMAGE="${IMAGE:-grain-guest:dev}"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -50,12 +72,22 @@ if [ ! -e /dev/kvm ]; then
 fi
 
 # Built from the vendored tree rather than taken from PATH: the whole
-# point of the pin above is that one commit drives both halves, and a
-# konturctl that happened to be installed on this machine is not that.
+# point above is that one commit drives both halves, and a konturctl that
+# happened to be installed on this machine is not that.
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 echo "building konturctl from third_party/kontur"
 (cd ../../third_party/kontur && go build -o "$workdir/konturctl" ./cmd/konturctl)
+
+if [ -z "$KONTUR_GUEST_BASE" ]; then
+  KONTUR_GUEST_BASE="kontur-guest-base:vendored"
+  echo "building ${KONTUR_GUEST_BASE} from third_party/kontur"
+  DOCKER_BUILDKIT=1 docker build \
+    --build-arg GUEST_KERNEL_PACKAGE=linux-image-amd64 \
+    --build-arg GUEST_CONSOLE_WRAP=0 \
+    -t "$KONTUR_GUEST_BASE" \
+    ../../third_party/kontur
+fi
 
 echo "building ${IMAGE} from ${KONTUR_GUEST_BASE}"
 "$workdir/konturctl" guest build \
