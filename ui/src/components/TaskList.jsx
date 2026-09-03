@@ -98,14 +98,16 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   // targetId is null) to the two backlog neighbours -- among the
   // orderable tasks currently visible under this filter -- the drop
   // landed between, and hands them to onReorder as afterId/beforeId.
-  // The pinned rows above the list are not among them: they hold no
-  // backlog position of their own for anything to land beside. The store
-  // places the dragged tasks between whatever those two names resolve to
-  // in the *full*, unfiltered backlog, which is what makes a drag inside a
-  // filtered view still land correctly relative to tasks the filter is
-  // hiding: dropping at the very top of a filtered view has no
-  // preceding job, so it goes just before the following one instead --
-  // the same rule the issue itself asks for.
+  // The pinned rows above the list are not among them: the head of the
+  // backlog is a position grain gave itself (orchestrator.fileFixTask),
+  // not one anything is ordered against, so a drop at the top of the
+  // orderable rows names no preceding task rather than naming a pinned
+  // one. The store places the dragged tasks between whatever those two
+  // names resolve to in the *full*, unfiltered backlog, which is what
+  // makes a drag inside a filtered view still land correctly relative to
+  // tasks the filter is hiding: dropping at the very top of a filtered
+  // view has no preceding job, so it goes just before the following one
+  // instead -- the same rule the issue itself asks for.
   const dropOn = (targetId) => {
     if (!dragIds) return;
     const dragging = new Set(dragIds);
