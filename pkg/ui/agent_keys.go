@@ -15,14 +15,21 @@ import (
 // (secrets.GeminiAPIKeySecret/ClaudeOAuthTokenSecret) before every
 // dispatch.
 //
-// They are ordinary secrets, so the Secrets pane could already set them
-// by hand -- but only by knowing both the exact secret name and the key
-// inside it, with nothing anywhere saying which names those are or
-// whether the framework an operator just switched to has a credential at
-// all. These handlers are that knowledge, moved into the one pane where
-// the framework itself is chosen: set a key, clear a key, and report
-// which of the two are set, never what they hold (the same write-only
-// contract secrets.Store.List gives everything else here).
+// They are ordinary secrets, so the Secrets pane this predates could
+// already set them by hand -- but only by knowing both the exact secret
+// name and the key inside it, with nothing anywhere saying which names
+// those are or whether the framework an operator just switched to has a
+// credential at all. These handlers are that knowledge, moved into the
+// one pane where the framework itself is chosen: set a key, clear a key,
+// and report which of the two are set, never what they hold (the same
+// write-only contract secrets.Store.List gives everything else here).
+//
+// grain/task-110 took the same argument the rest of the way: every
+// secret a capability resolves is reported beside that capability
+// (CapabilityStatus.Secrets) and set from there, and the flat Secrets
+// tab is gone. These two stay their own endpoints rather than joining
+// that listing -- an agent credential belongs to a framework, not to a
+// capability, and there is no CapabilitySpec.Requires naming it.
 //
 // Deliberately not model.Config fields: a credential is not
 // configuration, and nothing that reaches the store's config row is

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/model"
@@ -70,5 +71,26 @@ func TestSeedDemoCoversEveryState(t *testing.T) {
 	}
 	if len(detail.Comments) == 0 {
 		t.Error("awaiting-reply task has no comments; the pending question should be visible in the conversation")
+	}
+
+	// The running task carries a real prompt, so the demo's own prompt
+	// pane (grain/task-91) shows what a dispatch actually hands an agent
+	// rather than its "nothing has run yet" placeholder -- which is also
+	// what ui/e2e's own prompt test reads.
+	var running ui.Task
+	for _, task := range tasks {
+		if task.State == model.StateRunning {
+			running = task
+		}
+	}
+	prompt, err := client.TaskPrompt(ctx, running.ID)
+	if err != nil {
+		t.Fatalf("reading the running task's prompt: %v", err)
+	}
+	if prompt.Prompt == "" || prompt.Attempt != 1 {
+		t.Errorf("running task's prompt = %+v, want attempt 1's own prompt recorded", prompt)
+	}
+	if !strings.Contains(prompt.Prompt, model.BranchName(running.ID)) {
+		t.Errorf("prompt = %q, want the branch a real dispatch would name", prompt.Prompt)
 	}
 }

@@ -489,6 +489,49 @@ func TestRunDispatchRecordsTheAgentsTranscript(t *testing.T) {
 	}
 }
 
+// TestRunDispatchRecordsThePromptItGaveTheAgent covers grain/task-91's
+// half of "show the full prompt": whatever RunDispatch actually handed
+// framework.Run has to be readable back off the store afterwards, since
+// the prompt is assembled once from a task and a conversation that both
+// move on afterwards, and nothing else records it.
+//
+// It is recorded before the agent's first turn, not after it returns, so
+// a run still in flight can be asked what it was told -- which is what
+// the agent's own view of the store proves here: by the time
+// framework.Run is called, the row already carries it.
+func TestRunDispatchRecordsThePromptItGaveTheAgent(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	var gotPrompt, recordedDuringRun string
+	fw := agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		gotPrompt = cfg.Prompt
+		recordedDuringRun, _, _ = store.RunPrompt(ctx, "t1", 1)
+		return pushed(), nil
+	})
+
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", nil, baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+
+	prompt, found, err := store.RunPrompt(ctx, "t1", 1)
+	if err != nil || !found {
+		t.Fatalf("RunPrompt: (%q, %v, %v)", prompt, found, err)
+	}
+	if prompt != gotPrompt {
+		t.Errorf("recorded prompt = %q, want exactly what the agent was given: %q", prompt, gotPrompt)
+	}
+	if recordedDuringRun != gotPrompt {
+		t.Errorf("prompt readable mid-run = %q, want it already recorded before the agent's first turn", recordedDuringRun)
+	}
+}
+
 func TestRunDispatchFinishesTheRunAsFailedWhenACapabilityIsRefused(t *testing.T) {
 	store, ctx := openStore(t)
 	dispatchTask(t, ctx, store, "t1", model.Grant{Capability: "locked", Via: model.GrantByLabel})

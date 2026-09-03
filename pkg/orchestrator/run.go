@@ -649,6 +649,19 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			log.Printf("orchestrator: run %s: recording when its agent started: %v", d.RunID, err)
 		}
 
+		// The prompt itself, recorded here rather than reconstructed
+		// later: it is assembled once, out of a task that may since be
+		// edited and a conversation that has since grown, so this is the
+		// only moment "what was this run actually told?" has an answer
+		// (Store.SetRunPrompt, and pkg/ui's own /prompt route over it).
+		// Written before framework.Run rather than after, so a run still
+		// in flight can be asked the question too. Logged and no more on
+		// failure, for the same reason the write above is: a task must
+		// not fail because a bookkeeping write did.
+		if err := store.SetRunPrompt(ctx, d.RunID, prompt); err != nil {
+			log.Printf("orchestrator: run %s: recording the prompt it was given: %v", d.RunID, err)
+		}
+
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
 			Repo: repo, Branch: model.BranchName(task.ID),

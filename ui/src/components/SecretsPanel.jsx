@@ -9,10 +9,22 @@ import api from "../api.js";
 // the list and form are hidden behind a note instead of showing controls
 // that could only ever 404.
 //
-// bwsalmon/agents#456: lives as a tab inside SettingsOverlay rather than
-// its own top-level overlay, so it renders its content only -- the
-// shared Overlay/Dialog chrome is SettingsOverlay's.
-export default function SecretsPanel({ showError }) {
+// grain/task-110: this was the whole Secrets tab, a flat list of every
+// secret in the store with a three-box form under it. Everything grain
+// itself resolves now sits with whatever uses it instead -- the agent
+// credentials on the Agents tab (AgentKeysSection), each capability's own
+// beside it on the Capabilities tab (SecretField) -- because a name and a
+// key with nothing saying which capability wants them is not something an
+// operator can act on.
+//
+// What is left is this: the remainder, on the foot of the Capabilities
+// tab. `claimed` names the secrets a control elsewhere on the pane
+// already owns, and they are filtered out here rather than shown twice.
+// The free-form form stays, so a credential this build has no field for
+// -- a minter renamed through gcpkey.Config.MinterCredential, anything a
+// future capability reads -- is still settable from the UI rather than
+// only from `grain secrets set` on the host.
+export default function SecretsPanel({ showError, claimed }) {
   const [resp, setResp] = useState(null);
 
   const refresh = useCallback(async () => {
@@ -63,8 +75,21 @@ export default function SecretsPanel({ showError }) {
 
   if (resp === null) return null;
 
+  // A secret claimed elsewhere is dropped from the listing, not from the
+  // store: setting one from the form below still works, it just shows up
+  // where it belongs afterwards rather than here.
+  const owned = new Set(claimed || []);
+  const others = (resp.secrets || []).filter((s) => !owned.has(s.name));
+
   return (
-    <>
+    <Box sx={{ mt: 3 }}>
+      <Typography variant="subtitle2">Other secrets</Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+        Everything in this deployment&apos;s secrets store that nothing above claims -- the agent
+        credentials are set on the Agents tab, and each capability&apos;s own beside it here. Names
+        and keys only, never values: a secret can be set, replaced and deleted from here, and never
+        read back.
+      </Typography>
       {!resp.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this UI was not started with a local secrets directory to write to
@@ -76,7 +101,7 @@ export default function SecretsPanel({ showError }) {
       {resp.enabled && (
         <>
           <ul className="secrets-list">
-            {(resp.secrets || []).map((s) => (
+            {others.map((s) => (
               <li className="secret-row" key={s.name}>
                 <span className="secret-name">{s.name}</span>
                 <Box sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", flex: 1 }}>
@@ -96,17 +121,17 @@ export default function SecretsPanel({ showError }) {
               </li>
             ))}
           </ul>
-          {(resp.secrets || []).length === 0 && <p className="empty">No secrets set.</p>}
+          {others.length === 0 && <p className="empty">No other secrets set.</p>}
           <form onSubmit={submit}>
             <TextField name="secret" label="Secret" placeholder="github" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
             <TextField name="key" label="Key" placeholder="token" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
             <TextField name="value" label="Value" helperText="write-only -- never shown or read back" type="password" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-              <Button type="submit" variant="contained">Set</Button>
+              <Button type="submit" variant="contained">Set secret</Button>
             </Stack>
           </form>
         </>
       )}
-    </>
+    </Box>
   );
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bwsalmon/kontur/internal/qcow2"
 )
 
 // clearEnv resets every env var this package reads, so tests don't leak
@@ -13,7 +15,7 @@ import (
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		envDiskImage, envDiskReadonly, envDiskMode, envDiskOverlayPath, envExtraDisks, envKernel, envInitramfs,
+		envDiskImage, envDiskReadonly, envDiskMode, envDiskOverlayPath, envDiskSizeMB, envExtraDisks, envKernel, envInitramfs,
 		envFirmware, envCmdline, envCPUs, envCPUsMax, envMemoryMB, envMemoryMaxMB,
 		envMemoryHotplug, envMemoryShared, envNet,
 		envAPISocket, envBinaryPath, envExtraArgs, envShutdownTimeout,
@@ -656,5 +658,154 @@ func TestPrepareOverlayIsANoOpInTheOtherModes(t *testing.T) {
 				t.Error("an overlay was created in a mode that has none")
 			}
 		})
+	}
+}
+
+func TestFromEnv_DiskSizeMB(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.DiskSizeMB != 0 {
+		t.Errorf("DiskSizeMB = %d, want 0 (the disk image's own size) when %s is unset", cfg.DiskSizeMB, envDiskSizeMB)
+	}
+
+	t.Setenv(envDiskSizeMB, "8192")
+	cfg, err = FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.DiskSizeMB != 8192 {
+		t.Errorf("DiskSizeMB = %d, want 8192", cfg.DiskSizeMB)
+	}
+}
+
+func TestFromEnv_DiskSizeMBRejectsBadValues(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		size  string
+		mode  string
+		wants string
+	}{
+		{name: "not a number", size: "8G", mode: DiskModeOverlay, wants: envDiskSizeMB},
+		{name: "negative", size: "-1", mode: DiskModeOverlay, wants: "negative"},
+		// The overlay is the only disk kontur creates; in the other two
+		// modes the guest is on the image itself, which is shared and
+		// never resized -- so asking for a size there can't be honoured.
+		{name: "persistent mode", size: "8192", mode: DiskModePersistent, wants: DiskModeOverlay},
+		{name: "readonly mode", size: "8192", mode: DiskModeReadOnly, wants: DiskModeOverlay},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+			t.Setenv(envFirmware, writeTempFile(t, "fw"))
+			t.Setenv(envDiskMode, tc.mode)
+			t.Setenv(envDiskSizeMB, tc.size)
+
+			_, err := FromEnv()
+			if err == nil {
+				t.Fatalf("FromEnv() = nil, want an error for %s=%q with %s=%s", envDiskSizeMB, tc.size, envDiskMode, tc.mode)
+			}
+			if !strings.Contains(err.Error(), tc.wants) {
+				t.Errorf("FromEnv() error = %v, want it to mention %q", err, tc.wants)
+			}
+		})
+	}
+}
+
+// TestPrepareOverlaySizesANewOverlay: a VM told how big a disk it wants
+// gets an overlay presenting exactly that, rather than the source image's
+// size, from its very first boot.
+func TestPrepareOverlaySizesANewOverlay(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "disk.img")
+	if err := os.WriteFile(source, make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, "overlay", "disk.qcow2")
+
+	cfg := Config{
+		DiskMode:    DiskModeOverlay,
+		OverlayPath: overlay,
+		DiskSizeMB:  4096,
+		Disks:       []Disk{{Path: source}},
+	}
+	if err := cfg.PrepareOverlay(); err != nil {
+		t.Fatalf("PrepareOverlay() error = %v", err)
+	}
+	size, err := qcow2.VirtualSize(overlay)
+	if err != nil {
+		t.Fatalf("VirtualSize() error = %v", err)
+	}
+	if want := int64(4096) * 1024 * 1024; size != want {
+		t.Errorf("overlay virtual size = %d, want %d", size, want)
+	}
+}
+
+// TestPrepareOverlayGrowsAnExistingOverlay is the restart case: the
+// overlay from an earlier boot is kept (whatever the guest wrote is in
+// it), and raising the configured size grows it in place before the VM
+// starts rather than being ignored until someone deletes the container.
+func TestPrepareOverlayGrowsAnExistingOverlay(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "disk.img")
+	if err := os.WriteFile(source, make([]byte, 1<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, "overlay", "disk.qcow2")
+
+	first := Config{DiskMode: DiskModeOverlay, OverlayPath: overlay, DiskSizeMB: 1024, Disks: []Disk{{Path: source}}}
+	if err := first.PrepareOverlay(); err != nil {
+		t.Fatalf("PrepareOverlay() error = %v", err)
+	}
+
+	second := Config{DiskMode: DiskModeOverlay, OverlayPath: overlay, DiskSizeMB: 4096, Disks: []Disk{{Path: source}}}
+	if err := second.PrepareOverlay(); err != nil {
+		t.Fatalf("PrepareOverlay() on an existing overlay error = %v", err)
+	}
+	size, err := qcow2.VirtualSize(overlay)
+	if err != nil {
+		t.Fatalf("VirtualSize() error = %v", err)
+	}
+	if want := int64(4096) * 1024 * 1024; size != want {
+		t.Errorf("overlay virtual size = %d, want it grown to %d", size, want)
+	}
+	if second.Disks[0].Path != overlay {
+		t.Errorf("Disks[0].Path = %q, want the overlay %q", second.Disks[0].Path, overlay)
+	}
+
+	// Shrinking would leave the guest's filesystem spanning clusters
+	// past the new end, so a lowered size fails rather than boots.
+	third := Config{DiskMode: DiskModeOverlay, OverlayPath: overlay, DiskSizeMB: 2048, Disks: []Disk{{Path: source}}}
+	if err := third.PrepareOverlay(); err == nil {
+		t.Error("PrepareOverlay() = nil for a shrink, want an error")
+	}
+}
+
+// TestPrepareOverlayRejectsASizeSmallerThanTheImage: an overlay reads
+// through to the image for everything the guest hasn't written, so one
+// smaller than the image would present a truncated root filesystem.
+func TestPrepareOverlayRejectsASizeSmallerThanTheImage(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "disk.img")
+	if err := os.WriteFile(source, make([]byte, 4<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, "overlay", "disk.qcow2")
+
+	cfg := Config{DiskMode: DiskModeOverlay, OverlayPath: overlay, DiskSizeMB: 1, Disks: []Disk{{Path: source}}}
+	err := cfg.PrepareOverlay()
+	if err == nil {
+		t.Fatal("PrepareOverlay() = nil, want an error for a size below the source image's")
+	}
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("PrepareOverlay() error = %v, want it to explain the guest's filesystem would be truncated", err)
+	}
+	if _, statErr := os.Stat(overlay); !os.IsNotExist(statErr) {
+		t.Error("an overlay was created despite the rejected size")
 	}
 }

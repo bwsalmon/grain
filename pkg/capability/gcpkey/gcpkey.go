@@ -193,20 +193,56 @@ func (p *Provider) Spec() model.CapabilitySpec {
 }
 
 // Resolve refuses unless this deployment is actually configured for
-// gcp-key -- ServiceAccountEmail and ProjectID both come from an operator,
+// gcp-key: ServiceAccountEmail and ProjectID both come from an operator,
 // never a default, since a mistaken default here would mint against
-// whichever project a stray empty string happened to resolve to. The
-// message names the real `grain controller configure` flags
-// (v1's runbook called this "Enabling GCP access in sandboxes"), the same
-// "posted verbatim, so it should read as a sentence a human can act on"
-// bar Resolution.Reason sets.
+// whichever project a stray empty string happened to resolve to -- and
+// the minter credential those two are minted through has to actually
+// resolve to something.
+//
+// Every reason is a sentence naming the pane and the command that fixes
+// it, the "posted verbatim, so it should read as a sentence a human can
+// act on" bar Resolution.Reason sets. The three it replaced each failed
+// that bar in its own way: the configuration one named `grain controller
+// configure --gcp-agent-service-account-email`, flags no build of grain
+// has ever had (the real ones are `grain settings`', and the same pair
+// of fields sits on Settings -> Capabilities), and opened by telling a
+// human their *issue* carries a label, from a version of grain with
+// neither issues nor labels left in it. The missing-credential one
+// existed at all only as Materialize's own wrapped error a moment later
+// -- "materializing capabilities: gcpkey: resolving minter credential
+// ...", grain describing its own internals where a task's own comment
+// should have said which secret to paste where. Nothing new is caught
+// here: what changes is where an operator reads about it.
+//
+// Checking the credential means resolving it, which is why this asks for
+// nothing back: Resolve wants to know the name answers, and a
+// CredentialResolver that returns material to a caller with no use for it
+// is a copy of a secret made for no reason.
 func (p *Provider) Resolve(ctx context.Context, cc model.CapabilityContext) (model.Resolution, error) {
 	if p.Config.ServiceAccountEmail == "" || p.Config.ProjectID == "" {
 		return model.RefusedBecause(
-			"this issue is labelled `grain-gcp-key`, asking for a GCP service-account " +
-				"key this deployment isn't configured for. An operator runs `grain " +
-				"controller configure --gcp-agent-service-account-email <email> " +
-				"--gcp-project-id <project>`.",
+			"this task asks for a GCP service-account key this deployment isn't " +
+				"configured to mint. An operator sets the GCP project and the agent " +
+				"service account keys are minted for, under Settings -> Capabilities " +
+				"(`grain settings -gcp-project <project> -gcp-agent-service-account " +
+				"<email>`).",
+		), nil
+	}
+	credential := p.minterCredential()
+	if cc.Credentials == nil {
+		return model.RefusedBecause(
+			"this task asks for a GCP service-account key, but nothing here can reach " +
+				"the standing credential `" + credential + "` the key would be minted " +
+				"under.",
+		), nil
+	}
+	if _, err := cc.Credentials.Resolve(ctx, credential); err != nil {
+		return model.RefusedBecause(
+			"this task asks for a GCP service-account key, but the standing credential `" +
+				credential + "` it is minted under is not set on this deployment. An " +
+				"operator pastes the GCP minter service account's key file into Settings " +
+				"-> Secrets, or runs `grain secrets set " + credential + " key.json " +
+				"-value-file <path>`.",
 		), nil
 	}
 	return model.Honoured(), nil

@@ -38,6 +38,21 @@ test("loads directly into each sidebar sub-page from its URL", async ({ page }) 
   await expect(page.getByRole("heading", { name: "Debug" })).toBeVisible();
 });
 
+// A repo's own page is two URL segments deep (grain/task-111), which is
+// the first path here the SPA fallback has to answer for that could
+// plausibly be mistaken for a real static asset path.
+test("loads directly into a repo's own page, and its releases pane, from the URL", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: /^Repos/ }).click();
+  const repoName = await page.locator(".repo-list-name").first().innerText();
+
+  await page.goto(`/repos/${repoName}`);
+  await expect(page.getByRole("heading", { name: repoName })).toBeVisible();
+
+  await page.goto(`/repos/${repoName}/releases`);
+  await expect(page.getByRole("heading", { name: `${repoName} releases` })).toBeVisible();
+});
+
 test("deep-links to a task's detail overlay, including after a hard reload", async ({ page }) => {
   await page.goto("/");
   await page.locator(".task-row").first().click();

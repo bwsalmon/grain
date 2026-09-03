@@ -174,6 +174,26 @@ var Tables = []string{
 	// reached its agent at all (outcome "setup-failed", a checkout that
 	// would not clone), which is exactly the distinction a reader wants:
 	// no agent latency to report, because no agent ran.
+	//
+	// prompt is the whole text the agent was actually handed for this run
+	// -- the task's own title and body plus everything grain adds to them
+	// (orchestrator.BuildPrompt's branch and repo sentences, the
+	// conversation so far, the attachments section, and each capability's
+	// own prompt section). Nothing else records it: the prompt is
+	// assembled per run, from a task that may since have been edited and
+	// a conversation that has since grown, so it cannot be reconstructed
+	// after the fact from the task alone -- which is exactly why "what
+	// were you actually told?" needs a column rather than a re-derivation.
+	// It carries no credential material by construction (every capability
+	// PromptSection names its credential and hands over none -- see
+	// githubtoken and gcpkey's own tests), which is what makes it safe to
+	// show in the UI.
+	//
+	// Written once, by SetRunPrompt, immediately before
+	// orchestrator.RunDispatch hands the run to agent.Framework.Run, and
+	// so NULL for a run that never reached its agent at all (a checkout
+	// that would not clone, a capability that would not mint) as well as
+	// for every run recorded before this column existed.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_run`" + ` (
   ` + "`id`" + `               TEXT     NOT NULL,
   ` + "`task_id`" + `          TEXT     NOT NULL,
@@ -186,6 +206,7 @@ var Tables = []string{
   ` + "`outcome`" + `          TEXT     NULL,
   ` + "`detail`" + `           TEXT     NULL,
   ` + "`transcript`" + `       TEXT     NULL,
+  ` + "`prompt`" + `           TEXT     NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

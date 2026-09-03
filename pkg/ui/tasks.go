@@ -490,10 +490,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeClientError(w, err)
 		return
 	}
+	// Read before the capability listing below, which needs both to say
+	// whether a row a human can tick would actually work on this
+	// deployment -- the same two inputs the Settings pane's own
+	// Capabilities tab reads.
+	repoConfigs, err := s.tasks.Store.ListRepoConfigs(r.Context())
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
 	resp := configResponse{
 		Actor:         s.tasks.Config.Actor.ID,
 		ActorKind:     string(s.tasks.Config.Actor.Kind),
-		Capabilities:  s.tasks.Config.Capabilities,
+		Capabilities:  s.tasks.capabilitiesWithReadiness(cfg, repoConfigs),
 		RebootEnabled: s.tasks.Config.Reboot != nil,
 		TargetRepos:   s.tasks.targetRepos(),
 	}
@@ -523,11 +532,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// Outside the cfg != nil branch above: a repo can carry defaults of
 	// its own on a deployment that has never saved a settings row, the
 	// same case GetSettings reads this in both of its branches for.
-	repoConfigs, err := s.tasks.Store.ListRepoConfigs(r.Context())
-	if err != nil {
-		writeClientError(w, err)
-		return
-	}
 	for _, rc := range repoConfigs {
 		if rc.PromptExtension != "" {
 			resp.ReposWithPromptExtension = append(resp.ReposWithPromptExtension, rc.Repo.String())
@@ -598,6 +602,26 @@ func (s *Server) handleGetAttemptTranscript(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, attemptTranscriptResponse{Transcript: transcript})
+}
+
+// handleGetTaskPrompt serves the prompt a task's own agent was handed --
+// its own route rather than a field on TaskDetail, the same reasoning
+// attemptTranscriptResponse gives for the transcript: a prompt runs to
+// thousands of words, and the list every task detail fetch already pays
+// for should not carry one per task for the sake of a pane most readers
+// never open.
+//
+// A task that has no recorded prompt is a 200 with an empty one, not a
+// 404: the task exists and the honest answer is "nothing has been
+// dispatched for it yet" (Client.TaskPrompt), which the frontend renders
+// as such. Only an unknown task id 404s.
+func (s *Server) handleGetTaskPrompt(w http.ResponseWriter, r *http.Request) {
+	prompt, err := s.tasks.TaskPrompt(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, prompt)
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {

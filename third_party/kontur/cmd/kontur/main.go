@@ -123,9 +123,14 @@ func runVM() error {
 
 	// Before anything boots: in the default disk mode the guest writes
 	// into a qcow2 of its own rather than into the image, and this is
-	// what creates it and repoints the VM at it. See config.PrepareOverlay.
+	// what creates it, sizes it to CHV_DISK_SIZE_MB (growing one left
+	// over from an earlier boot at a smaller size), and repoints the VM
+	// at it. See config.PrepareOverlay.
 	if err := cfg.PrepareOverlay(); err != nil {
 		return err
+	}
+	if cfg.DiskSizeMB > 0 {
+		log.Printf("writable disk sized to %d MiB; the guest grows its own filesystem into it", cfg.DiskSizeMB)
 	}
 
 	if err := ensureGuestKey(&cfg, guestexec.DefaultKeyPath); err != nil {

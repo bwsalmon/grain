@@ -158,6 +158,37 @@ describe("NewTaskOverlay", () => {
     expect(payload.capabilities).toEqual(["web-search"]);
   });
 
+  // The picker used to offer every capability grain ships with no sign
+  // of whether this deployment could honour it, so ticking gemini-key on
+  // a deployment with no GCP project filed a task whose only symptom was
+  // failing to dispatch later. The row now says so where it is ticked.
+  it("warns in the picker about a capability this deployment is not configured for", async () => {
+    const config = {
+      capabilities: [
+        { id: "gemini-key", name: "Gemini key", ready: false, needs: ["GCP project"] },
+        { id: "self-debug", name: "Self debug", ready: true },
+      ],
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={[]} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.click(screen.getByLabelText("Capabilities"));
+    const gemini = await screen.findByRole("option", { name: /Gemini key/ });
+    expect(gemini).toHaveTextContent("GCP project");
+    expect(gemini).toHaveTextContent(/fail to dispatch/);
+    // A ready capability gets no such line.
+    expect(screen.getByRole("option", { name: /Self debug/ })).not.toHaveTextContent(/Not ready/);
+
+    // Warning, never refusing: it is still tickable, since filing the
+    // task first and setting the project second is an ordinary order.
+    await user.click(gemini);
+    await user.keyboard("{Escape}");
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key"]);
+  });
+
   // grain/task-14: the deployment's own default capabilities arrive
   // on GET /api/config and open the form already ticked, so filing a
   // task on a deployment that defaults gcp-key gets one without anyone

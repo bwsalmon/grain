@@ -16,6 +16,15 @@ import (
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 )
 
+// defaultShapeArgs is the size every "konturctl vm create" carries when
+// neither the run nor the deployment asked for one: grain's own default
+// shape (orchestrator.DefaultShape, kontur.DefaultCPUs/DefaultMemoryMB/
+// DefaultDiskGB), in the MiB kontur's disk flag takes. Spelled out as
+// literal numbers rather than built from those constants, so that
+// changing the size of every sandbox grain builds means editing a test
+// that says what the new size is.
+const defaultShapeArgs = " -cpus 2 -memory-mb 8192 -disk-size-mb 30720"
+
 // writeFakeKontur installs a shell script named "konturctl" on PATH --
 // the operator-facing binary orchestrator.KonturSandboxes actually execs
 // via pkg/kontur.Create/Delete, not the container-facing "kontur" binary
@@ -226,7 +235,7 @@ func TestKonturSandboxesAcquireCreatesAVMAndReleaseDeletesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := splitNonEmptyLines(string(data))
-	wantCreate := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat"
+	wantCreate := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat" + defaultShapeArgs
 	wantDelete := "vm delete g-t1-1 -state-dir " + stateDir
 	var creates, deletes int
 	for _, line := range lines {
@@ -279,7 +288,7 @@ func TestKonturSandboxesAcquireRebuildsAVMLeftUnderTheSameName(t *testing.T) {
 	if len(lines) < 2 || lines[0] != "vm delete g-t1-1 -state-dir "+stateDir {
 		t.Fatalf("konturctl calls = %q, want the stale VM deleted before anything else", lines)
 	}
-	if lines[1] != "vm create g-t1-1 -state-dir "+stateDir+" -backend docker -net flat" {
+	if lines[1] != "vm create g-t1-1 -state-dir "+stateDir+" -backend docker -net flat"+defaultShapeArgs {
 		t.Errorf("konturctl calls = %q, want a create straight after the delete", lines)
 	}
 }
@@ -445,8 +454,8 @@ func TestKonturSandboxesPassesIPAndPortVerbatimUnderNAT(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.2 -port 30080",
-		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net nat -ip 169.254.100.2 -port 30080",
+		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net nat" + defaultShapeArgs + " -ip 169.254.100.2 -port 30080",
+		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net nat" + defaultShapeArgs + " -ip 169.254.100.2 -port 30080",
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {
@@ -462,7 +471,8 @@ func TestKonturSandboxesPassesIPAndPortVerbatimUnderNAT(t *testing.T) {
 // TestKonturSandboxesCreateAppendsDefaultShape confirms
 // KonturConfig.DefaultCPUs/DefaultMemoryMB/DefaultDiskGB
 // (bwsalmon/agents#534, grain/task-41) reach "konturctl vm create" as
-// -cpus/-memory-mb/-disk-size-gb, after CreateArgs -- so an
+// -cpus/-memory-mb/-disk-size-mb, after CreateArgs (the last in MiB:
+// see createArgs' own mibPerGiB) -- so an
 // operator's own -kontur-create-arg=-cpus (if not set here too) is never
 // silently overridden by leaving DefaultCPUs at its zero "unset" value,
 // but the deployment-wide setting wins when both are configured, the
@@ -494,7 +504,7 @@ func TestKonturSandboxesCreateAppendsDefaultShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -disk /images/current/disk.img -cpus 4 -memory-mb 8192 -disk-size-gb 40"
+	want := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -disk /images/current/disk.img -cpus 4 -memory-mb 8192 -disk-size-mb 40960"
 	got := splitNonEmptyLines(string(data))
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("kontur invocations = %v, want [%q]", got, want)
@@ -540,8 +550,8 @@ func TestKonturSandboxesSetDefaultShapeAppliesToTheNextCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 8 -memory-mb 16384 -disk-size-gb 40",
-		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 1 -memory-mb 16384 -disk-size-gb 40",
+		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 8 -memory-mb 16384 -disk-size-mb 40960",
+		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 1 -memory-mb 16384 -disk-size-mb 40960",
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {
@@ -555,9 +565,13 @@ func TestKonturSandboxesSetDefaultShapeAppliesToTheNextCreate(t *testing.T) {
 }
 
 // Clearing every dimension back to "unset" has to reach the backend too
-// -- otherwise a deployment that went back to kontur's own default VM
-// size would keep building the size it had been told to forget.
-func TestKonturSandboxesSetDefaultShapeCanClearTheDefault(t *testing.T) {
+// -- otherwise a deployment that went back to grain's own default VM
+// size would keep building the size it had been told to forget. What it
+// lands on is that default, spelled out on the create: "unset" has never
+// meant "let kontur decide" since grain started naming all three sizes
+// itself, and the numbers below are the ones every sandbox is built at
+// on a deployment that has configured nothing.
+func TestKonturSandboxesSetDefaultShapeClearsBackToGrainsOwnDefault(t *testing.T) {
 	stateDir := t.TempDir()
 	argvLog := filepath.Join(t.TempDir(), "kontur-argv.log")
 	writeFakeKontur(t, argvLog, 30080)
@@ -583,10 +597,17 @@ func TestKonturSandboxesSetDefaultShapeCanClearTheDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat"
+	want := "vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat -cpus 2 -memory-mb 8192 -disk-size-mb 30720"
 	got := splitNonEmptyLines(string(data))
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("kontur invocations = %v, want [%q]", got, want)
+	}
+	// The same numbers, read off the constants the rest of the repo
+	// resolves an unset dimension through, so that a build whose
+	// DefaultShape drifted from the flags above fails here saying which
+	// of the two moved.
+	if def := orchestrator.DefaultShape(); def.CPUs != 2 || def.MemoryMB != 8192 || def.DiskGB != 30 {
+		t.Errorf("orchestrator.DefaultShape() = %d vCPU/%d MiB/%d GiB, want 2/8192/30", def.CPUs, def.MemoryMB, def.DiskGB)
 	}
 }
 
@@ -892,8 +913,8 @@ func TestKonturSandboxesFlatModeOmitsAddressing(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat",
-		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net flat",
+		"vm create g-t1-1 -state-dir " + stateDir + " -backend docker -net flat" + defaultShapeArgs,
+		"vm create g-t2-1 -state-dir " + stateDir + " -backend docker -net flat" + defaultShapeArgs,
 	}
 	got := splitNonEmptyLines(string(data))
 	if len(got) != len(want) {

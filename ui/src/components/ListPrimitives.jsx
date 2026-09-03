@@ -8,13 +8,12 @@ import { FormControl, InputLabel, MenuItem, Select, TextField, Typography } from
 // edit to one of these four -- gets the shared shape by construction
 // instead of by copying the right CSS class names onto the right divs.
 //
-// Deliberately not included: the row itself. TaskRow (still exported
-// from TaskList.jsx) already covers the one case where two of these
-// pages render an identical row (RepoList's per-repo task sublist); the
-// four pages' *own* rows carry different columns (a repo's chevron and
-// action buttons, a template's single title line, a schedule's second
-// "next run" line) that don't reduce to one shape without either losing
-// information or growing a prop for every page's special case.
+// Deliberately not included: the row itself. TaskRow stays exported from
+// TaskList.jsx for any view that wants a task row identical to that
+// list's own; the four pages' *own* rows carry different columns (a
+// repo's per-state counts, a template's single title line, a schedule's
+// second "next run" line) that don't reduce to one shape without either
+// losing information or growing a prop for every page's special case.
 export function ListHeader({ title, count, action, style }) {
   return (
     <div className="content-header" style={style}>

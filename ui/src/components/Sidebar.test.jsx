@@ -26,7 +26,7 @@ describe("Sidebar", () => {
     expect(screen.getByRole("button", { name: /All tasks 3/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Queued 2/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Running 1/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Completed/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Queued for merge/ })).not.toBeInTheDocument();
   });
 
   it("shows a blocked nav entry only when a task is blocked", () => {

@@ -3,6 +3,7 @@ package qcow2
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -91,6 +92,20 @@ const (
 	// qcow2L1CoverageBytes is how much of the virtual disk one L1 entry
 	// (i.e. one L2 table) covers: 512MiB with 64KiB clusters.
 	qcow2L1CoverageBytes = int64(qcow2ClusterSize) * int64(qcow2L2EntriesPerTable)
+
+	// qcow2FeatureExtendedL2 is the incompatible_features bit that says
+	// L2 entries are 16 bytes wide rather than 8, which halves how much
+	// virtual disk one L1 entry covers. Nothing here ever sets it, but
+	// Resize refuses to touch an image that has it rather than doing its
+	// L1 arithmetic with the wrong entry width.
+	qcow2FeatureExtendedL2 = 1 << 4
+
+	// qcow2MinClusterBits and qcow2MaxClusterBits bound the cluster size
+	// the format allows (512 bytes to 2MiB). Resize reads cluster_bits
+	// out of an existing image, so it checks the value is one the rest of
+	// its arithmetic can trust before shifting by it.
+	qcow2MinClusterBits = 9
+	qcow2MaxClusterBits = 21
 )
 
 // WriteOverlay creates a new qcow2 image at dest: a thin,
@@ -194,4 +209,151 @@ func WriteOverlay(dest, backingFile string, sizeBytes int64) (err error) {
 	}()
 	_, err = out.Write(buf)
 	return err
+}
+
+// VirtualSize returns the virtual disk size, in bytes, that the qcow2
+// image at path presents to a guest -- which, for an overlay, has nothing
+// to do with how large the file itself is.
+func VirtualSize(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	h, err := readHeader(f)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", path, err)
+	}
+	return h.size, nil
+}
+
+// Resize grows the virtual disk size of the qcow2 image at path to
+// sizeBytes, in place, without touching any data the guest has already
+// written into it: a qcow2's virtual size is a header field plus an L1
+// table sized to cover it, and clusters are only ever allocated as the
+// guest writes, so making the disk bigger allocates nothing and copies
+// nothing.
+//
+// Growing only. A size equal to the current one is a no-op (so calling
+// this on every boot is safe), and a smaller one is an error rather than
+// a truncation: the clusters past the new end would become unreachable,
+// and a guest filesystem that already spans them would be corrupt.
+//
+// The guest still has to grow its own partition table/filesystem into the
+// new space afterwards -- this only changes the size of the block device
+// it is offered.
+func Resize(path string, sizeBytes int64) error {
+	if sizeBytes < 0 {
+		return fmt.Errorf("negative disk size %d", sizeBytes)
+	}
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	h, err := readHeader(f)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if sizeBytes == h.size {
+		return nil
+	}
+	if sizeBytes < h.size {
+		return fmt.Errorf("%s is already %d bytes: shrinking a qcow2 disk is not supported", path, h.size)
+	}
+
+	// One L1 entry per L2 table, each covering clusterSize/8 clusters of
+	// virtual disk -- the same arithmetic WriteOverlay does, but with the
+	// cluster size this image actually uses rather than this package's own.
+	l2EntriesPerTable := h.clusterSize / 8
+	l1Coverage := h.clusterSize * l2EntriesPerTable
+	newL1Size := (sizeBytes + l1Coverage - 1) / l1Coverage
+	if newL1Size < 1 {
+		newL1Size = 1
+	}
+
+	// The L1 table is a cluster-granular allocation like everything else
+	// in a qcow2, so whatever is left of its last cluster past l1_size
+	// entries is padding nothing else can own -- growing into it needs no
+	// new clusters, no refcount updates and no relocation. One 64KiB
+	// cluster holds 8192 entries, i.e. 4TiB of virtual disk, so that
+	// covers any growth a caller is realistically asking for; a larger
+	// one needs the L1 table moved and the refcount structures updated
+	// with it, which is deliberately not implemented here.
+	oldClusters := clustersFor(h.l1Size*8, h.clusterSize)
+	newClusters := clustersFor(newL1Size*8, h.clusterSize)
+	if newClusters > oldClusters {
+		return fmt.Errorf("growing %s to %d bytes needs %d L1 table cluster(s) but only %d are allocated: recreate the disk at the larger size instead",
+			path, sizeBytes, newClusters, oldClusters)
+	}
+
+	// Zero the entries being brought into use before publishing the new
+	// l1_size, so a reader never sees an entry pointing at a stale L2
+	// table. WriteOverlay leaves this padding zeroed already; an image
+	// from elsewhere is not promised to.
+	if newL1Size > h.l1Size {
+		if _, err := f.WriteAt(make([]byte, (newL1Size-h.l1Size)*8), h.l1TableOffset+h.l1Size*8); err != nil {
+			return fmt.Errorf("extending the L1 table of %s: %w", path, err)
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("syncing the extended L1 table of %s: %w", path, err)
+		}
+	}
+
+	var buf [8]byte
+	binary.BigEndian.PutUint32(buf[:4], uint32(newL1Size))
+	if _, err := f.WriteAt(buf[:4], 36); err != nil { // l1_size
+		return fmt.Errorf("updating l1_size of %s: %w", path, err)
+	}
+	binary.BigEndian.PutUint64(buf[:], uint64(sizeBytes))
+	if _, err := f.WriteAt(buf[:], 24); err != nil { // size
+		return fmt.Errorf("updating the virtual size of %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("syncing the resized header of %s: %w", path, err)
+	}
+	return nil
+}
+
+// header is the handful of qcow2 header fields Resize and VirtualSize
+// need, already validated as something they can reason about.
+type header struct {
+	size          int64 // virtual disk size in bytes
+	clusterSize   int64
+	l1Size        int64 // L1 entries, not bytes
+	l1TableOffset int64
+}
+
+func readHeader(f *os.File) (header, error) {
+	buf := make([]byte, HeaderSize)
+	if _, err := io.ReadFull(io.NewSectionReader(f, 0, HeaderSize), buf); err != nil {
+		return header{}, fmt.Errorf("reading the qcow2 header: %w", err)
+	}
+	if magic := binary.BigEndian.Uint32(buf[0:4]); magic != Magic {
+		return header{}, fmt.Errorf("not a qcow2 image (magic %#x)", magic)
+	}
+	if version := binary.BigEndian.Uint32(buf[4:8]); version != Version {
+		return header{}, fmt.Errorf("unsupported qcow2 version %d, want %d", version, Version)
+	}
+	if features := binary.BigEndian.Uint64(buf[72:80]); features&qcow2FeatureExtendedL2 != 0 {
+		return header{}, fmt.Errorf("image uses extended L2 entries, which this package does not implement")
+	}
+	clusterBits := binary.BigEndian.Uint32(buf[20:24])
+	if clusterBits < qcow2MinClusterBits || clusterBits > qcow2MaxClusterBits {
+		return header{}, fmt.Errorf("implausible cluster_bits %d", clusterBits)
+	}
+	return header{
+		size:          int64(binary.BigEndian.Uint64(buf[24:32])),
+		clusterSize:   int64(1) << clusterBits,
+		l1Size:        int64(binary.BigEndian.Uint32(buf[36:40])),
+		l1TableOffset: int64(binary.BigEndian.Uint64(buf[40:48])),
+	}, nil
+}
+
+// clustersFor is the number of clusters needed to hold n bytes.
+func clustersFor(n, clusterSize int64) int64 {
+	return (n + clusterSize - 1) / clusterSize
 }

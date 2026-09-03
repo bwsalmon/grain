@@ -1,8 +1,16 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
+import api from "../api.js";
+
+vi.mock("../api.js", () => ({ default: vi.fn() }));
 
 describe("CapabilitiesPanel", () => {
+  afterEach(() => {
+    api.mockReset();
+  });
+
   it("shows an empty note with no capabilities", () => {
     render(<CapabilitiesPanel capabilities={[]} />);
     expect(screen.getByText("No capabilities known.")).toBeInTheDocument();
@@ -127,6 +135,57 @@ describe("CapabilitiesPanel", () => {
     expect(screen.queryByText("Default")).not.toBeInTheDocument();
     expect(screen.getByText("Default in 2 repos")).toBeInTheDocument();
     expect(screen.getByText(/acme\/widgets, acme\/gadgets/)).toBeInTheDocument();
+  });
+
+  // grain/task-110: a capability's own credentials are set from the row
+  // that reports them missing, rather than from a Secrets tab that never
+  // said which name belonged to which capability.
+  it("offers a write-only field for each credential a capability resolves", async () => {
+    api.mockResolvedValueOnce({});
+    const onSecretsChanged = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <CapabilitiesPanel
+        capabilities={[
+          {
+            id: "gcp-key",
+            name: "GCP key",
+            description: "Mint a key",
+            ready: false,
+            grantable: true,
+            missingSecrets: ["gcp-key-minter"],
+            secrets: [{ name: "gcp-key-minter", secret: "gcp-key-minter", key: "value", set: false }],
+          },
+        ]}
+        showError={() => {}}
+        onSecretsChanged={onSecretsChanged}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("gcp-key-minter"), "a-key");
+    await user.click(screen.getByRole("button", { name: "Set" }));
+
+    expect(api).toHaveBeenCalledWith("/api/secrets/gcp-key-minter/value", {
+      method: "PUT",
+      body: JSON.stringify({ value: "a-key" }),
+    });
+    expect(onSecretsChanged).toHaveBeenCalled();
+  });
+
+  // No colocated secrets store means the API reports no secrets for any
+  // capability, so there is nothing to offer -- a field whose every use
+  // would 404 is worse than none.
+  it("offers no secret field for a capability that reports none", () => {
+    render(
+      <CapabilitiesPanel
+        capabilities={[{ id: "github-sandbox", name: "GitHub sandbox", description: "Sandbox repo", ready: true }]}
+        showError={() => {}}
+        onSecretsChanged={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Set" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Credentials? this needs:/)).not.toBeInTheDocument();
   });
 
   it("falls back to the id when no display name is given", () => {

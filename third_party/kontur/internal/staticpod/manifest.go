@@ -126,6 +126,14 @@ spec:
           value: {{yq .DiskImage}}
         - name: CHV_DISK_MODE
           value: {{yq .DiskModeOrDerived}}
+{{- if .DiskSizeMB}}
+        # The VM container sizes its own overlay to this before booting,
+        # creating it that large or growing one an earlier boot of this
+        # same container left behind. Omitted entirely when unset, so the
+        # overlay keeps taking the disk image's own size.
+        - name: CHV_DISK_SIZE_MB
+          value: {{yq (itoa .DiskSizeMB)}}
+{{- end}}
 {{- if .Kernel}}
         - name: CHV_KERNEL
           value: {{yq .Kernel}}

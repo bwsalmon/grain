@@ -543,11 +543,12 @@ that same tree and runs `konturctl guest build` with `guest-setup.sh` as
 the setup script. It needs docker, `/dev/kvm` and Go.
 
 The disk that comes out is the rootfs plus 20% plus whatever
-`GUEST_DISK_EXTRA_MB` asked for, and that is also the whole of a
-sandbox's disk unless something says otherwise, since `konturctl` gives
-each VM an overlay at exactly its backing image's size. `sandbox-disk-gb`
-(Settings -> Sandbox, or a per-task override) is what says otherwise,
-reaching `konturctl vm create` as `-disk-size-gb`; the guest's own half
+`GUEST_DISK_EXTRA_MB` asked for, and it is the floor a sandbox's disk
+starts from rather than the whole of it: `konturctl` gives each VM an
+overlay at exactly its backing image's size, and grain then asks for one
+the size of `sandbox-disk-gb` (Settings -> Sandbox, or a per-task
+override), which is 30 GiB on a deployment that has set nothing --
+`konturctl vm create -disk-size-mb`, always passed. The guest's own half
 of it is the `grain-growfs` unit `guest-setup.sh` installs, which grows
 the root filesystem onto the larger device on each boot. Nothing about
 the image build changes for it -- a bigger disk is a create-time
