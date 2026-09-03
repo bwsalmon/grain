@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -71,8 +72,8 @@ var SettingsTables = []string{
 	"template_read",
 	"template_grant",
 	"template_sequence",
-	// Suites and the templates they run, but not suite_run and its own
-	// tables: a suite is settings, a run of one is not.
+	// Suites and the templates they run, but not suite_run and its
+	// own tables: a suite is settings, a run of one is not.
 	"suite",
 	"suite_item",
 	"suite_sequence",
@@ -321,9 +322,16 @@ that an unchanged database always produces byte-identical files.
   configuration, prompt extensions, schedules), tasks, runs and metrics.
 - ` + "`" + SchemaVersionFile + "`" + ` -- the schema the dump was written by. A grain
   that knows a different one refuses to import rather than guessing.
-- ` + "`" + SecretsFile + "`" + ` -- every secret grain holds, encrypted to a public key
-  whose private half only the operator has. Nothing else in this
-  repository is encrypted, and nothing but secrets goes in this file.
+
+Which tables are settings, and which are grain's own record of what it
+did, is the distinction to hold on to before changing anything.
+` + "`" + `template` + "`" + `, ` + "`" + `suite` + "`" + ` (with ` + "`" + `suite_item` + "`" + `), ` + "`" + `repo_config` + "`" + `,
+` + "`" + `schedule` + "`" + ` and ` + "`" + `grain_config` + "`" + `, plus the ` + "`" + `_read` + "`" + `/` + "`" + `_grant` + "`" + `/` + "`" + `_sequence` + "`" + `
+tables belonging to them, are settings. ` + "`" + `task` + "`" + `, ` + "`" + `task_run` + "`" + `,
+` + "`" + `task_comment` + "`" + `, ` + "`" + `task_observation` + "`" + `, ` + "`" + `lease` + "`" + `, ` + "`" + `branch` + "`" + `, ` + "`" + `release` + "`" + ` and
+their like are observations: grain writes them, and a change to one is
+either overwritten by the next export or kept as a record of something
+that never happened.
 
 ## Changing something
 
@@ -341,17 +349,29 @@ rows that run is working on. Editing one of those here while grain is
 running does nothing; the next export writes the database's version back
 over your change.
 
+Check it first. ` + "`" + `grain state check .` + "`" + ` loads the whole directory into a
+throwaway database and reports what breaks; without it, a malformed file
+or a row missing a required column fails when the daemon next starts,
+which is the worst place to find out.
+
 Do not hand-edit while grain is running unless you mean it: grain is the
 only writer, exports on a timer, and a local edit it did not make is
 overwritten by the next export.
 
-## Secrets
+## Secrets are not here
 
-` + "`" + SecretsFile + "`" + ` is an encrypted blob. Agents never read it: a run gets a
-secret only through the secret input a human asked for, exactly as
-before. Losing the private key means losing every secret in here -- the
-file cannot be recovered from grain, which holds no copy of the key
-beyond the one file the operator manages.
+grain's secrets are encrypted, and they are not in this repository. They
+sit beside the private key on the machine grain runs on, under
+` + "`" + `<data-dir>/secrets` + "`" + `, which is the directory an operator backs up -- the
+key was never here either, so a copy of this repository never could
+decrypt anything.
+
+They used to be here, as ` + "`" + SecretsFile + "`" + `. This repository is somewhere
+agents are dispatched to work now, and everything a sandbox can clone is
+everything a sandbox can read; ciphertext an agent can carry off is
+still ciphertext an agent can carry off. If that file appears anywhere
+in this repository's history, grain refuses to let any sandbox reach it
+at all -- see the "State repository" section of grain's README.
 `
 
 // EnsureIgnored writes a .gitignore that keeps the things which are not
@@ -359,6 +379,12 @@ beyond the one file the operator manages.
 // shares a directory with anything else. Small, and worth having
 // written down rather than assumed: a stray editor swap file committed
 // into the state repository would be pushed to the remote.
+//
+// A file that is already there is added to rather than replaced. It used
+// to be left exactly as it was, which was fine while this list never
+// changed; it does now (secrets.enc joined it), and a repository created
+// by an earlier build would otherwise never learn the new line. Whatever
+// an operator added themselves stays.
 func EnsureIgnored(dir string) error {
 	const body = "# Written by grain.\n" +
 		"*.swp\n" +
@@ -367,10 +393,39 @@ func EnsureIgnored(dir string) error {
 		// operator who drops one in this directory by mistake fail to
 		// commit it rather than push it to a remote.
 		"*.key\n" +
-		"secrets.key\n"
+		"secrets.key\n" +
+		// Nor does the encrypted file any more: this repository is
+		// somewhere agents are dispatched to work now, and everything a
+		// sandbox can clone is everything a sandbox can read. The
+		// ciphertext lives beside the key under <data-dir>/secrets --
+		// see SecretsFile -- and this line is what keeps a copy left
+		// behind by an older build, or by a hand that put one here, from
+		// being committed back.
+		SecretsFile + "\n"
 	path := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(path); err == nil {
+	existing, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return writeFileIfChanged(path, []byte(body))
+	}
+	if err != nil {
+		return fmt.Errorf("staterepo: reading %s: %w", path, err)
+	}
+	have := map[string]bool{}
+	for _, line := range strings.Split(string(existing), "\n") {
+		have[strings.TrimSpace(line)] = true
+	}
+	var missing []string
+	for _, line := range strings.Split(strings.TrimSuffix(body, "\n"), "\n") {
+		if !have[line] {
+			missing = append(missing, line)
+		}
+	}
+	if len(missing) == 0 {
 		return nil
 	}
-	return writeFileIfChanged(path, []byte(body))
+	updated := string(existing)
+	if !strings.HasSuffix(updated, "\n") {
+		updated += "\n"
+	}
+	return writeFileIfChanged(path, []byte(updated+strings.Join(missing, "\n")+"\n"))
 }

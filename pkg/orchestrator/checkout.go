@@ -67,6 +67,21 @@ type checkout struct {
 	// directory (CheckoutDir), or "" when there was nothing to clone --
 	// a task with no target, or a deployment running no git proxy.
 	Dir string
+	// StateRepo reports that what was cloned is a grain state repository
+	// (pkg/staterepo): a dump of grain's own database as text, rather
+	// than source code. It decides whether the prompt carries
+	// stateRepoSection, which is the only thing that reads it.
+	//
+	// Answered by what is in the checkout -- a tables/ directory beside
+	// a schema-version stamp -- rather than by comparing the target
+	// against this deployment's configured state remote. The layout is
+	// the thing the agent has to be told about, and it is the same
+	// layout whether the repository is this deployment's own state, some
+	// other grain's, or a copy somebody is editing offline; a check
+	// against one configured remote would say nothing about the other
+	// two, and would have to be threaded from the daemon through every
+	// caller of RunDispatch to say anything at all.
+	StateRepo bool
 	// Setup is what model.RepoConfig.SetupCommand did in that directory,
 	// or nil when the repo configures none -- which is every repo until
 	// somebody writes one. A setup that *failed* is still a non-nil
@@ -187,7 +202,9 @@ cd '%[1]s'
   git checkout --quiet -b '%[3]s' 'origin/%[3]s'
 else
   %[5]sgit checkout --quiet -b '%[3]s'
-fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, branch), rootOnBase)
+fi
+%[6]s`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, branch), rootOnBase,
+		stateRepoCheck())
 
 	run, ok := runCommandTool(tools)
 	if !ok {
@@ -210,7 +227,7 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 			log.Printf("orchestrator: task %s: %s", task.ID, strings.TrimSpace(said))
 		}
 	}
-	out := checkout{Dir: CheckoutDir}
+	out := checkout{Dir: CheckoutDir, StateRepo: strings.Contains(result.Text, stateRepoMarker)}
 	ran, err := runSetupCommand(ctx, run, task, setup)
 	if err != nil {
 		return checkout{}, err
@@ -381,6 +398,25 @@ done`, CheckoutDir, "'"+strings.Join(refs, "' '")+"'", commitMarker, limit)
 		}
 	}
 	return commits
+}
+
+// stateRepoMarker is what stateRepoCheck prints when the checkout turns
+// out to be a grain state repository, picked back out of run_command's
+// own framing the same way baseGoneMarker and commitMarker are.
+const stateRepoMarker = "grain-state-repo:yes"
+
+// stateRepoCheck is the shell that decides checkout.StateRepo: a
+// tables/ directory beside a schema-version stamp is a dump written by
+// pkg/staterepo and nothing else -- Export writes both, and HasDump asks
+// the same question of a working tree the daemon owns.
+//
+// Run in the checkout, after the branch is in place, and deliberately
+// unable to fail the dispatch: it ends in a bare `true` so that a tree
+// which is not a state repository leaves the script's exit status at 0
+// under `set -e`. What it decides is a paragraph of prompt; a missing
+// paragraph is worth nothing next to a dispatch that did not happen.
+func stateRepoCheck() string {
+	return "if [ -d tables ] && [ -f schema-version ]; then echo '" + stateRepoMarker + "'; fi\ntrue"
 }
 
 // baseGoneMarker prefixes what baseCheck prints when a task's base is not

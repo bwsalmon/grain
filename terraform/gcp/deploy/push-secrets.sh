@@ -63,11 +63,11 @@
 #   GRAIN_SECRETS_KEY                  this deployment's secrets private key
 #                                      (pkg/secrets) -- the one value here that is not a
 #                                      credential to some other service but grain's own,
-#                                      and the one file a redeploy must carry. The
-#                                      encrypted secrets travel *in* the state repository,
-#                                      so a rebuilt host clones them back and, having
-#                                      minted a fresh key of its own, cannot read any of
-#                                      them; pkg/secrets reports that as the unrecoverable
+#                                      and the one file a redeploy must carry: nothing
+#                                      else can read the encrypted secrets file beside it,
+#                                      so a host restored onto a fresh data directory with
+#                                      a freshly minted key of its own cannot read a line
+#                                      of it; pkg/secrets reports that as the unrecoverable
 #                                      state it is rather than starting over silently.
 #                                      Leave it unset on a first deploy -- the host mints
 #                                      its own, and `grain state status` on that host
@@ -116,7 +116,7 @@ push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
 push_secret "grain-claude-oauth-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 push_secret "grain-openai-api-key" "${GRAIN_OPENAI_API_KEY:-}"
 # grain's own key rather than a credential to anything else: what
-# decrypts the secrets file the state repository carries. Pushed only
+# decrypts the encrypted secrets file under the data directory. Pushed only
 # when a rebuilt host has to be given back the key its predecessor
 # minted -- setup.sh seeds it once and never overwrites a key already on
 # the host, so pushing it again is harmless and pushing it never is what

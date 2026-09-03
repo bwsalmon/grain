@@ -2491,14 +2491,25 @@ askpass script rather than argv or the remote URL: argv is world-readable
 through `ps`, and a URL with a token in it would persist in
 `.git/config`, inside the very repository being pushed.
 
-### Secrets go in it, encrypted
+### Secrets are encrypted, and they are not in it
 
-Secrets live in the same repository -- one thing to clone, one thing to
-back up -- as `secrets.enc`, the only file in there that is ciphertext.
+Secrets live under `<data-dir>/secrets`, as `secrets.enc` beside the
+private key that opens it. They used to live in the state repository
+itself -- one thing to clone, one thing to back up -- and that stopped
+being safe the moment a task could be dispatched at that repository (see
+"A task can change the settings", below): the git proxy authorizes per
+repository and streams a packfile it does not parse, so a sandbox that
+may clone the state repository gets every object in it. Ciphertext an
+agent can carry off is still ciphertext an agent can carry off.
+
+Nothing is lost by the move. The private key was never in the repository
+and is copied nowhere, so an off-host clone could never decrypt anything
+anyway; a restore always needed `<data-dir>/secrets`, and that directory
+is now the whole of what a restore needs.
+
 It is sealed to a public key whose private half grain reads from one file
-under `<data-dir>/secrets` and copies nowhere else, so cloning the
-repository gets everything grain knows and nothing it can authenticate
-as. The scheme is X25519 to an ephemeral key pair, HKDF-SHA256 for the
+under `<data-dir>/secrets` and copies nowhere else. The scheme is X25519
+to an ephemeral key pair, HKDF-SHA256 for the
 message key and AES-256-GCM over the plaintext, built out of the standard
 library: adding a dependency to encrypt one file grain alone ever reads
 is a larger commitment than composing three primitives that ship with
@@ -2507,6 +2518,15 @@ the compiler. Neither values nor secret names appear in the ciphertext.
 Agents cannot read it, and nothing about this changed that: a run still
 gets a secret only through the secret input a human asked for.
 
+An installation written by an earlier build has its copy moved out
+automatically, the first time anything opens the secret store. That
+removes the file from the tip of the branch and not from the history,
+which a clone reads just as easily -- so the git proxy refuses a state
+repository that has ever held one to every sandbox, whatever a task's
+scope says (`gitproxy.ModelAuthorizer.Forbidden`, wired from
+`forbiddenRepos`). Dispatching settings changes at such a repository
+means adopting one that has never carried the file.
+
 A fresh install mints its own key, which is what lets a local-only grain
 start with no input from anybody. A key that goes missing while an
 encrypted file remains is reported as the unrecoverable state it is,
@@ -2514,9 +2534,10 @@ never replaced with a new one -- minting silently there would leave an
 undecryptable file behind and look like it had worked.
 
 Which makes that key the one file a redeploy has to carry, and the one
-thing about a fresh install that is urgent: a rebuilt host clones its
-repository back, mints itself a new key, and then cannot read a line of
-the secrets in it. So it is seeded the way every other credential a
+thing about a fresh install that is urgent: nothing else can stand in for
+it, and a host restored onto a fresh data directory that mints itself a
+new key cannot read a line of the secrets file put back beside it. So it
+is seeded the way every other credential a
 deployment needs is -- `GRAIN_SECRETS_KEY`, through `scripts/setup.sh`'s
 own seed-once contract, pushed into instance metadata on the GCP path
 alongside the GitHub PAT and the minter's key -- and reported where an
@@ -2544,6 +2565,47 @@ A deployment answers the same question without anyone opening the pane:
 pointed at its own state rather than at whatever the last person to open
 a browser said. Pointing it somewhere else moves the working tree aside
 exactly as adopting does.
+
+### A task can change the settings
+
+The point of all of the above is a settings change that arrives the way
+every other change does. `grain create -repo owner/grain-state ...`
+files a task against the state repository; the run clones it through the
+same git proxy every other dispatch uses, branches, and opens a pull
+request against grain's own configuration, which a human reviews and
+merges. The next daemon start imports it.
+
+Three things make that work rather than merely be possible.
+
+The prompt says what the tree is. A checkout holding `tables/` beside a
+`schema-version` stamp is a state repository and nothing else looks like
+one, so a dispatch into it carries a paragraph naming the layout (one
+file per table, one object per row, columns in the table's declared
+order, rows by primary key), and -- the part no file in there states --
+which tables are settings and which are grain's own record of what it
+did. The settings list is `staterepo.SettingsTables` itself, not a copy
+of it: `template`, `suite`, `schedule`, `repo_config`, the qualification
+plan tables and `grain_config`, which is the same list `Apply` imports
+into a running daemon, so the prompt cannot call a table settings that
+grain will not treat as such. `task`, `task_run`, `task_comment`,
+`task_observation`, `lease`, `branch` and `release` are observations, and
+a run that edits one produces a diff that is either overwritten by the
+next export or merged into a history that then disagrees with what
+happened.
+
+`grain state check DIR` says whether the result will load. It imports
+the directory into a database it throws away and reports what broke, by
+file and by row. `staterepo.Import` was always the validator -- one
+transaction, rolled back whole on any inconsistency -- but the only
+thing that ever ran it was a daemon starting up, so a malformed dump or
+a row missing a NOT NULL column failed after the merge, on the
+deployment. As a CI step in the state repository (`grain state check .`
+needs no `-data-dir`, no store and no daemon) it fails the pull request
+instead.
+
+And the encrypted secrets file is not in there any more, for the reason
+the section above gives: a repository a sandbox may clone is a
+repository a sandbox may read whole.
 
 ## Deployment configuration lives in the store too
 

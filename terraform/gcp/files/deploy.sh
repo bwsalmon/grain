@@ -217,10 +217,10 @@ GEMINI_API_KEY="$(md_optional instance/attributes/grain-gemini-api-key)"
 CLAUDE_OAUTH_TOKEN="$(md_optional instance/attributes/grain-claude-oauth-token)"
 OPENAI_API_KEY="$(md_optional instance/attributes/grain-openai-api-key)"
 # The secrets private key (pkg/secrets), and the one value here whose
-# absence a *rebuild* pays for rather than the first deploy: the
-# encrypted secrets file travels in the state repository, so a host that
-# mints itself a fresh key cannot read the secrets its own repository
-# still holds. Seeded once by setup.sh -- a key already on the host
+# absence a *rebuild* pays for rather than the first deploy: it is the
+# only thing that can read the encrypted secrets file beside it, so a
+# host restored onto a fresh data directory with a key of its own cannot
+# read a line of what was put back there. Seeded once by setup.sh -- a key already on the host
 # always wins, since it is the key that host's secrets were encrypted
 # to -- and normally unset on a first deploy, where the host minting its
 # own is exactly right.

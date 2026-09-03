@@ -636,7 +636,9 @@ variable "state_repo_url" {
     (pkg/staterepo): the same rows as text, imported at startup and
     exported back on a timer, so an agent can propose a settings change
     as a pull request and an operator can back the deployment up by
-    cloning it.
+    cloning it. No secret is in there -- the encrypted secrets file lives
+    under the data directory, out of any repository a sandbox may
+    clone.
 
     files/deploy.sh passes it to scripts/setup.sh, which writes it into
     <data-dir>/state-repo.json -- so a host comes up already pointed at

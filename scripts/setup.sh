@@ -308,11 +308,15 @@ GRAIN_STATE_REPO_BRANCH="${GRAIN_STATE_REPO_BRANCH:-main}"
 #
 # Everything else under $GRAIN_DATA_DIR either comes back from the state
 # repository or is reissued by the deploy that seeded it. This does
-# neither. The encrypted secrets file lives *in* the repository, so a
-# rebuilt host clones it back and then cannot read a line of it, because
-# it minted itself a fresh key on first start -- which pkg/secrets
-# reports as the unrecoverable state it is rather than starting over
-# silently. Seeding it here is what makes a redeploy a redeploy.
+# neither, and nothing can stand in for it: the encrypted secrets file
+# beside it (grain/task-186 moved it out of the state repository, since
+# everything a sandbox can clone is everything a sandbox can read) is
+# encrypted to this key alone. A host restored onto a fresh data
+# directory therefore needs both halves handed back -- the secrets file
+# from a backup, and this key from here -- and one that mints itself a
+# fresh key instead cannot read a line of what was put beside it, which
+# pkg/secrets reports as the unrecoverable state it is rather than
+# starting over silently.
 #
 # Seeded once, on the same never-overwrite contract as every credential
 # below (seed_secret): a key already on this host always wins, since it
@@ -526,11 +530,11 @@ Recognized variables:
                              (`grain state key path` names the file it is
                              written to). Seeded once, like the credentials
                              above -- and the one value here a redeploy really
-                             must carry: the encrypted secrets file lives in the
-                             state repository, so a rebuilt host clones it back
-                             and, with a freshly minted key of its own, cannot
-                             read any of it. Back the file up when this script
-                             reports it (see "Readiness" at the end of a run)
+                             must carry: nothing else can stand in for it, and a
+                             host restored onto a fresh data directory that mints
+                             itself a key cannot read the secrets file put back
+                             beside it. Back the file up when this script reports
+                             it (see "Readiness" at the end of a run)
 
   GRAIN_TARGET_REPO         owner/name: the UI's default target for a task with
                              no repo of its own, and the repo this script pushes
@@ -1828,13 +1832,25 @@ reformat_store_if_schema_changed() {
   # lost that a remote does not still have, and a local-only deployment
   # keeps the old tree right here under its timestamped name.
   #
-  # The secrets file lives in that tree and is *not* regenerable, so it
-  # is carried across rather than archived with it: the key it is
-  # encrypted to has not changed, and an operator who kept their key
-  # keeps their credentials across a reformat.
+  # The encrypted secrets file used to live in that tree, and had to be
+  # carried across by hand here because it is the one thing in there that
+  # cannot be regenerated. It lives beside its own private key under
+  # $GRAIN_DATA_DIR/secrets now (grain/task-186: everything a sandbox can
+  # clone is everything a sandbox can read, and the state repository is
+  # somewhere agents are dispatched to work), which archive_state_repo
+  # never touches -- so a schema bump no longer goes anywhere near it. A
+  # tree written by an older build still has its copy carried across,
+  # since grain moves it out on its next start and a tree that was
+  # archived first would take it with it.
   if [ -d "$GRAIN_DATA_DIR/state-repo" ]; then
     log "Schema changed -- moving the state repository aside as well; grain re-seeds it on its next start"
     archive_state_repo "schema${old_version}-${stamp}"
+    if [ -s "$GRAIN_DATA_DIR/state-repo/secrets.enc" ] && [ ! -s "$GRAIN_DATA_DIR/secrets/secrets.enc" ]; then
+      install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
+      mv "$GRAIN_DATA_DIR/state-repo/secrets.enc" "$GRAIN_DATA_DIR/secrets/secrets.enc"
+      chown "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/secrets.enc"
+      log "  carried this deployment's encrypted secrets across, beside its key in $GRAIN_DATA_DIR/secrets"
+    fi
   fi
   printf '%s\n' "$new_version" > "$marker"
 }
@@ -2463,12 +2479,12 @@ report_readiness() {
     echo "    -- no secrets key on this host yet: grain-daemon.service mints one on its"
     echo "       first start. Back up $GRAIN_DATA_DIR/secrets/secrets.key once it exists"
     echo "       (\`grain state status\` prints it), and seed it on a rebuilt host with"
-    echo "       GRAIN_SECRETS_KEY -- nothing else can decrypt this deployment's secrets."
+    echo "       GRAIN_SECRETS_KEY -- nothing else can decrypt this deployment's secrets\ file."
   else
     echo "    -- back up $GRAIN_DATA_DIR/secrets/secrets.key: the one file here a redeploy"
-    echo "       cannot rebuild. The encrypted secrets travel in the state repository; a"
-    echo "       rebuilt host mints a fresh key and then cannot read a line of them."
-    echo "       Seed it back with GRAIN_SECRETS_KEY (see this script's own -h)."
+    echo "       cannot rebuild, and the only thing that can read $GRAIN_DATA_DIR/secrets/secrets.enc."
+    echo "       A host restored with a freshly minted key of its own cannot read a line"
+    echo "       of it. Seed it back with GRAIN_SECRETS_KEY (see this script's own -h)."
   fi
   if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then
     ready=0

@@ -112,10 +112,10 @@ own instead.
 
 `GRAIN_SECRETS_KEY` is optional too, and for the opposite reason: a first
 deploy has no secrets yet, so the host minting its own key is the right
-answer. Export it when standing a deployment back up on a rebuilt VM, so
-it can read the secrets its state repository still holds -- see "The
-secrets key is the one file a redeploy must carry" below, and copy that
-file off the host before you are the one who needs it.
+answer. Export it when standing a deployment back up on a rebuilt VM, so it can
+read a secrets file restored beside it -- see "The secrets key is the one
+file a redeploy must carry" below, and copy that file off the host before
+you are the one who needs it.
 
 `GRAIN_GITHUB_APP_ID`, `GRAIN_GITHUB_APP_INSTALLATION_ID` and
 `GRAIN_GITHUB_APP_PRIVATE_KEY` are an alternative to `GRAIN_GITHUB_TOKEN`,
@@ -327,8 +327,8 @@ plan this module is applied from:
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
 - **The secrets key** -- grain's own key rather than a credential to
-  anything else: what decrypts the secrets file the state repository
-  carries, pushed as `GRAIN_SECRETS_KEY`. Unset on a first deploy, where
+  anything else: what decrypts the encrypted secrets file under the data
+  directory, pushed as `GRAIN_SECRETS_KEY`. Unset on a first deploy, where
   the host mints its own. See "The secrets key is the one file a redeploy
   must carry" below, which is the only one of these five that a rebuilt
   host cannot be handed a fresh replacement for.
@@ -454,16 +454,18 @@ alone.
 ## The secrets key is the one file a redeploy must carry
 
 Every other value on the host is either reissued by the next deploy or
-cloned back from the state repository. The secrets key is neither. The
-encrypted secrets file lives *in* that repository, encrypted to a public
-key whose private half is one file under the data directory
-(`<data-dir>/secrets/secrets.key`) that grain never commits anywhere --
-which is exactly what makes cloning the repository safe. It also means a
-rebuilt host, having minted a fresh key of its own on first start, cannot
-read a line of the secrets its own repository still holds. `pkg/secrets`
-reports that as the unrecoverable state it is rather than starting over
-silently, and it is right to: there is no escrow here and no recovery
-path.
+cloned back from the state repository. The secrets key is neither, and
+nothing can stand in for it. grain's secrets live encrypted under the
+data directory (`<data-dir>/secrets/secrets.enc`, deliberately *not* in
+the state repository since that is somewhere agents are dispatched to
+work), sealed to a public key whose private half is one file beside it
+(`<data-dir>/secrets/secrets.key`) that grain copies nowhere. A host
+restored onto a fresh data directory therefore needs both halves handed
+back -- the secrets file from a backup of that directory, and the key
+from here -- and one that mints itself a fresh key instead cannot read a
+line of what was put beside it. `pkg/secrets` reports that as the
+unrecoverable state it is rather than starting over silently, and it is
+right to: there is no escrow here and no recovery path.
 
 So keep a copy, and push it back when you rebuild:
 

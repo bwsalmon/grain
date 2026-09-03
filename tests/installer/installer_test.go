@@ -336,8 +336,8 @@ func TestTheMinterCredentialReachedTheSecretsDatabase(t *testing.T) {
 // secrets store mints a key when there is none, and this deploy opens it
 // twice (seed_gcp_minter_key, and the readiness summary's own
 // `grain secrets list`). Seeded after either of those, the key on disk
-// would be the host's own -- and the secrets file its state repository
-// carries would be unreadable for the rest of the deployment's life.
+// would be the host's own -- and an encrypted secrets file restored
+// beside it would be unreadable for the rest of the deployment's life.
 func TestTheDeploymentKeptTheSecretsKeyItWasSeededWith(t *testing.T) {
 	requireInstaller(t)
 	d := deployed(t)
