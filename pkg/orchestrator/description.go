@@ -159,6 +159,31 @@ func grainAuthored(body, taskID string) bool {
 	return strings.TrimSpace(lines[len(lines)-1]) == descriptionFooter(taskID)
 }
 
+// branchCommits is the commits branch carries over base -- the ones a
+// pull request from one into the other would contain -- and whether they
+// are known at all.
+//
+// known is false when there was no base to compare against or the read
+// failed, and it is not the same as an empty list. An empty list is a
+// real answer, and a consequential one: it means the branch adds nothing
+// to its base, which is precisely what GitHub refuses to open a pull
+// request for (EnsurePullRequest, and github.IsNoCommitsBetween). A
+// failed read that returned the same empty slice would have the finish
+// path end a task over an API hiccup, so the two are kept apart here
+// rather than at each caller.
+func branchCommits(client github.Client, repo model.RepoRef, base, branch string) ([]github.Commit, bool) {
+	if base == "" {
+		return nil, false
+	}
+	commits, err := client.CompareCommits(repo.Owner, repo.Name, base, branch)
+	if err != nil {
+		log.Printf("orchestrator: reading %s's commits over %s: %v -- "+
+			"the pull request gets grain's plain one-line body instead", branch, base, err)
+		return nil, false
+	}
+	return commits, true
+}
+
 // describeBranch reads the commits branch carries over base and turns
 // them into a description, or returns "" if it cannot -- a description
 // is worth an API call, never worth failing a finish over, so every
@@ -166,15 +191,7 @@ func grainAuthored(body, taskID string) bool {
 // returned. The pull request itself is the thing that matters, and it
 // opens either way.
 func describeBranch(client github.Client, repo model.RepoRef, base, branch string) string {
-	if base == "" {
-		return ""
-	}
-	commits, err := client.CompareCommits(repo.Owner, repo.Name, base, branch)
-	if err != nil {
-		log.Printf("orchestrator: reading %s's commits over %s to describe them: %v -- "+
-			"the pull request gets grain's plain one-line body instead", branch, base, err)
-		return ""
-	}
+	commits, _ := branchCommits(client, repo, base, branch)
 	return describeCommits(commits)
 }
 

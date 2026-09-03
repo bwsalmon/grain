@@ -409,6 +409,51 @@ func TestSimRefusesAPullRequestAgainstABaseThatIsNotABranch(t *testing.T) {
 	}
 }
 
+// The sibling refusal, and the same argument for having it: real GitHub
+// declines a pull request whose head carries nothing its base does not
+// already have, every time, so a run that pushed a branch with no commits
+// on it could never be finished either -- refused, offered again,
+// refused identically. github.IsNoCommitsBetween reads the message this
+// answers with, and orchestrator.noteEmptyBranch is what does something
+// about it.
+func TestSimRefusesAPullRequestWhoseHeadAddsNothingToItsBase(t *testing.T) {
+	sim, client := newSim(t, "main")
+	// A branch pushed at the base's own tip: no commit of its own, which
+	// is what a run that reverted its work or never committed leaves.
+	run(t, t.TempDir(), "git", "--git-dir", sim.BareRepo,
+		"branch", "grain/task-1", "refs/heads/main")
+
+	_, err := client.CreatePullRequest("acme", "widgets", "grain/task-1", "main", "grain: task 1", "")
+	var ghErr *github.Error
+	if !errors.As(err, &ghErr) || ghErr.Status != 422 {
+		t.Fatalf("got %v, want a 422 for a head with no commits over its base", err)
+	}
+	if !strings.Contains(string(ghErr.Body), "No commits between main and grain/task-1") {
+		t.Errorf("body = %q, want GitHub's own words about it", ghErr.Body)
+	}
+	if !github.IsNoCommitsBetween(err) {
+		t.Errorf("IsNoCommitsBetween(%v) = false, want the predicate to recognise this body", err)
+	}
+	if len(sim.PullRequests) != 0 {
+		t.Errorf("pull requests = %+v, want none opened", sim.PullRequests)
+	}
+}
+
+// And a branch that is genuinely ahead is still opened -- the refusal
+// above must not be a blanket one, since every ordinary finish in this
+// package's tests goes through the same call.
+func TestSimOpensAPullRequestForABranchThatIsAhead(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/task-1")
+
+	if _, err := client.CreatePullRequest("acme", "widgets", "grain/task-1", "main", "grain: task 1", ""); err != nil {
+		t.Fatalf("CreatePullRequest for a branch with a commit on it: %v", err)
+	}
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v, want the one just opened", sim.PullRequests)
+	}
+}
+
 func TestSimPanicsOnAnUnhandledRequest(t *testing.T) {
 	sim, _ := newSim(t, "main")
 	sim.Issues[1] = &Issue{Title: "t", Body: "b", Labels: map[string]struct{}{}}

@@ -78,5 +78,15 @@ func recoverRun(ctx context.Context, store *model.Store, client github.Client, r
 		return nil
 	}
 	_, err = salvagePushedBranch(ctx, store, client, *task, now)
+	// A branch with no commits over its base is not a recovery failure to
+	// report: salvagePushedBranch has already said so on the task and
+	// parked it (noteEmptyBranch), and this run's own row was finished as
+	// "orphaned" above -- the truthful outcome for a process that died,
+	// whatever its branch turned out to hold. Reporting it would put a
+	// permanent condition into RecoverOrphanedRuns' joined error on every
+	// daemon startup, describing a task nothing is going to retry.
+	if _, empty := emptyBranch(err); empty {
+		return nil
+	}
 	return err
 }

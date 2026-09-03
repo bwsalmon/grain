@@ -885,6 +885,24 @@ on the task's own `Base`, since the other reasons a base goes missing (a
 typo, work that was abandoned) leave the pull request aimed at the wrong
 branch and only a human can tell which happened.
 
+**A branch with no commits over its base ends the task and says so**, the
+other 422 GitHub answers forever. A run that reverted its own work,
+committed only what the base already had, or pushed without committing
+lands in the same loop the vanished base used to cause — refused, offered
+again, refused identically — but with nothing to salvage: no work to open,
+no base to retarget, no diff for a reviewer. `EnsurePullRequest` asks the
+compare endpoint before it asks for a pull request (and recognises the
+refusal when it did not), and the finish path answers with an explanation
+in the task's own conversation and a park on it, the same
+`PendingQuestionCommentID` `ask_question` uses. Parking rather than
+closing, because which of those three things happened decides whether the
+task is finished or barely started, and grain cannot tell: any reply
+clears the park and queues the task again, with the explanation in the
+thread the next run reads. A run that asks for its own pull request
+mid-flight (`open_pull_request`) is told to commit something instead —
+it still has turns, and nothing is written to the task until the branch is
+final.
+
 Polling, not `OpenHands/automation` — see
 [Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
 `grain/automation/core.py` is the loop; `grain automation run-once`,
