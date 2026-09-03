@@ -321,3 +321,204 @@ func TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing(t *testing.T) {
 		t.Errorf("nextRunAt = %v, want it left untouched at %v after a failed firing", got.NextRunAt, sched.NextRunAt)
 	}
 }
+
+// --- schedules that run a task suite -------------------------------------
+
+// filedSuiteSchedule is filedSchedule's counterpart for the other thing a
+// schedule can fire: a one-item task suite, saved in the store the way
+// ui.Client.CreateSuite would save it, and a schedule pointing at it.
+func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) (model.TaskSuite, model.ScheduledTask) {
+	t.Helper()
+	ctx := t.Context()
+	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
+		t.Fatalf("put template: %v", err)
+	}
+	suite := model.TaskSuite{
+		ID: "suite-1", Name: "nightly smoke",
+		Items:     []model.TaskSuiteItem{{TemplateID: suiteSmokeTemplate().ID}},
+		Mode:      model.TaskSuiteCount,
+		Count:     2,
+		AutoMerge: true,
+		CreatedAt: baseTime,
+	}
+	if err := store.PutTaskSuite(ctx, suite); err != nil {
+		t.Fatalf("put suite: %v", err)
+	}
+	suiteID := suite.ID
+	sched := model.ScheduledTask{
+		ID:         id,
+		Title:      suite.Name,
+		SuiteID:    &suiteID,
+		Target:     model.RepoRef{Owner: "acme", Name: "widgets"},
+		Base:       "main",
+		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
+		Enabled:    true,
+		NextRunAt:  nextRunAt,
+		CreatedAt:  baseTime,
+	}
+	if err := store.PutScheduledTask(ctx, sched); err != nil {
+		t.Fatalf("filing schedule: %v", err)
+	}
+	return suite, sched
+}
+
+func runsOfSchedule(t *testing.T, store *model.Store, scheduleID string) []model.TaskSuiteRun {
+	t.Helper()
+	all, err := store.ListTaskSuiteRuns(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []model.TaskSuiteRun
+	for _, r := range all {
+		if r.ScheduleID == scheduleID {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// A due suite-backed schedule starts exactly the run ui.Client.
+// CreateSuiteRun would have started by hand -- against the schedule's own
+// repo and branch, with the suite's own items and settings -- and
+// advances its own timing afterwards, the same as a schedule that files a
+// task.
+func TestReconcileScheduleStartsATaskSuiteRun(t *testing.T) {
+	store, ctx := openStore(t)
+	suite, sched := filedSuiteSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
+
+	if err := runScheduleOnly(t, store, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+
+	runs := runsOfSchedule(t, store, sched.ID)
+	if len(runs) != 1 {
+		t.Fatalf("started %d runs, want 1", len(runs))
+	}
+	run := runs[0]
+	if run.SuiteID != suite.ID || run.SuiteName != suite.Name {
+		t.Errorf("run = %s/%q, want the schedule's own suite %s/%q", run.SuiteID, run.SuiteName, suite.ID, suite.Name)
+	}
+	if run.Target != sched.Target || run.Base != sched.Base {
+		t.Errorf("run targets %+v@%s, want the schedule's own %+v@%s", run.Target, run.Base, sched.Target, sched.Base)
+	}
+	if run.Status != model.TaskSuiteRunActive {
+		t.Errorf("status = %q, want active", run.Status)
+	}
+	if len(run.PassTasks(1)) != 1 {
+		t.Fatalf("pass 1 filed %d tasks, want one per suite item", len(run.PassTasks(1)))
+	}
+
+	// The tasks a run files are the suite's own, filed by the suite's own
+	// principal -- a schedule decides only when the run happens, never
+	// what a firing's tasks look like.
+	task, err := store.GetTask(ctx, run.PassTasks(1)[0].TaskID)
+	if err != nil || task == nil {
+		t.Fatalf("get filed task: (%v, %v)", task, err)
+	}
+	if task.Origin.Reason != model.ReasonSuite {
+		t.Errorf("origin reason = %q, want suite", task.Origin.Reason)
+	}
+	if task.Approval == nil {
+		t.Error("want the filed task already approved: the suite does not require approval")
+	}
+
+	updated, err := store.GetScheduledTask(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.NextRunAt.After(baseTime) {
+		t.Errorf("nextRunAt = %v, want it advanced past %v", updated.NextRunAt, baseTime)
+	}
+	if updated.LastRunAt == nil || !updated.LastRunAt.Equal(baseTime) {
+		t.Errorf("lastRunAt = %v, want %v", updated.LastRunAt, baseTime)
+	}
+	if updated.Title != suite.Name {
+		t.Errorf("display title = %q, want the suite's own name %q", updated.Title, suite.Name)
+	}
+}
+
+// The suite counterpart of "a previous firing that has not finished
+// suppresses the next one": for a suite the previous firing is a whole
+// run, not a single task, so an active run is what holds the next firing
+// back until it stops.
+func TestReconcileScheduleWaitsForThePreviousSuiteRunToFinish(t *testing.T) {
+	store, ctx := openStore(t)
+	_, sched := filedSuiteSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
+
+	if err := runScheduleOnly(t, store, baseTime); err != nil {
+		t.Fatalf("first RunCycle: %v", err)
+	}
+	first := runsOfSchedule(t, store, sched.ID)
+	if len(first) != 1 {
+		t.Fatalf("started %d runs on the first cycle, want 1", len(first))
+	}
+
+	// Force the schedule due again while its first run is still going.
+	later := baseTime.Add(time.Hour)
+	forceDue := func() {
+		t.Helper()
+		if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
+			s.NextRunAt = baseTime
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forceDue()
+	if err := runScheduleOnly(t, store, later); err != nil {
+		t.Fatalf("second RunCycle: %v", err)
+	}
+	if runs := runsOfSchedule(t, store, sched.ID); len(runs) != 1 {
+		t.Fatalf("started %d runs while the first was still active, want still 1", len(runs))
+	}
+
+	// Once that run stops, the next cycle is free to start another.
+	if err := store.CompleteTaskSuiteRun(ctx, first[0].ID, model.TaskSuiteRunSucceeded, "", later); err != nil {
+		t.Fatal(err)
+	}
+	forceDue()
+	if err := runScheduleOnly(t, store, later); err != nil {
+		t.Fatalf("third RunCycle: %v", err)
+	}
+	if runs := runsOfSchedule(t, store, sched.ID); len(runs) != 2 {
+		t.Fatalf("started %d runs once the first finished, want 2", len(runs))
+	}
+}
+
+// fireScheduledSuite's own defensive path, fireScheduledTask's
+// missing-template case one level out: a suite deleted out from under a
+// schedule (ui.Client.DeleteSuite tries to prevent it) fails that one
+// firing and leaves NextRunAt exactly where it was, rather than starting
+// a run of nothing.
+func TestReconcileScheduleFailsToFireWhenItsSuiteIsMissing(t *testing.T) {
+	store, ctx := openStore(t)
+	missing := "suite-does-not-exist"
+	sched := model.ScheduledTask{
+		ID:         "sched-1",
+		Title:      "nightly smoke",
+		SuiteID:    &missing,
+		Target:     model.RepoRef{Owner: "acme", Name: "widgets"},
+		Base:       "main",
+		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
+		Enabled:    true,
+		NextRunAt:  baseTime.Add(-time.Minute),
+		CreatedAt:  baseTime,
+	}
+	if err := store.PutScheduledTask(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runScheduleOnly(t, store, baseTime); err == nil {
+		t.Fatal("want RunCycle to report an error for a schedule whose suite is missing")
+	}
+	if runs := runsOfSchedule(t, store, sched.ID); len(runs) != 0 {
+		t.Fatalf("started %d runs for a schedule with a missing suite, want 0", len(runs))
+	}
+	got, err := store.GetScheduledTask(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.NextRunAt.Equal(sched.NextRunAt) {
+		t.Errorf("nextRunAt = %v, want it left untouched at %v after a failed firing", got.NextRunAt, sched.NextRunAt)
+	}
+}

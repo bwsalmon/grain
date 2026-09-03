@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/model/sqlite"
 )
 
 func smokeTemplate(id string) model.TaskTemplate {
@@ -508,6 +509,118 @@ func TestActiveTaskSuiteRunsAndCompleteTaskSuiteRun(t *testing.T) {
 	}
 	if got.Status != model.TaskSuiteRunSucceeded || got.LastError != "" {
 		t.Fatalf("got status %q error %q, want succeeded and no error", got.Status, got.LastError)
+	}
+}
+
+// A run a schedule fired records the schedule it came from, and
+// HasActiveRunForSchedule reads it back -- the idempotency gate
+// orchestrator.fireScheduledSuite needs, and the exact counterpart of
+// HasOpenTaskWithTag for a schedule that files a task instead.
+// A database created before a schedule could fire a suite has a
+// task_suite_run with no schedule_id column, which CREATE TABLE IF NOT
+// EXISTS never adds -- Store.Init's own migration step
+// (ensureTaskSuiteRunScheduleColumn) is what does, leaving every run
+// already on it reading as what it was: started by a human, not by a
+// schedule.
+func TestInitMigratesAnExistingDatabaseWithNoRunScheduleColumn(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_suite_run`"+` (
+  `+"`id`"+`                INTEGER PRIMARY KEY AUTOINCREMENT,
+  `+"`suite_id`"+`          TEXT     NOT NULL,
+  `+"`suite_name`"+`        TEXT     NOT NULL,
+  `+"`owner`"+`             TEXT     NOT NULL,
+  `+"`repo`"+`              TEXT     NOT NULL,
+  `+"`base`"+`              TEXT     NOT NULL,
+  `+"`mode`"+`              TEXT     NOT NULL,
+  `+"`count`"+`             INTEGER  NOT NULL,
+  `+"`max_passes`"+`        INTEGER  NOT NULL,
+  `+"`require_approval`"+`  INTEGER  NOT NULL,
+  `+"`auto_merge`"+`        INTEGER  NOT NULL,
+  `+"`status`"+`            TEXT     NOT NULL,
+  `+"`last_error`"+`        TEXT     NULL,
+  `+"`created_at`"+`        DATETIME NOT NULL,
+  `+"`completed_at`"+`      DATETIME NULL
+)`); err != nil {
+		t.Fatalf("creating the pre-schedule task_suite_run table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_suite_run` (`suite_id`,`suite_name`,`owner`,`repo`,`base`,`mode`,`count`,"+
+			"`max_passes`,`require_approval`,`auto_merge`,`status`,`created_at`) "+
+			"VALUES ('suite-1','nightly','acme','widgets','main','count',2,0,0,1,'active',?)", now); err != nil {
+		t.Fatalf("seeding a pre-schedule run row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database with no schedule_id: %v", err)
+	}
+
+	got, err := store.GetTaskSuiteRun(ctx, 1)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.SuiteName != "nightly" || got.ScheduleID != "" {
+		t.Fatalf("got %+v, want the pre-existing run intact and unattributed to any schedule", got)
+	}
+	active, err := store.HasActiveRunForSchedule(ctx, "sched-1")
+	if err != nil {
+		t.Fatalf("HasActiveRunForSchedule: %v", err)
+	}
+	if active {
+		t.Error("a migrated run belongs to no schedule, so no schedule may be gated by it")
+	}
+}
+
+func TestCreateScheduledTaskSuiteRunRecordsItsSchedule(t *testing.T) {
+	store, _, ctx := openStore(t)
+	suite := putSuite(t, ctx, store, twoItemSuite())
+
+	byHand, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	if err != nil {
+		t.Fatalf("create by hand: %v", err)
+	}
+	if byHand.ScheduleID != "" {
+		t.Errorf("scheduleId = %q, want empty for a run started by hand", byHand.ScheduleID)
+	}
+	active, err := store.HasActiveRunForSchedule(ctx, "sched-1")
+	if err != nil {
+		t.Fatalf("HasActiveRunForSchedule: %v", err)
+	}
+	if active {
+		t.Error("a run started by hand must not count as a schedule's own firing")
+	}
+
+	fired, err := store.CreateScheduledTaskSuiteRun(ctx, suite, widgets, "main", "sched-1", now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("create from a schedule: %v", err)
+	}
+	if fired.ScheduleID != "sched-1" {
+		t.Errorf("scheduleId = %q, want sched-1", fired.ScheduleID)
+	}
+	active, err = store.HasActiveRunForSchedule(ctx, "sched-1")
+	if err != nil {
+		t.Fatalf("HasActiveRunForSchedule: %v", err)
+	}
+	if !active {
+		t.Fatal("want sched-1 to have an active run while its firing is still going")
+	}
+
+	// Once that run finishes, the schedule is free to fire again.
+	if err := store.CompleteTaskSuiteRun(ctx, fired.ID, model.TaskSuiteRunSucceeded, "", now.Add(time.Hour)); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	active, err = store.HasActiveRunForSchedule(ctx, "sched-1")
+	if err != nil {
+		t.Fatalf("HasActiveRunForSchedule: %v", err)
+	}
+	if active {
+		t.Error("want no active run for sched-1 once its firing completed")
 	}
 }
 

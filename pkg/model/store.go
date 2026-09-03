@@ -135,6 +135,12 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskTemplateNoTargetColumns(ctx); err != nil {
 		return fmt.Errorf("migrating task_template: %w", err)
 	}
+	if err := s.ensureScheduledTaskSuiteColumn(ctx); err != nil {
+		return fmt.Errorf("migrating scheduled_task: %w", err)
+	}
+	if err := s.ensureTaskSuiteRunScheduleColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_suite_run: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -300,6 +306,36 @@ func (s *Store) ensureScheduledTaskTemplateColumn(ctx context.Context) error {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `scheduled_task` ADD COLUMN `template_id` TEXT NULL")
+	return err
+}
+
+// ensureScheduledTaskSuiteColumn adds scheduled_task.suite_id
+// (model.ScheduledTask.SuiteID's own doc comment has the reasoning) to a
+// database created before a schedule could fire a task suite, the same
+// probe-then-ALTER approach ensureScheduledTaskTemplateColumn already
+// uses for the column beside it. NULL for every existing row: a schedule
+// already on such a database files a single task, which is exactly what
+// NULL means here.
+func (s *Store) ensureScheduledTaskSuiteColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `suite_id` FROM `scheduled_task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `scheduled_task` ADD COLUMN `suite_id` TEXT NULL")
+	return err
+}
+
+// ensureTaskSuiteRunScheduleColumn adds task_suite_run.schedule_id
+// (schema.go's own DDL comment on the table has the reasoning) to a
+// database created before a schedule could fire a task suite. NULL for
+// every existing run, matching what every one of them was: started by a
+// human, not by a schedule.
+func (s *Store) ensureTaskSuiteRunScheduleColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `schedule_id` FROM `task_suite_run` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_suite_run` ADD COLUMN `schedule_id` TEXT NULL")
 	return err
 }
 
@@ -2224,23 +2260,26 @@ func newScheduledTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
 }
 
 const scheduledTaskColumns = "`id`,`title`,`body`,`target_owner`,`target_name`,`base`," +
-	"`auto_merge`,`template_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`," +
+	"`auto_merge`,`template_id`,`suite_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`," +
 	"`enabled`,`next_run_at`,`last_run_at`,`created_at`"
 
 func scanScheduledTask(scan func(...any) error) (ScheduledTask, error) {
 	var t ScheduledTask
-	var base, templateID sql.NullString
+	var base, templateID, suiteID sql.NullString
 	var kind string
 	var everyNHours, timeOfDay, weekday, dayOfMonth sql.NullInt64
 	var lastRun sql.NullTime
 	if err := scan(&t.ID, &t.Title, &t.Body, &t.Target.Owner, &t.Target.Name, &base,
-		&t.AutoMerge, &templateID, &kind, &everyNHours, &timeOfDay, &weekday, &dayOfMonth,
+		&t.AutoMerge, &templateID, &suiteID, &kind, &everyNHours, &timeOfDay, &weekday, &dayOfMonth,
 		&t.Enabled, &t.NextRunAt, &lastRun, &t.CreatedAt); err != nil {
 		return ScheduledTask{}, err
 	}
 	t.Base = base.String
 	if templateID.Valid {
 		t.TemplateID = &templateID.String
+	}
+	if suiteID.Valid {
+		t.SuiteID = &suiteID.String
 	}
 	t.Recurrence = Recurrence{
 		Kind:        RecurrenceKind(kind),
@@ -2276,11 +2315,11 @@ func putScheduledTask(ctx context.Context, tx *sql.Tx, t ScheduledTask) error {
 	}
 	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`scheduled_task`"+` (
   `+"`id`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
-		"`auto_merge`,`template_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`,"+
+		"`auto_merge`,`template_id`,`suite_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`,"+
 		"`enabled`,`next_run_at`,`last_run_at`,`created_at`"+`
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Title, t.Body, t.Target.Owner, t.Target.Name, nullable(t.Base),
-		t.AutoMerge, stringOf(t.TemplateID), string(r.Kind), everyNHours, timeOfDay, weekday, dayOfMonth,
+		t.AutoMerge, stringOf(t.TemplateID), stringOf(t.SuiteID), string(r.Kind), everyNHours, timeOfDay, weekday, dayOfMonth,
 		t.Enabled, t.NextRunAt.UTC(), timeOf(t.LastRunAt), t.CreatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("writing scheduled task %s: %w", t.ID, err)
@@ -2725,10 +2764,22 @@ func (s *Store) DeleteTaskTemplate(ctx context.Context, id string) error {
 // a schedule that still fires from it, and what a template's own "used by
 // N schedules" display reads.
 func (s *Store) SchedulesUsingTemplate(ctx context.Context, id string) ([]ScheduledTask, error) {
+	return s.schedulesUsing(ctx, "`template_id`", "template", id)
+}
+
+// SchedulesUsingSuite returns every schedule whose SuiteID is id -- what
+// ui.Client.DeleteSuite checks before deleting a suite out from under a
+// schedule that still runs it, SchedulesUsingTemplate's own reasoning
+// applied to the other thing a schedule can point at.
+func (s *Store) SchedulesUsingSuite(ctx context.Context, id string) ([]ScheduledTask, error) {
+	return s.schedulesUsing(ctx, "`suite_id`", "task suite", id)
+}
+
+func (s *Store) schedulesUsing(ctx context.Context, column, what, id string) ([]ScheduledTask, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` WHERE `template_id` = ? ORDER BY `id`", id)
+		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` WHERE "+column+" = ? ORDER BY `id`", id)
 	if err != nil {
-		return nil, fmt.Errorf("listing schedules using template %s: %w", id, err)
+		return nil, fmt.Errorf("listing schedules using %s %s: %w", what, id, err)
 	}
 	var out []ScheduledTask
 	for rows.Next() {

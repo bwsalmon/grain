@@ -199,6 +199,13 @@ func monthlyOccurrence(y int, m time.Month, dayOfMonth, timeOfDay int) time.Time
 // dependency link makes no sense against a task this schedule refiles
 // indefinitely, and CreateSchedule's own doc comment already explains why
 // approval is not a per-firing choice.
+//
+// SuiteID is the one field that changes *what* a firing is: set, this
+// schedule starts a TaskSuiteRun instead of filing a single Task. Every
+// other field here means the same thing either way -- the cadence, the
+// enabled switch, the target repo and base branch, and the "a previous
+// firing that has not finished suppresses the next one" rule are the
+// schedule's, not the task's.
 type ScheduledTask struct {
 	ID    string
 	Title string
@@ -227,6 +234,29 @@ type ScheduledTask struct {
 	// lookup, but while TemplateID is set they are not what decides what
 	// gets filed.
 	TemplateID *string
+
+	// SuiteID, if set, names the TaskSuite (suite.go) this schedule runs
+	// on its cadence instead of filing a single task: every firing is
+	// one CreateScheduledTaskSuiteRun against this schedule's own Target
+	// and Base, the same run a human starts by hand from the suites page,
+	// started by the clock instead. Mutually exclusive with TemplateID --
+	// a suite already resolves its own items' templates, so there is no
+	// second template for a firing to also carry -- and, like it,
+	// resolved fresh at firing time (orchestrator.fireScheduledSuite),
+	// never copied in once, so editing the suite changes what every
+	// schedule pointing at it runs next. Title is kept in sync with the
+	// suite's own Name as a display cache while this is set, exactly as
+	// the content fields above are for TemplateID; Body/AutoMerge/Reads/
+	// Grants are unused, since a suite run takes all of those from the
+	// suite and its templates.
+	//
+	// What a schedule fires -- a task or a suite -- is fixed when it is
+	// created: ui.UpdateSchedule will repoint a suite-backed schedule at
+	// a different suite, but never turn one kind into the other, since
+	// there is nothing sensible to carry across (a suite has no title or
+	// body of its own to become a task's, and a task's content has
+	// nowhere to go in a suite).
+	SuiteID *string
 
 	// Recurrence is how often this schedule fires.
 	Recurrence Recurrence
