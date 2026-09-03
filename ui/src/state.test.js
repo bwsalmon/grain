@@ -15,9 +15,11 @@ describe("completionPhase", () => {
     expect(phase.label).toBe("Awaiting submit");
   });
 
-  it("reports queued to merge once auto-merge is set", () => {
-    const phase = completionPhase({ state: "completed", pullRequest: "acme/widgets#1", autoMerge: true });
-    expect(phase.label).toBe("Queued to merge");
+  // The state badge beside it already reads "Queued for merge"
+  // (STATE_LABELS.completed), so the ordinary case has no correction to
+  // make and puts up no chip.
+  it("returns null once auto-merge is set and the queue has it", () => {
+    expect(completionPhase({ state: "completed", pullRequest: "acme/widgets#1", autoMerge: true })).toBeNull();
   });
 
   it("reports merge blocked once the merge queue has given up, even with auto-merge set", () => {
