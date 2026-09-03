@@ -290,8 +290,8 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st != model.StateCompleted {
-			t.Fatalf("state after the agent's push = %q, want completed", st)
+		if st != model.StateAwaitingSubmit {
+			t.Fatalf("state after the agent's push = %q, want awaiting_submit: the pull request is open and unsubmitted", st)
 		}
 	})
 	if sim.pullRequestCount() != 1 {
