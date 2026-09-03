@@ -175,7 +175,11 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
   return (
     <main>
       <Box sx={{ px: "1.5rem" }}>
-        <Button onClick={onBack} sx={{ mb: 1, ml: -0.9 }}>&larr; Repos</Button>
+        {/* Back to the repo's own page, which is the only way in here
+            now that the repo list's rows carry no buttons of their own
+            (grain/task-111) -- so it names that repo rather than the
+            list two steps up. */}
+        <Button onClick={onBack} sx={{ mb: 1, ml: -0.9 }}>&larr; {repo}</Button>
         <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{repo} releases</Typography>
 
         <form onSubmit={createRelease}>

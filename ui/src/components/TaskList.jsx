@@ -52,11 +52,11 @@ function groupByStack(tasks, matches) {
 
 export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll, onReorder }) {
   // search and sortBy are local, not lifted to App.jsx alongside
-  // stateFilter/repoFilter: unlike those two, they are a refinement of
-  // the list currently on screen rather than a standing question about
-  // "which tasks", so it is fine for them to reset the next time this
-  // component mounts (switching to the repos or schedules view and back)
-  // instead of surviving the trip the way repoFilter deliberately does.
+  // stateFilter: unlike that one, they are a refinement of the list
+  // currently on screen rather than a standing question about "which
+  // tasks", so it is fine for them to reset the next time this component
+  // mounts (switching to the repos or schedules view and back) instead
+  // of surviving the trip the way stateFilter deliberately does.
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("manual");
 
@@ -210,20 +210,19 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   );
 }
 
-// TaskRow is exported so any other view that lists tasks -- the repo
-// pane's own per-repo sublist (bwsalmon/agents#474) is the first -- can
-// render a row identical to this one instead of re-deriving the badge
-// and chip markup. Selection and dragging are both opt-in: a caller with
-// nowhere to put a batch-actions bar or a reorderable list (the repo
-// pane, again) just omits onToggleSelect/draggable and gets a plain row
-// with no checkbox or drag handle rather than a dead one.
+// TaskRow is exported so any other view that lists tasks can render a
+// row identical to this one instead of re-deriving the badge and chip
+// markup. Selection and dragging are both opt-in: a caller with nowhere
+// to put a batch-actions bar or a reorderable list just omits
+// onToggleSelect/draggable and gets a plain row with no checkbox or drag
+// handle rather than a dead one.
 //
 // nested says this row is already sitting in a .task-sublist under the
 // task it was generated from, which is the only thing that makes a
 // stacked task self-explaining -- so it is what decides whether the
 // "merge fix" chip below is worth its space. Callers that list tasks
-// flat (the repo pane; groupByStack's own fallback for a stacked task
-// whose parent is filtered out or gone) leave it off and get the chip.
+// flat (groupByStack's own fallback for a stacked task whose parent is
+// filtered out or gone) leave it off and get the chip.
 export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, nested }) {
   const phase = completionPhase(t);
   return (

@@ -1,47 +1,31 @@
 import { useState } from "react";
-import AddIcon from "@mui/icons-material/Add";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import ChevronRightIcon from "@mui/icons-material/ChevronRight";
-import { Alert, Box, Button, Checkbox, Chip, FormControl, FormHelperText, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Button, Chip, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, capabilityUnavailableHint, repoRows, unionCapabilities } from "../state.js";
-import { TaskRow } from "./TaskList.jsx";
+import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
 
-// RepoList is the repo page: one row per known repo -- every
+// RepoList is the repo index: one row per known repo -- every
 // config.targetRepos entry, plus any repo tasks target that isn't one,
 // plus any repo carrying default capabilities of its own (repoRows has
 // why all three) -- each showing how many tasks sit in every state so a
 // repo with something stuck (awaiting_reply, or a pile of blocked work)
-// stands out before anyone opens it. Clicking a row is the entry point
-// into the repo-centric task list -- onOpenRepo scopes App's own task
-// view to it.
+// stands out before anyone opens it. Clicking a row opens that repo's
+// own page (RepoPage, grain/task-111), which is where everything about
+// one repo now lives.
 //
-// The chevron (bwsalmon/agents#474) is a second way into the same
-// tasks: it folds them out right here, for a quick look that doesn't
-// leave the repo page, without replacing the deeper task-list view the
-// row itself still opens. The New branch, Releases and "+" buttons are
-// further entry points into the same row (hence stopPropagation on all
-// three, so none of them also fires onOpenRepo or the chevron toggle):
-// release management is a property of the repo (bwsalmon/agents#459),
-// creating a branch outright is too (bwsalmon/agents#638, for whatever
-// doesn't fit release management's own latest/rc/prod shape), and filing
-// a task against it is the repo page's own shortcut for not retyping the
-// repo you're already looking at, so all three live here rather than
-// behind a sidebar button reachable from anywhere. New branch's own form
-// folds out below the row the same way the chevron's tasks do, rather
-// than a modal, since it only ever needs the one field.
+// A row is a name and its counts, and nothing else. It used to carry a
+// chevron that folded the repo's tasks out in place plus four buttons --
+// New branch, Capabilities, Releases, Remove -- and a "+" for filing a
+// task, each with its own stopPropagation so it wouldn't also open the
+// row, and two of them folding a form out between rows (bwsalmon/agents
+// #459, #473, #474, #638). All of it moved onto the repo page: a list of
+// repos is for finding a repo, and each of those controls is about one
+// repo, which is a thing that now has a page of its own to be on.
 //
-// Adding and removing a target repo (bwsalmon/agents#473) lives here
-// too, replacing the "Target repos" list Settings used to bury this
-// behind: a repo is a thing this page is about, not a deployment knob.
-// Remove only appears on a row that is actually in config.targetRepos
-// (repoRows' own `configured`) -- a row that only exists because a task
-// already targets it has nothing to remove, and removing a configured
-// repo doesn't make the row disappear either as long as a task still
-// targets it, so the two facts (targeted, configured) stay visibly
-// independent rather than the button pretending removal always clears
-// the row.
+// Adding a target repo (bwsalmon/agents#473) stays here, since it is the
+// one control that isn't about a repo this page is already listing --
+// Remove, its counterpart, lives on the repo page beside everything else
+// about that repo.
 //
 // "Add repo" reads backwards the first time (grain/task-45). An empty
 // config.targetRepos means *unrestricted* everywhere it appears --
@@ -62,63 +46,16 @@ import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimi
 // (bwsalmon/agents#561): a .content-header with title, count, and this
 // page's own primary action (the add-repo form, in place of TaskList's
 // filter title or TemplatesList/SchedulesList's "+ New X" button) above
-// a .task-list-toolbar search box, then flat divider rows instead of
-// this list's old card-per-repo look -- so the four list pages read as
-// one design instead of four.
-export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, onOpenTask, onNewTask, onRefreshConfig, showError }) {
+// a .task-list-toolbar search box, then flat divider rows -- so the four
+// list pages read as one design instead of four.
+export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, showError }) {
   const [newRepo, setNewRepo] = useState("");
   const [search, setSearch] = useState("");
   const repos = repoRows(config, tasks);
-  const [expanded, setExpanded] = useState(() => new Set());
-  // branchRepo is the one repo, if any, whose "New branch" form and
-  // recent-branches list is open -- a single slot rather than a Set the
-  // way `expanded` is, since only one repo's own branches are ever being
-  // read from the API at a time (branches holds that one repo's list).
-  const [branchRepo, setBranchRepo] = useState(null);
-  const [branches, setBranches] = useState([]);
-  // capsRepo/caps/capsSelection are the same one-slot shape branchRepo/
-  // branches above use, for the per-repo default capability set
-  // (grain/task-24): which repo's form is open, what GET
-  // /api/repos/{owner}/{name}/capabilities last said (all three sets --
-  // the repo's own, the deployment's, and the union a task filed here
-  // would actually start with), and the unsaved ticks. caps is null
-  // while that read is in flight, which is what the form renders a
-  // loading line for rather than an empty picker that would look like
-  // "this repo adds nothing".
-  const [capsRepo, setCapsRepo] = useState(null);
-  const [caps, setCaps] = useState(null);
-  const [capsSelection, setCapsSelection] = useState([]);
 
   const q = search.trim().toLowerCase();
   const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
   const targetRepos = config?.targetRepos || [];
-
-  // capsEffective is what a task filed against the repo whose
-  // capabilities form is open would actually start out holding -- the
-  // line the form ends on. The union is recomputed from the unsaved
-  // ticks rather than read back from caps.effectiveDefaultCapabilities,
-  // so it describes the set Save is about to make real rather than the
-  // one the last response described.
-  //
-  // Filtered to what this build still offers, the same filter
-  // ui.(*Client).defaultCapabilities applies before any grant is written
-  // -- and so the same one behind RepoDefaults.
-  // EffectiveDefaultCapabilities, the server's own answer to this
-  // question. Neither of the two sets GET reports is filtered: both come
-  // back exactly as stored, retired ids included, deliberately, so an id
-  // chosen before a build retired it stays visible in the picker above
-  // to be unticked. But a task filed here does not start out holding
-  // one, so this line must not say it does.
-  const capsEffective = unionCapabilities(caps?.deploymentDefaultCapabilities, capsSelection)
-    .filter((id) => (config?.capabilities || []).some((c) => c.id === id));
-
-  const toggleExpanded = (repo) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(repo)) next.delete(repo); else next.add(repo);
-      return next;
-    });
-  };
 
   // firstAddWarning is what the confirmation says before the first repo
   // is added to an empty (== unrestricted) allowlist, or null when this
@@ -161,106 +98,6 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
       await api("/api/repos", { method: "POST", body: JSON.stringify({ repo }) });
       setNewRepo("");
       await onRefreshConfig();
-    } catch (err) {
-      showError(err);
-    }
-  };
-
-  const removeRepo = async (evt, repo) => {
-    evt.stopPropagation();
-    if (!confirm(`Remove ${repo} from target repos? Tasks that already target it are not affected, but new tasks won't be able to until it's added back.`)) return;
-    try {
-      const [owner, name] = repo.split("/");
-      await api(`/api/repos/${owner}/${name}`, { method: "DELETE" });
-      await onRefreshConfig();
-    } catch (err) {
-      showError(err);
-    }
-  };
-
-  const loadBranches = async (repo) => {
-    try {
-      const [owner, name] = repo.split("/");
-      setBranches(await api(`/api/repos/${owner}/${name}/branches`));
-    } catch (err) {
-      showError(err);
-    }
-  };
-
-  const toggleBranchForm = (evt, repo) => {
-    evt.stopPropagation();
-    if (branchRepo === repo) {
-      setBranchRepo(null);
-      return;
-    }
-    setBranchRepo(repo);
-    setBranches([]);
-    loadBranches(repo);
-  };
-
-  const loadCapabilities = async (repo) => {
-    try {
-      const [owner, name] = repo.split("/");
-      const loaded = await api(`/api/repos/${owner}/${name}/capabilities`);
-      setCaps(loaded);
-      setCapsSelection(loaded.defaultCapabilities || []);
-    } catch (err) {
-      // Closed again rather than left on "Loading capabilities…": the
-      // form has nothing to edit if this read failed, and the banner
-      // showError raises is where the reason belongs.
-      setCapsRepo(null);
-      showError(err);
-    }
-  };
-
-  const toggleCapabilitiesForm = (evt, repo) => {
-    evt.stopPropagation();
-    if (capsRepo === repo) {
-      setCapsRepo(null);
-      return;
-    }
-    setCapsRepo(repo);
-    setCaps(null);
-    setCapsSelection([]);
-    loadCapabilities(repo);
-  };
-
-  // saveCapabilities replaces this repo's own set wholesale (PUT's whole
-  // body is the new set, ui.SetRepoCapabilitiesRequest), then refreshes
-  // the config the new-task form seeds its own picker from -- otherwise a
-  // repo whose defaults just changed would keep filing tasks with the old
-  // ones until the page was reloaded.
-  const saveCapabilities = async (evt, repo) => {
-    evt.preventDefault();
-    try {
-      const [owner, name] = repo.split("/");
-      const updated = await api(`/api/repos/${owner}/${name}/capabilities`, {
-        method: "PUT",
-        body: JSON.stringify({ defaultCapabilities: capsSelection }),
-      });
-      setCaps(updated);
-      setCapsSelection(updated.defaultCapabilities || []);
-      await onRefreshConfig();
-    } catch (err) {
-      showError(err);
-    }
-  };
-
-  // createBranch only ever records the request -- the branches reconciler
-  // (pkg/orchestrator.SyncBranches) is what actually creates it on GitHub,
-  // typically within one cycle, so a freshly submitted name reappears
-  // below still "pending" until the next loadBranches picks up "created"
-  // or, if GitHub refused it, an error.
-  const createBranch = async (evt, repo) => {
-    evt.preventDefault();
-    const form = evt.target;
-    const name = form.elements.branchName.value.trim();
-    if (name === "") return;
-    try {
-      const [owner, repoName] = repo.split("/");
-      await api(`/api/repos/${owner}/${repoName}/branches`, { method: "POST", body: JSON.stringify({ name }) });
-      form.reset();
-      await loadBranches(repo);
     } catch (err) {
       showError(err);
     }
@@ -311,24 +148,16 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
       )}
       <ul className="repo-list">
         {visible.map((r) => {
-          const isOpen = expanded.has(r.repo);
           // A row with no tasks, off the allowlist, is on this page only
           // because the repo carries default capabilities of its own
-          // (repoRows' third source). It has no counts to show and no
-          // Remove to offer, so without saying so it would read as an
-          // empty row nobody asked for -- and the Capabilities button
-          // beside it is the only way to reach the set that put it here.
+          // (repoRows' third source). It has no counts to show, so
+          // without saying so it would read as an empty row nobody asked
+          // for -- and its page is the only way to reach the set that put
+          // it here.
           const defaultsOnly = r.defaults && !r.configured && r.total === 0;
           return (
             <li key={r.repo}>
               <div className="repo-list-row" onClick={() => onOpenRepo(r.repo)}>
-                <IconButton
-                  size="small"
-                  aria-label={isOpen ? `Hide tasks for ${r.repo}` : `Show tasks for ${r.repo}`}
-                  onClick={(evt) => { evt.stopPropagation(); toggleExpanded(r.repo); }}
-                >
-                  {isOpen ? <ExpandMoreIcon fontSize="small" /> : <ChevronRightIcon fontSize="small" />}
-                </IconButton>
                 <span className="repo-list-name">{r.repo}</span>
                 <span className="chips">
                   {/* Each chip here counts a repo's tasks in one state, not one
@@ -345,165 +174,14 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                       size="small"
                       variant="outlined"
                       label="Defaults only"
-                      title="No tasks, and not on this deployment's target repos -- listed here because it has default capabilities of its own, which Capabilities edits."
+                      title="No tasks, and not on this deployment's target repos -- listed here because it has default capabilities of its own, which its own page edits."
                     />
                   )}
                 </span>
                 <Typography variant="caption" color="text.secondary" whiteSpace="nowrap">
                   {r.total} task{r.total === 1 ? "" : "s"}
                 </Typography>
-                <IconButton
-                  size="small"
-                  aria-label={`New task under ${r.repo}`}
-                  title={`New task under ${r.repo}`}
-                  onClick={(evt) => { evt.stopPropagation(); onNewTask(r.repo); }}
-                >
-                  <AddIcon fontSize="small" />
-                </IconButton>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={(evt) => toggleBranchForm(evt, r.repo)}
-                >
-                  New branch
-                </Button>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={(evt) => toggleCapabilitiesForm(evt, r.repo)}
-                >
-                  Capabilities
-                </Button>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  onClick={(evt) => { evt.stopPropagation(); onOpenReleases(r.repo); }}
-                >
-                  Releases
-                </Button>
-                {r.configured && (
-                  <Button size="small" variant="outlined" color="error" onClick={(evt) => removeRepo(evt, r.repo)}>
-                    Remove
-                  </Button>
-                )}
               </div>
-              {branchRepo === r.repo && (
-                <Box sx={{ px: "1.75rem", py: 1.25, borderTop: "1px solid", borderColor: "divider" }}>
-                  <Stack component="form" direction="row" spacing={1} alignItems="flex-start" onSubmit={(evt) => createBranch(evt, r.repo)}>
-                    <TextField
-                      name="branchName" label="New branch name" placeholder="feature/foo"
-                      helperText="Created from the repo's current default branch"
-                      autoComplete="off" required InputLabelProps={{ required: false }} size="small"
-                    />
-                    <Button type="submit" variant="contained" size="small">Create branch</Button>
-                  </Stack>
-                  {branches.length > 0 && (
-                    <ul className="candidate-history" style={{ marginTop: "0.75rem" }}>
-                      {branches.map((b) => (
-                        <li key={`${b.name}-${b.createdAt}`}>
-                          <strong>{b.name}</strong> -- {b.status}
-                          {b.error && <span className="candidate-error"> ({b.error})</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </Box>
-              )}
-              {capsRepo === r.repo && (
-                <Box sx={{ px: "1.75rem", py: 1.25, borderTop: "1px solid", borderColor: "divider" }}>
-                  {caps === null ? (
-                    <Typography variant="body2" color="text.secondary">Loading capabilities…</Typography>
-                  ) : (
-                    <Stack component="form" spacing={1} onSubmit={(evt) => saveCapabilities(evt, r.repo)}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel id={`repo-capabilities-label-${r.repo.replace("/", "-")}`}>Default capabilities</InputLabel>
-                        <Select
-                          labelId={`repo-capabilities-label-${r.repo.replace("/", "-")}`}
-                          label="Default capabilities"
-                          multiple
-                          value={capsSelection}
-                          onChange={(e) => setCapsSelection(e.target.value)}
-                          renderValue={(selected) => (
-                            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                              {selected.map((id) => (
-                                <Chip key={id} size="small" label={capabilityName(config, id)} />
-                              ))}
-                            </Box>
-                          )}
-                        >
-                          {/* The same grantable-only listing Settings'
-                              own default-capabilities picker offers, and
-                              for the same reason: a default no task can
-                              be granted by hand would fail at every
-                              filing, and PUT rejects one anyway. It
-                              needs no filter of its own to say that,
-                              unlike Settings' settings.capabilities:
-                              config.capabilities *is*
-                              ui.OfferedCapabilities, which is what
-                              "grantable" means, where that one reports
-                              every provider grain ships and flags the
-                              ungrantable ones. A capability the
-                              deployment already defaults is still
-                              offered rather than hidden -- ticking it
-                              here is how a repo keeps it if the
-                              deployment-wide entry is later dropped --
-                              and says so in its own row, so nobody reads
-                              a blank box as "not on here". An id this
-                              repo stored before the build retired it
-                              gets a row too, purely so it can be
-                              unticked (capabilityRows, state.js). */}
-                          {capabilityRows(config?.capabilities, capsSelection).map((c) => (
-                            <MenuItem key={c.id} value={c.id} title={c.description}>
-                              <Checkbox checked={capsSelection.includes(c.id)} size="small" />
-                              <ListItemText
-                                primary={c.name}
-                                secondary={c.retired
-                                  ? c.description
-                                  /* A default this deployment cannot honour is worth
-                                     more warning here than on one task, not less: it
-                                     fails every task filed against this repo, and the
-                                     person who set it is not the one who sees them
-                                     fail. */
-                                  : capabilityUnavailableHint(c)
-                                    || ((caps.deploymentDefaultCapabilities || []).includes(c.id)
-                                      ? "already a deployment default -- on here either way"
-                                      : null)}
-                                secondaryTypographyProps={capabilityUnavailableHint(c)
-                                  ? { color: "warning.main" }
-                                  : undefined}
-                              />
-                            </MenuItem>
-                          ))}
-                        </Select>
-                        <FormHelperText>
-                          Added to this deployment&apos;s own defaults, never subtracted from them -- a repo can
-                          only widen what a task filed against it starts with. Whoever files one can still untick
-                          any of these on the new-task form, and tasks already filed keep what they were filed
-                          with.
-                        </FormHelperText>
-                      </FormControl>
-                      <Typography variant="body2" color="text.secondary">
-                        A task filed against {r.repo} starts with:{" "}
-                        {capsEffective.length === 0
-                          ? "nothing -- only what whoever files it ticks"
-                          : capsEffective.map((id) => capabilityName(config, id)).join(", ")}
-                      </Typography>
-                      <Stack direction="row" justifyContent="flex-end">
-                        <Button type="submit" variant="contained" size="small">Save capabilities</Button>
-                      </Stack>
-                    </Stack>
-                  )}
-                </Box>
-              )}
-              {isOpen && (
-                <ul className="task-sublist">
-                  {tasks.filter((t) => t.repo === r.repo).map((t) => (
-                    <li key={t.id}>
-                      <TaskRow t={t} config={config} onOpenTask={onOpenTask} />
-                    </li>
-                  ))}
-                </ul>
-              )}
             </li>
           );
         })}

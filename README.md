@@ -1786,6 +1786,30 @@ starts exactly where the list you opened it from started. Dialogs that
 are an *action* rather than a thing you opened — New task, Run a suite,
 Settings, Debugging, an attempt's transcript — stay centered boxes.
 
+**A repo is a page of its own, the way a task is (grain/task-111).**
+Everything grain knew about one repo used to hang off that repo's row in
+the repo list: a chevron that folded its tasks out in place, a "+" that
+filed one against it, and New branch, Capabilities, Releases and Remove
+buttons -- two of which folded a form out between rows, and every one of
+which needed its own `stopPropagation` so it wouldn't also fire the row's
+navigation. Five controls per row is a toolbar, not a list, and there was
+nowhere for the sixth thing a repo grows to go. So a repo opens the way a
+task does. A row is a name and its per-state counts; clicking it lands on
+`/repos/{owner}/{name}` (`RepoPage.jsx`, `paths.js` parsing the two
+segments a repo name takes), and everything about that repo is on that
+page -- its branches and its default capabilities as plain forms rather
+than fold-outs behind a button, the way into its releases
+(`/repos/{owner}/{name}/releases`), Remove, filing a task against it, and
+the repo's own tasks. Adding a repo is the one control that stays on the
+list, since it is the only one that isn't about a repo already listed.
+
+The repo's task list is `TaskList` itself, scoped to the repo and passed
+in as children by `App.jsx` rather than reimplemented on the page, so a
+repo's tasks get the same search, sort, multi-select and drag-reorder the
+flat list has instead of a poorer second list. That is also what retired
+the task view's `repoFilter` chip: "the tasks of one repo" is a place to
+go now, not a filter left standing on another place.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to
