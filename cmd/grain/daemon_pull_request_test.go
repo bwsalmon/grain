@@ -413,7 +413,7 @@ func TestClosingATaskSaysSoOnThePullRequestItOrphans(t *testing.T) {
 	}, w.store))
 	t.Cleanup(srv.Close)
 
-	if err := ui.NewHTTPClient(srv.URL).Close(ctx, w.task.ID); err != nil {
+	if err := ui.NewHTTPClient(srv.URL).Close(ctx, w.task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -434,6 +434,63 @@ func TestClosingATaskSaysSoOnThePullRequestItOrphans(t *testing.T) {
 	}
 	if !strings.Contains(comments[0].Body, "left this note on the pull request itself too") {
 		t.Fatalf("note = %q, want it to record that GitHub was told", comments[0].Body)
+	}
+}
+
+// The same glue for the close itself: a task closed with
+// close_pull_request set really does close that pull request on GitHub,
+// through the same pullRequestOpener and the same client. pkg/ui proves
+// the decision and pkg/github proves the call; what is only true here is
+// that "owner/name#123" is parsed back into the repo and number the
+// PATCH is aimed at -- and that what it aims at is the pull request and
+// not the branch under it.
+func TestClosingATaskWithTheOptionClosesThePullRequestOnGitHub(t *testing.T) {
+	w := newPullRequestWorld(t, "t1")
+	ctx := context.Background()
+
+	status, err := orchestrator.OpenPullRequestForTask(ctx, w.store, w.client, w.task)
+	if err != nil {
+		t.Fatalf("OpenPullRequestForTask: %v", err)
+	}
+
+	wire := &syncedSim{sim: w.sim}
+	opener := &pullRequestOpener{store: w.store, client: github.NewClient(wire, nil)}
+	srv := httptest.NewServer(ui.NewServer(ui.Config{
+		Actor:               ui.DefaultActor("tester"),
+		Capabilities:        ui.OfferedCapabilities(),
+		PullRequestComments: opener,
+		PullRequestCloser:   opener,
+	}, w.store))
+	t.Cleanup(srv.Close)
+
+	if err := ui.NewHTTPClient(srv.URL).Close(ctx, w.task.ID,
+		ui.CloseOptions{ClosePullRequest: true}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	detail, err := w.client.GetPullRequest(prWorldOwner, prWorldRepo, status.PullRequest.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "closed" || detail.Merged {
+		t.Fatalf("pull request state = %q, merged = %t, want closed and unmerged",
+			detail.State, detail.Merged)
+	}
+	// The branch the agent pushed is still there, at the same commit:
+	// nothing about closing a pull request throws its work away, which is
+	// the promise the checkbox is offered on.
+	head, err := w.client.GetBranchHead(prWorldOwner, prWorldRepo, w.branch)
+	if err != nil || head == nil {
+		t.Fatalf("branch head = %+v (%v), want the branch left exactly as it was", head, err)
+	}
+
+	ref := prWorldOwner + "/" + prWorldRepo + "#" + strconv.Itoa(status.PullRequest.Number)
+	comments, err := w.store.Comments(ctx, w.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0].Body, "grain has closed "+ref) {
+		t.Fatalf("comments on the task = %+v, want the note saying %s was closed", comments, ref)
 	}
 }
 
@@ -458,7 +515,7 @@ func TestClosingATaskBeforeTheGateHasAClientStillNotesTheOrphan(t *testing.T) {
 	}, w.store))
 	t.Cleanup(srv.Close)
 
-	if err := ui.NewHTTPClient(srv.URL).Close(ctx, w.task.ID); err != nil {
+	if err := ui.NewHTTPClient(srv.URL).Close(ctx, w.task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v -- a daemon with no GitHub client yet must still close a task", err)
 	}
 	comments, err := w.store.Comments(ctx, w.task.ID)

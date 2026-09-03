@@ -422,15 +422,74 @@ func TestSimPanicsOnAnUnhandledRequest(t *testing.T) {
 			t.Fatalf("got panic %v", r)
 		}
 	}()
-	// Closing a PR without merging it (PATCH .../pulls/{number}, state:
-	// closed) is real GitHub API surface neither Sim nor github.Client
-	// implements yet -- nothing in this project declines a PR today, only
-	// merges one (MergePullRequest) -- so this is called directly against
-	// Sim rather than through client, which has no method for it. A test
-	// exercising an endpoint this double doesn't yet answer for should
-	// fail loudly, the same as v1's own RealGitHubMock raising
-	// AssertionError.
-	sim.Request("PATCH", "/repos/acme/widgets/pulls/1", nil, []byte(`{"state":"closed"}`))
+	// Asking for a reviewer on a pull request (POST .../pulls/{number}/
+	// requested_reviewers) is real GitHub API surface neither Sim nor
+	// github.Client implements -- nothing in this project ever requests
+	// one -- so this is called directly against Sim rather than through
+	// client, which has no method for it. A test exercising an endpoint
+	// this double doesn't yet answer for should fail loudly, the same as
+	// v1's own RealGitHubMock raising AssertionError.
+	sim.Request("POST", "/repos/acme/widgets/pulls/1/requested_reviewers", nil,
+		[]byte(`{"reviewers":["someone"]}`))
+}
+
+// Closing a pull request without merging it, which is what a human
+// closing a task and asking for its pull request to go with it does
+// (github.RESTClient.ClosePullRequest). The state moves and nothing else
+// does: the branch is still there, at the same commit, and the pull
+// request is closed rather than merged -- which is the whole distinction
+// the offer to a human rests on.
+func TestSimClosesAPullRequestWithoutMergingIt(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/issue-1")
+	pr, err := client.CreatePullRequest("acme", "widgets", "grain/issue-1", "main", "t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := client.GetBranchHead("acme", "widgets", "grain/issue-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := client.GetBranchHead("acme", "widgets", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.ClosePullRequest("acme", "widgets", pr.Number); err != nil {
+		t.Fatalf("ClosePullRequest: %v", err)
+	}
+
+	detail, err := client.GetPullRequest("acme", "widgets", pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "closed" || detail.Merged {
+		t.Fatalf("state = %q, merged = %t, want closed and unmerged", detail.State, detail.Merged)
+	}
+	// Both branches exactly where they were: the work is still on the
+	// head branch, and none of it reached the base. That is what makes
+	// this reversible with a click, and what the human ticking the box
+	// was promised.
+	after, err := client.GetBranchHead("acme", "widgets", "grain/issue-1")
+	if err != nil || after.SHA != head.SHA {
+		t.Fatalf("head branch = %+v (%v), want the commits left exactly where they were", after, err)
+	}
+	baseAfter, err := client.GetBranchHead("acme", "widgets", "main")
+	if err != nil || baseAfter.SHA != base.SHA {
+		t.Fatalf("base branch = %+v (%v), want it untouched", baseAfter, err)
+	}
+}
+
+// A pull request number nothing opened is a 404, not a silent success --
+// a caller that closed nothing must be able to tell.
+func TestSimRefusesToCloseAPullRequestThatIsNotThere(t *testing.T) {
+	_, client := newSim(t, "main")
+
+	err := client.ClosePullRequest("acme", "widgets", 9999)
+	var ghErr *github.Error
+	if !errors.As(err, &ghErr) || ghErr.Status != 404 {
+		t.Fatalf("got %v, want a 404 for a pull request that does not exist", err)
+	}
 }
 
 func TestSimListReviewCommentsReadsSeededComments(t *testing.T) {

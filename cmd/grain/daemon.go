@@ -1439,6 +1439,23 @@ func (o *pullRequestOpener) Comment(ctx context.Context, ref, body string) error
 	return err
 }
 
+// Close is ui.Config.PullRequestCloser over the same client, and the one
+// place in this daemon where a pull request is closed rather than merged
+// -- reached only when whoever closed the task asked for it in the same
+// request (ui.CloseOptions.ClosePullRequest). It parses ref back the way
+// Comment above does, for the same reason.
+//
+// It closes the pull request and touches nothing else: the branch and
+// every commit on it stay where they are, and reopening the pull request
+// on GitHub restores it whole.
+func (o *pullRequestOpener) Close(ctx context.Context, ref string) error {
+	pr, err := model.ParsePullRequestRef(ref)
+	if err != nil {
+		return err
+	}
+	return o.client.ClosePullRequest(pr.Repo.Owner, pr.Repo.Name, pr.Number)
+}
+
 // pullRequestGate is the ui.Config.PullRequests the UI/API server is
 // given: whatever livePullRequests holds by the time a request actually
 // arrives, or a plain refusal until runDaemon has put one there.
@@ -1466,6 +1483,21 @@ func (pullRequestGate) Comment(ctx context.Context, ref, body string) error {
 				"its reconcile loop has not started (or has failed -- check the daemon log)")
 	}
 	return opener.Comment(ctx, ref, body)
+}
+
+// Close is the same gate for ui.Config.PullRequestCloser. Refusing is the
+// right answer rather than a shame here: a daemon with no GitHub client
+// cannot close a pull request, and the alternative to saying so is a
+// close that silently left one open. The refusal ends up quoted in the
+// note on the task, where whoever ticked the box will read it.
+func (pullRequestGate) Close(ctx context.Context, ref string) error {
+	opener := livePullRequests.Load()
+	if opener == nil {
+		return errors.New(
+			"this daemon has no GitHub client yet: " +
+				"its reconcile loop has not started (or has failed -- check the daemon log)")
+	}
+	return opener.Close(ctx, ref)
 }
 
 // reapInterval is how often reconcile calls reapCapabilities -- not
@@ -2342,6 +2374,15 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// request, this one turns it into a line in the note left on the
 		// task saying the pull request itself was not told.
 		PullRequestComments: pullRequestGate{},
+		// PullRequestCloser is the other half of that same close, and the
+		// only route in a grain deployment by which a pull request is
+		// ever closed rather than merged: a human who ticked the box
+		// beside Close asking for this task's pull request to be closed
+		// with it (ui.CloseOptions.ClosePullRequest). Behind the same
+		// gate as the two above. A deployment that wanted its UI able to
+		// say things on GitHub but never to shut anything would leave
+		// exactly this field nil, which is why it is a field of its own.
+		PullRequestCloser: pullRequestGate{},
 		// SandboxRecreate is how a dispatched run gets out of a sandbox
 		// it has broken beyond what it can fix from inside one
 		// (ui.Config.SandboxRecreate's own doc comment): its mcpserver

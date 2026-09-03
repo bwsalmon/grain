@@ -12,8 +12,8 @@
 // Sim implements every endpoint github.Client's real implementation
 // (github.RESTClient) calls: list/get/create issues, close/reopen/update
 // an issue, add/remove a label, default branch, branch existence, the
-// commits one branch carries over another, create/find/get/merge a pull
-// request, rewrite one's body, merging one branch into another,
+// commits one branch carries over another, create/find/get/merge/close a
+// pull request, rewrite one's body, merging one branch into another,
 // the plain comment thread, inline review comments and draft reviews, and
 // check runs -- the whole surface
 // github.go's Client interface names, so a live end-to-end test never
@@ -805,28 +805,40 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 	}
 
 	if method == "PATCH" {
-		// The one field of a pull request anything here edits: its body
+		// The two fields of a pull request anything here edits: its body
 		// (github.RESTClient.UpdatePullRequestBody, rewriting a
-		// description for a branch that has moved). A PATCH carrying
-		// anything else -- closing a pull request without merging it, say
-		// -- falls through to the unhandled-request panic below rather
-		// than being silently accepted and ignored, which is the whole
-		// value of that panic.
+		// description for a branch that has moved) and its state
+		// (github.RESTClient.ClosePullRequest, closing one without
+		// merging it). A PATCH carrying neither falls through to the
+		// unhandled-request panic below rather than being silently
+		// accepted and ignored, which is the whole value of that panic.
 		if m := pullRe.FindStringSubmatch(p); m != nil {
 			var payload struct {
-				Body *string `json:"body"`
+				Body  *string `json:"body"`
+				State *string `json:"state"`
 			}
 			if err := json.Unmarshal(body, &payload); err != nil {
 				return github.ApiResponse{}, err
 			}
-			if payload.Body != nil {
+			if payload.Body != nil || payload.State != nil {
 				s.mustOwn(m[1], m[2])
 				number := mustAtoi(m[3])
 				for i := range s.PullRequests {
 					if s.PullRequests[i].Number != number {
 						continue
 					}
-					s.PullRequests[i].Body = *payload.Body
+					if payload.Body != nil {
+						s.PullRequests[i].Body = *payload.Body
+					}
+					// State moves and nothing else does: closing a pull
+					// request on GitHub leaves the branch, the commits
+					// and Merged exactly as they were -- which is the
+					// whole reason a human is offered the choice at all,
+					// and the thing a test asserting "the work is still
+					// there" has to be able to see.
+					if payload.State != nil {
+						s.PullRequests[i].State = *payload.State
+					}
 					return jsonResponse(200, pullRequestDetailJSON(
 						s.PullRequests[i], s.branchSHA(s.PullRequests[i].Head))), nil
 				}

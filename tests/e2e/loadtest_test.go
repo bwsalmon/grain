@@ -483,7 +483,7 @@ func doLoadWriterAction(ctx context.Context, store *model.Store, rng *rand.Rand,
 			return s != model.StateClosed && s != model.StateRunning
 		}); ok {
 			start := time.Now()
-			err := client.Close(ctx, id)
+			err := client.Close(ctx, id, ui.CloseOptions{})
 			metrics.recordWrite(time.Since(start), benignOrErr(err))
 		}
 	default:

@@ -54,7 +54,14 @@ func noteOrphanedPullRequests(ctx context.Context, store *model.Store, client gi
 		if err != nil {
 			continue
 		}
-		noted, err := store.OrphanedPullRequestNoted(ctx, taskID, ref)
+		// The zero outcome, always: closing a pull request needs somebody
+		// to have asked for it at the moment they closed the task
+		// (ui.CloseOptions), and there is no human in front of this path
+		// at all -- it is a run discovering, as it finishes, that its
+		// task was closed underneath it. Nothing grain decides for
+		// itself closes a pull request.
+		outcome := model.PullRequestCloseOutcome{}
+		noted, err := store.OrphanedPullRequestNoted(ctx, taskID, ref, outcome)
 		if err != nil {
 			return err
 		}
@@ -66,7 +73,7 @@ func noteOrphanedPullRequests(ctx context.Context, store *model.Store, client gi
 			log.Printf("orchestrator: task %s closed with %s still open, "+
 				"but grain could not say so on the pull request itself: %v", taskID, ref, echo)
 		}
-		body := model.OrphanedPullRequestNote(taskID, ref, echo)
+		body := model.OrphanedPullRequestNote(taskID, ref, outcome, echo)
 		if err := store.NoteOrphanedPullRequest(ctx, taskID, ref, body, now); err != nil {
 			return err
 		}
@@ -79,7 +86,7 @@ func noteOrphanedPullRequests(ctx context.Context, store *model.Store, client gi
 // model.OrphanedPullRequestNote folds into the task's own copy.
 func commentOnPullRequest(client github.Client, taskID string, ref model.PullRequestRef) error {
 	_, err := client.CreateComment(ref.Repo.Owner, ref.Repo.Name, ref.Number,
-		model.OrphanedPullRequestComment(taskID, ref))
+		model.OrphanedPullRequestComment(taskID, ref, model.PullRequestCloseOutcome{}))
 	return err
 }
 
