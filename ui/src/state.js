@@ -61,6 +61,29 @@ export function completionPhase(t) {
   return null;
 }
 
+// orphanedPullRequest names the pull request a closed task has left open
+// behind it, or null when there is none to name.
+//
+// grain only ever merges a *completed* task's pull request (model.Store.
+// OpenPullRequestLinks), and nothing in grain closes one -- so a task
+// closed while its pull request was still open leaves that pull request
+// on GitHub with nobody watching it. It is a deliberate outcome, and the
+// point of surfacing it here is that it is otherwise invisible: the task
+// is closed, so nobody looks at it, and the pull request has merely gone
+// quiet. grain also says so on the task and on the pull request itself
+// (model.OrphanedPullRequestNote); this is the same fact where the person
+// who just clicked Close is actually looking.
+//
+// The events check is what keeps it from crying wolf on the ordinary
+// ending: a task whose pull request *merged* is closed too (orchestrator.
+// recordPullRequestEvents sets ClosedAt alongside PrMergedAt), and its
+// link is the most normal thing in the world.
+export function orphanedPullRequest(t) {
+  if (t.state !== "closed" || !t.pullRequest) return null;
+  const finished = (t.pullRequestEvents || []).some((e) => e.kind === "merged" || e.kind === "closed");
+  return finished ? null : t.pullRequest;
+}
+
 export function capabilityName(config, id) {
   const c = (config?.capabilities || []).find((c) => c.id === id);
   return c ? c.name : id;

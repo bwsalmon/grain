@@ -1612,6 +1612,13 @@ func (c *Client) AddComment(ctx context.Context, id, body string, uploads []Atta
 // model.StateClosed already names, and it is what "delete a task" means
 // here -- the store has no delete either, deliberately: a task that ran
 // is a record of a dispatch that happened.
+//
+// A task closed with a pull request still open leaves that pull request
+// behind: grain will not merge it and will not look at it again (only a
+// completed task's fixes-link reaches Store.OpenPullRequestLinks), and
+// nothing in grain closes a pull request. That is the intended outcome,
+// and this is where the person who caused it -- and whoever finds the
+// pull request later -- is told about it. See noteOrphanedPullRequests.
 func (c *Client) Close(ctx context.Context, id string) error {
 	return c.setClosed(ctx, id, true)
 }
@@ -1653,11 +1660,24 @@ func (c *Client) setClosed(ctx context.Context, id string, closed bool) error {
 		return &NotFoundError{ID: id}
 	}
 	now := c.now()
-	return c.Store.ObserveField(ctx, id, now, func(o *model.Observation) {
+	if err := c.Store.ObserveField(ctx, id, now, func(o *model.Observation) {
 		if closed {
 			o.ClosedAt = &now
 			return
 		}
 		o.ClosedAt = nil
-	})
+	}); err != nil {
+		return err
+	}
+	if !closed {
+		return nil
+	}
+	// After the close is written, not before: the note says the task *is*
+	// closed, and a note left in front of a close that then failed would
+	// say something untrue. Reading the links off the task fetched above
+	// is enough -- a link written between that read and this call belongs
+	// to a run still finishing, and the finish path re-reads the closure
+	// and leaves the same note itself (orchestrator's own
+	// salvagePushedBranch).
+	return c.noteOrphanedPullRequests(ctx, *task, now)
 }

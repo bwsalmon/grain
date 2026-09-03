@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, completionPhase, frameworkLabel } from "../state.js";
+import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, completionPhase, frameworkLabel, orphanedPullRequest } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -21,6 +21,7 @@ import TaskPicker from "./TaskPicker.jsx";
 // long answer wants the room.
 export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act, showError }) {
   const phase = completionPhase(t);
+  const orphaned = orphanedPullRequest(t);
   // editing is local to DetailOverlay, not lifted to App.jsx, the same
   // as Timeline's own openAttempt -- nothing outside this overlay needs
   // to know a task's title and description are mid-edit, and closing
@@ -75,6 +76,19 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             <Alert severity="error" sx={{ mb: 2 }}>
               <strong>{t.failedAttempts} consecutive failed attempt{t.failedAttempts === 1 ? "" : "s"}.</strong>
               {t.lastFailureReason && <> Last failure: {t.lastFailureReason}</>}
+            </Alert>
+          )}
+
+          {/* A pull request nobody is going to merge, said where the
+              person who closed the task is looking -- see state.js's
+              orphanedPullRequest for why a closed task can be carrying
+              one and why a merged one is not it. */}
+          {orphaned && (
+            <Alert severity="warning" sx={{ mb: 2 }}>
+              <strong>{orphaned} is still open, and grain has stopped watching it.</strong>{" "}
+              Closing this task took it off the merge queue for good, so grain will not merge
+              or update that pull request. Merge or close it on GitHub by hand, or reopen this
+              task to put it back under grain's watch.
             </Alert>
           )}
 

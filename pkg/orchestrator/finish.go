@@ -243,6 +243,14 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 // is protected either way; all that remains is a pull request visible on
 // a task somebody just closed.
 //
+// What remains is now also *said*, on the task and on the pull request
+// itself, rather than only being true: noteOrphanedPullRequests, on both
+// sides of the finish -- for a close this function found, and for one
+// that landed just after it looked. The decision is unchanged (nothing is
+// closed, nothing is merged, nothing is unlinked); what changed is that
+// nobody has to work it out for themselves from a pull request that has
+// simply gone quiet.
+//
 // It is also the answer already given to the same question one moment
 // later in a task's life -- a task closed after its pull request was
 // opened at the finish keeps that pull request open and unmerged forever
@@ -269,9 +277,12 @@ func salvagePushedBranch(ctx context.Context, store *model.Store, client github.
 		return true, err
 	}
 	if closed {
-		return true, nil
+		return true, noteOrphanedPullRequests(ctx, store, client, task.ID, now)
 	}
-	return true, finishWithPullRequest(ctx, store, client, task, now)
+	if err := finishWithPullRequest(ctx, store, client, task, now); err != nil {
+		return true, err
+	}
+	return true, noteOrphanedIfClosed(ctx, store, client, task.ID, now)
 }
 
 // noActionDetail says what the run did, not only what it did not do.

@@ -347,6 +347,16 @@ type Config struct {
 	// the same nil-means-unavailable contract Reboot and Sandboxes above
 	// already give.
 	PullRequests PullRequests
+	// PullRequestComments, when set, is what Close uses to say on a pull
+	// request itself that grain has stopped watching it -- see
+	// Client.noteOrphanedPullRequests, and model.OrphanedPullRequestNote
+	// for what is said and why it is said in two places at once.
+	//
+	// nil means this deployment's UI was not handed one, exactly as for
+	// PullRequests above, and is not an error here: the note still lands
+	// on the task, and says in so many words that the pull request itself
+	// was not told. A close never fails over this.
+	PullRequestComments PullRequestComments
 	// SandboxRecreate, when set, is what
 	// POST /api/tasks/{id}/sandbox/recreate calls to destroy a live run's
 	// sandbox and build an empty one in its place -- cmd/grain/daemon.go's
