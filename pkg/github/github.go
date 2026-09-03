@@ -439,6 +439,55 @@ type CheckRun struct {
 	Conclusion *string
 }
 
+// JobLog is one failed GitHub Actions job and the tail of what it
+// printed -- FailedJobLogs' unit.
+//
+// A check run says only that a job called "go" did not pass. That is
+// enough to know a pull request is red and not enough to do anything
+// about it, which is the gap this closes: the agent the merge queue
+// files a fix task for reads the failure itself, in the fix task's own
+// body, rather than being told a job name and left to go and find out
+// what it said.
+type JobLog struct {
+	Name string
+	// URL is the job's own page on github.com -- where the whole log
+	// lives, for a reader who needs more than the tail below.
+	URL string
+	// Log is the last JobLogTailBytes of the job's log at most, cut at a
+	// line boundary. The tail rather than the head because a job's log is
+	// the whole job, every step of it, and the thing that broke is at the
+	// end of it.
+	Log string
+	// Truncated reports whether Log is a tail rather than the whole log,
+	// so a caller rendering it can say so.
+	Truncated bool
+}
+
+// JobLogTailBytes is how much of one job's log FailedJobLogs keeps. Big
+// enough for a Go test failure's own output plus the surrounding
+// package lines; small enough that four of them stay something a person
+// (and a model's context window) can read.
+const JobLogTailBytes = 16 << 10
+
+// maxFailedJobLogs bounds how many failed jobs one FailedJobLogs call
+// reads logs for. A commit that failed more jobs than this has something
+// wrong that reading a fifth log will not add to.
+const maxFailedJobLogs = 4
+
+// failedConclusion reports whether a completed run or job's conclusion is
+// one of the three GitHub uses for "this did not pass" --
+// orchestrator.failingChecks reads the same three, and the two lists
+// have to keep agreeing: a job whose conclusion made a pull request
+// PrFailing there but not "failed" here is one the fix task names and
+// carries no log for.
+func failedConclusion(conclusion string) bool {
+	switch conclusion {
+	case "failure", "timed_out", "startup_failure":
+		return true
+	}
+	return false
+}
+
 // nextPagePath is the path+query of the rel="next" link, or "" on the
 // last page.
 //
@@ -495,6 +544,7 @@ type Client interface {
 	ListReviewComments(owner, repo string, number int) ([]ReviewComment, error)
 	ListCheckRuns(owner, repo, ref string) ([]CheckRun, error)
 	ListWorkflowRuns(owner, repo, headSHA string) ([]CheckRun, error)
+	FailedJobLogs(owner, repo, headSHA string) ([]JobLog, error)
 	ListComments(owner, repo string, number int) ([]Comment, error)
 	CreateComment(owner, repo string, number int, body string) (int, error)
 	CreateReview(owner, repo string, number int, body string, comments []NewReviewComment) (int, error)
@@ -1165,6 +1215,173 @@ func (c *RESTClient) ListWorkflowRuns(owner, repo, headSHA string) ([]CheckRun, 
 	return runs, nil
 }
 
+// FailedJobLogs returns the GitHub Actions jobs that failed against one
+// commit, each with the tail of its own log.
+//
+// Three reads, because GitHub has no endpoint from a commit to a log:
+// the runs for the commit, the jobs of each run that failed, and then
+// each failed job's log. It goes through Actions rather than the Checks
+// API for the same reason ListWorkflowRuns does -- Checks cannot be
+// granted to a fine-grained PAT at all, while "Actions" read can, and a
+// classic PAT's `repo` scope covers both. What that costs is the same
+// thing it costs there: CI reported by a third party (Buildkite,
+// CircleCI) has no Actions job behind it and so no log here. The caller
+// gets an empty result, not an error, and a fix task's body says what it
+// always said.
+//
+// The logs endpoint answers 302 to a short-lived storage URL, which the
+// http.Client under RealTransport follows on its own (dropping the
+// Authorization header on the cross-host hop, as it should). A job whose
+// log has expired -- GitHub keeps them 90 days by default -- answers 410
+// instead, and a job whose logs this credential cannot read answers 403;
+// both are skipped rather than failing the call, since the log is the
+// bonus here and the job names are the part the caller already has.
+//
+// headSHA may be empty on a pull request read before GitHub filled it in,
+// the same way it may be for checkRunsFor's fallback; there is nothing to
+// scope to, so this answers nothing.
+func (c *RESTClient) FailedJobLogs(owner, repo, headSHA string) ([]JobLog, error) {
+	if headSHA == "" {
+		return nil, nil
+	}
+	runIDs, err := c.failedRunIDs(owner, repo, headSHA)
+	if err != nil {
+		return nil, err
+	}
+	var logs []JobLog
+	for _, runID := range runIDs {
+		jobs, err := c.failedJobs(owner, repo, runID)
+		if err != nil {
+			return nil, err
+		}
+		for _, job := range jobs {
+			if len(logs) >= maxFailedJobLogs {
+				return logs, nil
+			}
+			text, err := c.jobLog(owner, repo, job.ID)
+			if err != nil {
+				return nil, err
+			}
+			if text == "" {
+				continue
+			}
+			tail, truncated := tailOf(text, JobLogTailBytes)
+			logs = append(logs, JobLog{
+				Name: job.Name, URL: job.URL, Log: tail, Truncated: truncated,
+			})
+		}
+	}
+	return logs, nil
+}
+
+// failedRunIDs is FailedJobLogs' first read: the workflow runs against
+// headSHA that finished and did not pass. Scoped to the commit, not the
+// branch, for the reason ListWorkflowRuns' own doc comment gives.
+func (c *RESTClient) failedRunIDs(owner, repo, headSHA string) ([]int64, error) {
+	var ids []int64
+	path := fmt.Sprintf("/repos/%s/%s/actions/runs?head_sha=%s&per_page=100",
+		owner, repo, url.QueryEscape(headSHA))
+	for path != "" {
+		resp, err := c.get(owner, repo, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status != 200 {
+			return nil, &Error{Status: resp.Status, Body: resp.Body}
+		}
+		var data struct {
+			WorkflowRuns []struct {
+				ID         int64  `json:"id"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+			} `json:"workflow_runs"`
+		}
+		if err := json.Unmarshal(resp.Body, &data); err != nil {
+			return nil, err
+		}
+		for _, run := range data.WorkflowRuns {
+			if run.Status == "completed" && failedConclusion(run.Conclusion) {
+				ids = append(ids, run.ID)
+			}
+		}
+		path = nextPagePath(resp.Headers["Link"])
+	}
+	return ids, nil
+}
+
+// jobRef is one job of a workflow run, as much of it as fetching a log
+// and naming it afterwards needs.
+type jobRef struct {
+	ID   int64
+	Name string
+	URL  string
+}
+
+// failedJobs is FailedJobLogs' second read: the jobs of one run that did
+// not pass. A run fails as a whole, but its log is per job -- and it is
+// the job's name ("go", "ui e2e") that matches what a check run is
+// called, so this is also where the two views of the same CI line up.
+func (c *RESTClient) failedJobs(owner, repo string, runID int64) ([]jobRef, error) {
+	var jobs []jobRef
+	path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?per_page=100", owner, repo, runID)
+	for path != "" {
+		resp, err := c.get(owner, repo, path)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Status != 200 {
+			return nil, &Error{Status: resp.Status, Body: resp.Body}
+		}
+		var data struct {
+			Jobs []struct {
+				ID         int64  `json:"id"`
+				Name       string `json:"name"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+				HTMLURL    string `json:"html_url"`
+			} `json:"jobs"`
+		}
+		if err := json.Unmarshal(resp.Body, &data); err != nil {
+			return nil, err
+		}
+		for _, job := range data.Jobs {
+			if job.Status == "completed" && failedConclusion(job.Conclusion) {
+				jobs = append(jobs, jobRef{ID: job.ID, Name: job.Name, URL: job.HTMLURL})
+			}
+		}
+		path = nextPagePath(resp.Headers["Link"])
+	}
+	return jobs, nil
+}
+
+// jobLog is FailedJobLogs' third read: one job's whole log as plain
+// text, or "" when GitHub will not serve it (see FailedJobLogs on the
+// 410 and 403 cases). Only a transport-level failure is an error --
+// nothing above this can carry on regardless of what one job's log says.
+func (c *RESTClient) jobLog(owner, repo string, jobID int64) (string, error) {
+	resp, err := c.get(owner, repo, fmt.Sprintf("/repos/%s/%s/actions/jobs/%d/logs", owner, repo, jobID))
+	if err != nil {
+		return "", err
+	}
+	if resp.Status != 200 {
+		return "", nil
+	}
+	return string(resp.Body), nil
+}
+
+// tailOf returns the last limit bytes of text, advanced to the next line
+// boundary so it never opens mid-line, and whether anything was cut.
+func tailOf(text string, limit int) (string, bool) {
+	if len(text) <= limit {
+		return text, false
+	}
+	tail := text[len(text)-limit:]
+	if at := strings.IndexByte(tail, '\n'); at >= 0 {
+		tail = tail[at+1:]
+	}
+	return tail, true
+}
+
 // ListComments returns the plain top-level conversation on an issue or PR
 // -- where a human's reply to an agent's ask_question call lands. Same
 // shared issues-comments endpoint and pagination shape ListReviewComments
@@ -1356,6 +1573,10 @@ func (d DryRunClient) ListCheckRuns(owner, repo, ref string) ([]CheckRun, error)
 
 func (d DryRunClient) ListWorkflowRuns(owner, repo, headSHA string) ([]CheckRun, error) {
 	return d.Inner.ListWorkflowRuns(owner, repo, headSHA)
+}
+
+func (d DryRunClient) FailedJobLogs(owner, repo, headSHA string) ([]JobLog, error) {
+	return d.Inner.FailedJobLogs(owner, repo, headSHA)
 }
 
 func (d DryRunClient) ListComments(owner, repo string, number int) ([]Comment, error) {

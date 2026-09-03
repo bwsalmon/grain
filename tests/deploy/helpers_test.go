@@ -49,6 +49,13 @@ func workflow(t *testing.T) string {
 	return read(t, ".github", "workflows", "build-artifacts.yml")
 }
 
+// testsWorkflow is the other one: the credential-free suite that runs on
+// every pull request, and so the definition of what a sandbox has to be
+// able to reproduce.
+func testsWorkflow(t *testing.T) string {
+	return read(t, ".github", "workflows", "tests.yml")
+}
+
 // setupCode is setup.sh with its comment lines dropped.
 //
 // That file is more comment than code, and much of that comment is about

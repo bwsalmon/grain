@@ -194,11 +194,14 @@ same three files, with the same names, the old `build.sh` produced.
 `build-guest.sh` in its place, and no longer installs debootstrap or
 e2fsprogs, since the build needs neither (nor root).
 
-`guest-setup.sh` reads one variable (`SANDBOX_SETUP_SCRIPT`, if set).
-kontur's hook execs the script with only its own build stage's
-environment, so `build-guest.sh` inserts it as an assignment immediately
-after the script's shebang -- which has to stay on line 1 for the exec to
-work -- rather than passing it as a build arg of its own.
+`guest-setup.sh` reads three variables: `GO_VERSION` and
+`GRAIN_DEP_MANIFESTS` (both required, both read out of the tree by
+`build-guest.sh` -- see "The Go and Node toolchains" above) and
+`SANDBOX_SETUP_SCRIPT` (optional). kontur's hook execs the script with
+only its own build stage's environment, so `build-guest.sh` inserts each
+as an assignment immediately after the script's shebang -- which has to
+stay on line 1 for the exec to work -- rather than passing them as build
+args of their own.
 
 It used to read a second, `OPERATOR_SSH_PUBLIC_KEY`, and that was what
 made the image deployment-specific. Resolved upstream in
@@ -352,6 +355,59 @@ v1's sandbox script gave for itself: it runs against this
 VM's SSH-exposed sandbox tools from the controller/orchestrator side, not
 on the guest, so there is nothing here worth a credential leak protecting
 in the first place.
+
+### The Go and Node toolchains, and why their caches are the point
+
+A sandbox is where the merge queue's own fix tasks run
+(`orchestrator.fileFixTask`). Every one of them used to end its commit
+message with some version of the same sentence -- *"not built or run:
+this sandbox has no Go toolchain and no network to fetch one"* -- and a
+fix agent that cannot run `go test ./...` is guessing. A merge fix that
+is a guess costs another queue cycle when it turns out not to be the fix,
+which is the whole thing the queue exists to avoid. So the image carries:
+
+- **Go**, at the version `go.mod` asks for. `build-guest.sh` reads it out
+  of `go.mod` with the same `sed` the `Makefile` uses for
+  `Dockerfile.build`, so the image and the module cannot drift apart
+  while only one of them is ever edited, and `GOTOOLCHAIN=local` (also
+  `Dockerfile.build`'s pin, for the same reason) turns a stale image into
+  an error naming both versions rather than a network fetch that cannot
+  succeed here.
+- **Node**, at the major `.github/workflows/tests.yml` pins for the `go`
+  job. Debian's own `nodejs` is 18, and `vitest` -- what `npm test` runs
+  -- needs 20.19 or newer. `tests/deploy` asserts the two files keep
+  naming the same major.
+- **A warm module cache and a warm npm cache**, holding what `go.sum` and
+  `ui/package-lock.json` resolve to at build time. This is the
+  load-bearing half rather than an optimization: a dispatched sandbox has
+  no route off the host except the git proxy, so a toolchain that arrives
+  with a cold cache cannot build anything at all. `build-guest.sh`
+  carries the four manifests in (gzipped and base64'd -- see its own
+  comment on why) and `guest-setup.sh` warms both caches into
+  `/home/debian`'s own defaults, so nothing has to point either tool at
+  them and both stay writable by the account that uses them.
+
+What still needs a network, and cannot be fixed here: a branch that adds
+a dependency the published image predates. That costs *that* branch its
+`go test`; a cold cache would cost every branch its `go test`.
+
+**Playwright's browsers are deliberately not here.** `npx playwright
+install` is a ~300MB download per image, and the suite it feeds
+(`make test-e2e`) is a separate CI job from the `go` job that merge fixes
+keep tripping over. But `@playwright/test` is in `ui/`'s
+devDependencies, and its install script fetches those browsers -- so a
+plain `npm ci` in `ui/`, which is what `make frontend` and therefore
+`make test` runs, would fail on a download this guest cannot make. The
+image wraps `npm` to default `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` on for
+exactly that, with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= npm ...` as the way
+back for a guest that does have a network.
+
+The cost is disk: the toolchains and their caches add roughly a gigabyte
+to `disk.img`, which is sized from the rootfs (`guest-image`'s
+`mke2fs -d`, rootfs plus 20%) and so grows with them -- paid on every
+`gsutil cp` of a published image and every `ensure_kontur_images` fetch
+of one. Weighed against a fix agent that can only read a diff and reason
+about what CI would have done with it, that is the cheaper side.
 
 ## Running a custom setup script
 
