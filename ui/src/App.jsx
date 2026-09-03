@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Chip } from "@mui/material";
 import api from "./api.js";
 import { buildPath, parsePath } from "./paths.js";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
 import RepoList from "./components/RepoList.jsx";
+import RepoPage from "./components/RepoPage.jsx";
 import SchedulesList from "./components/SchedulesList.jsx";
 import TemplatesList from "./components/TemplatesList.jsx";
 import SuitesList from "./components/SuitesList.jsx";
@@ -36,30 +36,34 @@ export default function App() {
   const [suites, setSuites] = useState([]);
   const [suiteRuns, setSuiteRuns] = useState([]);
   const [stateFilter, setStateFilter] = useState("all");
-  // view switches the main pane between the flat task list, the repo
-  // page, and the schedules page; repoFilter is orthogonal to
-  // stateFilter and survives a trip through the repo page and back,
-  // since "which repo" and "which state" are two independent questions
-  // about the same task list.
+  // view switches the main pane between the flat task list, the repos
+  // pane, and the schedules page.
   //
-  // view and showSettings (below) both seed from the URL the page
-  // loaded with rather than a fixed default, so a direct link to /repos
-  // or /settings lands on that sub-page instead of always opening on
-  // the task list first (bwsalmon/agents#548).
+  // view, openRepo and showSettings (below) all seed from the URL the
+  // page loaded with rather than a fixed default, so a direct link to
+  // /repos, /repos/acme/widgets or /settings lands on that sub-page
+  // instead of always opening on the task list first (bwsalmon/agents
+  // #548, grain/task-111).
   const [view, setView] = useState(() => parsePath(window.location.pathname).view);
-  const [repoFilter, setRepoFilter] = useState(null);
-  // releasesRepo is which repo's release pane is open within the repos
-  // view (null shows the repo list instead) -- see RepoList's own
-  // "Releases" button.
-  const [releasesRepo, setReleasesRepo] = useState(null);
+  // openRepo is which repo's own page is showing within the repos view
+  // (null shows the repo list instead), and releasesOpen whether that
+  // page's release pane is showing over it -- the repo page is the only
+  // way into releases now that the list's own "Releases" button is gone.
+  //
+  // The repo page is also what scopes a task list to one repo, which the
+  // task view's own repoFilter chip used to do: opening a repo lists its
+  // tasks *on the repo's page*, so there is no second, filtered flavour
+  // of the flat list to keep in step with it.
+  const [openRepo, setOpenRepo] = useState(() => parsePath(window.location.pathname).repo || null);
+  const [releasesOpen, setReleasesOpen] = useState(() => parsePath(window.location.pathname).showReleases === true);
   const [error, setError] = useState(null);
   const [openTaskId, setOpenTaskId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [showNewTask, setShowNewTask] = useState(false);
-  // newTaskRepo is the repo the "+" on a repo page row was opened from
-  // (bwsalmon/agents#474); null means "no override", so the overlay
-  // falls back to repoFilter the same way it always has for the
-  // sidebar's own "+ New task" button.
+  // newTaskRepo is the repo the "New task" button on a repo's own page
+  // was opened from (bwsalmon/agents#474, grain/task-111); null means
+  // "no override", so the overlay falls back to whichever repo page is
+  // open, the same as the sidebar's own "+ New task" button does.
   const [newTaskRepo, setNewTaskRepo] = useState(null);
   const [showSettings, setShowSettings] = useState(() => parsePath(window.location.pathname).showSettings === true);
   const [showDebug, setShowDebug] = useState(() => parsePath(window.location.pathname).showDebug === true);
@@ -104,9 +108,9 @@ export default function App() {
     setSuiteRuns(await api("/api/suite-runs"));
   }, []);
 
-  // refreshConfig re-fetches /api/config -- needed after adding or
-  // removing a target repo (RepoList's own "Add"/"Remove",
-  // bwsalmon/agents#473) since config is otherwise only ever fetched
+  // refreshConfig re-fetches /api/config -- needed after adding a target
+  // repo (RepoList's own "Add") or removing one (RepoPage's own
+  // "Remove", bwsalmon/agents#473) since config is otherwise only ever fetched
   // once, at mount, and the repos pane's own list (repoRows) reads
   // config.targetRepos to decide which repos to show and which ones it
   // can offer to remove. It reads config.repoDefaultCapabilities for the
@@ -163,31 +167,36 @@ export default function App() {
     openTask(id);
   }, [openTask]);
 
-  // openRepo is the repo page's row click: scope the task list to that
-  // repo and switch back to it, the same as clicking a repo chip
-  // anywhere else would.
-  const openRepo = useCallback((repo) => {
-    setRepoFilter(repo);
-    setReleasesRepo(null);
-    setView("tasks");
+  // openRepoPage is the repo list's row click: show that repo's own page
+  // (RepoPage, grain/task-111), which is where its tasks and everything
+  // else about it live.
+  const openRepoPage = useCallback((repo) => {
+    setOpenRepo(repo);
+    setReleasesOpen(false);
+    setView("repos");
   }, []);
 
-  // openNewTaskForRepo is the repo page's own "+" button: file a task
-  // against that specific repo without disturbing repoFilter, which is
-  // "what the tasks view is scoped to" and has nothing to do with which
-  // repo's row happened to be clicked here.
+  const closeRepoPage = useCallback(() => {
+    setOpenRepo(null);
+    setReleasesOpen(false);
+  }, []);
+
+  // openNewTaskForRepo is the repo page's own "New task" button: file a
+  // task against that specific repo. It takes the repo explicitly rather
+  // than reading openRepo, since the overlay outlives a navigation away
+  // from the page it was opened on.
   const openNewTaskForRepo = useCallback((repo) => {
     setNewTaskRepo(repo);
     setShowNewTask(true);
   }, []);
 
-  // setViewAndCloseReleases is Sidebar's onSetView: any nav click leaves
-  // the repos view's release pane behind, so returning to "repos" later
-  // should land back on the repo list rather than a stale release pane.
-  const setViewAndCloseReleases = useCallback((v) => {
-    setReleasesRepo(null);
+  // setViewAndCloseRepo is Sidebar's onSetView: any nav click leaves an
+  // open repo behind, so a later click on "Repos" lands back on the repo
+  // list rather than on whichever repo was last open.
+  const setViewAndCloseRepo = useCallback((v) => {
+    closeRepoPage();
     setView(v);
-  }, []);
+  }, [closeRepoPage]);
 
   // act runs a mutation, then re-fetches the task (and the list behind
   // it) so the screen reflects what the store now reports -- never the
@@ -335,7 +344,7 @@ export default function App() {
   // the time it does there is nothing left to push.
   const mountedRef = useRef(false);
   useEffect(() => {
-    const path = buildPath({ view, taskId: openTaskId, showSettings, showDebug });
+    const path = buildPath({ view, taskId: openTaskId, repo: openRepo, showReleases: releasesOpen, showSettings, showDebug });
     if (path !== window.location.pathname) {
       // The very first correction (e.g. an unrecognized path normalized
       // back to "/") replaces rather than pushes, so a mistyped or
@@ -347,7 +356,7 @@ export default function App() {
       }
     }
     mountedRef.current = true;
-  }, [view, openTaskId, showSettings, showDebug]);
+  }, [view, openTaskId, openRepo, releasesOpen, showSettings, showDebug]);
 
   // Mirrors the browser's own back/forward buttons onto the same state
   // buildPath/parsePath already govern everything else through.
@@ -357,6 +366,8 @@ export default function App() {
       setShowSettings(parsed.showSettings === true);
       setShowDebug(parsed.showDebug === true);
       setView(parsed.view);
+      setOpenRepo(parsed.repo || null);
+      setReleasesOpen(parsed.showReleases === true);
       if (parsed.taskId) {
         openTask(parsed.taskId);
       } else {
@@ -367,7 +378,29 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [openTask, closeDetail]);
 
-  const scopedTasks = repoFilter ? tasks.filter((t) => t.repo === repoFilter) : tasks;
+  // taskListPane is the flat task list plus the batch-actions bar under
+  // it -- rendered both as the tasks view itself and, scoped to one repo
+  // and unfiltered, as the body of that repo's page. The same list
+  // either way, search/sort/select/drag-reorder included, rather than a
+  // poorer second list of tasks on the repo page (RepoPage's own doc
+  // comment). A repo page always shows all of the repo's tasks: the
+  // sidebar's state filter is a question about the flat list, and
+  // picking one there navigates back to it (Sidebar's selectState).
+  const taskListPane = (list, filter) => (
+    <>
+      <TaskList
+        tasks={list}
+        stateFilter={filter}
+        config={config}
+        onOpenTask={openTask}
+        selected={selected}
+        onToggleSelect={toggleSelect}
+        onSelectAll={setSelection}
+        onReorder={reorderTasks}
+      />
+      <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
+    </>
+  );
 
   return (
     <div className="app-shell">
@@ -378,7 +411,7 @@ export default function App() {
           <Sidebar
             config={config}
             view={view}
-            onSetView={setViewAndCloseReleases}
+            onSetView={setViewAndCloseRepo}
             tasks={tasks}
             schedules={schedules}
             templates={templates}
@@ -389,18 +422,28 @@ export default function App() {
             onOpenDebug={() => setShowDebug(true)}
             onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
           />
-          {view === "repos" && releasesRepo !== null ? (
-            <RepoReleases repo={releasesRepo} templates={templates} onBack={() => setReleasesRepo(null)} showError={showError} />
+          {view === "repos" && openRepo !== null && releasesOpen ? (
+            <RepoReleases repo={openRepo} templates={templates} onBack={() => setReleasesOpen(false)} showError={showError} />
+          ) : view === "repos" && openRepo !== null ? (
+            <RepoPage
+              repo={openRepo}
+              tasks={tasks}
+              config={config}
+              onBack={closeRepoPage}
+              onNewTask={openNewTaskForRepo}
+              onOpenReleases={() => setReleasesOpen(true)}
+              onRefreshConfig={refreshConfig}
+              showError={showError}
+            >
+              {taskListPane(tasks.filter((t) => t.repo === openRepo), "all")}
+            </RepoPage>
           ) : view === "repos" ? (
             <RepoList
               tasks={tasks}
               config={config}
-              onOpenRepo={openRepo}
-              onOpenReleases={setReleasesRepo}
+              onOpenRepo={openRepoPage}
               onRefreshConfig={refreshConfig}
               showError={showError}
-              onOpenTask={openTask}
-              onNewTask={openNewTaskForRepo}
             />
           ) : view === "schedules" ? (
             <SchedulesList
@@ -428,32 +471,13 @@ export default function App() {
             />
           ) : (
             <div className="main-column">
-              {repoFilter !== null && (
-                <div className="repo-scope-bar">
-                  <Chip
-                    label={`Repo: ${repoFilter}`}
-                    onDelete={() => setRepoFilter(null)}
-                    deleteIcon={<span title="Clear repo filter">×</span>}
-                  />
-                </div>
-              )}
-              <TaskList
-                tasks={scopedTasks}
-                stateFilter={stateFilter}
-                config={config}
-                onOpenTask={openTask}
-                selected={selected}
-                onToggleSelect={toggleSelect}
-                onSelectAll={setSelection}
-                onReorder={reorderTasks}
-              />
-              <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
+              {taskListPane(tasks, stateFilter)}
             </div>
           )}
         </>
       )}
       {config !== null && (
-        <ConfigurationAgentButton defaultRepo={repoFilter} onOpenTask={openTask} showError={showError} />
+        <ConfigurationAgentButton defaultRepo={openRepo} onOpenTask={openTask} showError={showError} />
       )}
       {config?.reconcilerDown && <ReconcilerDownBanner />}
       {error !== null && <ErrorBanner message={error} />}
@@ -464,7 +488,7 @@ export default function App() {
         <NewTaskOverlay
           tasks={tasks}
           config={config}
-          defaultRepo={newTaskRepo !== null ? newTaskRepo : repoFilter}
+          defaultRepo={newTaskRepo !== null ? newTaskRepo : openRepo}
           onClose={() => setShowNewTask(false)}
           onCreated={refreshList}
           onOpenTask={openTask}

@@ -19,9 +19,6 @@ function renderList(overrides = {}) {
     tasks,
     config: null,
     onOpenRepo: vi.fn(),
-    onOpenReleases: vi.fn(),
-    onOpenTask: vi.fn(),
-    onNewTask: vi.fn(),
     onRefreshConfig: vi.fn(),
     showError: vi.fn(),
     ...overrides,
@@ -63,16 +60,9 @@ describe("RepoList", () => {
 
   // A repo that carries default capabilities of its own is listed even
   // when nothing else here mentions it: PUT /api/repos/{owner}/{name}/
-  // capabilities never required an allowlist entry, and this page is the
-  // only place that set can be edited.
-  it("also lists a repo that only carries default capabilities of its own", async () => {
-    api.mockResolvedValueOnce({
-      repo: "acme/orphan",
-      defaultCapabilities: ["gcp-key"],
-      deploymentDefaultCapabilities: [],
-      effectiveDefaultCapabilities: ["gcp-key"],
-    });
-    const user = userEvent.setup();
+  // capabilities never required an allowlist entry, and its own page is
+  // the only place that set can be edited.
+  it("also lists a repo that only carries default capabilities of its own", () => {
     const config = {
       targetRepos: [],
       repoDefaultCapabilities: { "acme/orphan": ["gcp-key"] },
@@ -81,14 +71,7 @@ describe("RepoList", () => {
     renderList({ config });
 
     const row = screen.getByText("acme/orphan").closest("li");
-    // Nothing to remove -- it was never on the allowlist -- and the row
-    // says why it is here rather than looking like an empty stray.
-    expect(within(row).queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
     expect(within(row).getByText("Defaults only")).toBeInTheDocument();
-
-    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/orphan/capabilities");
-    expect(await screen.findByText(/A task filed against acme\/orphan starts with:/)).toHaveTextContent("GCP key");
   });
 
   it("does not mark a repo that carries defaults and has tasks of its own as defaults-only", () => {
@@ -97,6 +80,19 @@ describe("RepoList", () => {
 
     const row = screen.getByText("acme/gadgets").closest("li");
     expect(within(row).queryByText("Defaults only")).not.toBeInTheDocument();
+  });
+
+  // grain/task-111: a row is a name and its counts. Everything that used
+  // to sit on one -- New branch, Capabilities, Releases, Remove, "+",
+  // and the chevron that folded the repo's tasks out in place -- is on
+  // the repo's own page now.
+  it("carries no per-row buttons at all", () => {
+    const config = { targetRepos: ["acme/widgets"] };
+    renderList({ config });
+
+    const row = screen.getByText("acme/widgets").closest("li");
+    expect(within(row).queryAllByRole("button")).toHaveLength(0);
+    expect(screen.queryByText("Fix the widget")).not.toBeInTheDocument();
   });
 
   it("filters the list by repo name", async () => {
@@ -126,19 +122,6 @@ describe("RepoList", () => {
     await user.click(screen.getByText("acme/gadgets"));
 
     expect(onOpenRepo).toHaveBeenCalledWith("acme/gadgets");
-  });
-
-  it("calls onOpenReleases, not onOpenRepo, when a row's Releases button is clicked", async () => {
-    const onOpenRepo = vi.fn();
-    const onOpenReleases = vi.fn();
-    const user = userEvent.setup();
-    renderList({ onOpenRepo, onOpenReleases });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Releases" }));
-
-    expect(onOpenReleases).toHaveBeenCalledWith("acme/gadgets");
-    expect(onOpenRepo).not.toHaveBeenCalled();
   });
 
   it("shows an empty message when there are no known repos", () => {
@@ -248,321 +231,5 @@ describe("RepoList", () => {
     expect(confirmed).not.toHaveBeenCalled();
     expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/gadgets" }) });
     vi.unstubAllGlobals();
-  });
-
-  it("only offers Remove on a row that is in config.targetRepos", () => {
-    const config = { targetRepos: ["acme/widgets"] };
-    renderList({ config });
-
-    const widgetsRow = screen.getByText("acme/widgets").closest("li");
-    const gadgetsRow = screen.getByText("acme/gadgets").closest("li");
-    expect(within(widgetsRow).getByRole("button", { name: "Remove" })).toBeInTheDocument();
-    expect(within(gadgetsRow).queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
-  });
-
-  it("removes a repo after confirmation, without also opening it", async () => {
-    api.mockResolvedValueOnce({});
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
-    const onOpenRepo = vi.fn();
-    const onRefreshConfig = vi.fn();
-    const user = userEvent.setup();
-    const config = { targetRepos: ["acme/widgets"] };
-    renderList({ config, onOpenRepo, onRefreshConfig });
-
-    const row = screen.getByText("acme/widgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Remove" }));
-
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets", { method: "DELETE" });
-    expect(onRefreshConfig).toHaveBeenCalledTimes(1);
-    expect(onOpenRepo).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
-  });
-
-  it("does not remove a repo when the confirmation is declined", async () => {
-    vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
-    const onRefreshConfig = vi.fn();
-    const user = userEvent.setup();
-    const config = { targetRepos: ["acme/widgets"] };
-    renderList({ config, onRefreshConfig });
-
-    const row = screen.getByText("acme/widgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Remove" }));
-
-    expect(api).not.toHaveBeenCalled();
-    expect(onRefreshConfig).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
-  });
-
-  it("folds a repo's tasks out of view until the chevron is clicked, without opening the repo", async () => {
-    const onOpenRepo = vi.fn();
-    const user = userEvent.setup();
-    renderList({ onOpenRepo });
-
-    expect(screen.queryByText("Fix the widget")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Show tasks for acme/widgets" }));
-
-    expect(screen.getByText("Fix the widget")).toBeInTheDocument();
-    expect(screen.getByText("Ship the widget")).toBeInTheDocument();
-    expect(screen.getByText("Recall the widget")).toBeInTheDocument();
-    expect(screen.queryByText("Ship the gadget")).not.toBeInTheDocument();
-    expect(onOpenRepo).not.toHaveBeenCalled();
-  });
-
-  it("hides a repo's tasks again when its chevron is toggled a second time", async () => {
-    const user = userEvent.setup();
-    renderList();
-
-    const toggle = () => screen.getByRole("button", { name: /tasks for acme\/widgets/ });
-    await user.click(toggle());
-    expect(screen.getByText("Fix the widget")).toBeInTheDocument();
-
-    await user.click(toggle());
-    expect(screen.queryByText("Fix the widget")).not.toBeInTheDocument();
-  });
-
-  it("opens a task from a folded-out sublist", async () => {
-    const onOpenTask = vi.fn();
-    const user = userEvent.setup();
-    renderList({ onOpenTask });
-
-    await user.click(screen.getByRole("button", { name: "Show tasks for acme/widgets" }));
-    await user.click(screen.getByText("Fix the widget"));
-
-    expect(onOpenTask).toHaveBeenCalledWith("1");
-  });
-
-  it("calls onNewTask with the repo, not onOpenRepo, when a row's + button is clicked", async () => {
-    const onOpenRepo = vi.fn();
-    const onNewTask = vi.fn();
-    const user = userEvent.setup();
-    renderList({ onOpenRepo, onNewTask });
-
-    await user.click(screen.getByRole("button", { name: "New task under acme/gadgets" }));
-
-    expect(onNewTask).toHaveBeenCalledWith("acme/gadgets");
-    expect(onOpenRepo).not.toHaveBeenCalled();
-  });
-
-  it("opens a row's New branch form and loads its branches, without also opening the repo", async () => {
-    api.mockResolvedValueOnce([]);
-    const onOpenRepo = vi.fn();
-    const user = userEvent.setup();
-    renderList({ onOpenRepo });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "New branch" }));
-
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/branches");
-    expect(screen.getByPlaceholderText("feature/foo")).toBeInTheDocument();
-    expect(onOpenRepo).not.toHaveBeenCalled();
-  });
-
-  it("closes a row's New branch form when its button is clicked again", async () => {
-    api.mockResolvedValue([]);
-    const user = userEvent.setup();
-    renderList();
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    const toggle = () => within(row).getByRole("button", { name: "New branch" });
-    await user.click(toggle());
-    expect(screen.getByPlaceholderText("feature/foo")).toBeInTheDocument();
-
-    await user.click(toggle());
-    expect(screen.queryByPlaceholderText("feature/foo")).not.toBeInTheDocument();
-  });
-
-  it("creates a branch and refreshes the branch list on success", async () => {
-    api.mockResolvedValueOnce([]); // the load on opening the form
-    api.mockResolvedValueOnce({ repo: "acme/gadgets", name: "myfeat", status: "pending", createdAt: "2026-01-01T00:00:00Z" });
-    api.mockResolvedValueOnce([{ repo: "acme/gadgets", name: "myfeat", status: "pending", createdAt: "2026-01-01T00:00:00Z" }]);
-    const user = userEvent.setup();
-    renderList();
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "New branch" }));
-    await user.type(screen.getByPlaceholderText("feature/foo"), "myfeat");
-    await user.click(within(row).getByRole("button", { name: "Create branch" }));
-
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/branches", {
-      method: "POST", body: JSON.stringify({ name: "myfeat" }),
-    });
-    const item = await screen.findByText("myfeat");
-    expect(item.closest("li")).toHaveTextContent("myfeat -- pending");
-  });
-
-  it("reports the error when creating a branch fails, without clearing the field", async () => {
-    api.mockResolvedValueOnce([]); // the load on opening the form
-    api.mockRejectedValueOnce(new Error("invalid branch name"));
-    const showError = vi.fn();
-    const user = userEvent.setup();
-    renderList({ showError });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "New branch" }));
-    await user.type(screen.getByPlaceholderText("feature/foo"), "bad name");
-    await user.click(within(row).getByRole("button", { name: "Create branch" }));
-
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "invalid branch name" }));
-    expect(screen.getByPlaceholderText("feature/foo")).toHaveValue("bad name");
-  });
-
-  // grain/task-24: a repo's own default capability set is edited here,
-  // next to the repo it belongs to, rather than on the deployment-wide
-  // Settings pane -- and the form says what a task filed against this
-  // repo would actually start with, which is the union of both layers.
-  it("opens a row's Capabilities form and loads that repo's own defaults", async () => {
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: ["gcp-key"],
-      deploymentDefaultCapabilities: ["gemini-key"],
-      effectiveDefaultCapabilities: ["gemini-key", "gcp-key"],
-    });
-    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
-    const onOpenRepo = vi.fn();
-    const user = userEvent.setup();
-    renderList({ config, onOpenRepo });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
-
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities");
-    expect(await screen.findByText(/A task filed against acme\/gadgets starts with:/)).toHaveTextContent(
-      "Gemini key, GCP key",
-    );
-    expect(onOpenRepo).not.toHaveBeenCalled();
-  });
-
-  // Both sets GET reports come back as stored, retired ids included, so
-  // that one chosen before a build retired it can still be seen and
-  // unticked. What a task starts with is the filtered union, though --
-  // (*Client).defaultCapabilities drops a retired id before any grant is
-  // written -- so this line must not list one.
-  it("leaves a retired id out of what a task filed against the repo starts with", async () => {
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: ["gcp-key", "scratch-repo"],
-      deploymentDefaultCapabilities: ["gemini-key", "old-deployment-key"],
-      effectiveDefaultCapabilities: ["gemini-key", "gcp-key"],
-    });
-    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
-    const user = userEvent.setup();
-    renderList({ config });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
-
-    const line = await screen.findByText(/A task filed against acme\/gadgets starts with:/);
-    expect(line).toHaveTextContent("Gemini key, GCP key");
-    expect(line).not.toHaveTextContent("scratch-repo");
-    expect(line).not.toHaveTextContent("old-deployment-key");
-  });
-
-  it("says a repo whose only defaults are retired ids starts with nothing", async () => {
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: ["scratch-repo"],
-      deploymentDefaultCapabilities: ["old-deployment-key"],
-      effectiveDefaultCapabilities: [],
-    });
-    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
-    const user = userEvent.setup();
-    renderList({ config });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
-
-    expect(await screen.findByText(/A task filed against acme\/gadgets starts with:/)).toHaveTextContent(
-      "nothing -- only what whoever files it ticks",
-    );
-  });
-
-  it("saves a repo's default capabilities and refreshes the config the new-task form seeds from", async () => {
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: [],
-      deploymentDefaultCapabilities: [],
-      effectiveDefaultCapabilities: [],
-    });
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: ["gcp-key"],
-      deploymentDefaultCapabilities: [],
-      effectiveDefaultCapabilities: ["gcp-key"],
-    });
-    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
-    const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    renderList({ config, onRefreshConfig });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
-    await user.click(await screen.findByLabelText("Default capabilities"));
-    await user.click(await screen.findByRole("option", { name: "GCP key" }));
-    await user.keyboard("{Escape}");
-    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
-
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities", {
-      method: "PUT", body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
-    });
-    expect(onRefreshConfig).toHaveBeenCalled();
-  });
-
-  // grain/task-43: the per-repo set is reported as stored too, so a
-  // capability retired since this repo named it arrives ticked with no
-  // row in config.capabilities to untick it -- and PUT rejects the whole
-  // set as "unknown capability" every time this form is saved with it
-  // still there. Its own row is the only way out.
-  it("offers a row for a stored repo default this build no longer lists", async () => {
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: ["gcp-key", "scratch-repo"],
-      deploymentDefaultCapabilities: [],
-      effectiveDefaultCapabilities: ["gcp-key"],
-    });
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: ["gcp-key"],
-      deploymentDefaultCapabilities: [],
-      effectiveDefaultCapabilities: ["gcp-key"],
-    });
-    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
-    const user = userEvent.setup();
-    renderList({ config });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
-    await user.click(await screen.findByLabelText("Default capabilities"));
-    const retired = await screen.findByRole("option", { name: /scratch-repo/ });
-    expect(retired).toHaveTextContent("No longer offered -- untick to remove it");
-
-    await user.click(retired);
-    await user.keyboard("{Escape}");
-    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
-
-    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities", {
-      method: "PUT", body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
-    });
-  });
-
-  it("reports the error when saving a repo's default capabilities fails", async () => {
-    api.mockResolvedValueOnce({
-      repo: "acme/gadgets",
-      defaultCapabilities: [],
-      deploymentDefaultCapabilities: [],
-      effectiveDefaultCapabilities: [],
-    });
-    api.mockRejectedValueOnce(new Error("unknown capability nope"));
-    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
-    const showError = vi.fn();
-    const user = userEvent.setup();
-    renderList({ config, showError });
-
-    const row = screen.getByText("acme/gadgets").closest("li");
-    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
-    await screen.findByLabelText("Default capabilities");
-    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
-
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "unknown capability nope" }));
   });
 });

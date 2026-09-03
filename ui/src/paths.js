@@ -1,9 +1,9 @@
 // paths.js maps App.jsx's own navigation state -- which of the four
-// sidebar destinations is showing, whether a task's detail overlay is
-// open, whether the settings or debug overlay is open -- onto real URL
-// paths and back, so each is directly loadable/bookmarkable/shareable
-// instead of reachable only by clicking through from "/" (bwsalmon/
-// agents#548).
+// sidebar destinations is showing, whether a task's or a repo's own page
+// is open, whether the settings or debug overlay is open -- onto real
+// URL paths and back, so each is directly loadable/bookmarkable/
+// shareable instead of reachable only by clicking through from "/"
+// (bwsalmon/agents#548).
 //
 // Kept as two pure functions rather than pulling in a routing library:
 // with only these few (mostly orthogonal) bits of state to encode,
@@ -24,12 +24,18 @@
 
 const VIEWS = ["tasks", "repos", "schedules", "templates", "suites"];
 
-// parsePath turns a URL path into the {view, taskId, showSettings,
-// showDebug} App needs in order to restore on load or on a
+// parsePath turns a URL path into the {view, taskId, repo, showReleases,
+// showSettings, showDebug} App needs in order to restore on load or on a
 // back/forward navigation. Anything it doesn't recognize -- an unknown
 // segment, a stray trailing slash -- falls back to the default tasks
 // view rather than erroring, the same as an unknown in-app route today
 // just lands on "/".
+//
+// A repo's own page (RepoPage, grain/task-111) takes two segments
+// rather than one, since a repo is named "owner/name" -- /repos/acme/
+// widgets -- and its releases pane hangs off that as a third. An
+// "owner" with no "name" is not a repo, so /repos/acme lands on the
+// repo list the same way any other unrecognized path lands on "/".
 export function parsePath(pathname) {
   const segments = pathname.split("/").filter(Boolean);
   if (segments[0] === "settings") {
@@ -41,6 +47,11 @@ export function parsePath(pathname) {
   if (segments[0] === "tasks" && segments[1]) {
     return { view: "tasks", taskId: segments[1] };
   }
+  if (segments[0] === "repos" && segments[1] && segments[2]) {
+    const repo = `${segments[1]}/${segments[2]}`;
+    if (segments[3] === "releases") return { view: "repos", repo, showReleases: true };
+    return { view: "repos", repo };
+  }
   if (VIEWS.includes(segments[0])) {
     return { view: segments[0] };
   }
@@ -51,10 +62,15 @@ export function parsePath(pathname) {
 // be showing at any moment. App diffs this against window.location on
 // every relevant state change to decide whether the address bar needs
 // updating at all.
-export function buildPath({ view, taskId, showSettings, showDebug }) {
+export function buildPath({ view, taskId, repo, showReleases, showSettings, showDebug }) {
   if (showSettings) return "/settings";
   if (showDebug) return "/debug";
   if (taskId) return `/tasks/${taskId}`;
+  // An open repo only means anything within the repos view -- App keeps
+  // the two together, and the sidebar clears the repo on the way out of
+  // that view, so this is belt and braces rather than a case that
+  // arises.
+  if (view === "repos" && repo) return `/repos/${repo}${showReleases ? "/releases" : ""}`;
   if (view === "tasks") return "/";
   return `/${view}`;
 }

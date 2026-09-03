@@ -19,7 +19,7 @@ import api from "../api.js";
 // Capabilities, a default Title/Description) is assembled server-side
 // from `configuration: true` alone, precisely so reaching for this needs
 // no more thought than clicking it. defaultRepo carries whatever repo
-// the screen is already scoped to (App.jsx's own repoFilter), the same
+// the screen is already about (App.jsx's own openRepo), the same
 // value NewTaskOverlay defaults its own repo field from -- empty falls
 // back to the deployment's own default target, and a deployment with
 // neither surfaces CreateTask's own "no repo given" error through
