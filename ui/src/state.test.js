@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -74,6 +74,34 @@ describe("capabilityRows", () => {
     expect(capabilityRows(null, ["scratch-repo"])).toEqual([
       { id: "scratch-repo", name: "scratch-repo", description: RETIRED_CAPABILITY_HINT, retired: true },
     ]);
+  });
+});
+
+describe("capabilityUnavailableHint", () => {
+  it("names every gap a capability this deployment cannot honour still has", () => {
+    const hint = capabilityUnavailableHint({
+      id: "gemini-key", ready: false, needs: ["GCP project", "gcp-key-minter"],
+    });
+    expect(hint).toContain("GCP project");
+    expect(hint).toContain("gcp-key-minter");
+    expect(hint).toContain("fail to dispatch");
+  });
+
+  it("still warns when the gap has no name attached to it", () => {
+    expect(capabilityUnavailableHint({ id: "gemini-key", ready: false })).toContain("Not ready");
+  });
+
+  it("says nothing about a ready capability", () => {
+    expect(capabilityUnavailableHint({ id: "gemini-key", ready: true })).toBe("");
+  });
+
+  // A build or an endpoint that computes no readiness leaves the field
+  // off entirely, and "unknown" must not read as a warning against every
+  // capability on the list.
+  it("says nothing when readiness is unknown", () => {
+    expect(capabilityUnavailableHint({ id: "gemini-key" })).toBe("");
+    expect(capabilityUnavailableHint({ id: "x", retired: true })).toBe("");
+    expect(capabilityUnavailableHint(undefined)).toBe("");
   });
 });
 

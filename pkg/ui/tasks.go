@@ -445,10 +445,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeClientError(w, err)
 		return
 	}
+	// Read before the capability listing below, which needs both to say
+	// whether a row a human can tick would actually work on this
+	// deployment -- the same two inputs the Settings pane's own
+	// Capabilities tab reads.
+	repoConfigs, err := s.tasks.Store.ListRepoConfigs(r.Context())
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
 	resp := configResponse{
 		Actor:         s.tasks.Config.Actor.ID,
 		ActorKind:     string(s.tasks.Config.Actor.Kind),
-		Capabilities:  s.tasks.Config.Capabilities,
+		Capabilities:  s.tasks.capabilitiesWithReadiness(cfg, repoConfigs),
 		RebootEnabled: s.tasks.Config.Reboot != nil,
 		TargetRepos:   s.tasks.targetRepos(),
 	}
@@ -477,11 +486,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// Outside the cfg != nil branch above: a repo can carry defaults of
 	// its own on a deployment that has never saved a settings row, the
 	// same case GetSettings reads this in both of its branches for.
-	repoConfigs, err := s.tasks.Store.ListRepoConfigs(r.Context())
-	if err != nil {
-		writeClientError(w, err)
-		return
-	}
 	for _, rc := range repoConfigs {
 		var ids []string
 		for _, id := range rc.DefaultCapabilities {

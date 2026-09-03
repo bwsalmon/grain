@@ -49,6 +49,35 @@ type Capability struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// Ready is CapabilityStatus.Ready for this same capability -- whether
+	// this deployment has the settings and secrets a task granted it
+	// would actually need -- carried on the picker's own row so ticking
+	// one that cannot work says so here rather than at the far end of a
+	// dispatch.
+	//
+	// That gap is what this field is for. The Settings pane has known
+	// since bwsalmon/agents#611 that gemini-key on a deployment with no
+	// GCP project, or no `gcp-key-minter` secret, is Not ready; the
+	// picker a human actually attaches capabilities with knew nothing
+	// about it and offered the row regardless. Ticking it filed an
+	// ordinary grant, and the first sign of trouble was the task's own
+	// run failing with "capability \"gemini-key\" refused: ..." some
+	// minutes later -- with the fix being in Settings, two panes away
+	// from where the mistake was made.
+	//
+	// A pointer, and omitted when nil, because "nobody computed this" is
+	// a third answer distinct from ready and not-ready:
+	// OfferedCapabilities is a static listing with no deployment behind
+	// it, and a false there would libel every capability grain ships. Only
+	// GET /api/config fills it in. The frontend reads `ready === false`
+	// for the same reason CapabilitiesPanel reads `grantable === false`.
+	Ready *bool `json:"ready,omitempty"`
+	// Needs is CapabilityStatus.MissingConfig and MissingSecrets run
+	// together -- every deployment setting and every secret this
+	// capability is still short of, in the same human-facing words the
+	// Capabilities tab uses, so the picker can name the gap rather than
+	// only report that there is one. Empty whenever Ready is nil or true.
+	Needs []string `json:"needs,omitempty"`
 }
 
 // OfferedCapabilities is every capability a human can attach to a task,

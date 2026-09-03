@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -166,13 +167,40 @@ func (c *Capability) Spec() model.CapabilitySpec {
 // grain/automation/gemini_keys.py's GeminiKey.resolve gives a deployment
 // missing gemini_key_config, translated to "this value was never wired
 // up" since v2 has no deployment config to be absent from yet.
+//
+// It also refuses when that credential names nothing this deployment's
+// secret store can resolve. Materialize would fail on the very same call
+// a moment later, so nothing new is caught here -- what changes is which
+// half of the contract reports it. A refusal is posted to the task
+// verbatim (Resolution.Reason), so an operator reads a sentence naming
+// the secret to set; a failed Materialize is wrapped into a run's error
+// detail as "materializing capabilities: geminikey: resolving credential
+// ...", which is grain describing its own internals. The distinction
+// matters most for exactly this capability, whose configuration is
+// spread across a deployment setting, a secret and a GCP IAM grant, and
+// which therefore has three separate ways to be half-wired.
 func (c *Capability) Resolve(ctx context.Context, cc model.CapabilityContext) (model.Resolution, error) {
 	if c.ProjectID == "" || c.Credential.Name == "" {
 		return model.RefusedBecause(
-			"this issue is labelled `grain-gemini-key`, asking for a Gemini key " +
-				"this deployment isn't configured to mint. An operator needs to wire " +
-				"up the gemini-key capability with a GCP project and a standing " +
-				"credential to mint under.",
+			"this task asks for a Gemini key this deployment isn't configured to " +
+				"mint. An operator sets the GCP project the key is minted in, under " +
+				"Settings -> Capabilities (`grain settings -gcp-project <project>`).",
+		), nil
+	}
+	if cc.Credentials == nil {
+		return model.RefusedBecause(
+			"this task asks for a Gemini key, but nothing here can reach the " +
+				"standing credential `" + c.Credential.Name + "` the key would be " +
+				"minted under.",
+		), nil
+	}
+	if _, err := cc.Credentials.Resolve(ctx, c.Credential.Name); err != nil {
+		return model.RefusedBecause(
+			"this task asks for a Gemini key, but the standing credential `" +
+				c.Credential.Name + "` it is minted under is not set on this " +
+				"deployment. An operator pastes the GCP minter service account's " +
+				"key file into Settings -> Secrets, or runs `grain secrets set " +
+				c.Credential.Name + " key.json -value-file <path>`.",
 		), nil
 	}
 	return model.Honoured(), nil
@@ -331,10 +359,11 @@ func deleteExpired(ctx context.Context, m minter, now time.Time, maxAge time.Dur
 // --- the real minter, against the live API Keys API ------------------
 
 // pollInterval paces polling a Create/Delete operation to completion.
-// Not configurable: it trades a handful of extra round trips for one
-// fewer knob, and every caller already governs the overall wait through
-// ctx.
-const pollInterval = 2 * time.Second
+// Not configurable by an operator: it trades a handful of extra round
+// trips for one fewer knob, and every caller already governs the overall
+// wait through ctx. A var rather than a const only so this package's own
+// tests can drive await's polling in milliseconds instead of seconds.
+var pollInterval = 2 * time.Second
 
 type apiKeysMinter struct {
 	svc       *apikeys.Service
@@ -380,11 +409,11 @@ func (a *apiKeysMinter) CreateKey(ctx context.Context, displayName, apiTargetSer
 	}
 	op, err := a.svc.Projects.Locations.Keys.Create(a.parent(), key).Context(ctx).Do()
 	if err != nil {
-		return "", "", fmt.Errorf("creating key: %w", err)
+		return "", "", fmt.Errorf("creating key: %w", advise(a.projectID, err))
 	}
 	op, err = a.await(ctx, op)
 	if err != nil {
-		return "", "", err
+		return "", "", advise(a.projectID, err)
 	}
 
 	var created apikeys.V2Key
@@ -403,7 +432,17 @@ func (a *apiKeysMinter) CreateKey(ctx context.Context, displayName, apiTargetSer
 	got, err := a.svc.Projects.Locations.Keys.GetKeyString(created.Name).Context(ctx).Do()
 	if err != nil {
 		_ = a.DeleteKey(ctx, created.Name)
-		return "", "", fmt.Errorf("reading back the key string: %w", err)
+		return "", "", fmt.Errorf("reading back the key string: %w", advise(a.projectID, err))
+	}
+	// An empty key string is the one failure here that looks like
+	// success: it would be placed at KeyPath, described to the agent as a
+	// working key by PromptSection, and only fail much later as an
+	// authentication error from Gemini with nothing in it naming grain.
+	// Treated as a failed mint, and cleaned up the same way an unreadable
+	// key is, for the same bwsalmon/agents#104 reason.
+	if got.KeyString == "" {
+		_ = a.DeleteKey(ctx, created.Name)
+		return "", "", fmt.Errorf("key %s was created but its key string came back empty", created.Name)
 	}
 	return created.Name, got.KeyString, nil
 }
@@ -475,4 +514,56 @@ func (a *apiKeysMinter) ListKeys(ctx context.Context) ([]mintedKey, error) {
 func isNotFound(err error) bool {
 	var apiErr *googleapi.Error
 	return errors.As(err, &apiErr) && apiErr.Code == 404
+}
+
+// advise annotates the two ways a mint fails on a project nobody
+// finished setting up, with the sentence that says what to do about it.
+//
+// Both arrive as an indistinguishable HTTP 403 from the API Keys API,
+// and both are easy to reach: `grain setup gcp` defaults
+// -enable-gemini-key to *off*, while terraform/gcp's own
+// enable_gemini_key defaults to *on*, so a deployment installed by
+// script rather than by that module has a GCP project, a minter
+// credential, a "Ready" badge on Settings' Capabilities tab -- and a
+// minter holding no roles/serviceusage.apiKeysAdmin and a project with
+// apikeys.googleapis.com never enabled. The raw error for that is
+// "googleapi: Error 403: Permission 'apikeys.keys.create' denied on
+// resource ... (or it may not exist)", which reads like a bug in grain
+// rather than like one unrun setup flag.
+//
+// The distinction between the two is drawn from the error's own
+// SERVICE_DISABLED reason (an ErrorInfo detail Google returns for every
+// call against an API a project has not enabled), falling back to the
+// message text, since that reason is what separates "enable the API"
+// from "grant the role" -- and the remedy names both anyway, because the
+// one command that fixes either fixes both.
+//
+// Anything that is not a 403 is returned unchanged: a 404, a quota
+// error, a transport failure all already say what they are, and wrapping
+// every failure in advice about IAM would make the one case this is for
+// harder to spot rather than easier.
+func advise(projectID string, err error) error {
+	var apiErr *googleapi.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != http.StatusForbidden {
+		return err
+	}
+	remedy := fmt.Sprintf("run `grain setup gcp -project %s -enable-gemini-key`, "+
+		"which grants the minter roles/serviceusage.apiKeysAdmin and enables both "+
+		"apikeys.googleapis.com and %s", projectID, DefaultAPITargetService)
+	if isServiceDisabled(apiErr) {
+		return fmt.Errorf("the API Keys API is not enabled in project %s -- %s: %w", projectID, remedy, err)
+	}
+	return fmt.Errorf("the minter credential is not permitted to administer API keys in "+
+		"project %s (it needs roles/serviceusage.apiKeysAdmin) -- %s: %w", projectID, remedy, err)
+}
+
+// isServiceDisabled reports whether a 403 is Google's "this API has
+// never been enabled in this project" rather than an IAM refusal. The
+// machine-readable form is an ErrorInfo detail with reason
+// SERVICE_DISABLED; googleapi.Error keeps the raw body, so this looks
+// there rather than reaching for a typed detail the generated client
+// does not expose.
+func isServiceDisabled(apiErr *googleapi.Error) bool {
+	return strings.Contains(apiErr.Body, "SERVICE_DISABLED") ||
+		strings.Contains(apiErr.Message, "has not been used in project")
 }
