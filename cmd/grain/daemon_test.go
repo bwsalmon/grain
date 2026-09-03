@@ -33,6 +33,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/ui"
 )
 
 func TestReadTrimmedFile(t *testing.T) {
@@ -145,6 +146,37 @@ func TestCapabilityProviders(t *testing.T) {
 				t.Fatalf("capabilityProviders(%+v) = %v, want %v", tc.cfg, got, tc.want)
 			}
 		})
+	}
+}
+
+// Every row the task capability picker offers must be a capability this
+// binary registers a provider for, on a deployment configured for
+// everything. The two lists drifting apart is not a cosmetic mismatch:
+// model.ResolveGrants refuses a grant naming a capability no provider is
+// registered for, and orchestrator's prepareCapabilities turns any
+// refusal into an error that stops the dispatch before the agent's first
+// turn -- so a picker row with nothing behind it fails the run of every
+// task that ticks it. That is what ui.DefaultCapabilities' "scratch-repo"
+// row did, inherited from v1's labels.py, whose scratch_repo_label had a
+// real implementation behind it that v2 never ported
+// (bwsalmon/agents#612).
+//
+// The config here is deliberately the fully-configured one: gcp-key and
+// gemini-key are gated on GCP settings by design (capabilityProviders'
+// own doc comment), and a deployment that has not set those is a
+// configuration gap Settings' Capabilities tab already reports as
+// "not ready", not the code-level drift this test is guarding.
+func TestEveryPickerCapabilityHasAProvider(t *testing.T) {
+	cfg := config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"}
+	var registered []string
+	for _, p := range capabilityProviders(cfg) {
+		registered = append(registered, p.Spec().Name)
+	}
+	for _, c := range ui.DefaultCapabilities() {
+		if !slices.Contains(registered, c.ID) {
+			t.Errorf("ui.DefaultCapabilities offers %q, but capabilityProviders registers only %v -- "+
+				"granting it would refuse the grant and fail the run", c.ID, registered)
+		}
 	}
 }
 

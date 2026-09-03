@@ -46,7 +46,25 @@ type Capability struct {
 }
 
 // DefaultCapabilities matches labels.py's _STYLES table, human-toggled
-// rows only.
+// rows only -- minus any row v2 ships no provider for.
+//
+// That subtraction is not cosmetic. A row here is a grant a task can be
+// given, and model.ResolveGrants refuses a grant naming a capability no
+// provider is registered for; orchestrator's prepareCapabilities turns
+// any refusal into an error that stops the dispatch before the agent's
+// first turn. So an offered row with nothing behind it does not degrade
+// to "the grant is quietly ignored" -- it fails the run of every task
+// that ticks it. labels.py's scratch_repo_label was such a row: v1 had
+// a real implementation behind it (grain/automation/scratch_repo.py),
+// v2 has none, and offering it anyway made "Scratch repo" a button that
+// broke the task it was ticked on (bwsalmon/agents#612). It is dropped
+// here rather than backed by a new provider; the nearest thing v2 does
+// have is pkg/capability/githubsandbox, which mints a single-use GitHub
+// repo per task and is not offered here either.
+//
+// cmd/grain/daemon_test.go's TestEveryPickerCapabilityHasAProvider holds
+// this list and capabilityProviders together, so the next such row fails
+// a test rather than a run.
 func DefaultCapabilities() []Capability {
 	return []Capability{
 		{ID: "gemini-key", Name: "Gemini key",
@@ -57,8 +75,6 @@ func DefaultCapabilities() []Capability {
 			Description: "Let this task run commands on grain's own host -- restart services, edit config, call the grain CLI -- each one needing a live reply in the task's chat before it runs"},
 		{ID: "bootstrap-playbooks", Name: "Bootstrap playbooks",
 			Description: "Let this task read grain's own bootstrap playbooks -- the runbooks for setting up GCP service accounts, the primary GitHub connection, CloudRun-based IAP access, and test repos -- so it can walk whoever is on the other end of this chat through one of them"},
-		{ID: "scratch-repo", Name: "Scratch repo",
-			Description: "Dispatch this task into its sandbox's own scratch repo instead of /repo"},
 	}
 }
 

@@ -726,6 +726,37 @@ func TestSetCapabilityAttachesAndDetaches(t *testing.T) {
 	}
 }
 
+// A grant whose capability the picker no longer offers can still be let
+// go of -- retiring a row (bwsalmon/agents#612's "scratch-repo") must not
+// strand the tasks already holding it, since a grant no provider is
+// registered for fails every run of the task that holds it and this is
+// the only route to removing one. Attaching it stays rejected: the point
+// of the picker listing is that nothing new can be granted off it.
+func TestSetCapabilityDetachesARetiredCapability(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+	if err := store.UpdateTask(ctx, task.ID, func(tk *model.Task) error {
+		tk.Grants = append(tk.Grants, model.Grant{Capability: "scratch-repo", Via: model.GrantByLabel})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.SetCapability(ctx, task.ID, "scratch-repo", true); err == nil {
+		t.Fatal("attaching a capability the picker does not offer succeeded, want a validation error")
+	}
+	if err := c.SetCapability(ctx, task.ID, "scratch-repo", false); err != nil {
+		t.Fatalf("detaching a retired capability: %v", err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Capabilities) != 0 {
+		t.Fatalf("capabilities after detach = %v, want none", got.Capabilities)
+	}
+}
+
 func TestSetDependencyAttachesAndDetaches(t *testing.T) {
 	c, _, ctx := testClient(t)
 	blocker := create(t, c, ctx)
