@@ -141,11 +141,23 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	// written out here: what the UI's own prompt pane shows in the demo
 	// is then the real thing, and stays the real thing as that function
 	// changes, instead of a paraphrase of it that quietly goes stale.
-	if seeded, err := store.GetTask(ctx, running.ID); err == nil && seeded != nil {
-		if err := store.SetRunPrompt(ctx, "demo-run-"+running.ID,
-			orchestrator.BuildPrompt(*seeded, orchestrator.CheckoutDir, true)); err != nil {
-			return fmt.Errorf("seeding a running task's prompt: %w", err)
-		}
+	//
+	// Read back through the store rather than built from the request
+	// above: BuildPrompt takes the model.Task that was actually filed,
+	// with the id and target ui.CreateTask resolved for it. A failure
+	// here fails the seed, like every other write in this function -- a
+	// demo whose prompt pane silently says "nothing has been dispatched"
+	// is the one thing that pane must not say about a running task.
+	seeded, err := store.GetTask(ctx, running.ID)
+	if err != nil {
+		return fmt.Errorf("re-reading the running task: %w", err)
+	}
+	if seeded == nil {
+		return fmt.Errorf("re-reading the running task: %s was not stored", running.ID)
+	}
+	if err := store.SetRunPrompt(ctx, "demo-run-"+running.ID,
+		orchestrator.BuildPrompt(*seeded, orchestrator.CheckoutDir, true)); err != nil {
+		return fmt.Errorf("seeding a running task's prompt: %w", err)
 	}
 
 	awaiting, err := create(ago(2*time.Hour), ui.CreateTaskRequest{

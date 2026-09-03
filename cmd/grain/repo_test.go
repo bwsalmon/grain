@@ -114,6 +114,18 @@ func TestRepoLine(t *testing.T) {
 				Repo: "acme/widgets", DefaultCapabilities: []string{"gcp-key", "self-debug"},
 			},
 			want: []string{"defaults: gcp-key, self-debug"},
+			// Named only when there is one: a note on every row would
+			// carry no information at all.
+			wantNot: []string{"prompt extension"},
+		},
+		{
+			// Named rather than quoted -- a repo's standing instructions
+			// can be a paragraph, and a line-per-repo listing is no place
+			// for one. The row is the pointer at `grain repo
+			// prompt-extension`, which prints the text.
+			name:    "a repo with standing instructions of its own says so without quoting them",
+			summary: ui.RepoSummary{Repo: "acme/widgets", PromptExtension: true},
+			want:    []string{"acme/widgets", "prompt extension"},
 		},
 		{
 			// A state RepoStateOrder does not name must not vanish from
@@ -142,6 +154,72 @@ func TestRepoLine(t *testing.T) {
 		})
 	}
 }
+
+// parseRepoPromptExtension makes the same read/write distinction
+// parseRepoCapabilities does, and getting it wrong costs more here: a
+// repo's standing instructions are a paragraph somebody wrote, and a
+// `grain repo prompt-extension acme/widgets` that stored the flag's own
+// empty default would wipe them in the act of printing them.
+func TestParseRepoPromptExtension(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantRepo string
+		wantSet  *string
+		wantErr  bool
+	}{
+		{
+			name:     "no -set at all is a read",
+			args:     []string{"acme/widgets"},
+			wantRepo: "acme/widgets",
+			wantSet:  nil,
+		},
+		{
+			name:     "-set names the whole text",
+			args:     []string{"-set", "Read db/README.md first.", "acme/widgets"},
+			wantRepo: "acme/widgets",
+			wantSet:  ptr("Read db/README.md first."),
+		},
+		{
+			// The case this function exists for: given empty, -set is
+			// still a write, and the only way to turn a repo's own
+			// standing instructions back off.
+			name:     "-set given empty clears rather than reads",
+			args:     []string{"-set", "", "acme/widgets"},
+			wantRepo: "acme/widgets",
+			wantSet:  ptr(""),
+		},
+		{
+			name:    "no repo at all is an error",
+			args:    []string{"-set", "something"},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, set, err := parseRepoPromptExtension(tc.args)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseRepoPromptExtension(%v) = %q, %v, nil; want an error", tc.args, repo, set)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseRepoPromptExtension(%v): %v", tc.args, err)
+			}
+			if repo != tc.wantRepo {
+				t.Errorf("repo = %q, want %q", repo, tc.wantRepo)
+			}
+			if (set == nil) != (tc.wantSet == nil) {
+				t.Fatalf("set = %v, want %v (nil-ness is what says read from write)", set, tc.wantSet)
+			}
+			if set != nil && *set != *tc.wantSet {
+				t.Errorf("set = %q, want %q", *set, *tc.wantSet)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
 
 // "none" rather than a blank: an empty line after a label reads as a
 // rendering bug, and this is the common case for two of the three sets
@@ -200,6 +278,8 @@ func TestRunCLIDispatchesTheRepoFamily(t *testing.T) {
 		{"-server", server, "repo", "add", "acme/widgets"},
 		{"-server", server, "repo", "capabilities", "-set", "self-debug", "acme/widgets"},
 		{"-server", server, "repo", "capabilities", "acme/widgets"},
+		{"-server", server, "repo", "prompt-extension", "-set", "Read db/README.md first.", "acme/widgets"},
+		{"-server", server, "repo", "prompt-extension", "acme/widgets"},
 		{"-server", server, "repo", "remove", "acme/widgets"},
 		{"-json", "-server", server, "repo", "list"},
 	} {
@@ -216,11 +296,12 @@ func TestRunCLIDispatchesTheRepoFamily(t *testing.T) {
 	if err := runCLI([]string{"-server", server, "repo", "nonesuch"}); err == nil {
 		t.Error("`grain repo nonesuch` returned no error")
 	}
-	// Each of the three that take one needs a repo, and none of them
+	// Each of the four that take one needs a repo, and none of them
 	// invents a default from Config.DefaultTarget: acting on a repo
 	// nobody named is exactly the mistake worth failing on.
 	for _, args := range [][]string{
 		{"-server", server, "repo", "capabilities"},
+		{"-server", server, "repo", "prompt-extension"},
 		{"-server", server, "repo", "add"},
 		{"-server", server, "repo", "remove"},
 	} {
