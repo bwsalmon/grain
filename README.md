@@ -181,6 +181,16 @@ pkg/metrics/    what the deployment actually delivers: tasks completed per
                 the daemon's own RunCycle tick, which leaves no row to
                 derive anything from -- see "Measuring the daemon's own
                 tick" below. See "Measuring throughput and latency" below
+pkg/version/    which build of grain this is, read back out of the
+                binary's own `go build -buildvcs` stamp: the commit, its
+                timestamp, and whether the tree was dirty. Nothing to
+                bump by hand and nothing for a deployment to be told --
+                the same reasoning cmd/grain/sandboximage.go gives for
+                stamping its sandbox tag in at build time. pkg/ui puts it
+                on GET /api/config and the sidebar's footer prints it, so
+                "is this deployment running the change I just merged?"
+                is answered by the page in front of you rather than by an
+                image tag that describes what was deployed
 tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
