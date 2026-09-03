@@ -119,6 +119,48 @@ describe("Sidebar", () => {
     expect(screen.queryByTitle(/^Environment:/)).not.toBeInTheDocument();
   });
 
+  // grain/task-164: which build is answering, in the rail's footer --
+  // the short commit and the UTC time it was made. UTC to the minute so
+  // that every browser looking at one deployment reads the same string
+  // and it lines up with `git log`.
+  it("prints the build's short commit and commit time in the footer", () => {
+    render(
+      <Sidebar
+        {...baseProps}
+        config={{ version: { commit: "0fbfb4619f0a1c2d3e4f5a6b7c8d9e0f11223344", committedAt: "2026-09-03T14:02:11Z" } }}
+        tasks={[]}
+      />,
+    );
+
+    expect(screen.getByText("0fbfb46 · 2026-09-03 14:02Z")).toBeInTheDocument();
+    expect(screen.getByTitle(/Running commit 0fbfb4619f0a1c2d3e4f5a6b7c8d9e0f11223344/)).toBeInTheDocument();
+  });
+
+  it("marks a build made from a modified tree", () => {
+    render(
+      <Sidebar {...baseProps} config={{ version: { commit: "0fbfb46199", committedAt: "2026-09-03T14:02:11Z", modified: true } }} tasks={[]} />,
+    );
+
+    expect(screen.getByText("0fbfb46-dirty · 2026-09-03 14:02Z")).toBeInTheDocument();
+    expect(screen.getByTitle(/uncommitted changes/)).toBeInTheDocument();
+  });
+
+  // Half a stamp is still worth printing, and a build with none at all
+  // (-buildvcs=false, and every `go test` binary) prints nothing rather
+  // than an empty line or an "Invalid Date".
+  it("prints the commit alone when the stamp carries no usable time", () => {
+    const { rerender } = render(<Sidebar {...baseProps} config={{ version: { commit: "0fbfb46199" } }} tasks={[]} />);
+    expect(screen.getByText("0fbfb46")).toBeInTheDocument();
+
+    rerender(<Sidebar {...baseProps} config={{ version: { commit: "0fbfb46199", committedAt: "not a timestamp" } }} tasks={[]} />);
+    expect(screen.getByText("0fbfb46")).toBeInTheDocument();
+  });
+
+  it("shows no build stamp when the binary carries none", () => {
+    render(<Sidebar {...baseProps} config={{}} tasks={[]} />);
+    expect(screen.queryByTitle(/^Running commit/)).not.toBeInTheDocument();
+  });
+
   // bwsalmon/agents#640: Logs and Sandbox health share the "Debugging"
   // nav entry rather than having one each of their own.
   it("does not show Logs or Sandbox health as their own nav entries", () => {

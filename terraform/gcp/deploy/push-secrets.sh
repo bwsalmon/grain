@@ -116,14 +116,19 @@ push_secret "grain-image-pull-token" "${GRAIN_IMAGE_PULL_TOKEN:-}"
 # for its minter key, so a stale credential from a previous run
 # does not linger indefinitely.
 #
-# scripts/setup.sh's own seed_gcp_minter_key only ever seeds the
-# host's local secrets database once (it never overwrites an existing
-# gcp-key-minter entry) -- so a *rotated* key reaching this metadata
-# attribute does not by itself reach the running daemon. Clear it by
-# hand first (`grain secrets delete gcp-key-minter key.json` on the
-# host, over `gcloud compute ssh --tunnel-through-iap`) if you need a
-# rotated key to actually take effect, then bump deploy_generation so
-# config-sync re-runs setup.sh.
+# The prune is only safe because the host converges on what is pushed
+# here: scripts/setup.sh's seed_gcp_minter_key writes this attribute's
+# value into the host's own secrets database on *every* run, so the
+# newest key is the one the daemon authenticates with by the end of the
+# next deploy. It used to seed only once and never overwrite, which
+# made these two lines a scheduled outage -- three runs of this script
+# and the key the daemon was still using had been deleted here, leaving
+# every gcp-key mint failing with Google's `invalid_grant` on a
+# deployment whose Settings pane read Ready. Keeping the previous key
+# alive is what covers the gap between this script running and the host
+# next deploying; a rotated key still only takes effect when it does, so
+# bump deploy_generation (or wait for the next push) rather than
+# expecting this script alone to move the running daemon.
 if [ -n "$minter_service_account" ]; then
   umask 077
   minter_file="$(mktemp)"

@@ -181,6 +181,16 @@ pkg/metrics/    what the deployment actually delivers: tasks completed per
                 the daemon's own RunCycle tick, which leaves no row to
                 derive anything from -- see "Measuring the daemon's own
                 tick" below. See "Measuring throughput and latency" below
+pkg/version/    which build of grain this is, read back out of the
+                binary's own `go build -buildvcs` stamp: the commit, its
+                timestamp, and whether the tree was dirty. Nothing to
+                bump by hand and nothing for a deployment to be told --
+                the same reasoning cmd/grain/sandboximage.go gives for
+                stamping its sandbox tag in at build time. pkg/ui puts it
+                on GET /api/config and the sidebar's footer prints it, so
+                "is this deployment running the change I just merged?"
+                is answered by the page in front of you rather than by an
+                image tag that describes what was deployed
 tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
@@ -1472,8 +1482,8 @@ binding: two runs dispatched concurrently against two different sandboxes
 would share one registration, and whichever wrote it last would decide
 where both runs' tools landed. So `Framework.Run` gives each run its own
 private `HOME` -- a temp directory holding nothing but the config file
-naming that run's own `mcpserver` server -- and deletes it as the run
-returns. That has the same effect `claude`'s `--strict-mcp-config` has
+naming that run's own `mcpserver` server, and the settings file
+authentication needs (below) -- and deletes it as the run returns. That has the same effect `claude`'s `--strict-mcp-config` has
 there: the only MCP server a run can see is its own, because there is no
 other config file in the `HOME` it was given to find one in.
 
@@ -1556,6 +1566,26 @@ upgrading across this change needs `agy` installed on the controller and
 otherwise keeps its existing `-gemini-api-key-file`, which `agy`
 authenticates with as `GEMINI_API_KEY` in the subprocess environment
 (never in argv).
+
+Authenticating that way is two things, not one, and grain does both. agy
+reads `GEMINI_API_KEY` only for a session whose settings ask it to --
+`"modelProvider": "gemini"` in `.gemini/antigravity-cli/settings.json` --
+so `Framework.Run` writes that file into the private `HOME` beside the
+MCP config whenever it has a key to pass. Without it agy ignores the
+variable, falls through to the interactive browser login its OAuth
+sessions come from, and, with a prompt on stdin rather than a terminal,
+exits 1 with `authentication required. Run 'agy' to log in, then retry`.
+The credential a run uses is grain's own either way: `GOOGLE_API_KEY` is
+cleared in the same environment, because agy prefers it when both are
+set and the subprocess inherits the controller's.
+
+The model name carries its reasoning effort: agy's catalog is
+`gemini-3.1-pro-high`, `gemini-3.1-pro-low`, `gemini-3.8-flash-medium`
+and so on (`agy models` lists them), and it refuses both a bare family
+name (`--model gemini-3.1-pro requires --effort`) and a suffixed name
+passed alongside `--effort`. `antigravity.DefaultModel` is one of the
+catalog names, and a deployment overriding it in Settings or with
+`-gemini-model` should name one too.
 
 ## Letting a run watch its own CI
 
@@ -2573,6 +2603,73 @@ private key material was base64-decoded to nothing, placed at
 `SandboxKeyPath`, and described to the agent as a working key. It is a
 failed mint now, and the useless key is deleted rather than left to
 count against the very cap above.
+
+### Debugging `gcp-key` again: the deploy rotated the key out from under the host
+
+"Attempting to add a gcp key to a task fails to provision the task."
+The same sentence as last time, a different failure underneath it, and
+this one was never grain's classification of a GCP error — it was the
+deployment invalidating its own credential on a schedule.
+
+```
+materializing capabilities: model: materializing capability "gcp-key":
+gcpkey: minting a key for projects/…/serviceAccounts/grain-main-agent@…:
+gcpkey: minting a key for projects/…/serviceAccounts/grain-main-agent@…:
+Post "https://iam.googleapis.com/…/keys?alt=json": auth: cannot fetch
+token: 400 Response: {"error":"invalid_grant","error_description":"Invalid
+JWT Signature."}
+```
+
+`invalid_grant` is Google's token endpoint refusing to exchange the JWT
+`gcp-key-minter`'s stored key signed, which means Google no longer holds
+the public half of that key. Nothing in the message says so: it names the
+*agent* account being minted for, never the minter credential doing the
+minting, and it arrives before any request reaches `iam.googleapis.com`
+— so it carries no `googleapi.Error`, no status code, and none of
+`explainCreateFailure`'s four explanations fire. It is also, as printed,
+the same forty characters of resource name twice, because `iamMinter`
+re-labelled every failure with the context `Materialize` had already
+wrapped it in.
+
+**Where the key went is `terraform/gcp/deploy/push-secrets.sh`.** It
+mints a *fresh* minter key on every run, pushes it into instance
+metadata, and then deletes every key on the minter account beyond the
+newest two — a deliberate rotate-and-prune, ported from v1. The other
+half never held up its end: `scripts/setup.sh`'s `seed_gcp_minter_key`
+returned early whenever `grain secrets list` already showed a
+`gcp-key-minter` entry, on the same never-overwrite rule every plain-file
+secret beside it follows. So the host seeded its copy on the first deploy
+and refused every replacement afterward, and the third `push-secrets.sh`
+run deleted, in GCP, the key the daemon was still authenticating with.
+The rotation was not a safety measure that happened to be inconvenient;
+it was a countdown. The documented remedy was to delete the entry by hand
+over IAP and bump `deploy_generation` — a manual step to repair a state
+the deployment created for itself.
+
+The seed converges now: a key handed to `setup.sh` is the key the daemon
+ends up holding, every run, so a rotation lands on the next deploy the
+way every other pushed secret does. The one early return left is for a
+deploy carrying no key at all, which still leaves an operator's own
+`grain secrets set` alone. It writes to whichever key the secret already
+holds rather than always to `key.json`, for the reason "Secrets sit with
+what uses them" below gives from the other side: `Resolve` answers the
+bare `gcp-key-minter` name only while the secret holds exactly one key,
+so a fixed name would break a secret first written from Settings (as
+`value`) in a second way while fixing the first.
+
+**And grain says which secret is dead when it happens**, since a key
+deleted in GCP by anything at all lands here, not just this deployment's
+own rotation. `isCredentialRefused` matches the token endpoint's body,
+and `explainRefusedCredential` — on `Provider`, the only thing that knows
+which secret the material came out of, and that `Revoke` authenticates as
+whatever the *lease* names rather than what `Config` says today — names
+that secret, the ways a stored key stops being one GCP will accept, and
+the two places a current one is pasted. `Materialize`, `Revoke` and
+`Reap` all go through it: a dead minter credential breaks releasing and
+reaping a key exactly as it breaks minting one. This is the third thing
+about `gcp-key` that no configuration pane can see — the tab reads
+**Ready** throughout, because the secret is set and only GCP knows the
+key inside it stopped working.
 
 ### The same set, per repo
 

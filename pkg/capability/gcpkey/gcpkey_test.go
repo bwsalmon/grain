@@ -3,6 +3,7 @@ package gcpkey
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -291,6 +292,107 @@ func TestMaterializeFailsIfMintFails(t *testing.T) {
 	_, err := p.Materialize(context.Background(), testContext(creds, time.Now()))
 	if err == nil {
 		t.Fatal("expected an error when minting fails")
+	}
+}
+
+// refusedCredentialError is what a stored minter key GCP no longer holds
+// the public half of actually produces -- an oauth2 transport error with
+// the token endpoint's own body quoted inside it, no googleapi.Error and
+// no status code anywhere errors.As can reach. Task 163's failure,
+// verbatim but for the project name.
+var refusedCredentialError = errors.New(
+	`Post "https://iam.googleapis.com/v1/projects/example-project/serviceAccounts/` +
+		`agent@example-project.iam.gserviceaccount.com/keys?alt=json&prettyPrint=false": ` +
+		`auth: cannot fetch token: 400 Response: ` +
+		`{"error":"invalid_grant","error_description":"Invalid JWT Signature."}`)
+
+// The failure this whole explanation exists for. What an operator saw
+// was Google's `invalid_grant`, which names no secret, no account and
+// nothing about grain -- on a deployment reading **Ready**, because the
+// secret is set and only GCP knows the key inside it has stopped
+// working.
+func TestMaterializeNamesTheSecretWhenGCPRefusesTheMinterCredential(t *testing.T) {
+	minter := newFakeMinter()
+	minter.createErr = refusedCredentialError
+	p := testProvider(minter)
+	creds := &fakeCredentials{material: map[string]string{DefaultMinterCredential: "x"}}
+
+	_, err := p.Materialize(context.Background(), testContext(creds, time.Now()))
+	if err == nil {
+		t.Fatal("expected a refused credential to fail the mint")
+	}
+	if !strings.Contains(err.Error(), DefaultMinterCredential) {
+		t.Errorf("error %q does not name the secret holding the dead credential", err)
+	}
+	if !strings.Contains(err.Error(), "grain secrets set") {
+		t.Errorf("error %q does not name the command that replaces it", err)
+	}
+	// Never worse than the original: GCP's own words survive.
+	if !strings.Contains(err.Error(), "invalid_grant") {
+		t.Errorf("error %q dropped GCP's own message", err)
+	}
+}
+
+// Revoke authenticates as whatever the lease itself names, so a lease
+// minted under a renamed or rotated credential has to report *that*
+// name -- pointing an operator at Config's current one would send them
+// to replace a secret that is not the one this failed on.
+func TestRevokeNamesTheLeasesOwnCredentialWhenGCPRefusesIt(t *testing.T) {
+	minter := newFakeMinter()
+	minter.keys["key-a"] = KeyInfo{ID: "key-a"}
+	minter.deleteErr = map[string]error{"key-a": refusedCredentialError}
+	p := testProvider(minter)
+	creds := &fakeCredentials{material: map[string]string{"older-minter": "x"}}
+
+	err := p.Revoke(context.Background(), testContext(creds, time.Now()), model.Lease{
+		Capability: "gcp-key", Resource: "key-a",
+		MintedBy: model.CredentialRef{Name: "older-minter"},
+	})
+	if err == nil {
+		t.Fatal("expected a refused credential to fail the revoke")
+	}
+	if !strings.Contains(err.Error(), "older-minter") {
+		t.Errorf("error %q does not name the credential this lease was minted under", err)
+	}
+}
+
+// Anything else is passed through as it is: wrapping every failure in
+// advice about a dead credential would bury the ones that say what they
+// are, the same restraint explainCreateFailure shows.
+func TestAnOrdinaryFailureIsNotBlamedOnTheCredential(t *testing.T) {
+	minter := newFakeMinter()
+	minter.createErr = errors.New("googleapi: Error 500: backend error")
+	p := testProvider(minter)
+	creds := &fakeCredentials{material: map[string]string{DefaultMinterCredential: "x"}}
+
+	_, err := p.Materialize(context.Background(), testContext(creds, time.Now()))
+	if err == nil {
+		t.Fatal("expected the mint to fail")
+	}
+	if strings.Contains(err.Error(), "grain secrets set") {
+		t.Errorf("error %q volunteers a credential replacement for a failure that is not one", err)
+	}
+}
+
+// The mint path used to name the account twice -- iam.go's own
+// "minting a key for <account>" wrapped again by Materialize's -- so
+// forty duplicated characters of resource name stood between an
+// operator and the clause that said what had gone wrong.
+func TestMintFailureNamesTheAccountOnlyOnce(t *testing.T) {
+	f := newFakeIAM()
+	f.createStatus = http.StatusInternalServerError
+	f.createBody = `{"error":{"code":500,"message":"backend error","status":"INTERNAL"}}`
+	m := testIAMMinter(t, f)
+	p := testProvider(newFakeMinter())
+	p.NewMinter = func(ctx context.Context, credentialJSON string) (Minter, error) { return m, nil }
+	creds := &fakeCredentials{material: map[string]string{DefaultMinterCredential: "x"}}
+
+	_, err := p.Materialize(context.Background(), testContext(creds, time.Now()))
+	if err == nil {
+		t.Fatal("expected the mint to fail")
+	}
+	if n := strings.Count(err.Error(), "gcpkey: minting a key for"); n != 1 {
+		t.Errorf("error %q says %q %d times, want once", err, "gcpkey: minting a key for", n)
 	}
 }
 

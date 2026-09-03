@@ -30,6 +30,44 @@ import GrainMark from "./GrainMark.jsx";
 // they are nav entries carrying a selected state now rather than plain
 // buttons: the rail stays visible under the pane, so it has to say
 // which of the two is covering everything else.
+// parseStampTime turns GET /api/config's committedAt into a Date, or
+// null for a build whose stamp carried no readable time -- the server
+// leaves the field off entirely in that case (pkg/ui/version.go), and a
+// value that will not parse is treated the same way rather than printed
+// as "Invalid Date".
+function parseStampTime(iso) {
+  if (!iso) return null;
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+// buildStampLabel is the one line the footer prints: the seven-character
+// commit and, after it, when that commit was made.
+//
+// UTC, to the minute. An operator comparing what a deployment is running
+// against `git log` is comparing against commit times, which are the
+// same everywhere -- and a stamp rendered in the reader's own zone would
+// say something different in every browser looking at the same
+// deployment. The tooltip gives the local reading for whoever wants it.
+//
+// "-dirty" borrows git's own word for it (`git describe --dirty`): the
+// build ran against uncommitted changes, so the hash beside it does not
+// fully describe what is running. Never true of a CI build.
+function buildStampLabel(version) {
+  const short = version.commit.slice(0, 7) + (version.modified ? "-dirty" : "");
+  const at = parseStampTime(version.committedAt);
+  if (!at) return short;
+  return `${short} · ${at.toISOString().slice(0, 16).replace("T", " ")}Z`;
+}
+
+function buildStampTitle(version) {
+  const parts = [`Running commit ${version.commit}`];
+  const at = parseStampTime(version.committedAt);
+  if (at) parts.push(`committed ${at.toLocaleString()}`);
+  if (version.modified) parts.push("built from a tree with uncommitted changes");
+  return parts.join(", ");
+}
+
 export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, showSettings = false, showDebug = false, onOpenSettings, onOpenDebug, onOpenNewTask }) {
   const counts = {};
   let blocked = 0;
@@ -161,6 +199,33 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           <ListItemText primary="Debugging" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showDebug ? "text.primary" : "text.secondary" }} />
         </ListItemButton>
       </List>
+
+      {/* Which build of grain is answering: the commit it was built from
+          and when that commit was made, out of the binary's own VCS
+          stamp (GET /api/config's "version", pkg/version). The question
+          "is this deployment running the change I just merged?" is asked
+          of a UI far more often than of a shell on the host, and every
+          other answer to it -- an image tag, a merge time, the upgrade
+          pane's last run -- is a claim about what was deployed rather
+          than about what is serving this page.
+          Deliberately the smallest thing on the rail, below the nav
+          rather than in it: it is worth a glance during a deploy and
+          nothing at all on any other day. Absent entirely on a binary
+          built without a stamp (`-buildvcs=false`, or a `go test`
+          binary), which is the same shape the environment chip above
+          takes when there is nothing to say. */}
+      {config?.version?.commit ? (
+        <Typography
+          variant="caption"
+          component="p"
+          color="text.secondary"
+          noWrap
+          title={buildStampTitle(config.version)}
+          sx={{ px: 0.9, m: 0, fontSize: "0.68rem", opacity: 0.75, fontVariantNumeric: "tabular-nums" }}
+        >
+          {buildStampLabel(config.version)}
+        </Typography>
+      ) : null}
     </Box>
   );
 }
