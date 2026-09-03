@@ -617,14 +617,91 @@ fieldset legend {
 .detail-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
 .detail-header h2 { margin: 0; font-size: 1.15rem; font-weight: 600; }
 .freshness { color: var(--text-tertiary); font-size: 0.8rem; margin-bottom: 1rem; }
+/* No white-space: pre-wrap any more -- a description is rendered as
+   markdown (Markdown.jsx), whose own remark-breaks keeps the hard line
+   breaks pre-wrap used to be here for, and leaving it on would also
+   preserve the leading indentation of a nested list or a fenced block
+   the renderer has already turned into real elements. */
 .description {
-  white-space: pre-wrap;
   margin: 1rem 0;
   background: var(--canvas);
   border-radius: 8px;
   padding: 0.85rem 1rem;
   font-size: 0.9rem;
 }
+
+/* Everything Markdown.jsx can emit for a comment body or a description
+   (grain/task-93). These bodies are agent prose in a dense panel, not an
+   article: the spacing is tighter than a browser's own defaults, headings
+   stay close to body size (an agent's "## " should read as a heading, not
+   as a banner three times the size of the text around it), and the first
+   and last blocks lose their outer margin so a one-paragraph comment sits
+   exactly where the plain <div> it replaced did. */
+.markdown { word-break: break-word; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 0 0 0.6rem; }
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  margin: 0.9rem 0 0.4rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+}
+.markdown h1 { font-size: 1.15em; }
+.markdown h2 { font-size: 1.08em; }
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 { font-size: 1em; }
+.markdown ul,
+.markdown ol { margin: 0 0 0.6rem; padding-left: 1.4rem; }
+.markdown li { margin: 0.15rem 0; }
+.markdown li > ul,
+.markdown li > ol { margin-bottom: 0; }
+/* GFM task lists: the checkbox is the list marker, so the bullet beside
+   it is noise. */
+.markdown li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.1rem; }
+.markdown li > input[type="checkbox"] { margin-right: 0.4rem; }
+.markdown a { color: var(--accent); }
+.markdown code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.88em;
+  background: var(--surface-hover);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+}
+/* A fenced block keeps its own alignment and scrolls sideways rather
+   than wrapping: a diff or a stack trace rewrapped is unreadable. The
+   <code> inside drops the inline chip styling it would otherwise
+   inherit, since the <pre> already carries the box. */
+.markdown pre {
+  margin: 0 0 0.6rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+.markdown pre code { background: none; border-radius: 0; padding: 0; font-size: 0.85em; }
+.markdown blockquote {
+  margin: 0 0 0.6rem;
+  padding-left: 0.75rem;
+  border-left: 3px solid var(--border-strong);
+  color: var(--text-tertiary);
+}
+.markdown hr { border: none; border-top: 1px solid var(--border); margin: 0.9rem 0; }
+.markdown img { max-width: 100%; }
+/* GFM tables. display: block so a wide one scrolls inside the panel
+   instead of stretching it. */
+.markdown table { display: block; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.6rem; }
+.markdown th,
+.markdown td { border: 1px solid var(--border); padding: 0.25rem 0.5rem; text-align: left; }
+.markdown th { background: var(--surface-hover); font-weight: 600; }
 
 .detail-state { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
 

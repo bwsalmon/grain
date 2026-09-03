@@ -1727,6 +1727,29 @@ are unchanged. `style.css` still owns what MUI has no primitive for: the
 state dot/badge, the sidebar's brand mark, and layout for the task list
 and detail panel.
 
+**Agent prose is rendered as the markdown it is written in
+(grain/task-93).** Every framework grain dispatches answers in markdown
+by default, so a relayed question or a `comment_on_issue` note arrives
+with headings, bullet lists, backticked paths and fenced blocks in it,
+and a task another run proposed arrives with a body written the same way.
+Rendering those as one flat run of text is what made a long answer hard
+to read, so `ui/src/components/Markdown.jsx` (react-markdown, with
+remark-gfm for tables and task lists) is what a comment body and a task
+description go through now, with `style.css`'s `.markdown` block carrying
+the element styles. Three things about it are deliberate. It renders no
+raw HTML — react-markdown skips embedded HTML without `rehype-raw`, which
+is not installed, and drops a `javascript:` href — because these strings
+reach the page straight off an agent or a GitHub user, and going through
+a parser rather than a regex pass is the whole point. It keeps
+remark-breaks, so a single newline stays a line break the way it does in
+a GitHub comment and the way the plain-text rendering this replaced did:
+without it a hand-typed reply's own line breaks would silently fold into
+one paragraph, which would be a regression dressed up as a feature. And
+it is deliberately *not* used for an attempt's transcript
+(`AttemptTranscriptOverlay`), which is a log of thinking, text and tool
+calls whose alignment is the whole of its legibility — that stays in its
+`<pre>`.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to

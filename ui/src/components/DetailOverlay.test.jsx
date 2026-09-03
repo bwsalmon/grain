@@ -820,6 +820,50 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("grain on behalf of the dispatched run · agent")).toBeInTheDocument();
   });
 
+  // grain/task-93: an agent's answer arrives as markdown, and reading it
+  // as one flat run of text is what this renders it out of.
+  it("renders a comment body as markdown", () => {
+    // document, not render()'s own container: Overlay is a MUI Dialog,
+    // so its content is portalled out of the container into <body>.
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          comments: [
+            { author: "grain", authorKind: "agent", body: "## What I did\n\n- touched `run.go`\n- pushed it" },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("heading", { name: "What I did" })).toBeInTheDocument();
+    expect(document.querySelectorAll(".timeline-comment-body li")).toHaveLength(2);
+    expect(screen.getByText("run.go").tagName).toBe("CODE");
+  });
+
+  // A description is markdown for the same reason a comment body is: a
+  // proposed task's own body is written by the run that proposed it
+  // (propose_task), in the same syntax.
+  it("renders the description as markdown", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, description: "**Why:** the retry path never resets" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    expect(document.querySelector(".description strong")).toHaveTextContent("Why:");
+  });
+
   it("posts a comment and clears the textarea", async () => {
     const act = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
