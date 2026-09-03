@@ -1626,11 +1626,14 @@ func scanTask(scan func(...any) error) (Task, error) {
 // per grant per link and need de-duplicating in Go, which is more code
 // to get wrong than the extra round trips are worth at this size.
 //
-// A caller wanting the traditional newest-first list (ui.Client.ListTasks,
-// unless model.Config.NewestFirst says otherwise -- bwsalmon/agents#476)
-// reverses this slice rather than asking for a second order here: OrderKey
-// ascending is the one order Ready also needs, so it is the one this
-// store computes. Ties break by id, ascending: OrderKey is unique in
+// This is the only order there is: ui.Client.ListTasks hands it to a UI
+// or a CLI untouched, so a list is read top-to-bottom in the order the
+// tasks will run. It used to reverse this slice into a newest-first
+// display unless model.Config.NewestFirst said otherwise
+// (bwsalmon/agents#476), which left the list pointing one way and the
+// dispatcher the other; that flip is gone (grain/task-201) and
+// NewestFirst is now only about which end OrderKeyForNewTask files new
+// work at. Ties break by id, ascending: OrderKey is unique in
 // practice (Store.OrderKeyForNewTask and Store.Reorder both space new
 // values away from their neighbours) but nothing enforces it, so a tie
 // still needs a stable, deterministic break.
@@ -2323,8 +2326,8 @@ func (s *Store) State(ctx context.Context, taskID string) (State, error) {
 // Ready is every task dispatchable right now: approved, not running, with
 // no open blocker -- in dispatch order, which is the backlog's own order
 // (bwsalmon/agents#476): ascending OrderKey, the same order ListTasks
-// hands a UI or CLI before any newest-first display flip, ties broken on
-// task ID.
+// hands a UI or CLI and the same order that list is drawn in, ties broken
+// on task ID.
 //
 // That is the whole rule, with no carve-out for any kind of task. A fix
 // task the merge queue filed (Origin.Reason == ReasonFix) used to sort

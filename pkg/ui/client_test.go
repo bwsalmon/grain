@@ -1845,13 +1845,15 @@ func TestListTasksCarriesEveryTaskWithItsState(t *testing.T) {
 	}
 }
 
-// TestListTasksDefaultsToNewestFirst is grain's original shape
-// (bwsalmon/agents#476), unchanged by OrderKey's arrival: three tasks
-// created in order end up listed in the reverse of that order, even
-// though Store.ListTasks itself now hands back the opposite (ascending
-// OrderKey, dispatch order) and this package's own ListTasks reverses it.
-func TestListTasksDefaultsToNewestFirst(t *testing.T) {
-	c, _, ctx := testClient(t)
+// TestListTasksIsDispatchOrder: the list a UI or CLI gets reads
+// top-to-bottom in the order grain will work through it (grain/task-201).
+// Three tasks created in order, with NewestFirst left at its default, are
+// listed in that same order -- each one joined the end of the backlog, so
+// the first one filed is both at the top and the next to run. This used
+// to be the reverse (newest first), which put the task that would run
+// next at the bottom of the list.
+func TestListTasksIsDispatchOrder(t *testing.T) {
+	c, store, ctx := testClient(t)
 	first := create(t, c, ctx)
 	second := create(t, c, ctx)
 	third := create(t, c, ctx)
@@ -1861,17 +1863,28 @@ func TestListTasksDefaultsToNewestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := []string{tasks[0].ID, tasks[1].ID, tasks[2].ID}
-	want := []string{third.ID, second.ID, first.ID}
+	want := []string{first.ID, second.ID, third.ID}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ListTasks order = %v, want newest first %v", got, want)
+		t.Fatalf("ListTasks order = %v, want dispatch order %v", got, want)
+	}
+
+	// The list is not merely in some fixed order: it is Ready's order,
+	// which is the whole claim being made to whoever reads it.
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(ready, got) {
+		t.Fatalf("Ready = %v, want the listed order %v", ready, got)
 	}
 }
 
 // TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue is
-// bwsalmon/agents#476's global switch: with model.Config.NewestFirst set,
-// a task created after two others still shows up first in the task list
-// (same as the default), but Store.Ready now dispatches it before them
-// too, instead of after -- the whole point of the setting.
+// bwsalmon/agents#476's global switch, now that it is only about where
+// new work joins the backlog (grain/task-201): with
+// model.Config.NewestFirst set, a task created after two others is
+// dispatched before them instead of after -- and, because the list is
+// dispatch order, it is at the top of it for exactly that reason.
 func TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue(t *testing.T) {
 	c, store, ctx := testClient(t)
 	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
@@ -1893,10 +1906,11 @@ func TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue(t *testing.T) {
 	got := []string{tasks[0].ID, tasks[1].ID, tasks[2].ID}
 	want := []string{third.ID, second.ID, first.ID}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ListTasks order under NewestFirst = %v, want still newest first %v", got, want)
+		t.Fatalf("ListTasks order under NewestFirst = %v, want newest first %v", got, want)
 	}
 
-	// Dispatch order, not just display order, now runs newest to oldest.
+	// And it is at the top because it runs first, not as a display
+	// convention of its own: Ready agrees, task for task.
 	ready, err := store.Ready(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1931,15 +1945,15 @@ func TestReorderMovesATaskInTheBacklog(t *testing.T) {
 		t.Fatalf("Ready after Reorder = %v, want %v", ready, want)
 	}
 
-	// And the list a UI shows reflects the same move, oldest-insertion
-	// convention aside: it is still the reverse of Ready, since NewestFirst
-	// was never switched on in this test.
+	// And the list a UI shows is that same order, not its reverse: a task
+	// dragged to the head of the list is the one that runs next, which is
+	// the whole point of being able to drag it there.
 	tasks, err := c.ListTasks(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := []string{tasks[0].ID, tasks[1].ID, tasks[2].ID}
-	if want := []string{second.ID, first.ID, third.ID}; !reflect.DeepEqual(got, want) {
+	if want := []string{third.ID, first.ID, second.ID}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("ListTasks after Reorder = %v, want %v", got, want)
 	}
 }

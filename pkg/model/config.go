@@ -159,14 +159,14 @@ type Config struct {
 	// line for it to be parsed from (see orchestrator.ParseDirectives'
 	// own doc comment).
 	TargetRepos []string
-	// NewestFirst switches the backlog's default order (bwsalmon/
-	// agents#476): false, the default, keeps grain's original shape --
-	// Store.OrderKeyForNewTask files a new task behind everything already
-	// queued, so it is dispatched last, and the task list shows it at the
-	// top regardless. true files a new task ahead of everything queued
-	// instead, so it dispatches next, and the task list's default sort
-	// flips to match -- top-to-bottom is dispatch order either way, this
-	// only decides which end a new task joins.
+	// NewestFirst decides which end of the backlog new work joins
+	// (bwsalmon/agents#476): false, the default, keeps grain's original
+	// shape -- Store.OrderKeyForNewTask files a new task behind
+	// everything already queued, so it is dispatched last and sits at the
+	// bottom of the list. true files it ahead of everything queued
+	// instead, so it dispatches next and sits at the top. A list is
+	// top-to-bottom dispatch order either way (ui.Client.ListTasks,
+	// grain/task-201); this only decides which end a new task joins.
 	NewestFirst bool
 	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) are the
 	// deployment-wide default VM shape orchestrator.KonturConfig passes

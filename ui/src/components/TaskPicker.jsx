@@ -18,11 +18,20 @@ export default function TaskPicker({ tasks, exclude = [], onPick, placeholder = 
   const [highlight, setHighlight] = useState(0);
   const anchorRef = useRef(null);
 
+  // Matches are newest first, and sorted here rather than taken in the
+  // order tasks arrives in: that list is backlog order now (top-to-bottom
+  // the order grain will run them, grain/task-201), and the eight rows
+  // this shows would otherwise be the eight closest to being dispatched
+  // rather than the eight most recently filed. Somebody picking a task to
+  // depend on is nearly always reaching for one they have just seen or
+  // just filed, which is what this order keeps within reach of a short
+  // query.
   const excludeSet = new Set(exclude);
   const q = query.trim().toLowerCase();
   const matches = q === "" ? [] : tasks
     .filter((t) => !excludeSet.has(t.id))
     .filter((t) => t.id.toLowerCase().includes(q) || t.title.toLowerCase().includes(q))
+    .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
     .slice(0, 8);
 
   useEffect(() => { setHighlight(0); }, [query]);

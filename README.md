@@ -1181,6 +1181,17 @@ merges first, and `Store.Ready` needs no carve-out for a fix task any
 more — being at the head of the list is what dispatches it first, which
 is a thing a human can see and, if they disagree, undo.
 
+That head is now the top of the list rather than its far end
+(grain/task-201). `ui.Client.ListTasks` used to hand a UI or CLI the
+*reverse* of the store's order unless `model.Config.NewestFirst` was set,
+a newest-first display inherited from when a task's position was just its
+age — so the paragraph above was only true if you read the list bottom
+upwards, and the tasks about to merge sat furthest from where anyone
+looks first. The flip is gone: a list reads top-to-bottom in the order
+grain will work through it, merges at the very top, and `NewestFirst` now
+only decides which end of that list a newly filed task joins (the bottom
+by default, behind everything already queued; the top when it is on).
+
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
 and sandbox-token identity included. `grain/proxy`'s

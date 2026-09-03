@@ -194,28 +194,33 @@ func (c *Client) capabilityByID(id string) (Capability, bool) {
 	return Capability{}, false
 }
 
-// ListTasks returns every task in this deployment's default backlog
-// order: newest first, unless model.Config.NewestFirst says otherwise,
-// in which case it is Store.ListTasks' own order untouched -- ascending
-// OrderKey, top-to-bottom the same order Store.Ready dispatches in
-// (bwsalmon/agents#476).
+// ListTasks returns every task in backlog order -- Store.ListTasks' own
+// order untouched, ascending OrderKey, which is top-to-bottom the order
+// Store.Ready dispatches in. Whatever runs next is at the top, the pull
+// requests the merge queue is about to land at the very top of that
+// (Store.MoveToFrontOfBacklog), and the work furthest out is at the
+// bottom.
+//
+// There is no display flip left to apply (grain/task-201). This used to
+// hand back the reverse of the store's order -- newest first -- unless
+// model.Config.NewestFirst was set, so a list read in the opposite
+// direction to the one grain works through it: the task at the top was
+// the last one that would run, and "what is grain about to do" meant
+// scrolling to the end. Reading the list downwards is reading the future
+// forwards, which is what makes the merge queue's own order at the head
+// of it (README's "what is grain about to finish, and in what order")
+// legible at all.
+//
+// NewestFirst survives as what it always really was underneath: where
+// new work joins the backlog, not how the backlog is drawn. Off, the
+// default, files a new task at the end of the list, behind everything
+// already queued; on files it at the front so it runs next
+// (Store.OrderKeyForNewTask, Client.CreateTask). Either way the list is
+// this one order.
 func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	tasks, err := c.Store.ListTasks(ctx)
 	if err != nil {
 		return nil, err
-	}
-	newestFirst, err := c.newestFirst(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Store.ListTasks already hands back ascending OrderKey -- Ready's
-	// own order, and NewestFirst's own "read it as-is" case. The
-	// traditional default (false) is that order's reverse: whichever
-	// task joined the backlog most recently sorts first.
-	if !newestFirst {
-		for i, j := 0, len(tasks)-1; i < j; i, j = i+1, j-1 {
-			tasks[i], tasks[j] = tasks[j], tasks[i]
-		}
 	}
 	states, err := c.Store.States(ctx)
 	if err != nil {
@@ -249,11 +254,11 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 
 // newestFirst reads model.Config.NewestFirst fresh from the store on
 // every call: a setting a UI toggles is expected to be honoured by the
-// very next task list (or task creation), not by the next restart, and
-// this package is the one that consumes it, so this is where re-reading
-// it belongs. A fresh deployment with no grain_config row yet (nil)
-// reads as false -- model.Config's own zero value, and the backlog order
-// grain has always defaulted to.
+// very next task creation, not by the next restart, and this package is
+// the one that consumes it, so this is where re-reading it belongs. A
+// fresh deployment with no grain_config row yet (nil) reads as false --
+// model.Config's own zero value, and the end of the backlog grain has
+// always filed new work at.
 //
 // Every other setting earns the same "no restart" treatment wherever its
 // own consumer is: orchestrator.RunCycle re-reads MaxWorkers/MaxMergers and
@@ -888,9 +893,9 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	}
 	// atFront: NewestFirst asks a new task to dispatch ahead of
 	// everything already queued (Store.OrderKeyForNewTask's own doc
-	// comment), not merely to display first -- the default (false) files
-	// it behind everything queued instead, the FIFO backlog grain has
-	// always defaulted to. An interactive task asks for the same
+	// comment), which is the top of the list -- the default (false) files
+	// it at the end instead, behind everything queued, the FIFO backlog
+	// grain has always defaulted to. An interactive task asks for the same
 	// treatment unconditionally, on top of whatever NewestFirst already
 	// says, since somebody is waiting on it right now rather than
 	// checking back on it later (CreateTaskRequest.Interactive's own doc

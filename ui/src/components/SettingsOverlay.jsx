@@ -457,8 +457,9 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
                   <>
                     Work through the backlog newest-first
                     <span className="hint">
-                      off (default): a new task is added to the top of the list but dispatched last, behind
-                      everything already queued. on: it is dispatched next instead, ahead of everything queued.
+                      the list runs top-to-bottom in the order tasks will be dispatched, whatever this says.
+                      off (default): a new task joins the end of it, dispatched last, behind everything already
+                      queued. on: it joins the top instead and is dispatched next, ahead of everything queued.
                     </span>
                   </>
                 )}
