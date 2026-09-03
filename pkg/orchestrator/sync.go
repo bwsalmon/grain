@@ -157,6 +157,15 @@ func unfinishedChecks(checks []github.CheckRun) []string {
 // configured never fills the list in, and there is nothing in the Checks
 // API that tells the two apart; only time does.
 //
+// GitHub's own mergeable_state is not the exception it looks like: it
+// reads "clean" for an empty check list, the same answer it gives a
+// genuinely green one, because it is computed from that same empty list.
+// A live pull request on this repository was caught reading "clean" with
+// zero check runs four seconds after a push, two seconds before its
+// first check registered -- this gap, measured, in the field that was
+// supposed to close it. See github.PullRequestDetail.MergeableState for
+// the whole run. Nothing there removes this wait.
+//
 // Two minutes is chosen against what it costs on each side. On a repo
 // that does have CI it costs nothing at all: the checks appear within
 // seconds and the very next tick sees them. On a repo with genuinely no
