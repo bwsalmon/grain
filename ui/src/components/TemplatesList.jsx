@@ -23,11 +23,15 @@ const SORTS = {
 // here any more; all of that moved into TemplateOverlay, opened either
 // by the "+ New template" button or by clicking a row, so this list
 // stays a list instead of also being a form.
-export default function TemplatesList({ templates, config, onRefresh, showError }) {
+//
+// Which template is open is App.jsx's state (openTemplateId), not this
+// component's, so the URL can name it -- SchedulesList's own doc
+// comment on why (grain/task-139).
+export default function TemplatesList({ templates, config, openTemplateId, onOpenTemplate, onRefresh, showError }) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("name");
   const [showNew, setShowNew] = useState(false);
-  const [editing, setEditing] = useState(null);
+  const editing = templates.find((t) => t.id === openTemplateId) || null;
 
   const q = search.trim().toLowerCase();
   const matches = (t) =>
@@ -50,7 +54,7 @@ export default function TemplatesList({ templates, config, onRefresh, showError 
       )}
       <ul className="template-list">
         {visible.map((tmpl) => (
-          <li className="template-row" key={tmpl.id} onClick={() => setEditing(tmpl)}>
+          <li className="template-row" key={tmpl.id} onClick={() => onOpenTemplate(tmpl.id)}>
             <span className="template-name">{tmpl.name}</span>
             <span className="template-title hint">{tmpl.title}</span>
           </li>
@@ -63,7 +67,7 @@ export default function TemplatesList({ templates, config, onRefresh, showError 
         <TemplateOverlay config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
       )}
       {editing && (
-        <TemplateOverlay template={editing} config={config} onClose={() => setEditing(null)} onSaved={onRefresh} showError={showError} />
+        <TemplateOverlay template={editing} config={config} onClose={() => onOpenTemplate(null)} onSaved={onRefresh} showError={showError} />
       )}
     </main>
   );

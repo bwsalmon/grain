@@ -25,17 +25,24 @@
 const VIEWS = ["tasks", "repos", "schedules", "templates", "suites"];
 
 // parsePath turns a URL path into the {view, taskId, repo, showReleases,
-// showSettings, showDebug} App needs in order to restore on load or on a
-// back/forward navigation. Anything it doesn't recognize -- an unknown
-// segment, a stray trailing slash -- falls back to the default tasks
-// view rather than erroring, the same as an unknown in-app route today
-// just lands on "/".
+// scheduleId, templateId, suiteId, showSettings, showDebug} App needs in
+// order to restore on load or on a back/forward navigation. Anything it
+// doesn't recognize -- an unknown segment, a stray trailing slash --
+// falls back to the default tasks view rather than erroring, the same as
+// an unknown in-app route today just lands on "/".
 //
 // A repo's own page (RepoPage, grain/task-111) takes two segments
 // rather than one, since a repo is named "owner/name" -- /repos/acme/
 // widgets -- and its releases pane hangs off that as a third. An
 // "owner" with no "name" is not a repo, so /repos/acme lands on the
 // repo list the same way any other unrecognized path lands on "/".
+//
+// A schedule, a template and a suite each take one segment under their
+// own list -- /schedules/sched-1 -- the way /tasks/42 already does
+// (grain/task-139). Opening one of the four fills the same pane beside
+// the sidebar (grain/task-94), so all four are the same kind of link:
+// loadable cold, survives a reload, and back closes the pane rather
+// than the page.
 export function parsePath(pathname) {
   const segments = pathname.split("/").filter(Boolean);
   if (segments[0] === "settings") {
@@ -52,6 +59,15 @@ export function parsePath(pathname) {
     if (segments[3] === "releases") return { view: "repos", repo, showReleases: true };
     return { view: "repos", repo };
   }
+  if (segments[0] === "schedules" && segments[1]) {
+    return { view: "schedules", scheduleId: segments[1] };
+  }
+  if (segments[0] === "templates" && segments[1]) {
+    return { view: "templates", templateId: segments[1] };
+  }
+  if (segments[0] === "suites" && segments[1]) {
+    return { view: "suites", suiteId: segments[1] };
+  }
   if (VIEWS.includes(segments[0])) {
     return { view: segments[0] };
   }
@@ -62,15 +78,21 @@ export function parsePath(pathname) {
 // be showing at any moment. App diffs this against window.location on
 // every relevant state change to decide whether the address bar needs
 // updating at all.
-export function buildPath({ view, taskId, repo, showReleases, showSettings, showDebug }) {
+export function buildPath({
+  view, taskId, repo, showReleases, scheduleId, templateId, suiteId, showSettings, showDebug,
+}) {
   if (showSettings) return "/settings";
   if (showDebug) return "/debug";
   if (taskId) return `/tasks/${taskId}`;
   // An open repo only means anything within the repos view -- App keeps
   // the two together, and the sidebar clears the repo on the way out of
   // that view, so this is belt and braces rather than a case that
-  // arises.
+  // arises. The same goes for each open item below: a schedule is only
+  // showing while the schedules view is.
   if (view === "repos" && repo) return `/repos/${repo}${showReleases ? "/releases" : ""}`;
+  if (view === "schedules" && scheduleId) return `/schedules/${scheduleId}`;
+  if (view === "templates" && templateId) return `/templates/${templateId}`;
+  if (view === "suites" && suiteId) return `/suites/${suiteId}`;
   if (view === "tasks") return "/";
   return `/${view}`;
 }

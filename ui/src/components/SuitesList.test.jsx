@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -51,9 +52,18 @@ const noop = () => {};
 // first match -- clicking that is what opens the edit overlay.
 const suiteRow = (name) => screen.getAllByText(name)[0];
 
+// Which suite is open is App.jsx's state now, so that the URL can name
+// it (/suites/:id, grain/task-139) -- this wrapper stands in for App
+// with the smallest thing that holds that one piece of state, so
+// clicking a row still opens the pane the way it does in the app.
+function ControlledSuitesList(props) {
+  const [openSuiteId, setOpenSuiteId] = useState(null);
+  return <SuitesList openSuiteId={openSuiteId} onOpenSuite={setOpenSuiteId} {...props} />;
+}
+
 function renderList(props = {}) {
   return render(
-    <SuitesList
+    <ControlledSuitesList
       suites={[suite]}
       suiteRuns={[run]}
       templates={templates}

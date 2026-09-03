@@ -32,6 +32,12 @@ describe("parsePath", () => {
     expect(parsePath("/repos/acme")).toEqual({ view: "repos" });
   });
 
+  it("parses an open schedule, template and suite", () => {
+    expect(parsePath("/schedules/sched-1")).toEqual({ view: "schedules", scheduleId: "sched-1" });
+    expect(parsePath("/templates/template-1")).toEqual({ view: "templates", templateId: "template-1" });
+    expect(parsePath("/suites/suite-1")).toEqual({ view: "suites", suiteId: "suite-1" });
+  });
+
   it("parses the settings path", () => {
     expect(parsePath("/settings")).toEqual({ view: "tasks", showSettings: true });
   });
@@ -64,6 +70,16 @@ describe("buildPath", () => {
     expect(buildPath({ view: "tasks", repo: "acme/widgets" })).toBe("/");
   });
 
+  it("builds an open schedule's, template's and suite's own path", () => {
+    expect(buildPath({ view: "schedules", scheduleId: "sched-1" })).toBe("/schedules/sched-1");
+    expect(buildPath({ view: "templates", templateId: "template-1" })).toBe("/templates/template-1");
+    expect(buildPath({ view: "suites", suiteId: "suite-1" })).toBe("/suites/suite-1");
+  });
+
+  it("ignores an open item outside its own view", () => {
+    expect(buildPath({ view: "templates", scheduleId: "sched-1" })).toBe("/templates");
+  });
+
   it("prefers an open task over the underlying view", () => {
     expect(buildPath({ view: "repos", taskId: "42" })).toBe("/tasks/42");
   });
@@ -74,8 +90,9 @@ describe("buildPath", () => {
 
   it("round-trips every path parsePath recognizes", () => {
     const paths = [
-      "/", "/repos", "/schedules", "/templates", "/tasks/42", "/settings",
+      "/", "/repos", "/schedules", "/templates", "/suites", "/tasks/42", "/settings",
       "/repos/acme/widgets", "/repos/acme/widgets/releases",
+      "/schedules/sched-1", "/templates/template-1", "/suites/suite-1",
     ];
     for (const path of paths) {
       expect(buildPath(parsePath(path))).toBe(path);

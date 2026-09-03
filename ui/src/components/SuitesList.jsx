@@ -25,11 +25,16 @@ function describeMode(run) {
 // "flat list, click a row to edit, a '+' button to add one" shape,
 // with a second list (runs) beneath it since a suite's own status lives
 // in what it has run, not in the suite itself.
-export default function SuitesList({ suites, suiteRuns, templates = [], config, tasks, onRefresh, onRefreshRuns, onRefreshTemplates, showError }) {
+//
+// Which suite is open is App.jsx's state (openSuiteId), not this
+// component's, so the URL can name it -- SchedulesList's own doc
+// comment on why (grain/task-139). Starting a run stays local: a run is
+// an action to fill in and dismiss, not something you open.
+export default function SuitesList({ suites, suiteRuns, templates = [], config, tasks, openSuiteId, onOpenSuite, onRefresh, onRefreshRuns, onRefreshTemplates, showError }) {
   const [showNew, setShowNew] = useState(false);
-  const [editing, setEditing] = useState(null);
   const [running, setRunning] = useState(null); // suite id a "Run" click opened SuiteRunOverlay for, or true for the bare "+ Run" button
   const repoOptions = knownRepos(config, tasks);
+  const editing = suites.find((s) => s.id === openSuiteId) || null;
 
   const suiteName = (id) => suites.find((s) => s.id === id)?.name || id;
 
@@ -42,7 +47,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
       />
       <ul className="template-list">
         {suites.map((s) => (
-          <li className="template-row" key={s.id} onClick={() => setEditing(s)}>
+          <li className="template-row" key={s.id} onClick={() => onOpenSuite(s.id)}>
             <span className="template-name">{s.name}</span>
             <Chip size="small" label={describeMode(s)} />
             <Chip size="small" variant="outlined" label={`${s.items.length} template${s.items.length === 1 ? "" : "s"}`} />
@@ -90,7 +95,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
           suite={editing}
           templates={templates}
           config={config}
-          onClose={() => setEditing(null)}
+          onClose={() => onOpenSuite(null)}
           onSaved={onRefresh}
           onTemplatesChanged={onRefreshTemplates}
           showError={showError}

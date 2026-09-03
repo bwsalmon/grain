@@ -56,6 +56,23 @@ export default function App() {
   // of the flat list to keep in step with it.
   const [openRepo, setOpenRepo] = useState(() => parsePath(window.location.pathname).repo || null);
   const [releasesOpen, setReleasesOpen] = useState(() => parsePath(window.location.pathname).showReleases === true);
+  // openScheduleId/openTemplateId/openSuiteId are which schedule,
+  // template or suite is showing as a pane over its own list -- the
+  // openTaskId (below) of the other three lists. They live here rather
+  // than inside SchedulesList/TemplatesList/SuitesList so that buildPath
+  // can name the open item in the URL the way it already names an open
+  // task or an open repo (grain/task-139): opening one is the same
+  // gesture with the same result in all four lists (grain/task-94), so
+  // it is the same kind of link too.
+  //
+  // Each seeds straight from the URL the page loaded with, and needs no
+  // fetch of its own to do it -- unlike a task's detail, which is a
+  // round trip and so a mount effect below. App already holds all three
+  // lists in full, so restoring one of these panes is just finding the
+  // row this id names once its list has landed.
+  const [openScheduleId, setOpenScheduleId] = useState(() => parsePath(window.location.pathname).scheduleId || null);
+  const [openTemplateId, setOpenTemplateId] = useState(() => parsePath(window.location.pathname).templateId || null);
+  const [openSuiteId, setOpenSuiteId] = useState(() => parsePath(window.location.pathname).suiteId || null);
   const [error, setError] = useState(null);
   const [openTaskId, setOpenTaskId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -92,16 +109,30 @@ export default function App() {
     });
   }, []);
 
+  // All three of these drop an open item the store no longer reports --
+  // one deleted from its own pane, or a URL naming one that never
+  // existed -- so the address bar never keeps naming a pane that isn't
+  // there: refreshList's own pruning of `selected` above, applied to
+  // each list's own open item. It hangs off the fetch rather than off an
+  // effect watching the list because all three lists start out empty,
+  // and an empty list nothing has fetched yet says nothing about
+  // whether the item the URL names exists.
   const refreshSchedules = useCallback(async () => {
-    setSchedules(await api("/api/schedules"));
+    const next = await api("/api/schedules");
+    setSchedules(next);
+    setOpenScheduleId((prev) => (prev === null || next.some((s) => s.id === prev) ? prev : null));
   }, []);
 
   const refreshTemplates = useCallback(async () => {
-    setTemplates(await api("/api/templates"));
+    const next = await api("/api/templates");
+    setTemplates(next);
+    setOpenTemplateId((prev) => (prev === null || next.some((t) => t.id === prev) ? prev : null));
   }, []);
 
   const refreshSuites = useCallback(async () => {
-    setSuites(await api("/api/suites"));
+    const next = await api("/api/suites");
+    setSuites(next);
+    setOpenSuiteId((prev) => (prev === null || next.some((s) => s.id === prev) ? prev : null));
   }, []);
 
   const refreshSuiteRuns = useCallback(async () => {
@@ -199,13 +230,27 @@ export default function App() {
     setShowNewTask(true);
   }, []);
 
-  // setViewAndCloseRepo is Sidebar's onSetView: any nav click leaves an
-  // open repo behind, so a later click on "Repos" lands back on the repo
-  // list rather than on whichever repo was last open.
-  const setViewAndCloseRepo = useCallback((v) => {
+  // closeOpenItems clears whichever list's item pane is open -- only one
+  // of the three can be, since each belongs to its own view. An open
+  // pane is a modal dialog over the sidebar (Overlay.jsx), so today
+  // nothing can navigate with one open and this never fires; it is here
+  // so that "which item is open" can't outlive the view it means
+  // anything in and quietly reopen on the way back to that view.
+  const closeOpenItems = useCallback(() => {
+    setOpenScheduleId(null);
+    setOpenTemplateId(null);
+    setOpenSuiteId(null);
+  }, []);
+
+  // setViewAndCloseOpen is Sidebar's onSetView: any nav click leaves an
+  // open repo -- and an open schedule, template or suite -- behind, so a
+  // later click on that destination lands back on its list rather than
+  // on whichever item was last open there.
+  const setViewAndCloseOpen = useCallback((v) => {
     closeRepoPage();
+    closeOpenItems();
     setView(v);
-  }, [closeRepoPage]);
+  }, [closeRepoPage, closeOpenItems]);
 
   // act runs a mutation, then re-fetches the task (and the list behind
   // it) so the screen reflects what the store now reports -- never the
@@ -342,9 +387,9 @@ export default function App() {
     if (taskId) openTask(taskId);
   }, [openTask]);
 
-  // Keeps the address bar in sync with view/openTaskId/showSettings --
-  // the three things paths.js's buildPath encodes -- so every way of
-  // reaching a sub-page (a sidebar click, closing an overlay, the
+  // Keeps the address bar in sync with view/openTaskId/openScheduleId/
+  // showSettings -- everything paths.js's buildPath encodes -- so every
+  // way of reaching a sub-page (a sidebar click, closing an overlay, the
   // popstate handler below) ends up shareable/bookmarkable, not just a
   // page loaded fresh from one. Skips the update entirely once the
   // computed path already matches the address bar, which is what stops
@@ -353,7 +398,17 @@ export default function App() {
   // the time it does there is nothing left to push.
   const mountedRef = useRef(false);
   useEffect(() => {
-    const path = buildPath({ view, taskId: openTaskId, repo: openRepo, showReleases: releasesOpen, showSettings, showDebug });
+    const path = buildPath({
+      view,
+      taskId: openTaskId,
+      repo: openRepo,
+      showReleases: releasesOpen,
+      scheduleId: openScheduleId,
+      templateId: openTemplateId,
+      suiteId: openSuiteId,
+      showSettings,
+      showDebug,
+    });
     if (path !== window.location.pathname) {
       // The very first correction (e.g. an unrecognized path normalized
       // back to "/") replaces rather than pushes, so a mistyped or
@@ -365,7 +420,7 @@ export default function App() {
       }
     }
     mountedRef.current = true;
-  }, [view, openTaskId, openRepo, releasesOpen, showSettings, showDebug]);
+  }, [view, openTaskId, openRepo, releasesOpen, openScheduleId, openTemplateId, openSuiteId, showSettings, showDebug]);
 
   // Mirrors the browser's own back/forward buttons onto the same state
   // buildPath/parsePath already govern everything else through.
@@ -377,6 +432,9 @@ export default function App() {
       setView(parsed.view);
       setOpenRepo(parsed.repo || null);
       setReleasesOpen(parsed.showReleases === true);
+      setOpenScheduleId(parsed.scheduleId || null);
+      setOpenTemplateId(parsed.templateId || null);
+      setOpenSuiteId(parsed.suiteId || null);
       if (parsed.taskId) {
         openTask(parsed.taskId);
       } else {
@@ -420,7 +478,7 @@ export default function App() {
           <Sidebar
             config={config}
             view={view}
-            onSetView={setViewAndCloseRepo}
+            onSetView={setViewAndCloseOpen}
             tasks={tasks}
             schedules={schedules}
             templates={templates}
@@ -463,11 +521,20 @@ export default function App() {
               suites={suites}
               config={config}
               tasks={tasks}
+              openScheduleId={openScheduleId}
+              onOpenSchedule={setOpenScheduleId}
               onRefresh={refreshSchedules}
               showError={showError}
             />
           ) : view === "templates" ? (
-            <TemplatesList templates={templates} config={config} onRefresh={refreshTemplates} showError={showError} />
+            <TemplatesList
+              templates={templates}
+              config={config}
+              openTemplateId={openTemplateId}
+              onOpenTemplate={setOpenTemplateId}
+              onRefresh={refreshTemplates}
+              showError={showError}
+            />
           ) : view === "suites" ? (
             <SuitesList
               suites={suites}
@@ -475,6 +542,8 @@ export default function App() {
               templates={templates}
               config={config}
               tasks={tasks}
+              openSuiteId={openSuiteId}
+              onOpenSuite={setOpenSuiteId}
               onRefresh={refreshSuites}
               onRefreshRuns={refreshSuiteRuns}
               onRefreshTemplates={refreshTemplates}

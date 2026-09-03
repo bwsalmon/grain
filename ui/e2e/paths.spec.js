@@ -22,6 +22,9 @@ test("loads directly into each sidebar sub-page from its URL", async ({ page }) 
   await page.goto("/templates");
   await expect(page.getByRole("heading", { name: "Task templates" })).toBeVisible();
 
+  await page.goto("/suites");
+  await expect(page.getByRole("heading", { name: "Task suites" })).toBeVisible();
+
   // /logs and /sandboxes were sidebar destinations of their own until
   // both moved into Settings' Debug tab (bwsalmon/agents#623), then out
   // again onto their own "Debugging" entry at /debug (bwsalmon/
@@ -67,6 +70,76 @@ test("deep-links to a task's detail overlay, including after a hard reload", asy
   // that task's detail before anything else has rendered.
   await page.reload();
   await expect(page.locator(".detail-header h2", { hasText: title })).toBeVisible();
+});
+
+// grain/task-139: a schedule, a template and a suite each open the same
+// pane a task does (grain/task-94), so each is deep-linkable the same
+// way -- /schedules/:id, /templates/:id, /suites/:id. `grain demo` seeds
+// none of the three, so these file their own through the very endpoints
+// the frontend posts to, then ask for the item's URL cold: a real GET
+// the SPA fallback has to answer with index.html, and an App.jsx that
+// has only the path to tell it which pane to open.
+async function seedOne(page, path, data) {
+  const res = await page.request.post(path, { data });
+  expect(res.ok(), `POST ${path}: ${res.status()}`).toBe(true);
+  return res.json();
+}
+
+test("deep-links to a schedule, a template and a suite from their own URLs", async ({ page }) => {
+  const stamp = Date.now();
+  const template = await seedOne(page, "/api/templates", {
+    name: `E2E deep-link template ${stamp}`, title: "Bump dependencies",
+  });
+  const suite = await seedOne(page, "/api/suites", {
+    name: `E2E deep-link suite ${stamp}`, templateIds: [template.id], mode: "until_clean", maxPasses: 3,
+  });
+  const schedule = await seedOne(page, "/api/schedules", {
+    title: `E2E deep-link schedule ${stamp}`,
+    repo: "acme/widgets",
+    recurrence: { kind: "everyNHours", everyNHours: 24 },
+  });
+
+  await page.goto(`/templates/${template.id}`);
+  await expect(page.getByRole("heading", { name: "Edit template" })).toBeVisible();
+  await expect(page.getByLabel("Name")).toHaveValue(`E2E deep-link template ${stamp}`);
+
+  await page.goto(`/suites/${suite.id}`);
+  await expect(page.getByRole("heading", { name: "Edit task suite" })).toBeVisible();
+  await expect(page.getByLabel("Name")).toHaveValue(`E2E deep-link suite ${stamp}`);
+
+  await page.goto(`/schedules/${schedule.id}`);
+  await expect(page.getByRole("heading", { name: "Edit schedule" })).toBeVisible();
+  await expect(page.getByLabel(/^Title/)).toHaveValue(`E2E deep-link schedule ${stamp}`);
+
+  // An id no schedule answers to is not a pane: the list shows, and the
+  // address bar is corrected back to it rather than left naming
+  // something that isn't open.
+  await page.goto("/schedules/sched-does-not-exist");
+  await expect(page.getByRole("heading", { name: "Schedules" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Edit schedule" })).toHaveCount(0);
+  await expect(page).toHaveURL(/\/schedules$/);
+});
+
+test("opens a template into its own URL, and back closes the pane rather than the page", async ({ page }) => {
+  const name = `E2E back-out template ${Date.now()}`;
+  const template = await seedOne(page, "/api/templates", { name, title: "Bump dependencies" });
+
+  await page.goto("/templates");
+  await page.locator(".template-row", { hasText: name }).click();
+  await expect(page.getByRole("heading", { name: "Edit template" })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/templates/${template.id}$`));
+
+  // Back used to leave the templates page altogether, since the open
+  // template was state nothing had pushed a history entry for.
+  await page.goBack();
+  await expect(page).toHaveURL(/\/templates$/);
+  await expect(page.getByRole("heading", { name: "Edit template" })).toHaveCount(0);
+  await expect(page.locator(".template-row", { hasText: name })).toBeVisible();
+
+  // ...and forward opens the same pane again.
+  await page.goForward();
+  await expect(page).toHaveURL(new RegExp(`/templates/${template.id}$`));
+  await expect(page.getByRole("heading", { name: "Edit template" })).toBeVisible();
 });
 
 test("updates the URL when navigating the sidebar, and restores the previous page on back", async ({ page }) => {
