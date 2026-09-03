@@ -64,22 +64,31 @@ type Settings struct {
 	// shows up first in the task list; true moves it to the front of
 	// both instead.
 	NewestFirst bool `json:"newestFirst"`
-	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) are the
-	// deployment-wide default shape a kontur-managed sandbox VM is
-	// created with -- model.Config's own fields of the same name. Zero
-	// (the default for both) means "use bwsalmon/kontur's own default"
-	// rather than a deliberately tiny VM. Meaningless, and simply unused,
+	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) are the deployment-wide
+	// default shape a kontur-managed sandbox VM is created with --
+	// model.Config's own fields of the same name. Zero (the default for
+	// all three) means "use bwsalmon/kontur's own default" rather than a
+	// deliberately tiny VM. Meaningless, and simply unused,
 	// under a deployment running the default local-directory sandboxing
 	// (no -kontur-sandboxes); GetSettings still reports whatever is
 	// stored either way, the same as every other kontur* setting here.
 	SandboxCPUs     int `json:"sandboxCpus"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb"`
+	SandboxDiskGB   int `json:"sandboxDiskGb"`
 	// SandboxCPUsDefault and SandboxMemoryMBDefault are bwsalmon/kontur's
 	// own default VM shape (kontur.DefaultCPUs/DefaultMemoryMB) -- the
 	// shape actually in effect whenever SandboxCPUs/SandboxMemoryMB above
 	// is 0, surfaced so a caller can show that real current shape instead
 	// of a bare, misleadingly literal 0 (bwsalmon/agents#610). Constant,
 	// never read from or written to the store.
+	//
+	// There is deliberately no SandboxDiskGBDefault beside them: a VM's
+	// disk defaults to however large the guest image it is backed by
+	// happens to be (model.Config.SandboxDiskGB), which is a property of
+	// the image a deployment built, not a constant this build could
+	// name. The pane says so in words instead of showing a number that
+	// would be wrong for anyone who rebuilt their guest.
 	SandboxCPUsDefault     int `json:"sandboxCpusDefault"`
 	SandboxMemoryMBDefault int `json:"sandboxMemoryMbDefault"`
 	// ShowClosedByDefault is model.Config's own field of the same name
@@ -298,6 +307,7 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		NewestFirst:                   cfg.NewestFirst,
 		SandboxCPUs:                   cfg.SandboxCPUs,
 		SandboxMemoryMB:               cfg.SandboxMemoryMB,
+		SandboxDiskGB:                 cfg.SandboxDiskGB,
 		SandboxCPUsDefault:            kontur.DefaultCPUs,
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
@@ -409,6 +419,7 @@ type UpdateSettingsRequest struct {
 	NewestFirst            *bool     `json:"newestFirst"`
 	SandboxCPUs            *int      `json:"sandboxCpus"`
 	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
+	SandboxDiskGB          *int      `json:"sandboxDiskGb"`
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
 	ApprovedByDefault      *bool     `json:"approvedByDefault"`
 	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
@@ -551,6 +562,17 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			return Settings{}, validationErrorf("sandboxMemoryMb must be 0 (unset) or at least 128")
 		}
 		cfg.SandboxMemoryMB = *req.SandboxMemoryMB
+	}
+	if req.SandboxDiskGB != nil {
+		// No bound from bwsalmon/kontur to mirror here, unlike the two
+		// above: konturctl has no disk-size default of its own to be
+		// validated against, so the only value this has to reject is a
+		// negative one, and 0 keeps meaning "unset" the same way it does
+		// everywhere else in this shape.
+		if *req.SandboxDiskGB < 0 {
+			return Settings{}, validationErrorf("sandboxDiskGb must be 0 (unset) or at least 1")
+		}
+		cfg.SandboxDiskGB = *req.SandboxDiskGB
 	}
 	if req.ShowClosedByDefault != nil {
 		cfg.ShowClosedByDefault = *req.ShowClosedByDefault

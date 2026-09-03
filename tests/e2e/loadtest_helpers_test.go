@@ -85,7 +85,7 @@ func (g *loadGitHub) FindOpenPullRequestForBranch(owner, repo, branch string) (*
 func (g *loadGitHub) CreateIssue(owner, repo, title, body string, labels []string) (github.Issue, error) {
 	return github.Issue{}, g.unsupported("CreateIssue")
 }
-func (g *loadGitHub) MergePullRequest(owner, repo string, number int) error {
+func (g *loadGitHub) MergePullRequest(owner, repo string, number int, headSHA string) error {
 	return g.unsupported("MergePullRequest")
 }
 func (g *loadGitHub) GetPullRequest(owner, repo string, number int) (github.PullRequestDetail, error) {
@@ -102,6 +102,9 @@ func (g *loadGitHub) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, 
 }
 func (g *loadGitHub) ListWorkflowRuns(owner, repo, headSHA string) ([]github.CheckRun, error) {
 	return nil, g.unsupported("ListWorkflowRuns")
+}
+func (g *loadGitHub) FailedJobLogs(owner, repo, headSHA string) ([]github.JobLog, error) {
+	return nil, g.unsupported("FailedJobLogs")
 }
 func (g *loadGitHub) ListComments(owner, repo string, number int) ([]github.Comment, error) {
 	return nil, g.unsupported("ListComments")

@@ -59,18 +59,20 @@ type Task struct {
 	// frontend can label its chat distinctly from an ordinary interactive
 	// task's.
 	Configuration bool `json:"configuration,omitempty"`
-	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override the
+	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) override the
 	// deployment's default sandbox shape for this task's own dispatch
 	// alone -- model.Task's own fields of the same name. Zero (the
-	// default for both) means "use the deployment default", omitted from
-	// the JSON response the same way Base's own empty string is, since
-	// "no override" is the common case and worth not cluttering every
-	// task response with.
+	// default for all three) means "use the deployment default", omitted
+	// from the JSON response the same way Base's own empty string is,
+	// since "no override" is the common case and worth not cluttering
+	// every task response with.
 	SandboxCPUs     int `json:"sandboxCpus,omitempty"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb,omitempty"`
+	SandboxDiskGB   int `json:"sandboxDiskGb,omitempty"`
 	// AgentFramework is this task's own override of the deployment's
 	// agent framework -- model.Task's own field of the same name.
-	// Omitted, like the two above, for the common "no override" case, so
+	// Omitted, like the three above, for the common "no override" case, so
 	// a frontend reading it back gets the same empty-means-default it
 	// sent.
 	AgentFramework string   `json:"agentFramework,omitempty"`
@@ -255,6 +257,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		Configuration:       t.Configuration,
 		SandboxCPUs:         t.SandboxCPUs,
 		SandboxMemoryMB:     t.SandboxMemoryMB,
+		SandboxDiskGB:       t.SandboxDiskGB,
 		AgentFramework:      t.AgentFramework,
 		Capabilities:        []string{},
 		Stacked:             t.Origin.Reason == model.ReasonFix,

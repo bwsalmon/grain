@@ -240,6 +240,19 @@ func WithGrainServer(url string) Option {
 	return func(f *Framework) { f.grainServerURL = url }
 }
 
+// Asserted here rather than left to the one call site that type-asserts
+// for it (orchestrator.frameworkOpensPullRequests): a Framework that
+// stopped implementing this would otherwise not fail to compile, it
+// would quietly stop telling its runs about a tool they still have.
+var _ agent.PullRequestFramework = (*Framework)(nil)
+
+// CanOpenPullRequest implements agent.PullRequestFramework, exactly as
+// agent/claude's method of the same name does and for the same reason:
+// only a Framework built WithGrainServer passes its forked mcpserver the
+// -server/-task pair open_pull_request is registered on, so only it can
+// tell orchestrator.BuildPrompt that the tool will be there.
+func (f *Framework) CanOpenPullRequest() bool { return f.grainServerURL != "" }
+
 // New builds a Framework that runs the real agy binary at agyPath
 // (typically just "agy", resolved against $PATH) and points every run's
 // MCP settings at grainBinaryPath -- the same grain binary this process

@@ -47,6 +47,44 @@ export function capabilityName(config, id) {
   return c ? c.name : id;
 }
 
+// RETIRED_CAPABILITY_HINT labels a capability that is selected somewhere
+// but no longer offered -- worded as an instruction because turning it
+// off is the only thing its row is there for (capabilityRows below).
+export const RETIRED_CAPABILITY_HINT = "No longer offered -- untick to remove it";
+
+// capabilityRows is the listing any capability picker has to be built
+// from: the rows this build offers, plus a row of its own for each
+// selected id that has none.
+//
+// Every stored capability set -- a task's own grants, the deployment's
+// defaults (model.Config.DefaultCapabilities) and a repo's
+// (model.RepoConfig.DefaultCapabilities) -- is reported as stored, so an
+// id retired since somebody chose it stays in the set an operator is
+// looking at (ui.OfferedCapabilities' own "scratch-repo", now
+// github-sandbox). That is deliberate: ui.Settings.DefaultCapabilities
+// says as much, "an operator can only clear one they can see". But a MUI
+// multiple Select only ever deselects a value through that value's own
+// MenuItem, so an id with no row is a chip nothing can untick, and it is
+// sent straight back on the next save -- which ui.UpdateSettings and
+// ui.SetRepoDefaultCapabilities both refuse outright as "unknown
+// capability", pinning the whole pane until the id goes away. The extra
+// row exists purely to be turned off, which is what makes that save
+// possible again.
+//
+// `retired` is set on those rows so a picker can label one as something
+// to switch off rather than something to switch on. It is a function of
+// its own because all three pickers need the same rows for the same
+// reason, and one that quietly stopped adding them would be a pane
+// nobody could save.
+export function capabilityRows(offered, selected) {
+  const rows = offered || [];
+  return rows.concat(
+    (selected || [])
+      .filter((id) => !rows.some((c) => c.id === id))
+      .map((id) => ({ id, name: id, description: RETIRED_CAPABILITY_HINT, retired: true })),
+  );
+}
+
 // unionCapabilities composes the two layers of default capabilities the
 // way ui.(*Client).defaultCapabilities does server-side: base (the
 // deployment's own set) with extra (one repo's) appended, deduped,
@@ -95,12 +133,14 @@ export function defaultCapabilitiesFor(config, repo) {
   );
 }
 
-// repoRows unions config.targetRepos with every repo a task's write
-// target names (Task.Repo, never Reads -- a read-only repo grants
-// nothing and is not what a task "belongs to") into one row per repo,
-// sorted alphabetically, for the repo page and its per-state counts.
-// Tasks with no target (a proposal nobody has pointed at a repo yet) are
-// omitted rather than grouped under a blank name.
+// repoRows unions the three things that can make this deployment know a
+// repo at all -- config.targetRepos, every repo a task's write target
+// names (Task.Repo, never Reads: a read-only repo grants nothing and is
+// not what a task "belongs to"), and every repo carrying defaults of its
+// own in config.repoDefaultCapabilities -- into one row per repo, sorted
+// alphabetically, for the repo page and its per-state counts. Tasks with
+// no target (a proposal nobody has pointed at a repo yet) are omitted
+// rather than grouped under a blank name.
 //
 // A targetRepos entry with no tasks yet still gets a (zero-count) row --
 // bwsalmon/agents#473 moved adding/removing a target repo onto this
@@ -110,17 +150,49 @@ export function defaultCapabilitiesFor(config, repo) {
 // repos pane only offers to remove the former, since there is nothing to
 // remove otherwise -- an unrestricted deployment's targetRepos is always
 // empty, so every row it has is `configured: false`.
+//
+// The third source is there for the same reason, one step further out.
+// ui.(*Client).SetRepoDefaultCapabilities does not require a repo to be
+// allow-listed (its own doc comment: a repo can be configured before it
+// is allowed, and keeps its configuration after it is removed), so a
+// repo can hold a stored default set while matching neither of the other
+// two -- and this page is the only place that set can be edited, so
+// dropping the row would leave it real, really seeded onto every task
+// filed there, and unreachable. `grain repo list` (grain/task-36) reads
+// the same three sources for the same reason; the page and the CLI are
+// meant to agree on which repos this deployment knows about.
+//
+// `defaults` is whether the repo carries a set of its own, which on a
+// row that is neither configured nor targeted is the only reason it is
+// here at all -- the repos pane says so rather than leaving an empty row
+// with nothing to explain it.
 export function repoRows(config, tasks) {
   const byRepo = new Map();
+  const row = (repo) => {
+    if (!byRepo.has(repo)) {
+      byRepo.set(repo, {
+        repo,
+        total: 0,
+        counts: {},
+        blocked: 0,
+        configured: false,
+        defaults: (config?.repoDefaultCapabilities?.[repo] || []).length > 0,
+      });
+    }
+    return byRepo.get(repo);
+  };
   for (const repo of config?.targetRepos || []) {
-    byRepo.set(repo, { repo, total: 0, counts: {}, blocked: 0, configured: true });
+    row(repo).configured = true;
+  }
+  // An absent key and an empty list mean the same thing here (nothing
+  // added), the way ui.configResponse.RepoDefaultCapabilities says they
+  // do, so an empty one is not a repo to put a row up for.
+  for (const [repo, ids] of Object.entries(config?.repoDefaultCapabilities || {})) {
+    if ((ids || []).length > 0) row(repo);
   }
   for (const t of tasks) {
     if (!t.repo) continue;
-    if (!byRepo.has(t.repo)) {
-      byRepo.set(t.repo, { repo: t.repo, total: 0, counts: {}, blocked: 0, configured: false });
-    }
-    const entry = byRepo.get(t.repo);
+    const entry = row(t.repo);
     entry.total += 1;
     entry.counts[t.state] = (entry.counts[t.state] || 0) + 1;
     if (t.blocked) entry.blocked += 1;
@@ -135,6 +207,13 @@ export function repoRows(config, tasks) {
 // deployment still gets a useful dropdown once it has filed at least one
 // task, rather than staying a bare text field forever. Sorted and
 // deduped the same way repoRows already sorts its own rows.
+//
+// Two sources, not repoRows' three: a repo that only carries defaults of
+// its own is not somewhere a task can be filed today (targeting a repo
+// off a non-empty allowlist parks it before it dispatches,
+// ui.(*Client).parkOffAllowlist), and offering it here would read as
+// this deployment inviting a task it is going to park. It still gets a
+// row on the repos page, which is where its defaults are edited.
 export function knownRepos(config, tasks) {
   const repos = new Set(config?.targetRepos || []);
   for (const t of tasks || []) {

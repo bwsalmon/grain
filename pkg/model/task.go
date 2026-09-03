@@ -415,17 +415,19 @@ type Task struct {
 	// tool meant to help stuck behind the very saturation it might need
 	// to diagnose.
 	Configuration bool
-	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override
-	// Config.SandboxCPUs/SandboxMemoryMB for this task's own dispatch
-	// only -- the per-job escape hatch alongside the deployment-wide
-	// setting, for a task that is known ahead of time to need more (or
-	// less) than the default shape, e.g. a build-heavy repo or a task
-	// deliberately run on a constrained VM to reproduce a memory-pressure
-	// bug. Zero, the default for both, means "use the deployment
-	// default" -- the same "zero means unset" contract
-	// Config.SandboxCPUs/SandboxMemoryMB itself uses, chosen so a task
-	// created before this field existed reads back as unset rather than
-	// as an explicit "shrink this VM to nothing."
+	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) override
+	// Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB for this task's
+	// own dispatch only -- the per-job escape hatch alongside the
+	// deployment-wide setting, for a task that is known ahead of time to
+	// need more (or less) than the default shape, e.g. a build-heavy repo
+	// whose checkout and toolchain do not fit the guest image's own disk,
+	// or a task deliberately run on a constrained VM to reproduce a
+	// memory-pressure bug. Zero, the default for all three, means "use
+	// the deployment default" -- the same "zero means unset" contract
+	// Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB itself uses,
+	// chosen so a task created before these fields existed reads back as
+	// unset rather than as an explicit "shrink this VM to nothing."
 	//
 	// Applied by orchestrator.runOne, once per dispatch, immediately
 	// before the sandbox is handed to the run: a slot's sandbox is
@@ -435,7 +437,7 @@ type Task struct {
 	// moment the sandbox is created, which is the only moment its size is
 	// decided now that one is built per run (orchestrator.Shape, passed to
 	// Sandboxes.Acquire). Only orchestrator.KonturSandboxes can honour it
-	// -- a task with either field set,
+	// -- a task with any of the three set,
 	// dispatched onto the default orchestrator.HostSandboxes backend
 	// (no VM to resize), fails that dispatch outright rather than
 	// silently running at whatever shape the host itself happens to be,
@@ -444,6 +446,7 @@ type Task struct {
 	// local directory to place it in.
 	SandboxCPUs     int
 	SandboxMemoryMB int
+	SandboxDiskGB   int
 	// AgentFramework overrides Config.AgentFramework for this task's own
 	// dispatch only -- the per-task escape hatch alongside the
 	// deployment-wide default, for a task better suited to one framework
@@ -475,6 +478,14 @@ type Task struct {
 	// step past whichever extreme is currently in play, and Store.Reorder
 	// (a drag-and-drop move) rewrites it directly, so two tasks created
 	// or moved in the same instant still compare distinctly.
+	//
+	// It is also where grain writes down its own ordering, rather than
+	// keeping a second one to itself: Store.MoveToFrontOfBacklog puts the
+	// tasks waiting on a repo's merge queue at the front of the backlog in
+	// the order they will land, and orchestrator.fileFixTask files a
+	// repair at the very head of it. Everything that decides what happens
+	// next -- Ready, ListTasks, orchestrator.queueOrder -- then reads that
+	// one column, which is the one a human can see and drag.
 	OrderKey float64
 }
 
@@ -571,6 +582,13 @@ type Run struct {
 	// task) can see why a run failed from `grain get` without reading
 	// graind's own stdout, which per README's security design is not
 	// necessarily somewhere they can reach at all.
+	//
+	// A succeeded run fills it in too, with the tools it called and how
+	// often (orchestrator.outcomeOf). "How Outcome was reached" is the
+	// honest reading of the field, not "why it went wrong", and success is
+	// the ending where nothing else survives: agent.Result is discarded,
+	// so without this there was no stored answer to "did this run ever
+	// call the tool we built for it" for the runs that worked.
 	//
 	// Its own transcript -- the agent framework's full narrative record of
 	// the run, agent.Result.Transcript -- is not a field here: unlike
