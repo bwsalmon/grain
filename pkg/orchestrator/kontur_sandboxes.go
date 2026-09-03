@@ -210,10 +210,9 @@ func (c KonturConfig) createArgs(shape Shape) []string {
 	//
 	// Only the overlay is ever resized, never the guest image every other
 	// VM booting it shares, so this needs the VM to be in kontur's
-	// overlay disk mode -- which is what scripts/setup.sh's own
-	// -disk-readonly=false derives (staticpod.VMSpec.DiskModeOrDerived),
-	// and which a create rejects outright rather than ignoring if it is
-	// not.
+	// overlay disk mode -- which scripts/setup.sh asks for by name
+	// (-disk-mode=overlay, also kontur's own default), and which a create
+	// rejects outright rather than ignoring if it is not.
 	//
 	// An unset disk size omits the flag rather than passing a 0, the same
 	// way -cpus and -memory-mb above do: a deployment that has never

@@ -76,8 +76,8 @@ Three things it refuses rather than does, all of which would cost a guest
 its filesystem: shrinking, a size below the disk image the overlay reads
 through to, and being used outside `-disk-mode=overlay`, where the disk
 is the shared image itself and kontur has no overlay of its own to size.
-grain's VMs are in overlay mode (`-disk-readonly=false`, which still
-derives it), so only the first two are reachable from here.
+grain's VMs are in overlay mode -- `scripts/setup.sh` passes
+`-disk-mode=overlay` -- so only the first two are reachable from here.
 
 What it sizes is the block device the guest is offered. Growing the
 filesystem onto it is the guest's own job, which grain's guest already

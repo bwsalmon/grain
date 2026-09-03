@@ -3095,8 +3095,8 @@ It is MiB where this setting is GiB, so
 `orchestrator.KonturConfig.createArgs` converts at that one point, and it
 is `-disk-mode=overlay` only — the guest image underneath is shared with
 every other VM booting it, so nothing ever resizes that. grain's VMs are
-in that mode already (`-disk-readonly=false` still derives it). Zero
-still omits the flag entirely.
+in that mode already: `scripts/setup.sh` asks for it by name. Zero still
+omits the flag entirely.
 
 The real-KVM suite asserts the whole chain from inside a guest: a VM
 created a gigabyte larger than the image it boots comes up with a
