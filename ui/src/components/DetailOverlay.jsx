@@ -6,6 +6,7 @@ import { STATE_LABELS, capabilityRows, completionPhase, frameworkLabel } from ".
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
+import Markdown from "./Markdown.jsx";
 import Overlay from "./Overlay.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 import TaskPicker from "./TaskPicker.jsx";
@@ -45,7 +46,13 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
                 )}
               </div>
 
-              <div className="description">{t.description || "(no description)"}</div>
+              {/* The placeholder is grain's own words, not the task's,
+                  so it stays a plain string -- only a real description
+                  (often an agent's own markdown, for a task another run
+                  proposed) goes through the renderer. */}
+              {t.description
+                ? <Markdown className="description">{t.description}</Markdown>
+                : <div className="description">(no description)</div>}
               <AttachmentLinks taskId={t.id} attachments={t.attachments} />
             </>
           )}
@@ -432,7 +439,7 @@ function timelineEvents(t) {
       render: () => (
         <>
           <div className="timeline-meta">{who} · {c.authorKind}</div>
-          {c.body && <div className="timeline-comment-body">{c.body}</div>}
+          {c.body && <Markdown className="timeline-comment-body">{c.body}</Markdown>}
           <AttachmentLinks taskId={t.id} attachments={c.attachments} />
         </>
       ),
