@@ -3,6 +3,7 @@ package gcpkey
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,16 +137,72 @@ func TestResolveRefusesWhenUnconfigured(t *testing.T) {
 	if !res.Refused || res.Reason == "" {
 		t.Fatalf("got %+v, want a refusal with a human-facing reason", res)
 	}
+	// A Reason is posted to the task verbatim, so it has to name
+	// something that exists: this one named `grain controller configure
+	// --gcp-project-id`, which no build of grain has ever had.
+	if !strings.Contains(res.Reason, "grain settings -gcp-project") {
+		t.Errorf("reason %q does not name the command that actually sets the project", res.Reason)
+	}
+	if strings.Contains(res.Reason, "labelled") {
+		t.Errorf("reason %q still speaks of issue labels, which v2 has none of", res.Reason)
+	}
 }
 
 func TestResolveHonoursWhenConfigured(t *testing.T) {
 	p := testProvider(newFakeMinter())
-	res, err := p.Resolve(context.Background(), model.CapabilityContext{})
+	creds := &fakeCredentials{material: map[string]string{DefaultMinterCredential: "minter-key-material"}}
+	res, err := p.Resolve(context.Background(), testContext(creds, time.Now()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.Refused {
 		t.Fatalf("got %+v, want honoured", res)
+	}
+}
+
+// A deployment with both settings filled in and the minter secret never
+// pasted in is the half-wired case Resolve exists to park rather than
+// let Materialize discover: "materializing capabilities: gcpkey:
+// resolving minter credential ..." is grain describing its own
+// internals, where a task's own comment should name the secret to set.
+func TestResolveRefusesWhenTheMinterCredentialIsUnset(t *testing.T) {
+	p := testProvider(newFakeMinter())
+	creds := &fakeCredentials{material: map[string]string{}}
+	res, err := p.Resolve(context.Background(), testContext(creds, time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Refused {
+		t.Fatal("expected a refusal when the minter credential resolves to nothing")
+	}
+	if !strings.Contains(res.Reason, DefaultMinterCredential) {
+		t.Errorf("reason %q does not name the credential an operator has to set", res.Reason)
+	}
+	if !strings.Contains(res.Reason, "grain secrets set") {
+		t.Errorf("reason %q does not name the command that sets it", res.Reason)
+	}
+}
+
+func TestResolveNamesTheConfiguredMinterCredential(t *testing.T) {
+	p := testProvider(newFakeMinter())
+	p.Config.MinterCredential = "custom-minter"
+	res, err := p.Resolve(context.Background(), testContext(&fakeCredentials{}, time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Refused || !strings.Contains(res.Reason, "custom-minter") {
+		t.Errorf("got %+v, want a refusal naming this deployment's own minter credential", res)
+	}
+}
+
+func TestResolveRefusesWithNoResolverAtAll(t *testing.T) {
+	p := testProvider(newFakeMinter())
+	res, err := p.Resolve(context.Background(), model.CapabilityContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Refused {
+		t.Fatal("expected a refusal rather than a panic when no resolver was wired up")
 	}
 }
 
