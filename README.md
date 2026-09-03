@@ -1912,6 +1912,60 @@ avoided by seeding at task creation and reading nothing at dispatch. A
 schedule that wants `gcp-key` says so, once, where every task it files
 can be traced back to it.
 
+### A `grain repo` family, and why `-target-repos` stayed put
+
+The layer above left a one-directional surface behind: `grain settings`
+prints what each repo defaults ("default in: `owner/name`", on the
+capability line it already printed) with no way from a shell to act on
+what it just showed. `grain repo` (`cmd/grain/repo.go`, grain/task-36) is
+that missing half — `list`, `capabilities [-set a,b] <owner/name>`, `add`
+and `remove` — over four new `ui.HTTPClient` methods mirroring the
+`ui.Client` ones the repos pane already calls.
+
+**Why this and not schedules, templates or suites**, which are still
+UI-only and stay that way. The CLI's subset was never "tasks only": it is
+task management *plus deployment configuration* — `grain settings`,
+`grain secrets`, `grain config` — because "why did this deployment do
+that" is asked from a shell on the host at least as often as from a
+browser. A repo's own defaults are deployment configuration by that
+reading, and were the one member of the category with no spelling here.
+Schedules, templates and suites are authored *content*: written once, in
+a form built for writing them, and docs/scheduled-tasks.md records their
+absence from the CLI as an open gap waiting on somebody who needs it
+rather than as a decision. Adding a `repo` family does not make them
+next.
+
+**`-target-repos` stays on `grain settings`.** The repos *pane* dropped
+its own copy of that field when bwsalmon/agents#473 moved add/remove onto
+the repo rows, but what it dropped was a comma-separated text box — a bad
+control for a human and a perfectly good flag for a script. The field
+itself is still deployment-wide configuration (`model.Config.
+TargetRepos`), and it is the whole-list form `grain sync`'s own
+`settings` section already speaks verbatim (`ui.UpdateSettingsRequest.
+TargetRepos`); removing the flag would leave the CLI unable to say
+declaratively what a config file next to it can, and break existing
+scripts to buy nothing. So both spellings exist and write the same field:
+`-target-repos` replaces the list, `grain repo add`/`remove` change one
+entry, and `grain repo add` says out loud when the list it prints back
+has exactly one entry — an empty allowlist is what means *unrestricted*,
+so the first repo added to a deployment that never restricted itself
+narrows it rather than widening anything.
+
+**`grain repo list` is composed on the client, from `GET /api/config` and
+`GET /api/tasks`**, rather than served by a `GET /api/repos` of its own.
+A repo is not a stored row: the folder tree is still unbuilt, so "a repo
+grain knows about" is *derived* — whatever `targetRepos` names, union
+whatever a task targets, union whatever carries defaults of its own — and
+`ui/src/state.js`'s `repoRows` already derives it from those same two
+responses. A third derivation on the server would be a second definition
+to keep in step with the first. It does differ from `repoRows` in one
+way, deliberately: a repo that carries defaults while being neither
+allow-listed nor targeted still gets a row, because
+`SetRepoDefaultCapabilities` permits exactly that repo to exist and a
+list whose job includes reporting per-repo defaults must not be the one
+place they are invisible. (The repos *page* still drops such a row; that
+is a UI gap, filed separately, not a difference of opinion.)
+
 ## Write-only secrets access when colocated
 
 `pkg/secrets.Store` (above, "no secret store in the model") was

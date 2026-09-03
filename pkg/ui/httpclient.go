@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/bwsalmon/grain/pkg/model"
@@ -236,4 +237,114 @@ func (c *HTTPClient) UpdateSettings(ctx context.Context, req UpdateSettingsReque
 		return Settings{}, err
 	}
 	return settings, nil
+}
+
+// The repo family (grain/task-36): what a repo defaults on its own, and
+// whether the deployment's allowlist names it. Four of the five mirror
+// the Client method of the same name -- the ones the repos pane already
+// calls in-process -- and ListRepos has no Client counterpart because it
+// composes two endpoints that already exist rather than reaching a new
+// one. The types they speak are repos.go's, next to the Client methods
+// and HTTP handlers they cross the wire between; only the wire calls
+// themselves live here, where every other HTTPClient method does.
+
+// ListRepos reports one row per repo this deployment knows about --
+// RepoSummary's own doc comment for why that is derived from GET
+// /api/config and GET /api/tasks here rather than served whole by an
+// endpoint of its own.
+//
+// Two requests, not one, and deliberately not concurrent: the second is
+// a plain list of tasks, the ordering between them does not matter, and
+// a CLI list command is not where saving one round trip is worth a
+// goroutine and a second error path.
+func (c *HTTPClient) ListRepos(ctx context.Context) ([]RepoSummary, error) {
+	var cfg configResponse
+	if err := c.do(ctx, http.MethodGet, "/api/config", nil, &cfg); err != nil {
+		return nil, err
+	}
+	tasks, err := c.ListTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repoSummaries(cfg.TargetRepos, tasks, cfg.RepoDefaultCapabilities), nil
+}
+
+// RepoDefaults reads repo's own default capability set, alongside the
+// deployment-wide one it composes with and the effective set that
+// composition produces -- Client.RepoDefaults over the wire.
+func (c *HTTPClient) RepoDefaults(ctx context.Context, repo string) (RepoDefaults, error) {
+	path, err := repoAPIPath(repo, "/capabilities")
+	if err != nil {
+		return RepoDefaults{}, err
+	}
+	var defaults RepoDefaults
+	if err := c.do(ctx, http.MethodGet, path, nil, &defaults); err != nil {
+		return RepoDefaults{}, err
+	}
+	return defaults, nil
+}
+
+// SetRepoDefaultCapabilities replaces repo's own default capability set
+// -- Client.SetRepoDefaultCapabilities over the wire, including its
+// refusal of an id no capability answers to. A nil or empty ids is how a
+// repo is returned to adding nothing, the same as sending an empty list
+// from the repos pane.
+func (c *HTTPClient) SetRepoDefaultCapabilities(ctx context.Context, repo string, ids []string) (RepoDefaults, error) {
+	path, err := repoAPIPath(repo, "/capabilities")
+	if err != nil {
+		return RepoDefaults{}, err
+	}
+	var defaults RepoDefaults
+	if err := c.do(ctx, http.MethodPut, path, SetRepoCapabilitiesRequest{DefaultCapabilities: ids}, &defaults); err != nil {
+		return RepoDefaults{}, err
+	}
+	return defaults, nil
+}
+
+// AddTargetRepo appends repo to the deployment's TargetRepos allowlist
+// and returns the settings that result -- Client.AddTargetRepo over the
+// wire, idempotent the same way.
+//
+// Note what an empty allowlist means everywhere else it appears
+// (Config.TargetRepos): unrestricted. So the *first* repo added to a
+// deployment that has never restricted itself does not widen anything --
+// it narrows the deployment to that one repo. `grain repo add` says so
+// when the list it prints back has exactly one entry.
+func (c *HTTPClient) AddTargetRepo(ctx context.Context, repo string) (Settings, error) {
+	var settings Settings
+	if err := c.do(ctx, http.MethodPost, "/api/repos", AddRepoRequest{Repo: repo}, &settings); err != nil {
+		return Settings{}, err
+	}
+	return settings, nil
+}
+
+// RemoveTargetRepo removes repo from the deployment's TargetRepos
+// allowlist -- Client.RemoveTargetRepo over the wire, a no-op rather
+// than an error when repo isn't on it. It leaves everything else about
+// the repo alone: tasks already targeting it keep doing so, and whatever
+// it defaults on its own stays stored.
+func (c *HTTPClient) RemoveTargetRepo(ctx context.Context, repo string) (Settings, error) {
+	path, err := repoAPIPath(repo, "")
+	if err != nil {
+		return Settings{}, err
+	}
+	var settings Settings
+	if err := c.do(ctx, http.MethodDelete, path, nil, &settings); err != nil {
+		return Settings{}, err
+	}
+	return settings, nil
+}
+
+// repoAPIPath builds /api/repos/{owner}/{name} + suffix, parsing repo
+// first so a malformed one fails here, as the same ValidationError the
+// Client method of the same name would return, rather than as whatever
+// the resulting URL happened to hit: "widgets" with no owner would
+// otherwise build /api/repos/widgets/capabilities and come back as a
+// bare 404 from a route it could never have matched.
+func repoAPIPath(repo, suffix string) (string, error) {
+	parsed, err := model.ParseRepo(repo)
+	if err != nil {
+		return "", validationErrorf("repo: %v", err)
+	}
+	return "/api/repos/" + url.PathEscape(parsed.Owner) + "/" + url.PathEscape(parsed.Name) + suffix, nil
 }
