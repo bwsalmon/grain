@@ -63,6 +63,13 @@ type CapabilityStatus struct {
 	// deployment starts out holding it, rather than only the ones
 	// somebody ticks it on.
 	//
+	// Deployment-wide only, and deliberately not widened to mean "some
+	// task somewhere starts with this" now that a repo can default one
+	// too (DefaultRepos below). A pane that folded the two layers into
+	// one flag would describe a deployment-wide default that only some
+	// tasks actually get, which is exactly the reporting failure two
+	// layers introduce.
+	//
 	// It is a separate axis from Grantable, not a stronger form of it.
 	// Grantable still means what it always did -- the picker offers a row
 	// -- and a defaulted capability needs that row for two reasons: it is
@@ -72,6 +79,20 @@ type CapabilityStatus struct {
 	// would be one every task holds and none can drop, which is exactly
 	// the deployment-wide, un-detachable grant this deliberately is not.
 	Default bool `json:"default"`
+	// DefaultRepos is every repo whose own row
+	// (model.RepoConfig.DefaultCapabilities) names this capability --
+	// the second layer, reported as the repos it actually applies to
+	// rather than as a bare boolean, since "which repos" is the only
+	// useful form of that answer. Sorted by repo, the order
+	// Store.ListRepoConfigs already returns.
+	//
+	// Empty for a capability no repo names, including on a deployment
+	// where every task gets it deployment-wide: the two axes are read
+	// together, and Default above is the one that says "everywhere".
+	// Reported even for an entry that is also in Default -- a repo may
+	// restate one the deployment already gives, and the pane that lists
+	// repos should list the repo that said so.
+	DefaultRepos []string `json:"defaultRepos,omitempty"`
 	// MissingConfig is every deployment setting (this Settings tab's own
 	// General fields) this capability still needs -- e.g. "GCP project"
 	// for gcp-key/gemini-key. Empty for a capability with no such gate
@@ -191,10 +212,24 @@ func missingSecretsFor(requires []string, list []secrets.SecretInfo) []string {
 }
 
 // capabilityStatuses builds every CapabilityStatus for cfg -- the
-// deployment's current store-backed settings -- c.Config.Secrets, this
-// Client's own secrets store, if any, and c.Config.Capabilities, the
+// deployment's current store-backed settings -- repoConfigs, every repo
+// that adds defaults of its own (Store.ListRepoConfigs), c.Config.Secrets,
+// this Client's own secrets store, if any, and c.Config.Capabilities, the
 // picker listing that decides Grantable.
-func (c *Client) capabilityStatuses(cfg model.Config) []CapabilityStatus {
+func (c *Client) capabilityStatuses(cfg model.Config, repoConfigs []model.RepoConfig) []CapabilityStatus {
+	// Inverted once, here, rather than rescanned per capability: the
+	// listing is one row per capability and the answer each row needs is
+	// "which repos name me".
+	reposByCapability := make(map[string][]string)
+	for _, rc := range repoConfigs {
+		repo := rc.Repo.String()
+		for _, id := range rc.DefaultCapabilities {
+			if slices.Contains(reposByCapability[id], repo) {
+				continue
+			}
+			reposByCapability[id] = append(reposByCapability[id], repo)
+		}
+	}
 	var secretList []secrets.SecretInfo
 	if c.Config.Secrets != nil {
 		// Best-effort: a listing error here would only ever be a store
@@ -217,6 +252,7 @@ func (c *Client) capabilityStatuses(cfg model.Config) []CapabilityStatus {
 			Description:   spec.Description,
 			Grantable:     grantable,
 			Default:       slices.Contains(cfg.DefaultCapabilities, spec.Name),
+			DefaultRepos:  reposByCapability[spec.Name],
 			MissingConfig: missingConfigFor(spec.Name, cfg),
 		}
 		if c.Config.Secrets != nil {

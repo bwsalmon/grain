@@ -112,6 +112,13 @@ type Settings struct {
 	// great deal more for a capability every task holds than for one
 	// nobody has ticked.
 	//
+	// Deployment-wide only. A repo can default capabilities of its own on
+	// top of these (model.RepoConfig.DefaultCapabilities, edited on the
+	// repos pane), which is reported here as the repos each capability is
+	// defaulted on (CapabilityStatus.DefaultRepos) rather than folded
+	// into this list -- a set that mixed the two would describe a
+	// deployment-wide default that only some tasks actually get.
+	//
 	// Deliberately not omitempty, for the same reason PendingRestart is
 	// not: the frontend merges an update response over the settings it
 	// already has, so a set cleared back to nothing has to arrive as
@@ -267,7 +274,12 @@ func (c *Client) pendingRestart(stored model.Config) []string {
 	return pending
 }
 
-func (c *Client) settingsFrom(cfg model.Config) Settings {
+// settingsFrom is cfg, plus every repo that adds defaults of its own,
+// as the wire shape this pane reads. repoConfigs is passed in rather
+// than read here so this stays a pure projection of what its two callers
+// have already loaded -- the same reason it takes cfg rather than
+// re-reading the config row.
+func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) Settings {
 	agentFramework := model.NormalizeAgentFramework(cfg.AgentFramework)
 	geminiKeySet, claudeTokenSet := c.agentKeysSet()
 	return Settings{
@@ -289,7 +301,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		SandboxCPUsDefault:            kontur.DefaultCPUs,
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
-		Capabilities:                  c.capabilityStatuses(cfg),
+		Capabilities:                  c.capabilityStatuses(cfg, repoConfigs),
 		DefaultCapabilities:           cfg.DefaultCapabilities,
 		ApprovedByDefault:             cfg.ApprovedByDefault,
 		AutoMergeByDefault:            cfg.AutoMergeByDefault,
@@ -333,6 +345,15 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
+	// Read in both branches below: a repo can be given defaults of its
+	// own before this deployment has ever saved a settings row (nothing
+	// in SetRepoDefaultCapabilities requires one), and a Capabilities tab
+	// that hid those until someone pressed Save on an unrelated pane
+	// would be describing a deployment that does not exist.
+	repoConfigs, err := c.Store.ListRepoConfigs(ctx)
+	if err != nil {
+		return Settings{}, err
+	}
 	if cfg == nil {
 		// Key presence is reported here too, not only once something has
 		// been saved: pasting the two credentials in is exactly what an
@@ -348,7 +369,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		return Settings{
 			SandboxCPUsDefault:     kontur.DefaultCPUs,
 			SandboxMemoryMBDefault: kontur.DefaultMemoryMB,
-			Capabilities:           c.capabilityStatuses(model.Config{}),
+			Capabilities:           c.capabilityStatuses(model.Config{}, repoConfigs),
 			AgentKeysEnabled:       c.Config.Secrets != nil,
 			GeminiAPIKeySet:        geminiKeySet,
 			ClaudeOAuthTokenSet:    claudeTokenSet,
@@ -362,7 +383,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			RestartRequired: restartRequiredKeys(),
 		}, nil
 	}
-	return c.settingsFrom(*cfg), nil
+	return c.settingsFrom(*cfg, repoConfigs), nil
 }
 
 // UpdateSettingsRequest is Settings' editable fields -- nil means "leave
@@ -588,7 +609,11 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	// NewClient set it; TargetRepos is the only one a running server ever
 	// changes.
 	c.setTargetRepos(cfg.TargetRepos)
-	return c.settingsFrom(cfg), nil
+	repoConfigs, err := c.Store.ListRepoConfigs(ctx)
+	if err != nil {
+		return Settings{}, err
+	}
+	return c.settingsFrom(cfg, repoConfigs), nil
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
