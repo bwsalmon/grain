@@ -572,6 +572,13 @@ type Run struct {
 	// graind's own stdout, which per README's security design is not
 	// necessarily somewhere they can reach at all.
 	//
+	// A succeeded run fills it in too, with the tools it called and how
+	// often (orchestrator.outcomeOf). "How Outcome was reached" is the
+	// honest reading of the field, not "why it went wrong", and success is
+	// the ending where nothing else survives: agent.Result is discarded,
+	// so without this there was no stored answer to "did this run ever
+	// call the tool we built for it" for the runs that worked.
+	//
 	// Its own transcript -- the agent framework's full narrative record of
 	// the run, agent.Result.Transcript -- is not a field here: unlike
 	// Detail, nothing needs it alongside a whole Run, only on its own
