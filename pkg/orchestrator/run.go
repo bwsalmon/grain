@@ -582,9 +582,9 @@ const maxBranchCommits = 10
 // detail includes the tool census for a run that succeeded as well as
 // one that failed. The cheapest thing that costs is re-doing the
 // diagnosis attempt 1 already paid for; the dearest is re-attempting
-// precisely the thing that hit the wall clock, which is the one ending
-// whose detail says so (errRunTimedOut's own detail) and the one a run
-// cannot infer from a branch.
+// precisely the thing that hit the wall clock -- an ending a branch
+// cannot reveal and the detail says outright ("the run exceeded its 2h0m0s
+// wall-clock limit", recorded on RunDispatch's errRunTimedOut arm).
 //
 // Bounded on purpose, by maxPreviousAttempts, maxAttemptDetail and
 // maxBranchCommits: this is orientation, not a transcript store. The
