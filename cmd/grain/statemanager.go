@@ -182,7 +182,9 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 	// The existing working tree is a clone of a different repository, and
 	// no change of URL makes it a clone of this one. Moved aside rather
 	// than deleted: an operator who adopts the wrong repository has lost
-	// nothing, and the secrets file inside it is not regenerable.
+	// nothing. The secrets file is not in there to be archived with it
+	// any more (secretsConfig), so adopting no longer moves the one
+	// unregenerable thing this deployment has out from under itself.
 	if err := archiveStateRepo(m.dataDir); err != nil {
 		return ui.StateRepoStatus{}, err
 	}

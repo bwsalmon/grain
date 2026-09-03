@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,7 +28,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/model"
-	"github.com/bwsalmon/grain/pkg/secrets"
+	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/staterepo"
 )
 
@@ -46,6 +47,10 @@ Commands:
                             one's contents replace the database; an empty one is
                             seeded from it
   sync                      export the database, commit and push, now
+  check DIR                 load a state repository's files into a throwaway
+                            database and report what breaks. Needs no -data-dir
+                            and touches nothing: this is the CI step a state
+                            repository runs against a proposed change
   key show                  print this installation's secrets public key
   key path                  print where the private key is read from
 `
@@ -64,16 +69,24 @@ func runState(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *dataDir == "" {
-		fs.Usage()
-		return errors.New("-data-dir is required")
-	}
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
 		return errors.New("a command is required")
 	}
 	ctx := context.Background()
+	// check is the one command here that is not about this host's own
+	// installation: it reads a directory somebody hands it, in a CI
+	// runner that has no data directory, no store and no deployment. So
+	// it is dispatched before -data-dir is insisted on rather than being
+	// made to invent one.
+	if rest[0] == "check" {
+		return stateCheck(ctx, rest[1:])
+	}
+	if *dataDir == "" {
+		fs.Usage()
+		return errors.New("-data-dir is required")
+	}
 	switch cmd, cmdArgs := rest[0], rest[1:]; cmd {
 	case "status":
 		return stateStatus(ctx, *dataDir)
@@ -119,6 +132,28 @@ func stateStatus(ctx context.Context, dataDir string) error {
 	fmt.Printf("schema:     %d in the repository, %d in this build\n", version, model.SchemaVersion)
 	fmt.Printf("secrets:    %s (key: %s)\n",
 		secretsConfig(dataDir).File, secretsConfig(dataDir).KeyFile)
+	// Whether a task can be dispatched at this repository, which is not
+	// something an operator can tell by looking: it turns on whether
+	// grain's encrypted secrets file appears anywhere in the history, and
+	// a repository that has one looks exactly like one that has not until
+	// the first push through the proxy is refused.
+	held, err := repo.HasSecrets(ctx)
+	switch {
+	case err != nil:
+		fmt.Printf("dispatch:   unknown -- could not read this repository's history (%v), "+
+			"so the git proxy refuses it to every sandbox\n", err)
+	case settings.Remote == "":
+		fmt.Printf("dispatch:   not applicable -- a local-only repository is not reachable " +
+			"through the git proxy at all\n")
+	case held:
+		fmt.Printf("dispatch:   refused -- %s appears in this repository, so the git proxy "+
+			"refuses it to every sandbox. Removing it does not undo that: a clone reads "+
+			"history. Adopt a repository that has never held one to file settings tasks "+
+			"against it\n", staterepo.SecretsFile)
+	default:
+		fmt.Printf("dispatch:   allowed -- a task may be filed against this repository " +
+			"(`grain create -repo <owner>/<name> ...`)\n")
+	}
 	return nil
 }
 
@@ -245,13 +280,106 @@ func stateSync(ctx context.Context, dataDir string) error {
 	return nil
 }
 
+// stateCheck loads a directory of state files into a database it throws
+// away, and says what broke.
+//
+// The point is where it runs: not here, on the deployment, but in the
+// state repository's own CI, against a pull request nobody has merged
+// yet. staterepo.Import is already the validator -- one transaction,
+// foreign keys deferred, rolled back whole on any inconsistency -- and
+// until this command existed the only thing that ever ran it was a
+// daemon starting up. A dump that was malformed, or a row missing a NOT
+// NULL column, therefore failed at import time on the next start: after
+// the merge, in the deployment, to whoever was on call rather than to
+// whoever wrote the diff.
+//
+// It needs no -data-dir and reads nothing but the directory named, so a
+// CI runner needs this binary and a checkout and nothing else:
+//
+//	grain state check .
+func stateCheck(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("grain state check", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, "usage: grain state check DIR\n\n"+
+			"DIR is the root of a state repository -- the directory holding tables/ and\n"+
+			"schema-version, which for a CI step run at the top of the checkout is \".\".\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dir := "."
+	switch fs.NArg() {
+	case 0:
+	case 1:
+		dir = fs.Arg(0)
+	default:
+		fs.Usage()
+		return errors.New("check takes one directory")
+	}
+
+	db, cleanup, err := throwawayStore()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	report, err := staterepo.Check(ctx, db, dir, model.SchemaVersion)
+	if err != nil {
+		// Whatever the import objected to, printed before the error, so a
+		// CI log says which schema the dump claimed as well as why it did
+		// not load.
+		for _, w := range report.Warnings {
+			fmt.Printf("warning: %s\n", w)
+		}
+		return err
+	}
+	for _, w := range report.Warnings {
+		fmt.Printf("warning: %s\n", w)
+	}
+	fmt.Printf("schema:  %d, which is what this build of grain knows\n", report.SchemaVersion)
+	fmt.Printf("loaded:  %d rows across %d tables\n", report.Total(), len(report.Rows))
+	for _, t := range report.Tables() {
+		fmt.Printf("  %-28s %d\n", t, report.Rows[t])
+	}
+	fmt.Println("ok: grain can load this")
+	return nil
+}
+
+// throwawayStore opens an empty database in a temporary directory, at
+// this build's schema, for a check to import into and nothing else.
+//
+// Temporary and its own, because staterepo.Import replaces every row in
+// whatever database it is given: a check that ran against the store
+// under -data-dir would be a check that cost the deployment its state.
+// Check tightens the connection pool and the pragmas on it from there.
+func throwawayStore() (*sql.DB, func(), error) {
+	dir, err := os.MkdirTemp("", "grain-state-check-")
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, nil, err
+	}
+	cleanup := func() {
+		db.Close()
+		os.RemoveAll(dir)
+	}
+	if err := model.New(db).Init(context.Background()); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("applying schema: %w", err)
+	}
+	return db, cleanup, nil
+}
+
 // stateKey is the operator's view of the secrets key: the public half,
 // which is safe to print, and where the private half is read from, which
 // is what they have to back up. It never prints the private key --
 // reading it is `cat` on a file they already own, and a command that
 // prints one invites it into a terminal's scrollback.
 func stateKey(dataDir string, args []string) error {
-	store := secrets.Open(secretsConfig(dataDir))
+	store := openSecrets(dataDir)
 	if len(args) == 0 {
 		return errors.New("usage: grain state key show|path")
 	}
