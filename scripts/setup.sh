@@ -469,7 +469,12 @@ Recognized variables:
                                       Seeded once
   GRAIN_GCP_SERVICE_ACCOUNT_EMAIL    the narrow agent service account they mint
                                       for. Seeded once
-  GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE a minter key to seed under secrets/gcp-key-minter/
+  GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE a minter key to seed under the gcp-key-minter
+                                      secret. Written on *every* run, unlike the
+                                      seeded-once values above: the deploy that
+                                      supplies this key also rotates it in GCP, so a
+                                      host that kept its first copy ends up
+                                      authenticating with a key GCP has deleted
 
   GRAIN_TARGET_REPO         owner/name: the UI's default target for a task with
                              no repo of its own, and the repo this script pushes
