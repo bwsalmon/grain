@@ -72,18 +72,41 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 //
 // Order matters. A question ends the run's turn by contract (mcp's own
 // ask_question doc comment: "after calling this, do not take any further
-// actions") so it is checked, and returned on, before anything else --
-// answering it is the whole reason the run stopped, and no PR exists yet
-// for an ask_question turn to have opened regardless. Proposed tasks are
-// relayed independent of how the run otherwise ended, since v1's own
-// propose_task can accompany other work rather than replacing it.
+// actions") so it is what the task ends up parked on, and is returned on
+// before anything else -- answering it is the whole reason the run
+// stopped, and no PR exists yet for an ask_question turn to have opened
+// regardless. Proposed tasks are relayed independent of how the run
+// otherwise ended, since v1's own propose_task can accompany other work
+// rather than replacing it.
+//
+// A comment_on_issue call is therefore relayed before either of those
+// two returns rather than after both of them, which is what a run that
+// commented *and* did something else used to lose. Both combinations are
+// ones the tools themselves invite: comment_on_issue's own description
+// says a pull request is opened for pushed commits "regardless of whether
+// you also call this", and a run that reports what it found before asking
+// what to do next is saying two different things, not the same thing
+// twice. Under the old order the question's return and the pushed
+// branch's return each came first, and the comment was dropped silently
+// and irrecoverably -- agent.Result is never persisted, so the words
+// existed nowhere else, and neither path reaches the "nothing to act on"
+// log line that would at least have recorded that the call happened.
+// Relaying costs one row and puts the words in front of the human reading
+// the task and the redispatched run reading the thread back (run.go's
+// commentThreadSection).
+//
+// Only the relaying moved. What the comment means for the task's state is
+// still decided by what else the run did: it is a closing note that
+// completes the task only when there was no question and no branch, and
+// parking is still keyed to the question, whose comment id is the one
+// PendingQuestionCommentID names.
 //
 // add_review_comment is not relayed here at all: doing so needs a PR
 // already in hand to attach a draft review to, which only a /review-intent
 // dispatch (not yet built -- see directives.go) would have. A run that
-// calls it today gets ProcessResult's ordinary "nothing to act on" ending;
-// nothing is lost, since ask_question/comment_on_issue/propose_task's own
-// contracts already say a run should call one of the four, not several.
+// calls it today gets ProcessResult's ordinary "nothing to act on"
+// ending, which at least names the call in the run's own outcome detail
+// (noActionDetail) rather than losing it in silence.
 //
 // runID is d.RunID, the very run result came from -- needed only for the
 // "nothing to act on" ending below, to correct that run's own outcome
@@ -95,6 +118,20 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 
 	if err := relayProposedTasks(ctx, store, task, result, now); err != nil {
 		return err
+	}
+
+	// Relayed up front, before either ending that used to return past it.
+	// What a comment_on_issue call means for the task's *state* depends on
+	// what else the run did -- a closing note on its own, a remark
+	// alongside a pull request, a finding in front of a question -- but
+	// the words themselves are the run's own and belong in the
+	// conversation on every one of those paths.
+	comment, ok := firstToolCallArg(result, "comment_on_issue", "comment")
+	hasComment := ok && comment != ""
+	if hasComment {
+		if _, err := relayComment(ctx, store, task, comment, now); err != nil {
+			return fmt.Errorf("orchestrator: posting comment for %s: %w", task.ID, err)
+		}
 	}
 
 	if question, ok := firstToolCallArg(result, "ask_question", "question"); ok && question != "" {
@@ -115,10 +152,7 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		return nil
 	}
 
-	if comment, ok := firstToolCallArg(result, "comment_on_issue", "comment"); ok && comment != "" {
-		if _, err := relayComment(ctx, store, task, comment, now); err != nil {
-			return fmt.Errorf("orchestrator: posting closing comment for %s: %w", task.ID, err)
-		}
+	if hasComment {
 		return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.CompletedAt = &now })
 	}
 
