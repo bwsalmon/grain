@@ -891,3 +891,20 @@ func TestRunNamesNoTurnBudgetWhenNoneWasConfigured(t *testing.T) {
 		t.Errorf("err = %q, want it to still say the run was stopped at a turn limit", err)
 	}
 }
+
+// The prompt's half of open_pull_request: orchestrator.BuildPrompt names
+// the tool only for a run that really has it, and this is the answer it
+// asks for (agent.PullRequestFramework). It tracks WithGrainServer alone,
+// since that is the half of -server/-task a Framework holds -- the other
+// half, a task id, comes with every dispatch.
+func TestCanOpenPullRequestTracksWithGrainServer(t *testing.T) {
+	with := New("claude", "/path/to/grain", WithGrainServer("http://127.0.0.1:8420"))
+	if !with.CanOpenPullRequest() {
+		t.Error("CanOpenPullRequest() = false for a Framework built WithGrainServer")
+	}
+	without := New("claude", "/path/to/grain")
+	if without.CanOpenPullRequest() {
+		t.Error("CanOpenPullRequest() = true for a Framework with no daemon to ask -- " +
+			"its runs' mcpserver registers no open_pull_request at all")
+	}
+}
