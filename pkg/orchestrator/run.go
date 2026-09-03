@@ -132,12 +132,15 @@ func frameworkOpensPullRequests(framework agent.Framework) bool {
 // informational -- it tells the agent those repos exist and are safe to
 // clone, rather than granting anything itself.
 //
-// The last paragraph, for a task that has a target at all, is the
-// push/check/repair loop pkg/mcp's pull_request_status exists for. It is
-// informational in the same way: nothing here grants a second push, the
-// proxy already allowed every push to task.Target -- what it grants is
-// the knowledge that the loop is available, which no tool description
-// on its own can convey (see the comment at that paragraph).
+// The last paragraphs, for a task that has a target at all, are the
+// push/check/repair loop pkg/mcp's pull_request_status exists for, and
+// what finishing that loop means: green checks and a branch that still
+// merges into its base. They are informational in the same way: nothing
+// here grants a second push, the proxy already allowed every push to
+// task.Target -- what they grant is the knowledge that the loop is
+// available and that a push alone is not the end of it, neither of which
+// a tool description on its own can convey (see the comments at those
+// paragraphs).
 //
 // canOpenPullRequest is the one fact in that paragraph this function
 // cannot work out for itself: whether this run's mcpserver actually
@@ -210,6 +213,30 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 				"request grain opens for you when this run finishes, and calling it more " +
 				"than once never opens a second one."
 		}
+		// Where the loop ends, said in words for the same reason the loop
+		// itself is: a run that pushes, reads one status and stops has
+		// followed every sentence above this one to the letter. Both
+		// halves here are ways a push that looked finished is not. An
+		// unfinished check carries no verdict at all -- pull_request_status
+		// says so on the answer itself, and healthFrom makes the same call
+		// at the merge gate -- so stopping on a queued job is stopping on
+		// an unknown. And a branch that conflicts with its base never
+		// merges however green its checks are (healthFrom reads
+		// PrConflicted off the pull request before it looks at a single
+		// check), which the run still holding the checkout can fix in a
+		// turn, rather than leaving it to the fix task the merge queue
+		// files minutes later in a cold sandbox (sync.go's fileFixTask).
+		base := baseDescription(task)
+		prompt += fmt.Sprintf(
+			"\n\nYour job is not done at the moment you push: it is done when those "+
+				"checks have finished and passed and your branch still merges cleanly "+
+				"into %s. A check that has not finished carries no verdict, so wait and "+
+				"look again rather than reading it as a pass. If your branch conflicts "+
+				"with %s, resolving that is part of this task too -- `git fetch origin`, "+
+				"merge that branch into %q, resolve the conflicts, commit and push "+
+				"again.",
+			base, base, branch,
+		)
 	}
 	if len(task.Reads) > 0 {
 		names := make([]string, len(task.Reads))
@@ -224,6 +251,21 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 	}
 	prompt += proposalSection(task)
 	return prompt
+}
+
+// baseDescription names the branch a run's own branch has to keep
+// merging into, for the sentence above -- task.Base when the task fixes
+// one (directives.go's `/base`, and every merge queue fix task, which
+// fileFixTask points back at the branch it repairs), and otherwise the
+// repo's default branch, which is whatever prepareCheckout's clone left
+// at origin/HEAD. Unnamed rather than guessed in that second case:
+// grain does not know the repo's default branch here, and naming the
+// wrong one would send a run merging a branch that does not exist.
+func baseDescription(task model.Task) string {
+	if task.Base != "" {
+		return "`" + task.Base + "`"
+	}
+	return "its base branch"
 }
 
 // proposalSection is the follow-on task etiquette every dispatch is told,
