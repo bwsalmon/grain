@@ -298,7 +298,7 @@ func (s *simulation) putSettings(ctx context.Context) {
 		}
 	}
 	for i := 0; i < 12; i++ {
-		if err := s.store.PutTaskTemplate(ctx, model.TaskTemplate{
+		if err := s.store.PutTemplate(ctx, model.Template{
 			ID:        fmt.Sprintf("tpl-%d", i),
 			Name:      fmt.Sprintf("template %d", i),
 			Title:     "Do the thing",

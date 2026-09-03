@@ -78,6 +78,26 @@ export function sortedOutcomes(outcomes) {
   return Object.entries(outcomes || {}).sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
 }
 
+// formatBytes renders a result size the way somebody sizing a truncation
+// cap reads one. Binary units, because the cap they would set is written
+// in them (mcp.maxToolResultBytes is 64 << 10), and no decimals below a
+// megabyte: the difference between 63 KB and 64 KB matters and the
+// difference between 63.4 and 63.5 does not.
+export function formatBytes(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// percent renders a rate (0..1) as whole percent. Rates here are read
+// against each other -- edit_file's against run_command's -- rather than
+// to a decimal place.
+export function percent(rate) {
+  if (!rate) return "0%";
+  return `${Math.round(rate * 100)}%`;
+}
+
 // backlogRows orders the backlog by STATE_ORDER -- model.StateOf's own
 // precedence, the order the sidebar already lists states in -- with any
 // state this UI does not know about appended alphabetically rather than
@@ -184,7 +204,15 @@ export default function MetricsPage({ showError, onOpenTask }) {
   const measured = latency.some((s) => s.n > 0);
   const thin = latency.some((s) => isThinPercentile(s.n, 90) || isThinPercentile(s.n, 99));
   const outcomes = sortedOutcomes(report?.runs?.outcomes);
+  const endings = sortedOutcomes(report?.runs?.endings);
   const backlog = backlogRows(report?.backlog?.byState);
+  // Both sections describe the inside of a run, and both are absent
+  // rather than zeroed on a deployment whose runs predate the census --
+  // "nobody measured this" is not "the tools never failed", so neither
+  // renders at all until something recorded one.
+  const tools = report?.tools;
+  const checks = report?.checks;
+  const verdicts = sortedOutcomes(checks?.verdicts);
   const oldestTaskId = report?.backlog?.oldestQueuedTaskId;
 
   return (
@@ -253,11 +281,25 @@ export default function MetricsPage({ showError, onOpenTask }) {
             <Stat label="Running right now" value={report.runs.live} />
           </Box>
           {outcomes.length > 0 && (
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: 2.5 }}>
+            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: endings.length > 0 ? 1 : 2.5 }}>
               {outcomes.map(([name, count]) => (
                 <Chip key={name} size="small" variant="outlined" label={`${name} ${count}`} />
               ))}
             </Box>
+          )}
+          {endings.length > 0 && (
+            <>
+              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 0.5 }}>
+                …and how those attempts actually ended. The outcome words above cover more than one ending each:
+                “cancelled” is both a human closing the task and a run hitting its wall-clock cap, and “failed” is both a
+                broken framework and a run that used up its turns. Each has a different fix.
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: 2.5 }}>
+                {endings.map(([name, count]) => (
+                  <Chip key={name} size="small" variant="outlined" label={`${name} ${count}`} />
+                ))}
+              </Box>
+            </>
           )}
 
           <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>Latency</Typography>
@@ -313,6 +355,89 @@ export default function MetricsPage({ showError, onOpenTask }) {
                   under another name.
                 </Typography>
               )}
+            </>
+          )}
+
+          {tools?.calls > 0 && (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5, mt: 2.5 }}>Tool use</Typography>
+              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
+                What the window's runs spent their turns on, over the {tools.runs} attempt{tools.runs === 1 ? "" : "s"}{" "}
+                that recorded it. An errored call is an ordinary turn of an agent's loop rather than a broken run, so
+                these rates are never zero — what they are for is the trend, and the comparison between tools.
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3, mb: 1 }}>
+                <Stat label="Tool calls" value={tools.calls} sub={`${tools.callsPerRun.p50} per run at the median`} />
+                <Stat label="Errored calls" value={tools.errored} sub={`${percent(tools.erroredShare)} of all calls`} />
+              </Box>
+              <Table size="small" sx={{ mb: 0.5 }}>
+                <TableHead>
+                  <TableRow>
+                    <TableCell>Tool</TableCell>
+                    <TableCell align="right">runs</TableCell>
+                    <TableCell align="right">calls</TableCell>
+                    <TableCell align="right">errors</TableCell>
+                    <TableCell align="right">timed out</TableCell>
+                    <TableCell align="right">mean result</TableCell>
+                    <TableCell align="right">p95 result</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {tools.byTool.map((use) => (
+                    <TableRow key={use.name}>
+                      <TableCell>{use.name}</TableCell>
+                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>{use.runs}</TableCell>
+                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>{use.calls}</TableCell>
+                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                        {use.errored} ({percent(use.errorRate)})
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                        {use.timedOut > 0 ? `${use.timedOut} (${percent(use.timeoutRate)})` : "—"}
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                        {formatBytes(use.resultBytes.meanBytes)}
+                      </TableCell>
+                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                        <Tooltip title="An upper bound: sizes are kept in base-2 buckets, so the real number is inside the octave below this. It is what should size the cap on a tool result.">
+                          <span>≤ {formatBytes(use.resultBytes.p95AtMostBytes)}</span>
+                        </Tooltip>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </>
+          )}
+
+          {checks?.waits > 0 && (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5, mt: 2.5 }}>CI waits</Typography>
+              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
+                The loop every run is told to go round: push, wait for checks, fix, push again.{" "}
+                {checks.waits} wait{checks.waits === 1 ? "" : "s"} across {checks.runs} attempt
+                {checks.runs === 1 ? "" : "s"}. Mostly <code>timed_out</code> means the wait's own default is set wrong
+                for this CI; mostly <code>no_checks</code> means runs are being sent to wait for CI that does not exist.
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: 1 }}>
+                {verdicts.map(([name, count]) => (
+                  <Chip key={name} size="small" variant="outlined" label={`${name} ${count}`} />
+                ))}
+              </Box>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+                <Stat
+                  label="Blocked, median"
+                  value={formatSeconds(checks.blocked.p50Seconds)}
+                  sub={`p90 ${formatSeconds(checks.blocked.p90Seconds)} · max ${formatSeconds(checks.blocked.maxSeconds)}`}
+                />
+                {checks.greenRuns > 0 && (
+                  <Stat
+                    label="Pushes before green"
+                    value={checks.pushesToGreen.mean.toFixed(1)}
+                    sub={`${checks.pushesToGreen.max} at worst, over ${checks.greenRuns} attempt${checks.greenRuns === 1 ? "" : "s"} that went green`}
+                    title="How many pushes a run had made when its first passing wait returned. 1.0 is CI right first time; the distance above it is what the loop costs."
+                  />
+                )}
+              </Box>
             </>
           )}
 

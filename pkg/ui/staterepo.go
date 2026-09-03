@@ -82,7 +82,10 @@ type StateRepoManager interface {
 	// credential to push with, for a repository this deployment's own
 	// GitHub credential ladder does not cover.
 	Adopt(ctx context.Context, remote, branch, token string) (StateRepoStatus, error)
-	// Sync exports, commits and pushes now, rather than at the next tick.
+	// Sync runs the daemon's own sync cycle now, rather than at the next
+	// tick: pull whatever was merged and make its settings live, then
+	// export, commit and push. Both directions, because an operator who
+	// has just merged a change presses this to stop waiting for it.
 	Sync(ctx context.Context) (StateRepoStatus, error)
 }
 

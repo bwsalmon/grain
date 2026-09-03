@@ -299,6 +299,23 @@ func (c *HTTPClient) UpdateSettings(ctx context.Context, req UpdateSettingsReque
 	return settings, nil
 }
 
+// CheckCapability is Client.CheckCapability over the wire: authenticate
+// as one capability's standing credential, make one cheap and harmless
+// call with it, and report what came back.
+//
+// Its caller is `grain settings -check-capability` (cmd/grain/main.go).
+// The question -- "is the credential this deployment holds still one the
+// far end accepts?" -- is asked from a shell on the host at least as
+// often as from a browser, and a host shell is where somebody reading a
+// failed task's error is usually already standing.
+func (c *HTTPClient) CheckCapability(ctx context.Context, id string) (CapabilityCheck, error) {
+	var check CapabilityCheck
+	if err := c.do(ctx, http.MethodPost, "/api/capabilities/"+url.PathEscape(id)+"/check", nil, &check); err != nil {
+		return CapabilityCheck{}, err
+	}
+	return check, nil
+}
+
 // The repo family (grain/task-36): what a repo defaults on its own, and
 // whether the deployment's allowlist names it. Four of the five mirror
 // the Client method of the same name -- the ones the repos pane already

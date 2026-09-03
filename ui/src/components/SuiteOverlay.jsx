@@ -4,10 +4,10 @@ import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import TemplateOverlay from "./TemplateOverlay.jsx";
 
-// SuiteOverlay is the task suites page's own sub page (bwsalmon/
+// SuiteOverlay is the suites page's own sub page (bwsalmon/
 // agents#642), TemplateOverlay's own "+ on the list opens this blank,
-// clicking a row opens it pre-filled" split: a task suite is a saved
-// combination of task templates plus how to run them (run them Count
+// clicking a row opens it pre-filled" split: a suite is a saved
+// combination of templates plus how to run them (run them Count
 // times, or run them until a pass produces no pull request and no
 // follow-up task), created here and then run against any repo and
 // branch from SuiteRunOverlay.
@@ -56,7 +56,7 @@ export default function SuiteOverlay({ suite, templates = [], config, onClose, o
   };
 
   const remove = async () => {
-    if (!confirm(`Delete the task suite "${suite.name}"? Runs already started from it are unaffected.`)) return;
+    if (!confirm(`Delete the suite "${suite.name}"? Runs already started from it are unaffected.`)) return;
     try {
       await api(`/api/suites/${suite.id}`, { method: "DELETE" });
       await onSaved();
@@ -68,15 +68,15 @@ export default function SuiteOverlay({ suite, templates = [], config, onClose, o
 
   return (
     <Overlay onClose={onClose} pane>
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New task suite" : "Edit task suite"}</Typography>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New suite" : "Edit suite"}</Typography>
       <form className="pane-form" onSubmit={submit}>
         <TextField name="name" label="Name" defaultValue={suite?.name} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
 
         <FormControl fullWidth margin="normal" size="small">
-          <InputLabel id="suite-templates-label">Task templates</InputLabel>
+          <InputLabel id="suite-templates-label">Templates</InputLabel>
           <Select
             labelId="suite-templates-label"
-            label="Task templates"
+            label="Templates"
             multiple
             value={templateIds}
             onChange={(e) => setTemplateIds(e.target.value)}

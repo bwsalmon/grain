@@ -30,9 +30,9 @@ func (c *clock) now() time.Time { return c.t }
 func (c *clock) tick()          { c.t = c.t.Add(30 * time.Second) }
 func newClock() *clock          { return &clock{t: now} }
 
-// openRepo is a local-only repository on a hand-wound clock -- the state
-// every test here starts from.
-func openRepo(t *testing.T, c *clock) *staterepo.Repo {
+// openTieredRepo is a local-only repository on a hand-wound clock -- the
+// state every test here starts from.
+func openTieredRepo(t *testing.T, c *clock) *staterepo.Repo {
 	t.Helper()
 	repo, err := staterepo.Open(context.Background(), staterepo.Config{
 		Dir: filepath.Join(t.TempDir(), "state"), Now: c.now,
@@ -54,7 +54,7 @@ func TestChurnCommitsOnItsOwnClockAndNotOnEveryTick(t *testing.T) {
 		t.Fatalf("putting: %v", err)
 	}
 	c := newClock()
-	repo := openRepo(t, c)
+	repo := openTieredRepo(t, c)
 	if err := staterepo.Seed(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestSettingsStillReachTheRepositoryImmediately(t *testing.T) {
 	ctx := context.Background()
 	store, db := openDB(t)
 	c := newClock()
-	repo := openRepo(t, c)
+	repo := openTieredRepo(t, c)
 	if err := staterepo.Seed(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestAnUnchangedDatabaseCommitsNothingAcrossAChurnBoundary(t *testing.T) {
 		t.Fatalf("putting: %v", err)
 	}
 	c := newClock()
-	repo := openRepo(t, c)
+	repo := openTieredRepo(t, c)
 	if err := staterepo.Seed(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestSyncAllWritesChurnOutImmediately(t *testing.T) {
 		t.Fatalf("putting: %v", err)
 	}
 	c := newClock()
-	repo := openRepo(t, c)
+	repo := openTieredRepo(t, c)
 	if err := staterepo.Seed(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("seeding: %v", err)
 	}

@@ -7,6 +7,12 @@
 // repository out from under the loop -- so both have to go through the
 // same lock rather than through two independent handles on one working
 // tree.
+//
+// That lock is also what makes a live import safe to do at all: cycle,
+// below, pulls a merged change down and imports the settings tables of
+// it into the running database, and it does that holding the same mutex
+// an adopt and an on-demand sync take, so no two of the three can be
+// rewriting rows at once.
 package main
 
 import (
@@ -48,20 +54,58 @@ func newStateManager(dataDir string, db *sql.DB, repo *staterepo.Repo, secretSto
 func (m *stateManager) sync(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	changed, err := staterepo.Sync(ctx, m.repo, m.db, model.SchemaVersion)
-	m.lastErr = err
-	return changed, err
+	return m.cycle(ctx, false)
 }
 
 // syncAll is sync with grain's own churn written out whether or not its
-// slower clock says it is due -- what a human asking for a sync means,
-// and what the loop owes the repository on the way out.
+// slower clock says it is due (pkg/staterepo/tier.go) -- what a human
+// asking for a sync means, and what the loop owes the repository on the
+// way out.
 func (m *stateManager) syncAll(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	changed, err := staterepo.SyncAll(ctx, m.repo, m.db, model.SchemaVersion)
-	m.lastErr = err
-	return changed, err
+	return m.cycle(ctx, true)
+}
+
+// cycle is one pass over the repository, in both directions: pull what a
+// merged pull request left on the remote and make its settings live
+// (staterepo.Apply), then export the database, commit and push. It
+// reports whether either direction had anything to carry.
+//
+// Pull first, and that order is load-bearing rather than incidental. The
+// export commits, so a cycle that exported first would leave a local
+// commit the remote has never seen; a merge that landed in the meantime
+// is a commit on the other side of the same parent, and the two together
+// are exactly the divergence Pull refuses to resolve. Pulled first, the
+// working tree is still where the last push left it, and the merge is a
+// fast-forward.
+// all says whether the export writes grain's own churn out too, or
+// leaves it to its own slower clock: false for the timer's own tick,
+// true for a human asking for a sync outright.
+func (m *stateManager) cycle(ctx context.Context, all bool) (bool, error) {
+	applied, applyErr := staterepo.Apply(ctx, m.repo, m.db, model.SchemaVersion)
+	if errors.Is(applyErr, staterepo.ErrNotApplied) {
+		// The working tree is at a commit the database has not taken up --
+		// a dump this build cannot read, or rows it could not insert. The
+		// export must not run: it would write the database over those
+		// files, commit that, and push a silent revert of whatever was
+		// merged. Stopping here leaves grain running on the database it
+		// has, says why in the pane, and lets the next tick try again once
+		// somebody has fixed the repository.
+		m.lastErr = applyErr
+		return false, applyErr
+	}
+	// Any other failure to pull -- an unreachable remote, an expired
+	// credential -- is not a reason to stop exporting. The commits pile
+	// up locally and go out with the next push that works, which is the
+	// same thing the loop already did before it pulled at all.
+	export := staterepo.Sync
+	if all {
+		export = staterepo.SyncAll
+	}
+	changed, syncErr := export(ctx, m.repo, m.db, model.SchemaVersion)
+	m.lastErr = errors.Join(applyErr, syncErr)
+	return applied || changed, m.lastErr
 }
 
 func (m *stateManager) Status(ctx context.Context) (ui.StateRepoStatus, error) {
@@ -155,7 +199,9 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 	// The existing working tree is a clone of a different repository, and
 	// no change of URL makes it a clone of this one. Moved aside rather
 	// than deleted: an operator who adopts the wrong repository has lost
-	// nothing, and the secrets file inside it is not regenerable.
+	// nothing. The secrets file is not in there to be archived with it
+	// any more (secretsConfig), so adopting no longer moves the one
+	// unregenerable thing this deployment has out from under itself.
 	if err := archiveStateRepo(m.dataDir); err != nil {
 		return ui.StateRepoStatus{}, err
 	}
@@ -174,15 +220,17 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 	return m.status(ctx), nil
 }
 
-// Sync is the pane's own button, so it writes everything out: a human
-// who presses Sync is asking for the repository to match the database
-// now, not for the half of it that is due.
+// Sync is the pane's "Sync now": the same cycle the timer runs, on
+// demand. Both directions, deliberately -- an operator who has just
+// merged a change to a template presses this to have it now rather than
+// in thirty seconds, and a button that only pushed would not give them
+// that. And all of it, churn included: a human who presses Sync is
+// asking for the repository to match the database now, not for the half
+// of it that is due.
 func (m *stateManager) Sync(ctx context.Context) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, err := staterepo.SyncAll(ctx, m.repo, m.db, model.SchemaVersion)
-	m.lastErr = err
-	if err != nil {
+	if _, err := m.cycle(ctx, true); err != nil {
 		return ui.StateRepoStatus{}, err
 	}
 	return m.status(ctx), nil

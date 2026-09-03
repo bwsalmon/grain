@@ -2,17 +2,19 @@
 // repository lives under -data-dir, how it is opened, what authenticates
 // its pushes, and the loop that keeps it up to date with the database.
 //
-// The shape is deliberately one-directional at runtime. The repository
-// is loaded into the database once, at startup (loadStateRepo), and
-// exported back out on a timer after that (stateSyncLoop). grain is the
-// only writer of these files while it is running -- the UI and the CLI
-// reach it over REST rather than opening the store, which is this
-// file's whole reason for being able to say "no merges" -- so a sync is
-// a commit and a push, never a resolve. A change an agent makes arrives
-// the other way, as a merged pull request against the repository, and
-// takes effect the next time the daemon starts: the import is a
-// wholesale replacement of every row, which is not something to do
-// underneath runs that are live.
+// Traffic runs both ways on the timer (stateSyncLoop), but not
+// symmetrically. grain is the only writer of these files while it is
+// running -- the UI and the CLI reach it over REST rather than opening
+// the store, which is this file's whole reason for being able to say "no
+// merges" -- so the outward half is a commit and a push, never a
+// resolve. The inward half is a fast-forward pull, and what it may do
+// with what arrives depends on which rows changed: the whole database is
+// replaced only at startup (staterepo.Load), because that replacement is
+// what makes a merged deletion delete something and is not an operation
+// to run underneath runs holding task and run ids. On a tick, only the
+// settings tables an agent actually proposes changes to are imported
+// (staterepo.Apply and its SettingsTables), which is enough for a merged
+// settings change to take effect without a restart.
 package main
 
 import (
@@ -26,6 +28,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/staterepo"
 )
@@ -40,17 +43,32 @@ func stateRepoDir(dataDir string) string { return filepath.Join(dataDir, "state-
 // on this host and out of the repository.
 func secretsDir(dataDir string) string { return filepath.Join(dataDir, "secrets") }
 
-// secretsConfig places the two halves of pkg/secrets: the encrypted file
-// inside the state repository, where a push carries it off the host, and
-// the private key outside it under -data-dir/secrets, where nothing
-// commits it anywhere.
+// secretsConfig places the two halves of pkg/secrets, both under
+// -data-dir/secrets: the private key, which has always been there, and
+// the encrypted file, which has not.
+//
+// The encrypted file used to sit inside the state repository, so that a
+// push carried a copy of it off the host. That stopped being safe the
+// moment the state repository became somewhere agents are dispatched to
+// work (grain/task-186): the git proxy authorizes per repository and
+// streams a packfile it does not parse, so a sandbox that may clone the
+// state repository gets every object in it -- the ciphertext included,
+// and a file deleted three commits ago just as readily as one in the
+// tree. Ciphertext an agent can carry off is still ciphertext an agent
+// can carry off.
+//
+// Nothing is lost by moving it. The private key was never in the
+// repository and is copied nowhere, so the off-host ciphertext could
+// never be decrypted from a clone anyway: a restore always needed
+// -data-dir/secrets, and now that directory is the whole of what a
+// restore needs.
 //
 // Named once, here, because four call sites -- the daemon, the UI it
 // serves, `grain secrets` and the controller -- have to agree on both
 // paths for a key pasted in one to be the key another reads.
 func secretsConfig(dataDir string) secrets.Config {
 	return secrets.Config{
-		File:    filepath.Join(stateRepoDir(dataDir), secrets.DefaultFileName),
+		File:    filepath.Join(secretsDir(dataDir), secrets.DefaultFileName),
 		KeyFile: filepath.Join(secretsDir(dataDir), secrets.DefaultKeyFileName),
 	}
 }
@@ -59,7 +77,14 @@ func secretsConfig(dataDir string) secrets.Config {
 // had to mint the key -- the one thing about a fresh install that is
 // urgent, since a key nobody has copied anywhere is a key one disk
 // failure away from taking every secret with it.
+//
+// It is also where an installation written by a build that kept the
+// encrypted file in the state repository catches up: every path that
+// reads or writes a secret comes through here, so the file is moved
+// once, by whichever of them runs first, rather than by a migration step
+// an operator has to know to run.
 func openSecrets(dataDir string) *secrets.Store {
+	moveSecretsOutOfStateRepo(dataDir)
 	store := secrets.Open(secretsConfig(dataDir))
 	if store.KeyCreated() {
 		log.Printf("grain: generated a new secrets key at %s -- back this file up: "+
@@ -67,6 +92,99 @@ func openSecrets(dataDir string) *secrets.Store {
 			store.KeyFile(), store.File())
 	}
 	return store
+}
+
+// moveSecretsOutOfStateRepo lifts an encrypted secrets file an earlier
+// build left inside the state repository out to where secretsConfig now
+// looks for it.
+//
+// A rename, not a copy: a copy would leave the ciphertext in the working
+// tree for the next sync to commit again, which is the whole thing being
+// undone. The state repository's next commit stages the removal, so the
+// file leaves the tip of the branch too -- though not the history, which
+// is why forbiddenRepos below still refuses a repository that ever held
+// one.
+//
+// Failures are logged rather than returned. Every caller of this is on
+// its way to open the store, and a deployment that cannot move the file
+// is better off carrying on with the copy it has (and the proxy refusing
+// the repository) than refusing to start.
+func moveSecretsOutOfStateRepo(dataDir string) {
+	from := filepath.Join(stateRepoDir(dataDir), secrets.DefaultFileName)
+	if _, err := os.Stat(from); err != nil {
+		return
+	}
+	to := secretsConfig(dataDir).File
+	if _, err := os.Stat(to); err == nil {
+		// Both exist: the one outside the repository is the one grain
+		// reads, and guessing which is newer is not a guess worth making
+		// with secrets. Said out loud so an operator can look.
+		log.Printf("grain: %s still holds an encrypted secrets file, and %s exists too -- "+
+			"grain reads the second and has left the first alone; delete it once you are sure", from, to)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		log.Printf("grain: preparing %s: %v", filepath.Dir(to), err)
+		return
+	}
+	if err := os.Rename(from, to); err != nil {
+		log.Printf("grain: moving %s out of the state repository to %s: %v", from, to, err)
+		return
+	}
+	log.Printf("grain: moved the encrypted secrets file out of the state repository, from %s to %s -- "+
+		"it is beside the private key now, and %s is what a backup has to include",
+		from, to, secretsDir(dataDir))
+}
+
+// forbiddenRepos is the set of repos this deployment's git proxy refuses
+// to every sandbox, whatever a task's scope says
+// (gitproxy.ModelAuthorizer.Forbidden).
+//
+// There is one candidate: this deployment's own state repository, and
+// only when it holds -- or has ever held -- the encrypted secrets file.
+// Dispatching a task at the state repository is the point of
+// grain/task-186; a repository that carries grain's ciphertext in its
+// history is the one case where that cannot be allowed, because a
+// sandbox that may clone a repository may read every object in it and
+// the proxy has no finer grain than the repository to refuse at.
+//
+// A local-only installation has nothing to add here: with no remote,
+// there is no owner/repo for a sandbox to ask the proxy for in the first
+// place.
+//
+// A repository whose history cannot be read fails closed, refused rather
+// than allowed: the question is "is grain's ciphertext reachable from
+// here", and an unanswered question is not a no.
+func forbiddenRepos(ctx context.Context, dataDir string) ([]model.RepoRef, error) {
+	settings, err := staterepo.LoadSettings(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	owner, name, ok := repoFromRemote(settings.Remote)
+	if !ok {
+		return nil, nil
+	}
+	ref := model.RepoRef{Owner: owner, Name: name}
+	repo, err := openStateRepo(ctx, dataDir)
+	if err != nil {
+		log.Printf("grain: cannot open the state repository to check it for secrets (%v); "+
+			"the git proxy will refuse %s to every sandbox", err, ref)
+		return []model.RepoRef{ref}, nil
+	}
+	held, err := repo.HasSecrets(ctx)
+	if err != nil {
+		log.Printf("grain: cannot tell whether %s holds grain's encrypted secrets file (%v); "+
+			"the git proxy will refuse it to every sandbox", ref, err)
+		return []model.RepoRef{ref}, nil
+	}
+	if !held {
+		return nil, nil
+	}
+	log.Printf("grain: %s holds (or once held) grain's encrypted secrets file, so the git proxy "+
+		"refuses it to every sandbox -- tasks cannot be dispatched against this state repository. "+
+		"Removing the file does not undo it: a clone reads history. Adopt a repository that has "+
+		"never held one to dispatch settings changes against it", ref)
+	return []model.RepoRef{ref}, nil
 }
 
 // openStateRepo prepares the state repository named by
@@ -166,20 +284,23 @@ func hostnameOrLocalhost() string {
 	return "localhost"
 }
 
-// stateSyncInterval is how often the daemon writes its database back out
-// to the repository.
+// stateSyncInterval is how often the daemon reconciles its database with
+// the repository, in both directions.
 //
 // A timer rather than a hook on every write: the export is a full dump,
 // which is cheap at grain's scale but not free, and batching a burst of
 // writes into one commit produces a history a human can actually read --
 // one commit per reconcile cycle's worth of change rather than one per
-// row. Nothing is lost by the delay, because the database, not the
-// repository, is what the daemon reads from while it runs.
+// row. Nothing is lost outbound by the delay, because the database, not
+// the repository, is what the daemon reads from while it runs; inbound
+// it is the upper bound on how long a merged settings change takes to
+// become live, which at half a minute is a good deal less than the
+// restart it used to take.
 const stateSyncInterval = 30 * time.Second
 
-// stateSyncLoop exports, commits and pushes until ctx is cancelled, then
-// does it once more on the way out so a clean shutdown leaves nothing
-// unwritten.
+// stateSyncLoop pulls, applies, exports, commits and pushes until ctx is
+// cancelled, then does it once more on the way out so a clean shutdown
+// leaves nothing unwritten.
 //
 // The last one is a syncAll rather than a sync: an ordinary tick leaves
 // grain's own churn for the churn interval to pick up
@@ -190,7 +311,8 @@ const stateSyncInterval = 30 * time.Second
 // A failure is logged and the loop continues. A remote that is
 // unreachable, or a credential that has expired, must not stop grain
 // from running: the database is still the live state, and the next tick
-// will push everything that accumulated in the meantime.
+// will push everything that accumulated in the meantime -- and will try
+// the pull again.
 func stateSyncLoop(ctx context.Context, sync, syncAll func(context.Context) (bool, error)) {
 	ticker := time.NewTicker(stateSyncInterval)
 	defer ticker.Stop()

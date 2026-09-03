@@ -60,6 +60,17 @@ const (
 // A table not named here is TierState. That default is the safe one: it
 // is what every table did before this file existed, so a table a later
 // build adds is exported on every sync until somebody decides otherwise.
+//
+// This is not SettingsTables (bind.go), and the two are not two spellings
+// of one list. SettingsTables answers "which rows may be replaced
+// underneath a daemon that is running", and is a short allowlist that has
+// to earn every entry. This answers "how often is it worth writing a
+// table out at all", and is a short denylist for the same reason in
+// reverse: everything is worth writing out promptly unless it is
+// something grain only ever wrote to itself. Every table in
+// SettingsTables is TierState, and TierState is far wider -- task,
+// task_comment and task_attachment are all things people write and none
+// of them are safe to replace live.
 var churnTables = map[string]bool{
 	"task_observation": true,
 	"task_run":         true,

@@ -14,16 +14,16 @@ import (
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
-func buildTemplate(id string) model.TaskTemplate {
-	return model.TaskTemplate{
+func buildTemplate(id string) model.Template {
+	return model.Template{
 		ID: id, Name: "Build", Title: "Build", Body: "go build ./...",
 		Reads:  []model.RepoRef{gadgets},
 		Grants: []model.Grant{{Capability: "run-tests", Via: model.GrantByLabel}}, CreatedAt: now,
 	}
 }
 
-func unitTestTemplate(id string) model.TaskTemplate {
-	return model.TaskTemplate{
+func unitTestTemplate(id string) model.Template {
+	return model.Template{
 		ID: id, Name: "Unit tests", Title: "Unit tests", Body: "go test ./...",
 		CreatedAt: now,
 	}
@@ -105,10 +105,10 @@ func TestPutQualificationPlanReplacesRatherThanAccumulating(t *testing.T) {
 
 func TestCreateQualificationRunInstantiatesEveryItemWithDependencyLinks(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutTaskTemplate(ctx, buildTemplate("template-build")); err != nil {
+	if err := store.PutTemplate(ctx, buildTemplate("template-build")); err != nil {
 		t.Fatalf("put build template: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
+	if err := store.PutTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
 		t.Fatalf("put unit template: %v", err)
 	}
 	candidate := cutTestCandidate(t, ctx, store)
@@ -204,10 +204,10 @@ func TestCreateQualificationRunInstantiatesEveryItemWithDependencyLinks(t *testi
 // start," exercised directly rather than trusted from a doc comment.
 func TestCreateQualificationRunLinksEveryDependentInstanceToEveryDependencyInstance(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutTaskTemplate(ctx, buildTemplate("template-build")); err != nil {
+	if err := store.PutTemplate(ctx, buildTemplate("template-build")); err != nil {
 		t.Fatalf("put build template: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
+	if err := store.PutTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
 		t.Fatalf("put unit template: %v", err)
 	}
 	candidate := cutTestCandidate(t, ctx, store)
@@ -270,7 +270,7 @@ func TestCreateQualificationRunLinksEveryDependentInstanceToEveryDependencyInsta
 // already makes.
 func TestCreateQualificationRunUnderConcurrentRaceCreatesExactlyOneRun(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutTaskTemplate(ctx, buildTemplate("template-build")); err != nil {
+	if err := store.PutTemplate(ctx, buildTemplate("template-build")); err != nil {
 		t.Fatalf("put build template: %v", err)
 	}
 	candidate := cutTestCandidate(t, ctx, store)
@@ -322,10 +322,10 @@ func TestCreateQualificationRunFailsWhenATemplateIsMissing(t *testing.T) {
 
 func TestCreateQualificationRunLeavesTasksUnapprovedWhenPlanRequiresApproval(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutTaskTemplate(ctx, buildTemplate("template-build")); err != nil {
+	if err := store.PutTemplate(ctx, buildTemplate("template-build")); err != nil {
 		t.Fatalf("put build template: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
+	if err := store.PutTemplate(ctx, unitTestTemplate("template-unit")); err != nil {
 		t.Fatalf("put unit template: %v", err)
 	}
 	candidate := cutTestCandidate(t, ctx, store)

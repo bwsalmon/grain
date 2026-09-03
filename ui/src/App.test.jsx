@@ -133,7 +133,7 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
       templatesState = templatesState.filter((t) => t.id !== templateMatch[1]);
       return Promise.resolve(null);
     }
-    // Task suites (bwsalmon/agents#642). Both endpoints are fetched on
+    // Suites (bwsalmon/agents#642). Both endpoints are fetched on
     // mount, and ui.Client.ListSuites/ListSuiteRuns both build their
     // result with make([]T, 0, ...), so a deployment with no suites gets
     // [] rather than null -- mirror that here. Falling through to this
@@ -532,7 +532,7 @@ describe("App", () => {
     setupApi(initialTasks, [], [], [suite]);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Edit task suite" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Edit suite" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/suites/suite-1");
   });
 
@@ -555,9 +555,9 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: /^Task templates/ }));
+    await user.click(screen.getByRole("button", { name: /^Templates/ }));
 
-    expect(await screen.findByRole("heading", { name: "Task templates" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Templates" })).toBeInTheDocument();
     expect(screen.getByText("Dependency bump")).toBeInTheDocument();
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });

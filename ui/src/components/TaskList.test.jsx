@@ -282,8 +282,8 @@ describe("TaskList", () => {
         tasks[1],
       ],
     });
-    expect(screen.getByTitle("filed automatically by a task suite run")).toHaveTextContent("suite");
-    expect(screen.queryAllByTitle("filed automatically by a task suite run")).toHaveLength(1);
+    expect(screen.getByTitle("filed automatically by a suite run")).toHaveTextContent("suite");
+    expect(screen.queryAllByTitle("filed automatically by a suite run")).toHaveLength(1);
     // The suite chip is its own thing, not the schedule one relabelled.
     expect(screen.queryByTitle("filed automatically by a schedule")).not.toBeInTheDocument();
   });

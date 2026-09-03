@@ -89,6 +89,91 @@ type MetricsReport struct {
 	// are what tell a queue_wait spent waiting for capacity from one
 	// spent waiting for the scheduler.
 	Cycles MetricsCycles `json:"cycles"`
+	// Tools and Checks are the inside of a run: what its tools cost it,
+	// and how the CI loop every prompt sends it round actually went. Both
+	// are empty (n = 0 everywhere) on a deployment whose runs all predate
+	// the census, which is a different thing from a deployment whose runs
+	// called nothing -- runs says which.
+	Tools  MetricsTools  `json:"tools"`
+	Checks MetricsChecks `json:"checks"`
+}
+
+// MetricsTools is the per-run tool census over the window: how much of a
+// run goes on tool calls, how many of them come back as errors, and which
+// tool the errors are in.
+type MetricsTools struct {
+	// Runs is how many of the window's finished runs recorded a census at
+	// all, and every rate here is over those runs rather than over
+	// throughput.runsFinished.
+	Runs    int `json:"runs"`
+	Calls   int `json:"calls"`
+	Errored int `json:"errored"`
+	// ErroredShare is errored/calls across every tool -- a rate, 0..1.
+	ErroredShare float64      `json:"erroredShare"`
+	CallsPerRun  MetricsCount `json:"callsPerRun"`
+	// ByTool is busiest first, which is the order that matters: an error
+	// rate over four calls is not an error rate.
+	ByTool []MetricsToolUse `json:"byTool"`
+}
+
+// MetricsToolUse is one tool's numbers. errorRate and timeoutRate are
+// fractions of that tool's own calls; timeouts are only ever reported for
+// a tool that bounds its own work and says so (run_command), and are zero
+// elsewhere because nothing else can say, not because nothing else ran
+// long.
+type MetricsToolUse struct {
+	Name        string      `json:"name"`
+	Runs        int         `json:"runs"`
+	Calls       int         `json:"calls"`
+	Errored     int         `json:"errored"`
+	ErrorRate   float64     `json:"errorRate"`
+	TimedOut    int         `json:"timedOut"`
+	TimeoutRate float64     `json:"timeoutRate"`
+	ResultBytes MetricsSize `json:"resultBytes"`
+}
+
+// MetricsSize is how big one tool's answers were, in bytes. mean and max
+// are exact; the percentiles are bounds -- the largest result the bucket
+// the p'th sample fell in can hold -- which is why they are named
+// atMost. See metrics.Sizes on why a bound rather than a value.
+type MetricsSize struct {
+	N         int   `json:"n"`
+	MeanBytes int64 `json:"meanBytes"`
+	MaxBytes  int64 `json:"maxBytes"`
+	P50AtMost int64 `json:"p50AtMostBytes"`
+	P95AtMost int64 `json:"p95AtMostBytes"`
+	P99AtMost int64 `json:"p99AtMostBytes"`
+}
+
+// MetricsCount is a distribution of whole numbers -- calls in a run,
+// pushes before a green build. Nearest-rank percentiles, like every other
+// distribution here, so each number is one that really happened.
+type MetricsCount struct {
+	N     int     `json:"n"`
+	Min   int64   `json:"min"`
+	P50   int64   `json:"p50"`
+	P90   int64   `json:"p90"`
+	P99   int64   `json:"p99"`
+	Max   int64   `json:"max"`
+	Mean  float64 `json:"mean"`
+	Total int64   `json:"total"`
+}
+
+// MetricsChecks is the CI loop measured end to end: every run is told to
+// push, wait for checks, fix and push again, and this is how that
+// actually goes. A deployment where most verdicts are "timed_out" has its
+// wait_for_checks default set wrong for its CI; one where most are
+// "no_checks" is sending runs to wait for CI that does not exist.
+type MetricsChecks struct {
+	Waits    int            `json:"waits"`
+	Runs     int            `json:"runs"`
+	Verdicts map[string]int `json:"verdicts"`
+	// Blocked is how long a wait blocked for, in seconds.
+	Blocked MetricsDistribution `json:"blocked"`
+	// PushesToGreen is how many pushes a run had made when its first
+	// passing wait returned, over the greenRuns that got a pass at all.
+	PushesToGreen MetricsCount `json:"pushesToGreen"`
+	GreenRuns     int          `json:"greenRuns"`
 }
 
 // MetricsThroughput is how much crossed each line during the window, and
@@ -136,12 +221,18 @@ type MetricsStage struct {
 // MetricsRuns is how the window's attempts ended, and how much of the
 // deployment's dispatch capacity they used.
 type MetricsRuns struct {
-	Outcomes              map[string]int `json:"outcomes"`
-	AttemptsPerCompletion float64        `json:"attemptsPerCompletion"`
-	MeanConcurrent        float64        `json:"meanConcurrent"`
-	MaxConcurrent         int            `json:"maxConcurrent"`
-	Utilization           float64        `json:"utilization"`
-	Live                  int            `json:"live"`
+	Outcomes map[string]int `json:"outcomes"`
+	// Endings counts the same runs by how they actually ended, which the
+	// outcome words above cannot say: "cancelled" is both a human closing
+	// the task and the run hitting its wall-clock cap, and "failed" is
+	// both a broken framework and a run that used up its turns. See
+	// model.RunEnding for the vocabulary.
+	Endings               map[model.RunEnding]int `json:"endings"`
+	AttemptsPerCompletion float64                 `json:"attemptsPerCompletion"`
+	MeanConcurrent        float64                 `json:"meanConcurrent"`
+	MaxConcurrent         int                     `json:"maxConcurrent"`
+	Utilization           float64                 `json:"utilization"`
+	Live                  int                     `json:"live"`
 }
 
 // MetricsBacklog is what was still in the system when the report was
@@ -219,6 +310,15 @@ type MetricsDistribution struct {
 	MeanSeconds float64 `json:"meanSeconds"`
 }
 
+// countOf is distributionOf for a series of whole numbers: no unit
+// conversion, since a count is already the unit it is stated in.
+func countOf(c metrics.Counts) MetricsCount {
+	return MetricsCount{
+		N: c.N, Min: c.Min, P50: c.P50, P90: c.P90, P99: c.P99,
+		Max: c.Max, Mean: c.Mean, Total: c.Total,
+	}
+}
+
 func distributionOf(d metrics.Distribution) MetricsDistribution {
 	return MetricsDistribution{
 		N:           d.N,
@@ -257,6 +357,16 @@ func (c *Client) Metrics(ctx context.Context, window time.Duration, buckets int)
 	}
 	if in.States, err = c.Store.States(ctx); err != nil {
 		return MetricsReport{}, fmt.Errorf("reading task states: %w", err)
+	}
+	// What each run recorded about its own tool use. A deployment whose
+	// runs all predate these rows reads them as empty and gets the rest
+	// of the report unchanged -- which is the honest answer, since
+	// nothing measured what those runs did inside themselves.
+	if in.ToolUses, err = c.Store.RunToolUses(ctx); err != nil {
+		return MetricsReport{}, fmt.Errorf("reading run tool use: %w", err)
+	}
+	if in.CheckWaits, err = c.Store.RunCheckWaits(ctx); err != nil {
+		return MetricsReport{}, fmt.Errorf("reading run CI waits: %w", err)
 	}
 	// A deployment whose settings have never been written has no
 	// concurrency limit to compare occupancy against; the rest of the
@@ -311,6 +421,7 @@ func metricsReportFrom(rep metrics.Report, cycles bool) MetricsReport {
 		},
 		Runs: MetricsRuns{
 			Outcomes:              rep.Runs.Outcomes,
+			Endings:               rep.Runs.Endings,
 			AttemptsPerCompletion: rep.Runs.AttemptsPerCompletion,
 			MeanConcurrent:        rep.Runs.MeanConcurrent,
 			MaxConcurrent:         rep.Runs.MaxConcurrent,
@@ -352,6 +463,47 @@ func metricsReportFrom(rep metrics.Report, cycles bool) MetricsReport {
 	}
 	if out.Runs.Outcomes == nil {
 		out.Runs.Outcomes = map[string]int{}
+	}
+	if out.Runs.Endings == nil {
+		out.Runs.Endings = map[model.RunEnding]int{}
+	}
+	out.Tools = MetricsTools{
+		Runs:         rep.Tools.Runs,
+		Calls:        rep.Tools.Calls,
+		Errored:      rep.Tools.Errored,
+		ErroredShare: rep.Tools.ErroredShare,
+		CallsPerRun:  countOf(rep.Tools.CallsPerRun),
+		ByTool:       make([]MetricsToolUse, 0, len(rep.Tools.ByTool)),
+	}
+	for _, use := range rep.Tools.ByTool {
+		out.Tools.ByTool = append(out.Tools.ByTool, MetricsToolUse{
+			Name:        use.Name,
+			Runs:        use.Runs,
+			Calls:       use.Calls,
+			Errored:     use.Errored,
+			ErrorRate:   use.ErrorRate,
+			TimedOut:    use.TimedOut,
+			TimeoutRate: use.TimeoutRate,
+			ResultBytes: MetricsSize{
+				N:         use.ResultBytes.N,
+				MeanBytes: use.ResultBytes.Mean,
+				MaxBytes:  use.ResultBytes.Max,
+				P50AtMost: use.ResultBytes.P50AtMost,
+				P95AtMost: use.ResultBytes.P95AtMost,
+				P99AtMost: use.ResultBytes.P99AtMost,
+			},
+		})
+	}
+	out.Checks = MetricsChecks{
+		Waits:         rep.Checks.Waits,
+		Runs:          rep.Checks.Runs,
+		Verdicts:      rep.Checks.Verdicts,
+		Blocked:       distributionOf(rep.Checks.Blocked),
+		PushesToGreen: countOf(rep.Checks.PushesToGreen),
+		GreenRuns:     rep.Checks.GreenRuns,
+	}
+	if out.Checks.Verdicts == nil {
+		out.Checks.Verdicts = map[string]int{}
 	}
 
 	l := rep.Latency

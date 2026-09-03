@@ -62,6 +62,11 @@ type BuildConfig struct {
 	// "github.com over TLS".
 	ForwardHost string
 	ForwardTLS  bool
+	// Forbidden is ModelAuthorizer.Forbidden: repos no sandbox may reach
+	// through this proxy at all. Nil for a deployment with none, which
+	// is every deployment whose state repository has never held the
+	// encrypted secrets file.
+	Forbidden []model.RepoRef
 }
 
 // BuildProxy wires the real files under DataDir plus the live model store
@@ -86,7 +91,7 @@ func BuildProxy(cfg BuildConfig) (*GitProxy, error) {
 	}
 
 	return &GitProxy{
-		Authorizer:          &ModelAuthorizer{Store: cfg.Store},
+		Authorizer:          &ModelAuthorizer{Store: cfg.Store, Forbidden: cfg.Forbidden},
 		Credentials:         credentials,
 		Tokens:              tokens,
 		Forwarder:           &RealForwarder{Host: host, UseTLS: useTLS},

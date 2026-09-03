@@ -115,6 +115,39 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 
+// branchSHA is what bare has branch pointing at, or "" if it has no such
+// branch -- the same resolution a Sim does when it turns a pull
+// request's head branch into the sha it keys check runs by.
+func branchSHA(t *testing.T, bare, branch string) string {
+	t.Helper()
+	cmd := exec.Command("git", "--git-dir", bare, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// The helper's own contract above, checked rather than trusted: every
+// merge-queue test here that seeds one branch's check runs depends on no
+// other branch it pushed answering to the same sha, and two pushes
+// inside one second is exactly the case a fixed commit message used to
+// collapse into a single object. githubsim's own copy of pushBranch
+// carries the same guard, for the same reason.
+func TestPushBranchGivesEachBranchItsOwnSHA(t *testing.T) {
+	sim, _ := newSim(t, "acme", "widgets", "main")
+	pushBranch(t, sim.BareRepo, "grain/task-1")
+	pushBranch(t, sim.BareRepo, "grain/task-2")
+
+	first, second := branchSHA(t, sim.BareRepo, "grain/task-1"), branchSHA(t, sim.BareRepo, "grain/task-2")
+	if first == "" || second == "" {
+		t.Fatalf("both branches should be on the remote: %q, %q", first, second)
+	}
+	if first == second {
+		t.Fatalf("two branches share a commit sha (%s): the check runs a test seeds for one pull request are served for every other pull request in the sim, and a test holding one queue head's CI queued silently holds the whole queue with it", first)
+	}
+}
+
 // pushAnotherCommit lands one more commit on a branch that already
 // exists -- pushBranch creates one, this moves it, which is what a push
 // arriving while the merge queue is mid-cycle does.

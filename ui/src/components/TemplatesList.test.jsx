@@ -58,7 +58,7 @@ describe("TemplatesList", () => {
   it("shows an empty message when there are none", () => {
     render(<ControlledTemplatesList templates={[]} onRefresh={noop} showError={noop} />);
 
-    expect(screen.getByText("No task templates.")).toBeInTheDocument();
+    expect(screen.getByText("No templates.")).toBeInTheDocument();
     // Nothing to search or sort when the list is empty.
     expect(screen.queryByPlaceholderText("Search templates…")).not.toBeInTheDocument();
   });
