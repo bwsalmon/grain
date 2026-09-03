@@ -596,7 +596,8 @@ func cmdConfig(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain settings", flag.ContinueOnError)
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
-	maxConcurrent := fs.Int("max-concurrent", 0, "maximum number of tasks dispatched at once")
+	maxWorkers := fs.Int("max-workers", 0, "maximum number of ordinary tasks dispatched at once")
+	maxMergers := fs.Int("max-mergers", 0, "capacity on top of -max-workers only the merge queue's own fix tasks may use (0 lets them contend for it like anything else)")
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)")
@@ -639,9 +640,12 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "poll-interval":
 			v := *pollInterval
 			req.PollInterval = &v
-		case "max-concurrent":
-			v := *maxConcurrent
-			req.MaxConcurrent = &v
+		case "max-workers":
+			v := *maxWorkers
+			req.MaxWorkers = &v
+		case "max-mergers":
+			v := *maxMergers
+			req.MaxMergers = &v
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
@@ -794,7 +798,8 @@ func (p *printer) settings(s ui.Settings) {
 		return
 	}
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
-	fmt.Printf("max concurrent: %d\n", s.MaxConcurrent)
+	fmt.Printf("max workers:    %d\n", s.MaxWorkers)
+	fmt.Printf("max mergers:    %d\n", s.MaxMergers)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
 	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
 	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)

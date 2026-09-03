@@ -260,8 +260,8 @@ func TestRunCycleAdoptsThePullRequestAFailedRunAlreadyOpened(t *testing.T) {
 
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(ranOutOfTurns),
-		MaxConcurrent: 1,
+		Framework:  orchestrator.StaticFramework(ranOutOfTurns),
+		MaxWorkers: 1,
 	}
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
 	if openErr != nil {

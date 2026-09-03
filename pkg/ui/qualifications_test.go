@@ -115,7 +115,7 @@ func TestApproveQualificationRunApprovesEveryTaskAndOrdersFailuresFirst(t *testi
 	// failures-first ordering has something to sort.
 	for i := 0; i < model.MaxConsecutiveFailures; i++ {
 		runID := "run-" + run.Tasks[0].TaskID + "-" + string(rune('a'+i))
-		if err := store.StartRun(ctx, model.Run{ID: runID, TaskID: run.Tasks[0].TaskID, Sandbox: "sandbox-1", Attempt: i + 1, StartedAt: baseTime}, 0); err != nil {
+		if err := store.StartRun(ctx, model.Run{ID: runID, TaskID: run.Tasks[0].TaskID, Sandbox: "sandbox-1", Attempt: i + 1, StartedAt: baseTime}, model.Limits{}); err != nil {
 			t.Fatalf("start run: %v", err)
 		}
 		if err := store.FinishRun(ctx, runID, baseTime, "failed", "boom"); err != nil {

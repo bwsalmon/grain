@@ -1334,7 +1334,7 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "build error"); err != nil {
@@ -1343,7 +1343,7 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r2", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 2, StartedAt: baseTime.Add(time.Hour),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1387,7 +1387,7 @@ func TestGetTaskHidesFailedAttemptsOnceTheTaskHasCompleted(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "exceeded max turns (2) without a final answer"); err != nil {
@@ -1430,7 +1430,7 @@ func TestRetryClearsAFailedTasksStreak(t *testing.T) {
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: task.ID, Sandbox: "s1",
 			Attempt: i + 1, StartedAt: started,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, started.Add(time.Minute), "failed", "boom"); err != nil {
@@ -1563,7 +1563,7 @@ func TestAttemptTranscript(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "succeeded", ""); err != nil {
@@ -1610,7 +1610,7 @@ func TestAttemptTranscriptPrefersTheLiveTranscriptWhileARunIsStillGoing(t *testi
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1634,7 +1634,7 @@ func TestAttemptTranscriptFallsBackToTheStoreOnceALiveRunFinishes(t *testing.T) 
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(time.Minute), "succeeded", ""); err != nil {
@@ -1663,7 +1663,7 @@ func TestAttemptTranscriptFallsBackToTheStoreWhenLiveHasNothingYet(t *testing.T)
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2097,9 +2097,9 @@ func TestGetSettingsIsUnconfiguredOnAFreshStore(t *testing.T) {
 }
 
 func firstSettings() ui.UpdateSettingsRequest {
-	pollInterval, maxConcurrent, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
+	pollInterval, maxWorkers, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
 	return ui.UpdateSettingsRequest{
-		PollInterval: &pollInterval, MaxConcurrent: &maxConcurrent,
+		PollInterval: &pollInterval, MaxWorkers: &maxWorkers,
 		GeminiModel: &geminiModel, ClaudeModel: &claudeModel, GitHubHost: &host,
 	}
 }
@@ -2113,8 +2113,8 @@ func TestUpdateSettingsFirstTimeRequiresTheCoreFields(t *testing.T) {
 	}
 
 	c2, _, ctx2 := testClient(t)
-	maxConcurrent := 1
-	_, err := c2.UpdateSettings(ctx2, ui.UpdateSettingsRequest{MaxConcurrent: &maxConcurrent})
+	maxWorkers := 1
+	_, err := c2.UpdateSettings(ctx2, ui.UpdateSettingsRequest{MaxWorkers: &maxWorkers})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("saving settings for the first time with pollInterval missing: error = %v, want a ValidationError", err)
@@ -2152,6 +2152,41 @@ func TestUpdateSettingsThenGetRoundTrips(t *testing.T) {
 	}
 }
 
+// grain/task-63: a first save that never mentions maxMergers stores
+// model.DefaultConfig's own value for it rather than a zero nobody
+// chose, and a later save can set it -- including back to 0, which means
+// "mergers contend for worker capacity" rather than "unset".
+func TestUpdateSettingsDefaultsAndRoundTripsMaxMergers(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	got, err := c.UpdateSettings(ctx, firstSettings())
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.MaxMergers != model.DefaultMaxMergers {
+		t.Fatalf("maxMergers after a first save that never mentioned it = %d, want DefaultMaxMergers (%d)",
+			got.MaxMergers, model.DefaultMaxMergers)
+	}
+
+	three := 3
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{MaxMergers: &three})
+	if err != nil {
+		t.Fatalf("setting maxMergers: %v", err)
+	}
+	if got.MaxMergers != 3 || got.MaxWorkers != 1 {
+		t.Fatalf("settings = %+v, want maxMergers 3 with maxWorkers left at 1", got)
+	}
+
+	none := 0
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{MaxMergers: &none})
+	if err != nil {
+		t.Fatalf("clearing maxMergers: %v", err)
+	}
+	if got.MaxMergers != 0 {
+		t.Fatalf("maxMergers = %d after being set to 0, want 0 kept as the choice it is", got.MaxMergers)
+	}
+}
+
 // A later partial update changes only the fields given, leaving
 // everything else -- including fields with no UI equivalent yet, like
 // GCPProject -- exactly as they were, the same UpdateTaskRequest
@@ -2180,7 +2215,7 @@ func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
 // default sandbox shape) round-trip through UpdateSettings/GetSettings
 // the same as every other store-backed field, and 0 -- the "unset, use
 // bwsalmon/kontur's own default" zero value -- is valid, unlike
-// MaxConcurrent's own "must be at least 1".
+// MaxWorkers's own "must be at least 1".
 func TestUpdateSettingsSandboxShapeRoundTrips(t *testing.T) {
 	c, _, ctx := testClient(t)
 	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
@@ -2221,7 +2256,7 @@ func TestUpdateSettingsSandboxShapeRoundTrips(t *testing.T) {
 	}
 }
 
-// Unlike MaxConcurrent, an empty TargetRepos is meaningful (unrestricted)
+// Unlike MaxWorkers, an empty TargetRepos is meaningful (unrestricted)
 // rather than rejected -- v1's target_repos "leave empty for a
 // single-repo deployment."
 func TestUpdateSettingsTargetReposRoundTripsIncludingEmpty(t *testing.T) {
@@ -2258,14 +2293,16 @@ func TestUpdateSettingsValidates(t *testing.T) {
 	bad := "not-a-duration"
 	empty := ""
 	negative := -1
-	zeroConcurrent := 0
+	zeroWorkers := 0
+	negativeMergers := -1
 	badRepo := []string{"not-owner-slash-name"}
 	negativeCPUs := -1
 	lowMemory := 64
 	negativeDisk := -1
 	cases := map[string]ui.UpdateSettingsRequest{
 		"unparseable poll interval": {PollInterval: &bad},
-		"zero max concurrent":       {MaxConcurrent: &zeroConcurrent},
+		"zero max workers":          {MaxWorkers: &zeroWorkers},
+		"negative max mergers":      {MaxMergers: &negativeMergers},
 		"blank gemini model":        {GeminiModel: &empty},
 		"blank github host":         {GitHubHost: &empty},
 		"negative max agent turns":  {MaxAgentTurns: &negative},

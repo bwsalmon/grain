@@ -430,16 +430,32 @@ var Tables = []string{
 	// Store.Init's own migration step (store.go's
 	// ensureConfigTargetReposColumn) instead of from this DDL.
 	//
-	// max_concurrent replaced a slots column (a comma-separated list of
-	// operator-chosen concurrency-slot names) here for bwsalmon/agents#461:
-	// Config.MaxConcurrent is a plain count. It stayed one when slots
-	// themselves were removed -- dispatch.Cycle no longer expands it into
-	// identifiers at all, it simply starts runs until this many are live.
-	// The same CREATE TABLE IF NOT EXISTS limitation applies,
-	// so an already-created grain_config gets max_concurrent added, and
-	// backfilled from however many names its old slots column held, by
-	// Store.Init's own ensureConfigMaxConcurrentColumn, which also drops
-	// that now-unused column.
+	// max_workers and max_mergers are the two halves of this deployment's
+	// concurrency (model.Limits, grain/task-63): how many runs of
+	// ordinary work may be live, and how much further capacity only the
+	// merge queue's own fix tasks may reach.
+	//
+	// max_workers is the descendant of a slots column (a comma-separated
+	// list of operator-chosen concurrency-slot names), which
+	// bwsalmon/agents#461 replaced with a plain max_concurrent count, and
+	// which grain/task-63 renamed once it stopped being the whole limit.
+	// The same CREATE TABLE IF NOT EXISTS limitation applies to both
+	// columns, so an already-created grain_config gets max_concurrent
+	// added and backfilled from its old slots column by Store.Init's own
+	// ensureConfigMaxConcurrentColumn, and then gets max_workers
+	// (backfilled from max_concurrent, which is dropped) and max_mergers
+	// from ensureConfigWorkerMergerColumns after it. max_mergers DEFAULT
+	// 1 is model.DefaultMaxMergers, the same number DefaultConfig carries
+	// for every row written from Go rather than defaulted by the engine.
+	//
+	// Both carry a DEFAULT, unlike the columns beside them that predate
+	// the convention, and max_workers' own is what keeps a *downgrade*
+	// survivable: a build from before the split writes a settings row
+	// naming max_concurrent and not max_workers (its own migration
+	// re-adds the column this one dropped), which a NOT NULL column with
+	// no default would reject outright. The setting such a write leaves
+	// behind is wrong until something sets it again; the alternative is a
+	// deployment that cannot save settings at all.
 	//
 	// agent_framework (bwsalmon/agents#609) is Config.AgentFramework's own
 	// column -- DEFAULT 'antigravity' both here and in
@@ -481,7 +497,8 @@ var Tables = []string{
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
-  ` + "`max_concurrent`" + `              INTEGER NOT NULL,
+  ` + "`max_workers`" + `                 INTEGER NOT NULL DEFAULT 1,
+  ` + "`max_mergers`" + `                 INTEGER NOT NULL DEFAULT 1,
   ` + "`gemini_model`" + `                TEXT    NOT NULL,
   ` + "`max_agent_turns`" + `             INTEGER NOT NULL,
   ` + "`github_host`" + `                 TEXT    NOT NULL,

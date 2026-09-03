@@ -22,7 +22,7 @@ import (
 // grain_config seeded from them.
 func startupConfig() config {
 	return config{
-		pollInterval: 30 * time.Second, maxConcurrent: 1,
+		pollInterval: 30 * time.Second, maxWorkers: 1,
 		agentFramework: model.AgentFrameworkAntigravity,
 		geminiModel:    "gemini-2.5-pro", claudeModel: "claude-sonnet-5",
 		githubHost: "github.com",
@@ -214,8 +214,8 @@ func TestLiveConfigKeepsStartupValuesForUnsetStoredFields(t *testing.T) {
 	live.refresh(ctx, &deps)
 
 	now := live.current()
-	if now.pollInterval != 30*time.Second || now.maxConcurrent != 1 {
-		t.Fatalf("poll interval/max concurrent = %s/%d, want the startup 30s/1", now.pollInterval, now.maxConcurrent)
+	if now.pollInterval != 30*time.Second || now.maxWorkers != 1 {
+		t.Fatalf("poll interval/max workers = %s/%d, want the startup 30s/1", now.pollInterval, now.maxWorkers)
 	}
 	if now.geminiModel != "gemini-2.5-pro" || now.claudeModel != "claude-sonnet-5" {
 		t.Fatalf("models = %q/%q, want the startup ones", now.geminiModel, now.claudeModel)

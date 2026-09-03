@@ -41,7 +41,7 @@ func TestDispatchAsksForTheTaskOwnAgentFramework(t *testing.T) {
 				Arguments: map[string]any{"comment": "done"},
 			})}, nil
 		},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
 		t.Fatalf("RunCycle: %v", err)
@@ -70,7 +70,7 @@ func TestDispatchAsksForTheDeploymentDefaultWhenATaskNamesNoFramework(t *testing
 				Arguments: map[string]any{"comment": "done"},
 			})}, nil
 		},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
 		t.Fatalf("RunCycle: %v", err)
@@ -99,7 +99,7 @@ func TestDispatchFinishesTheRunAsSetupFailedWhenTheFrameworkCannotBeBuilt(t *tes
 		Framework: func(context.Context, string) (agent.Framework, error) {
 			return nil, missingKey
 		},
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 	err := orchestrator.RunCycle(ctx, deps, baseTime)
 	if !errors.Is(err, missingKey) {

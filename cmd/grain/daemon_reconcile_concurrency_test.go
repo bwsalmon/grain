@@ -77,7 +77,7 @@ func TestReconcileDispatchesWhileAnEarlierRunIsStillLive(t *testing.T) {
 		Client:        github.NewClient(githubsim.New(owner, repoName, bare, "main"), nil),
 		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     orchestrator.StaticFramework(agentStub),
-		MaxConcurrent: 2,
+		MaxWorkers: 2,
 		Runs:          runs,
 	}
 
@@ -160,7 +160,7 @@ func TestDrainInFlightWaitsForACancelledRunToReleaseItsSandbox(t *testing.T) {
 		Client:        github.NewClient(githubsim.New(owner, repoName, bare, "main"), nil),
 		Sandboxes:     orchestrator.NewHostSandboxes(sandboxDir),
 		Framework:     orchestrator.StaticFramework(agentStub),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 		Runs:          runs,
 	}
 
