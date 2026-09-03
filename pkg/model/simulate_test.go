@@ -166,7 +166,7 @@ func TestAgentSessionLeasesAreRevokedWhenARunFinishes(t *testing.T) {
 	}
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "s1", Attempt: 1, StartedAt: now, Leases: leases,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if live, err := store.LiveLeases(ctx, ""); err != nil || len(live) != 2 {
@@ -243,7 +243,7 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 	}
 	if err := store.StartRun(ctx, model.Run{
 		ID: "t0-1", TaskID: "t0", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if occ, _ := store.LiveRunCount(ctx); occ != 1 {
@@ -260,7 +260,7 @@ func TestSandboxTransitionReusesFreedSlotForTheNextRun(t *testing.T) {
 	}
 	if err := store.StartRun(ctx, model.Run{
 		ID: "t1-1", TaskID: "t1", Sandbox: "sandbox-1", Attempt: 1, StartedAt: now.Add(time.Hour),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if occ, _ := store.LiveRunCount(ctx); occ != 1 {
@@ -286,7 +286,7 @@ func TestClosingATaskWhileItsRunIsStillLiveOutranksRunning(t *testing.T) {
 	}
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "s1", Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if st, _ := store.State(ctx, "a1b2"); st != model.StateRunning {
@@ -324,7 +324,7 @@ type leaseInfo struct {
 func TestModelInvariantsHoldUnderRandomComponentActions(t *testing.T) {
 	store, ctx := open(t)
 	rng := rand.New(rand.NewPCG(1, 220))
-	const maxConcurrent = 3
+	const maxWorkers = 3
 	leaseCaps := []string{"gemini-key", "gcp-key", "github-app-token"}
 	const maxTasks = 14
 
@@ -351,7 +351,7 @@ func TestModelInvariantsHoldUnderRandomComponentActions(t *testing.T) {
 		}
 
 		// Dispatcher / sandbox: hand every ready task a free slot.
-		dispatchReadyTasks(t, store, ctx, rng, world, maxConcurrent, clock, leaseCaps)
+		dispatchReadyTasks(t, store, ctx, rng, world, maxWorkers, clock, leaseCaps)
 
 		// Agent session: for a live run, ask a question or finish.
 		for _, id := range order {
@@ -444,13 +444,13 @@ func approveARandomProposedTask(t *testing.T, store *model.Store, ctx context.Co
 }
 
 func dispatchReadyTasks(t *testing.T, store *model.Store, ctx context.Context, rng *rand.Rand,
-	world map[string]*taskState, maxConcurrent int, clock time.Time, leaseCaps []string) {
+	world map[string]*taskState, maxWorkers int, clock time.Time, leaseCaps []string) {
 	t.Helper()
 	live, err := store.LiveRunCount(ctx)
 	if err != nil {
 		t.Fatalf("LiveRunCount: %v", err)
 	}
-	free := maxConcurrent - live
+	free := maxWorkers - live
 	if free <= 0 {
 		return
 	}
@@ -508,7 +508,7 @@ func dispatchReadyTasks(t *testing.T, store *model.Store, ctx context.Context, r
 			run.Leases = append(run.Leases, l)
 			leases = append(leases, leaseInfo{runID: runID, capability: capability, resource: resource})
 		}
-		if err := store.StartRun(ctx, run, 0); err != nil {
+		if err := store.StartRun(ctx, run, model.Limits{}); err != nil {
 			t.Fatalf("StartRun(%s): %v", id, err)
 		}
 		ts.liveRunID, ts.liveSandbox, ts.leases, ts.attempts = runID, runID, leases, attempt

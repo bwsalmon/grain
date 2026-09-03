@@ -183,7 +183,7 @@ func TestDefaultAgentFrameworkFollowsTheStoredSetting(t *testing.T) {
 	}
 
 	if err := store.PutConfig(ctx, model.Config{
-		PollInterval: 30_000_000_000, MaxConcurrent: 1,
+		PollInterval: 30_000_000_000, MaxWorkers: 1,
 		AgentFramework: model.AgentFrameworkClaude,
 	}); err != nil {
 		t.Fatal(err)

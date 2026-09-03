@@ -353,7 +353,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		fileIssue(w, parentID, human("alice"), rig.target)
 		assertState(w, parentID, model.StateQueued, false)
 
-		dispatches, err := dispatch.Cycle(ctx, store, 1, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,7 +406,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		// Not dispatchable, even with the slot the parent's own run just
 		// freed up.
 		clock = clock.Add(time.Minute)
-		stillProposed, err := dispatch.Cycle(ctx, store, 1, clock)
+		stillProposed, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -435,7 +435,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{proposalID + "-1": rig.credentialedRoot()}}
 
 		clock = clock.Add(time.Minute)
-		dispatches, err := dispatch.Cycle(ctx, store, 1, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -510,7 +510,7 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		w := &world{t: t, store: store, ctx: ctx, roots: map[string]string{parentID + "-1": rig.credentialedRoot()}}
 		fileIssue(w, parentID, human("alice"), rig.target)
 
-		dispatches, err := dispatch.Cycle(ctx, store, 1, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -591,7 +591,7 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		clock = clock.Add(time.Minute)
 		// Room for both, deliberately: "nothing dispatched" has to mean the
 		// links held it back rather than the concurrency limit.
-		none, err := dispatch.Cycle(ctx, store, 2, clock)
+		none, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -615,7 +615,7 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		assertBlocked(w, lintID, true)
 
 		clock = clock.Add(time.Minute)
-		dispatches, err := dispatch.Cycle(ctx, store, 2, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -644,7 +644,7 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		// than settled when the link was written.
 		assertBlocked(w, lintID, true)
 		clock = clock.Add(time.Minute)
-		stillBlocked, err := dispatch.Cycle(ctx, store, 2, clock)
+		stillBlocked, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -664,7 +664,7 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		// runs like any other task from there.
 		assertBlocked(w, lintID, false)
 		clock = clock.Add(time.Minute)
-		last, err := dispatch.Cycle(ctx, store, 2, clock)
+		last, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, clock)
 		if err != nil {
 			t.Fatal(err)
 		}

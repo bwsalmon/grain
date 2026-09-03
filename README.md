@@ -31,7 +31,8 @@ pkg/dispatch/   which tasks run now: what one cycle decides to
                 subcommand's timer does, through pkg/orchestrator -- and
                 it carries no
                 scheduling policy: it drains task_ready until
-                max_concurrent runs are live
+                max_workers ordinary runs, or max_workers+max_mergers
+                runs of any kind, are live
 pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
@@ -1315,7 +1316,7 @@ reassemble the bundle by hand. `Task.Configuration` also changes how
 `dispatch.Cycle` schedules the task: `dispatchConfiguration` starts every
 such task unconditionally, ahead of the capacity-gated loop that governs
 everything else, so the configuration agent can always start a sandbox
-even when the deployment is already at `MaxConcurrent` -- the moment
+even when the deployment is already at its worker limit -- the moment
 someone reaches for it is often exactly the moment the deployment is
 already saturated.
 
@@ -1676,7 +1677,7 @@ same machine the two are indistinguishable.
 
 bwsalmon/agents#320 asked the same "the store is the record" question
 "Input is a model update, not a GitHub issue" (above) already answered
-for tasks, aimed at the daemon's own flags this time: `-max-concurrent`,
+for tasks, aimed at the daemon's own flags this time: `-max-workers`,
 `-poll-interval`, `-gemini-model`, `-claude-model`, `-max-agent-turns`, `-github-host`,
 `-github-insecure-http`, `-gcp-project` and `-gcp-agent-service-account`
 used to be the only way to set any of these, which meant changing one
@@ -1748,7 +1749,7 @@ Storing the configuration was only half of it. `loadConfig` read
 `grain_config` exactly once, at startup, so *saving* a setting and
 *applying* one had come apart: the Settings pane wrote a row and then
 showed it back as though something were now running that way, when in
-fact nothing but `-max-concurrent` (re-read by `RunCycle` itself) would
+fact nothing but the concurrency limit (re-read by `RunCycle` itself) would
 change until someone restarted the process. An operator raising the turn
 cap, switching models, or widening a sandbox saw a saved value and no
 different behaviour, with nothing on screen to say why.
@@ -1762,15 +1763,15 @@ for `gcp-project`/`gcp-agent-service-account`, and
 `KonturSandboxes.SetDefaultShape` for
 `sandbox-cpus`/`sandbox-memory-mb`/`sandbox-disk-gb`.
 The rest were already read per cycle or per dispatch, or gained it here:
-`RunCycle` re-reads `max-concurrent` *and* `max-agent-turns`;
+`RunCycle` re-reads `max-workers`/`max-mergers` *and* `max-agent-turns`;
 `dispatchConfig` re-reads `agent-framework`, `gemini-model` and
 `claude-model` when a run's framework is built (which is per dispatch,
 for the same reason the credential is); and `target-repos`,
 `newest-first`, `environment-name` and the three "by default" toggles are
-read out of the store by `pkg/ui` on the request that needs them. What a change costs is
-therefore at most one poll interval, and nothing already in flight is
-disturbed: `Deps` is copied per cycle and per dispatch, so a run keeps
-the registry and the caps it started under.
+read out of the store by `pkg/ui` on the request that needs them. What a
+change costs is therefore at most one poll interval, and nothing already
+in flight is disturbed: `Deps` is copied per cycle and per dispatch, so a
+run keeps the registry and the caps it started under.
 
 Two settings genuinely cannot be swapped under a live deployment:
 `github-host` and `github-insecure-http`. They are baked into the git
@@ -2702,8 +2703,9 @@ interfaces are all gone with the problem they solved. What
 tasks on one sandbox from each other" — is here a property rather than
 something knowingly given up.
 
-**Concurrency is a count.** `Cycle` takes `max_concurrent` and starts
-runs until that many are live. The DB-level backstop that used to be a
+**Concurrency is a count.** `Cycle` takes a limit and starts runs until
+that many are live (two counts since "Merge capacity is its own number"
+below; one, `max_concurrent`, when this was written). The DB-level backstop that used to be a
 unique index on the slot each run claimed (bwsalmon/agents#434, catching
 two overlapping cycles that both thought a slot was free) is now a count
 inside `StartRun`'s own transaction, which rules that race out rather
@@ -2713,7 +2715,7 @@ at most one run in flight, which is what `task_state` already assumed.
 **A run outlives the cycle that started it.** `reconcileDispatch` used
 to wait for every run it dispatched, and `cmd/grain`'s reconcile loop
 waits for a cycle before it ticks again — so one long run held the whole
-controller. Nothing else was dispatched however much of `max_concurrent`
+controller. Nothing else was dispatched however much of the limit
 was free, no pull request was synced, no schedule came due, until that
 agent finished. A deployment configured for several concurrent runs only
 ever reached that number when a single tick happened to find several
@@ -2826,8 +2828,8 @@ leaning on it. Flat mode, the default, ignores both.
 it, and `RunDispatch` — the only thing that finishes a run — is never
 reached when setup fails. Left there, the row stays live forever:
 `task_state` reads it as `running` so the task never returns to `queued`,
-`LiveRunCount` keeps counting it so the deployment loses a unit of
-`max_concurrent`, and `retryEligible` reads *finished* runs so the
+`LiveRunCount` keeps counting it so the deployment loses a unit of its
+worker capacity, and `retryEligible` reads *finished* runs so the
 backoff never retries. Nothing sweeps it — `MaxRunRuntime` is enforced
 inside `RunDispatch`, `RecoverOrphanedRuns` is a startup pass — so it
 lasts until someone restarts the daemon. That was survivable while a
@@ -2960,6 +2962,7 @@ average and memory, from both ends:
 Both report 0/0 when there is no reading to be had, which the pane shows
 as a dash and the trend charts skip rather than plotting as an empty
 disk — the same "unavailable is not zero" treatment memory already got.
+
 ## Measuring throughput and latency
 
 The previous section ends with "worth measuring before reaching for
@@ -3199,3 +3202,58 @@ per-tick budget, which is a queued task waiting on the tick itself rather
 than on a deployment that was full. A tick growing under a large store is
 the thing a load test is best placed to catch, and that is the shape it
 now catches it in.
+
+## Merge capacity is its own number
+
+Concurrency was one number: `max_concurrent`, the count of runs
+`dispatch.Cycle` would let be in flight. Every kind of run drew on it
+equally, which put the two least alike kinds in direct competition. Most
+runs are new work, at the start of its life. A few are the merge queue's
+own fix tasks (`Origin.Reason == ReasonFix`, `fileFixTask`), filed
+against a pull request that will not land — the last step of work that is
+already committed, pushed and reviewed. A saturated deployment starved
+exactly the second kind, and starving it is expensive twice over: the
+branch a fix targets keeps moving while the fix waits, so a repair
+delayed long enough has to be filed again, and the queue behind it waits
+too.
+
+`model.Limits` is that one number split in two — `MaxWorkers` and
+`MaxMergers`, in the store as `grain_config.max_workers`/`max_mergers`,
+on the daemon as `-max-workers`/`-max-mergers`, in Settings as "Max
+worker agents" and "Max merge agents". The rule they make is
+deliberately asymmetric:
+
+- no more than `MaxWorkers` runs of ordinary work are ever live;
+- no more than `MaxWorkers + MaxMergers` runs are ever live at all.
+
+A merger is bounded only by the second, so it may take a worker's free
+slot; a worker is bounded by both, so it can never take a merger's. With
+3 workers and 2 mergers a deployment can be running five mergers, or
+three workers and two mergers, but never four workers and never six of
+anything. Capacity kept back for finishing work is reachable by work
+that is nearly finished, and by nothing else.
+
+The split lands in the two places the old count did, and nowhere new.
+`Limits.Admits` is the whole rule, written once: `dispatch.Cycle` asks it
+before spending capacity it can see (`Store.LiveRunCounts`, the live
+count split the same way, and `Store.ReadyMergers` to say which ready
+task is which kind), and `Store.StartRun` asks it again inside the
+transaction that records the run, which is where the limit is actually
+enforced — two overlapping cycles cannot both spend the last slot. A
+candidate whose own half is full is passed over rather than ending the
+cycle, the same skip a task still backing off gets, so a queue of
+ordinary work at the head of the backlog no longer hides the fix task
+behind it from the capacity kept for it.
+
+`-max-concurrent` still parses, as the former spelling of
+`-max-workers`: a deployment's unit file is written once by
+`scripts/setup.sh` and the Upgrade button then replaces only the binary,
+so dropping the old flag would stop the daemon at the moment nobody is
+watching. The stored column is migrated rather than reinterpreted
+(`ensureConfigWorkerMergerColumns`): `max_workers` is backfilled from
+`max_concurrent`, which is then dropped, and `max_mergers` starts at
+`model.DefaultMaxMergers` — one — so an upgraded deployment keeps the
+ordinary concurrency it had and gains a single slot the merge queue
+cannot be shut out of. Setting it to 0 puts a deployment back exactly
+where it was: fix tasks contending for worker capacity like anything
+else.

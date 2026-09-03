@@ -193,7 +193,7 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 
 	storeDir := t.TempDir()
 	sandboxes := credentialed(t, remote)
-	const maxConcurrent = 3
+	const maxWorkers = 3
 
 	client := github.NewClient(sim, nil)
 	rng := rand.New(cfg.seed)
@@ -218,7 +218,7 @@ func runRandomizedCluster(t *testing.T, cfg clusterRunConfig) {
 	// used by one run at a time.
 	var genMu sync.Mutex
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: maxConcurrent,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: maxWorkers,
 		Framework: func(context.Context, string) (agent.Framework, error) {
 			return antigravity.NewForTest(&randomGenerator{
 				mu: &genMu, rng: rng, githubHost: githubHost, pushed: roundAttempts, coverage: coverage,

@@ -174,7 +174,7 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 
 	sandboxes := orchestrator.NewHostSandboxes(t.TempDir())
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxWorkers: 1,
 		Framework: orchestrator.StaticFramework(framework),
 	}
 

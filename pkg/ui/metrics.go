@@ -267,7 +267,11 @@ func (c *Client) Metrics(ctx context.Context, window time.Duration, buckets int)
 		return MetricsReport{}, fmt.Errorf("reading deployment settings: %w", err)
 	}
 	if cfg != nil {
-		in.MaxConcurrent = cfg.MaxConcurrent
+		// The ceiling MeanConcurrent is a fraction of is every kind of
+		// run together, so it is the whole of model.Limits and not just
+		// its worker half: a merger may take a free worker slot, so a
+		// deployment can have MaxWorkers+MaxMergers runs live at once.
+		in.MaxConcurrent = cfg.MaxWorkers + cfg.MaxMergers
 	}
 	// The one input that is not a row: a tick leaves no record, so the
 	// daemon that ran it is the only thing that can say how long it took

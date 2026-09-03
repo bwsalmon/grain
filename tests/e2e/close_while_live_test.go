@@ -104,7 +104,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 	var d dispatch.Dispatch
 	var fullTask model.Task
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		dispatches, err := dispatch.Cycle(ctx, store, 1, baseTime)
+		dispatches, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, baseTime)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -190,7 +190,7 @@ func TestClosingATaskWhileItsRunIsStillLiveCancelsItAndNeverReDispatchesOrOpensA
 	// The slot is free again, but dispatch.Cycle must never hand a closed
 	// task another run.
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		again, err := dispatch.Cycle(ctx, store, 1, baseTime.Add(2*time.Minute))
+		again, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, baseTime.Add(2*time.Minute))
 		if err != nil {
 			t.Fatal(err)
 		}

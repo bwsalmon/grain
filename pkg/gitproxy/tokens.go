@@ -175,7 +175,7 @@ func readTokenFile(path string) (map[string]string, error) {
 // another, before the daemon dispatched anything. A sandbox per run mints
 // from orchestrator's runOne, which reconcileDispatch runs one goroutine
 // per dispatch of, so two mints genuinely overlap the moment
-// -max-concurrent is above 1. Unguarded, both read the same map, both add
+// -max-workers is above 1. Unguarded, both read the same map, both add
 // their own sandbox, and whichever renames last drops the other's token
 // on the floor: that run then holds a token the proxy will never find in
 // the file, and every git operation inside its sandbox fails closed for

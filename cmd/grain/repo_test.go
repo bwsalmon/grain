@@ -178,9 +178,9 @@ func repoServer(t *testing.T) string {
 		DefaultTarget: &repo,
 		Capabilities:  ui.OfferedCapabilities(),
 	}, store)
-	pollInterval, maxConcurrent, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
+	pollInterval, maxWorkers, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
 	if _, err := client.UpdateSettings(ctx, ui.UpdateSettingsRequest{
-		PollInterval: &pollInterval, MaxConcurrent: &maxConcurrent,
+		PollInterval: &pollInterval, MaxWorkers: &maxWorkers,
 		GeminiModel: &geminiModel, ClaudeModel: &claudeModel, GitHubHost: &host,
 	}); err != nil {
 		t.Fatalf("saving settings: %v", err)

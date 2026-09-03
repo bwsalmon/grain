@@ -210,7 +210,7 @@ type Config struct {
 	// Whatever a caller sets here is only the starting value on a
 	// deployment with a store: RunCycle re-reads model.Config.
 	// MaxAgentTurns out of grain_config every cycle, alongside
-	// Deps.MaxConcurrent, so a change made in Settings reaches the next
+	// Deps.MaxWorkers/MaxMergers, so a change made in Settings reaches the next
 	// run dispatched rather than the next restart.
 	MaxAgentTurns int
 	// GitRemoteBase is the base URL of this deployment's git proxy

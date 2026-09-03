@@ -22,9 +22,10 @@ import (
 // for the local-directory stand-in, or KonturSandboxes for a real
 // bwsalmon/kontur-managed VM — see the package doc comment.
 //
-// MaxConcurrent is how many runs may be in flight at once. It was a
-// []string of slot identifiers until slots stopped existing; dispatch.
-// Cycle counts live runs against this instead of differencing a pool.
+// MaxWorkers/MaxMergers are how many runs may be in flight at once, of
+// each kind model.Limits distinguishes. They were one []string of slot
+// identifiers until slots stopped existing, then one count; dispatch.
+// Cycle counts live runs against them instead of differencing a pool.
 type Deps struct {
 	Store     *model.Store
 	Client    github.Client
@@ -70,20 +71,26 @@ type Deps struct {
 	// not authorization, which Store.GitScope already handles by
 	// resolving a sandbox through the live run on it.
 	RevokeSandboxToken func(sandbox string) error
-	// MaxConcurrent is the starting value for a deployment -- cmd/grain
-	// seeds it from cfg.maxConcurrent -- but RunCycle overwrites its own
+	// MaxWorkers is the starting value for a deployment -- cmd/grain
+	// seeds it from cfg.maxWorkers -- but RunCycle overwrites its own
 	// copy every cycle from deps.Store's grain_config row, so changing it
 	// through the store takes effect on the next tick rather than
 	// requiring a restart. See RunCycle's own doc comment.
-	MaxConcurrent int
+	MaxWorkers int
+	// MaxMergers is MaxWorkers' counterpart for the merge queue's own fix
+	// tasks (grain/task-63): capacity on top of MaxWorkers that only they
+	// may reach, refreshed from the store every cycle the same way. The
+	// pair of them is what reconcileDispatch hands dispatch.Cycle as one
+	// model.Limits -- see that type for the rule they make together.
+	MaxMergers int
 	// Runs, when non-nil, is where a cycle parks the runs it starts:
 	// reconcileDispatch gives each dispatch a goroutine tracked there and
 	// returns without waiting for it, so the cycle -- and the tick after
 	// it -- is over in the time the dispatch *decisions* take rather than
-	// in the time the agents take. That is what makes MaxConcurrent
-	// reachable by a deployment whose tasks arrive one at a time: see
-	// InFlight's own doc comment for what waiting used to cost, and
-	// cmd/grain's drainInFlight for the other half, draining it at
+	// in the time the agents take. That is what makes the configured
+	// concurrency reachable by a deployment whose tasks arrive one at a
+	// time: see InFlight's own doc comment for what waiting used to
+	// cost, and cmd/grain's drainInFlight for the other half, draining it at
 	// shutdown so a run still gets to release its sandbox.
 	//
 	// Nil means a cycle waits for every run it started before returning,
@@ -225,11 +232,12 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // cancelled context means the daemon is shutting down rather than that
 // one reconciler has a problem the others might not.
 //
-// deps.MaxConcurrent and deps.Config.MaxAgentTurns are refreshed from
-// deps.Store's own grain_config row (if any) before any reconciler runs,
-// so a change made through the store -- `grain settings`, or the UI's
-// Settings page -- takes effect on this cycle rather than at the next
-// restart. They are the two settings this package itself is the consumer
+// deps.MaxWorkers, deps.MaxMergers and deps.Config.MaxAgentTurns are
+// refreshed from deps.Store's own grain_config row (if any) before any
+// reconciler runs, so a change made through the store -- `grain
+// settings`, or the UI's Settings page -- takes effect on this cycle
+// rather than at the next
+// restart. They are the settings this package itself is the consumer
 // of; the rest of model.Config is re-applied by whoever owns the piece
 // it configures (cmd/grain/daemon.go's liveConfig, once per tick, for
 // everything a running daemon can adopt at all). deps is taken by value,
@@ -275,7 +283,7 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 		if mc, err := deps.Store.GetConfig(ctx); err != nil {
 			log.Printf("orchestrator: reading stored configuration: %v", err)
 		} else if mc != nil {
-			deps.MaxConcurrent = mc.MaxConcurrent
+			deps.MaxWorkers, deps.MaxMergers = mc.MaxWorkers, mc.MaxMergers
 			deps.Config.MaxAgentTurns = mc.MaxAgentTurns
 		}
 	}
@@ -371,7 +379,7 @@ func reconcileSuites(ctx context.Context, deps Deps, now time.Time) error {
 // handed to deps.Runs, and so outliving this cycle, wherever a caller has
 // given it somewhere to park them (Deps.Runs).
 //
-// This is what actually makes -max-concurrent/GRAIN_MAX_CONCURRENT a
+// This is what actually makes -max-workers/GRAIN_MAX_WORKERS a
 // concurrency knob rather than just a scheduling one (bwsalmon/
 // agents#435): each Dispatch names a distinct task and a distinct run,
 // and each run acquires a sandbox of its own, so two dispatches from the
@@ -409,7 +417,8 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	if deps.Runs != nil {
 		opts = append(opts, dispatch.Busy(deps.Runs.Busy))
 	}
-	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.MaxConcurrent, now, opts...)
+	limits := model.Limits{Workers: deps.MaxWorkers, Mergers: deps.MaxMergers}
+	dispatches, err := dispatch.Cycle(ctx, deps.Store, limits, now, opts...)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
 	}
@@ -420,7 +429,8 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	// for why -- in short, waiting here made a cycle as slow as its
 	// slowest agent, and cmd/grain's reconcile loop does not tick again
 	// until a cycle returns, so a single running task stopped every other
-	// task from starting however much of MaxConcurrent was free.
+	// task from starting however much of the deployment's capacity was
+	// free.
 	//
 	// An error has nowhere to be returned to once that happens -- the
 	// cycle it belonged to is long over -- so it is logged, the same way
@@ -499,7 +509,7 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// That is not merely untidy. task_state reads a live run as 'running',
 	// so the task never returns to 'queued' and task_ready never offers it
 	// again; LiveRunCount still counts the row, so the deployment
-	// permanently loses one unit of -max-concurrent; and retryEligible
+	// permanently loses one unit of -max-workers; and retryEligible
 	// reads *finished* runs, so the backoff that is supposed to retry a
 	// transient failure never sees one to retry. Nothing sweeps it either:
 	// Config.MaxRunRuntime is enforced inside RunDispatch, and

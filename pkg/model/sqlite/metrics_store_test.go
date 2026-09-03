@@ -30,7 +30,7 @@ func TestTimingsReadEveryMomentAReportMeasuresBetween(t *testing.T) {
 	started, agentStarted, finished := now.Add(time.Hour), now.Add(time.Hour+5*time.Minute), now.Add(90*time.Minute)
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "s1", Attempt: 1, StartedAt: started,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetRunAgentStarted(ctx, "r1", agentStarted); err != nil {
@@ -41,7 +41,7 @@ func TestTimingsReadEveryMomentAReportMeasuresBetween(t *testing.T) {
 	}
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r2", TaskID: "a1b2", Sandbox: "s2", Attempt: 2, StartedAt: now.Add(2 * time.Hour),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	completed := now.Add(3 * time.Hour)

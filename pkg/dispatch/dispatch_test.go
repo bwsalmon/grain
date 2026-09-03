@@ -92,7 +92,7 @@ func TestCycleDispatchesReadyTasksInOrderAndNoFurther(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true), task("t1", true), task("t2", true))
 
-	got, err := dispatch.Cycle(ctx, store, 2, now)
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestCycleLeavesAnAlreadyRunningTaskAlone(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true))
 
-	first, err := dispatch.Cycle(ctx, store, 2, now)
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, now)
 	if err != nil || len(first) != 1 {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -138,7 +138,7 @@ func TestCycleLeavesAnAlreadyRunningTaskAlone(t *testing.T) {
 	// Two slots, still only one task in the world, and it is already
 	// running — task_ready excludes it, so a second cycle must dispatch
 	// nothing even though slot-2 has never been used.
-	second, err := dispatch.Cycle(ctx, store, 2, now.Add(time.Minute))
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +153,9 @@ func TestCycleRespectsTheConcurrencyLimit(t *testing.T) {
 	for _, id := range ids {
 		putTasks(t, store, ctx, task(id, true))
 	}
-	const maxConcurrent = 2
+	const maxWorkers = 2
 
-	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now)
 	if err != nil || len(first) != 2 {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -166,7 +166,7 @@ func TestCycleRespectsTheConcurrencyLimit(t *testing.T) {
 
 	// No headroom: nothing more may be dispatched no matter how many
 	// tasks are ready.
-	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(time.Minute))
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestCycleRespectsTheConcurrencyLimit(t *testing.T) {
 	if err := store.FinishRun(ctx, first[0].RunID, now.Add(2*time.Minute), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
-	third, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(3*time.Minute))
+	third, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now.Add(3*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,14 +194,14 @@ func TestCycleRespectsTheConcurrencyLimit(t *testing.T) {
 // TestCycleDispatchesAConfigurationTaskEvenAtTheConcurrencyLimit is
 // bwsalmon/agents#621's whole point: the configuration agent must always
 // be able to start a sandbox, even when the deployment is already at
-// MaxConcurrent -- unlike TestCycleRespectsTheConcurrencyLimit's ordinary
+// MaxWorkers -- unlike TestCycleRespectsTheConcurrencyLimit's ordinary
 // tasks, which the same setup here leaves stuck at capacity.
 func TestCycleDispatchesAConfigurationTaskEvenAtTheConcurrencyLimit(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true), task("t1", true))
-	const maxConcurrent = 2
+	const maxWorkers = 2
 
-	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now)
 	if err != nil || len(first) != 2 {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -214,7 +214,7 @@ func TestCycleDispatchesAConfigurationTaskEvenAtTheConcurrencyLimit(t *testing.T
 	// configuration agent into exactly this situation is the scenario
 	// bwsalmon/agents#621 exists for.
 	putTasks(t, store, ctx, configurationTask("config"))
-	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(time.Minute))
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,9 +234,9 @@ func TestCycleDispatchesAConfigurationTaskEvenAtTheConcurrencyLimit(t *testing.T
 func TestCycleDispatchesAConfigurationTaskAheadOfOrdinaryTasksWithoutSpendingTheirCapacity(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, configurationTask("config"), task("t0", true), task("t1", true))
-	const maxConcurrent = 2
+	const maxWorkers = 2
 
-	got, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 		task("blocked", true, model.Link{Kind: model.LinkDependsOn, Target: "blocker"}),
 	)
 
-	got, err := dispatch.Cycle(ctx, store, 2, now)
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 	}
 	// Still a limit of 2, and the blocker's own run is still live, so
 	// exactly one unit of capacity is free for the unblocked task.
-	got, err = dispatch.Cycle(ctx, store, 2, now.Add(time.Minute))
+	got, err = dispatch.Cycle(ctx, store, model.Limits{Workers: 2}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestCycleDispatchesFixTasksBeforeOrdinaryReadyTasks(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("a-new-work", true), fixTask("z-fix"))
 
-	got, err := dispatch.Cycle(ctx, store, 1, now)
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,12 +314,101 @@ func TestCycleDispatchesFixTasksBeforeOrdinaryReadyTasks(t *testing.T) {
 	}
 }
 
+// The three tests below are grain/task-63's whole rule (model.Limits):
+// workers are capped at Limits.Workers, everything together is capped at
+// Workers+Mergers, and the asymmetry between those two is what lets a
+// merge-queue fix task use a worker's free slot while a worker can never
+// use a merger's.
+
+// A merge-queue fix task may take capacity ordinary work cannot: with
+// three workers and two mergers configured, five fix tasks run at once.
+func TestCycleLetsMergersUseWorkerCapacityAsWellAsTheirOwn(t *testing.T) {
+	store, ctx := open(t)
+	for i := 0; i < 6; i++ {
+		putTasks(t, store, ctx, fixTask(fmt.Sprintf("fix-%d", i)))
+	}
+
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 3, Mergers: 2}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("dispatched %d fix tasks, want 5 (3 worker slots plus 2 merger slots): %+v", len(got), got)
+	}
+	live, err := store.LiveRunCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Mergers != 5 || live.Workers != 0 {
+		t.Fatalf("live runs = %+v, want five mergers and no workers", live)
+	}
+}
+
+// Ordinary work is capped at Limits.Workers even when every merger slot
+// is idle: the capacity kept back for the merge queue is not a general
+// pool with a name on it.
+func TestCycleNeverLetsWorkersTakeMergerCapacity(t *testing.T) {
+	store, ctx := open(t)
+	for i := 0; i < 6; i++ {
+		putTasks(t, store, ctx, task(fmt.Sprintf("t%d", i), true))
+	}
+
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 3, Mergers: 2}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("dispatched %d ordinary tasks, want 3 (the worker limit, with the two merger slots left alone): %+v",
+			len(got), got)
+	}
+}
+
+// A ready task whose own half of the limits is full is passed over, not
+// treated as the end of the cycle: with the single worker slot taken,
+// the second ordinary task waits while a fix task further down the ready
+// order still reaches the capacity kept for it. That skip is the same
+// one a task still backing off gets, and it is what makes reserved
+// merger capacity reachable at all on a saturated deployment -- the case
+// it exists for.
+func TestCycleSkipsPastAFullWorkerHalfToReachAMerger(t *testing.T) {
+	store, ctx := open(t)
+	// Not fixTask's own head-of-backlog position: this one has to sit
+	// behind the ordinary work for the skip to be what dispatches it.
+	behind := fixTask("z-fix")
+	behind.OrderKey = 1
+	putTasks(t, store, ctx, task("t0", true), task("t1", true), behind)
+
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1, Mergers: 1}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatched := map[string]bool{}
+	for _, d := range got {
+		dispatched[d.TaskID] = true
+	}
+	if len(got) != 2 || !dispatched["t0"] || !dispatched["z-fix"] {
+		t.Fatalf("dispatched %+v, want t0 (the one worker slot) and z-fix (the merger slot), with t1 left queued", got)
+	}
+	live, err := store.LiveRunCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.Workers != 1 || live.Mergers != 1 {
+		t.Fatalf("live runs = %+v, want one of each", live)
+	}
+	// And nothing more: the sum of the two limits is the ceiling on
+	// everything, so t1 stays queued until one of them ends.
+	if again, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1, Mergers: 1}, now.Add(time.Minute)); err != nil || len(again) != 0 {
+		t.Fatalf("second cycle dispatched %+v (%v), want nothing past the sum of the two limits", again, err)
+	}
+}
+
 func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true))
-	const maxConcurrent = 1
+	const maxWorkers = 1
 
-	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now)
 	if err != nil || len(first) != 1 || first[0].Attempt != 1 {
 		t.Fatalf("first dispatch: %v, %+v", err, first)
 	}
@@ -329,7 +418,7 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "requeued", ""); err != nil {
 		t.Fatal(err)
 	}
-	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(2*time.Minute))
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now.Add(2*time.Minute))
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("second dispatch: %v, %+v", err, second)
 	}
@@ -349,9 +438,9 @@ func TestAttemptNumberIncrementsOnEachRedispatch(t *testing.T) {
 func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true), task("t1", true))
-	const maxConcurrent = 1
+	const maxWorkers = 1
 
-	first, err := dispatch.Cycle(ctx, store, maxConcurrent, now)
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now)
 	if err != nil || len(first) != 1 || first[0].TaskID != "t0" {
 		t.Fatalf("first dispatch: %v, %+v", err, first)
 	}
@@ -362,7 +451,7 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 	// t0 just failed and has not backed off yet, but t1 has never run at
 	// all -- it must be offered the only free slot instead of the cycle
 	// giving up because task_ready's first entry (t0) is not eligible.
-	second, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(2*time.Second))
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now.Add(2*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +471,7 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 
 	// Still too soon after t0's own failure: nothing to dispatch even
 	// though the slot is free again.
-	third, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(4*time.Second))
+	third, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now.Add(4*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +480,7 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 	}
 
 	// Comfortably past baseRetryBackoff (30s): t0 is eligible again.
-	fourth, err := dispatch.Cycle(ctx, store, maxConcurrent, now.Add(time.Minute))
+	fourth, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,14 +497,14 @@ func TestARecentlyFailedTaskBacksOffWithoutBlockingOthers(t *testing.T) {
 func TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true))
-	const maxConcurrent = 1
+	const maxWorkers = 1
 
 	clock := now
 	for i := 0; i < model.MaxConsecutiveFailures; i++ {
 		// Advance well past any backoff window so the cap itself, not a
 		// still-pending backoff, is what this test exercises.
 		clock = clock.Add(time.Hour)
-		got, err := dispatch.Cycle(ctx, store, maxConcurrent, clock)
+		got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, clock)
 		if err != nil {
 			t.Fatalf("attempt %d: Cycle: %v", i+1, err)
 		}
@@ -437,7 +526,7 @@ func TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady(t *testing.T) {
 	}
 
 	clock = clock.Add(24 * time.Hour)
-	got, err := dispatch.Cycle(ctx, store, maxConcurrent, clock)
+	got, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +546,7 @@ func TestATaskCappedAtMaxConsecutiveFailuresStopsBeingReady(t *testing.T) {
 		t.Fatalf("state after a retry request = %q (%v), want queued", st, err)
 	}
 	clock = clock.Add(time.Minute)
-	got, err = dispatch.Cycle(ctx, store, maxConcurrent, clock)
+	got, err = dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +582,7 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 		putTasks(t, store, ctx, task(ids[i], true, links...))
 	}
 
-	const maxConcurrent = 3
+	const maxWorkers = 3
 	closed := map[string]bool{}
 	liveRunID := map[string]string{}   // task -> its current run, while live
 	liveSandbox := map[string]string{} // task -> the sandbox its live run was given
@@ -508,7 +597,7 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 
 	for cycle := 0; cycle < 60; cycle++ {
 		clock = clock.Add(time.Minute)
-		dispatches, err := dispatch.Cycle(ctx, store, maxConcurrent, clock)
+		dispatches, err := dispatch.Cycle(ctx, store, model.Limits{Workers: maxWorkers}, clock)
 		if err != nil {
 			t.Fatalf("cycle %d: %v", cycle, err)
 		}
@@ -540,8 +629,8 @@ func TestInvariantsHoldAcrossManyRandomCycles(t *testing.T) {
 			attemptsSoFar[d.TaskID]++
 		}
 
-		if len(sandboxOf) > maxConcurrent {
-			t.Fatalf("cycle %d: %d runs live, limit is %d", cycle, len(sandboxOf), maxConcurrent)
+		if len(sandboxOf) > maxWorkers {
+			t.Fatalf("cycle %d: %d runs live, limit is %d", cycle, len(sandboxOf), maxWorkers)
 		}
 		if occ, err := store.LiveRunCount(ctx); err != nil {
 			t.Fatalf("cycle %d: LiveRunCount: %v", cycle, err)
@@ -595,7 +684,7 @@ func TestCycleSkipsATaskItsCallerIsStillFinishingWith(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("t0", true), task("t1", true))
 
-	first, err := dispatch.Cycle(ctx, store, 1, now)
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now)
 	if err != nil || len(first) != 1 || first[0].TaskID != "t0" {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -609,7 +698,7 @@ func TestCycleSkipsATaskItsCallerIsStillFinishingWith(t *testing.T) {
 	}
 
 	busy := func(taskID string) bool { return taskID == "t0" }
-	second, err := dispatch.Cycle(ctx, store, 1, now.Add(2*time.Minute), dispatch.Busy(busy))
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now.Add(2*time.Minute), dispatch.Busy(busy))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +716,7 @@ func TestCycleSkipsATaskItsCallerIsStillFinishingWith(t *testing.T) {
 	if err := store.FinishRun(ctx, second[0].RunID, now.Add(3*time.Minute), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
-	third, err := dispatch.Cycle(ctx, store, 1, now.Add(4*time.Minute))
+	third, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now.Add(4*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +731,7 @@ func TestCycleSkipsAConfigurationTaskItsCallerIsStillFinishingWith(t *testing.T)
 	store, ctx := open(t)
 	putTasks(t, store, ctx, configurationTask("config"))
 
-	first, err := dispatch.Cycle(ctx, store, 1, now)
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now)
 	if err != nil || len(first) != 1 || first[0].TaskID != "config" {
 		t.Fatalf("first cycle: %v, %+v", err, first)
 	}
@@ -651,7 +740,7 @@ func TestCycleSkipsAConfigurationTaskItsCallerIsStillFinishingWith(t *testing.T)
 	}
 
 	busy := func(taskID string) bool { return taskID == "config" }
-	second, err := dispatch.Cycle(ctx, store, 1, now.Add(2*time.Minute), dispatch.Busy(busy))
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now.Add(2*time.Minute), dispatch.Busy(busy))
 	if err != nil {
 		t.Fatal(err)
 	}

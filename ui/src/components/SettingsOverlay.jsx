@@ -126,10 +126,16 @@ export default function SettingsOverlay({ onClose, showError }) {
     const pollInterval = form.elements.pollInterval.value.trim();
     if (pollInterval !== (settings.pollInterval || "")) payload.pollInterval = pollInterval;
 
-    const maxConcurrentRaw = form.elements.maxConcurrent.value.trim();
-    if (maxConcurrentRaw !== "") {
-      const maxConcurrent = parseInt(maxConcurrentRaw, 10);
-      if (maxConcurrent !== (settings.maxConcurrent || 0)) payload.maxConcurrent = maxConcurrent;
+    const maxWorkersRaw = form.elements.maxWorkers.value.trim();
+    if (maxWorkersRaw !== "") {
+      const maxWorkers = parseInt(maxWorkersRaw, 10);
+      if (maxWorkers !== (settings.maxWorkers || 0)) payload.maxWorkers = maxWorkers;
+    }
+
+    const maxMergersRaw = form.elements.maxMergers.value.trim();
+    if (maxMergersRaw !== "") {
+      const maxMergers = parseInt(maxMergersRaw, 10);
+      if (maxMergers !== (settings.maxMergers || 0)) payload.maxMergers = maxMergers;
     }
 
     const newestFirst = form.elements.newestFirst.checked;
@@ -341,7 +347,8 @@ export default function SettingsOverlay({ onClose, showError }) {
               margin="normal"
             />
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
-            <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
+            <TextField name="maxWorkers" label="Max worker agents" helperText="maximum number of ordinary tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxWorkers || "")} fullWidth margin="normal" />
+            <TextField name="maxMergers" label="Max merge agents" helperText="extra agents only the merge queue may dispatch, to repair a pull request that will not land -- on top of the workers above, and free to use a spare worker slot too. 0 makes them wait for one like anything else" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxMergers ?? "")} fullWidth margin="normal" />
             <Typography variant="subtitle2" sx={{ mt: 2 }}>Backlog &amp; task defaults</Typography>
             <FormControlLabel
               control={<Checkbox name="newestFirst" defaultChecked={!!settings.newestFirst} />}

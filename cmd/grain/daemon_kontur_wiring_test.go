@@ -166,7 +166,7 @@ func TestRunBuildsAKonturVMForADispatchUsingCreateArgs(t *testing.T) {
 	db.Close()
 
 	cfg := config{
-		dataDir: dataDir, maxConcurrent: 1, pollInterval: time.Hour,
+		dataDir: dataDir, maxWorkers: 1, pollInterval: time.Hour,
 		geminiAPIKeyFile: geminiKeyFile,
 		// agent/antigravity runs a real binary, so agentFrameworks
 		// resolves one before anything dispatches -- unlike the

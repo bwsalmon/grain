@@ -137,7 +137,7 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	}
 
 	const owner, repoName = "acme", "gizmos"
-	// maxConcurrent 1, so the seeded task's first attempt is the only
+	// maxWorkers 1, so the seeded task's first attempt is the only
 	// run this drives, and its sandbox is named after it.
 
 	// A real bare repo standing in for the GitHub-hosted one, seeded
@@ -196,7 +196,7 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, config{
-			dataDir: dataDir, maxConcurrent: 1, pollInterval: 5 * time.Second,
+			dataDir: dataDir, maxWorkers: 1, pollInterval: 5 * time.Second,
 			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
 			githubHost: githubHost, githubInsecureHTTP: true,
 

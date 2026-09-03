@@ -19,12 +19,12 @@ import (
 // concurrent runs only ever reached that number when a single tick
 // happened to find several tasks ready at once; a task filed a second
 // after a run started waited out the whole run, no matter how much of
-// -max-concurrent was idle. That is what this fixes: the runs of a cycle
+// -max-workers was idle. That is what this fixes: the runs of a cycle
 // outlive the cycle, and the next tick dispatches into whatever
 // headroom is free at that moment.
 //
 // It is not itself the concurrency limit, and deliberately keeps no
-// count anything enforces. Config.MaxConcurrent is the limit, and
+// count anything enforces. model.Limits is the limit, and
 // dispatch.Cycle enforces it from the store -- LiveRunCount, re-checked
 // inside StartRun's own transaction -- which stays accurate across ticks
 // exactly because a run's row stays live until the goroutine tracked
