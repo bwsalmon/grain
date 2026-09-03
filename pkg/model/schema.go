@@ -234,6 +234,64 @@ var Tables = []string{
 	// only the currently-open one must be unique.
 	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`task_run_open_task`" + ` ON ` + "`task_run`" + ` (` + "`task_id`" + `) WHERE ` + "`finished_at`" + ` IS NULL`,
 
+	// task_run_tool is the per-run, per-tool census: how many times a run
+	// called each tool, how many of those calls came back as errors, how
+	// many the tool's own bound cut off, and how big the answers were.
+	// telemetry.go's own doc comment argues for storing it at all -- it is
+	// the one measurement in this schema that is not derivable from
+	// something else, because agent.Result does not survive the run.
+	//
+	// size_buckets is a base-2 histogram of result sizes
+	// (model.SizeHistogram), encoded as "bucket:count" pairs. A column
+	// rather than a table because it is only ever read whole, with the row
+	// it belongs to, and never joined or queried on.
+	//
+	// Neither this table nor task_run_check_wait below needs a
+	// SchemaVersion bump, and neither needs a rung on store.go's migration
+	// ladder: Init's own CREATE TABLE IF NOT EXISTS creates a *missing*
+	// table on an existing database perfectly well -- what it cannot do is
+	// alter one that is already there, which is what every ensure*Column
+	// migration and every bump exists for. An older store simply gains two
+	// empty tables and starts filling them from its next run.
+	//
+	// Written once, by orchestrator.RunDispatch, after FinishRun has
+	// recorded the run's own outcome -- the same after-the-fact shape
+	// task_run.transcript uses. A run that never reached its agent, or
+	// that made no tool calls at all, gets no rows here rather than rows
+	// of zeroes: that fact is already in its outcome, and a zero row would
+	// only dilute the per-tool rates it was averaged into.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_run_tool`" + ` (
+  ` + "`run_id`" + `           TEXT     NOT NULL,
+  ` + "`tool`" + `             TEXT     NOT NULL,
+  ` + "`calls`" + `            INTEGER  NOT NULL,
+  ` + "`errored`" + `          INTEGER  NOT NULL,
+  ` + "`timed_out`" + `        INTEGER  NOT NULL,
+  ` + "`result_bytes`" + `     INTEGER  NOT NULL,
+  ` + "`max_result_bytes`" + ` INTEGER  NOT NULL,
+  ` + "`size_buckets`" + `     TEXT     NULL,
+  PRIMARY KEY (` + "`run_id`" + `, ` + "`tool`" + `)
+)`,
+
+	// task_run_check_wait is one row per wait_for_checks call: the CI loop
+	// BuildPrompt sends every run around, measured end to end.
+	//
+	// A row per call rather than a per-run total because the sequence is
+	// the question. "How many pushes does a run take before its checks go
+	// green?" is read off the first wait that ended
+	// mcp.WaitVerdictPassed, and a per-run average could not answer it;
+	// nor could it show a deployment where most waits end with the clock
+	// running out, which is mcp.DefaultWaitForChecksTimeout set wrong for
+	// that CI. A run makes a handful of these calls, not hundreds, so the
+	// per-call shape costs a handful of rows.
+	`CREATE TABLE IF NOT EXISTS ` + "`task_run_check_wait`" + ` (
+  ` + "`run_id`" + `        TEXT     NOT NULL,
+  ` + "`seq`" + `           INTEGER  NOT NULL,
+  ` + "`verdict`" + `       TEXT     NOT NULL,
+  ` + "`waited_ms`" + `     INTEGER  NOT NULL,
+  ` + "`pushes_before`" + ` INTEGER  NOT NULL,
+  PRIMARY KEY (` + "`run_id`" + `, ` + "`seq`" + `)
+)`,
+
 	`CREATE TABLE IF NOT EXISTS ` + "`lease`" + ` (
   ` + "`run_id`" + `     TEXT     NOT NULL,
   ` + "`capability`" + ` TEXT     NOT NULL,
