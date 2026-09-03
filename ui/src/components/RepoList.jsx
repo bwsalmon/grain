@@ -4,16 +4,18 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, FormHelperText, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS, STATE_ORDER, capabilityName, repoRows, unionCapabilities } from "../state.js";
+import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, repoRows, unionCapabilities } from "../state.js";
 import { TaskRow } from "./TaskList.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
 
 // RepoList is the repo page: one row per known repo -- every
-// config.targetRepos entry, plus any repo tasks target that isn't one --
-// each showing how many tasks sit in every state so a repo with
-// something stuck (awaiting_reply, or a pile of blocked work) stands out
-// before anyone opens it. Clicking a row is the entry point into the
-// repo-centric task list -- onOpenRepo scopes App's own task view to it.
+// config.targetRepos entry, plus any repo tasks target that isn't one,
+// plus any repo carrying default capabilities of its own (repoRows has
+// why all three) -- each showing how many tasks sit in every state so a
+// repo with something stuck (awaiting_reply, or a pile of blocked work)
+// stands out before anyone opens it. Clicking a row is the entry point
+// into the repo-centric task list -- onOpenRepo scopes App's own task
+// view to it.
 //
 // The chevron (bwsalmon/agents#474) is a second way into the same
 // tasks: it folds them out right here, for a quick look that doesn't
@@ -48,10 +50,10 @@ import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimi
 // not widen anything, it narrows the deployment to exactly that repo,
 // and the next task filed against any other repo parks off the allowlist
 // instead of dispatching. Two things say so, one before the click and
-// one at it: allowlistNote below stands on the page for as long as the
-// allowlist is empty (and, once it holds one entry, says that too --
-// keyed on the list rather than on the transition, the way `grain repo
-// add`'s own one-line note is), and addRepo confirms the first add
+// one at it: the note below the header stands on the page for as long
+// as the allowlist is empty (and, once it holds one entry, says that
+// too -- keyed on the list rather than on the transition, the way `grain
+// repo add`'s own one-line note is), and addRepo confirms the first add
 // naming the repos that would fall off. The confirmation is the one that
 // can be specific, since only it knows which repo is being added; the
 // standing note is what somebody reads while deciding to click at all.
@@ -91,6 +93,25 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
   const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
   const targetRepos = config?.targetRepos || [];
 
+  // capsEffective is what a task filed against the repo whose
+  // capabilities form is open would actually start out holding -- the
+  // line the form ends on. The union is recomputed from the unsaved
+  // ticks rather than read back from caps.effectiveDefaultCapabilities,
+  // so it describes the set Save is about to make real rather than the
+  // one the last response described.
+  //
+  // Filtered to what this build still offers, the same filter
+  // ui.(*Client).defaultCapabilities applies before any grant is written
+  // -- and so the same one behind RepoDefaults.
+  // EffectiveDefaultCapabilities, the server's own answer to this
+  // question. Neither of the two sets GET reports is filtered: both come
+  // back exactly as stored, retired ids included, deliberately, so an id
+  // chosen before a build retired it stays visible in the picker above
+  // to be unticked. But a task filed here does not start out holding
+  // one, so this line must not say it does.
+  const capsEffective = unionCapabilities(caps?.deploymentDefaultCapabilities, capsSelection)
+    .filter((id) => (config?.capabilities || []).some((c) => c.id === id));
+
   const toggleExpanded = (repo) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -103,15 +124,19 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
   // is added to an empty (== unrestricted) allowlist, or null when this
   // add can only ever widen an allowlist that already restricts.
   //
-  // The repos it names are the rows this page is already showing: with
-  // targetRepos empty every one of them exists because a task targets it
-  // (repoRows), so they are exactly the repos whose next task would park
-  // -- worth listing, since that is the cost of the click and nothing
-  // else on the page states it. Compared as typed rather than as the
-  // server will store it (AddTargetRepo runs the string through
-  // model.ParseRepo first), so an oddly-spelled repo may list itself
-  // among the fallers; the sentence is still true, and the alternative
-  // is a second parse here that could drift from that one.
+  // The repos it names are the rows this page is already showing. With
+  // targetRepos empty none of them is `configured`, so every one is here
+  // because a task targets it or because it carries default capabilities
+  // of its own -- repoRows' other two sources -- and either way the
+  // allowlist this click creates leaves it off, so the next task filed
+  // against it parks. Worth listing, since that is the cost of the click
+  // and nothing else on the page states it.
+  //
+  // Compared as typed rather than as the server will store it
+  // (AddTargetRepo runs the string through model.ParseRepo first), so an
+  // oddly-spelled repo may list itself among the fallers; the sentence
+  // is still true, and the alternative is a second parse here that could
+  // drift from that one.
   const firstAddWarning = (repo) => {
     if (targetRepos.length > 0) return null;
     const falling = repos.map((r) => r.repo).filter((r) => r !== repo);
@@ -287,6 +312,13 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
       <ul className="repo-list">
         {visible.map((r) => {
           const isOpen = expanded.has(r.repo);
+          // A row with no tasks, off the allowlist, is on this page only
+          // because the repo carries default capabilities of its own
+          // (repoRows' third source). It has no counts to show and no
+          // Remove to offer, so without saying so it would read as an
+          // empty row nobody asked for -- and the Capabilities button
+          // beside it is the only way to reach the set that put it here.
+          const defaultsOnly = r.defaults && !r.configured && r.total === 0;
           return (
             <li key={r.repo}>
               <div className="repo-list-row" onClick={() => onOpenRepo(r.repo)}>
@@ -308,6 +340,14 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                     <Chip key={s} size="small" className={`badge badge-${s}`} label={`${STATE_LABELS[s]} ${r.counts[s]}`} />
                   ))}
                   {r.blocked > 0 && <Chip size="small" color="error" label={`Blocked ${r.blocked}`} />}
+                  {defaultsOnly && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label="Defaults only"
+                      title="No tasks, and not on this deployment's target repos -- listed here because it has default capabilities of its own, which Capabilities edits."
+                    />
+                  )}
                 </span>
                 <Typography variant="caption" color="text.secondary" whiteSpace="nowrap">
                   {r.total} task{r.total === 1 ? "" : "s"}
@@ -395,21 +435,33 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                               own default-capabilities picker offers, and
                               for the same reason: a default no task can
                               be granted by hand would fail at every
-                              filing, and PUT rejects one anyway. A
-                              capability the deployment already defaults
-                              is still offered rather than hidden --
-                              ticking it here is how a repo keeps it if
-                              the deployment-wide entry is later dropped
-                              -- and says so in its own row, so nobody
-                              reads a blank box as "not on here". */}
-                          {(config?.capabilities || []).map((c) => (
+                              filing, and PUT rejects one anyway. It
+                              needs no filter of its own to say that,
+                              unlike Settings' settings.capabilities:
+                              config.capabilities *is*
+                              ui.OfferedCapabilities, which is what
+                              "grantable" means, where that one reports
+                              every provider grain ships and flags the
+                              ungrantable ones. A capability the
+                              deployment already defaults is still
+                              offered rather than hidden -- ticking it
+                              here is how a repo keeps it if the
+                              deployment-wide entry is later dropped --
+                              and says so in its own row, so nobody reads
+                              a blank box as "not on here". An id this
+                              repo stored before the build retired it
+                              gets a row too, purely so it can be
+                              unticked (capabilityRows, state.js). */}
+                          {capabilityRows(config?.capabilities, capsSelection).map((c) => (
                             <MenuItem key={c.id} value={c.id} title={c.description}>
                               <Checkbox checked={capsSelection.includes(c.id)} size="small" />
                               <ListItemText
                                 primary={c.name}
-                                secondary={(caps.deploymentDefaultCapabilities || []).includes(c.id)
-                                  ? "already a deployment default -- on here either way"
-                                  : null}
+                                secondary={c.retired
+                                  ? c.description
+                                  : (caps.deploymentDefaultCapabilities || []).includes(c.id)
+                                    ? "already a deployment default -- on here either way"
+                                    : null}
                               />
                             </MenuItem>
                           ))}
@@ -421,16 +473,11 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                           with.
                         </FormHelperText>
                       </FormControl>
-                      {/* The union, recomputed from the unsaved ticks
-                          rather than read back from the last response,
-                          so this line describes the set that Save is
-                          about to make real. */}
                       <Typography variant="body2" color="text.secondary">
                         A task filed against {r.repo} starts with:{" "}
-                        {unionCapabilities(caps.deploymentDefaultCapabilities, capsSelection).length === 0
+                        {capsEffective.length === 0
                           ? "nothing -- only what whoever files it ticks"
-                          : unionCapabilities(caps.deploymentDefaultCapabilities, capsSelection)
-                            .map((id) => capabilityName(config, id)).join(", ")}
+                          : capsEffective.map((id) => capabilityName(config, id)).join(", ")}
                       </Typography>
                       <Stack direction="row" justifyContent="flex-end">
                         <Button type="submit" variant="contained" size="small">Save capabilities</Button>

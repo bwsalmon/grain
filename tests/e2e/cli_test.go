@@ -84,7 +84,13 @@ func (s *syncedSim) firstPullRequestNumber() int {
 // simulated user's own merge push both use -- goes to this package's own
 // gitHTTPBackend (harness_test.go), reused directly since both live in
 // package e2e.
-func githubHostServer(t *testing.T, sim *syncedSim, gitRoot string) string {
+//
+// sim is a github.Transport rather than the *syncedSim every caller here
+// passes, so that a test wanting to see what actually arrived on the wire
+// can wrap one (mcpserver_pull_request_test.go's authRecordingSim, which
+// checks that a token really was sent) without a second copy of this
+// handler.
+func githubHostServer(t *testing.T, sim github.Transport, gitRoot string) string {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +316,7 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	userTransport := github.NewRealTransport(githubHost)
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
-	if err := userClient.MergePullRequest(owner, repoName, prNumber); err != nil {
+	if err := userClient.MergePullRequest(owner, repoName, prNumber, ""); err != nil {
 		t.Fatalf("submitting (merging) the pull request: %v", err)
 	}
 

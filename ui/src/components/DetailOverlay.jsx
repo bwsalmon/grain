@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, completionPhase, frameworkLabel } from "../state.js";
+import { STATE_LABELS, capabilityRows, completionPhase, frameworkLabel } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -140,12 +140,14 @@ function Declared({ t }) {
   if (t.base) rows.push(["Base", t.base]);
   if (t.reads && t.reads.length > 0) rows.push(["Reads", t.reads.join(", ")]);
   rows.push(["Auto-merge", String(t.autoMerge)]);
-  // bwsalmon/agents#534: a per-task sandbox shape override, shown only
-  // when set -- most tasks use the deployment default and have neither
-  // field, the same "0 means unset" convention that keeps them out of
-  // the JSON response at all (Task's own omitempty).
+  // bwsalmon/agents#534, grain/task-41: a per-task sandbox shape
+  // override, shown only when set -- most tasks use the deployment
+  // default and have none of the three fields, the same "0 means unset"
+  // convention that keeps them out of the JSON response at all (Task's
+  // own omitempty).
   if (t.sandboxCpus) rows.push(["Sandbox vCPUs", String(t.sandboxCpus)]);
   if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
+  if (t.sandboxDiskGb) rows.push(["Sandbox disk (GiB)", String(t.sandboxDiskGb)]);
   // Same treatment for a per-task agent framework: shown only when this
   // task overrides the deployment's own, which most do not.
   if (t.agentFramework) rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);
@@ -430,18 +432,13 @@ function CapabilityToggles({ t, config, act }) {
   const selected = t.capabilities || [];
   // A task can hold a grant the picker no longer offers -- a capability
   // renamed or dropped since it was attached ("scratch-repo", now
-  // github-sandbox, bwsalmon/agents#612). Without a row of its own it
-  // would show as a chip that nothing can untick, and a grant no
-  // provider is registered for fails every run of the task holding it,
-  // so it gets a row here purely to be turned off: rows come from the
-  // listing, and only rows can be toggled. SetCapability (pkg/ui,
+  // github-sandbox, bwsalmon/agents#612). capabilityRows (state.js)
+  // gives it a row of its own purely to be turned off; without one it is
+  // a chip nothing can untick, and a grant no provider is registered for
+  // fails every run of the task holding it. SetCapability (pkg/ui,
   // client.go) is the other half -- it validates on attach only, so the
   // detach this row sends is accepted.
-  const rows = capabilities.concat(
-    selected
-      .filter((id) => !capabilities.some((c) => c.id === id))
-      .map((id) => ({ id, name: id, description: "No longer offered -- untick to remove it" })),
-  );
+  const rows = capabilityRows(capabilities, selected);
 
   const handleChange = (e) => {
     const next = e.target.value;

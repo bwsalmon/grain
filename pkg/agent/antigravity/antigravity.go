@@ -156,6 +156,7 @@ type Framework struct {
 	githubDataDir   string
 	githubHost      string
 	githubInsecure  bool
+	grainServerURL  string
 }
 
 // Option configures a Framework at construction time.
@@ -227,6 +228,31 @@ func WithGitHubAccess(dataDir, host string, insecureHTTP bool) Option {
 	}
 }
 
+// WithGrainServer names the running "grain daemon"'s own UI/API base URL
+// (e.g. "http://127.0.0.1:8420") for the forked "mcpserver" subprocess to
+// reach it at -- which, together with a RunConfig.TaskID, is what gives a
+// run the open_pull_request tool: agent/claude's option of the same name,
+// for the same reason, since both frameworks fork the identical server.
+//
+// Unset leaves that tool unregistered and every run exactly as it was: a
+// pushed branch still becomes a pull request when the run finishes.
+func WithGrainServer(url string) Option {
+	return func(f *Framework) { f.grainServerURL = url }
+}
+
+// Asserted here rather than left to the one call site that type-asserts
+// for it (orchestrator.frameworkOpensPullRequests): a Framework that
+// stopped implementing this would otherwise not fail to compile, it
+// would quietly stop telling its runs about a tool they still have.
+var _ agent.PullRequestFramework = (*Framework)(nil)
+
+// CanOpenPullRequest implements agent.PullRequestFramework, exactly as
+// agent/claude's method of the same name does and for the same reason:
+// only a Framework built WithGrainServer passes its forked mcpserver the
+// -server/-task pair open_pull_request is registered on, so only it can
+// tell orchestrator.BuildPrompt that the tool will be there.
+func (f *Framework) CanOpenPullRequest() bool { return f.grainServerURL != "" }
+
 // New builds a Framework that runs the real agy binary at agyPath
 // (typically just "agy", resolved against $PATH) and points every run's
 // MCP settings at grainBinaryPath -- the same grain binary this process
@@ -244,8 +270,9 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 	return f
 }
 
-// allowedTools names the exact tools NewSandboxTools, NewMockTools and
-// NewPullRequestTools register, mcp__-prefixed the way agy reports them
+// allowedTools names the exact tools NewSandboxTools, NewMockTools,
+// NewPullRequestTools and NewOpenPullRequestTools register, mcp__-prefixed
+// the way agy reports them
 // once loaded from its settings -- computed from those constructors
 // directly rather than hand-copied, so this can never drift from what
 // the "mcpserver" subcommand actually advertises the way v1's
@@ -267,6 +294,14 @@ func allowedTools() []string {
 	for _, t := range mcp.NewPullRequestTools(nil, mcp.PullRequestScope{}) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
+	// open_pull_request is named unconditionally too, even for a run
+	// whose mcpserver will not register it (no -server/-task): this list
+	// only ever filters what the server actually advertises, so naming a
+	// tool that is not there costs nothing. nil is a PullRequestOpener no
+	// run ever gets -- this only wants the names.
+	for _, t := range mcp.NewOpenPullRequestTools(nil) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
 	return names
 }
 
@@ -279,8 +314,10 @@ func allowedTools() []string {
 // either host-rooted or kontur-named, never both), but a Framework this
 // simple is not the place to enforce that.
 //
-// pullRequestArgs is appended to either, since which repo's CI a run may
-// read is independent of which backend its sandbox runs on.
+// pullRequestArgs and grainServerArgs are appended to either, since
+// which repo's CI a run may read, and whether it may ask grain to open
+// its pull request, are both independent of which backend its sandbox
+// runs on.
 func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 	var args []string
 	switch {
@@ -305,7 +342,21 @@ func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("antigravity: RunConfig.SandboxRoot or .KonturVM is required")
 	}
-	return append(args, f.pullRequestArgs(cfg)...), nil
+	args = append(args, f.pullRequestArgs(cfg)...)
+	return append(args, f.grainServerArgs(cfg)...), nil
+}
+
+// grainServerArgs is the "-server/-task" pair that turns on the forked
+// mcpserver's open_pull_request, or nothing at all when either half is
+// missing -- a Framework built without WithGrainServer, or a caller with
+// no task to name. One without the other names a question with no
+// address to send it to, or an address with nothing to ask about, and
+// mcpserver.go rejects either half on its own.
+func (f *Framework) grainServerArgs(cfg agent.RunConfig) []string {
+	if f.grainServerURL == "" || cfg.TaskID == "" {
+		return nil
+	}
+	return []string{"-server", f.grainServerURL, "-task", cfg.TaskID}
 }
 
 // pullRequestArgs is the "-data-dir/-pr-repo/-pr-branch" triple that

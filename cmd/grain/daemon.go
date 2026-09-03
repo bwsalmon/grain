@@ -309,6 +309,11 @@ func daemon(args []string) {
 		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM, passed as `konturctl vm "+
 			"create`'s own -memory-mb (only used with -kontur-sandboxes); 0 leaves bwsalmon/kontur's own "+
 			"default in place. Overridable per task from the UI/API (model.Task.SandboxMemoryMB)"+seedOnly)
+	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
+		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM, passed as `konturctl "+
+			"vm create`'s own -disk-size-gb (only used with -kontur-sandboxes); 0 leaves the VM's disk as large "+
+			"as the guest image behind it, which is what every sandbox got before this flag existed. "+
+			"Overridable per task from the UI/API (model.Task.SandboxDiskGB)"+seedOnly)
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -386,7 +391,7 @@ func daemon(args []string) {
 		konturCreateArgs: konturCreateArgs, konturNet: *konturNet,
 		konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
 		konturGitProxyHost: *konturGitProxyHost,
-		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
+		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB, sandboxDiskGB: *sandboxDiskGB,
 	}); err != nil {
 		log.Fatalf("grain daemon: %v", err)
 	}
@@ -489,13 +494,15 @@ type config struct {
 	// why a kontur VM cannot reach that default (bwsalmon/agents#567).
 	// Required whenever konturSandboxes is set; unused otherwise.
 	konturGitProxyHost string
-	// sandboxCPUs and sandboxMemoryMB are store-backed
-	// (model.Config.SandboxCPUs/SandboxMemoryMB, bwsalmon/agents#534),
+	// sandboxCPUs, sandboxMemoryMB and sandboxDiskGB are store-backed
+	// (model.Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB,
+	// bwsalmon/agents#534 and grain/task-41),
 	// like poll-interval and the rest of the seedOnly flags above --
 	// only consulted with -kontur-sandboxes, the same as every
 	// other kontur* field here.
 	sandboxCPUs     int
 	sandboxMemoryMB int
+	sandboxDiskGB   int
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
@@ -546,6 +553,7 @@ func run(ctx context.Context, cfg config) error {
 			Port:            cfg.konturBasePort,
 			DefaultCPUs:     cfg.sandboxCPUs,
 			DefaultMemoryMB: cfg.sandboxMemoryMB,
+			DefaultDiskGB:   cfg.sandboxDiskGB,
 		})
 		sandboxes = konturSandboxes
 	} else {
@@ -721,6 +729,13 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	githubTransport := github.NewRealTransport(cfg.githubHost)
 	githubTransport.UseTLS = !cfg.githubInsecureHTTP
 	githubClient := github.NewClient(githubTransport, credentialTokenSource{credentials})
+
+	// Published for the UI/API server started above this one (see
+	// livePullRequests): from here on, a dispatched run asking for its own
+	// pull request through POST /api/tasks/{id}/pull-request reaches this
+	// same client, and so opens exactly the pull request this loop's own
+	// finish path would have opened for it.
+	livePullRequests.Store(&pullRequestOpener{store: store, client: githubClient})
 
 	registry := model.NewCapabilityRegistry(capabilityProviders(cfg)...)
 
@@ -968,6 +983,9 @@ func buildAntigravityFramework(ctx context.Context, cfg config, secretStore *sec
 		// RunConfig.SandboxRoot instead.
 		opts = append(opts, antigravity.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
 	}
+	if url := daemonServerURL(cfg.uiAddr); url != "" {
+		opts = append(opts, antigravity.WithGrainServer(url))
+	}
 	return antigravity.New(agyPath, grainBinaryPath, opts...), nil
 }
 
@@ -1030,7 +1048,39 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 		// needs none of this.
 		opts = append(opts, claude.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
 	}
+	if url := daemonServerURL(cfg.uiAddr); url != "" {
+		opts = append(opts, claude.WithGrainServer(url))
+	}
 	return claude.New(claudePath, grainBinaryPath, opts...), nil
+}
+
+// daemonServerURL is the base URL this same process's own UI/API server
+// is reachable at, for a run's forked mcpserver to ask it to open that
+// run's pull request (agent/claude's and agent/antigravity's
+// WithGrainServer). It is derived from -ui-addr rather than configured
+// separately: the two are the same server, and a second flag naming the
+// same thing is a second thing to get wrong.
+//
+// A host-less address (":8420", what a deployment serving on every
+// interface passes) becomes loopback, which is both correct and the only
+// address worth using here: the asker is a process on this very host.
+//
+// "" -- no UI/API server at all (-ui-addr emptied out), or one bound to
+// port 0, whose real port is only known to the listener rather than to
+// this string -- means runs simply get no open_pull_request tool, which
+// is the same deployment they had before it existed.
+func daemonServerURL(uiAddr string) string {
+	if uiAddr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(uiAddr)
+	if err != nil || port == "" || port == "0" {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // agentCredential reads the credential one agent framework runs as: the
@@ -1087,6 +1137,87 @@ func agentCredential(ctx context.Context, secretStore *secrets.Store, secret, fi
 // endpoint, can see reconciliation is dead without an operator having to
 // notice and interpret a single log line (bwsalmon/agents#576).
 var reconcilerDown atomic.Bool
+
+// livePullRequests holds the GitHub-backed pull request opener runDaemon
+// builds, for the UI/API server that was started before it to reach.
+//
+// The two halves of this process come up in that order on purpose: the
+// UI/API server starts as early as the store allows, precisely so a
+// deployment whose reconcile loop never comes up is still visible and
+// operable (bwsalmon/agents#576, and run()'s own comment on the
+// ordering). But the GitHub client belongs to runDaemon, below it, so
+// POST /api/tasks/{id}/pull-request has nothing to call until runDaemon
+// gets there. Set once, from runDaemon, and read through pullRequestGate
+// -- the same shape reconcilerDown above already uses to let these two
+// halves see one fact about each other without either owning the other.
+//
+// A run's mcpserver reaching this before it is set gets an honest "not
+// ready yet" rather than a nil dereference; in practice nothing can,
+// since no run exists to ask until the loop that dispatches runs is
+// already going.
+var livePullRequests atomic.Pointer[pullRequestOpener]
+
+// pullRequestOpener is ui.Config.PullRequests over
+// orchestrator.OpenPullRequestForTask: the one place this deployment's
+// store and its GitHub client are both in scope for a request that
+// arrived over the UI/API. Its caller is a dispatched run's own mcpserver
+// (cmd/grain/mcpserver.go's daemonPullRequests), which holds no GitHub
+// credential itself.
+//
+// It converts orchestrator.PullRequestStatus into ui.PullRequestStatus
+// field for field, for the same reason sandboxHealthAdapter converts
+// orchestrator.SandboxHealth: pkg/ui does not import pkg/orchestrator,
+// and this file is where both types are in scope.
+type pullRequestOpener struct {
+	store  *model.Store
+	client github.Client
+}
+
+func (o *pullRequestOpener) OpenForTask(ctx context.Context, taskID string) (ui.PullRequestStatus, error) {
+	task, err := o.store.GetTask(ctx, taskID)
+	if err != nil {
+		return ui.PullRequestStatus{}, err
+	}
+	if task == nil {
+		return ui.PullRequestStatus{}, fmt.Errorf("no task %s", taskID)
+	}
+	status, err := orchestrator.OpenPullRequestForTask(ctx, o.store, o.client, *task)
+	if err != nil {
+		return ui.PullRequestStatus{}, err
+	}
+	out := ui.PullRequestStatus{
+		Number:          status.PullRequest.Number,
+		URL:             status.PullRequest.HTMLURL,
+		ChecksAvailable: status.ChecksKnown,
+		ChecksError:     status.ChecksError,
+	}
+	if task.Target != nil {
+		out.Repo = task.Target.String()
+	}
+	for _, c := range status.Checks {
+		check := ui.CheckStatus{Name: c.Name, Status: c.Status}
+		if c.Conclusion != nil {
+			check.Conclusion = *c.Conclusion
+		}
+		out.Checks = append(out.Checks, check)
+	}
+	return out, nil
+}
+
+// pullRequestGate is the ui.Config.PullRequests the UI/API server is
+// given: whatever livePullRequests holds by the time a request actually
+// arrives, or a plain refusal until runDaemon has put one there.
+type pullRequestGate struct{}
+
+func (pullRequestGate) OpenForTask(ctx context.Context, taskID string) (ui.PullRequestStatus, error) {
+	opener := livePullRequests.Load()
+	if opener == nil {
+		return ui.PullRequestStatus{}, errors.New(
+			"this daemon has no GitHub client yet, so it cannot open a pull request: " +
+				"its reconcile loop has not started (or has failed -- check the daemon log)")
+	}
+	return opener.OpenForTask(ctx, taskID)
+}
 
 // reapInterval is how often reconcile calls reapCapabilities -- not
 // configurable, since nothing about it needs to race a deployment's own
@@ -1309,9 +1440,9 @@ func (l *liveConfig) refresh(ctx context.Context, deps *orchestrator.Deps) (poll
 		// dispatch) rather than seeing one change underneath it.
 		deps.Config.Capabilities = model.NewCapabilityRegistry(capabilityProviders(now)...)
 	}
-	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB {
+	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB || now.sandboxDiskGB != was.sandboxDiskGB {
 		if shaper, ok := l.sandboxes.(defaultShaper); ok {
-			shaper.SetDefaultShape(orchestrator.Shape{CPUs: now.sandboxCPUs, MemoryMB: now.sandboxMemoryMB})
+			shaper.SetDefaultShape(orchestrator.Shape{CPUs: now.sandboxCPUs, MemoryMB: now.sandboxMemoryMB, DiskGB: now.sandboxDiskGB})
 		}
 	}
 	return now.pollInterval != was.pollInterval
@@ -1342,6 +1473,7 @@ func (c config) changesFrom(prev config) []string {
 	note("target-repos", prev.targetRepos, c.targetRepos)
 	note("sandbox-cpus", prev.sandboxCPUs, c.sandboxCPUs)
 	note("sandbox-memory-mb", prev.sandboxMemoryMB, c.sandboxMemoryMB)
+	note("sandbox-disk-gb", prev.sandboxDiskGB, c.sandboxDiskGB)
 	return changes
 }
 
@@ -1412,6 +1544,7 @@ func (c config) logStoreOverrides(mc model.Config) {
 	warn("target-repos", c.targetRepos, mc.TargetRepos)
 	warn("sandbox-cpus", c.sandboxCPUs, mc.SandboxCPUs)
 	warn("sandbox-memory-mb", c.sandboxMemoryMB, mc.SandboxMemoryMB)
+	warn("sandbox-disk-gb", c.sandboxDiskGB, mc.SandboxDiskGB)
 }
 
 // toModelConfig is the flag-parsed subset of config that mirrors
@@ -1432,7 +1565,7 @@ func (c config) toModelConfig() model.Config {
 	mc.GitHubHost, mc.GitHubInsecureHTTP = c.githubHost, c.githubInsecureHTTP
 	mc.GCPProject, mc.GCPServiceAccountEmail = c.gcpProject, c.gcpServiceAccountEmail
 	mc.TargetRepos = c.targetRepos
-	mc.SandboxCPUs, mc.SandboxMemoryMB = c.sandboxCPUs, c.sandboxMemoryMB
+	mc.SandboxCPUs, mc.SandboxMemoryMB, mc.SandboxDiskGB = c.sandboxCPUs, c.sandboxMemoryMB, c.sandboxDiskGB
 	return mc
 }
 
@@ -1487,6 +1620,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.targetRepos = mc.TargetRepos
 	c.sandboxCPUs = mc.SandboxCPUs
 	c.sandboxMemoryMB = mc.SandboxMemoryMB
+	c.sandboxDiskGB = mc.SandboxDiskGB
 	return c
 }
 
@@ -1814,8 +1948,10 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		Sandboxes: sandboxHealthAdapter{sandboxes},
 		// hostStats reads this same process's own machine, not any one
 		// sandbox -- see pkg/sysstat's own doc comment on why that's a
-		// separate reading from Sandboxes above.
-		HostStats: hostStats,
+		// separate reading from Sandboxes above. It takes the data
+		// directory because the disk figure has to name a filesystem
+		// (hostStats' own doc comment on why that one).
+		HostStats: func() (ui.HostPressure, error) { return hostStats(cfg.dataDir) },
 		// ReconcilerDown mirrors this same process's own package-level
 		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
 		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
@@ -1825,6 +1961,14 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// compares the stored row against to say which of the two
 		// restart-only settings have been saved but not yet applied.
 		RunningConfig: live.modelConfig,
+		// PullRequests is how a dispatched run opens its own pull request
+		// before it exits (ui.Config.PullRequests' own doc comment): its
+		// mcpserver asks this API, which asks the daemon's GitHub client.
+		// The gate, rather than that client directly, because this server
+		// starts before runDaemon has built one -- deliberately, so the
+		// UI survives a reconcile loop that never comes up at all -- and
+		// livePullRequests is what closes that gap once it does.
+		PullRequests: pullRequestGate{},
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)
@@ -1964,6 +2108,8 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 			LoadAverage:   s.LoadAverage,
 			MemoryUsedMB:  s.MemoryUsedMB,
 			MemoryTotalMB: s.MemoryTotalMB,
+			DiskUsedMB:    s.DiskUsedMB,
+			DiskTotalMB:   s.DiskTotalMB,
 		}
 	}
 	return out
@@ -1973,17 +2119,34 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 // CPU-load/memory pressure, read straight out of /proc by pkg/sysstat --
 // see that package's own doc comment for why this, not any one sandbox,
 // is what it reports.
-func hostStats() (ui.HostPressure, error) {
+//
+// dataDir names the filesystem the disk reading describes. Not "/": the
+// daemon runs in a container whose root filesystem is an image layer
+// nobody's runs fill up, while -data-dir is on the host volume that
+// holds the store *and* (in scripts/setup.sh's own layout) every
+// sandbox VM's disk overlay -- the one that actually runs out
+// (grain/task-41).
+//
+// A failing disk reading is left as 0/0 rather than failing the whole
+// call: load and memory came from a different file and are still good,
+// and the pane already reads 0/0 as "no figure to show" for a sandbox.
+// It is also the reading most likely to be unavailable for an
+// uninteresting reason -- a non-Linux developer machine -- which should
+// not cost the two readings beside it.
+func hostStats(dataDir string) (ui.HostPressure, error) {
 	snap, err := sysstat.Read()
 	if err != nil {
 		return ui.HostPressure{}, err
 	}
+	diskTotalMB, diskUsedMB, _ := sysstat.DiskUsage(dataDir)
 	return ui.HostPressure{
 		LoadAverage1:  snap.LoadAverage1,
 		LoadAverage5:  snap.LoadAverage5,
 		LoadAverage15: snap.LoadAverage15,
 		MemoryUsedMB:  snap.MemUsedMB,
 		MemoryTotalMB: snap.MemTotalMB,
+		DiskUsedMB:    diskUsedMB,
+		DiskTotalMB:   diskTotalMB,
 	}, nil
 }
 

@@ -155,7 +155,7 @@ func TestSimMergePullRequestClosesIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.MergePullRequest("acme", "widgets", pr.Number); err != nil {
+	if err := client.MergePullRequest("acme", "widgets", pr.Number, ""); err != nil {
 		t.Fatal(err)
 	}
 	detail, err := client.GetPullRequest("acme", "widgets", pr.Number)
@@ -172,6 +172,92 @@ func TestSimMergePullRequestClosesIt(t *testing.T) {
 	cmd := exec.Command("git", "--git-dir", sim.BareRepo, "merge-base", "--is-ancestor", "grain/issue-1", "main")
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("expected grain/issue-1 to have actually landed in main: %v", err)
+	}
+}
+
+// The merge endpoint's own `sha` parameter -- "SHA that pull request head
+// must match to allow merge". A caller that merged on one commit's CI
+// sends it, and a branch that has moved since must be refused rather than
+// merged, or nothing on this side can tell the two apart and a test about
+// racing pushes would pass whatever the code did.
+func TestSimMergePullRequestRefusesAMovedHead(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/issue-1")
+	pr, err := client.CreatePullRequest("acme", "widgets", "grain/issue-1", "main", "t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	judged := sim.branchSHA("grain/issue-1")
+
+	// The push that lands after whoever is merging read the branch.
+	pushAnotherCommit(t, sim.BareRepo, "grain/issue-1")
+
+	err = client.MergePullRequest("acme", "widgets", pr.Number, judged)
+	if err == nil {
+		t.Fatal("expected the merge to be refused, the head having moved")
+	}
+	ghErr, ok := err.(*github.Error)
+	if !ok || ghErr.Status != 409 {
+		t.Fatalf("got %v, want a 409", err)
+	}
+	detail, err := client.GetPullRequest("acme", "widgets", pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.State != "open" || detail.Merged {
+		t.Fatalf("a refused merge left the PR %+v", detail)
+	}
+
+	// Pinning the commit that is actually there now merges, so the
+	// refusal above is about the sha and not about pinning at all.
+	if err := client.MergePullRequest("acme", "widgets", pr.Number, sim.branchSHA("grain/issue-1")); err != nil {
+		t.Fatalf("merging the branch's own tip: %v", err)
+	}
+	if detail, err = client.GetPullRequest("acme", "widgets", pr.Number); err != nil {
+		t.Fatal(err)
+	}
+	if !detail.Merged {
+		t.Fatalf("got %+v, want merged", detail)
+	}
+}
+
+// Check runs are seeded under whichever ref a test finds readable and
+// read back under whichever ref the caller asks by -- a branch name here,
+// a commit sha in orchestrator.checkRunsFor -- because BareRepo resolves
+// the two to one commit the way GitHub does.
+func TestSimListCheckRunsResolvesBetweenBranchAndSHA(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/issue-1")
+	sim.CheckRuns["grain/issue-1"] = []github.CheckRun{{Name: "build", Status: "completed"}}
+
+	runs, err := client.ListCheckRuns("acme", "widgets", sim.branchSHA("grain/issue-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Name != "build" {
+		t.Fatalf("a sha-scoped read of branch-seeded checks got %+v", runs)
+	}
+
+	// And the other way round, which is what lets a test seed one
+	// commit's checks and not another's.
+	sim.CheckRuns = map[string][]github.CheckRun{
+		sim.branchSHA("grain/issue-1"): {{Name: "tests", Status: "queued"}},
+	}
+	if runs, err = client.ListCheckRuns("acme", "widgets", "grain/issue-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Name != "tests" {
+		t.Fatalf("a branch-scoped read of sha-seeded checks got %+v", runs)
+	}
+
+	// A commit nothing was seeded for has no checks, however many the
+	// branch it is on has: that distinction is the whole point.
+	pushAnotherCommit(t, sim.BareRepo, "grain/issue-1")
+	if runs, err = client.ListCheckRuns("acme", "widgets", sim.branchSHA("grain/issue-1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("the new commit answered with the old one's checks: %+v", runs)
 	}
 }
 

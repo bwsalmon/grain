@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/model"
@@ -268,5 +269,110 @@ func TestHTTPClientSettingsRoundTrip(t *testing.T) {
 	// comment already says as much.
 	if !after.Configured || after.PollInterval != "1m0s" || after.GeminiModel != geminiModel {
 		t.Fatalf("settings after update = %+v", after)
+	}
+}
+
+// The repo family over the wire (grain/task-36): the four calls `grain
+// repo` makes, driven end to end against a real server, since each one
+// builds a path out of an owner/name and two of them are the only way
+// the CLI can reach a repo's own stored defaults at all.
+func TestHTTPClientRepoFamilyRoundTrip(t *testing.T) {
+	c, ctx := testHTTPClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatalf("seeding settings: %v", err)
+	}
+
+	settings, err := c.AddTargetRepo(ctx, "acme/widgets")
+	if err != nil {
+		t.Fatalf("AddTargetRepo: %v", err)
+	}
+	if !reflect.DeepEqual(settings.TargetRepos, []string{"acme/widgets"}) {
+		t.Fatalf("targetRepos after add = %v, want [acme/widgets]", settings.TargetRepos)
+	}
+
+	defaults, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", []string{"self-debug"})
+	if err != nil {
+		t.Fatalf("SetRepoDefaultCapabilities: %v", err)
+	}
+	if !reflect.DeepEqual(defaults.DefaultCapabilities, []string{"self-debug"}) {
+		t.Fatalf("own defaults after set = %v, want [self-debug]", defaults.DefaultCapabilities)
+	}
+	read, err := c.RepoDefaults(ctx, "acme/widgets")
+	if err != nil {
+		t.Fatalf("RepoDefaults: %v", err)
+	}
+	if !reflect.DeepEqual(read, defaults) {
+		t.Fatalf("RepoDefaults = %+v, want what the write returned %+v", read, defaults)
+	}
+
+	if _, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "fix it", Repo: "acme/widgets", Approved: true}); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	repos, err := c.ListRepos(ctx)
+	if err != nil {
+		t.Fatalf("ListRepos: %v", err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("ListRepos = %+v, want one row", repos)
+	}
+	want := ui.RepoSummary{
+		Repo: "acme/widgets", Configured: true, Tasks: 1,
+		States:              map[model.State]int{model.StateQueued: 1},
+		DefaultCapabilities: []string{"self-debug"},
+	}
+	if !reflect.DeepEqual(repos[0], want) {
+		t.Fatalf("ListRepos row = %+v, want %+v", repos[0], want)
+	}
+
+	// Removing the repo from the allowlist leaves everything else about
+	// it alone: the task still targets it, so it still has a row, and
+	// its own defaults are still stored -- the independence
+	// RemoveTargetRepo's own doc comment promises.
+	settings, err = c.RemoveTargetRepo(ctx, "acme/widgets")
+	if err != nil {
+		t.Fatalf("RemoveTargetRepo: %v", err)
+	}
+	if len(settings.TargetRepos) != 0 {
+		t.Fatalf("targetRepos after remove = %v, want empty", settings.TargetRepos)
+	}
+	repos, err = c.ListRepos(ctx)
+	if err != nil {
+		t.Fatalf("ListRepos after remove: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Configured || len(repos[0].DefaultCapabilities) != 1 {
+		t.Fatalf("ListRepos after remove = %+v, want one unconfigured row that kept its defaults", repos)
+	}
+}
+
+// An unknown capability is refused where whoever chose it can still see
+// the refusal, rather than stored and quietly never granted -- the same
+// answer UpdateSettings gives for the deployment-wide set.
+func TestHTTPClientSetRepoDefaultCapabilitiesRejectsAnUnknownID(t *testing.T) {
+	c, ctx := testHTTPClient(t)
+	_, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", []string{"no-such-capability"})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("SetRepoDefaultCapabilities with an unknown id: error = %v, want a ValidationError", err)
+	}
+}
+
+// A repo with no owner is caught before a request is sent, as the same
+// ValidationError the server would have given -- without it, the path
+// built from "widgets" matches no route and comes back as a bare 404
+// about nothing in particular. AddTargetRepo is deliberately not in this
+// list: it carries the repo in the body rather than the path, so there
+// is no route to miss and the server's own refusal arrives intact.
+func TestHTTPClientRepoMethodsRejectAMalformedRepoLocally(t *testing.T) {
+	c := ui.NewHTTPClient("http://127.0.0.1:1") // never dialed
+	ctx := context.Background()
+	var ve *ui.ValidationError
+	if _, err := c.RepoDefaults(ctx, "widgets"); !errors.As(err, &ve) {
+		t.Errorf("RepoDefaults(\"widgets\"): error = %v, want a ValidationError", err)
+	}
+	if _, err := c.SetRepoDefaultCapabilities(ctx, "widgets", nil); !errors.As(err, &ve) {
+		t.Errorf("SetRepoDefaultCapabilities(\"widgets\"): error = %v, want a ValidationError", err)
+	}
+	if _, err := c.RemoveTargetRepo(ctx, "widgets"); !errors.As(err, &ve) {
+		t.Errorf("RemoveTargetRepo(\"widgets\"): error = %v, want a ValidationError", err)
 	}
 }
