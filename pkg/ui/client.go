@@ -1113,8 +1113,18 @@ func (c *Client) mutate(ctx context.Context, id string, apply func(*model.Task) 
 // SetCapability attaches or detaches one capability grant. Detaching one
 // that is not attached is a no-op rather than an error, matching what
 // removing an absent label used to do.
+//
+// Only attaching checks the id against this deployment's listing.
+// Detaching an id with no row is allowed, because a task can be holding
+// a grant nothing offers any more -- a renamed capability
+// (DefaultCapabilities' own "scratch-repo", now github-sandbox), or one
+// a deployment stopped listing -- and such a grant is exactly the one an
+// operator most needs to remove: it fails the task's every dispatch at
+// model.ResolveGrants. Refusing to detach it would leave the only route
+// out through the store. Detaching can only ever shrink the grant set,
+// so nothing the validation protects is reachable this way.
 func (c *Client) SetCapability(ctx context.Context, id, capabilityID string, attach bool) error {
-	if _, ok := c.capabilityByID(capabilityID); !ok {
+	if _, ok := c.capabilityByID(capabilityID); attach && !ok {
 		return validationErrorf("unknown capability %s", capabilityID)
 	}
 	// Rebuilding the grant set inside the closure is what lets two people
