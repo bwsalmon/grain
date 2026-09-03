@@ -14,9 +14,11 @@ import (
 	"flag"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -59,6 +61,13 @@ func (p *printer) metrics(rep ui.MetricsReport) {
 	if outcomes := outcomeSummary(rep.Runs.Outcomes); outcomes != "" {
 		fmt.Printf("  attempt outcomes         %s\n", outcomes)
 	}
+	// Printed under the outcomes rather than instead of them: the words
+	// above are what the rows say, and this is what they mean. The two
+	// disagree on purpose -- one "cancelled" is a human closing a task
+	// and the next is a run that hit the two-hour wall.
+	if endings := endingSummary(rep.Runs.Endings); endings != "" {
+		fmt.Printf("  ...how they ended        %s\n", endings)
+	}
 	fmt.Printf("  attempts per completion  %6.2f\n", rep.Runs.AttemptsPerCompletion)
 
 	fmt.Println("\ncapacity")
@@ -87,6 +96,9 @@ func (p *printer) metrics(rep ui.MetricsReport) {
 			seconds(s.P50Seconds), seconds(s.P90Seconds), seconds(s.MaxSeconds))
 	}
 
+	printTools(rep.Tools)
+	printChecks(rep.Checks)
+
 	if len(rep.Backlog.ByState) > 0 {
 		fmt.Println("\nbacklog (right now, not over the window)")
 		states := make([]string, 0, len(rep.Backlog.ByState))
@@ -100,6 +112,66 @@ func (p *printer) metrics(rep ui.MetricsReport) {
 				rep.Backlog.OldestQueuedTaskID, seconds(rep.Backlog.OldestQueuedSeconds))
 		}
 	}
+}
+
+// printTools renders the tool census: what a run spends its turns on, and
+// which tool its errors are in.
+//
+// Nothing is printed when no run in the window recorded one -- a
+// deployment whose runs all predate the census, or a window with no runs
+// in it. A table of zeroes there would read as "the tools never fail",
+// which is the opposite of "nobody measured them".
+func printTools(t ui.MetricsTools) {
+	if t.Runs == 0 || t.Calls == 0 {
+		return
+	}
+	fmt.Printf("\ntool use (%d run(s) in the window recorded what they called)\n", t.Runs)
+	fmt.Printf("  calls                    %6d  (%.0f per run at the median, %d at p90)\n",
+		t.Calls, float64(t.CallsPerRun.P50), t.CallsPerRun.P90)
+	fmt.Printf("  errored calls            %6d  (%.1f%% of them -- a handful is the ordinary shape of this work)\n",
+		t.Errored, t.ErroredShare*100)
+	fmt.Printf("  %-16s %8s %8s %8s %9s %11s %11s\n",
+		"tool", "runs", "calls", "errors", "timed out", "mean bytes", "p95 bytes")
+	for _, use := range t.ByTool {
+		timeouts := "-"
+		if use.TimedOut > 0 {
+			timeouts = fmt.Sprintf("%d (%.0f%%)", use.TimedOut, use.TimeoutRate*100)
+		}
+		fmt.Printf("  %-16s %8d %8d %7d%% %9s %11d %11s\n",
+			use.Name, use.Runs, use.Calls, int(use.ErrorRate*100+0.5), timeouts,
+			use.ResultBytes.MeanBytes, atMost(use.ResultBytes.P95AtMost))
+	}
+	fmt.Println("  (p95 bytes is an upper bound: sizes are kept in base-2 buckets, so the real" +
+		"\n   number is inside the octave below it. It is what should size the tool-result cap.)")
+}
+
+// printChecks renders the CI loop every prompt sends a run around: how
+// each wait ended, how long it blocked, and how many pushes a run took to
+// go green. Silent for a window whose runs never waited on CI, for the
+// same reason printTools is.
+func printChecks(c ui.MetricsChecks) {
+	if c.Waits == 0 {
+		return
+	}
+	fmt.Printf("\nCI waits (%d wait(s) across %d run(s))\n", c.Waits, c.Runs)
+	if verdicts := outcomeSummary(c.Verdicts); verdicts != "" {
+		fmt.Printf("  verdicts                 %s\n", verdicts)
+	}
+	fmt.Printf("  blocked                  p50 %s, p90 %s, max %s\n",
+		seconds(c.Blocked.P50Seconds), seconds(c.Blocked.P90Seconds), seconds(c.Blocked.MaxSeconds))
+	if c.GreenRuns > 0 {
+		fmt.Printf("  pushes before green      %.1f on average, %d at worst (over %d run(s) that went green)\n",
+			c.PushesToGreen.Mean, c.PushesToGreen.Max, c.GreenRuns)
+	}
+}
+
+// atMost renders a bucketed percentile as the bound it is, so nobody
+// reads it as a measured byte count.
+func atMost(bytes int64) string {
+	if bytes == 0 {
+		return "-"
+	}
+	return "<=" + strconv.FormatInt(bytes, 10)
 }
 
 // printCycles renders the daemon's own tick -- the section that says
@@ -199,4 +271,15 @@ func outcomeSummary(outcomes map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", name, outcomes[name]))
 	}
 	return strings.Join(parts, " ")
+}
+
+// endingSummary is outcomeSummary over the endings a report splits the
+// outcome words into (model.RunEnding), in the same count-descending
+// order.
+func endingSummary(endings map[model.RunEnding]int) string {
+	counts := make(map[string]int, len(endings))
+	for ending, n := range endings {
+		counts[string(ending)] = n
+	}
+	return outcomeSummary(counts)
 }
