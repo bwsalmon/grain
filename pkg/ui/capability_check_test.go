@@ -199,11 +199,15 @@ func TestCapabilityStatusIsUncheckableWithNoCheckerWired(t *testing.T) {
 
 // A check is a call somebody else's API answers, which is exactly what a
 // browser, a proxy or a link prefetch must not be free to repeat on its
-// own.
+// own -- so only POST reaches it. The GET is not asserted on by status:
+// an unrouted path falls through to the SPA handler, which answers
+// index.html on a build with a frontend in it and 404 on one without.
+// What matters is that no check ran.
 func TestCheckCapabilityIsNotAGet(t *testing.T) {
-	srv := testServerWithChecker(t, &fakeChecker{})
-	rec := do(t, srv, http.MethodGet, "/api/capabilities/gcp-key/check", "")
-	if rec.Code == http.StatusOK {
-		t.Fatalf("GET was answered %d -- a credential check must be a POST", rec.Code)
+	checker := &fakeChecker{}
+	srv := testServerWithChecker(t, checker)
+	do(t, srv, http.MethodGet, "/api/capabilities/gcp-key/check", "")
+	if len(checker.asked) != 0 {
+		t.Fatalf("a GET ran a credential check: %v", checker.asked)
 	}
 }
