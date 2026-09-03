@@ -84,6 +84,31 @@ func TestReadCheckWaitClassifiesEveryVerdictTheWaiterProduces(t *testing.T) {
 	}
 }
 
+// A timeout the run's own clock caused says something different in its
+// closing paragraph -- there is no larger timeout_seconds to ask for --
+// and it is still a timeout. The two halves reached this file from
+// different branches, so this is the case where a verdict would most
+// easily go unread: a deployment whose runs keep outliving their CI
+// would otherwise measure that as having never waited at all.
+func TestReadCheckWaitReadsATimeoutTheRunsOwnClockCaused(t *testing.T) {
+	waiter := waiterFor(&scriptedChecks{head: pushed(), rounds: [][]github.CheckRun{
+		{running("tests")},
+	}}, &fakeClock{})
+	waiter.deadlineClamped = true
+
+	text, err := waiter.wait(context.Background(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	got, ok := ReadCheckWait(text)
+	if !ok || got.Verdict != WaitVerdictTimedOut {
+		t.Errorf("ReadCheckWait = %+v, %v; want a timed-out verdict, in:\n%s", got, ok, text)
+	}
+	if !got.WaitedKnown || got.Waited != 30*time.Second {
+		t.Errorf("waited = %v (known %v), want 30s, in:\n%s", got.Waited, got.WaitedKnown, text)
+	}
+}
+
 // The clamp note waitForChecksTimeout puts in front of a report, and the
 // deadline notice a Registry appends to the back of one, both leave the
 // verdict readable: neither is part of the report, and a reader that only
