@@ -271,7 +271,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // allowedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools and NewOpenPullRequestTools register, mcp__-prefixed
+// NewPullRequestTools, NewOpenPullRequestTools and
+// NewRecreateSandboxTools register, mcp__-prefixed
 // the way agy reports them
 // once loaded from its settings -- computed from those constructors
 // directly rather than hand-copied, so this can never drift from what
@@ -300,6 +301,12 @@ func allowedTools() []string {
 	// tool that is not there costs nothing. nil is a PullRequestOpener no
 	// run ever gets -- this only wants the names.
 	for _, t := range mcp.NewOpenPullRequestTools(nil) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
+	// recreate_sandbox is registered by the same -server/-task pair
+	// open_pull_request is, so it is named here on the same terms. nil
+	// is a SandboxRecreator no run ever gets -- this only wants the name.
+	for _, t := range mcp.NewRecreateSandboxTools(nil) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	return names

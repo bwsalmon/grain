@@ -785,6 +785,10 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// Nothing else ever told a sandbox where its repo lives.
 			GitRemoteBase: proxyURL,
 			GrantTools:    grantTools(sourceDir(cfg.upgradeSrcDir)),
+			// The same registry startUIServer above already handed the
+			// UI, so a run that registers itself here is one
+			// POST /api/tasks/{id}/sandbox/recreate can actually find.
+			SandboxRecreations: sandboxRecreations,
 		},
 		MintSandboxToken:   tokens.EnsureToken,
 		RevokeSandboxToken: tokens.Revoke,
@@ -1179,6 +1183,21 @@ var livePullRequests atomic.Pointer[pullRequestOpener]
 // has died: see reconcilerDown).
 var cycleTimes = orchestrator.NewCycleTimes(orchestrator.DefaultCycleHistory)
 
+// sandboxRecreations is the set of live runs that can be asked to throw
+// their sandbox away and start again in a clean one -- the daemon side
+// of pkg/mcp's recreate_sandbox, reached over
+// POST /api/tasks/{id}/sandbox/recreate.
+//
+// Package-level for the reason cycleTimes above is, and with the same
+// consequence: the UI/API server starts before runDaemon builds its
+// Deps, so the two halves need one object they can both name. It needs
+// no gate the way livePullRequests does, because it is not a client to
+// be built later but a registry that is empty until runs put themselves
+// in it -- and a request arriving before the reconcile loop has started
+// finds no live run, which is exactly true of a deployment that has
+// dispatched nothing.
+var sandboxRecreations = orchestrator.NewSandboxRecreations()
+
 // pullRequestOpener is ui.Config.PullRequests over
 // orchestrator.OpenPullRequestForTask: the one place this deployment's
 // store and its GitHub client are both in scope for a request that
@@ -1224,6 +1243,35 @@ func (o *pullRequestOpener) OpenForTask(ctx context.Context, taskID string) (ui.
 		out.Checks = append(out.Checks, check)
 	}
 	return out, nil
+}
+
+// sandboxRecreateAdapter is ui.Config.SandboxRecreate over
+// orchestrator.SandboxRecreations, converting the result field for field
+// for the reason pullRequestOpener above converts its own: pkg/ui does
+// not import pkg/orchestrator, and this file is where both types are in
+// scope.
+//
+// Unlike pullRequestGate below it needs no gate. The registry it wraps
+// is allocated at process start (sandboxRecreations' own doc comment)
+// and is simply empty until runs register themselves in it, so a request
+// that arrives before -- or after -- the reconcile loop is running gets
+// the honest "no live run on this daemon" rather than a nil dereference
+// or a made-up failure.
+type sandboxRecreateAdapter struct {
+	recreations *orchestrator.SandboxRecreations
+}
+
+func (a sandboxRecreateAdapter) RecreateForTask(ctx context.Context, taskID string) (ui.SandboxRecreation, error) {
+	recreation, err := a.recreations.Recreate(ctx, taskID)
+	if err != nil {
+		return ui.SandboxRecreation{}, err
+	}
+	return ui.SandboxRecreation{
+		Sandbox:     recreation.Sandbox,
+		CheckoutDir: recreation.CheckoutDir,
+		Restored:    recreation.Restored,
+		Warnings:    recreation.Warnings,
+	}, nil
 }
 
 // pullRequestGate is the ui.Config.PullRequests the UI/API server is
@@ -1997,6 +2045,13 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// UI survives a reconcile loop that never comes up at all -- and
 		// livePullRequests is what closes that gap once it does.
 		PullRequests: pullRequestGate{},
+		// SandboxRecreate is how a dispatched run gets out of a sandbox
+		// it has broken beyond what it can fix from inside one
+		// (ui.Config.SandboxRecreate's own doc comment): its mcpserver
+		// asks this API, which asks the registry the run put itself in
+		// when it was dispatched. No gate, unlike PullRequests above --
+		// see sandboxRecreations' own doc comment.
+		SandboxRecreate: sandboxRecreateAdapter{sandboxRecreations},
 		// The reconcile loop's own tick, for GET /api/metrics' "cycles"
 		// section. No gate needed, unlike PullRequests above: cycleTimes
 		// is allocated at process start and runDaemon writes into that

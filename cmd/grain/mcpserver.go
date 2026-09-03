@@ -32,15 +32,21 @@
 // docs/design.md's split surface -- "Sandboxes: git transport only" --
 // is untouched. See pkg/mcp/pullrequest_tools.go's own doc comment.
 //
-// -server and -task add one further tool, open_pull_request: a run that
+// -server and -task add two further tools. open_pull_request: a run that
 // has pushed its branch can have grain open its pull request there and
 // then, and read back what the repo's own CI makes of it, rather than
-// exiting blind and leaving the pull request to the finish path. They
-// name the daemon to ask and the task to ask about. Unlike
-// pull_request_status above, that one is a *write*, and writes stay
+// exiting blind and leaving the pull request to the finish path. And
+// recreate_sandbox: a run whose sandbox has become unusable -- a wedged
+// guest, a full disk, a filesystem an interrupted install left in a
+// state no command can untangle -- can have grain destroy it and build a
+// clean one, and carry on in the turns it has left instead of failing
+// every remaining call in a sandbox it cannot repair from inside.
+//
+// The flags name the daemon to ask and the task to ask about. Unlike
+// pull_request_status above, both of these are *writes*, and writes stay
 // grain's: this process asks the daemon over its REST API rather than
-// opening anything with a credential of its own. See daemonPullRequests
-// below.
+// acting with a credential -- or, for the sandbox, an authority -- of
+// its own. See daemonPullRequests and daemonSandbox below.
 package main
 
 import (
@@ -100,6 +106,38 @@ func (d daemonPullRequests) OpenPullRequest(ctx context.Context) (mcp.PullReques
 		})
 	}
 	return report, nil
+}
+
+// daemonSandbox implements mcp.SandboxRecreator by asking a running
+// "grain daemon" to destroy this run's sandbox and build an empty one in
+// its place (pkg/ui's POST /api/tasks/{id}/sandbox/recreate) -- the same
+// REST hop daemonPullRequests above makes, over the same client, for the
+// same reason.
+//
+// The reason is sharper here than it is there, though. This process
+// cannot do the job at all, not merely "should not": every tool it
+// serves reaches into the sandbox and does nothing else, while creating
+// and destroying sandboxes needs the VM shape this run asked for, the
+// proxy token to mint for it, the capability material to place in it and
+// the repo to clone into it -- none of which exists on this side of the
+// hop. Which sandbox gets destroyed is fixed at process start by -task,
+// so no tool call can name another run's.
+type daemonSandbox struct {
+	client *ui.HTTPClient
+	taskID string
+}
+
+func (d daemonSandbox) RecreateSandbox(ctx context.Context) (mcp.SandboxRecreationReport, error) {
+	recreation, err := d.client.RecreateSandbox(ctx, d.taskID)
+	if err != nil {
+		return mcp.SandboxRecreationReport{}, err
+	}
+	return mcp.SandboxRecreationReport{
+		Sandbox:     recreation.Sandbox,
+		CheckoutDir: recreation.CheckoutDir,
+		Restored:    recreation.Restored,
+		Warnings:    recreation.Warnings,
+	}, nil
 }
 
 func mcpserver(args []string) {
@@ -168,12 +206,13 @@ func mcpserver(args []string) {
 	// from this process, on the controller. See the file's doc comment.
 	registry.Register(pullRequestTools(*dataDir, *githubHost, *githubInsecureHTTP, *prRepo, *prBranch)...)
 
-	// open_pull_request is the one tool here whose effect is real and
-	// immediate, so it is registered only when this process was actually
-	// told which daemon and which task it serves -- a run driven from a
-	// bare `grain mcpserver -sandbox-root` (pkg/mcp's own tests,
-	// tests/e2e/) has no daemon to ask and is better off not advertising
-	// a tool that could only ever refuse.
+	// open_pull_request and recreate_sandbox are the two tools here whose
+	// effect is real and immediate, and both happen by asking the daemon
+	// rather than from this process, so both are registered only when
+	// this process was actually told which daemon and which task it
+	// serves -- a run driven from a bare `grain mcpserver -sandbox-root`
+	// (pkg/mcp's own tests, tests/e2e/) has no daemon to ask and is
+	// better off not advertising tools that could only ever refuse.
 	switch {
 	case *server != "" && *taskID == "":
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -task is required with -server")
@@ -182,8 +221,11 @@ func mcpserver(args []string) {
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -server is required with -task")
 		os.Exit(2)
 	case *server != "":
+		client := ui.NewHTTPClient(*server)
 		registry.Register(mcp.NewOpenPullRequestTools(
-			daemonPullRequests{client: ui.NewHTTPClient(*server), taskID: *taskID})...)
+			daemonPullRequests{client: client, taskID: *taskID})...)
+		registry.Register(mcp.NewRecreateSandboxTools(
+			daemonSandbox{client: client, taskID: *taskID})...)
 	}
 
 	// Serve returns io.EOF once its caller closes the write end of our

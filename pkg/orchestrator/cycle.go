@@ -688,6 +688,30 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		placer = placing
 	}
 
+	// From here this run can be asked to throw its sandbox away and start
+	// again in a fresh one (Config.SandboxRecreations, and pkg/mcp's
+	// recreate_sandbox behind it) -- an agent that has wedged its own
+	// sandbox, or landed on a guest that stopped answering, otherwise has
+	// no move left but to spend the rest of its turns failing.
+	//
+	// Registered after everything a rebuild has to put back is in hand
+	// (the sandbox itself, its tools, and the two routes a placement can
+	// take into it) and deferred *after* the release above, so that
+	// deferred calls run in the order this needs: unregistering first --
+	// which waits out a rebuild already in flight -- and only then
+	// destroying the VM that rebuild was building.
+	stopRecreating := deps.Config.SandboxRecreations.register(d.TaskID, &sandboxRecreation{
+		store:       deps.Store,
+		cfg:         deps.Config,
+		task:        *task,
+		sandbox:     sandbox,
+		tools:       tools,
+		sandboxRoot: sandboxRoot,
+		placer:      placer,
+		mint:        deps.MintSandboxToken,
+	})
+	defer stopRecreating()
+
 	// Built here, after the sandbox and before RunDispatch takes over
 	// finishing this run, so a task naming a framework whose credential
 	// is not configured yet ends as a setup-failed run saying exactly

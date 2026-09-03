@@ -307,12 +307,15 @@ func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 				t.Errorf("tools/list is missing %q; got %v", want, names)
 			}
 		}
-		// open_pull_request is the one tool here whose effect is a write,
-		// and it is registered only with -server/-task, neither of which
-		// this process was given. A roster advertising it anyway would be
-		// offering an agent a tool that could only ever refuse.
-		if names["open_pull_request"] {
-			t.Errorf("tools/list advertises open_pull_request without -server/-task; got %v", names)
+		// open_pull_request and recreate_sandbox are the two tools here
+		// whose effect is a write, and both are registered only with
+		// -server/-task, neither of which this process was given. A
+		// roster advertising either anyway would be offering an agent a
+		// tool that could only ever refuse.
+		for _, unwanted := range []string{"open_pull_request", "recreate_sandbox"} {
+			if names[unwanted] {
+				t.Errorf("tools/list advertises %s without -server/-task; got %v", unwanted, names)
+			}
 		}
 	})
 

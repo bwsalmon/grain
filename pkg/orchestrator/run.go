@@ -442,6 +442,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
 			attachments, checkoutDir, frameworkOpensPullRequests(framework))
 	}
+	// Told to the recreate path, which is registered one level up in
+	// runOne and so never sees this: what a rebuilt sandbox needs is
+	// these already-minted placements written back into it, not a second
+	// materialization that would mint a second set of credentials behind
+	// the back of the single revoke below. A no-op for the usual run,
+	// which has no capabilities at all, and for every caller that wired
+	// no registry.
+	cfg.SandboxRecreations.setMaterialized(d.TaskID, materialized)
 
 	var result *agent.Result
 	var runErr error

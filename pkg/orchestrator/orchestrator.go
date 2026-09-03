@@ -322,6 +322,18 @@ type Config struct {
 	// handed an in-process registry. See selfrepair.Confirm's own doc
 	// comment for what closing that gap would take.
 	GrantTools map[string]func(store *model.Store, taskID string) []mcp.Tool
+	// SandboxRecreations, when non-nil, is the registry each dispatched
+	// run parks itself in so that it can later ask for its own sandbox to
+	// be destroyed and rebuilt -- the daemon-side half of pkg/mcp's
+	// recreate_sandbox tool. See SandboxRecreations' own doc comment for
+	// why the request has to come back to the daemon at all rather than
+	// being something the run does inside its sandbox.
+	//
+	// nil registers nothing and answers every request with "no live run",
+	// which is the honest answer for a caller (a test, a one-shot cycle,
+	// `grain demo`) that has no UI/API route for such a request to arrive
+	// over in the first place.
+	SandboxRecreations *SandboxRecreations
 }
 
 func (c Config) cancelPollInterval() time.Duration {
@@ -506,6 +518,28 @@ func (s *hostSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
 // method of the same name has to reach into a VM's guest to do it.
 func (s *hostSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
 	return mcp.ConfigureGitCredentials(s.root, remoteURL, token)
+}
+
+// Rebuild implements SandboxRebuilder: remove this run's directory and
+// make an empty one again at the same path -- Acquire's own
+// RemoveAll/MkdirAll pair, which is already exactly "destroy whatever is
+// under this name and start clean".
+//
+// It is worth having here even though a host directory cannot break the
+// way a VM can (there is no guest to stop answering, no disk of its own
+// to fill). What it can be is *wrong* -- a build left half-finished, a
+// dependency tree in a state the agent cannot reason about -- and
+// starting over is the same answer to that whichever backend a
+// deployment runs. A run that reaches for this on one backend and is
+// refused on the other would be the more surprising outcome.
+func (s *hostSandbox) Rebuild(ctx context.Context) error {
+	if err := os.RemoveAll(s.root); err != nil {
+		return fmt.Errorf("orchestrator: removing sandbox directory %q to rebuild it: %w", s.root, err)
+	}
+	if err := os.MkdirAll(s.root, 0o755); err != nil {
+		return fmt.Errorf("orchestrator: recreating sandbox directory %q: %w", s.root, err)
+	}
+	return nil
 }
 
 // Release removes the directory. Unlike a kontur VM's own Release there
