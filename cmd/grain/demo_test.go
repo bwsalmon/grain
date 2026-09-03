@@ -58,6 +58,23 @@ func TestSeedDemoCoversEveryState(t *testing.T) {
 		}
 	}
 
+	// The seeded merge-queue fix sits at the head of the backlog, the
+	// same place orchestrator.fileFixTask puts a real one: it is the one
+	// task nobody files and nobody orders, so `grain demo` has to show it
+	// where the frontend pins it (TaskList.jsx's partitionPinned) rather
+	// than wherever OrderKey's zero value happens to fall among the keys
+	// the other seeded tasks were assigned.
+	seeded, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("listing seeded tasks off the store: %v", err)
+	}
+	if len(seeded) == 0 {
+		t.Fatal("seedDemo seeded no tasks at all")
+	}
+	if head := seeded[0]; head.Origin.Reason != model.ReasonFix {
+		t.Errorf("head of the backlog = %s (reason %q), want the seeded merge-queue fix", head.ID, head.Origin.Reason)
+	}
+
 	var awaiting ui.Task
 	for _, task := range tasks {
 		if task.State == model.StateAwaitingReply {
