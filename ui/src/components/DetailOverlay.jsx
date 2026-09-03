@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
 import { STATE_LABELS, completionPhase, frameworkLabel } from "../state.js";
@@ -429,11 +429,14 @@ function CapabilityToggles({ t, config, act }) {
   const capabilities = config?.capabilities || [];
   const selected = t.capabilities || [];
   // A task can hold a grant the picker no longer offers -- a capability
-  // retired since it was attached (bwsalmon/agents#612's "scratch-repo").
-  // Without a row of its own it would show as a chip that nothing can
-  // untick, and a grant no provider is registered for fails every run of
-  // the task holding it, so it gets a row here purely to be turned off:
-  // rows come from the listing, and only rows can be toggled.
+  // renamed or dropped since it was attached ("scratch-repo", now
+  // github-sandbox, bwsalmon/agents#612). Without a row of its own it
+  // would show as a chip that nothing can untick, and a grant no
+  // provider is registered for fails every run of the task holding it,
+  // so it gets a row here purely to be turned off: rows come from the
+  // listing, and only rows can be toggled. SetCapability (pkg/ui,
+  // client.go) is the other half -- it validates on attach only, so the
+  // detach this row sends is accepted.
   const rows = capabilities.concat(
     selected
       .filter((id) => !capabilities.some((c) => c.id === id))
@@ -487,13 +490,30 @@ function CapabilityToggles({ t, config, act }) {
   );
 }
 
+// What a chip cannot fit -- the depended-on task's state, and the tail
+// of a long title -- goes here instead, so hovering a dependency tells
+// you what it is without opening it. dep is missing
+// when the depended-on task is not in the loaded list, and then its id
+// is genuinely all this overlay knows about it.
+function dependencyTooltip(id, dep, blocking) {
+  if (!dep) return blocking ? `${id} — still open` : id;
+  const state = STATE_LABELS[dep.state] || dep.state;
+  return `${id} ${dep.title}${state ? ` — ${state}` : ""}${blocking ? " (blocking this task)" : ""}`;
+}
+
 // Dependencies is the "definition" and "signal" this whole feature is
 // about, together: what a task has declared it depends on (chips,
 // removable), which of those are still open (the "blocked" styling on a
 // chip), and a way to add another -- attach/detach through /depends-on.
+//
+// One full-width chip per line, carrying the depended-on task's title:
+// a wrapped row of id-only chips came out as bubbles a couple of
+// characters wide, which named a dependency without telling you
+// anything about it.
 function Dependencies({ t, tasks, act, onOpenTask }) {
   const dependsOn = t.dependsOn || [];
   const blockedBy = new Set(t.blockedBy || []);
+  const byId = new Map((tasks || []).map((other) => [other.id, other]));
 
   const add = (picked) => act(() => api(`/api/tasks/${t.id}/depends-on`, {
     method: "POST",
@@ -504,26 +524,31 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
     <fieldset>
       <legend>Depends on</legend>
       {dependsOn.length === 0 && <p className="hint">No dependencies.</p>}
-      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mb: dependsOn.length > 0 ? 1 : 0 }}>
+      <Stack spacing={0.6} sx={{ mb: dependsOn.length > 0 ? 1 : 0 }}>
         {dependsOn.map((id) => {
           const blocking = blockedBy.has(id);
+          // A dependency the loaded list does not carry still gets its
+          // chip, id only: dependsOn records ids, and hiding the row for
+          // want of a title would hide the dependency itself.
+          const dep = byId.get(id);
           return (
-            <Chip
-              key={id}
-              size="small"
-              variant={blocking ? "outlined" : "filled"}
-              color={blocking ? "warning" : "default"}
-              label={`${id}${blocking ? " (open)" : ""}`}
-              onClick={() => onOpenTask(id)}
-              onDelete={() => act(() => api(`/api/tasks/${t.id}/depends-on`, {
-                method: "POST",
-                body: JSON.stringify({ id, attach: false }),
-              }), t.id)}
-              deleteIcon={<span title={`Remove dependency on ${id}`}>×</span>}
-            />
+            <Tooltip key={id} title={dependencyTooltip(id, dep, blocking)} placement="left">
+              <Chip
+                variant={blocking ? "outlined" : "filled"}
+                color={blocking ? "warning" : "default"}
+                label={`${id}${dep ? ` ${dep.title}` : ""}${blocking ? " (open)" : ""}`}
+                onClick={() => onOpenTask(id)}
+                onDelete={() => act(() => api(`/api/tasks/${t.id}/depends-on`, {
+                  method: "POST",
+                  body: JSON.stringify({ id, attach: false }),
+                }), t.id)}
+                deleteIcon={<span title={`Remove dependency on ${id}`}>×</span>}
+                sx={{ width: "100%", justifyContent: "space-between", "& .MuiChip-label": { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } }}
+              />
+            </Tooltip>
           );
         })}
-      </Box>
+      </Stack>
       <TaskPicker
         tasks={tasks || []}
         exclude={[t.id, ...dependsOn]}

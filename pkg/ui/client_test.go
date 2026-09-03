@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -726,13 +727,43 @@ func TestSetCapabilityAttachesAndDetaches(t *testing.T) {
 	}
 }
 
-// A grant whose capability the picker no longer offers can still be let
-// go of -- retiring a row (bwsalmon/agents#612's "scratch-repo") must not
-// strand the tasks already holding it, since a grant no provider is
-// registered for fails every run of the task that holds it and this is
-// the only route to removing one. Attaching it stays rejected: the point
-// of the picker listing is that nothing new can be granted off it.
-func TestSetCapabilityDetachesARetiredCapability(t *testing.T) {
+// gcp-key and github-sandbox each had a provider cmd/grain/daemon.go
+// registered and no DefaultCapabilities row, so every attempt to attach
+// one -- the only way a model.Grant is ever written -- was rejected as
+// an unknown capability, and no sandbox on any deployment ever got
+// gcpkey.SandboxKeyPath. Both routes a human has are covered here,
+// since both validate against the same listing.
+func TestGCPKeyAndGitHubSandboxCanBeGranted(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "mint me a key", Approved: true,
+		Capabilities: []string{"gcp-key", "github-sandbox"},
+	})
+	if err != nil {
+		t.Fatalf("creating a task granting gcp-key and github-sandbox: %v", err)
+	}
+	for _, want := range []string{"gcp-key", "github-sandbox"} {
+		if !slices.Contains(task.Capabilities, want) {
+			t.Errorf("capabilities = %v, want %s among them", task.Capabilities, want)
+		}
+	}
+
+	plain := create(t, c, ctx)
+	for _, id := range []string{"gcp-key", "github-sandbox"} {
+		if err := c.SetCapability(ctx, plain.ID, id, true); err != nil {
+			t.Errorf("attaching %s: %v", id, err)
+		}
+	}
+}
+
+// A task can be holding a grant this deployment no longer offers -- a
+// renamed capability, "scratch-repo" being the one that was here, which
+// fails the task's every dispatch at model.ResolveGrants. Detaching it
+// has to work, or the only route out is the store itself. Attaching one
+// is still refused: that is the check that keeps an unknown id from
+// becoming a grant in the first place.
+func TestSetCapabilityDetachesAnIDNoLongerOffered(t *testing.T) {
 	c, store, ctx := testClient(t)
 	task := create(t, c, ctx)
 	if err := store.UpdateTask(ctx, task.ID, func(tk *model.Task) error {
@@ -742,11 +773,8 @@ func TestSetCapabilityDetachesARetiredCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.SetCapability(ctx, task.ID, "scratch-repo", true); err == nil {
-		t.Fatal("attaching a capability the picker does not offer succeeded, want a validation error")
-	}
 	if err := c.SetCapability(ctx, task.ID, "scratch-repo", false); err != nil {
-		t.Fatalf("detaching a retired capability: %v", err)
+		t.Fatalf("detaching a capability this deployment no longer offers: %v", err)
 	}
 	got, err := c.Task(ctx, task.ID)
 	if err != nil {
@@ -754,6 +782,12 @@ func TestSetCapabilityDetachesARetiredCapability(t *testing.T) {
 	}
 	if len(got.Capabilities) != 0 {
 		t.Fatalf("capabilities after detach = %v, want none", got.Capabilities)
+	}
+
+	err = c.SetCapability(ctx, task.ID, "scratch-repo", true)
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("attaching an unknown capability: error = %v, want a ValidationError", err)
 	}
 }
 
@@ -1541,6 +1575,47 @@ func TestReorderValidatesIDsIsNotEmpty(t *testing.T) {
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("Reorder with no ids: error = %v, want a ValidationError", err)
+	}
+}
+
+// AuthorKind is what lets the frontend tell a task somebody filed by
+// hand from one grain or a dispatched run filed for itself -- Author
+// alone cannot, since a login, a run ID and a deployment name are all
+// just strings. state.js's lastBaseForRepo reads it to keep a
+// system-generated task's base branch out of the human's own "Base
+// branch" default.
+func TestAuthorKindCarriesTheFilingPrincipalsKind(t *testing.T) {
+	c, store, ctx := testClient(t)
+	filed := create(t, c, ctx)
+	if filed.AuthorKind != string(model.PrincipalHuman) {
+		t.Fatalf("AuthorKind of a task filed through the client = %q, want human", filed.AuthorKind)
+	}
+
+	id, err := store.NewTaskID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduled := model.Task{
+		ID:     id,
+		Intent: model.IntentImplement,
+		Title:  "nightly sweep",
+		Body:   "filed by a schedule",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+			Reason:      model.ReasonSchedule,
+		},
+		CreatedAt: &baseTime,
+	}
+	if err := store.PutTask(ctx, scheduled); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.Task(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AuthorKind != string(model.PrincipalAutomation) {
+		t.Fatalf("AuthorKind of a scheduled task = %q, want automation", got.AuthorKind)
 	}
 }
 

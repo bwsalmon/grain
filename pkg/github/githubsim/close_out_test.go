@@ -175,6 +175,33 @@ func TestSimMergePullRequestClosesIt(t *testing.T) {
 	}
 }
 
+// GitHub's own GET .../pulls/{number} carries head.sha, and grain reads
+// it for two things that both go wrong quietly without it: scoping the
+// Actions fallback to the commit the pull request actually points at, and
+// telling one push's empty check list from the next one's
+// (orchestrator's emptyChecksSettled). A sim that always answered with an
+// empty sha would exercise neither.
+func TestSimGetPullRequestReadsTheHeadBranchesTip(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/issue-1")
+	pr, err := client.CreatePullRequest("acme", "widgets", "grain/issue-1", "main", "t", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := client.GetPullRequest("acme", "widgets", pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sim.branchSHA("grain/issue-1")
+	if want == "" {
+		t.Fatal("the branch just pushed has no tip")
+	}
+	if detail.HeadSHA != want {
+		t.Fatalf("HeadSHA = %q, want the branch's own tip %q", detail.HeadSHA, want)
+	}
+}
+
 func TestSimListCheckRunsReadsSeededRuns(t *testing.T) {
 	sim, client := newSim(t, "main")
 

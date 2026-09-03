@@ -29,6 +29,18 @@ import (
 // judged, so the answer settles on its own within a cycle or two of CI
 // finishing.
 //
+// An *empty* check list is the case no read of GitHub can resolve on its
+// own: a repo with no CI configured and a repo whose CI has not
+// registered its first check run yet look exactly alike from the Checks
+// API. checksSettled is the caller's answer to that -- true once the
+// current head commit has been sitting there with nothing reported for
+// long enough that CI would have shown up if there were any (see
+// emptyChecksSettled). Until then an empty list reads PrPending, so a
+// pull request opened seconds ago waits a cycle or two rather than
+// merging in the gap between the push and GitHub creating the workflow
+// run's check runs. checksSettled is only consulted for an empty list;
+// once even one check exists, the rules above already decide.
+//
 // Pending deliberately outranks failing, so a red check alongside a
 // still-running one waits rather than escalating immediately. The queue
 // files exactly one automatic fix per PR (fileFixTask, escalateToUser),
@@ -46,7 +58,7 @@ import (
 // merge queue's own "cancelled, will retry" check block a PR this
 // package has no business blocking, or file a fix task against a
 // workflow waiting on a human's approval, which no agent can fix.
-func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, checksKnown bool) model.PrHealth {
+func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, checksKnown, checksSettled bool) model.PrHealth {
 	if detail.State == "closed" {
 		if detail.Merged {
 			return model.PrMerged
@@ -71,6 +83,13 @@ func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, check
 		if c.Status != "completed" {
 			return model.PrPending
 		}
+	}
+	// Nothing reported at all, and not yet for long enough to believe
+	// that means there is nothing to report. PrPending rather than
+	// PrUnknown: this resolves by itself, on a clock, which is what
+	// PENDING says and what UNKNOWN does not.
+	if len(checks) == 0 && !checksSettled {
+		return model.PrPending
 	}
 	if len(failingChecks(checks)) > 0 {
 		return model.PrFailing
@@ -102,6 +121,141 @@ func failingChecks(checks []github.CheckRun) []string {
 		}
 	}
 	return names
+}
+
+// defaultCheckRegistrationWindow is how long a pull request's head commit
+// has to have had *no* checks reported against it before healthFrom
+// believes that means the repo has no CI, rather than that CI has not got
+// round to registering yet.
+//
+// It exists because the two are the same API response. GitHub Actions
+// creates a workflow run's check runs asynchronously, after it has
+// processed the push, and finishWithPullRequest opens the pull request
+// the moment the branch lands -- so a SyncPullRequests tick landing in
+// that gap reads an empty list on a repo whose CI is about to start, and
+// reading that as clean is how a merge beats the tests. A repo with no CI
+// configured never fills the list in, and there is nothing in the Checks
+// API that tells the two apart; only time does.
+//
+// Two minutes is chosen against what it costs on each side. On a repo
+// that does have CI it costs nothing at all: the checks appear within
+// seconds and the very next tick sees them. On a repo with genuinely no
+// CI it is the whole cost -- every merge waits this out, once, per head
+// commit -- so it wants to be small enough not to feel like a stall and
+// large enough to cover GitHub being slow to dispatch a workflow, which
+// is measured in seconds but not reliably in single digits.
+const defaultCheckRegistrationWindow = 2 * time.Minute
+
+// emptyChecks remembers, per pull request, the head commit this process
+// first saw an empty check list for and when it first saw it -- what
+// emptyChecksSettled measures the window from -- alongside the window
+// itself, so SetCheckRegistrationWindow can change it without racing a
+// cycle that is reading it.
+//
+// Deliberately in memory rather than in a task's Observation. Persisting
+// it would mean a schema column, and the fact is not worth one: losing it
+// (a restart, a new leader) makes the next cycle start the window afresh,
+// which costs one more window of waiting and can never merge something
+// early. Erring toward waiting is the whole point of the mechanism.
+//
+// It is keyed by pull request and holds the head sha alongside, so a push
+// to a branch that already has a pull request open -- a fix task merging
+// into it, a human pushing by hand, a redispatched task -- restarts the
+// window rather than inheriting the settled verdict of the commit before
+// it. That push resets the check list to empty just as surely as the
+// first one did.
+var emptyChecks = struct {
+	sync.Mutex
+	window time.Duration
+	seen   map[string]emptyCheckSighting
+}{window: defaultCheckRegistrationWindow, seen: map[string]emptyCheckSighting{}}
+
+type emptyCheckSighting struct {
+	headSHA string
+	first   time.Time
+}
+
+// SetCheckRegistrationWindow replaces the window described on
+// defaultCheckRegistrationWindow and returns the function that puts the
+// old one back -- the same shape DisableBranchExistsSleep has, and used
+// the same way.
+//
+// Zero disables the wait outright: an empty check list is believed the
+// first time it is read, which is what this package did before the window
+// existed. That is the right setting for a caller driving a simulated
+// GitHub whose repos have no CI at all and never will -- every test in
+// tests/e2e and cmd/grain is one -- where the only thing the window can
+// do is make each of them sit out two minutes of wall clock for a signal
+// that is never coming. It is the wrong setting for a deployment: see
+// defaultCheckRegistrationWindow for what the wait is buying.
+//
+// Changing the window clears the sightings taken under the old one.
+// Measuring an existing sighting against a window it was not started for
+// is meaningless in the shortening direction and wrong in the lengthening
+// one, and starting every window afresh is the conservative reset -- it
+// can only make the next merge later, never earlier.
+func SetCheckRegistrationWindow(d time.Duration) func() {
+	emptyChecks.Lock()
+	defer emptyChecks.Unlock()
+	prev := emptyChecks.window
+	emptyChecks.window = d
+	emptyChecks.seen = map[string]emptyCheckSighting{}
+	return func() { SetCheckRegistrationWindow(prev) }
+}
+
+// emptyChecksSettled reports whether ref's current head commit has had an
+// empty check list for longer than the registration window --
+// healthFrom's checksSettled. Call it only when the check list actually
+// is empty: the first such call for a given commit is what starts that
+// commit's window.
+//
+// now comes from the caller (SyncPullRequests') clock, the same one that
+// recorded the sighting, so this never compares grain's clock against
+// GitHub's -- which is the trap in measuring the window from a timestamp
+// GitHub stamped, like the pull request's own CreatedAt.
+//
+// An empty headSHA is never settled, short of the window being off
+// altogether. GitHub fills the head sha in asynchronously the same way it
+// computes Mergeable (PullRequestDetail's own doc comments), so a read
+// without one is a read of a pull request GitHub has not finished
+// thinking about -- not a commit whose CI can be concluded absent.
+func emptyChecksSettled(ref model.PullRequestRef, headSHA string, now time.Time) bool {
+	emptyChecks.Lock()
+	defer emptyChecks.Unlock()
+	// A window of zero is off, and off means every path here answers the
+	// way it did before the window existed -- including the one below
+	// that has nothing to do with elapsed time.
+	if emptyChecks.window <= 0 {
+		return true
+	}
+	if headSHA == "" {
+		return false
+	}
+	key := ref.String()
+	sighting, ok := emptyChecks.seen[key]
+	if !ok || sighting.headSHA != headSHA {
+		sighting = emptyCheckSighting{headSHA: headSHA, first: now}
+		emptyChecks.seen[key] = sighting
+	}
+	// Written as a comparison against the deadline rather than as
+	// `now.Sub(first) >= window`, so a clock that jumped backwards reads
+	// as "not settled yet": the same direction everything else here errs
+	// in.
+	return !now.Before(sighting.first.Add(emptyChecks.window))
+}
+
+// forgetEmptyChecks drops ref's sighting, called when its pull request
+// closes: that is the one moment this package knows a pull request will
+// never be synced again, so it is where the map stops growing. Anything
+// that stops being tracked without ever reading closed leaks one small
+// entry until the process restarts, which is a bound worth having over
+// pruning the map against the live set every cycle -- two daemons sharing
+// a process (as tests do) would then each delete the other's windows and
+// leave every pull request waiting afresh every cycle.
+func forgetEmptyChecks(ref model.PullRequestRef) {
+	emptyChecks.Lock()
+	defer emptyChecks.Unlock()
+	delete(emptyChecks.seen, ref.String())
 }
 
 // workflowFallbackOnce keeps the "falling back to Actions" notice to one
@@ -364,13 +518,21 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// forever, not just once.
 	var checks []github.CheckRun
 	checksKnown := true
+	checksSettled := true
 	if detail.State != "closed" {
 		checks, checksKnown, err = checkRunsFor(client, ref, detail.HeadRef, detail.HeadSHA)
 		if err != nil {
 			return err
 		}
+		// Only an empty list needs the window, and asking only for one
+		// is what keeps the sighting map to pull requests that are
+		// actually in that state (emptyChecksSettled starts a commit's
+		// window on the first call for it).
+		if checksKnown && len(checks) == 0 {
+			checksSettled = emptyChecksSettled(ref, detail.HeadSHA, now)
+		}
 	}
-	health := healthFrom(detail, checks, checksKnown)
+	health := healthFrom(detail, checks, checksKnown, checksSettled)
 
 	isFixTask := task.Origin.Reason == model.ReasonFix
 	isHead := heads[ref.Repo.String()] == task.ID
@@ -389,11 +551,12 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// defeat the reason to queue at all.
 	//
 	// PrPending matches neither arm on purpose, and neither does
-	// PrUnknown: CI is still running (or its verdict is unreadable), so
-	// there is nothing to merge yet and nothing to file a fix for. The
-	// entry is simply left where it is -- still the head of its queue,
-	// holding the position -- and the next cycle asks GitHub again. That
-	// is what makes a merge wait for the tests rather than race them,
+	// PrUnknown: CI is still running, or has not reported for the first
+	// time yet, or its verdict is unreadable -- so in every case there
+	// is nothing to merge yet and nothing to file a fix for. The entry
+	// is simply left where it is -- still the head of its queue, holding
+	// the position -- and the next cycle asks GitHub again. That is what
+	// makes a merge wait for the tests rather than race them,
 	// and it is deliberately the same "do nothing, look again" the
 	// asynchronous Mergeable read has always taken.
 	switch {
@@ -409,7 +572,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		if err != nil {
 			return fmt.Errorf("orchestrator: re-reading %s after merge: %w", ref, err)
 		}
-		health = healthFrom(detail, checks, checksKnown)
+		health = healthFrom(detail, checks, checksKnown, checksSettled)
 
 	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
 		if err := advanceMergeQueueHead(ctx, store, task, ref, detail, health, checks, now); err != nil {
@@ -425,6 +588,9 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// recording on a cycle that closes nothing (an open PR seen for the
 	// first time), and PrMergedAt/PrClosedAt only ever get set alongside
 	// ClosedAt, so there is never a cycle needing both writes at once.
+	if health == model.PrMerged || health == model.PrClosed {
+		forgetEmptyChecks(ref)
+	}
 	return recordPullRequestEvents(ctx, store, task.ID, e.obs, detail, health, now)
 }
 
