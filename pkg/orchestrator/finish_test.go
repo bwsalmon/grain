@@ -220,6 +220,46 @@ func TestProcessResultRelaysBothACommentAndAQuestion(t *testing.T) {
 	}
 }
 
+// TestProcessResultRelaysACommentAlongsideAPushedBranch is the same drop
+// on the other ending: a pushed branch returned as soon as its pull
+// request was opened, past the comment the same run had left. That
+// combination is one comment_on_issue's own description invites -- "if
+// you do push commits, a pull request is opened for them regardless of
+// whether you also call this" -- so the remark explaining the push has to
+// survive it.
+func TestProcessResultRelaysACommentAlongsideAPushedBranch(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
+
+	result := toolResult(
+		agent.ToolCall{Name: "run_command", Text: "pushed"},
+		agent.ToolCall{
+			Name: "comment_on_issue", Arguments: map[string]any{"comment": "fixed it; here is why"},
+		},
+	)
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("expected one pull request, got %+v", sim.PullRequests)
+	}
+	if got := commentBodies(t, ctx, store, task.ID); len(got) != 1 || got[0] != "fixed it; here is why" {
+		t.Fatalf("conversation = %q, want the relayed comment", got)
+	}
+
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateCompleted {
+		t.Fatalf("state = %q, want completed", st)
+	}
+}
+
 func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	store, ctx := openStore(t)
 	_, client := newSim(t, "acme", "widgets", "main")
