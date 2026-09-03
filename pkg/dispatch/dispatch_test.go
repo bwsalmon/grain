@@ -12,6 +12,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -746,5 +748,44 @@ func TestCycleSkipsAConfigurationTaskItsCallerIsStillFinishingWith(t *testing.T)
 	}
 	if len(second) != 0 {
 		t.Fatalf("cycle with the configuration task busy = %+v, want nothing dispatched", second)
+	}
+}
+
+// RunID's own doc comment makes two promises the rest of the tree spends:
+// that a run id is exactly "<task>-<attempt>", and that its *last* "-"
+// still splits it back into those two halves now that the separator
+// carries no letter of its own. orchestrator's VM-name budget is
+// measured against the first (kontur_sandboxes_test.go's
+// TestVMNameBudgetCoversRealisticRunIDs counts the bytes this format
+// costs), and the second holds only for as long as a task id never
+// contains a "-" itself -- Store.NewTaskID hands out decimal counters,
+// which is a fact about a different package. Neither was pinned in the
+// package that makes the name, so a change to the format would have been
+// caught, if at all, by a byte-counting test somewhere else.
+func TestRunIDIsTaskAndAttemptSplitByItsLastSeparator(t *testing.T) {
+	for _, tc := range []struct {
+		taskID  string
+		attempt int
+		want    string
+	}{
+		{"1", 1, "1-1"},
+		{"42", 7, "42-7"},
+		{"999999", 99, "999999-99"},
+	} {
+		got := dispatch.RunID(tc.taskID, tc.attempt)
+		if got != tc.want {
+			t.Errorf("RunID(%q, %d) = %q, want %q", tc.taskID, tc.attempt, got, tc.want)
+			continue
+		}
+		i := strings.LastIndex(got, "-")
+		if i < 0 {
+			t.Errorf("RunID(%q, %d) = %q, which has no separator to split back on", tc.taskID, tc.attempt, got)
+			continue
+		}
+		taskID, attempt := got[:i], got[i+1:]
+		if taskID != tc.taskID || attempt != strconv.Itoa(tc.attempt) {
+			t.Errorf("%q split on its last %q = (%q, %q), want (%q, %d)",
+				got, "-", taskID, attempt, tc.taskID, tc.attempt)
+		}
 	}
 }
