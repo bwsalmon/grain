@@ -182,8 +182,10 @@ type Sim struct {
 	// doc comment in github.go.
 	Comments map[int][]github.Comment
 	// CheckRuns is keyed by whatever ref a test seeds it under -- a branch
-	// name or a sha, matching whatever ListCheckRuns is called with, since
-	// Sim has no real commit graph to resolve one into the other.
+	// name or a sha. A read for either finds it: BareRepo is a real
+	// repository, so the branch a test named and the sha the caller asks
+	// by resolve to one commit here the same way they do on GitHub (see
+	// checkRunsFor).
 	CheckRuns map[string][]github.CheckRun
 	// WorkflowJobs is the CI behind those check runs: the GitHub Actions
 	// jobs, and their logs, that github.RESTClient.FailedJobLogs reaches
@@ -432,7 +434,7 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			if err != nil {
 				ref = m[3]
 			}
-			return jsonResponse(200, checkRunsJSON(s.CheckRuns[ref])), nil
+			return jsonResponse(200, checkRunsJSON(s.checkRunsFor(ref))), nil
 		}
 		if m := actionsRunsRe.FindStringSubmatch(p); m != nil {
 			s.mustOwn(m[1], m[2])
@@ -671,8 +673,27 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 		if m := pullMergeRe.FindStringSubmatch(p); m != nil {
 			s.mustOwn(m[1], m[2])
 			number := mustAtoi(m[3])
+			var payload struct {
+				SHA string `json:"sha"`
+			}
+			if len(body) > 0 {
+				if err := json.Unmarshal(body, &payload); err != nil {
+					return github.ApiResponse{}, err
+				}
+			}
 			for i := range s.PullRequests {
 				if s.PullRequests[i].Number == number {
+					// GitHub's own `sha` parameter: "SHA that pull
+					// request head must match to allow merge", answered
+					// 409 when it does not. A caller that merges on a
+					// verdict it computed from one commit's CI sends it
+					// (orchestrator.syncEntry), and a branch that moved
+					// since then has to be refused here rather than
+					// merged, or a test can never tell the two apart.
+					if payload.SHA != "" && payload.SHA != s.branchSHA(s.PullRequests[i].Head) {
+						return github.ApiResponse{Status: 409, Body: []byte(
+							`{"message":"Head branch was modified. Review and try the merge again."}`)}, nil
+					}
 					if err := s.mergeIntoBase(s.PullRequests[i]); err != nil {
 						return github.ApiResponse{Status: 405, Body: []byte(err.Error())}, nil
 					}
@@ -699,6 +720,44 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 	}
 
 	panic(fmt.Sprintf("githubsim: unhandled request %s %s", method, path))
+}
+
+// checkRunsFor answers GET .../commits/{ref}/check-runs for a ref that
+// may be a branch name or a commit sha, whichever CheckRuns happens to be
+// keyed by -- real GitHub resolves both to one commit, and BareRepo is
+// where the same resolution lives here.
+//
+// It matters because the two ends disagree on purpose. A test seeds
+// checks against a branch, which is the readable thing to write; the
+// orchestrator asks by head sha, because a branch-scoped read answers for
+// whatever the branch points at now rather than for the commit whose
+// health it is deciding (orchestrator.checkRunsFor). Resolving here keeps
+// those tests saying what they mean, while a test that seeds by sha --
+// one about a branch that moves mid-cycle -- still gets an answer that is
+// strictly about the commit it named, since a moved branch resolves to a
+// different sha and finds nothing.
+func (s *Sim) checkRunsFor(ref string) []github.CheckRun {
+	if runs, ok := s.CheckRuns[ref]; ok {
+		return runs
+	}
+	// ref is a branch whose checks were seeded by sha...
+	if sha := s.branchSHA(ref); sha != "" {
+		return s.CheckRuns[sha]
+	}
+	// ...or a sha whose checks were seeded by branch name. Keys in sorted
+	// order so two branches sitting on one commit answer the same way
+	// every run rather than however the map felt like iterating.
+	keys := make([]string, 0, len(s.CheckRuns))
+	for key := range s.CheckRuns {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if s.branchSHA(key) == ref {
+			return s.CheckRuns[key]
+		}
+	}
+	return nil
 }
 
 // pullRequest returns the pull request numbered number, if Sim has one.

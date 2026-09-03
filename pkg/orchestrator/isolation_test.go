@@ -102,7 +102,7 @@ func mergedPullRequestTask(t *testing.T, ctx context.Context, store *model.Store
 		t.Fatal(err)
 	}
 	if merge {
-		if err := client.MergePullRequest(repo.Owner, repo.Name, pr.Number); err != nil {
+		if err := client.MergePullRequest(repo.Owner, repo.Name, pr.Number, ""); err != nil {
 			t.Fatal(err)
 		}
 	}

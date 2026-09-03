@@ -707,6 +707,7 @@ func TestCreateTaskValidates(t *testing.T) {
 		"unparseable read":         {Title: "t", Reads: []string{"not-a-repo"}},
 		"negative sandbox cpus":    {Title: "t", SandboxCPUs: -1},
 		"sandbox memory below 128": {Title: "t", SandboxMemoryMB: 64},
+		"negative sandbox disk":    {Title: "t", SandboxDiskGB: -1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.CreateTask(ctx, req)
@@ -802,41 +803,49 @@ func TestUpdateTaskEditsEveryField(t *testing.T) {
 	}
 }
 
-// bwsalmon/agents#534: a task's own SandboxCPUs/SandboxMemoryMB override
+// bwsalmon/agents#534, grain/task-41: a task's own SandboxCPUs/
+// SandboxMemoryMB/SandboxDiskGB override
 // round-trips through CreateTask and UpdateTask the same as every other
-// task field, and setting either back to 0 through UpdateTask clears the
-// override (distinct from leaving the request field nil, which leaves it
-// alone -- UpdateTaskRequest's own doc comment).
+// task field, and setting any of them back to 0 through UpdateTask clears
+// that override (distinct from leaving the request field nil, which
+// leaves it alone -- UpdateTaskRequest's own doc comment).
 func TestTaskSandboxShapeOverrideRoundTrips(t *testing.T) {
 	c, _, ctx := testClient(t)
 
 	created, err := c.CreateTask(ctx, ui.CreateTaskRequest{
 		Title: "t", Repo: "acme/widgets", Approved: true,
-		SandboxCPUs: 4, SandboxMemoryMB: 8192,
+		SandboxCPUs: 4, SandboxMemoryMB: 8192, SandboxDiskGB: 40,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.SandboxCPUs != 4 || created.SandboxMemoryMB != 8192 {
-		t.Fatalf("created task sandbox shape = %d/%d, want 4/8192", created.SandboxCPUs, created.SandboxMemoryMB)
+	if created.SandboxCPUs != 4 || created.SandboxMemoryMB != 8192 || created.SandboxDiskGB != 40 {
+		t.Fatalf("created task sandbox shape = %d/%d/%d, want 4/8192/40",
+			created.SandboxCPUs, created.SandboxMemoryMB, created.SandboxDiskGB)
 	}
 
-	cpus, memoryMB := 2, 4096
-	updated, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB})
+	cpus, memoryMB, diskGB := 2, 4096, 20
+	updated, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{
+		SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB, SandboxDiskGB: &diskGB,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.SandboxCPUs != 2 || updated.SandboxMemoryMB != 4096 {
-		t.Fatalf("updated task sandbox shape = %d/%d, want 2/4096", updated.SandboxCPUs, updated.SandboxMemoryMB)
+	if updated.SandboxCPUs != 2 || updated.SandboxMemoryMB != 4096 || updated.SandboxDiskGB != 20 {
+		t.Fatalf("updated task sandbox shape = %d/%d/%d, want 2/4096/20",
+			updated.SandboxCPUs, updated.SandboxMemoryMB, updated.SandboxDiskGB)
 	}
 
 	zero := 0
-	cleared, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{SandboxCPUs: &zero, SandboxMemoryMB: &zero})
+	cleared, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{
+		SandboxCPUs: &zero, SandboxMemoryMB: &zero, SandboxDiskGB: &zero,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleared.SandboxCPUs != 0 || cleared.SandboxMemoryMB != 0 {
-		t.Fatalf("cleared task sandbox shape = %d/%d, want 0/0", cleared.SandboxCPUs, cleared.SandboxMemoryMB)
+	if cleared.SandboxCPUs != 0 || cleared.SandboxMemoryMB != 0 || cleared.SandboxDiskGB != 0 {
+		t.Fatalf("cleared task sandbox shape = %d/%d/%d, want 0/0/0",
+			cleared.SandboxCPUs, cleared.SandboxMemoryMB, cleared.SandboxDiskGB)
 	}
 }
 
@@ -876,7 +885,7 @@ func TestUpdateTaskValidates(t *testing.T) {
 	task := create(t, c, ctx)
 
 	blank, bad := "  ", "not-a-repo"
-	negativeCPUs, lowMemory := -1, 64
+	negativeCPUs, lowMemory, negativeDisk := -1, 64, -1
 	for name, req := range map[string]ui.UpdateTaskRequest{
 		"empty title": {Title: &blank},
 		// Clearing the target is rejected rather than allowed: a task with
@@ -887,6 +896,7 @@ func TestUpdateTaskValidates(t *testing.T) {
 		"unparseable read":         {Reads: &[]string{"not-a-repo"}},
 		"negative sandbox cpus":    {SandboxCPUs: &negativeCPUs},
 		"sandbox memory below 128": {SandboxMemoryMB: &lowMemory},
+		"negative sandbox disk":    {SandboxDiskGB: &negativeDisk},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.UpdateTask(ctx, task.ID, req)
@@ -2165,7 +2175,8 @@ func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
-// bwsalmon/agents#534: SandboxCPUs/SandboxMemoryMB (the deployment-wide
+// bwsalmon/agents#534, grain/task-41: SandboxCPUs/SandboxMemoryMB/
+// SandboxDiskGB (the deployment-wide
 // default sandbox shape) round-trip through UpdateSettings/GetSettings
 // the same as every other store-backed field, and 0 -- the "unset, use
 // bwsalmon/kontur's own default" zero value -- is valid, unlike
@@ -2176,30 +2187,37 @@ func TestUpdateSettingsSandboxShapeRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cpus, memoryMB := 4, 8192
-	got, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB})
+	cpus, memoryMB, diskGB := 4, 8192, 40
+	got, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB, SandboxDiskGB: &diskGB,
+	})
 	if err != nil {
 		t.Fatalf("setting sandbox shape: %v", err)
 	}
-	if got.SandboxCPUs != 4 || got.SandboxMemoryMB != 8192 {
-		t.Fatalf("sandboxCpus/sandboxMemoryMb = %d/%d, want 4/8192", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 4 || got.SandboxMemoryMB != 8192 || got.SandboxDiskGB != 40 {
+		t.Fatalf("sandboxCpus/sandboxMemoryMb/sandboxDiskGb = %d/%d/%d, want 4/8192/40",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 
 	read, err := c.GetSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.SandboxCPUs != 4 || read.SandboxMemoryMB != 8192 {
-		t.Fatalf("GetSettings sandboxCpus/sandboxMemoryMb = %d/%d, want 4/8192", read.SandboxCPUs, read.SandboxMemoryMB)
+	if read.SandboxCPUs != 4 || read.SandboxMemoryMB != 8192 || read.SandboxDiskGB != 40 {
+		t.Fatalf("GetSettings sandboxCpus/sandboxMemoryMb/sandboxDiskGb = %d/%d/%d, want 4/8192/40",
+			read.SandboxCPUs, read.SandboxMemoryMB, read.SandboxDiskGB)
 	}
 
 	zero := 0
-	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: &zero, SandboxMemoryMB: &zero})
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		SandboxCPUs: &zero, SandboxMemoryMB: &zero, SandboxDiskGB: &zero,
+	})
 	if err != nil {
 		t.Fatalf("clearing sandbox shape: %v", err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("sandboxCpus/sandboxMemoryMb after clearing = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("sandboxCpus/sandboxMemoryMb/sandboxDiskGb after clearing = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 
@@ -2244,6 +2262,7 @@ func TestUpdateSettingsValidates(t *testing.T) {
 	badRepo := []string{"not-owner-slash-name"}
 	negativeCPUs := -1
 	lowMemory := 64
+	negativeDisk := -1
 	cases := map[string]ui.UpdateSettingsRequest{
 		"unparseable poll interval": {PollInterval: &bad},
 		"zero max concurrent":       {MaxConcurrent: &zeroConcurrent},
@@ -2253,6 +2272,7 @@ func TestUpdateSettingsValidates(t *testing.T) {
 		"malformed target repo":     {TargetRepos: &badRepo},
 		"negative sandbox cpus":     {SandboxCPUs: &negativeCPUs},
 		"sandbox memory below 128":  {SandboxMemoryMB: &lowMemory},
+		"negative sandbox disk":     {SandboxDiskGB: &negativeDisk},
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {

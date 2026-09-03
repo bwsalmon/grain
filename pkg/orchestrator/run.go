@@ -87,6 +87,22 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 	}
 }
 
+// frameworkOpensPullRequests asks the Framework about to drive this run
+// whether its runs get the open_pull_request tool at all, so BuildPrompt
+// can name it only where it exists (agent.PullRequestFramework's own doc
+// comment says why the Framework is the only thing that knows).
+//
+// A Framework that does not implement that interface -- every test fake
+// here, and any implementation added later that forks no mcpserver --
+// answers no, which is the safe direction: a run that is never told
+// about a tool it happens to have loses one convenience, where a run
+// told to call a tool it does not have burns turns on an error it cannot
+// fix.
+func frameworkOpensPullRequests(framework agent.Framework) bool {
+	f, ok := framework.(agent.PullRequestFramework)
+	return ok && f.CanOpenPullRequest()
+}
+
 // BuildPrompt is the prompt a dispatched run receives — deliberately
 // plain: the task's own title and body plus the facts that are grain's
 // own, never the agent's to guess (which branch to push, which repo it
@@ -122,7 +138,17 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // proxy already allowed every push to task.Target -- what it grants is
 // the knowledge that the loop is available, which no tool description
 // on its own can convey (see the comment at that paragraph).
-func BuildPrompt(task model.Task, checkoutDir string) string {
+//
+// canOpenPullRequest is the one fact in that paragraph this function
+// cannot work out for itself: whether this run's mcpserver actually
+// registered open_pull_request. That depends on the Framework driving
+// the run having been given a daemon to ask (agent.PullRequestFramework,
+// and cmd/grain/mcpserver.go's -server/-task), which is a deployment's
+// choice -- a UI/API served at all -- rather than anything visible in a
+// task. False leaves the paragraph naming only pull_request_status, so a
+// deployment without that route never sends a run after a tool that is
+// not on its roster.
+func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) string {
 	branch := model.BranchName(task.ID)
 	var prompt string
 	if task.Target == nil {
@@ -167,6 +193,23 @@ func BuildPrompt(task model.Task, checkoutDir string) string {
 				"finishing on a red build.",
 			branch,
 		)
+		// The second half of the same loop, for a run that really has the
+		// tool (canOpenPullRequest above): pull_request_status reports the
+		// checks a push triggered directly, but a repo whose CI only runs
+		// on pull requests has none until one is open, and grain does not
+		// open it until the run has already exited. A run that opens it
+		// itself sees those checks while it still has turns left to fix
+		// them -- which is the whole reason open_pull_request exists, and
+		// is exactly as undiscoverable from a tool description as the
+		// loop above.
+		if canOpenPullRequest {
+			prompt += "\n\nOnce you have pushed, you can call `open_pull_request` to open the " +
+				"pull request for that branch without waiting for your run to end, and " +
+				"see what CI says about it there and then -- then fix what it reports, " +
+				"push again, and call it again for the next round. It is the same pull " +
+				"request grain opens for you when this run finishes, and calling it more " +
+				"than once never opens a second one."
+		}
 	}
 	if len(task.Reads) > 0 {
 		names := make([]string, len(task.Reads))
@@ -396,7 +439,8 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prompt string
 	var prepErr error
 	if checkoutErr == nil {
-		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments, attachments, checkoutDir)
+		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
+			attachments, checkoutDir, frameworkOpensPullRequests(framework))
 	}
 
 	var result *agent.Result
@@ -460,6 +504,10 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
 			Repo: repo, Branch: model.BranchName(task.ID),
+			// TaskID is what lets a Framework's own forked mcpserver ask
+			// the daemon to act for this run rather than only on its
+			// sandbox -- open_pull_request, today (see RunConfig.TaskID).
+			TaskID:   task.ID,
 			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
@@ -547,6 +595,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 // nothing at all when the framework returned no result to say. Kept to
 // names and counts, like noActionDetail: this lands in a stored outcome
 // column that `grain get` prints, not a transcript.
+//
+// Both ways a run can fail with a result behind it use this: a framework
+// that returned an error (above) and a run whose own tool call errored
+// (outcomeOf). The second used to record only the failing call's name, so
+// a run that opened its pull request and then tripped over something
+// unrelated read back as never having opened one -- which is a wrong
+// answer to the only question task_run.detail can be asked about tool
+// use, not merely a thinner one.
 func partialWorkSuffix(result *agent.Result) string {
 	if result == nil || len(result.ToolCalls) == 0 {
 		return ""
@@ -563,18 +619,40 @@ func partialWorkSuffix(result *agent.Result) string {
 // run_command did not do the work. Ported from pkg/orchestrate's own
 // runAgent (bwsalmon/agents#254), extended with detail for
 // bwsalmon/agents#403's own "a human should see why, not just that".
+//
+// Every ending that had a run behind it at all carries toolCallSummary,
+// including the successful one, which used to record nothing. That is not
+// symmetry for its own sake: which tools a run reached for is the only
+// evidence there is for whether a tool grain went to the trouble of
+// building and naming in the prompt is actually being used, and until now
+// it survived a successful run nowhere. agent.Result is never persisted;
+// noActionDetail and partialWorkSuffix wrote the summary only for runs
+// that failed or achieved nothing; and Result.Transcript is prose, is
+// best-effort per framework (agent.Result's own doc comment), and renders
+// a call as a "> name(args)" line that any tool's own *output* can
+// contain verbatim -- so counting calls out of it is both framework-
+// specific and unsound. A run that pushed, checked CI, repaired and
+// pushed again is exactly the run that succeeds, so the successful path
+// was precisely the one where the question "did it call the tool?" could
+// not be answered.
+//
+// Names and counts only, into a stored column a task listing prints --
+// the same bound noActionDetail's own doc comment sets, and the reason
+// this is not a transcript store.
 func outcomeOf(result *agent.Result) (outcome, detail string) {
 	sawTool := false
 	for _, c := range result.ToolCalls {
 		sawTool = true
 		if c.IsError {
-			return "failed", fmt.Sprintf("tool call %q failed: %s", c.Name, c.Text)
+			return "failed", fmt.Sprintf("tool call %q failed: %s%s",
+				c.Name, c.Text, partialWorkSuffix(result))
 		}
 	}
 	if !sawTool {
 		return "failed", "the agent made no tool calls at all"
 	}
-	return "succeeded", ""
+	return "succeeded", fmt.Sprintf("the run made %d tool call(s)%s",
+		len(result.ToolCalls), toolCallSummary(result))
 }
 
 // prepareCapabilities resolves and materializes cc.Task's capability
@@ -608,11 +686,16 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // that task, or from the default set, whichever the operator meant.
 // Silently running an agent without a capability its task is recorded as
 // holding would trade that for a run that quietly does the wrong work.
+//
+// checkoutDir and canOpenPullRequest are passed straight through to
+// BuildPrompt, which is where both are explained: nothing here reads
+// either, this being the one path that assembles a dispatch's prompt.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
-	attachments []model.Attachment, checkoutDir string) (materialized []model.Materialized, prompt string, err error) {
+	attachments []model.Attachment, checkoutDir string,
+	canOpenPullRequest bool) (materialized []model.Materialized, prompt string, err error) {
 
-	prompt = BuildPrompt(cc.Task, checkoutDir)
+	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest)
 	if thread := commentThreadSection(comments); thread != "" {
 		prompt += "\n\n" + thread
 	}

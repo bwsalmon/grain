@@ -375,7 +375,7 @@ func TestRunCycleAcquiresTheSandboxWithTheTasksOwnShape(t *testing.T) {
 	_, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	task := filedTask(t, ctx, store, "t1", repo)
-	task.SandboxCPUs, task.SandboxMemoryMB = 8, 16384
+	task.SandboxCPUs, task.SandboxMemoryMB, task.SandboxDiskGB = 8, 16384, 40
 	if err := store.PutTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestRunCycleAcquiresTheSandboxWithTheTasksOwnShape(t *testing.T) {
 	if len(acquired) != 1 {
 		t.Fatalf("Acquire calls = %+v, want exactly one", acquired)
 	}
-	if want := (orchestrator.Shape{CPUs: 8, MemoryMB: 16384}); acquired[0].shape != want {
+	if want := (orchestrator.Shape{CPUs: 8, MemoryMB: 16384, DiskGB: 40}); acquired[0].shape != want {
 		t.Errorf("Acquire shape = %+v, want %+v -- a task's override is a create-time argument now", acquired[0].shape, want)
 	}
 }
@@ -424,13 +424,16 @@ func TestRunCycleAcquiresWithNoShapeForATaskThatSetsNeitherField(t *testing.T) {
 	}
 }
 
-// A host-directory sandbox has no CPU or memory of its own, so a task
-// asking for a specific shape against that backend fails its dispatch
-// rather than silently getting the whole host.
+// A host-directory sandbox has no CPU, memory or disk of its own, so a
+// task asking for a specific shape against that backend fails its
+// dispatch rather than silently getting the whole host.
 func TestHostSandboxesRefusesAShapeItCannotHonour(t *testing.T) {
 	h := orchestrator.NewHostSandboxes(t.TempDir())
 	if _, err := h.Acquire(context.Background(), "t1-1", orchestrator.Shape{CPUs: 4}); err == nil {
 		t.Fatal("expected HostSandboxes.Acquire to refuse a shape it cannot honour")
+	}
+	if _, err := h.Acquire(context.Background(), "t1-1", orchestrator.Shape{DiskGB: 40}); err == nil {
+		t.Fatal("expected HostSandboxes.Acquire to refuse a disk size too -- a directory has no disk of its own")
 	}
 	if _, err := h.Acquire(context.Background(), "t1-1", orchestrator.Shape{}); err != nil {
 		t.Fatalf("Acquire with no shape: %v", err)

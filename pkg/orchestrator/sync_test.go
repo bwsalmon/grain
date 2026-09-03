@@ -30,7 +30,7 @@ func TestSyncPullRequestsClosesOutAMergedPullRequest(t *testing.T) {
 
 	// GitHub merges the PR "out of band" -- SyncPullRequests must notice
 	// on its own next read, not be told.
-	if err := client.MergePullRequest("acme", "widgets", pr.Number); err != nil {
+	if err := client.MergePullRequest("acme", "widgets", pr.Number, ""); err != nil {
 		t.Fatal(err)
 	}
 
