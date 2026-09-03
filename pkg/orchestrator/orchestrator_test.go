@@ -92,6 +92,18 @@ func newSim(t *testing.T, owner, repo, branch string) (*githubsim.Sim, *github.R
 // pushBranch pushes an empty commit on branch straight to bare, standing
 // in for a real dispatch's own git push -- this package's own tests care
 // about what happens once a branch is real, not about how it got there.
+//
+// The commit message names the branch, and has to. Two empty commits off
+// the same base, by the same author, with the same message, in the same
+// second are the same commit: git hashes exactly those inputs, so two
+// branches pushed back to back here used to land on one identical sha.
+// That was harmless while a pull request's checks were read by branch
+// name, and stopped being harmless when they started being read by head
+// sha (checkRunsFor, "Pin the check read and the merge to one commit"):
+// a test seeding CheckRuns for one branch was seeding them for the other
+// too, so a second task queued behind a stuck one inherited the stuck
+// one's pending check and never merged. Making the message differ makes
+// the shas differ, which is what every caller here already assumed.
 func pushBranch(t *testing.T, bare, branch string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -100,7 +112,7 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.email", "agent@example.com")
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "checkout", "-q", "-b", branch)
-	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit")
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit on "+branch)
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 
