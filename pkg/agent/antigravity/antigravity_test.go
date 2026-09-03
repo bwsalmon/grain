@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -216,6 +217,12 @@ func TestRunPassesTheRunsOwnRepoAndBranchToTheMCPServer(t *testing.T) {
 				t.Errorf("mcp args = %v, want %s %s", args, want[0], want[1])
 			}
 		}
+		// The flag a local mock deployment lives or dies by: dropped, the
+		// forked mcpserver speaks HTTPS to a githubsim serving plain
+		// HTTP and every pull_request_status answer becomes a TLS error.
+		if !slices.Contains(args, "-github-insecure-http") {
+			t.Errorf("mcp args = %v, want -github-insecure-http passed through", args)
+		}
 	})
 
 	// A task with no repo attached is a real case, and half the flags
@@ -224,8 +231,29 @@ func TestRunPassesTheRunsOwnRepoAndBranchToTheMCPServer(t *testing.T) {
 		r := &recordingRunner{stdout: okStream()}
 		f := newFramework(r, "/usr/local/bin/grain", WithGitHubAccess("/data", "github.com", false))
 		args := mcpArgs(t, f, agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}, r)
-		if argsHave(args, "-pr-repo", "") || argsHave(args, "-data-dir", "") {
-			t.Errorf("mcp args = %v, want none of the pull-request flags for a run with no repo", args)
+		// By name alone, not name-and-value: a flag is passed with a
+		// real value after it, so asking whether "-pr-repo" is followed
+		// by the empty string is a question nothing could ever answer
+		// yes to, wired or not.
+		for _, unwanted := range []string{"-data-dir", "-pr-repo", "-pr-branch", "-github-host"} {
+			if slices.Contains(args, unwanted) {
+				t.Errorf("mcp args = %v, want no %s for a run with no repo", args, unwanted)
+			}
+		}
+	})
+
+	// And a deployment that never called WithGitHubAccess has no
+	// credential to read GitHub with, so naming the repo would only
+	// produce a warning per run.
+	t.Run("no github access on the framework", func(t *testing.T) {
+		r := &recordingRunner{stdout: okStream()}
+		f := newFramework(r, "/usr/local/bin/grain")
+		args := mcpArgs(t, f, agent.RunConfig{
+			Prompt: "go", SandboxRoot: t.TempDir(),
+			Repo: "acme/widgets", Branch: "grain/task-9",
+		}, r)
+		if slices.Contains(args, "-pr-repo") {
+			t.Errorf("mcp args = %v, want no -pr-repo without WithGitHubAccess", args)
 		}
 	})
 }

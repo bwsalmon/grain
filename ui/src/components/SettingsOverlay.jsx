@@ -7,6 +7,7 @@ import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
 import { useThemeMode } from "../ThemeModeContext.jsx";
+import { capabilityRows } from "../state.js";
 
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
 // sidebar overlays; they live here now as tabs alongside the rest of
@@ -225,6 +226,16 @@ export default function SettingsOverlay({ onClose, showError }) {
 
   const restartRequired = new Set(settings.restartRequired || []);
   const pendingRestart = new Set(settings.pendingRestart || []);
+
+  // The Capabilities tab's own picker rows. settings.capabilities is
+  // every capability grain ships a provider for, so an ungrantable one
+  // is filtered out here before capabilityRows appends anything: what is
+  // left is what UpdateSettings validates the set against, plus a row
+  // for each already-stored id this build no longer offers at all.
+  const capabilityChoices = capabilityRows(
+    (settings.capabilities || []).filter((c) => c.grantable !== false),
+    defaultCapabilities,
+  );
 
   // restartHint annotates one field: "this one needs a restart" always,
   // and "you have already changed it, and it isn't running yet" once the
@@ -466,7 +477,10 @@ export default function SettingsOverlay({ onClose, showError }) {
             {/* Only grantable capabilities are offered: the set is
                 validated against the same picker listing a task's own
                 capabilities are, and one no task could be granted by hand
-                would be a default that failed at every filing. */}
+                would be a default that failed at every filing. A stored
+                id this build has retired gets a row anyway, purely so it
+                can be unticked -- capabilityRows (state.js) has why a
+                pane without one cannot be saved at all. */}
             <FormControl fullWidth margin="normal" size="small">
               <InputLabel id="settings-default-capabilities-label">Default capabilities</InputLabel>
               <Select
@@ -478,16 +492,16 @@ export default function SettingsOverlay({ onClose, showError }) {
                 renderValue={(selected) => (
                   <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
                     {selected.map((id) => {
-                      const cap = (settings.capabilities || []).find((c) => c.id === id);
+                      const cap = capabilityChoices.find((c) => c.id === id);
                       return <Chip key={id} size="small" label={cap ? cap.name || cap.id : id} />;
                     })}
                   </Box>
                 )}
               >
-                {(settings.capabilities || []).filter((c) => c.grantable !== false).map((c) => (
+                {capabilityChoices.map((c) => (
                   <MenuItem key={c.id} value={c.id} title={c.description}>
                     <Checkbox checked={defaultCapabilities.includes(c.id)} size="small" />
-                    <ListItemText primary={c.name || c.id} />
+                    <ListItemText primary={c.name || c.id} secondary={c.retired ? c.description : null} />
                   </MenuItem>
                 ))}
               </Select>
