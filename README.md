@@ -995,7 +995,18 @@ sync landing in the gap between the push and that sees nothing — and
 nothing is also what a repo with no CI configured answers, forever, with
 no way to tell the two apart from the Checks API. The window is the only
 thing that can, and a deployment with genuinely no CI pays it once per
-head commit. Nor does it wait for CI that is never coming: a head that
+head commit. And all of that is reasoning about one *commit*, so the
+cycle names it at every step rather than letting any of them mean
+"whatever the branch points at now": the check runs are read for the head
+sha off the pull-request read (a branch-scoped read answers for a commit
+the cycle never saw), the window above is keyed on it, and the merge
+carries it in GitHub's own `sha` parameter, which refuses with `409` if
+the branch has moved since. That closes the gap a push landing mid-cycle
+would otherwise walk through — a human's own "push a fix by hand", a fix
+task merging into the branch it repairs, a redispatched task pushing
+again — and costs one cycle when it happens: the task keeps its queue
+position and the commit that landed is judged next cycle on its own CI.
+Nor does it wait for CI that is never coming: a head that
 has read `PENDING` for longer than `defaultCheckStallDeadline` (two
 hours, timed per head commit over one unbroken run of pending reads) is
 given up on — a comment naming the checks that never finished,

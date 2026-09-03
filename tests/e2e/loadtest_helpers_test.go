@@ -85,7 +85,7 @@ func (g *loadGitHub) FindOpenPullRequestForBranch(owner, repo, branch string) (*
 func (g *loadGitHub) CreateIssue(owner, repo, title, body string, labels []string) (github.Issue, error) {
 	return github.Issue{}, g.unsupported("CreateIssue")
 }
-func (g *loadGitHub) MergePullRequest(owner, repo string, number int) error {
+func (g *loadGitHub) MergePullRequest(owner, repo string, number int, headSHA string) error {
 	return g.unsupported("MergePullRequest")
 }
 func (g *loadGitHub) GetPullRequest(owner, repo string, number int) (github.PullRequestDetail, error) {

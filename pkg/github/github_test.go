@@ -561,7 +561,7 @@ func TestCreateIssueRaisesOnANon201(t *testing.T) {
 func TestMergePullRequestPutsToTheMergeEndpoint(t *testing.T) {
 	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte(`{"merged": true}`)})
 	client := NewClient(transport, StaticToken{strPtr("t")})
-	if err := client.MergePullRequest("o", "r", 5); err != nil {
+	if err := client.MergePullRequest("o", "r", 5, ""); err != nil {
 		t.Fatal(err)
 	}
 	call := transport.Calls[0]
@@ -570,10 +570,65 @@ func TestMergePullRequestPutsToTheMergeEndpoint(t *testing.T) {
 	}
 }
 
+// The `sha` field is what makes this a merge of one named commit rather
+// than of whatever the head branch points at when GitHub gets round to
+// it. orchestrator.syncEntry sends the commit it read CI for, so a push
+// that lands in between is refused (409) instead of merged untested.
+func TestMergePullRequestPinsTheHeadSHAWhenGivenOne(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte(`{"merged": true}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.MergePullRequest("o", "r", 5, "cafef00d"); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(transport.Calls[0].Body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent["sha"] != "cafef00d" {
+		t.Fatalf("body = %+v, want the head sha pinned", sent)
+	}
+}
+
+// Empty means unpinned: a human clicking merge is not merging a
+// particular commit's verdict, and a `sha` GitHub had no reason to check
+// could only refuse a merge that was asked for.
+func TestMergePullRequestOmitsTheSHAKeyWhenUnpinned(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte(`{"merged": true}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.MergePullRequest("o", "r", 5, ""); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(transport.Calls[0].Body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sent["sha"]; ok {
+		t.Fatalf("expected no sha key, got %+v", sent)
+	}
+}
+
+// GitHub's answer to a pinned merge whose branch has moved. It reaches
+// the caller as an *Error carrying the status, which is what lets
+// orchestrator.SyncPullRequests treat it as "look again next cycle"
+// rather than as a broken deployment.
+func TestMergePullRequestSurfacesAMovedHeadAsA409(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 409, Body: []byte(
+		`{"message":"Head branch was modified. Review and try the merge again."}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	err := client.MergePullRequest("o", "r", 5, "cafef00d")
+	if err == nil {
+		t.Fatal("expected a moved head to be refused, not merged")
+	}
+	ghErr, ok := err.(*Error)
+	if !ok || ghErr.Status != 409 {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestMergePullRequestRaisesOnANon200(t *testing.T) {
 	transport := NewFakeTransport(ApiResponse{Status: 405, Body: []byte("not mergeable")})
 	client := NewClient(transport, StaticToken{strPtr("t")})
-	err := client.MergePullRequest("o", "r", 5)
+	err := client.MergePullRequest("o", "r", 5, "")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -1269,7 +1324,7 @@ func TestDryRunClientPassesCheckRunsThroughButPrintsIssueAndMerge(t *testing.T) 
 		if _, err := dry.CreateIssue("o", "r", "fix it", "", []string{"grain-agent-needs-approval"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := dry.MergePullRequest("o", "r", 5); err != nil {
+		if err := dry.MergePullRequest("o", "r", 5, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
