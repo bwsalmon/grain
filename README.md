@@ -4257,6 +4257,117 @@ than on a deployment that was full. A tick growing under a large store is
 the thing a load test is best placed to catch, and that is the shape it
 now catches it in.
 
+## Measuring what a run does with its tools
+
+The two sections above measure the outside of a run: when it started, how
+long it took, how it was recorded. Everything that makes a run *hard* is
+on the inside of it — a tool that answers unhelpfully, a search-and-edit
+loop that keeps missing, a command that gets killed by a bound nobody
+chose, a CI wait that never resolves — and none of it was measured
+anywhere. `docs/agent-ergonomics.md` is a whole review of that surface
+argued entirely from code-reading and single transcripts, because there
+was no aggregate to argue from.
+
+The counting was already happening. `orchestrator.toolCallSummary` has
+always tallied every tool a run called and how many of those calls came
+back as errors, for every run including the successful ones — and then
+rendered it into English in `task_run.detail`, a column a human reads one
+row at a time. Nothing could aggregate it, because it was prose.
+
+So the census is stored as data, and `grain metrics` prints it under the
+latency table:
+
+```console
+tool use (37 run(s) in the window recorded what they called)
+  calls                      4127  (98 per run at the median, 212 at p90)
+  errored calls               372  (9.0% of them -- a handful is the ordinary shape of this work)
+  tool                 runs    calls   errors timed out  mean bytes   p95 bytes
+  run_command            37     2894       7%    12 (0%)        1841     <=65535
+  edit_file              31      704      22%         -          118       <=511
+  read_file              29      402       4%         -        4210     <=32767
+  wait_for_checks        18       84       0%         -        1024      <=2047
+  (p95 bytes is an upper bound: sizes are kept in base-2 buckets, so the real
+   number is inside the octave below it. It is what should size the tool-result cap.)
+
+CI waits (84 wait(s) across 18 run(s))
+  verdicts                 passed=41 failed=28 timed_out=13 no_checks=2
+  blocked                  p50 3m20s, p90 14m0s, max 15m0s
+  pushes before green      2.4 on average, 7 at worst (over 16 run(s) that went green)
+```
+
+**This is the one measurement that had to be stored,** and it is stored
+because it is not derivable from anything that survives the run.
+`agent.Result` carries every call and every answer, and is discarded when
+`RunDispatch` returns; the transcript is per-framework prose that a
+tool's own output can forge (`orchestrator.outcomeOf` says why counting
+calls out of it would be unsound); `task_run.detail` is a sentence. Two
+tables, written once per run after its outcome, best-effort and logged
+rather than surfaced on failure — a measurement that cannot be taken is
+not a reason to fail the run being measured. `task_run_tool` is the
+census, one row per run per tool; `task_run_check_wait` is one row per
+`wait_for_checks` call, because the CI loop is a sequence rather than a
+total. Neither needed a `SchemaVersion` bump: `CREATE TABLE IF NOT
+EXISTS` creates a *missing* table on an existing store perfectly well,
+and an older store simply starts filling them.
+
+**Counts and sizes only.** No argument, no result and no fragment of
+output crosses into a measurement table. What a run's commands said stays
+in the transcript, which has its own bounds and its own reasons to exist.
+
+**A result-size percentile is a bound, and says so.** An exact one needs
+every sample, which means a stored row per tool *call* — hundreds a run,
+read whole on every report. Each census row instead carries a base-2
+histogram of its result sizes, so `p95 <=65535` means "95% of those
+answers were at most 64 KB", with the real number inside the octave
+below. That is precise enough for the question it exists to answer: what
+should `mcp.maxToolResultBytes` be, which is currently a defensible guess
+at 64 KB and deliberately a `var` until this says otherwise.
+
+**Two facts had to be read back out of a tool's own text,** because
+nothing else carries them: whether a `run_command` was ended by its bound
+rather than by the command (a bounded-out call is an error like any
+other), and which of its four verdicts a `wait_for_checks` reached (every
+wait_for_checks answer is a success). `mcp.RunCommandTimedOut` and
+`mcp.ReadCheckWait` live beside the code that writes those sentences and
+match markers that the sentences are *built* from, which is the only
+arrangement where rewording one cannot silently zero the other. Only
+grain's own trailing notices are searched, so a command whose output
+quotes the notice is not a command that timed out; the hedged `exit=137`
+notice (which may be the OOM killer) and the stalled-transport notice are
+counted as neither, since neither is a bound running out.
+
+**Attempt outcomes are also split by what they mean.** `task_run.outcome`
+is coarse enough that `cancelled` is both "a human closed the task" and
+"the run hit its two-hour wall", and `failed` is both "the CLI died" and
+"the run exhausted `-max-agent-turns`" — pairs with different fixes,
+distinguishable only by the sentence recorded beside them. `grain
+metrics` prints a second line under the outcomes for how those attempts
+actually ended, `no_action` among them: a run that had tools, used them
+and produced nothing is the purest measure of this surface failing, and
+it used to be one key in a map beside `succeeded`. The sentences are
+built in `pkg/model` and read back there (`model.EndingOf`), so the
+writer and the reader cannot drift apart.
+
+**The CI loop is measured end to end** because the prompt sends every run
+around it: push, `wait_for_checks`, fix, push again. A deployment where
+most waits end `timed_out` has `mcp.DefaultWaitForChecksTimeout` set
+wrong for its CI; one where most end `no_checks` is sending runs to wait
+for CI that does not exist; and "pushes before green" is what the loop
+costs in rework — 1.0 is CI right first time. A push is counted from the
+`git push` in a `run_command`'s own arguments, and only from a call that
+did not error, because a rejected push is not a push: it under-counts
+rather than over-counts, which is the right direction for a number whose
+point is how much rework there was.
+
+**Everything else about it follows this package's existing rules.** A
+census row has no moment of its own, so it belongs to a window when its
+*run* finished inside it. A run that recorded none contributes to nothing
+rather than to a zero — which is why `tool use` states how many runs are
+behind it, and why neither section renders at all, in the CLI or the UI,
+until something has recorded one. A deployment upgraded into this reports
+no tool use for its older runs, and that is the honest answer: nobody was
+measuring.
+
 ## Merge capacity is its own number
 
 Concurrency was one number: `max_concurrent`, the count of runs

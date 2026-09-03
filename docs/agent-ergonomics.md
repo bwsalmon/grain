@@ -371,7 +371,11 @@ row — which is why it is ninth rather than third.
 
 ---
 
-## Metrics: everything above is currently argued from anecdote
+## Metrics: everything above was argued from anecdote
+
+*(Findings 11, 12 and 13 below are **done**, grain/task-153 — the three
+of them are one change. What this section describes as missing is what
+was missing when it was written.)*
 
 `pkg/metrics` measures what the deployment delivers — throughput, latency
 by stage, run outcomes, backlog, cycle behaviour. It measures nothing
@@ -405,6 +409,23 @@ or a JSON column alongside `detail`, which the migration ladder in
 - **`run_command` timeout rate**, once finding 3 makes timeouts
   distinguishable at all.
 
+**Done** (grain/task-153), with 12 and 13. `task_run_tool` holds the
+census one row per run per tool — calls, errored calls, calls the tool's
+own bound cut off, result bytes and their base-2 histogram — written once
+by `RunDispatch` from the `agent.Result` that is about to be discarded,
+best-effort and logged rather than surfaced, since a measurement that
+cannot be taken is not a reason to fail the run being measured.
+`task_run.detail`'s sentence is untouched. `metrics.Report.Tools` reports
+all four bullets over a window, and `grain metrics` and the Metrics pane
+both print it. The size percentiles are bounds and are named `AtMost`:
+an exact one needs a stored row per *call*, and a bound within an octave
+is enough to size `mcp.maxToolResultBytes`, which is still the 64 KB
+guess finding 4 left deliberately as a `var`. The timeout rate reads
+finding 3's own notice back (`mcp.RunCommandTimedOut`), matching a marker
+that notice is built from, and counts neither the hedged `exit=137` nor a
+stalled transport as a timeout. See README.md's "Measuring what a run does
+with its tools".
+
 ### 12. Split the endings that are ergonomics problems out of `Outcomes`
 
 `metrics.Runs.Outcomes` counts `task_run.outcome` strings, and the
@@ -420,6 +441,20 @@ ended by exhausting `MaxAgentTurns`, `no_action` runs, and runs paused by
 a usage limit. Each has a different fix, and today they are
 indistinguishable in aggregate.
 
+**Done** (grain/task-153). `metrics.Runs.Endings` counts the same runs by
+`model.RunEnding` — `runtime_cap`, `task_closed`, `turns_exhausted`,
+`no_action`, `usage_limit`, `setup_failed`, `succeeded`, `failed`, and a
+`cancelled` for a cancellation that names neither of its two causes, so
+that neither of those series is inflated by a run that might not belong
+to it. `Runs.Outcomes` still counts the words verbatim, and the two
+readings sit next to each other on purpose. Nothing new is stored for it:
+the distinction was always in `task_run.detail`, and what was missing was
+a way to read that back as a fact. The sentences are now built and matched
+in one place (`model.RuntimeCapDetail`, `model.TaskClosedDetail`, and
+`agent.MaxTurnsExceeded` for the phrase all three frameworks return),
+each with a test on the round trip, because a reworded sentence would
+otherwise leave a series quietly reading zero forever.
+
 ### 13. Measure the CI loop the prompt sends every run around
 
 `BuildPrompt` now tells every run to push, call `wait_for_checks`, fix
@@ -430,6 +465,19 @@ pushes a run makes before its checks go green. A deployment where most
 waits end with "still running when the clock ran out" is one where
 `DefaultWaitForChecksTimeout` is set wrong for its CI, and nothing today
 would ever show that.
+
+**Done** (grain/task-153). `task_run_check_wait` holds one row per
+`wait_for_checks` call — a run makes a handful, not hundreds — with the
+verdict it reached, how long it blocked, and how many pushes the run had
+made before it; `metrics.Report.Checks` reports the verdict counts, the
+blocked distribution and pushes-to-green, read off the *first* passing
+wait in each run. The verdict comes from `mcp.ReadCheckWait`, which lives
+beside the report it reads and matches phrases that report is built from;
+an answer that is not one of the four (a branch not pushed yet, a CI that
+could not be read) counts as none of them rather than being folded into
+the nearest. A push is the `git push` in a `run_command`'s own arguments,
+and only from a call that did not error, so the number under-counts
+rather than over-counts.
 
 ---
 
@@ -444,7 +492,8 @@ Filed as separate proposals, each depending on this document:
 3. Tell a run its wall-clock budget (finding 7) — **done**,
    grain/task-151.
 4. Tell a redispatched run what its previous attempts did (finding 8).
-5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13).
+5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13)
+   — **done**, grain/task-153.
 6. A per-repo setup command (finding 9).
 
 Findings 6 and 10 are small enough to fold into whichever of those
