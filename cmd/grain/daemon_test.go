@@ -149,6 +149,36 @@ func TestCapabilityProviders(t *testing.T) {
 	}
 }
 
+// reapCapabilities picks what to sweep by type-asserting each registered
+// provider to model.Reaper, so a capability minting a resource with no
+// native TTL is only actually swept if the provider a real daemon builds
+// implements that interface -- an equivalent package-level function is
+// not reached, however well it works. gemini-key was exactly that gap
+// (grain/task-140): its "clean up after 24 hours if leaked" backstop had
+// no caller outside a test, so a key minted for a run whose controller
+// died before the lease was written was never deleted by anything.
+//
+// The three named here each mint a bearer resource GCP or GitHub will
+// never expire on its own; a future MINT provider whose resource does
+// expire by itself needs no Reap, which is why this lists names rather
+// than asserting over every model.ProvisionMint spec.
+func TestEveryLeakableCapabilityIsReaped(t *testing.T) {
+	cfg := config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"}
+	reaped := map[string]bool{}
+	for _, p := range capabilityProviders(cfg, nil) {
+		if _, ok := p.(model.Reaper); ok {
+			reaped[p.Spec().Name] = true
+		}
+	}
+	for _, name := range []string{"gcp-key", "gemini-key", "github-sandbox"} {
+		if !reaped[name] {
+			t.Errorf("capability %q is registered but does not implement model.Reaper: "+
+				"reapCapabilities skips it entirely, so a resource it minted for a run whose record was "+
+				"lost outlives its 24-hour bound forever", name)
+		}
+	}
+}
+
 // gitHubTokenNames is what run() reads the deployment's named tokens
 // from, once, before either half of the process is up -- the ladder's
 // own directory under -data-dir, the same place the default token lives.
