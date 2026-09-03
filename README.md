@@ -137,7 +137,13 @@ pkg/staterepo/  grain's database as a git repository: every table
                 exported to tables/<name>.json, rows sorted by primary key
                 and columns in declared order, so an unchanged database
                 produces byte-identical files and a settings change is a
-                diff an agent can propose. Import is the other direction
+                diff an agent can propose. On two clocks: everything
+                anybody reads on every 30s sync, and the four tables grain
+                writes to itself on every reconcile cycle (tier.go) once
+                an hour, which is what stops a busy day from costing 2,880
+                commits and gigabytes of .git -- see "Two clocks, so the
+                repository grows with the data and not with time" below.
+                Import is the other direction
                 and is a wholesale replacement -- that is how a merged
                 pull request, including one that deletes a row, becomes
                 the running configuration. Load imports the whole of it
@@ -2460,6 +2466,15 @@ makes them safe to replace live. A merged change to a task or a run is
 not applied, and the next export writes the database's own version of it
 back out: the database is authoritative for what grain itself did.
 
+Even the startup import is only wholesale in the case that needs it to
+be. A working tree with no marker is a clone onto a host that has never
+loaded it -- the restore case, where the repository is the only copy
+there is -- and every table comes back. A marker that disagrees with
+HEAD is a repository that moved under a host which already has a
+database, and there only the state tier is replaced, because the
+database is by design ahead of the repository on grain's own churn
+(below).
+
 If a pull arrives that cannot be applied -- a dump stamped with a schema
 this build does not know, or rows that will not insert -- the daemon
 stops exporting until it can. Writing the database over those files
@@ -2490,6 +2505,62 @@ ladder everything else here uses, resolved per push rather than cached
 askpass script rather than argv or the remote URL: argv is world-readable
 through `ps`, and a URL with a token in it would persist in
 `.git/config`, inside the very repository being pushed.
+
+### Two clocks, so the repository grows with the data and not with time
+
+Exporting every table on a 30s timer is right for settings and wrong for
+the tables grain writes to itself. A reconcile cycle stamps
+`task_observation.observed_at` on every task whose pull request it is
+watching, every cycle, whether or not anything moved; runs start, finish
+and have their transcripts written all day. Nobody sends a pull request
+against those rows. Committing them every 30 seconds rewrites the largest
+files in the dump forever, and git keeps every version it is ever shown.
+
+Measured rather than assumed (`pkg/staterepo/growth_test.go` drives a
+real database and a real git repository through a simulated day of a busy
+deployment -- 400 tasks of history, 25 tasks watched per cycle, 300 runs
+and 60 new tasks over the day, transcripts at 30 KiB apiece):
+
+| a simulated day                | grain#174 as merged | this build |
+|--------------------------------|--------------------:|-----------:|
+| commits                        |               2,880 |         84 |
+| of those, about settings       |                  10 |         10 |
+| `.git` growth, on disk         |             2.9 GiB |  227.6 MiB |
+| `.git` growth, once packed     |            18.9 MiB |    9.1 MiB |
+| CPU spent in `Sync`            |             43m 07s |     2m 15s |
+
+Every one of those 2,880 commits touched `task_observation.json`; ten of
+them were about anything a human would want to read. Three things
+changed, and the numbers above are all three together.
+
+**A churn tier on a slower clock.** Four tables -- `task_run`,
+`task_observation`, `lease`, `task_read` -- are exported hourly rather
+than every 30 seconds (`pkg/staterepo/tier.go` names them and says why
+each one is on the list). Everything else, which is everything anybody
+reads or reviews, is still exported on every sync and still commits
+within 30 seconds of changing. They were not dropped from the dump: a
+clone is still a complete restore, just up to an hour behind on runs,
+which is the one real cost here and is what the alternative -- leaving
+them out entirely -- would have made permanent.
+
+**Packing.** Every commit writes a whole new blob per file it touched, so
+a repository committed to on a timer accumulates loose objects that are
+each a complete copy of a dump nearly identical to the last one. Nothing
+ever packed them. `git gc --auto` now runs after a sync that committed,
+at a `gc.auto` threshold set for a repository whose objects are database
+dumps rather than source files. On its own that is the 2.9 GiB → 18.9 MiB
+column above.
+
+**An import that does not roll churn back.** Since the database is now
+ahead of the repository on churn by up to an hour by design, a merged
+pull request arriving at startup imports only the state tier and leaves
+grain's own record of what it did alone. A clone with no marker -- the
+restore case, where the repository is the only copy there is -- still
+imports all of it.
+
+Squashing history periodically was the other candidate and is not what
+happened: it means force-pushing a branch that people open pull requests
+against, which trades a disk problem for a workflow one.
 
 ### Secrets are encrypted, and they are not in it
 

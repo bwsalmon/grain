@@ -54,7 +54,17 @@ func newStateManager(dataDir string, db *sql.DB, repo *staterepo.Repo, secretSto
 func (m *stateManager) sync(ctx context.Context) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.cycle(ctx)
+	return m.cycle(ctx, false)
+}
+
+// syncAll is sync with grain's own churn written out whether or not its
+// slower clock says it is due (pkg/staterepo/tier.go) -- what a human
+// asking for a sync means, and what the loop owes the repository on the
+// way out.
+func (m *stateManager) syncAll(ctx context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cycle(ctx, true)
 }
 
 // cycle is one pass over the repository, in both directions: pull what a
@@ -69,7 +79,10 @@ func (m *stateManager) sync(ctx context.Context) (bool, error) {
 // are exactly the divergence Pull refuses to resolve. Pulled first, the
 // working tree is still where the last push left it, and the merge is a
 // fast-forward.
-func (m *stateManager) cycle(ctx context.Context) (bool, error) {
+// all says whether the export writes grain's own churn out too, or
+// leaves it to its own slower clock: false for the timer's own tick,
+// true for a human asking for a sync outright.
+func (m *stateManager) cycle(ctx context.Context, all bool) (bool, error) {
 	applied, applyErr := staterepo.Apply(ctx, m.repo, m.db, model.SchemaVersion)
 	if errors.Is(applyErr, staterepo.ErrNotApplied) {
 		// The working tree is at a commit the database has not taken up --
@@ -86,7 +99,11 @@ func (m *stateManager) cycle(ctx context.Context) (bool, error) {
 	// credential -- is not a reason to stop exporting. The commits pile
 	// up locally and go out with the next push that works, which is the
 	// same thing the loop already did before it pulled at all.
-	changed, syncErr := staterepo.Sync(ctx, m.repo, m.db, model.SchemaVersion)
+	export := staterepo.Sync
+	if all {
+		export = staterepo.SyncAll
+	}
+	changed, syncErr := export(ctx, m.repo, m.db, model.SchemaVersion)
 	m.lastErr = errors.Join(applyErr, syncErr)
 	return applied || changed, m.lastErr
 }
@@ -207,11 +224,13 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 // demand. Both directions, deliberately -- an operator who has just
 // merged a change to a template presses this to have it now rather than
 // in thirty seconds, and a button that only pushed would not give them
-// that.
+// that. And all of it, churn included: a human who presses Sync is
+// asking for the repository to match the database now, not for the half
+// of it that is due.
 func (m *stateManager) Sync(ctx context.Context) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, err := m.cycle(ctx); err != nil {
+	if _, err := m.cycle(ctx, true); err != nil {
 		return ui.StateRepoStatus{}, err
 	}
 	return m.status(ctx), nil

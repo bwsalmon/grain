@@ -267,7 +267,10 @@ func stateSync(ctx context.Context, dataDir string) error {
 		return err
 	}
 	defer db.Close()
-	changed, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion)
+	// SyncAll, not Sync: a human typing this is asking for the whole
+	// database to be written out now, not for the state tier alone with
+	// grain's own churn left to its slower clock (pkg/staterepo/tier.go).
+	changed, err := staterepo.SyncAll(ctx, repo, db, model.SchemaVersion)
 	if err != nil {
 		return err
 	}

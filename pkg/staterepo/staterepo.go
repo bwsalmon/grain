@@ -78,7 +78,32 @@ type Config struct {
 	// a token that expires (a GitHub App installation token lasts an
 	// hour) is re-read rather than cached until it fails.
 	Token func(ctx context.Context) (string, error)
+	// ChurnInterval is how often the tier-churn tables are written out;
+	// DefaultChurnInterval if zero. Every other table is written out on
+	// every Sync. See tier.go for which tables those are and why they get
+	// a clock of their own.
+	ChurnInterval time.Duration
+	// Now is the clock ChurnInterval is measured against, and nil means
+	// time.Now. It exists for the measurement in growth_test.go, which
+	// drives a simulated day through this package in a few minutes of
+	// wall clock and would otherwise be measuring its own runtime rather
+	// than the cadence it set out to.
+	Now func() time.Time
 }
+
+// DefaultChurnInterval is how often grain's own record of what it did --
+// runs, leases, observations, read marks -- reaches the repository.
+//
+// An hour, against a 30-second sync, because the two halves are answers
+// to different questions. Settings have to be current: the repository is
+// where they are read and reviewed, and a change made in the UI that is
+// not in the repository yet is a change nobody can see. Churn only has
+// to be recoverable, and the database on disk is the live copy of it --
+// the repository is the off-host backup, so the cost of an hour's lag is
+// an hour of run history lost in a total loss of the host, which is a
+// price worth paying to stop that history from being rewritten 2,880
+// times a day.
+const DefaultChurnInterval = time.Hour
 
 // Repo is an opened state repository. Build one with Open.
 type Repo struct {
@@ -94,6 +119,9 @@ func (r *Repo) Branch() string { return r.branch }
 
 // Remote returns the tracked remote, or "" for a local-only repository.
 func (r *Repo) Remote() string { return r.cfg.Remote }
+
+// now is the clock Config.Now names.
+func (r *Repo) now() time.Time { return r.cfg.Now() }
 
 // Open prepares the state repository, creating it if it is not there.
 //
@@ -121,6 +149,12 @@ func Open(ctx context.Context, cfg Config) (*Repo, error) {
 	}
 	if cfg.AuthorEmail == "" {
 		cfg.AuthorEmail = "grain@localhost"
+	}
+	if cfg.ChurnInterval <= 0 {
+		cfg.ChurnInterval = DefaultChurnInterval
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	r := &Repo{cfg: cfg, branch: branch}
 
@@ -199,6 +233,20 @@ func (r *Repo) configure(ctx context.Context) error {
 		// and a host with commit.gpgsign set globally would otherwise
 		// break every automated commit with a passphrase prompt.
 		{"commit.gpgsign", "false"},
+		// How many loose objects `gc --auto` (maintain) will tolerate
+		// before packing them. git's own default is 6700, which is tuned
+		// for a repository whose objects are source files a person wrote:
+		// this one's are whole database dumps, tens of megabytes each, so
+		// 6700 of them is hundreds of gigabytes of disk sitting unpacked.
+		// A few dozen commits' worth is the right order here, and packing
+		// that often is cheap because it is exactly what git is good at.
+		{"gc.auto", "128"},
+		// Synchronously, not in a background process that outlives the
+		// call. The daemon runs in a container that can be stopped between
+		// one sync and the next, and a detached gc killed halfway is a
+		// repository nobody was watching over. Run inline it is bounded by
+		// the same timeout every other git command here has.
+		{"gc.autoDetach", "false"},
 	} {
 		if _, err := r.git(ctx, "config", kv[0], kv[1]); err != nil {
 			return err
@@ -431,11 +479,75 @@ func (r *Repo) recordLoadedHead(ctx context.Context) error {
 // assuming <dir>/.git: that is a file, not a directory, in a worktree,
 // and writing into it would corrupt the repository.
 func (r *Repo) loadedHeadPath(ctx context.Context) (string, error) {
+	return r.gitDirFile(ctx, loadedHeadFile)
+}
+
+func (r *Repo) gitDirFile(ctx context.Context, name string) (string, error) {
 	out, err := r.git(ctx, "rev-parse", "--absolute-git-dir")
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(strings.TrimSpace(out), loadedHeadFile), nil
+	return filepath.Join(strings.TrimSpace(out), name), nil
+}
+
+// churnExportedFile records when the tier-churn tables were last written
+// out. It sits beside loadedHead, inside the git directory, for the same
+// reason: it is a fact about this host's own clock, not about the
+// repository, so it must not be committed and must not travel to a
+// remote. A clone that arrives without one exports churn on its first
+// sync, which is the right answer -- a fresh working tree has no idea how
+// stale its churn files are.
+const churnExportedFile = "grain-churn-exported"
+
+// churnDue reports whether the churn tier is due to be written out. A
+// marker that is missing, empty or unreadable means yes: erring towards
+// one extra export costs one commit, where erring the other way would
+// silently stop exporting run history altogether.
+func (r *Repo) churnDue(ctx context.Context, now time.Time) bool {
+	path, err := r.gitDirFile(ctx, churnExportedFile)
+	if err != nil {
+		return true
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return true
+	}
+	return !now.Before(last.Add(r.cfg.ChurnInterval))
+}
+
+func (r *Repo) recordChurnExport(ctx context.Context, at time.Time) error {
+	path, err := r.gitDirFile(ctx, churnExportedFile)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(at.UTC().Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("staterepo: writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// maintain lets git pack what has accumulated.
+//
+// Every commit here writes a whole new blob for each file it touched --
+// git has no concept of appending to one -- so a repository that is
+// committed to on a timer accumulates loose objects, each a complete
+// zlib copy of a dump that is mostly identical to the one before it.
+// Packing turns that pile into deltas, and it is dramatic rather than
+// marginal: a measured day of a busy deployment is gigabytes loose and
+// tens of megabytes packed (see growth_test.go).
+//
+// git's own `gc --auto` is what does it, at the threshold configure()
+// sets, so the policy is git's and the only thing this adds is a place
+// to call it from. Errors are deliberately dropped: housekeeping that
+// could not run is a repository that is larger than it needs to be, and
+// failing a sync -- and so a push of real state -- over that would be
+// the worse outcome by far.
+func (r *Repo) maintain(ctx context.Context) {
+	_, _ = r.git(ctx, "gc", "--auto", "--quiet")
 }
 
 // git runs one git command in the working tree.

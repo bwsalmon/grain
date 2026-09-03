@@ -623,7 +623,7 @@ func run(ctx context.Context, cfg config) error {
 	syncStopped := make(chan struct{})
 	go func() {
 		defer close(syncStopped)
-		stateSyncLoop(ctx, stateManager.sync)
+		stateSyncLoop(ctx, stateManager.sync, stateManager.syncAll)
 	}()
 	// Waited for here, and deliberately after `defer db.Close()` above so
 	// that it runs *before* it: the loop's last act on the way out is one
