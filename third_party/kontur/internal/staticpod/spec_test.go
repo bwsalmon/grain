@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/kontur/internal/config"
 	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
@@ -17,49 +18,55 @@ func baseSpec() VMSpec {
 	return s
 }
 
-func TestValidate_WritableDiskMustBeUnderImagesMountPath(t *testing.T) {
-	s := baseSpec()
-	s.DiskReadOnly = false
-	s.DiskImage = "/var/lib/kontur/guest/disk.img"
-	if err := s.Validate(); err == nil {
-		t.Fatalf("Validate() = nil, want an error for a writable disk outside %s", ImagesMountPath)
-	}
-}
-
-func TestValidate_WritableDiskRequiresDiskHostPath(t *testing.T) {
+func TestValidate_WritableDiskNeedsNoHostPathOrImagesPrefix(t *testing.T) {
+	// Both of these used to be errors, and stopped being ones when the
+	// overlay moved inside the VM's container: there is no host-side
+	// qcow2 to place, so no -disk-hostpath to require, and no backing
+	// file to resolve out here, so no reason the source has to sit under
+	// the shared /images mount.
 	s := baseSpec()
 	s.DiskReadOnly = false
 	s.DiskHostPath = ""
-	if err := s.Validate(); err == nil {
-		t.Fatalf("Validate() = nil, want an error for an empty disk-hostpath with disk-readonly=false")
-	}
-}
-
-func TestValidate_WritableDiskUnderImagesMountPathOK(t *testing.T) {
-	s := baseSpec()
-	s.DiskReadOnly = false
+	s.DiskImage = "/var/lib/kontur/guest/disk.img"
 	if err := s.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want nil for a writable disk under %s with a disk-hostpath set", err, ImagesMountPath)
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+	if s.DiskImage != "/var/lib/kontur/guest/disk.img" {
+		t.Errorf("DiskImage = %q, want it passed through unchanged", s.DiskImage)
 	}
 }
 
-func TestResolvedDiskImage(t *testing.T) {
-	s := baseSpec()
-	if got, want := s.ResolvedDiskImage(), s.DiskImage; got != want {
-		t.Errorf("ResolvedDiskImage() = %q, want %q (unchanged) when DiskReadOnly", got, want)
+func TestDiskModeOrDerived(t *testing.T) {
+	// -disk-readonly=false has always meant "a private writable disk for
+	// this VM", which the overlay mode is; mapping it to persistent
+	// instead would silently point every existing caller's guest at the
+	// shared image and let two VMs write to one file.
+	cases := []struct {
+		name string
+		mut  func(s *VMSpec)
+		want string
+	}{
+		{"explicit mode wins", func(s *VMSpec) { s.DiskMode = config.DiskModePersistent; s.DiskReadOnly = true }, config.DiskModePersistent},
+		{"readonly true", func(s *VMSpec) { s.DiskReadOnly = true }, config.DiskModeReadOnly},
+		{"readonly false", func(s *VMSpec) { s.DiskReadOnly = false }, config.DiskModeOverlay},
 	}
-
-	s.DiskReadOnly = false
-	if got, want := s.ResolvedDiskImage(), DiskMountPath+"/disk.qcow2"; got != want {
-		t.Errorf("ResolvedDiskImage() = %q, want %q when writable", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := baseSpec()
+			s.DiskMode = ""
+			tc.mut(&s)
+			if got := s.DiskModeOrDerived(); got != tc.want {
+				t.Errorf("DiskModeOrDerived() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestWritableDiskDir(t *testing.T) {
+func TestValidate_RejectsAnUnknownDiskMode(t *testing.T) {
 	s := baseSpec()
-	s.DiskHostPath = "/var/lib/kontur/vm-disks"
-	if got, want := s.WritableDiskDir(), "/var/lib/kontur/vm-disks/web"; got != want {
-		t.Errorf("WritableDiskDir() = %q, want %q", got, want)
+	s.DiskMode = "writable"
+	if err := s.Validate(); err == nil {
+		t.Error("Validate() = nil, want an error naming the three valid modes")
 	}
 }
 
@@ -70,7 +77,6 @@ func TestValidate_RequiresCore(t *testing.T) {
 	}{
 		{"name", func(s *VMSpec) { s.Name = "" }},
 		{"name too long for tap device", func(s *VMSpec) { s.Name = "way-too-long-a-name" }},
-		{"disk", func(s *VMSpec) { s.DiskImage = "" }},
 		{"ip", func(s *VMSpec) { s.IP = "" }},
 		{"bad ip", func(s *VMSpec) { s.IP = "not-an-ip" }},
 		{"ipv6", func(s *VMSpec) { s.IP = "::1" }},
@@ -91,6 +97,34 @@ func TestValidate_RequiresCore(t *testing.T) {
 				t.Errorf("Validate() = nil, want an error")
 			}
 		})
+	}
+}
+
+func TestValidate_NoDiskMeansTheImagesOwnGuest(t *testing.T) {
+	// An empty DiskImage is not a missing field: it means the guest
+	// baked into the kontur image, which is what a VM booted from a
+	// customized kontur image runs. There is no host path to name and no
+	// shared backing file to overlay, so the writable-disk rules below
+	// must not apply to it either.
+	s := baseSpec()
+	s.Backend = BackendDocker
+	s.DiskImage = ""
+	s.DiskReadOnly = false
+	s.DiskHostPath = ""
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil for a spec with no disk of its own", err)
+	}
+	if s.DiskImage != "" {
+		t.Errorf("DiskImage = %q, want it left empty so kontur run's own default applies", s.DiskImage)
+	}
+}
+
+func TestValidate_NoDiskIsRejectedOnTheStaticPodBackend(t *testing.T) {
+	s := baseSpec()
+	s.Backend = BackendStaticPod
+	s.DiskImage = ""
+	if err := s.Validate(); err == nil {
+		t.Error("Validate() = nil, want an error: the pod manifest always emits CHV_DISK_IMAGE, and an empty value is not an unset one")
 	}
 }
 

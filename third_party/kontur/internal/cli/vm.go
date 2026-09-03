@@ -72,6 +72,7 @@ func runVM(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 type vmFlags struct {
 	diskImage                     *string
 	diskReadOnly                  *bool
+	diskMode                      *string
 	kernel                        *string
 	initramfs                     *string
 	firmware                      *string
@@ -105,7 +106,8 @@ type vmFlags struct {
 func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v := &vmFlags{}
 	v.diskImage = fs.String("disk", d.DiskImage, "path to the VM's disk image under -images-hostpath, as seen inside the kontur container (e.g. /images/disk.img)")
-	v.diskReadOnly = fs.Bool("disk-readonly", d.DiskReadOnly, "attach the disk read-only; if false, a private writable qcow2 overlay backed by -disk is created under -disk-hostpath before the VM starts, since -images-hostpath itself is always mounted read-only")
+	v.diskMode = fs.String("disk-mode", d.DiskMode, `how the VM attaches its disk: "overlay" (the default -- the guest writes into a thin qcow2 of its own, created in its container, leaving the image untouched and shared), "persistent" (the guest writes through to the image itself) or "readonly"`)
+	v.diskReadOnly = fs.Bool("disk-readonly", d.DiskReadOnly, "deprecated, use -disk-mode: true means -disk-mode=readonly, false means -disk-mode=overlay (which is what it always did: a private writable disk per VM)")
 	v.kernel = fs.String("kernel", d.Kernel, "path to a kernel for direct boot, as seen inside the container (mutually exclusive with -firmware)")
 	v.initramfs = fs.String("initramfs", d.Initramfs, "path to an initramfs, used with -kernel")
 	v.firmware = fs.String("firmware", d.Firmware, "path to firmware for firmware boot, as seen inside the container (mutually exclusive with -kernel)")
@@ -125,7 +127,10 @@ func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v.dockerRunOpts.values = append([]string(nil), d.DockerRunOpts...)
 	fs.Var(&v.dockerRunOpts, "docker-run-opt", "extra option passed verbatim to the \"docker run\" creating the network namespace holder, repeatable (e.g. -docker-run-opt -p -docker-run-opt 8080:80); -backend docker only")
 	v.imagesHostPath = fs.String("images-hostpath", d.ImagesHostPath, "host directory mounted read-only at /images in the kontur container")
-	v.diskHostPath = fs.String("disk-hostpath", d.DiskHostPath, "host directory where each VM's own writable qcow2 overlay is stored, one subdirectory per VM name; only used when -disk-readonly=false")
+	// Accepted and ignored rather than removed: a deployment's own
+	// scripts pass it, and failing their "vm create" outright over a flag
+	// that now has nothing to configure would break them for no gain.
+	v.diskHostPath = fs.String("disk-hostpath", d.DiskHostPath, "deprecated and ignored: each VM's writable overlay is created inside its own container now, so there is no host directory to place it in")
 	v.konturImage = fs.String("kontur-image", d.KonturImage, "kontur image reference, used for both the netshim init container and the VM container")
 	v.terminationGracePeriodSeconds = fs.Int("termination-grace-period", d.TerminationGracePeriodSeconds, "pod terminationGracePeriodSeconds; must comfortably exceed -shutdown-timeout")
 	v.staticPodPath = fs.String("static-pod-path", d.StaticPodPath, "directory the standalone kubelet watches for static pod manifests")
@@ -137,6 +142,7 @@ func (v *vmFlags) toSpec(name string) staticpod.VMSpec {
 		Name:                          name,
 		DiskImage:                     *v.diskImage,
 		DiskReadOnly:                  *v.diskReadOnly,
+		DiskMode:                      *v.diskMode,
 		Kernel:                        *v.kernel,
 		Initramfs:                     *v.initramfs,
 		Firmware:                      *v.firmware,
@@ -271,10 +277,6 @@ func submitVM(ctx context.Context, spec staticpod.VMSpec, stateDir string, stdou
 	if err := spec.Validate(); err != nil {
 		return err
 	}
-	if err := staticpod.PrepareWritableDisk(spec); err != nil {
-		return err
-	}
-
 	switch spec.Backend {
 	case staticpod.BackendDocker:
 		if err := dockervm.Create(ctx, &dockervm.Docker{}, spec, stdout); err != nil {
@@ -334,11 +336,10 @@ func runVMDelete(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return err
 	}
 
-	if err == nil && !existing.DiskReadOnly {
-		if rmErr := os.RemoveAll(existing.WritableDiskDir()); rmErr != nil {
-			return fmt.Errorf("removing writable disk overlay for %q: %w", name, rmErr)
-		}
-	}
+	// Nothing to clean up out here any more: a VM's writable overlay
+	// lives inside its own container (see config.PrepareOverlay), so
+	// removing the container removes it, and there is no host directory
+	// left over to delete.
 
 	switch backend {
 	case staticpod.BackendDocker:

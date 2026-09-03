@@ -7,12 +7,19 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 (see "Local patches" below).
 
 This snapshot is kontur's `main` at
-`384e91a750402a31e5b733ae805617cb30181683` (2026-09-02), the merge of
-[bwsalmon/kontur#35](https://github.com/bwsalmon/kontur/pull/35). It was
-briefly vendored from that PR's branch while it was open, since the grain
-changes alongside it cannot build or run without it; re-vendoring from
-`main` after the merge produced a byte-identical tree, verified with
-`diff -r` against a fresh checkout.
+`e2b8b4506babe9c787f6b3943d8a20cfd549eeb1` (2026-09-03), the merge of
+[bwsalmon/kontur#37](https://github.com/bwsalmon/kontur/pull/37) on top of
+[#36](https://github.com/bwsalmon/kontur/pull/36).
+
+The guest base image grain builds on comes from this same commit:
+`ghcr.io/bwsalmon/kontur:debian12-e2b8b4506babe9c787f6b3943d8a20cfd549eeb1`,
+published by kontur's own CI for exactly this SHA. That pairing is not a
+convention, it is the invariant: `konturctl` is built from the tree here
+and talks to a guest built from that image, and the two agree on the
+guest-side contract (`kontur-authorized-key`, the control-net overlay,
+the mem-agent, the disk modes) only because they are the same commit.
+Re-vendoring means moving both, and the SHA appearing in two places is
+what makes a mismatch visible rather than a runtime mystery.
 
 The snapshot history: it was first vendored at commit `a13a8cc` (2026-08-28, bwsalmon/agents#351), then
 partially re-synced to `3cf4f9286402753add8390302cfb7c1fa82e4f81`
@@ -31,7 +38,51 @@ three local patches going upstream plus the build-time guest setup hook),
 and fully re-synced to `9a43152b09807814ba1a364fab313a72183f9bac`
 (2026-08-31, flat networking mode and CI, bwsalmon/kontur#29 and #30).
 
-## This resync: a per-boot guest exec keypair
+## This resync: container-capable guests, built by booting one
+
+Two changes, both driven by grain needing a guest that runs docker and
+`kind` and a deployment that pulls one rather than building it.
+
+**#36 — a guest can bring its own kernel, and be derived from a
+published image.** `GUEST_KERNEL_PACKAGE` installs a distro kernel into
+the guest rootfs, in the stage where the rootfs is a running container
+rather than during `debootstrap`, so the initramfs its postinst
+generates already carries kontur's udev mask -- an initramfs predating
+that mask renames the NIC away from `eth0` before the real root mounts,
+and konturctl's hard-coded `ip=...:eth0:off` then names a device that
+does not exist. `kontur-net-cmdline.service` hands `ip=` to klibc's
+`ipconfig` for kernels without `CONFIG_IP_PNP` (Debian's has none), and
+no-ops under the bundled kernel. `final` carries the guest's own
+vmlinuz/initrd and boots them when both are present. `GUEST_CONSOLE_WRAP=0`
+drops the sshd `ForceCommand` that ran every session under a pty --
+which grain's own `guest-setup.sh` used to have to undo, because a pty
+rewrites newlines as CRLF and merges stderr into stdout, corrupting
+every `read_file` and emptying every error.
+
+`konturctl guest build` boots a guest image, runs a setup script inside
+it, scrubs per-boot identity (machine-id, host keys, random seed, DHCP
+leases, logs), powers it off and commits the container. That is how
+grain's guest is now built: `FROM` a published kontur image, provision,
+commit -- an ordinary OCI image that is also the sandbox container.
+
+**#37 — the writable disk moved into the VM's own container.** A VM's
+overlay was a qcow2 konturctl created on the *host* and bind-mounted in,
+which is why a writable `-disk` had to live under `-images-hostpath` and
+why `-disk-hostpath` existed. Neither works for a guest that travels
+inside an image: there is no host path, so it could only be read-only,
+and making it writable would have overlayfs copy the whole multi-gigabyte
+image up on the guest's first write, on every VM start.
+`CHV_DISK_MODE=overlay|persistent|readonly` replaces the boolean, with
+`overlay` the default. What this deletes on grain's side is the whole
+`-images-hostpath`/`-disk-hostpath` apparatus in `scripts/setup.sh`.
+
+Note the two deprecated spellings map to *different* modes on purpose:
+`CHV_DISK_READONLY=false` (read inside the container) always meant
+writing through to the image, so it maps to `persistent`; konturctl's
+own `-disk-readonly=false` meant "a private writable disk for this VM",
+so it maps to `overlay`. grain passes the latter.
+
+## The previous resync: a per-boot guest exec keypair
 
 Everything between `63b5def` (the previous snapshot) and this branch,
 which is upstream `33fe6af` plus

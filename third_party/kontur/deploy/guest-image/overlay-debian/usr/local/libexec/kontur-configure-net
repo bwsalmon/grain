@@ -1,0 +1,50 @@
+#!/bin/sh
+# Configure this guest's primary NIC from the kernel's own "ip=" boot
+# parameter, for a guest whose kernel does not do that itself.
+#
+# kontur's own bundled kernel (the fetch-kernel stage's
+# cloud-hypervisor/linux release build) sets CONFIG_IP_PNP, so the kernel
+# acts on "ip=" before userspace starts, and this script finds the
+# interface already configured and exits. A guest built with
+# GUEST_KERNEL_PACKAGE boots a distro kernel instead, and Debian's does
+# NOT set CONFIG_IP_PNP -- nothing acts on "ip=" at all there, so such a
+# guest would otherwise come up with no address and simply never be
+# reachable.
+#
+# klibc's ipconfig(8) implements the same static-addressing syntax the
+# in-kernel code would, but (unlike that code) does not read /proc/cmdline
+# itself -- it only accepts the spec as an argument, which is what this
+# wrapper exists to pass. It arrives with the kernel package, via
+# initramfs-tools -> klibc-utils; its absence means no distro kernel was
+# installed, i.e. the bundled kernel already did this.
+#
+# Ordering matters and is enforced by kontur-net-cmdline.service, not
+# here: this has to run after udev has settled (so the NIC exists under
+# the name the "ip=" spec names) and before sshd.
+set -eu
+
+ipparam=$(sed -n 's/.*\bip=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$ipparam" ] || exit 0
+
+ipconfig=/usr/lib/klibc/bin/ipconfig
+[ -x "$ipconfig" ] || exit 0
+
+# Field 6 of ip=<client>:<server>:<gw>:<netmask>:<hostname>:<device>:<autoconf>
+# -- konturctl derives that spec itself (internal/staticpod/spec.go) and
+# names "eth0", but reading the device back out of the spec keeps this
+# correct for a caller that sets CHV_CMDLINE by hand.
+dev=$(printf '%s' "$ipparam" | cut -d: -f6)
+dev=${dev:-eth0}
+
+# Nothing auto-loads virtio_net early enough on a distro kernel, where it
+# is a module rather than built in. A no-op when it is built in (or
+# already loaded), which is the bundled kernel's case.
+modprobe -q virtio_net 2>/dev/null || true
+
+# Already addressed: either the kernel's own IP_PNP did it, or this ran
+# before. Either way there is nothing to do, and re-running ipconfig
+# against a configured interface risks disturbing it for no gain.
+addr=$(ip -4 -o addr show dev "$dev" 2>/dev/null || true)
+[ -z "$addr" ] || exit 0
+
+exec "$ipconfig" "$ipparam"

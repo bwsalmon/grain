@@ -10,11 +10,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bwsalmon/kontur/internal/qcow2"
 )
 
 const (
 	envDiskImage        = "CHV_DISK_IMAGE"
 	envDiskReadonly     = "CHV_DISK_READONLY"
+	envDiskMode         = "CHV_DISK_MODE"
+	envDiskOverlayPath  = "CHV_DISK_OVERLAY_PATH"
 	envExtraDisks       = "CHV_EXTRA_DISKS"
 	envKernel           = "CHV_KERNEL"
 	envInitramfs        = "CHV_INITRAMFS"
@@ -80,6 +84,33 @@ const (
 	// any other guest.
 	defaultDiskImage = "/var/lib/kontur/guest/disk.img"
 
+	// DiskModeOverlay, DiskModePersistent and DiskModeReadOnly are the
+	// three things "a writable root disk" can mean, which CHV_DISK_READONLY
+	// could not express as a boolean.
+	//
+	//   overlay    (the default) the guest writes into a thin qcow2 of its
+	//              own, backed by the disk image, which is only ever read.
+	//              Boot costs no copy of the image however large it is,
+	//              several VMs on a host share it, and discarding the
+	//              overlay resets the guest.
+	//   persistent the guest writes through to the disk image itself. What
+	//              "konturctl guest build" needs, since the point there is
+	//              for the changes to end up in the image being committed,
+	//              and what CHV_DISK_READONLY=false has always meant.
+	//   readonly   the disk is attached read-only, as CHV_DISK_READONLY=true.
+	DiskModeOverlay    = "overlay"
+	DiskModePersistent = "persistent"
+	DiskModeReadOnly   = "readonly"
+
+	// defaultOverlayPath is where DiskModeOverlay puts the guest's qcow2.
+	// Inside the container's own writable layer rather than on a tmpfs, so
+	// a stopped-and-started container keeps whatever the guest had written
+	// -- the same thing that happened when writes landed in the disk image
+	// -- and only "docker rm" discards it. The .qcow2 suffix is load-bearing:
+	// it is what hypervisor.Args uses to decide image_type and
+	// backing_files. Override with CHV_DISK_OVERLAY_PATH.
+	defaultOverlayPath = "/var/lib/kontur/overlay/disk.qcow2"
+
 	// defaultKernel is the guest kernel baked into the kontur OCI image
 	// itself (see the Dockerfile's fetch-kernel stage): a
 	// cloud-hypervisor/linux release build with PVH entry plus
@@ -91,6 +122,18 @@ const (
 	// (e.g. for a custom guest that needs its own kernel, or a
 	// firmware/bootloader-based guest) always overrides it as before.
 	defaultKernel = "/var/lib/kontur/guest/vmlinux"
+
+	// defaultGuestKernel and defaultGuestInitramfs are the guest's *own*
+	// kernel and initramfs, present only when the image was built with
+	// GUEST_KERNEL_PACKAGE (see the Dockerfile's guest-customized stage).
+	// A guest that brings its own kernel needs it and nothing else:
+	// booting such a rootfs under defaultKernel above instead gives it a
+	// kernel whose modules are not the ones in its /lib/modules, which
+	// fails late and obscurely rather than at boot. So when both are
+	// there they win over defaultKernel, and when they are not -- the
+	// default build -- nothing changes at all.
+	defaultGuestKernel    = "/var/lib/kontur/guest/vmlinuz"
+	defaultGuestInitramfs = "/var/lib/kontur/guest/initrd.img"
 )
 
 // Disk describes one virtio-blk device to attach to the VM.
@@ -104,6 +147,15 @@ type Config struct {
 	// Disks[0] is always the primary boot disk (CHV_DISK_IMAGE). Any
 	// further entries come from CHV_EXTRA_DISKS.
 	Disks []Disk
+
+	// DiskMode is how Disks[0] is attached: DiskModeOverlay,
+	// DiskModePersistent or DiskModeReadOnly. In overlay mode Disks[0]
+	// still names the *source* image here; the caller creates the overlay
+	// and repoints it (see PrepareOverlay) before the VM boots.
+	DiskMode string
+
+	// OverlayPath is where DiskModeOverlay writes the guest's qcow2.
+	OverlayPath string
 
 	// Direct kernel boot. Kernel is mutually exclusive with Firmware:
 	// setting both is an error, but leaving both unset is not -- Kernel
@@ -230,11 +282,13 @@ func FromEnv() (Config, error) {
 	}
 
 	diskPath := getEnvDefault(envDiskImage, defaultDiskImage)
-	readonly, err := getEnvBool(envDiskReadonly, false)
+	mode, err := diskModeFromEnv()
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.Disks = append(cfg.Disks, Disk{Path: diskPath, ReadOnly: readonly})
+	cfg.DiskMode = mode
+	cfg.OverlayPath = getEnvDefault(envDiskOverlayPath, defaultOverlayPath)
+	cfg.Disks = append(cfg.Disks, Disk{Path: diskPath, ReadOnly: mode == DiskModeReadOnly})
 
 	for _, spec := range splitNonEmpty(os.Getenv(envExtraDisks), ",") {
 		path, ro, err := parseExtraDisk(spec)
@@ -343,12 +397,18 @@ func FromEnv() (Config, error) {
 	if cfg.Kernel != "" && cfg.Firmware != "" {
 		return Config{}, fmt.Errorf("%s and %s are mutually exclusive", envKernel, envFirmware)
 	}
-	// Neither set: default to the kernel baked into the image itself
-	// (defaultKernel), matching the bundled guest disk image the same
-	// way -- rather than requiring one of the two to be supplied
-	// externally.
+	// Neither set: default to the kernel baked into the image itself,
+	// matching the bundled guest disk image the same way -- rather than
+	// requiring one of the two to be supplied externally. The guest's
+	// own kernel, if the image has one, is the right default for the
+	// disk beside it; defaultKernel is the fallback for a guest that
+	// brought none. CHV_INITRAMFS set by hand is left alone either way.
 	if cfg.Kernel == "" && cfg.Firmware == "" {
-		cfg.Kernel = defaultKernel
+		kernel, initramfs := bakedInKernel(defaultGuestKernel, defaultGuestInitramfs, defaultKernel)
+		cfg.Kernel = kernel
+		if cfg.Initramfs == "" {
+			cfg.Initramfs = initramfs
+		}
 	}
 
 	if err := cfg.checkPathsExist(); err != nil {
@@ -365,6 +425,32 @@ func FromEnv() (Config, error) {
 // container, not to boot one.
 func APISocket() string {
 	return getEnvDefault(envAPISocket, defaultAPISocket)
+}
+
+// bakedInKernel picks between the two kernels an image can carry: the
+// guest's own (guestKernel plus guestInitramfs, present only when the
+// image was built with GUEST_KERNEL_PACKAGE) and fallback, the
+// fetch-kernel build that has always been there. Both halves of the pair
+// have to exist to take it -- a vmlinuz with no matching initrd would
+// boot without the modules and udev rules the initramfs carries, which
+// is exactly the silent unreachable-guest failure the pair exists to
+// avoid. The fallback pairs with no initramfs, as before.
+func bakedInKernel(guestKernel, guestInitramfs, fallback string) (kernel, initramfs string) {
+	if fileExists(guestKernel) && fileExists(guestInitramfs) {
+		return guestKernel, guestInitramfs
+	}
+	return fallback, ""
+}
+
+// fileExists reports whether path is present and is a regular file --
+// used to pick between the two baked-in kernels, where "is it in this
+// image" is the whole question. Any error (including a directory in the
+// way) reads as absent: the fallback it selects is the kernel that has
+// always been used, so a wrong answer here degrades to today's behavior
+// rather than to a boot failure.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func (c Config) checkPathsExist() error {
@@ -471,5 +557,96 @@ func netsFromEnv() []string {
 	if v := os.Getenv(envNet); v != "" {
 		return []string{v}
 	}
+	return nil
+}
+
+// diskModeFromEnv resolves CHV_DISK_MODE, falling back to the boolean it
+// replaced.
+//
+// The fallback is not a straight translation, because the two settings
+// were asked in different places and "writable" meant different things in
+// each. CHV_DISK_READONLY is read here, inside the VM's own container,
+// where false has always meant "write through to the disk image" -- so it
+// maps to DiskModePersistent, and a deployment that sets it keeps exactly
+// the behaviour it has today rather than silently acquiring a
+// throw-away overlay. konturctl's own -disk-readonly=false meant
+// something else again ("give this VM a private writable disk", which it
+// implemented as a host-side overlay), so it maps to DiskModeOverlay --
+// see internal/cli's own translation.
+//
+// Setting both is an error rather than a precedence rule: they contradict
+// each other often enough (mode=overlay with readonly=true) that guessing
+// which the caller meant is worse than saying so.
+func diskModeFromEnv() (string, error) {
+	mode := os.Getenv(envDiskMode)
+	rawReadonly, hasReadonly := os.LookupEnv(envDiskReadonly)
+
+	if mode != "" && hasReadonly {
+		return "", fmt.Errorf("%s and %s are mutually exclusive (%s=%q, %s=%q): %s replaces it",
+			envDiskMode, envDiskReadonly, envDiskMode, mode, envDiskReadonly, rawReadonly, envDiskMode)
+	}
+
+	if mode == "" {
+		if !hasReadonly {
+			return DiskModeOverlay, nil
+		}
+		readonly, err := getEnvBool(envDiskReadonly, false)
+		if err != nil {
+			return "", err
+		}
+		if readonly {
+			return DiskModeReadOnly, nil
+		}
+		return DiskModePersistent, nil
+	}
+
+	switch mode {
+	case DiskModeOverlay, DiskModePersistent, DiskModeReadOnly:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%s must be %q, %q or %q, got %q",
+			envDiskMode, DiskModeOverlay, DiskModePersistent, DiskModeReadOnly, mode)
+	}
+}
+
+// PrepareOverlay makes DiskModeOverlay real: it creates the guest's qcow2
+// at OverlayPath, backed by the source image Disks[0] currently names, and
+// repoints Disks[0] at it. A no-op in the other two modes.
+//
+// Idempotent, and deliberately so in a specific way: an overlay that
+// already exists is reused rather than recreated, so restarting a
+// container keeps whatever the guest had written -- which is what happened
+// when writes landed in the disk image itself, and the behaviour a caller
+// restarting a VM expects. Discarding the overlay (removing the container)
+// is what resets the guest.
+//
+// The backing file is recorded as the path Disks[0] already holds, which
+// is a path inside this container -- the same place cloud-hypervisor will
+// open it from, since it runs here too.
+func (c *Config) PrepareOverlay() error {
+	if c.DiskMode != DiskModeOverlay || len(c.Disks) == 0 {
+		return nil
+	}
+	source := c.Disks[0].Path
+
+	if _, err := os.Stat(c.OverlayPath); err == nil {
+		c.Disks[0] = Disk{Path: c.OverlayPath}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking for an existing overlay at %s: %w", c.OverlayPath, err)
+	}
+
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("statting the source disk %s: %w", source, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(c.OverlayPath), 0o755); err != nil {
+		return fmt.Errorf("creating the overlay directory: %w", err)
+	}
+	if err := qcow2.WriteOverlay(c.OverlayPath, source, info.Size()); err != nil {
+		return fmt.Errorf("creating the qcow2 overlay %s backed by %s: %w", c.OverlayPath, source, err)
+	}
+
+	c.Disks[0] = Disk{Path: c.OverlayPath}
 	return nil
 }

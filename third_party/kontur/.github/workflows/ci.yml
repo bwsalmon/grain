@@ -80,30 +80,217 @@ jobs:
   # image stage and using `mke2fs -d`, so there is nothing special to
   # arrange here.
   #
-  # Both guest variants are built, not just the default: the Debian and
-  # Alpine rootfs stages carry separate overlays and separate
-  # service-enabling logic (see deploy/guest-image/README.md), so
-  # building only one leaves the other's changes uncompiled.
+  # Every variant is built, not just the default. The Debian and Alpine
+  # rootfs stages carry separate overlays and separate service-enabling
+  # logic (see deploy/guest-image/README.md), so building only one leaves
+  # the other's changes uncompiled -- and "debian12" exercises a third
+  # path through the same Dockerfile that neither of those two reaches:
+  # GUEST_KERNEL_PACKAGE, whose whole point is what happens to the
+  # initramfs, and which fails in ways only a build reveals.
+  #
+  # On main these are published to GHCR. That is what makes a guest
+  # something a consumer derives from rather than rebuilds: a customized
+  # guest is this image, booted, provisioned and committed (see
+  # "kontur guest build"), so the base has to exist somewhere pullable.
+  # Never on pull_request -- publishing needs a credential, and running a
+  # credentialed job against an unreviewed branch is exactly what this
+  # workflow's own push-vs-pull_request split exists to avoid.
   image:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
-        guest_distro: [debian, alpine]
+        include:
+          # The default guest: kontur's own minimal reference image,
+          # booting the bundled cloud-hypervisor/linux kernel.
+          - variant: debian
+            moving_tag: latest
+            build_args: |
+              GUEST_DISTRO=debian
+          - variant: alpine
+            moving_tag: alpine
+            build_args: |
+              GUEST_DISTRO=alpine
+          # A guest that can run containers and be driven
+          # programmatically: Debian's own kernel (overlayfs, cgroup v2,
+          # bridge netfilter, veth -- none of which a kernel built for
+          # cloud-hypervisor's CI promises) and no console wrapper
+          # forcing every "kontur exec" session through a pty. Same
+          # rootfs as "debian"; the two differ only in those args.
+          - variant: debian12
+            moving_tag: debian12
+            build_args: |
+              GUEST_DISTRO=debian
+              GUEST_KERNEL_PACKAGE=linux-image-amd64
+              GUEST_CONSOLE_WRAP=0
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # The build fetches a pinned cloud-hypervisor release and kernel
       # and runs debootstrap/apk against distro mirrors, so it is slow
-      # from cold. The layer cache is scoped per guest variant, since the
-      # two share every stage up to the rootfs and nothing after it.
-      - name: docker build (GUEST_DISTRO=${{ matrix.guest_distro }})
+      # from cold. The layer cache is scoped per variant, since they
+      # share every stage up to the rootfs and diverge after it.
+      #
+      # Both a moving tag and an immutable per-commit one: the moving tag
+      # is what a human pulls, and the commit tag is what a consumer
+      # pins, so a guest built on top of one keeps naming the exact base
+      # it was built against even after the moving tag advances.
+      - name: docker build (${{ matrix.variant }})
         uses: docker/build-push-action@v6
         with:
           context: .
-          build-args: GUEST_DISTRO=${{ matrix.guest_distro }}
-          push: false
-          cache-from: type=gha,scope=${{ matrix.guest_distro }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.guest_distro }}
+          build-args: ${{ matrix.build_args }}
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ matrix.moving_tag }}
+            ghcr.io/${{ github.repository }}:${{ matrix.variant }}-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+  # Everything above is unit tests and image builds; neither boots a VM,
+  # and the paths that only exist once one does are exactly the ones that
+  # fail silently. A guest whose kernel handles "ip=" differently, or
+  # whose initramfs renamed its NIC, does not fail to build -- it builds
+  # perfectly and then never becomes reachable. So this boots the
+  # container-capable variant for real, customizes it the way a consumer
+  # would, and boots the result.
+  #
+  # GitHub's ubuntu runners provide /dev/kvm. The check below is not
+  # ceremony: without it a runner that stopped providing it would turn
+  # this job into a slow no-op that still reported success.
+  guest-build:
+    name: guest build under real KVM
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Require KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is not present on this runner, so nothing below would boot a VM. A green tick here would mean nothing." >&2
+            exit 1
+          fi
+          ls -l /dev/kvm
+
+      # The same variant the image job publishes, loaded into the local
+      # daemon rather than pushed, and sharing that job's layer cache.
+      - name: Build the debian12 guest image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            GUEST_DISTRO=debian
+            GUEST_KERNEL_PACKAGE=linux-image-amd64
+            GUEST_CONSOLE_WRAP=0
+          load: true
+          tags: kontur:debian12
+          cache-from: type=gha,scope=debian12
+
+      - name: Build konturctl
+        run: go build -o konturctl ./cmd/konturctl
+
+      # Deliberately does things a container build cannot: starts a
+      # service, and records the machine-id it saw while running. The
+      # second is what proves the scrub actually happened -- the
+      # committed image's guest must come up with a *different* one, or
+      # every VM cloned from it would share an identity.
+      - name: Write a setup script
+        run: |
+          cat > setup.sh <<'EOF'
+          set -eux
+          systemctl is-system-running --wait || true
+          systemctl start systemd-journald
+          cat /etc/machine-id > /etc/kontur-build-machine-id
+          echo provisioned > /etc/kontur-guest-build-ok
+          EOF
+
+      - name: konturctl guest build
+        run: |
+          ./konturctl guest build \
+            -from kontur:debian12 \
+            -setup ./setup.sh \
+            -t kontur:debian12-customized
+
+      # Boot what came out. This is the assertion that the whole chain
+      # holds: a guest that got its address from "ip=", a kernel and
+      # initramfs the image carried, a disk the commit captured, and an
+      # exec path that works without the console wrapper.
+      - name: Boot the customized guest and check it
+        run: |
+          set -euo pipefail
+          # No -disk: the guest to boot is the one inside the image
+          # being verified. Writable, because a read-only root cannot
+          # complete a boot. -state-dir because konturctl's default is
+          # /var/lib/kontur, which a runner's unprivileged user cannot
+          # create -- and the VM container starts before that write, so
+          # without this the failure lands after a VM is already running.
+          ./konturctl vm create verify \
+            -backend docker \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
+            -kontur-image kontur:debian12-customized \
+            -disk-readonly=false \
+            -ip 169.254.100.9 -port 22222 -guest-user root
+          for i in $(seq 1 60); do
+            if docker exec kontur-vm-verify kontur exec -- true 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "${ready:-0}" != "1" ]; then
+            echo "::error::the customized guest never became reachable" >&2
+            docker logs --tail 100 kontur-vm-verify >&2 || true
+            exit 1
+          fi
+          docker exec kontur-vm-verify kontur exec -- \
+            sh -c 'test -f /etc/kontur-guest-build-ok'
+          echo "provisioning survived the commit"
+          docker exec kontur-vm-verify kontur exec -- sh -c '
+            built=$(cat /etc/kontur-build-machine-id)
+            now=$(cat /etc/machine-id)
+            test -n "$now"
+            if [ "$built" = "$now" ]; then
+              echo "machine-id $now survived the scrub; every VM from this image would share it" >&2
+              exit 1
+            fi'
+          echo "the scrub reset the guest's identity"
+          # The disk mode is not observable from inside the guest, but it
+          # is from out here: `docker diff` lists what the container has
+          # written into its own layer. In the default overlay mode that
+          # is the qcow2 and never the image -- which is the whole point,
+          # since a write to the image would copy all of it up first, on
+          # every VM's first write. A regression here is silent and only
+          # shows as VMs being slow to start.
+          diff_out=$(docker diff kontur-vm-verify)
+          echo "$diff_out"
+          if ! grep -q "/var/lib/kontur/overlay" <<<"$diff_out"; then
+            echo "::error::no overlay was created; the guest is writing somewhere else" >&2
+            exit 1
+          fi
+          if grep -q "guest/disk.img" <<<"$diff_out"; then
+            echo "::error::the guest disk image itself was copied up, so the overlay is not in use" >&2
+            exit 1
+          fi
+          echo "the guest wrote into its overlay, not the image"
+
+      - name: Guest console on failure
+        if: failure()
+        run: docker logs --tail 200 kontur-vm-verify || true

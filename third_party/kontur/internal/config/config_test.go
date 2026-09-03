@@ -13,7 +13,7 @@ import (
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		envDiskImage, envDiskReadonly, envExtraDisks, envKernel, envInitramfs,
+		envDiskImage, envDiskReadonly, envDiskMode, envDiskOverlayPath, envExtraDisks, envKernel, envInitramfs,
 		envFirmware, envCmdline, envCPUs, envCPUsMax, envMemoryMB, envMemoryMaxMB,
 		envMemoryHotplug, envMemoryShared, envNet,
 		envAPISocket, envBinaryPath, envExtraArgs, envShutdownTimeout,
@@ -460,5 +460,201 @@ func TestFromEnv_RejectsNonPositiveMemAgentStepMB(t *testing.T) {
 
 	if _, err := FromEnv(); err == nil {
 		t.Fatal("expected error for CHV_MEM_AGENT_STEP_MB=0, got nil")
+	}
+}
+
+func TestBakedInKernelPrefersTheGuestsOwn(t *testing.T) {
+	// A guest built with GUEST_KERNEL_PACKAGE carries its own kernel and
+	// initramfs beside its disk; booting that rootfs under the
+	// fetch-kernel build instead would give it a kernel whose modules
+	// are not the ones in its /lib/modules.
+	dir := t.TempDir()
+	guestKernel := filepath.Join(dir, "vmlinuz")
+	guestInitramfs := filepath.Join(dir, "initrd.img")
+	fallback := filepath.Join(dir, "vmlinux")
+	for _, p := range []string{guestKernel, guestInitramfs, fallback} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	kernel, initramfs := bakedInKernel(guestKernel, guestInitramfs, fallback)
+	if kernel != guestKernel {
+		t.Errorf("kernel = %q, want the guest's own %q", kernel, guestKernel)
+	}
+	if initramfs != guestInitramfs {
+		t.Errorf("initramfs = %q, want %q", initramfs, guestInitramfs)
+	}
+}
+
+func TestBakedInKernelFallsBackWithoutBothHalves(t *testing.T) {
+	// Half a pair is not a guest kernel: a vmlinuz with no initrd boots
+	// without the modules and udev rules the initramfs carries, which
+	// fails as an unreachable guest rather than as a boot error. The
+	// default build has neither half, which is the same case.
+	dir := t.TempDir()
+	fallback := filepath.Join(dir, "vmlinux")
+	if err := os.WriteFile(fallback, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	guestKernel := filepath.Join(dir, "vmlinuz")
+
+	for _, tc := range []struct {
+		name    string
+		present []string
+	}{
+		{"neither", nil},
+		{"kernel only", []string{guestKernel}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, p := range tc.present {
+				if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Remove(p) })
+			}
+			kernel, initramfs := bakedInKernel(guestKernel, filepath.Join(dir, "initrd.img"), fallback)
+			if kernel != fallback {
+				t.Errorf("kernel = %q, want the fallback %q", kernel, fallback)
+			}
+			if initramfs != "" {
+				t.Errorf("initramfs = %q, want none", initramfs)
+			}
+		})
+	}
+}
+
+func TestDiskModeDefaultsToOverlay(t *testing.T) {
+	// The default matters more than most: it is what every VM that says
+	// nothing gets, and the alternative -- writing through to the disk
+	// image -- costs a copy of that image on the guest's first write and
+	// makes two VMs on one host contend for the same file.
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.DiskMode != DiskModeOverlay {
+		t.Errorf("DiskMode = %q, want %q", cfg.DiskMode, DiskModeOverlay)
+	}
+	if cfg.Disks[0].ReadOnly {
+		t.Error("Disks[0].ReadOnly = true, want false: an overlay-backed disk is attached writable")
+	}
+}
+
+func TestDiskModeFallsBackToTheBoolean(t *testing.T) {
+	// CHV_DISK_READONLY=false has always meant "write through to the disk
+	// image" in this container, so a deployment still setting it must keep
+	// getting exactly that rather than quietly acquiring a throw-away
+	// overlay.
+	for _, tc := range []struct {
+		readonly string
+		want     string
+	}{
+		{"false", DiskModePersistent},
+		{"true", DiskModeReadOnly},
+	} {
+		t.Run(tc.readonly, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+			t.Setenv(envFirmware, writeTempFile(t, "fw"))
+			t.Setenv(envDiskReadonly, tc.readonly)
+
+			cfg, err := FromEnv()
+			if err != nil {
+				t.Fatalf("FromEnv() error = %v", err)
+			}
+			if cfg.DiskMode != tc.want {
+				t.Errorf("DiskMode = %q, want %q", cfg.DiskMode, tc.want)
+			}
+		})
+	}
+}
+
+func TestDiskModeRejectsContradictions(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envDiskMode, DiskModeOverlay)
+	t.Setenv(envDiskReadonly, "true")
+
+	if _, err := FromEnv(); err == nil {
+		t.Error("FromEnv() = nil, want an error: the two settings contradict each other and guessing is worse than saying so")
+	}
+}
+
+func TestDiskModeRejectsUnknownModes(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(envDiskImage, writeTempFile(t, "disk.img"))
+	t.Setenv(envFirmware, writeTempFile(t, "fw"))
+	t.Setenv(envDiskMode, "writable")
+
+	if _, err := FromEnv(); err == nil {
+		t.Error("FromEnv() = nil, want an error naming the three valid modes")
+	}
+}
+
+func TestPrepareOverlayCreatesAndThenReusesTheOverlay(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "disk.img")
+	if err := os.WriteFile(source, []byte("source disk contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(dir, "overlay", "disk.qcow2")
+
+	cfg := Config{
+		DiskMode:    DiskModeOverlay,
+		OverlayPath: overlay,
+		Disks:       []Disk{{Path: source}},
+	}
+	if err := cfg.PrepareOverlay(); err != nil {
+		t.Fatalf("PrepareOverlay() error = %v", err)
+	}
+	if cfg.Disks[0].Path != overlay {
+		t.Errorf("Disks[0].Path = %q, want the overlay %q", cfg.Disks[0].Path, overlay)
+	}
+	// The suffix is not cosmetic: hypervisor.Args keys image_type and
+	// backing_files off it, and a qcow2 passed as raw does not boot.
+	if filepath.Ext(cfg.Disks[0].Path) != ".qcow2" {
+		t.Errorf("overlay path %q must end in .qcow2", cfg.Disks[0].Path)
+	}
+
+	// A restarted container must find the guest's writes still there, so
+	// a second call reuses the overlay rather than starting it over.
+	if err := os.WriteFile(overlay, []byte("written by the guest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg2 := Config{DiskMode: DiskModeOverlay, OverlayPath: overlay, Disks: []Disk{{Path: source}}}
+	if err := cfg2.PrepareOverlay(); err != nil {
+		t.Fatalf("PrepareOverlay() second call error = %v", err)
+	}
+	data, err := os.ReadFile(overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "written by the guest" {
+		t.Error("PrepareOverlay() recreated an existing overlay, discarding whatever the guest had written")
+	}
+}
+
+func TestPrepareOverlayIsANoOpInTheOtherModes(t *testing.T) {
+	for _, mode := range []string{DiskModePersistent, DiskModeReadOnly} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			overlay := filepath.Join(dir, "overlay", "disk.qcow2")
+			cfg := Config{DiskMode: mode, OverlayPath: overlay, Disks: []Disk{{Path: "/images/disk.img"}}}
+			if err := cfg.PrepareOverlay(); err != nil {
+				t.Fatalf("PrepareOverlay() error = %v", err)
+			}
+			if cfg.Disks[0].Path != "/images/disk.img" {
+				t.Errorf("Disks[0].Path = %q, want the source untouched", cfg.Disks[0].Path)
+			}
+			if _, err := os.Stat(overlay); !os.IsNotExist(err) {
+				t.Error("an overlay was created in a mode that has none")
+			}
+		})
 	}
 }
