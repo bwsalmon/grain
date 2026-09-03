@@ -66,10 +66,14 @@ than needing a fixed list selected ahead of time.
 
 Once installed, verify with a read-only check rather than taking the
 human's word for it -- ask them to open (or start) a task with the
-`scratch-repo` capability and confirm it dispatches successfully; a
+`github-sandbox` capability and confirm it dispatches successfully; a
 failure to mint a token there means the install didn't take, or is
-scoped to the wrong account. If this deployment also has a fixed list of
-real target repos (`test_repos` in `terraform/gcp/variables.tf`, or
+scoped to the wrong account. (This step named `scratch-repo` until
+bwsalmon/agents#612 -- v1's name for it, which v2 ships no provider
+under; `github-sandbox` is the provider that actually mints the App's
+tokens, and the row the capability picker now offers.) If this
+deployment also has a fixed list of real target repos (`test_repos` in
+`terraform/gcp/variables.tf`, or
 `pkg/model.Config.TargetRepos`), confirm those repos already exist
 under the account the App is installed on -- `githubsandbox` only ever
 creates its own ephemeral scratch repos, never the deployment's real

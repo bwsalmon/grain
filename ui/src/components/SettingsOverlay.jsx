@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Radio, RadioGroup, Select, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import AgentKeysSection from "./AgentKeysSection.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
@@ -7,6 +7,7 @@ import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
 import { useThemeMode } from "../ThemeModeContext.jsx";
+import { capabilityRows } from "../state.js";
 
 // bwsalmon/agents#456: Secrets and Upgrade used to be their own top-level
 // sidebar overlays; they live here now as tabs alongside the rest of
@@ -61,12 +62,21 @@ const settingLabel = (key) => SETTING_LABELS[key] || key;
 export default function SettingsOverlay({ onClose, showError }) {
   const [tab, setTab] = useState("general");
   const [settings, setSettings] = useState(null);
+  // defaultCapabilities is the one field on this pane that is not a
+  // plain form input: it is a multi-select of capability ids (the set
+  // every new task is filed holding, model.Config.DefaultCapabilities),
+  // so it needs state of its own rather than being read off the form at
+  // submit. Seeded from the loaded settings and from every response that
+  // carries the field back, so saving another tab does not strand it.
+  const [defaultCapabilities, setDefaultCapabilities] = useState([]);
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
 
   useEffect(() => {
     (async () => {
       try {
-        setSettings(await api("/api/settings"));
+        const loaded = await api("/api/settings");
+        setSettings(loaded);
+        setDefaultCapabilities(loaded.defaultCapabilities || []);
       } catch (err) {
         showError(err);
       }
@@ -93,6 +103,7 @@ export default function SettingsOverlay({ onClose, showError }) {
     try {
       const updated = await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
       setSettings((prev) => ({ ...prev, ...updated }));
+      if ("defaultCapabilities" in updated) setDefaultCapabilities(updated.defaultCapabilities || []);
     } catch (err) {
       // Same banner task creation's own validation errors surface
       // through.
@@ -105,13 +116,26 @@ export default function SettingsOverlay({ onClose, showError }) {
     const form = evt.target;
     const payload = {};
 
+    // Trimmed here and again on the way in (ui.UpdateSettings), so
+    // clearing the box back to blank sends "" -- a deliberate "this
+    // deployment has no name" -- rather than being mistaken for
+    // unchanged the way a blank sandbox-shape box would be.
+    const environmentName = form.elements.environmentName.value.trim();
+    if (environmentName !== (settings.environmentName || "")) payload.environmentName = environmentName;
+
     const pollInterval = form.elements.pollInterval.value.trim();
     if (pollInterval !== (settings.pollInterval || "")) payload.pollInterval = pollInterval;
 
-    const maxConcurrentRaw = form.elements.maxConcurrent.value.trim();
-    if (maxConcurrentRaw !== "") {
-      const maxConcurrent = parseInt(maxConcurrentRaw, 10);
-      if (maxConcurrent !== (settings.maxConcurrent || 0)) payload.maxConcurrent = maxConcurrent;
+    const maxWorkersRaw = form.elements.maxWorkers.value.trim();
+    if (maxWorkersRaw !== "") {
+      const maxWorkers = parseInt(maxWorkersRaw, 10);
+      if (maxWorkers !== (settings.maxWorkers || 0)) payload.maxWorkers = maxWorkers;
+    }
+
+    const maxMergersRaw = form.elements.maxMergers.value.trim();
+    if (maxMergersRaw !== "") {
+      const maxMergers = parseInt(maxMergersRaw, 10);
+      if (maxMergers !== (settings.maxMergers || 0)) payload.maxMergers = maxMergers;
     }
 
     const newestFirst = form.elements.newestFirst.checked;
@@ -172,9 +196,11 @@ export default function SettingsOverlay({ onClose, showError }) {
     const payload = {};
 
     // An empty box is a deliberate "go back to the default" (bwsalmon/agents#610),
-    // not "leave it alone" -- unlike every other field on this pane, these two
-    // pre-fill that default in faintly, so an operator who never touched them
-    // and one who cleared them back to blank on purpose type the same thing here.
+    // not "leave it alone": unlike every other field on this pane, an unset one
+    // of these reads as blank rather than as its stored value, so an operator
+    // who never touched it and one who cleared it back to blank on purpose type
+    // the same thing here. (vCPUs and memory show the real default faintly, as a
+    // placeholder; disk has no such number to show -- see its own field below.)
     const sandboxCpusRaw = form.elements.sandboxCpus.value.trim();
     const sandboxCpus = sandboxCpusRaw === "" ? 0 : parseInt(sandboxCpusRaw, 10);
     if (sandboxCpus !== (settings.sandboxCpus || 0)) payload.sandboxCpus = sandboxCpus;
@@ -182,6 +208,10 @@ export default function SettingsOverlay({ onClose, showError }) {
     const sandboxMemoryMbRaw = form.elements.sandboxMemoryMb.value.trim();
     const sandboxMemoryMb = sandboxMemoryMbRaw === "" ? 0 : parseInt(sandboxMemoryMbRaw, 10);
     if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
+
+    const sandboxDiskGbRaw = form.elements.sandboxDiskGb.value.trim();
+    const sandboxDiskGb = sandboxDiskGbRaw === "" ? 0 : parseInt(sandboxDiskGbRaw, 10);
+    if (sandboxDiskGb !== (settings.sandboxDiskGb || 0)) payload.sandboxDiskGb = sandboxDiskGb;
 
     return save(payload);
   };
@@ -197,6 +227,17 @@ export default function SettingsOverlay({ onClose, showError }) {
     const gcpServiceAccountEmail = form.elements.gcpServiceAccountEmail.value.trim();
     if (gcpServiceAccountEmail !== (settings.gcpServiceAccountEmail || "")) payload.gcpServiceAccountEmail = gcpServiceAccountEmail;
 
+    // Compared as a set, not by identity: an operator who ticked one box
+    // and unticked another has changed it, and one who reordered nothing
+    // has not. A present list replaces the whole set server-side
+    // (ui.UpdateSettingsRequest.DefaultCapabilities), empty included, so
+    // sending it only when it differs keeps this tab from rewriting a
+    // set another client changed underneath it.
+    const stored = settings.defaultCapabilities || [];
+    const same = stored.length === defaultCapabilities.length
+      && stored.every((id) => defaultCapabilities.includes(id));
+    if (!same) payload.defaultCapabilities = defaultCapabilities;
+
     return save(payload);
   };
 
@@ -204,6 +245,16 @@ export default function SettingsOverlay({ onClose, showError }) {
 
   const restartRequired = new Set(settings.restartRequired || []);
   const pendingRestart = new Set(settings.pendingRestart || []);
+
+  // The Capabilities tab's own picker rows. settings.capabilities is
+  // every capability grain ships a provider for, so an ungrantable one
+  // is filtered out here before capabilityRows appends anything: what is
+  // left is what UpdateSettings validates the set against, plus a row
+  // for each already-stored id this build no longer offers at all.
+  const capabilityChoices = capabilityRows(
+    (settings.capabilities || []).filter((c) => c.grantable !== false),
+    defaultCapabilities,
+  );
 
   // restartHint annotates one field: "this one needs a restart" always,
   // and "you have already changed it, and it isn't running yet" once the
@@ -284,8 +335,20 @@ export default function SettingsOverlay({ onClose, showError }) {
             <FormControlLabel value="dark" control={<Radio />} label="Dark" />
           </RadioGroup>
           <form onSubmit={submitGeneral}>
+            <Typography variant="subtitle2" sx={{ mt: 1 }}>Deployment</Typography>
+            <TextField
+              name="environmentName"
+              label="Environment name"
+              helperText="Shown beside the grain mark and in the browser tab, e.g. staging. Leave empty for an unnamed deployment."
+              defaultValue={settings.environmentName || ""}
+              inputProps={{ maxLength: 32 }}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+            />
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
-            <TextField name="maxConcurrent" label="Max concurrent agents" helperText="maximum number of tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxConcurrent || "")} fullWidth margin="normal" />
+            <TextField name="maxWorkers" label="Max worker agents" helperText="maximum number of ordinary tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxWorkers || "")} fullWidth margin="normal" />
+            <TextField name="maxMergers" label="Max merge agents" helperText="extra agents only the merge queue may dispatch, to repair a pull request that will not land -- on top of the workers above, and free to use a spare worker slot too. 0 makes them wait for one like anything else" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxMergers ?? "")} fullWidth margin="normal" />
             <Typography variant="subtitle2" sx={{ mt: 2 }}>Backlog &amp; task defaults</Typography>
             <FormControlLabel
               control={<Checkbox name="newestFirst" defaultChecked={!!settings.newestFirst} />}
@@ -319,9 +382,9 @@ export default function SettingsOverlay({ onClose, showError }) {
                 <>
                   Queue new tasks immediately by default
                   <span className="hint">
-                    off (default): a new task's own "Queue immediately" checkbox starts unchecked, filing it as a
-                    proposal needing approval. on: it starts checked instead, filing a task ready to dispatch at
-                    once.
+                    on (default): a new task's own "Queue immediately" checkbox starts checked, filing a task ready
+                    to dispatch at once. off: it starts unchecked instead, filing it as a proposal needing
+                    approval.
                   </span>
                 </>
               )}
@@ -333,8 +396,8 @@ export default function SettingsOverlay({ onClose, showError }) {
                 <>
                   Auto-merge new tasks by default
                   <span className="hint">
-                    off (default): a new task's own "Auto-merge once checks pass" checkbox starts unchecked. on: it
-                    starts checked instead.
+                    on (default): a new task's own "Auto-merge once checks pass" checkbox starts checked. off: it
+                    starts unchecked instead.
                   </span>
                 </>
               )}
@@ -428,6 +491,23 @@ export default function SettingsOverlay({ onClose, showError }) {
             fullWidth
             margin="normal"
           />
+          {/*
+            No faint placeholder default here, unlike the two above: a VM's
+            disk is as large as the guest image behind it when nothing is set,
+            which is a property of the image this deployment built rather than
+            a number the API could report (ui.Settings' own comment on why
+            there is no sandboxDiskGbDefault). The helper text says so instead.
+          */}
+          <TextField
+            name="sandboxDiskGb"
+            label="Sandbox disk (GiB)"
+            helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Empty leaves it as large as the guest image. Overridable per task."
+            type="number"
+            inputProps={{ min: 0, step: 1 }}
+            defaultValue={settings.sandboxDiskGb ? String(settings.sandboxDiskGb) : ""}
+            fullWidth
+            margin="normal"
+          />
 
           <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
             <Button type="submit" variant="contained">Save</Button>
@@ -440,6 +520,46 @@ export default function SettingsOverlay({ onClose, showError }) {
             <Typography variant="subtitle2">GCP</Typography>
             <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
+
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>New tasks</Typography>
+            {/* Only grantable capabilities are offered: the set is
+                validated against the same picker listing a task's own
+                capabilities are, and one no task could be granted by hand
+                would be a default that failed at every filing. A stored
+                id this build has retired gets a row anyway, purely so it
+                can be unticked -- capabilityRows (state.js) has why a
+                pane without one cannot be saved at all. */}
+            <FormControl fullWidth margin="normal" size="small">
+              <InputLabel id="settings-default-capabilities-label">Default capabilities</InputLabel>
+              <Select
+                labelId="settings-default-capabilities-label"
+                label="Default capabilities"
+                multiple
+                value={defaultCapabilities}
+                onChange={(e) => setDefaultCapabilities(e.target.value)}
+                renderValue={(selected) => (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                    {selected.map((id) => {
+                      const cap = capabilityChoices.find((c) => c.id === id);
+                      return <Chip key={id} size="small" label={cap ? cap.name || cap.id : id} />;
+                    })}
+                  </Box>
+                )}
+              >
+                {capabilityChoices.map((c) => (
+                  <MenuItem key={c.id} value={c.id} title={c.description}>
+                    <Checkbox checked={defaultCapabilities.includes(c.id)} size="small" />
+                    <ListItemText primary={c.name || c.id} secondary={c.retired ? c.description : null} />
+                  </MenuItem>
+                ))}
+              </Select>
+              <FormHelperText>
+                attached to every new task as it is filed, whichever repo it targets -- whoever files one can
+                untick any of these on the new-task form, and any of them can be detached from a task
+                afterwards. Tasks already filed keep what they were filed with. An individual repo can add
+                more of its own, on the repos page.
+              </FormHelperText>
+            </FormControl>
 
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2, mb: 2 }}>
               <Button type="submit" variant="contained">Save</Button>

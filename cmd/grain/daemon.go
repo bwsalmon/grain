@@ -21,8 +21,8 @@
 // fleet this deployment shape has nowhere to run. -kontur-sandboxes
 // is the opt in to the real alternative (bwsalmon/agents#274):
 // orchestrator.KonturSandboxes, one real bwsalmon/kontur-managed VM per
-// run, reached over SSH. -max-concurrent caps how many runs are in
-// flight at once either way, and a sandbox is built for each of them and
+// run, reached over SSH. -max-workers/-max-mergers cap how many runs
+// are in flight at once either way, and a sandbox is built for each of them and
 // destroyed with it; nothing
 // above pkg/orchestrator.Deps needs to change to serve more than one.
 //
@@ -34,7 +34,7 @@
 // resolution/materialization and reconcile-loop shape onto it. See
 // README.md for what that merge kept and dropped.
 //
-// Most of this file's own flags (-max-concurrent, -poll-interval, -agent-framework,
+// Most of this file's own flags (-max-workers, -max-mergers, -poll-interval, -agent-framework,
 // -gemini-model, -claude-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
 // -gcp-agent-service-account, -target-repos) are store-backed now
 // (bwsalmon/agents#320):
@@ -93,6 +93,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/mcp"
+	"github.com/bwsalmon/grain/pkg/metrics"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
@@ -131,7 +132,22 @@ func daemon(args []string) {
 		"flag from -data-dir rather than a subdirectory of it (bwsalmon/agents#587): a task's checked-out repo and whatever it wrote into its "+
 		"sandbox are disposable, unlike the store and secrets under -data-dir, so this belongs on storage that a VM wipe or redeploy is free to "+
 		"discard along with the rest of the host")
-	maxConcurrent := fs.Int("max-concurrent", 1, "maximum number of tasks dispatched at once -- the size of the concurrency pool dispatch.Cycle fills"+seedOnly)
+	maxWorkers := fs.Int("max-workers", 1, "maximum number of ordinary tasks dispatched at once -- the worker half of the concurrency "+
+		"dispatch.Cycle fills (model.Limits)"+seedOnly)
+	maxMergers := fs.Int("max-mergers", model.DefaultMaxMergers, "capacity on top of -max-workers that only the merge queue's own "+
+		"fix tasks may use -- so a pull request that will not land can be repaired without waiting out whatever ordinary work is "+
+		"running, and so that repair can still take a free worker slot when there is one (model.Limits). 0 makes fix tasks contend "+
+		"for -max-workers like anything else, which is what every deployment did before this flag existed"+seedOnly)
+	// -max-concurrent is what -max-workers was called while it was the
+	// whole limit. It stays accepted because a deployment's own systemd
+	// unit outlives the build it was written for -- scripts/setup.sh
+	// writes the flags in once and the UI's Upgrade button then replaces
+	// only the binary -- so a rename that dropped the old spelling would
+	// stop the daemon at exactly the moment nobody is watching a terminal.
+	// Its zero default is how "not passed" is told from "passed as 0",
+	// which flag.Int cannot say on its own.
+	maxConcurrent := fs.Int("max-concurrent", 0, "former name of -max-workers, still accepted so an existing unit file keeps working; "+
+		"pass one or the other, not both")
 	pollInterval := fs.Duration("poll-interval", 30*time.Second, "how often to run a reconcile cycle"+seedOnly)
 
 	uiAddr := fs.String("ui-addr", "127.0.0.1:8420", "address to serve the UI/API on, in-process, over this same store -- empty disables it")
@@ -309,6 +325,11 @@ func daemon(args []string) {
 		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM, passed as `konturctl vm "+
 			"create`'s own -memory-mb (only used with -kontur-sandboxes); 0 leaves bwsalmon/kontur's own "+
 			"default in place. Overridable per task from the UI/API (model.Task.SandboxMemoryMB)"+seedOnly)
+	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
+		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM, passed as `konturctl "+
+			"vm create`'s own -disk-size-gb (only used with -kontur-sandboxes); 0 leaves the VM's disk as large "+
+			"as the guest image behind it, which is what every sandbox got before this flag existed. "+
+			"Overridable per task from the UI/API (model.Task.SandboxDiskGB)"+seedOnly)
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -345,8 +366,22 @@ func daemon(args []string) {
 			os.Exit(2)
 		}
 	}
-	if *maxConcurrent < 1 {
-		fmt.Fprintln(os.Stderr, "grain daemon: -max-concurrent must be at least 1")
+	passed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+	if passed["max-concurrent"] {
+		if passed["max-workers"] {
+			fmt.Fprintln(os.Stderr, "grain daemon: -max-concurrent is the former name of -max-workers; pass one or the other")
+			os.Exit(2)
+		}
+		log.Printf("grain daemon: -max-concurrent is now called -max-workers; using -max-workers=%d", *maxConcurrent)
+		*maxWorkers = *maxConcurrent
+	}
+	if *maxWorkers < 1 {
+		fmt.Fprintln(os.Stderr, "grain daemon: -max-workers must be at least 1")
+		os.Exit(2)
+	}
+	if *maxMergers < 0 {
+		fmt.Fprintln(os.Stderr, "grain daemon: -max-mergers cannot be negative")
 		os.Exit(2)
 	}
 	// NormalizeAgentFramework first, so the legacy "gemini" spelling a
@@ -367,7 +402,8 @@ func daemon(args []string) {
 	defer stop()
 
 	if err := run(ctx, config{
-		dataDir: *dataDir, sandboxDir: *sandboxDir, maxConcurrent: *maxConcurrent, pollInterval: *pollInterval,
+		dataDir: *dataDir, sandboxDir: *sandboxDir, maxWorkers: *maxWorkers, maxMergers: *maxMergers,
+		pollInterval: *pollInterval,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		targetRepos:      targetReposList,
 		agentFramework:   *agentFramework,
@@ -386,16 +422,21 @@ func daemon(args []string) {
 		konturCreateArgs: konturCreateArgs, konturNet: *konturNet,
 		konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
 		konturGitProxyHost: *konturGitProxyHost,
-		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
+		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB, sandboxDiskGB: *sandboxDiskGB,
 	}); err != nil {
 		log.Fatalf("grain daemon: %v", err)
 	}
 }
 
 type config struct {
-	dataDir       string
-	maxConcurrent int
-	pollInterval  time.Duration
+	dataDir string
+	// maxWorkers and maxMergers are this deployment's concurrency, split
+	// the way model.Limits is: how many ordinary runs may be live, and
+	// how much further capacity only the merge queue's own fix tasks may
+	// reach.
+	maxWorkers   int
+	maxMergers   int
+	pollInterval time.Duration
 	// sandboxDir roots orchestrator.HostSandboxes -- see -sandbox-dir's
 	// own flag doc comment for why this is not just a subdirectory of
 	// dataDir. Only consulted when konturSandboxes is false, the same
@@ -489,13 +530,15 @@ type config struct {
 	// why a kontur VM cannot reach that default (bwsalmon/agents#567).
 	// Required whenever konturSandboxes is set; unused otherwise.
 	konturGitProxyHost string
-	// sandboxCPUs and sandboxMemoryMB are store-backed
-	// (model.Config.SandboxCPUs/SandboxMemoryMB, bwsalmon/agents#534),
+	// sandboxCPUs, sandboxMemoryMB and sandboxDiskGB are store-backed
+	// (model.Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB,
+	// bwsalmon/agents#534 and grain/task-41),
 	// like poll-interval and the rest of the seedOnly flags above --
 	// only consulted with -kontur-sandboxes, the same as every
 	// other kontur* field here.
 	sandboxCPUs     int
 	sandboxMemoryMB int
+	sandboxDiskGB   int
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
@@ -546,6 +589,7 @@ func run(ctx context.Context, cfg config) error {
 			Port:            cfg.konturBasePort,
 			DefaultCPUs:     cfg.sandboxCPUs,
 			DefaultMemoryMB: cfg.sandboxMemoryMB,
+			DefaultDiskGB:   cfg.sandboxDiskGB,
 		})
 		sandboxes = konturSandboxes
 	} else {
@@ -722,6 +766,13 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	githubTransport.UseTLS = !cfg.githubInsecureHTTP
 	githubClient := github.NewClient(githubTransport, credentialTokenSource{credentials})
 
+	// Published for the UI/API server started above this one (see
+	// livePullRequests): from here on, a dispatched run asking for its own
+	// pull request through POST /api/tasks/{id}/pull-request reaches this
+	// same client, and so opens exactly the pull request this loop's own
+	// finish path would have opened for it.
+	livePullRequests.Store(&pullRequestOpener{store: store, client: githubClient})
+
 	registry := model.NewCapabilityRegistry(capabilityProviders(cfg)...)
 
 	// Recovering any run a previous process left running (bwsalmon/agents#425)
@@ -769,18 +820,28 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// Nothing else ever told a sandbox where its repo lives.
 			GitRemoteBase: proxyURL,
 			GrantTools:    grantTools(sourceDir(cfg.upgradeSrcDir)),
+			// The same registry startUIServer above already handed the
+			// UI, so a run that registers itself here is one
+			// POST /api/tasks/{id}/sandbox/recreate can actually find.
+			SandboxRecreations: sandboxRecreations,
 		},
 		MintSandboxToken:   tokens.EnsureToken,
 		RevokeSandboxToken: tokens.Revoke,
-		MaxConcurrent:      cfg.maxConcurrent,
+		MaxWorkers:         cfg.maxWorkers,
+		MaxMergers:         cfg.maxMergers,
 		// A run outlives the cycle that started it (orchestrator.Deps.Runs):
 		// without this the loop below could not tick again -- and so could
-		// not dispatch into the rest of -max-concurrent, nor sync a single
+		// not dispatch into the rest of -max-workers, nor sync a single
 		// pull request -- until every agent a cycle started had finished.
 		Runs: inFlight,
+		// The same ring startUIServer above already handed the UI, so
+		// what GET /api/metrics reports about this deployment's tick is
+		// what this loop actually measured (cycleTimes' own doc comment).
+		CycleTimes: cycleTimes,
 	}
-	log.Printf("grain daemon: reconciling every %s across %d concurrent run(s) -- both re-read from the store "+
-		"each tick, so changing either in Settings needs no restart", cfg.pollInterval, cfg.maxConcurrent)
+	log.Printf("grain daemon: reconciling every %s across %d worker run(s) plus %d reserved for the merge queue "+
+		"-- all re-read from the store each tick, so changing any of them in Settings needs no restart",
+		cfg.pollInterval, cfg.maxWorkers, cfg.maxMergers)
 	reconcile(ctx, deps, live)
 	// reconcile only returns once ctx is done, which is also what tells
 	// every live run to wind up -- so this is the shutdown drain, not a
@@ -955,6 +1016,11 @@ func buildAntigravityFramework(ctx context.Context, cfg config, secretStore *sec
 			return agentCredential(ctx, secretStore, secrets.GeminiAPIKeySecret, cfg.geminiAPIKeyFile)
 		}),
 		antigravity.WithModel(cfg.geminiModel),
+		// The controller's own GitHub credential ladder, so a run can
+		// call pull_request_status and see CI's verdict on the commits
+		// it pushed. Not a per-run secret and not a sandbox one: the
+		// forked mcpserver reading it runs here, on the controller.
+		antigravity.WithGitHubAccess(cfg.dataDir, cfg.githubHost, cfg.githubInsecureHTTP),
 	}
 	if cfg.konturSandboxes {
 		// Only meaningful with -kontur-sandboxes, exactly as for
@@ -962,6 +1028,9 @@ func buildAntigravityFramework(ctx context.Context, cfg config, secretStore *sec
 		// orchestrator.HostSandboxes directory reaches it through
 		// RunConfig.SandboxRoot instead.
 		opts = append(opts, antigravity.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
+	}
+	if url := daemonServerURL(cfg.uiAddr); url != "" {
+		opts = append(opts, antigravity.WithGrainServer(url))
 	}
 	return antigravity.New(agyPath, grainBinaryPath, opts...), nil
 }
@@ -1013,6 +1082,9 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 			return agentCredential(ctx, secretStore, secrets.ClaudeOAuthTokenSecret, cfg.claudeOAuthTokenFile)
 		}),
 		claude.WithModel(cfg.claudeModel),
+		// The controller's own GitHub credential ladder -- see the
+		// identical line in buildAntigravityFramework.
+		claude.WithGitHubAccess(cfg.dataDir, cfg.githubHost, cfg.githubInsecureHTTP),
 	}
 	if cfg.konturSandboxes {
 		// Only meaningful with -kontur-sandboxes: a run dispatched
@@ -1022,7 +1094,39 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 		// needs none of this.
 		opts = append(opts, claude.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
 	}
+	if url := daemonServerURL(cfg.uiAddr); url != "" {
+		opts = append(opts, claude.WithGrainServer(url))
+	}
 	return claude.New(claudePath, grainBinaryPath, opts...), nil
+}
+
+// daemonServerURL is the base URL this same process's own UI/API server
+// is reachable at, for a run's forked mcpserver to ask it to open that
+// run's pull request (agent/claude's and agent/antigravity's
+// WithGrainServer). It is derived from -ui-addr rather than configured
+// separately: the two are the same server, and a second flag naming the
+// same thing is a second thing to get wrong.
+//
+// A host-less address (":8420", what a deployment serving on every
+// interface passes) becomes loopback, which is both correct and the only
+// address worth using here: the asker is a process on this very host.
+//
+// "" -- no UI/API server at all (-ui-addr emptied out), or one bound to
+// port 0, whose real port is only known to the listener rather than to
+// this string -- means runs simply get no open_pull_request tool, which
+// is the same deployment they had before it existed.
+func daemonServerURL(uiAddr string) string {
+	if uiAddr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(uiAddr)
+	if err != nil || port == "" || port == "0" {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // agentCredential reads the credential one agent framework runs as: the
@@ -1079,6 +1183,148 @@ func agentCredential(ctx context.Context, secretStore *secrets.Store, secret, fi
 // endpoint, can see reconciliation is dead without an operator having to
 // notice and interpret a single log line (bwsalmon/agents#576).
 var reconcilerDown atomic.Bool
+
+// livePullRequests holds the GitHub-backed pull request opener runDaemon
+// builds, for the UI/API server that was started before it to reach.
+//
+// The two halves of this process come up in that order on purpose: the
+// UI/API server starts as early as the store allows, precisely so a
+// deployment whose reconcile loop never comes up is still visible and
+// operable (bwsalmon/agents#576, and run()'s own comment on the
+// ordering). But the GitHub client belongs to runDaemon, below it, so
+// POST /api/tasks/{id}/pull-request has nothing to call until runDaemon
+// gets there. Set once, from runDaemon, and read through pullRequestGate
+// -- the same shape reconcilerDown above already uses to let these two
+// halves see one fact about each other without either owning the other.
+//
+// A run's mcpserver reaching this before it is set gets an honest "not
+// ready yet" rather than a nil dereference; in practice nothing can,
+// since no run exists to ask until the loop that dispatches runs is
+// already going.
+var livePullRequests atomic.Pointer[pullRequestOpener]
+
+// cycleTimes is this process's record of its own RunCycle ticks -- how
+// long each took, and how far into each one the dispatch decision was
+// reached (orchestrator.CycleTimes). GET /api/metrics serves it as the
+// "cycles" section beside the runs one, which is where it answers the
+// question that report otherwise only raises: a queue wait looks
+// identical whether the deployment was at max_concurrent or whether
+// there was room all along and the tick was slow to get to dispatch.
+//
+// Package-level for the same reason reconcilerDown and livePullRequests
+// above are: the UI/API server starts before runDaemon builds its Deps,
+// so the two halves need one thing they can both name. Unlike those two
+// it needs no gate -- it is a value, allocated at process start, and
+// reading it before the reconcile loop has ticked reports no ticks,
+// which is exactly true of a deployment whose loop has not started (or
+// has died: see reconcilerDown).
+var cycleTimes = orchestrator.NewCycleTimes(orchestrator.DefaultCycleHistory)
+
+// sandboxRecreations is the set of live runs that can be asked to throw
+// their sandbox away and start again in a clean one -- the daemon side
+// of pkg/mcp's recreate_sandbox, reached over
+// POST /api/tasks/{id}/sandbox/recreate.
+//
+// Package-level for the reason cycleTimes above is, and with the same
+// consequence: the UI/API server starts before runDaemon builds its
+// Deps, so the two halves need one object they can both name. It needs
+// no gate the way livePullRequests does, because it is not a client to
+// be built later but a registry that is empty until runs put themselves
+// in it -- and a request arriving before the reconcile loop has started
+// finds no live run, which is exactly true of a deployment that has
+// dispatched nothing.
+var sandboxRecreations = orchestrator.NewSandboxRecreations()
+
+// pullRequestOpener is ui.Config.PullRequests over
+// orchestrator.OpenPullRequestForTask: the one place this deployment's
+// store and its GitHub client are both in scope for a request that
+// arrived over the UI/API. Its caller is a dispatched run's own mcpserver
+// (cmd/grain/mcpserver.go's daemonPullRequests), which holds no GitHub
+// credential itself.
+//
+// It converts orchestrator.PullRequestStatus into ui.PullRequestStatus
+// field for field, for the same reason sandboxHealthAdapter converts
+// orchestrator.SandboxHealth: pkg/ui does not import pkg/orchestrator,
+// and this file is where both types are in scope.
+type pullRequestOpener struct {
+	store  *model.Store
+	client github.Client
+}
+
+func (o *pullRequestOpener) OpenForTask(ctx context.Context, taskID string) (ui.PullRequestStatus, error) {
+	task, err := o.store.GetTask(ctx, taskID)
+	if err != nil {
+		return ui.PullRequestStatus{}, err
+	}
+	if task == nil {
+		return ui.PullRequestStatus{}, fmt.Errorf("no task %s", taskID)
+	}
+	status, err := orchestrator.OpenPullRequestForTask(ctx, o.store, o.client, *task)
+	if err != nil {
+		return ui.PullRequestStatus{}, err
+	}
+	out := ui.PullRequestStatus{
+		Number:          status.PullRequest.Number,
+		URL:             status.PullRequest.HTMLURL,
+		ChecksAvailable: status.ChecksKnown,
+		ChecksError:     status.ChecksError,
+	}
+	if task.Target != nil {
+		out.Repo = task.Target.String()
+	}
+	for _, c := range status.Checks {
+		check := ui.CheckStatus{Name: c.Name, Status: c.Status}
+		if c.Conclusion != nil {
+			check.Conclusion = *c.Conclusion
+		}
+		out.Checks = append(out.Checks, check)
+	}
+	return out, nil
+}
+
+// sandboxRecreateAdapter is ui.Config.SandboxRecreate over
+// orchestrator.SandboxRecreations, converting the result field for field
+// for the reason pullRequestOpener above converts its own: pkg/ui does
+// not import pkg/orchestrator, and this file is where both types are in
+// scope.
+//
+// Unlike pullRequestGate below it needs no gate. The registry it wraps
+// is allocated at process start (sandboxRecreations' own doc comment)
+// and is simply empty until runs register themselves in it, so a request
+// that arrives before -- or after -- the reconcile loop is running gets
+// the honest "no live run on this daemon" rather than a nil dereference
+// or a made-up failure.
+type sandboxRecreateAdapter struct {
+	recreations *orchestrator.SandboxRecreations
+}
+
+func (a sandboxRecreateAdapter) RecreateForTask(ctx context.Context, taskID string) (ui.SandboxRecreation, error) {
+	recreation, err := a.recreations.Recreate(ctx, taskID)
+	if err != nil {
+		return ui.SandboxRecreation{}, err
+	}
+	return ui.SandboxRecreation{
+		Sandbox:     recreation.Sandbox,
+		CheckoutDir: recreation.CheckoutDir,
+		Restored:    recreation.Restored,
+		Warnings:    recreation.Warnings,
+	}, nil
+}
+
+// pullRequestGate is the ui.Config.PullRequests the UI/API server is
+// given: whatever livePullRequests holds by the time a request actually
+// arrives, or a plain refusal until runDaemon has put one there.
+type pullRequestGate struct{}
+
+func (pullRequestGate) OpenForTask(ctx context.Context, taskID string) (ui.PullRequestStatus, error) {
+	opener := livePullRequests.Load()
+	if opener == nil {
+		return ui.PullRequestStatus{}, errors.New(
+			"this daemon has no GitHub client yet, so it cannot open a pull request: " +
+				"its reconcile loop has not started (or has failed -- check the daemon log)")
+	}
+	return opener.OpenForTask(ctx, taskID)
+}
 
 // reapInterval is how often reconcile calls reapCapabilities -- not
 // configurable, since nothing about it needs to race a deployment's own
@@ -1141,6 +1387,12 @@ func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, c
 // pkg/orchestrator, which -- being "a library, not a binary" (its own
 // doc comment) -- has no timer loop of its own.
 //
+// Each tick measures itself into deps.CycleTimes (the package-level
+// cycleTimes ring, which GET /api/metrics reads back): "waits for one to
+// return before the next interval starts" is exactly why a tick's own
+// duration is part of how long a queued task waits, and nothing outside
+// a test could see it.
+//
 // The interval, and everything else in live, is re-read from the store
 // once per tick rather than fixed for the life of the process: this loop
 // is the deployment's own heartbeat, so it is also the natural place to
@@ -1197,7 +1449,7 @@ type defaultShaper interface {
 // in effect: what loadConfig read at startup, plus every later change to
 // it that a *running* daemon can apply on its own.
 //
-// bwsalmon/agents#320 left every setting but max-concurrent needing a
+// bwsalmon/agents#320 left every setting but max-workers needing a
 // restart -- loadConfig read grain_config once and nothing ever re-read
 // it -- which is the wrong shape for a pane whose whole promise is that
 // changing a value changes what the deployment does. refresh is called
@@ -1210,7 +1462,8 @@ type defaultShaper interface {
 //	                                  resolves a task's grants against (refresh)
 //	sandbox-cpus, sandbox-memory-mb   the default shape the next sandbox is
 //	                                  built at (refresh, via defaultShaper)
-//	max-concurrent, max-agent-turns   orchestrator.RunCycle's own per-cycle re-read
+//	max-workers, max-mergers, max-agent-turns
+//	                                  orchestrator.RunCycle's own per-cycle re-read
 //	agent-framework, gemini-model, claude-model
 //	                                  dispatchConfig's own per-dispatch re-read
 //	target-repos, newest-first, show-closed-by-default,
@@ -1301,9 +1554,9 @@ func (l *liveConfig) refresh(ctx context.Context, deps *orchestrator.Deps) (poll
 		// dispatch) rather than seeing one change underneath it.
 		deps.Config.Capabilities = model.NewCapabilityRegistry(capabilityProviders(now)...)
 	}
-	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB {
+	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB || now.sandboxDiskGB != was.sandboxDiskGB {
 		if shaper, ok := l.sandboxes.(defaultShaper); ok {
-			shaper.SetDefaultShape(orchestrator.Shape{CPUs: now.sandboxCPUs, MemoryMB: now.sandboxMemoryMB})
+			shaper.SetDefaultShape(orchestrator.Shape{CPUs: now.sandboxCPUs, MemoryMB: now.sandboxMemoryMB, DiskGB: now.sandboxDiskGB})
 		}
 	}
 	return now.pollInterval != was.pollInterval
@@ -1324,7 +1577,8 @@ func (c config) changesFrom(prev config) []string {
 		}
 	}
 	note("poll-interval", prev.pollInterval, c.pollInterval)
-	note("max-concurrent", prev.maxConcurrent, c.maxConcurrent)
+	note("max-workers", prev.maxWorkers, c.maxWorkers)
+	note("max-mergers", prev.maxMergers, c.maxMergers)
 	note("agent-framework", prev.agentFramework, c.agentFramework)
 	note("gemini-model", prev.geminiModel, c.geminiModel)
 	note("claude-model", prev.claudeModel, c.claudeModel)
@@ -1334,6 +1588,7 @@ func (c config) changesFrom(prev config) []string {
 	note("target-repos", prev.targetRepos, c.targetRepos)
 	note("sandbox-cpus", prev.sandboxCPUs, c.sandboxCPUs)
 	note("sandbox-memory-mb", prev.sandboxMemoryMB, c.sandboxMemoryMB)
+	note("sandbox-disk-gb", prev.sandboxDiskGB, c.sandboxDiskGB)
 	return changes
 }
 
@@ -1392,7 +1647,8 @@ func (c config) logStoreOverrides(mc model.Config) {
 		}
 	}
 	warn("poll-interval", c.pollInterval, mc.PollInterval)
-	warn("max-concurrent", c.maxConcurrent, mc.MaxConcurrent)
+	warn("max-workers", c.maxWorkers, mc.MaxWorkers)
+	warn("max-mergers", c.maxMergers, mc.MaxMergers)
 	warn("agent-framework", c.agentFramework, mc.AgentFramework)
 	warn("gemini-model", c.geminiModel, mc.GeminiModel)
 	warn("claude-model", c.claudeModel, mc.ClaudeModel)
@@ -1404,21 +1660,29 @@ func (c config) logStoreOverrides(mc model.Config) {
 	warn("target-repos", c.targetRepos, mc.TargetRepos)
 	warn("sandbox-cpus", c.sandboxCPUs, mc.SandboxCPUs)
 	warn("sandbox-memory-mb", c.sandboxMemoryMB, mc.SandboxMemoryMB)
+	warn("sandbox-disk-gb", c.sandboxDiskGB, mc.SandboxDiskGB)
 }
 
 // toModelConfig is the flag-parsed subset of config that mirrors
 // model.Config -- the seed loadConfig writes when a deployment has never
 // stored one.
+//
+// It starts from model.DefaultConfig rather than a zero model.Config:
+// the settings with no flag behind them here (ApprovedByDefault and
+// AutoMergeByDefault, whose default is on) still have to be seeded as
+// what a deployment that has never chosen them runs, and PutConfig binds
+// every column, so anything left at its Go zero value here is stored as a
+// deliberate-looking value nobody chose.
 func (c config) toModelConfig() model.Config {
-	return model.Config{
-		PollInterval: c.pollInterval, MaxConcurrent: c.maxConcurrent,
-		AgentFramework: c.agentFramework,
-		GeminiModel:    c.geminiModel, ClaudeModel: c.claudeModel, MaxAgentTurns: c.maxAgentTurns,
-		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
-		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
-		TargetRepos: c.targetRepos,
-		SandboxCPUs: c.sandboxCPUs, SandboxMemoryMB: c.sandboxMemoryMB,
-	}
+	mc := model.DefaultConfig()
+	mc.PollInterval, mc.MaxWorkers, mc.MaxMergers = c.pollInterval, c.maxWorkers, c.maxMergers
+	mc.AgentFramework = c.agentFramework
+	mc.GeminiModel, mc.ClaudeModel, mc.MaxAgentTurns = c.geminiModel, c.claudeModel, c.maxAgentTurns
+	mc.GitHubHost, mc.GitHubInsecureHTTP = c.githubHost, c.githubInsecureHTTP
+	mc.GCPProject, mc.GCPServiceAccountEmail = c.gcpProject, c.gcpServiceAccountEmail
+	mc.TargetRepos = c.targetRepos
+	mc.SandboxCPUs, mc.SandboxMemoryMB, mc.SandboxDiskGB = c.sandboxCPUs, c.sandboxMemoryMB, c.sandboxDiskGB
+	return mc
 }
 
 // withLiveModelConfig is withModelConfig restricted to what a *running*
@@ -1440,8 +1704,11 @@ func (c config) withLiveModelConfig(mc model.Config) config {
 	if mc.PollInterval <= 0 {
 		live.pollInterval = c.pollInterval
 	}
-	if mc.MaxConcurrent < 1 {
-		live.maxConcurrent = c.maxConcurrent
+	if mc.MaxWorkers < 1 {
+		live.maxWorkers = c.maxWorkers
+	}
+	if mc.MaxMergers < 0 {
+		live.maxMergers = c.maxMergers
 	}
 	if mc.AgentFramework == "" {
 		live.agentFramework = c.agentFramework
@@ -1460,7 +1727,8 @@ func (c config) withLiveModelConfig(mc model.Config) config {
 // row exists.
 func (c config) withModelConfig(mc model.Config) config {
 	c.pollInterval = mc.PollInterval
-	c.maxConcurrent = mc.MaxConcurrent
+	c.maxWorkers = mc.MaxWorkers
+	c.maxMergers = mc.MaxMergers
 	c.agentFramework = mc.AgentFramework
 	c.geminiModel = mc.GeminiModel
 	c.claudeModel = mc.ClaudeModel
@@ -1472,6 +1740,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.targetRepos = mc.TargetRepos
 	c.sandboxCPUs = mc.SandboxCPUs
 	c.sandboxMemoryMB = mc.SandboxMemoryMB
+	c.sandboxDiskGB = mc.SandboxDiskGB
 	return c
 }
 
@@ -1751,7 +2020,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 	}
 	uiCfg := ui.Config{
 		Actor:        ui.DefaultActor(actorID(cfg.actor)),
-		Capabilities: ui.DefaultCapabilities(),
+		Capabilities: ui.OfferedCapabilities(),
 		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,
@@ -1799,8 +2068,10 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		Sandboxes: sandboxHealthAdapter{sandboxes},
 		// hostStats reads this same process's own machine, not any one
 		// sandbox -- see pkg/sysstat's own doc comment on why that's a
-		// separate reading from Sandboxes above.
-		HostStats: hostStats,
+		// separate reading from Sandboxes above. It takes the data
+		// directory because the disk figure has to name a filesystem
+		// (hostStats' own doc comment on why that one).
+		HostStats: func() (ui.HostPressure, error) { return hostStats(cfg.dataDir) },
 		// ReconcilerDown mirrors this same process's own package-level
 		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
 		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
@@ -1810,6 +2081,26 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// compares the stored row against to say which of the two
 		// restart-only settings have been saved but not yet applied.
 		RunningConfig: live.modelConfig,
+		// PullRequests is how a dispatched run opens its own pull request
+		// before it exits (ui.Config.PullRequests' own doc comment): its
+		// mcpserver asks this API, which asks the daemon's GitHub client.
+		// The gate, rather than that client directly, because this server
+		// starts before runDaemon has built one -- deliberately, so the
+		// UI survives a reconcile loop that never comes up at all -- and
+		// livePullRequests is what closes that gap once it does.
+		PullRequests: pullRequestGate{},
+		// SandboxRecreate is how a dispatched run gets out of a sandbox
+		// it has broken beyond what it can fix from inside one
+		// (ui.Config.SandboxRecreate's own doc comment): its mcpserver
+		// asks this API, which asks the registry the run put itself in
+		// when it was dispatched. No gate, unlike PullRequests above --
+		// see sandboxRecreations' own doc comment.
+		SandboxRecreate: sandboxRecreateAdapter{sandboxRecreations},
+		// The reconcile loop's own tick, for GET /api/metrics' "cycles"
+		// section. No gate needed, unlike PullRequests above: cycleTimes
+		// is allocated at process start and runDaemon writes into that
+		// same ring once it gets there (cycleTimes' own doc comment).
+		Cycles: cycleTimesAdapter{cycleTimes},
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)
@@ -1949,7 +2240,49 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 			LoadAverage:   s.LoadAverage,
 			MemoryUsedMB:  s.MemoryUsedMB,
 			MemoryTotalMB: s.MemoryTotalMB,
+			DiskUsedMB:    s.DiskUsedMB,
+			DiskTotalMB:   s.DiskTotalMB,
 		}
+	}
+	return out
+}
+
+// cycleTimesAdapter adapts orchestrator's own CycleTiming (what a cycle
+// measured about itself) onto metrics.CycleSample (what pkg/metrics
+// summarises), field for field -- the one place both types are ever in
+// scope, so neither package needs to import the other, exactly as
+// sandboxHealthAdapter above does for the sandbox pane.
+//
+// It converts eagerly rather than handing over the ring: a report is a
+// read of a bounded slice a few hundred entries long, taken once per
+// GET /api/metrics, and copying it is what keeps the reconcile loop's
+// own record out of reach of everything downstream of it.
+type cycleTimesAdapter struct {
+	inner *orchestrator.CycleTimes
+}
+
+func (a cycleTimesAdapter) CycleTimes() metrics.CycleHistory {
+	recent, observed := a.inner.History()
+	out := metrics.CycleHistory{
+		Observed: observed,
+		Samples:  make([]metrics.CycleSample, 0, len(recent)),
+	}
+	for _, c := range recent {
+		sample := metrics.CycleSample{
+			Start:        c.Start,
+			Duration:     c.Duration,
+			DispatchWait: c.DispatchWait,
+			Reconcilers:  make([]metrics.ReconcilerSample, 0, len(c.Reconcilers)),
+		}
+		for _, r := range c.Reconcilers {
+			sample.Reconcilers = append(sample.Reconcilers, metrics.ReconcilerSample{
+				Name:     r.Name,
+				Wait:     r.Wait,
+				Duration: r.Duration,
+				Failed:   r.Failed,
+			})
+		}
+		out.Samples = append(out.Samples, sample)
 	}
 	return out
 }
@@ -1958,17 +2291,34 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 // CPU-load/memory pressure, read straight out of /proc by pkg/sysstat --
 // see that package's own doc comment for why this, not any one sandbox,
 // is what it reports.
-func hostStats() (ui.HostPressure, error) {
+//
+// dataDir names the filesystem the disk reading describes. Not "/": the
+// daemon runs in a container whose root filesystem is an image layer
+// nobody's runs fill up, while -data-dir is on the host volume that
+// holds the store *and* (in scripts/setup.sh's own layout) every
+// sandbox VM's disk overlay -- the one that actually runs out
+// (grain/task-41).
+//
+// A failing disk reading is left as 0/0 rather than failing the whole
+// call: load and memory came from a different file and are still good,
+// and the pane already reads 0/0 as "no figure to show" for a sandbox.
+// It is also the reading most likely to be unavailable for an
+// uninteresting reason -- a non-Linux developer machine -- which should
+// not cost the two readings beside it.
+func hostStats(dataDir string) (ui.HostPressure, error) {
 	snap, err := sysstat.Read()
 	if err != nil {
 		return ui.HostPressure{}, err
 	}
+	diskTotalMB, diskUsedMB, _ := sysstat.DiskUsage(dataDir)
 	return ui.HostPressure{
 		LoadAverage1:  snap.LoadAverage1,
 		LoadAverage5:  snap.LoadAverage5,
 		LoadAverage15: snap.LoadAverage15,
 		MemoryUsedMB:  snap.MemUsedMB,
 		MemoryTotalMB: snap.MemTotalMB,
+		DiskUsedMB:    diskUsedMB,
+		DiskTotalMB:   diskTotalMB,
 	}, nil
 }
 

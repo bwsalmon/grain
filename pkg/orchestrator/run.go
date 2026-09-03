@@ -87,6 +87,22 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 	}
 }
 
+// frameworkOpensPullRequests asks the Framework about to drive this run
+// whether its runs get the open_pull_request tool at all, so BuildPrompt
+// can name it only where it exists (agent.PullRequestFramework's own doc
+// comment says why the Framework is the only thing that knows).
+//
+// A Framework that does not implement that interface -- every test fake
+// here, and any implementation added later that forks no mcpserver --
+// answers no, which is the safe direction: a run that is never told
+// about a tool it happens to have loses one convenience, where a run
+// told to call a tool it does not have burns turns on an error it cannot
+// fix.
+func frameworkOpensPullRequests(framework agent.Framework) bool {
+	f, ok := framework.(agent.PullRequestFramework)
+	return ok && f.CanOpenPullRequest()
+}
+
 // BuildPrompt is the prompt a dispatched run receives — deliberately
 // plain: the task's own title and body plus the facts that are grain's
 // own, never the agent's to guess (which branch to push, which repo it
@@ -104,12 +120,35 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // with no target) and gets its own sentence explaining why, rather than
 // silently reading like a clone that simply failed.
 //
+// The one thing here that is advice rather than fact is
+// proposalSection's follow-on task etiquette, and it is here for the same
+// reason the rest is: the facts it stands on (this run's task id, whether
+// that task auto-merges) are grain's own, and an agent told neither
+// cannot fill in a proposal's depends_on or decide its auto_merge at all.
+//
 // task.Reads is mentioned but not enforced here: the git proxy already
 // allows a fetch against any of them and refuses a push to any but
 // task.Target (gitproxy/authorize.go), so this line is purely
 // informational -- it tells the agent those repos exist and are safe to
 // clone, rather than granting anything itself.
-func BuildPrompt(task model.Task, checkoutDir string) string {
+//
+// The last paragraph, for a task that has a target at all, is the
+// push/check/repair loop pkg/mcp's pull_request_status exists for. It is
+// informational in the same way: nothing here grants a second push, the
+// proxy already allowed every push to task.Target -- what it grants is
+// the knowledge that the loop is available, which no tool description
+// on its own can convey (see the comment at that paragraph).
+//
+// canOpenPullRequest is the one fact in that paragraph this function
+// cannot work out for itself: whether this run's mcpserver actually
+// registered open_pull_request. That depends on the Framework driving
+// the run having been given a daemon to ask (agent.PullRequestFramework,
+// and cmd/grain/mcpserver.go's -server/-task), which is a deployment's
+// choice -- a UI/API served at all -- rather than anything visible in a
+// task. False leaves the paragraph naming only pull_request_status, so a
+// deployment without that route never sends a run after a tool that is
+// not on its roster.
+func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) string {
 	branch := model.BranchName(task.ID)
 	var prompt string
 	if task.Target == nil {
@@ -135,6 +174,43 @@ func BuildPrompt(task model.Task, checkoutDir string) string {
 			checkoutDir, branch, branch,
 		)
 	}
+	// Said out loud because neither half is discoverable from the tools
+	// alone. Nothing stops a run pushing repeatedly -- the branch is its
+	// own and the proxy authorizes every push to it (gitproxy/authorize.go)
+	// -- but the sentences above read as one final act, and a run that
+	// treats them that way has no reason to ever call pull_request_status,
+	// whose whole value is being called again after the next push. Leaving
+	// that loop implicit is what left a red build to the merge queue's
+	// separate fix task (sync.go's fileFixTask) even when the run that
+	// caused it was still running.
+	if task.Target != nil {
+		prompt += fmt.Sprintf(
+			"\n\nPush as often as you like: %q is your branch, and each push reruns CI "+
+				"against the new commit. After a push, call `pull_request_status` to "+
+				"see what GitHub's checks made of it -- that is how you find out "+
+				"whether tests you cannot run in the sandbox actually pass. If any "+
+				"check fails, fix it, push again and check again, rather than "+
+				"finishing on a red build.",
+			branch,
+		)
+		// The second half of the same loop, for a run that really has the
+		// tool (canOpenPullRequest above): pull_request_status reports the
+		// checks a push triggered directly, but a repo whose CI only runs
+		// on pull requests has none until one is open, and grain does not
+		// open it until the run has already exited. A run that opens it
+		// itself sees those checks while it still has turns left to fix
+		// them -- which is the whole reason open_pull_request exists, and
+		// is exactly as undiscoverable from a tool description as the
+		// loop above.
+		if canOpenPullRequest {
+			prompt += "\n\nOnce you have pushed, you can call `open_pull_request` to open the " +
+				"pull request for that branch without waiting for your run to end, and " +
+				"see what CI says about it there and then -- then fix what it reports, " +
+				"push again, and call it again for the next round. It is the same pull " +
+				"request grain opens for you when this run finishes, and calling it more " +
+				"than once never opens a second one."
+		}
+	}
 	if len(task.Reads) > 0 {
 		names := make([]string, len(task.Reads))
 		for i, r := range task.Reads {
@@ -146,7 +222,45 @@ func BuildPrompt(task model.Task, checkoutDir string) string {
 			strings.Join(names, ", "),
 		)
 	}
+	prompt += proposalSection(task)
 	return prompt
+}
+
+// proposalSection is the follow-on task etiquette every dispatch is told,
+// and the two facts an agent cannot work out for itself that it needs to
+// follow it: which task it is running as, and whether that task is an
+// auto-merge job.
+//
+// Both are grain's own facts, the same reason BuildPrompt names the
+// branch rather than letting an agent pick one. Without the task id, an
+// agent splitting a piece out of the work it is doing has nothing to put
+// in that proposal's depends_on -- it would have to reverse the id out of
+// the branch name -- and relayProposedTasks resolves depends_on against
+// real task ids, so a proposal that names nothing is filed unblocked and
+// can be approved and dispatched beside the task it was meant to follow.
+// Without knowing its own task auto-merges, an agent has no way to tell
+// whether propose_task's auto_merge is even open to it: proposedAutoMerge
+// caps a proposal at the proposing task's own setting, so the sentence is
+// omitted, rather than negated, for a task that is not one -- there is
+// nothing an agent could usefully do with "you may not ask for this".
+func proposalSection(task model.Task) string {
+	s := fmt.Sprintf(
+		"\n\nYou are running as task %s. Anything you split out with propose_task "+
+			"should say what it has to wait on in depends_on: task %s itself, when "+
+			"the follow-up only makes sense once this task's own change has landed, "+
+			"and the id you gave an earlier proposal in this same run that it builds "+
+			"on. A proposal that names nothing is unblocked the moment a human "+
+			"approves it, and can be dispatched beside work it was supposed to "+
+			"follow.",
+		task.ID, task.ID,
+	)
+	if task.AutoMerge {
+		s += " This task is an auto-merge job: its pull request merges on its own " +
+			"once its checks pass, with no human review. A proposal that is a piece " +
+			"of this same task inherits that -- pass auto_merge: false on one that " +
+			"is separate work and deserves a human's own review."
+	}
+	return s
 }
 
 // commentThreadSection renders task's conversation into a prompt section,
@@ -325,8 +439,17 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prompt string
 	var prepErr error
 	if checkoutErr == nil {
-		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments, attachments, checkoutDir)
+		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
+			attachments, checkoutDir, frameworkOpensPullRequests(framework))
 	}
+	// Told to the recreate path, which is registered one level up in
+	// runOne and so never sees this: what a rebuilt sandbox needs is
+	// these already-minted placements written back into it, not a second
+	// materialization that would mint a second set of credentials behind
+	// the back of the single revoke below. A no-op for the usual run,
+	// which has no capabilities at all, and for every caller that wired
+	// no registry.
+	cfg.SandboxRecreations.setMaterialized(d.TaskID, materialized)
 
 	var result *agent.Result
 	var runErr error
@@ -377,8 +500,38 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			watchForTaskClosed(runCtx, ctx, store, task.ID, cfg.cancelPollInterval(), cancelRun)
 		}()
 
+		// Repo/Branch are the same pair BuildPrompt names in the prompt,
+		// passed structurally as well so a Framework can scope its
+		// forked mcpserver's pull_request_status to exactly this run's
+		// branch. Empty for a task with no target, which
+		// agent.RunConfig.Repo's own doc comment covers.
+		var repo string
+		if task.Target != nil {
+			repo = task.Target.String()
+		}
+
+		// Setup is over and the agent's own time starts here -- the one
+		// moment inside a run nothing else records, and the line
+		// pkg/metrics splits SandboxSetup from AgentWork at. Everything
+		// above (a sandbox built, a repo cloned, capabilities minted and
+		// placed) is on the near side of it; everything framework.Run
+		// does is on the far side.
+		//
+		// A failure to record it is logged and no more. The measurement
+		// is worth taking on every run, and worth nothing at all if
+		// taking it can cost one: a task must not fail because a
+		// bookkeeping write did (Store.SetRunAgentStarted).
+		if err := store.SetRunAgentStarted(ctx, d.RunID, cfg.now()); err != nil {
+			log.Printf("orchestrator: run %s: recording when its agent started: %v", d.RunID, err)
+		}
+
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
+			Repo: repo, Branch: model.BranchName(task.ID),
+			// TaskID is what lets a Framework's own forked mcpserver ask
+			// the daemon to act for this run rather than only on its
+			// sandbox -- open_pull_request, today (see RunConfig.TaskID).
+			TaskID:   task.ID,
 			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
@@ -466,6 +619,15 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 // nothing at all when the framework returned no result to say. Kept to
 // names and counts, like noActionDetail: this lands in a stored outcome
 // column that `grain get` prints, not a transcript.
+//
+// The one way a run can now fail with a result behind it uses this: a
+// framework that returned an error (above). An erroring tool call used to
+// be a second way, and used to record only the failing call's name, so a
+// run that opened its pull request and then tripped over something
+// unrelated read back as never having opened one -- a wrong answer to the
+// only question task_run.detail can be asked about tool use, not merely a
+// thinner one. It is not an ending at all any more (outcomeOf), which
+// leaves this to the framework's own failures.
 func partialWorkSuffix(result *agent.Result) string {
 	if result == nil || len(result.ToolCalls) == 0 {
 		return ""
@@ -477,23 +639,96 @@ func partialWorkSuffix(result *agent.Result) string {
 // outcomeOf reads agent.Result.ToolCalls -- the only record of what
 // happened inside the run (mcp/mock_tools.go's own sink is internal and
 // discarded when Run returns) -- and turns it into a run outcome and a
-// short reason for it: any error tool call fails the run, and so does a
-// run that made no tool call at all, since an agent that never touched
-// run_command did not do the work. Ported from pkg/orchestrate's own
-// runAgent (bwsalmon/agents#254), extended with detail for
-// bwsalmon/agents#403's own "a human should see why, not just that".
+// short reason for it: a run that made no tool call at all failed, since
+// an agent that never touched run_command did not do the work, and every
+// other run that got as far as its tools reads "succeeded" here until
+// ProcessResult has checked whether those calls amounted to anything
+// (Store.SetRunOutcome's own doc comment on that division of labour).
+// Ported from pkg/orchestrate's own runAgent (bwsalmon/agents#254),
+// extended with detail for bwsalmon/agents#403's own "a human should see
+// why, not just that".
+//
+// An errored tool call is deliberately not a failure any more. It used to
+// be -- the first ToolCall with IsError set ended this function -- and
+// that read a normal turn of the agent's own loop as a broken run. IsError
+// is how a tool reports an ordinary result the agent is expected to read
+// and work around: pkg/mcp's run_command sets it for any non-zero exit
+// status, so a grep that matched nothing, a test suite that failed before
+// the agent fixed it, or a `git diff --quiet` that found changes all
+// marked the whole run failed; read_file sets it for a file that is not
+// there, and edit_file for an old_string that did not match or matched
+// twice, which is the search-and-refine loop working exactly as intended.
+// Almost every real run trips one of those, so almost every real run --
+// including the ones that committed, pushed and opened a pull request --
+// was recorded "failed".
+//
+// What that cost was never cosmetic. task_streak (schema.go) counts every
+// finished run whose outcome is not "succeeded", so those bogus failures
+// drive dispatch.retryEligible's exponential backoff on a task that is
+// working fine, and take it to model.MaxConsecutiveFailures -- state
+// 'failed', dispatched no more -- on the strength of a grep. It also had
+// to be papered over twice downstream, once in model.Transitions and once
+// in ui.Client.Task, both of which suppress a failure streak on a task
+// that plainly completed (bwsalmon/agents#502 and #514); those guards are
+// treating this symptom rather than the cause.
+//
+// A run really broken by its tools does not need this heuristic. A tool
+// framework that failed -- the agent CLI dying, its MCP connection
+// dropping, a sandbox that stopped answering -- comes back as a non-nil
+// error from framework.Run and is recorded "failed" by RunDispatch above,
+// with the framework's own diagnosis. A run whose tools worked but which
+// achieved nothing is corrected to "no_action" by ProcessResult once a
+// push, a question and a closing comment have all actually been ruled
+// out. This function's job is only the guess in between.
+//
+// Every ending that had a run behind it at all carries toolCallSummary,
+// including the successful one, which used to record nothing. That is not
+// symmetry for its own sake: which tools a run reached for is the only
+// evidence there is for whether a tool grain went to the trouble of
+// building and naming in the prompt is actually being used, and until now
+// it survived a successful run nowhere. agent.Result is never persisted;
+// noActionDetail and partialWorkSuffix wrote the summary only for runs
+// that failed or achieved nothing; and Result.Transcript is prose, is
+// best-effort per framework (agent.Result's own doc comment), and renders
+// a call as a "> name(args)" line that any tool's own *output* can
+// contain verbatim -- so counting calls out of it is both framework-
+// specific and unsound. A run that pushed, checked CI, repaired and
+// pushed again is exactly the run that succeeds, so the successful path
+// was precisely the one where the question "did it call the tool?" could
+// not be answered.
+//
+// Names and counts only, into a stored column a task listing prints --
+// the same bound noActionDetail's own doc comment sets, and the reason
+// this is not a transcript store.
 func outcomeOf(result *agent.Result) (outcome, detail string) {
-	sawTool := false
-	for _, c := range result.ToolCalls {
-		sawTool = true
-		if c.IsError {
-			return "failed", fmt.Sprintf("tool call %q failed: %s", c.Name, c.Text)
-		}
-	}
-	if !sawTool {
+	if len(result.ToolCalls) == 0 {
 		return "failed", "the agent made no tool calls at all"
 	}
-	return "succeeded", ""
+	return "succeeded", fmt.Sprintf("the run made %d tool call(s)%s%s",
+		len(result.ToolCalls), toolCallSummary(result), erroredCallSuffix(result))
+}
+
+// erroredCallSuffix says how many of a run's tool calls came back as
+// errors, or nothing at all when none did.
+//
+// Recorded even though it no longer decides the outcome (see outcomeOf):
+// toolCallSummary already marks which tools errored and how often, but it
+// marks them per tool, and the one number a human scanning `grain get`
+// wants is how much of the run was spent on calls that did not land. A
+// handful is the ordinary shape of agentic work; nearly all of them is
+// the shape of a sandbox that stopped answering, and that is worth being
+// able to see on a run whose outcome is otherwise unremarkable.
+func erroredCallSuffix(result *agent.Result) string {
+	errored := 0
+	for _, c := range result.ToolCalls {
+		if c.IsError {
+			errored++
+		}
+	}
+	if errored == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d of them returned an error", errored)
 }
 
 // prepareCapabilities resolves and materializes cc.Task's capability
@@ -512,11 +747,31 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // agent whose capability request was refused must not run at all, since
 // the task it would work almost always depends on it. Ported from
 // pkg/orchestrate's own prepare (bwsalmon/agents#254).
+//
+// That rule holds for every grant, including one a task was filed with
+// because the deployment attaches it to everything, or because the repo
+// it targets adds it (model.Config.DefaultCapabilities,
+// model.RepoConfig.DefaultCapabilities, model.GrantByDefault). There is no
+// "degrade rather than fail" tier here, and it is not an oversight: v1
+// needed one because it minted a GCP key per dispatch for every sandbox,
+// with no task holding the request and nowhere to record that it had
+// failed, so swallowing the error was the only way a broken minter did
+// not stop the deployment. A default here is instead seeded onto the
+// task at creation, so a failed mint fails one task, says so on it, and
+// is fixed either by fixing the capability or by detaching it -- from
+// that task, or from the default set, whichever the operator meant.
+// Silently running an agent without a capability its task is recorded as
+// holding would trade that for a run that quietly does the wrong work.
+//
+// checkoutDir and canOpenPullRequest are passed straight through to
+// BuildPrompt, which is where both are explained: nothing here reads
+// either, this being the one path that assembles a dispatch's prompt.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
-	attachments []model.Attachment, checkoutDir string) (materialized []model.Materialized, prompt string, err error) {
+	attachments []model.Attachment, checkoutDir string,
+	canOpenPullRequest bool) (materialized []model.Materialized, prompt string, err error) {
 
-	prompt = BuildPrompt(cc.Task, checkoutDir)
+	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest)
 	if thread := commentThreadSection(comments); thread != "" {
 		prompt += "\n\n" + thread
 	}

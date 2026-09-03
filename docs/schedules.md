@@ -1,4 +1,4 @@
-# Scheduled tasks (v2)
+# Schedules (v2)
 
 bwsalmon/agents#376: give v2 the recurring-chore mechanism v1 already
 proved out (bwsalmon/agents#163, `docs/roadmap.md` §28 — a dependency
@@ -10,7 +10,7 @@ operator drops on the host.
 
 This document describes what is actually implemented on this branch
 (`pkg/model/schedule.go`, `pkg/orchestrator/schedule.go`,
-`pkg/ui/schedules.go`, `ui/src/components/ScheduledTasksOverlay.jsx`,
+`pkg/ui/schedules.go`, `ui/src/components/ScheduleOverlay.jsx`,
 and the accompanying tests), not a proposal — it exists so a reviewer
 has one place to read the shape of the feature and why it looks the way
 it does, alongside the code's own doc comments.
@@ -47,15 +47,15 @@ itself went through GitHub, and "absence of the directory is the off
 switch" fit that world. v2 already moved task creation onto the store
 (`Client.CreateTask` writes straight to `model.Store`, no issue
 involved) specifically so a UI or the CLI could create one without a
-redeploy; a `ScheduledTask` (`pkg/model/schedule.go`) is the same idea —
-`ScheduledTasksOverlay.jsx` creates, pauses/resumes, and deletes one the
+redeploy; a `Schedule` (`pkg/model/schedule.go`) is the same idea —
+`ScheduleOverlay.jsx` creates, pauses/resumes, and deletes one the
 same way `SecretsPanel.jsx` already manages secrets.
 
 **No `needs_approval` field.** v1's design draft called `SCHEDULED` "the
 one origin that chooses per instance" before `docs/data-model.md`
 dissolved the special case: creating a schedule *is* the human's standing
 approval, so every firing lands already approved
-(`fireScheduledTask` sets `Approval` unconditionally). This
+(`fireTaskSchedule` sets `Approval` unconditionally). This
 implementation takes that dissolution all the way — there is no
 per-schedule opt-in to land `proposed` instead, unlike v1's own
 `needs_approval` header. A schedule whose work genuinely needs review
@@ -77,8 +77,8 @@ express.
 
 **`NextRunAt`, not "last fired + interval, computed on read."** Each
 schedule carries its own `NextRunAt`/`LastRunAt` columns
-(`scheduled_task` table, `SchemaVersion` 7 → 8), advanced by
-`fireScheduledTask` itself in a loop that walks `NextRunAt` forward by
+(`schedule` table, `SchemaVersion` 7 → 8), advanced by
+`fireTaskSchedule` itself in a loop that walks `NextRunAt` forward by
 `Interval` until it is back in the future — so a schedule paused (or a
 daemon down) through several missed intervals fires once on resume and
 resyncs to its normal cadence, rather than firing once per missed
@@ -87,7 +87,7 @@ gets `NextRunAt = now`, so it fires on the very next cycle rather than
 waiting a full interval for its first task — `CreateTask`'s own "queued
 the moment it is written" immediacy, applied to a schedule's timing.
 
-**Pausing keeps the row.** `DeleteScheduledTask` removes a schedule
+**Pausing keeps the row.** `DeleteSchedule` removes a schedule
 outright with no soft-delete, since (per its own doc comment) a schedule
 carries no history worth keeping once nobody wants it — every task it
 already filed stays exactly where it was. Pausing instead
@@ -96,27 +96,27 @@ UI's "Pause"/"Resume" button rather than "Delete" for that case.
 
 ## Shape of the pieces
 
-- **`model.ScheduledTask`** (`pkg/model/schedule.go`): `ID`, `Title`,
+- **`model.Schedule`** (`pkg/model/schedule.go`): `ID`, `Title`,
   `Body`, `Target`, `Base`, `AutoMerge`, `Interval`, `Enabled`,
   `NextRunAt`, `LastRunAt`, `CreatedAt`. No `Reads`, `Grants`,
   `DependsOn`, or `Capabilities` — a firing carries none of those (see
   "Left open").
-- **Schema** (`pkg/model/schema.go`): `scheduled_task` (one row per
-  schedule) and `scheduled_task_sequence` (its own autoincrement
+- **Schema** (`pkg/model/schema.go`): `schedule` (one row per
+  schedule) and `schedule_sequence` (its own autoincrement
   allocator, so a schedule id like `sched-3` is never confused with a
-  task id — `NewScheduledTaskID`, distinct from `NewTaskID`).
+  task id — `NewScheduleID`, distinct from `NewTaskID`).
   `SchemaVersion` 7 → 8. No changes to `task`, `task_state`,
   `task_blocked`, or `task_ready`: the tag-based open-firing check reads
   `task_tag`/`task_state`, both of which already existed.
-- **Store** (`pkg/model/store.go`): `PutScheduledTask`,
-  `GetScheduledTask`, `ListScheduledTasks`, `UpdateScheduledTask`
+- **Store** (`pkg/model/store.go`): `PutSchedule`,
+  `GetSchedule`, `ListSchedules`, `UpdateSchedule`
   (read-modify-write-and-retry, `UpdateTask`'s own shape),
-  `DeleteScheduledTask`, `DueScheduledTasks(ctx, now)` (enabled schedules
+  `DeleteSchedule`, `DueSchedules(ctx, now)` (enabled schedules
   whose `NextRunAt` has passed), `HasOpenTaskWithTag`.
 - **Orchestrator** (`pkg/orchestrator/schedule.go`): `reconcileSchedule`,
   registered in `Reconcilers()` *before* `dispatch` — so a task a
   schedule files this tick is dispatchable the same tick, the same
-  latency argument that already puts `sync` last. `fireScheduledTask`
+  latency argument that already puts `sync` last. `fireTaskSchedule`
   does the open-tag check, allocates a task id, builds and writes the
   `model.Task` (attributed to a new `scheduler` principal — automation,
   ID `"schedule"`, distinct from `"grain"`'s relayed-agent-output
@@ -130,7 +130,7 @@ UI's "Pause"/"Resume" button rather than "Delete" for that case.
   same way `Client.CreateTask` is; `HTTPClient` (the CLI/remote path)
   gains no matching methods, so a schedule can be managed from the web
   UI but not yet from `grain` on the command line — see "Left open."
-- **Frontend** (`ScheduledTasksOverlay.jsx`): a list-plus-form overlay
+- **Frontend** (`ScheduleOverlay.jsx`): a list-plus-form overlay
   following `SecretsPanel.jsx`'s pattern exactly, opened from a new
   sidebar entry alongside Settings. A task the overlay's own
   schedule fired shows a "Scheduled" badge in the ordinary task list
@@ -145,7 +145,7 @@ schedule_test.go` (a due schedule fires exactly one task and advances
 its timing; an open previous firing suppresses the next one; a
 not-yet-due schedule fires nothing), `pkg/ui/schedules_test.go` and
 `server_schedules_test.go` (the `Client` methods and the five HTTP
-routes), and `ScheduledTasksOverlay.test.jsx` plus the `Sidebar.test.jsx`
+routes), and `SchedulesList.test.jsx` plus the `Sidebar.test.jsx`
 addition for the new entry point.
 
 ## Left open
@@ -168,7 +168,7 @@ addition for the new entry point.
 
 ## Update: schedules got their own pane (bwsalmon/agents#455)
 
-The "Frontend" bullet above and `ScheduledTasksOverlay.jsx` describe how
+The "Frontend" bullet above and `ScheduleOverlay.jsx` describe how
 this first shipped; bwsalmon/agents#455 moved the UI from a modal opened
 by a footer button to a full pane (`SchedulesList.jsx`), selected the
 same way the repo page already is: a `ListItemButton` alongside "Repos"
@@ -186,7 +186,7 @@ Two of this document's own "Left open" items from when the feature first
 shipped are closed as of here.
 
 **A schedule is no longer only "every N hours/minutes since it last
-fired."** `model.ScheduledTask.Interval` (a bare `time.Duration`) is
+fired."** `model.Schedule.Interval` (a bare `time.Duration`) is
 replaced by `Recurrence` (`pkg/model/schedule.go`), a small sum type: `Kind`
 is one of `RecurrenceEveryNHours`, `RecurrenceDaily`, `RecurrenceWeekly`, or
 `RecurrenceMonthly`, and the fields that apply depend on which -- the same
@@ -197,7 +197,7 @@ wall-clock aligned for the three new kinds (a calendar month is not a
 fixed number of hours, so `RecurrenceMonthly` walks actual months rather
 than adding an approximate duration, clamping a day-of-month past a
 shorter month's own last day rather than overflowing into the next one).
-`fireScheduledTask`'s loop is otherwise unchanged in shape -- it still
+`fireTaskSchedule`'s loop is otherwise unchanged in shape -- it still
 walks forward from the schedule's own `NextRunAt` (never from "now"
 directly) until back in the future, so a schedule paused, or a daemon
 down, through several missed occurrences still fires exactly once on
@@ -209,7 +209,7 @@ unchanged, since `TimeOfDay`/`Weekday`/`DayOfMonth` are read against UTC,
 same as `NextRunAt`/`LastRunAt` always have been.
 
 A database created before this migrates in place
-(`ensureScheduledTaskRecurrenceColumns`, `pkg/model/store.go`): its old
+(`ensureScheduleRecurrenceColumns`, `pkg/model/store.go`): its old
 `interval_ms` column is read once, backfilled into `every_n_hours`
 (rounded down to whole hours, matching `RecurrenceEveryNHours`'s own
 granularity) and dropped, the same probe-then-`ALTER TABLE` approach
@@ -218,9 +218,9 @@ granularity) and dropped, the same probe-then-`ALTER TABLE` approach
 
 **Reads and Grants join Target/Base/AutoMerge on a schedule.** The
 former "Left open" bullet on this narrowed: a schedule's own `Reads`
-(read-only repos, `scheduled_task_read`) and `Grants` (capabilities,
-`scheduled_task_grant`) are new child tables, `task_read`/`task_grant`'s
-own shape ported onto `scheduled_task_id`, and `fireScheduledTask` copies
+(read-only repos, `schedule_read`) and `Grants` (capabilities,
+`schedule_grant`) are new child tables, `task_read`/`task_grant`'s
+own shape ported onto `schedule_id`, and `fireTaskSchedule` copies
 both onto the filed `Task` the same way it already copies `Target`/
 `Base`/`AutoMerge`. `DependsOn` and `Approved` remain deliberately absent
 -- `ui.CreateScheduleRequest`'s own doc comment explains why: a one-shot
@@ -255,9 +255,9 @@ future"), so a later caller beyond schedules has somewhere to point too,
 without this type or its store surface changing shape for that caller.
 
 **A schedule optionally references a template rather than always
-carrying its own copy.** `ScheduledTask.TemplateID` (nullable
-`scheduled_task.template_id`, a database created before this migrates in
-place via `ensureScheduledTaskTemplateColumn` the same probe-then-`ALTER
+carrying its own copy.** `Schedule.TemplateID` (nullable
+`schedule.template_id`, a database created before this migrates in
+place via `ensureScheduleTemplateColumn` the same probe-then-`ALTER
 TABLE` approach every other migration in `store.go` already uses) is
 `nil` for a schedule that still declares its content inline, exactly as
 every schedule always has; set, it names the template that content comes
@@ -274,9 +274,9 @@ synced onto the row in place as an independent, directly-editable copy
 rather than blanking it out.
 
 **Resolved fresh at firing time, not copied in once.**
-`orchestrator.fireScheduledTask` re-reads a template-backed schedule's
+`orchestrator.fireTaskSchedule` re-reads a template-backed schedule's
 `TaskTemplate` from the store on every firing rather than trusting
-`ScheduledTask`'s own inline columns, so editing a template changes what
+`Schedule`'s own inline columns, so editing a template changes what
 every schedule pointing at it files *next*, with no separate "push the
 edit out" step -- the entire reason a template is worth having over
 copy-paste. Those inline columns are not dead weight even so: the same
@@ -433,7 +433,7 @@ Base as their own fields unconditionally, `templateId` or not --
 `templateId` still takes over Title/Description/AutoMerge/Reads/
 Capabilities entirely, the same "no mixing a template with per-field
 overrides" rule as before, just five fields instead of seven.
-`orchestrator.fireScheduledTask` no longer reads Target/Base off a
+`orchestrator.fireTaskSchedule` no longer reads Target/Base off a
 resolved template; a schedule's own Target/Base are what every firing
 targets, template-backed or not. `ui.PutQualificationPlan` and
 `model.CreateQualificationRun` drop their "template must target this
@@ -448,3 +448,178 @@ behavioural change -- only the template picker's secondary text
 (`t.repo`) and `RepoReleases.jsx`'s "templates already declared for this
 repo" filter, both of which assumed a field that no longer exists, come
 out.
+
+
+## Update: a schedule can run a task suite, not only file a task
+
+A task suite (`docs/design.md`, `pkg/model/suite.go` --
+bwsalmon/agents#642) was runnable only by hand: a human picks a suite, a
+repo and a branch, and `ui.Client.CreateSuiteRun` starts one run. The
+recurring-chore case this whole document is about wanted the other half
+-- "sweep this branch for bugs every night", not "sweep it when I
+remember to click Run" -- so a schedule now fires either of the two
+things grain knows how to start.
+
+**One schedule type, not a second parallel mechanism.**
+`Schedule.SuiteID` (`pkg/model/schedule.go`) sits beside the
+existing `TemplateID`, `schedule.suite_id` beside
+`schedule.template_id`, and the two are mutually exclusive: a
+schedule files a task (inline content or a template's), or it starts a
+suite run. Everything else about a schedule keeps meaning exactly what it
+already meant -- the recurrence, the enabled/paused switch, `NextRunAt`/
+`LastRunAt` and the walk-forward loop that resyncs a schedule paused
+through several missed occurrences, the target repo and base branch, and
+the "a previous firing that has not finished suppresses the next one"
+rule. That was the point of doing it this way rather than adding a
+`ScheduledSuite` row, a second reconciler and a second page: none of that
+machinery is about what a firing *is*, so none of it needed a second
+copy. `orchestrator.fireSchedule` is the whole of the fork --
+`fireTaskSchedule` or `fireSuiteSchedule`, sharing `advanceSchedule`
+for the timing half both need.
+
+**Idempotency is an active run, not an open task.** A schedule filing a
+task checks `Store.HasOpenTaskWithTag` for its own firing tag; a schedule
+running a suite checks `Store.HasActiveRunForSchedule`, since a firing
+there is a whole run over as many passes as the suite's mode asks for,
+not one task. `task_suite_run.schedule_id` is what that reads (NULL for a
+run a human started, which is also how a database created before this
+migrates -- `ensureTaskSuiteRunScheduleColumn`, the same
+probe-then-`ALTER TABLE` approach as every other migration in
+`store.go`). Both checks have the same consequence: a suppressed firing
+leaves `NextRunAt` where it was, so it is delayed rather than skipped.
+
+**Resolved fresh at firing time.** `fireSuiteSchedule` re-reads the
+`TaskSuite` on every firing, exactly as `fireTaskSchedule` re-reads a
+`TaskTemplate`, so editing a suite changes what every schedule pointing
+at it runs *next*, with no push step; the schedule's own `Title` is kept
+in sync with the suite's name as a display cache the same way. A suite
+deleted out from under a schedule fails that one firing with a plain
+error rather than starting a run of nothing --
+`ui.Client.DeleteSuite` refuses the delete in the first place
+(`Store.SchedulesUsingSuite`), `DeleteTemplate`'s own guard applied to
+the other thing a schedule can point at.
+
+**What a schedule fires is fixed when it is created.**
+`ui.UpdateScheduleRequest.SuiteID` repoints a suite-backed schedule at a
+different suite, but converting a schedule from one kind to the other is
+refused in both directions: a suite has no title or body of its own to
+become a task's, and a task's content has nowhere to go in a suite, so
+the honest answer is "delete it and create the other kind" rather than a
+half-populated row. This is the one place a suite-backed schedule reads
+differently from a template-backed one, where `templateId: ""` detaches
+and leaves the last-synced content behind as an editable copy.
+
+**Base is required for a suite-backed schedule**, matching
+`CreateSuiteRunRequest`'s own rule (a suite run stacks its tasks against
+one named branch and has no default to fall back to), where an ordinary
+schedule may leave it blank and take the repo's default branch. Every
+task a firing files is the suite's own -- `SuitePrincipal`,
+`ReasonSuite`, the suite's `RequireApproval` and `AutoMerge` -- since a
+schedule decides only when a run happens and what it runs against, never
+what the run's tasks look like. That is why `RequireApproval` is
+available here at all, incidentally closing (for suites only) this
+document's long-standing "no per-schedule approval gate" gap: a schedule
+running a suite that requires approval leaves each pass's tasks for a
+human, where a schedule filing a task still cannot.
+
+**UI.** `ScheduleOverlay.jsx` gains a "Fires" picker (a task, or a task
+suite) offered on a new schedule only, and a suite picker in place of the
+template picker and every content field when a suite is chosen -- the
+same "hide fields the request would silently ignore" rule the template
+picker already follows. `SchedulesList.jsx` shows a `Suite: <name>` chip
+beside the existing `Template:` one, and `SuitesList.jsx`'s run list
+marks a run a schedule started with a "Scheduled" chip.
+
+No `SchemaVersion` bump: both new columns are nullable and added by an
+`ensure*` migration, so an existing database upgrades in place rather
+than being moved aside at deploy (`SchemaVersion`'s own doc comment on
+which changes need the bump).
+
+Tests: `pkg/model/sqlite/schedule_store_test.go` (the `SuiteID` round
+trip and `SchedulesUsingSuite`), `pkg/model/sqlite/suite_store_test.go`
+(a run recording its schedule, `HasActiveRunForSchedule`, the
+schedule_id migration), `pkg/orchestrator/schedule_test.go` (a due
+suite-backed schedule starts exactly one run and advances its timing; an
+active run suppresses the next firing; a missing suite fails the firing
+without advancing it), `pkg/ui/schedules_test.go` and `suites_test.go`
+(creation, the suite/template exclusivity, the required base, repointing,
+the refused kind change, and the delete-while-in-use guard), and
+`SchedulesList.test.jsx`.
+
+Still open, unchanged: no CLI for schedules or suites.
+
+## Update: the task list badges every task nobody filed by hand
+
+`Task.SuiteRun` (`ReasonSuite`) had the backend half of the "Scheduled"
+badge above and none of the frontend, so a whole pass of suite-filed
+tasks sat in the backlog reading as work somebody typed in. `TaskRow`
+now renders a `suite` chip beside `scheduled`, same tinted fill and
+same title tooltip.
+
+A stacked task -- the merge queue's own automatic fix, `ReasonFix` --
+gets a `merge fix` chip on the same rule, but only when it is *not*
+nested under the task it repairs: nesting is already the explanation,
+and repeating it on every child row would be noise. `TaskRow` takes a
+`nested` prop for that, set by `TaskList.jsx` on the rows it puts in a
+`.task-sublist` and left off everywhere a task is listed flat -- the
+repo pane, and `groupByStack`'s own fallback for a fix whose parent is
+filtered out of the current view or gone. Its tooltip names the parent
+when there is one to name.
+
+Tests: `TaskList.test.jsx` (the suite chip, and the merge-fix chip
+present in each un-nested case but absent under a parent).
+
+## Update: "scheduled tasks" are just schedules
+
+The feature was named twice over, and the two names had drifted apart.
+Most of it already said *schedule*: `/api/schedules`,
+`pkg/ui/schedules.go` and its `Schedule`, `SchedulesList.jsx`, the
+`sched-` id prefix, this document's own prose throughout. The model, the
+store and the schema still said *scheduled task* —
+`model.ScheduledTask`, `Store.PutScheduledTask`, the `scheduled_task`
+table — and so did the two labels a human actually reads, the sidebar
+entry and the list heading. The older name is also actively wrong now: a
+schedule has fired a whole task suite rather than a single task since the
+update above, so "scheduled task" names one of the two things it does.
+
+So: one name, the shorter one. `model.Schedule`, `Store.PutSchedule`/
+`GetSchedule`/`ListSchedules`/`UpdateSchedule`/`DeleteSchedule`/
+`DueSchedules`/`NewScheduleID`, and `Store.CreateScheduledSuiteRun`.
+`orchestrator.fireScheduledTask`/`fireScheduledSuite` become
+`fireTaskSchedule`/`fireSuiteSchedule` — the two kinds of schedule, named
+after the schedule rather than after what it fires, since `fireSchedule`
+above already dispatches between them. The UI's two remaining "Scheduled
+tasks" labels (the sidebar entry and the list heading) become
+"Schedules", and this file moves from `docs/scheduled-tasks.md` to
+`docs/schedules.md`.
+
+The tables move with it: `scheduled_task`, `scheduled_task_sequence`,
+`scheduled_task_read` and `scheduled_task_grant` become `schedule`,
+`schedule_sequence`, `schedule_read` and `schedule_grant`, and the child
+tables' `scheduled_task_id` column becomes `schedule_id`. A database
+written before this migrates in place — `Store.renameScheduleTables`,
+plain `ALTER TABLE ... RENAME`, no row rewritten and no id reissued
+(SQLite carries an AUTOINCREMENT table's `sqlite_sequence` entry across a
+rename, so the next `sched-` id follows the last one issued rather than
+starting over). It runs *before* `Init` applies the DDL, unlike every
+`ensure*` migration beside it, and has to: `Statements()` would otherwise
+create an empty `schedule` table beside the populated `scheduled_task`
+one, leaving the rename with nowhere to go. Each step is guarded on the
+old name being present and the new one absent, so it is idempotent and
+safe to interrupt.
+
+No `SchemaVersion` bump, for the reason
+`ensureConfigWorkerMergerColumns`' own rename of `max_concurrent` did not
+need one: an existing database migrates into the new shape rather than
+being one this build cannot be re-created into.
+
+Nothing about behaviour changes, and neither does the wire format: the
+REST surface was already `/api/schedules` with `pkg/ui.Schedule`'s own
+JSON field names, so no client sees this at all. What stays "scheduled"
+is what genuinely describes a *task*: `ui.Task.Scheduled`, the task
+list's `scheduled` chip, and `model.ReasonSchedule` all still name a task
+filed automatically by a schedule.
+
+Tests: `pkg/model/sqlite/schedule_store_test.go` gains a database built
+under the old four table names, checking `Init` carries the row, its
+reads and grants, and the sequence position onto the new ones.

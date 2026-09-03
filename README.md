@@ -31,17 +31,42 @@ pkg/dispatch/   which tasks run now: what one cycle decides to
                 subcommand's timer does, through pkg/orchestrator -- and
                 it carries no
                 scheduling policy: it drains task_ready until
-                max_concurrent runs are live
+                max_workers ordinary runs, or max_workers+max_mergers
+                runs of any kind, are live
 pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
-                propose_task, add_review_comment). NewSandboxTools runs
+                propose_task, add_review_comment) -- plus two tools whose
+                effect is real and immediate rather than mocked and
+                deferred. open_pull_request
+                (NewOpenPullRequestTools): a run
+                that has pushed its branch can have grain open its pull
+                request there and then and read back what the repo's own
+                CI makes of it, instead of exiting blind and leaving the
+                pull request to orchestrator's finish path. Opening one
+                is a write, and writes stay grain's: it asks the daemon
+                (pkg/ui's POST /api/tasks/{id}/pull-request) rather than
+                holding a credential of its own -- see "A run can open
+                its own pull request" below. And recreate_sandbox
+                (NewRecreateSandboxTools): a run whose sandbox has become
+                unusable can have grain destroy it and build a clean one,
+                with the checkout, credentials and placements grain put
+                there restored, rather than spending its remaining turns
+                failing in a sandbox no tool it holds can repair -- the
+                same hop, to pkg/ui's
+                POST /api/tasks/{id}/sandbox/recreate, and see "A run can
+                rebuild its own sandbox" below. NewSandboxTools runs
                 those four locally, confined to a directory; NewSSHSandboxTools
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
                 into that VM's own container -- see "Reaching a sandbox
-                guest without a route into it" below
+                guest without a route into it" below.
+                NewPullRequestTools adds pull_request_status: the one
+                tool here that really reads GitHub, from the controller,
+                so a run can see CI's verdict on the commits it pushed
+                and repair a red build inside its own turn budget -- see
+                "Letting a run watch its own CI" below
 pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
                 run's VM, the container names kontur derives from a VM
                 name, and the one `docker inspect` that tells a VM whose
@@ -116,7 +141,25 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 (see "Input is a model update, not a GitHub issue").
                 RunCycle runs the two halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
-                pipeline" below.
+                pipeline" below. It also times itself
+                (orchestrator.CycleTimes): a bounded in-memory ring of how
+                long recent ticks took and how far into each one the
+                dispatch decision was reached, which is the one thing a
+                deployment measures about itself rather than derives from
+                a row -- see "Measuring the daemon's own tick" below
+pkg/metrics/    what the deployment actually delivers: tasks completed per
+                day (throughput) and where a task's wall-clock time goes
+                (latency), computed from rows that already exist -- filed,
+                approved, dispatched, agent-started, finished, completed --
+                with nothing stored, nothing counted on a hot path and no
+                way for a number to disagree with the task it describes.
+                It holds no state and opens no database: pkg/model reads
+                the rows (Store.TaskTimings/RunTimings), this decides what
+                they mean, pkg/ui serves it as GET /api/metrics and
+                `grain metrics` prints it. Its one non-derived input is
+                the daemon's own RunCycle tick, which leaves no row to
+                derive anything from -- see "Measuring the daemon's own
+                tick" below. See "Measuring throughput and latency" below
 tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
@@ -201,7 +244,12 @@ cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 pkg/kontur, above) for NewSSHSandboxTools against a real
                 kontur-managed VM -- what a running daemon (via
                 pkg/agent/claude) forks *this same binary* to get, rather
-                than needing a second one on disk. "demo" (demo.go,
+                than needing a second one on disk. -server plus -task adds
+                open_pull_request to that roster: the daemon to ask and
+                the task to ask about, so a run can have its own pull
+                request opened while it still has turns left to react to
+                what CI says about it (see "A run can open its own pull
+                request" below). "demo" (demo.go,
                 formerly `grain ui -demo`) is a fifth, smaller mode: a
                 throwaway pkg/ui.Server over fake data and a temp-directory
                 store, for trying out the frontend with no daemon, no
@@ -920,20 +968,82 @@ dropped. `add_review_comment` calls from a run are recorded (`agent.
 Result.ToolCalls` carries them, the same seam `ProcessResult` reads
 `ask_question`/`comment_on_issue`/`propose_task` off of) but never turned
 into a real `CreateReview` call for the same reason: nothing yet dispatches
-with review intent for one to attach to. `propose_task`'s `depends_on`
-also files today without resolving a same-run local `id` to the real issue
-number GitHub assigned it — each proposal lands as its own issue, with
-`depends_on` printed into nothing yet, since resolving it needs holding a
-whole batch open and rewriting cross-references after every one is filed.
+with review intent for one to attach to. `propose_task`'s `depends_on` is
+resolved now: `relayProposedTasks` files each entry as a real
+`model.LinkDependsOn`, against an existing task id (the proposing task's
+own included, which is what a piece split out of the work in hand names)
+or the local `id` of an *earlier* `propose_task` call in the same run —
+earlier, not any, since a batch resolved in call order cannot contain a
+cycle, and a `depends-on` cycle is two tasks neither of which is ever
+dispatchable again. An entry naming neither is kept in the proposal's own
+body for a human instead of filed as a link: `task_blocked` inner-joins
+`task` on the target and so ignores a dangling one, while `model.IsBlocked`
+counts it as open forever, and a proposal blocked by something that does
+not exist has nothing that could ever unblock it.
+
+Resolving it is half of it; an agent has to be told to write one at all,
+and told the two facts it needs to. `propose_task`'s description now asks
+for `depends_on` in so many words — a proposal that names nothing is
+unblocked the moment a human approves it and can be dispatched beside the
+work it was meant to follow — and `BuildPrompt` names the running task's
+own id, which an agent otherwise could only reverse out of its branch
+name. The same schema carries `auto_merge`: a proposal inherits the
+proposing task's setting as before (bwsalmon/agents#345), an explicit
+`false` opts a proposal out of that inheritance for work an agent judges
+deserves its own review, and an explicit `true` is still capped at what
+the proposing task itself holds (`proposedAutoMerge`) — a run that could
+mark its own proposals auto-merge would be granting itself the unreviewed
+merge a human withheld. `BuildPrompt` mentions `auto_merge` only to a task
+that is itself an auto-merge job, since there is nothing another task
+could do with it.
 
 Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
 task that asked for `/auto-merge` and still has a PR open. Only the
-queue's head — the earliest submitted, per repo — is ever acted on in a
+queue's head — whichever of a repo's waiting tasks sits first in the
+backlog — is ever acted on in a
 cycle; a fix filed for the second task while the first is still being
 repaired would likely need refiling the moment the first merges and
 changes what the second is based against, so everything behind the head
-just waits. A conflicted or failing head gets a fix task filed straight
+just waits. Nothing merges while CI is still
+running: a check run GitHub has not finished reads `PrHealth.PENDING`
+(`healthFrom`), which is neither clean nor failing, so the head simply
+holds its place and the next cycle asks again — a queue that merged on
+"no failure reported yet" would land changes before their tests had said
+anything about them. Pending outranks failing on purpose, so a red job
+alongside a still-running one waits too: the queue files exactly one
+automatic fix per pull request, and it is worth a cycle to file that one
+against CI's whole verdict rather than against whichever job went red
+first. Nor does it merge before CI has said *anything*: an empty check
+list is read `PENDING` too, until the head commit has carried it for
+`defaultCheckRegistrationWindow` (two minutes). GitHub creates a
+workflow run's check runs asynchronously after processing a push, so a
+sync landing in the gap between the push and that sees nothing — and
+nothing is also what a repo with no CI configured answers, forever, with
+no way to tell the two apart from the Checks API. The window is the only
+thing that can, and a deployment with genuinely no CI pays it once per
+head commit. And all of that is reasoning about one *commit*, so the
+cycle names it at every step rather than letting any of them mean
+"whatever the branch points at now": the check runs are read for the head
+sha off the pull-request read (a branch-scoped read answers for a commit
+the cycle never saw), the window above is keyed on it, and the merge
+carries it in GitHub's own `sha` parameter, which refuses with `409` if
+the branch has moved since. That closes the gap a push landing mid-cycle
+would otherwise walk through — a human's own "push a fix by hand", a fix
+task merging into the branch it repairs, a redispatched task pushing
+again — and costs one cycle when it happens: the task keeps its queue
+position and the commit that landed is judged next cycle on its own CI.
+Nor does it wait for CI that is never coming: a head that
+has read `PENDING` for longer than `defaultCheckStallDeadline` (two
+hours, timed per head commit over one unbroken run of pending reads) is
+given up on — a comment naming the checks that never finished,
+`Observation.MergeQueueBlockedAt` set, the queue moved on — since a
+workflow waiting on an approval nobody gives, or a provider that posted
+"queued" and went away, would otherwise hold its repo's whole queue for
+the life of the deployment with nothing said to anyone. No fix task is
+filed for that one: nothing has failed, and a check that never finishes
+is usually waiting on something outside the pull request, so there may
+be nothing in it to repair. A conflicted or failing head gets a fix task filed straight
 into the store already approved (`Task.Approval` set by
 `PrincipalAutomation`, `LinkFixTask` recording which one) rather than
 `core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`
@@ -950,9 +1060,23 @@ automatically rather than refiling: it comments explaining why, sets
 task in that repo — a blocked task still merges the moment a human's own
 push makes it clean, it just stops being anyone's queue head, so it can
 no longer hold up what's behind it. No new record was needed for the
-queue itself: `queueHeads` derives head-of-queue from `Task.CreatedAt`
-and `Task.AutoMerge` fresh every cycle, the same "derive it, don't store
-it" discipline `TaskState` already holds to.
+queue itself: `queueOrder` derives the whole queue from `Task.AutoMerge`,
+`Origin.Reason` and `MergeQueueBlockedAt` fresh every cycle, and
+`queueHeads` takes each repo's first entry from it — the same "derive it,
+don't store it" discipline `TaskState` already holds to.
+
+What the queue does write down is where it is. Every cycle,
+`showQueueAtFrontOfBacklog` moves the tasks waiting to land to the front
+of the backlog in the order they will land, and `fileFixTask` files a
+repair at the very head of it (`Store.MoveToFrontOfBacklog`,
+`Store.OrderKeyForNewTask`) — so a task list answers "what is grain about
+to finish, and in what order" without anyone opening a task. It is the
+same order in both directions: `queueOrder` reads position back off the
+backlog rather than comparing `Task.CreatedAt` behind everyone's back, so
+dragging one waiting pull request above another really does change which
+merges first, and `Store.Ready` needs no carve-out for a fix task any
+more — being at the head of the list is what dispatches it first, which
+is a thing a human can see and, if they disagree, undo.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
@@ -1140,7 +1264,7 @@ make. It proves the pieces already built compose correctly; it does not
 close the gap above, since nothing there is wired to run on its own yet.
 
 `self-debug` and `self-repair` (bwsalmon/agents#540, "configuration
-mode") went from `ui.DefaultCapabilities` names with nothing behind them
+mode") went from `ui.OfferedCapabilities` names with nothing behind them
 to real `model.CapabilityProvider`s -- `pkg/capability/selfdebug` and
 `pkg/capability/selfrepair` -- but what each one grants is not material
 in a sandbox or text in a prompt, `model.CapabilityProvider`'s only two
@@ -1175,10 +1299,16 @@ process. `Config.GrantTools` still assembles these tools and
 `RunDispatch` still passes them, but no `Framework` consumes them, so
 `selfrepair`/`selfdebug`'s host tools reach no running agent today.
 Closing that gap means giving the `mcpserver` subcommand a route back to
-the store -- it takes only a sandbox root or a kontur VM name now (see
-`cmd/grain/mcpserver.go`), which is exactly the isolation that makes the
-subprocess frameworks safe, so it is a design question rather than a
-missing flag.
+the store, which is a design question rather than a missing flag: the
+isolation that makes the subprocess frameworks safe is exactly that it
+holds no store handle. What it does hold is deliberately narrow and
+deliberately not that: a read-only GitHub client scoped to one branch
+(`-data-dir`/`-pr-repo`/`-pr-branch`, for `pull_request_status` -- see
+"Letting a run watch its own CI", below), and a REST client of the
+daemon aimed at one endpoint about one task id
+(`-server`/`-task`, for `open_pull_request` -- see "A run can open its
+own pull request"). Neither is a store handle, and neither can answer
+`selfrepair.Confirm`'s blocking read of `Store.Comments`.
 
 bwsalmon/agents#621 turned that pair of capabilities into an explicit
 "configuration agent": an overlay button the frontend keeps reachable in
@@ -1194,7 +1324,7 @@ reassemble the bundle by hand. `Task.Configuration` also changes how
 `dispatch.Cycle` schedules the task: `dispatchConfiguration` starts every
 such task unconditionally, ahead of the capacity-gated loop that governs
 everything else, so the configuration agent can always start a sandbox
-even when the deployment is already at `MaxConcurrent` -- the moment
+even when the deployment is already at its worker limit -- the moment
 someone reaches for it is often exactly the moment the deployment is
 already saturated.
 
@@ -1272,10 +1402,13 @@ Interactive task's `run_host_command` confirmation prompt
 (`selfrepair.Confirm`, which blocks on `Store.Comments` from inside a
 tool call) is not reachable by a running agent today. Closing that gap
 means giving the `mcpserver` subcommand a route back to the store, which
-it deliberately does not have: it takes a sandbox root or a kontur VM
-name and nothing else, and that narrowness is exactly what makes the
-subprocess frameworks safe to run. It is a design question, not a missing
-flag, so it is recorded here rather than guessed at.
+it deliberately does not have: besides its sandbox, all it takes is one
+branch to read CI for (`-pr-repo`/`-pr-branch`) and a daemon URL and a
+task id (`-server`/`-task`, for `open_pull_request` -- "A run can open
+its own pull request", below), which is a REST client of one endpoint
+rather than a store handle, and that narrowness is exactly what makes
+the subprocess frameworks safe to run. It is a design question, not a
+missing flag, so it is recorded here rather than guessed at.
 
 ### Operating it
 
@@ -1294,6 +1427,44 @@ upgrading across this change needs `agy` installed on the controller and
 otherwise keeps its existing `-gemini-api-key-file`, which `agy`
 authenticates with as `GEMINI_API_KEY` in the subprocess environment
 (never in argv).
+
+## Letting a run watch its own CI
+
+A run could always push more than once — the git proxy authorizes every
+push to the task's own target (`gitproxy/authorize.go`), and
+`ConfigureGitCredentials` leaves a working identity and credential helper
+behind — but it had no way to find out what CI made of a push. The
+checks were read minutes later by a different process
+(`SyncPullRequests`), and a red build became a whole separate fix task
+(`fileFixTask`), dispatched into a cold sandbox, to repair something the
+run that broke it was still sitting there able to repair.
+
+`pkg/mcp`'s `pull_request_status` closes that loop. It reports the branch
+tip, the pull request open for it if there is one, and every check run
+against the pushed commit with the failing ones named — enough for a run
+to push, look, fix and push again inside one dispatch.
+
+It does not reopen docs/design.md's split surface ("Sandboxes: git
+transport only. No REST, no GraphQL"). The tool is served by the
+`grain mcpserver` process, which runs on the *controller*, and reads
+GitHub with the controller's own `secrets/github` ladder — exactly the
+shape the `ask_question` escape hatch already had, and acceptable for the
+same reason: what crosses into the sandbox is a rendered answer, never a
+credential and never a general-purpose API call. The scope is fixed at
+process start from flags `cmd/grain/mcpserver.go` receives
+(`-pr-repo`/`-pr-branch`, written by each framework's `mcpServerArgs`
+from `agent.RunConfig`), and no tool argument can move it: a run reads CI
+for its own branch or nothing. The tool is registered whatever those
+flags said, so a task with no repo attached gets its own explanation
+rather than an "unknown tool" that reads like a broken grain.
+
+Two things had to be said out loud rather than left implicit. `BuildPrompt`
+now names the push/check/repair loop, because nothing about a tool
+description tells a run that it may push a second time and the sentences
+around it read like one final act. And an unfinished check is reported as
+carrying no verdict, never as passing — the same call `healthFrom` makes
+at the merge gate, made again here so a run that pushes and sees three
+queued jobs does not declare itself done.
 
 ## Reaching a sandbox guest without a route into it
 
@@ -1369,6 +1540,60 @@ konturctl/docker/cloud-hypervisor VM under real KVM, and skips wherever
 docker, `/dev/kvm` or the guest-image build prerequisites are missing --
 so it never runs on a hosted runner, and does run wherever kontur's
 prerequisites genuinely exist.
+
+## And the route out of one
+
+The other direction had been broken for as long as flat mode has been the
+default, and nothing said so. `docs/design.md`'s "Sandbox egress is open
+by default" was simply not true of any VM this repo booted: a sandbox
+guest could reach its own subnet -- the git proxy on the docker bridge
+gateway, which is why dispatch worked at all -- and nothing beyond it. No
+`proxy.golang.org`, no `registry.npmjs.org`, no GitHub, no apt mirror.
+Enough of the guest image is built around that (`scripts/kontur`'s warm
+module and npm caches, the `npm` wrapper that skips Playwright's
+browsers) that the missing network read as a design constraint rather
+than as a fault.
+
+It was a fault, in one line of `third_party/kontur`. A flat-mode guest
+takes over the identity the container runtime assigned its namespace, and
+`netshim.DiscoverIdentity` reads that identity back off the external
+interface: address, MAC, MTU -- and the namespace's default route, which
+reaches the guest as the gateway field of the `ip=` kernel parameter
+`FlatGuestConfig` derives. It looked for that route by testing
+`r.Dst == nil`, which a route read back off the kernel never satisfies:
+the kernel omits `RTA_DST` when the prefix length is zero, and
+`vishvananda/netlink` fills the absence back in the way iproute2 does,
+synthesizing `0.0.0.0/0`. So the gateway was always nil, the parameter
+always read `ip=<addr>:::<mask>::eth0:off`, and klibc's `ipconfig`
+configured an address with no default route behind it.
+
+Every other part of the takeover fails loudly -- a guest with the wrong
+address or MAC never becomes reachable, and its dispatch fails on that --
+which is exactly why this one survived: it fails silently. The VM boots,
+`kontur exec` reaches it over the control link, every tool call succeeds,
+and only the network is gone. Confirmed on a live sandbox guest, whose
+`/proc/cmdline` carried the empty gateway field and whose routing table
+stopped at its own `/16`; re-running the guest's own `ipconfig` with the
+gateway filled in installed the default route, after which DNS and HTTPS
+both worked from inside the guest.
+
+The fix is `netshim`'s, and it is a local patch to the vendored copy
+rather than the resync this repo prefers -- see
+`third_party/kontur/VENDORED.md`'s "Local patches" for that trade and for
+how it goes away. What is grain's own is the assertion that stops it
+recurring: `assertGuestHasEgress`, in
+`TestKonturSandboxesAgainstARealDockerBackedVM`, compares the guest's own
+default route against the gateway docker reports for that VM's network
+namespace -- so the claim under test is "the guest took over the
+namespace's route out", not "the runner happened to use 172.17.0.1". It
+runs in the `real-vm` job, on every pull request and every push to
+`main`.
+
+NAT mode never had this: there `konturctl` fills the gateway in itself,
+from the bridge CIDR it already knows. Neither mode gives the guest a
+resolver of its own -- `ip=`'s DNS fields go unused, and what a guest
+resolves with is whatever `/etc/resolv.conf` its image was built with,
+which is worth revisiting separately.
 
 ## The UI
 
@@ -1515,7 +1740,7 @@ same machine the two are indistinguishable.
 
 bwsalmon/agents#320 asked the same "the store is the record" question
 "Input is a model update, not a GitHub issue" (above) already answered
-for tasks, aimed at the daemon's own flags this time: `-max-concurrent`,
+for tasks, aimed at the daemon's own flags this time: `-max-workers`,
 `-poll-interval`, `-gemini-model`, `-claude-model`, `-max-agent-turns`, `-github-host`,
 `-github-insecure-http`, `-gcp-project` and `-gcp-agent-service-account`
 used to be the only way to set any of these, which meant changing one
@@ -1552,7 +1777,22 @@ read-modify-write against whatever `grain_config` currently holds (or
 the zero `model.Config`, the first time). `grain settings` is the CLI
 side of the same `Client` methods — no flags prints what is stored (or
 that nothing is, yet); any flags apply just those, the way `grain
-update` already treats a task's own flags.
+update` already treats a task's own flags. Every store-backed field has
+a flag there, all three dimensions of the deployment-wide sandbox VM
+shape (`-sandbox-cpus`/`-sandbox-memory-mb`/`-sandbox-disk-gb`) included:
+a setting reachable only
+from the Settings pane would be one a deployment could not be configured
+from a shell, which is where `grain sync` and every scripted setup
+already live. Unset, vCPUs and memory print as the shape actually in
+effect — `bwsalmon/kontur`'s own default, carried alongside the stored
+value as `sandboxCpusDefault`/`sandboxMemoryMbDefault` — rather than as
+the bare `0` that is stored, since a literal `0` reads as a deliberately
+empty VM. Disk has no such default to print beside it, deliberately (see
+`Settings`' own doc comment): a VM's disk is however large the guest
+image behind it happens to be, which is a property of the image a
+deployment built rather than a constant this build could name, so unset
+disk prints as `unset` instead of a number that would be wrong for
+anyone who rebuilt their guest.
 
 `ui/` (bwsalmon/agents#333) now has a settings panel too — the topbar's
 "Settings" button opens a form reading `GET /api/settings`,
@@ -1572,7 +1812,7 @@ Storing the configuration was only half of it. `loadConfig` read
 `grain_config` exactly once, at startup, so *saving* a setting and
 *applying* one had come apart: the Settings pane wrote a row and then
 showed it back as though something were now running that way, when in
-fact nothing but `-max-concurrent` (re-read by `RunCycle` itself) would
+fact nothing but the concurrency limit (re-read by `RunCycle` itself) would
 change until someone restarted the process. An operator raising the turn
 cap, switching models, or widening a sandbox saw a saved value and no
 different behaviour, with nothing on screen to say why.
@@ -1583,17 +1823,18 @@ is noticed: once per tick, before the cycle, `liveConfig.refresh`
 re-reads `grain_config` and hands each change to whatever it configures
 — its own ticker for `poll-interval`, a rebuilt `model.CapabilityRegistry`
 for `gcp-project`/`gcp-agent-service-account`, and
-`KonturSandboxes.SetDefaultShape` for `sandbox-cpus`/`sandbox-memory-mb`.
+`KonturSandboxes.SetDefaultShape` for
+`sandbox-cpus`/`sandbox-memory-mb`/`sandbox-disk-gb`.
 The rest were already read per cycle or per dispatch, or gained it here:
-`RunCycle` re-reads `max-concurrent` *and* `max-agent-turns`;
+`RunCycle` re-reads `max-workers`/`max-mergers` *and* `max-agent-turns`;
 `dispatchConfig` re-reads `agent-framework`, `gemini-model` and
 `claude-model` when a run's framework is built (which is per dispatch,
 for the same reason the credential is); and `target-repos`,
-`newest-first` and the three "by default" toggles are read out of the
-store by `pkg/ui` on the request that needs them. What a change costs is
-therefore at most one poll interval, and nothing already in flight is
-disturbed: `Deps` is copied per cycle and per dispatch, so a run keeps
-the registry and the caps it started under.
+`newest-first`, `environment-name` and the three "by default" toggles are
+read out of the store by `pkg/ui` on the request that needs them. What a
+change costs is therefore at most one poll interval, and nothing already
+in flight is disturbed: `Deps` is copied per cycle and per dispatch, so a
+run keeps the registry and the caps it started under.
 
 Two settings genuinely cannot be swapped under a live deployment:
 `github-host` and `github-insecure-http`. They are baked into the git
@@ -1614,6 +1855,274 @@ saved but not yet running; `grain settings` prints the same thing as a
 closing line. `restartOnlySettings` in `pkg/ui/settings.go` is the one
 list both ends read, so a setting cannot be applied live *and* annotated,
 nor left needing a restart in silence.
+
+### Telling one deployment from another
+
+`model.Config.EnvironmentName` (grain/task-69) is a name an operator
+gives a deployment — "staging", "dev", a hostname — and it is the only
+setting here that changes nothing the daemon does. Nothing dispatches,
+sandboxes, or authenticates differently because of it; `pkg/ui` is the
+only thing that reads it at all.
+
+It exists for the one mistake a single-operator cluster invites. Two
+deployments of grain are pixel-identical: the same sidebar, the same task
+list, the same Merge and Approve and reboot buttons, and nothing on
+screen saying which store is behind them. Approving on the wrong tab is
+therefore a mis-click rather than a mistake anyone could have caught, and
+no amount of `target-repos` fixes it — that setting refuses a repo, while
+this one answers "which deployment am I looking at" *before* the click.
+
+So it is a label, and rendered like one: a warning-coloured badge beside
+the grain mark in the sidebar (`Sidebar.jsx`, on screen in every view),
+and the same name in front of the browser tab's own title (`App.jsx` —
+first, not last, because a narrow tab truncates its title from the end
+and `grain — sta…` would say nothing this is for). Empty, the default and
+what every deployment upgrading across this reads back, draws neither:
+an operator running one deployment has nothing to be told apart from, and
+grain's own shape is the one it has always had.
+
+It rides on `GET /api/config` as well as `GET /api/settings`, unlike most
+of what the Settings pane edits: the frontend needs it on first paint, on
+every view, and `/api/config` is the one call `App.jsx` makes before it
+renders anything. Free text, since what environments a deployment sits
+among is the operator's own vocabulary and grain has no list to validate
+against — `ui.UpdateSettings` only trims it (so a stray space is not the
+difference between named and unnamed) and bounds it to 32 runes with no
+line breaks, which is what it takes for a badge to stay a badge.
+
+### A capability can be ready and still ungrantable
+
+The Settings pane's Capabilities tab answers "would this capability work
+if a task were granted it": which deployment settings it still needs
+(`missingConfig`), which secrets are unset (`missingSecrets`), and
+`ready` when neither list has anything in it. That turns out not to be
+the whole question, and the half it left out is the one that is harder to
+see.
+
+Which capabilities a task can be granted at all is decided somewhere
+else entirely: `ui.OfferedCapabilities` (`pkg/ui/labels.go`, named
+`DefaultCapabilities` when this was written) is the
+picker's listing, and `grantsFor`/`SetCapability` reject any id it has no
+row for as "unknown capability" before a `model.Grant` is ever written.
+The set of capabilities `cmd/grain/daemon.go`'s `capabilityProviders`
+*registers* is a different list, maintained by hand in a different file,
+and the two have drifted: `gcp-key` and `github-sandbox` are registered
+by the daemon and absent from the picker. A deployment can therefore
+have `gcp-key` fully configured — a project, an agent service account, a
+`gcp-key-minter` secret, the tab showing **Ready** — and still never mint
+a key, because no task has ever been able to ask for one. Nothing failed:
+`ResolveGrants` was never reached, so there is no refusal in a run's
+output, no error in the daemon's log, and nothing at all in the sandbox
+where `/home/debian/.gcp-service-account.json` should be. This is the
+second distinct way `grain-gcp-key` has failed to reach a sandbox — see
+`konturSandbox.PlaceFile` above for the first, which was fixed — and
+unlike that one it is invisible from every surface an operator had.
+
+`CapabilityStatus.Grantable` is that missing half, reported alongside
+`Ready` rather than folded into it, because the two name gaps that are
+fixed in opposite places: an unready capability is this deployment's
+configuration, while an ungrantable one is grain's own code and no amount
+of configuring will move it. The Capabilities tab badges it "Not
+grantable" with a line saying configuration cannot fix it, and `grain
+settings` — which until now printed no capability information at all,
+leaving a shell on the host with no way to ask this question — prints the
+whole table, both gaps named separately.
+
+Reporting the drift is not repairing it. Whether `gcp-key` should join
+the picker, or be granted to every dispatch the way v1 minted one
+unconditionally per sandbox (`gcp_keys.py`: "every sandbox, every
+dispatch... rather than a task label"), is a design question this leaves
+open; what changes here is that a deployment in that state now says so.
+
+### A default set of capabilities, seeded onto the task
+
+Both. `gcp-key` and `github-sandbox` got picker rows first, and
+`model.Config.DefaultCapabilities` is the other half: a deployment-wide
+set of capability ids, chosen on the Settings pane's Capabilities tab,
+that every new task is filed already holding. A deployment that wants a
+service-account key in every sandbox — v1's shape — ticks `gcp-key` once
+and stops thinking about it.
+
+What it is *not* is v1's per-dispatch mint restored. The set is read at
+creation, by `ui.CreateTask`, and written onto the task as ordinary
+`model.Grant`s (`GrantByDefault`, provenance only — nothing reads `Via`
+to decide what a grant does). It is never consulted again at dispatch.
+That one choice answers the whole question the picker rows left open:
+
+- **The default is modifiable, which is what was actually asked for.**
+  The new-task form opens with those boxes already ticked (`GET
+  /api/config`'s `defaultCapabilities`) and sends the resulting list, so
+  unticking one files the task without it. Afterwards it detaches from
+  the task like any other grant. A deployment-level set read at dispatch
+  could be neither seen on the task nor taken off one.
+- **A failed mint stays a failed dispatch, and needs no degrade tier.**
+  `prepareCapabilities` treats a refused resolve or a failed materialize
+  as no dispatch at all, and that stays true for a defaulted grant.
+  v1 needed its local `except` because nothing held the request: the
+  mint happened per dispatch, for every sandbox, with nowhere to record
+  that it had failed, so swallowing the error was the only way a broken
+  minter did not stop the deployment. Here the grant is on one task, the
+  failure is that task's, and the fix — repair the capability, detach it
+  from the task, or drop it from the default set — is reachable from the
+  failure. Running an agent while quietly withholding a capability its
+  task is recorded as holding would trade a loud stop for a run that
+  does the wrong work.
+- **`Grantable` keeps its meaning.** A capability must have a picker row
+  to be defaulted at all (`UpdateSettings` validates the set against
+  `OfferedCapabilities`, which is what `DefaultCapabilities` was renamed
+  to, since the two names now mean different things). That row is also
+  what lets a human drop it from one task. `CapabilityStatus.Default` is
+  reported next to `Ready`/`Grantable` rather than folded into either:
+  the Capabilities tab and `grain settings` both flag a defaulted
+  capability that is not ready, because that is a deployment-wide
+  problem — every task filed will fail on it — rather than a per-task
+  one.
+
+The cost, stated plainly: turning an entry off does not disarm the tasks
+already filed with it, since they hold their own grants. That is the
+same property that makes a default modifiable in the first place.
+
+A stored id this build no longer offers (a renamed capability, the way
+`scratch-repo` became `github-sandbox`) is skipped at creation rather
+than failing it — `UpdateSettings` refuses an unknown id on the way in,
+so a stale entry can only come from an upgrade, and a settings row left
+behind must not become a deployment where no task can be filed at all.
+Per-repo defaults are the next step and resolve in the same place
+(`(*ui.Client).defaultCapabilities`); they compose as more ids in the
+set a new task starts with, which is a different thing from
+docs/data-model.md's folder `offers`, those being floors a task cannot
+drop rather than a seed it can.
+
+### The same set, per repo
+
+The ask task-14 came from also said "we will also want this to be
+possible on individual repos in the future," and this is that: a repo can
+name capabilities of its own that a task filed against it starts holding,
+on top of whatever the deployment already defaults.
+
+**Where it is stored is a new `repo_config` table**, keyed `(owner,
+name)` the same way `qualification_config` already is, holding
+`model.RepoConfig` — one field today, `DefaultCapabilities`, with the
+same comma-separated storage `grain_config.default_capabilities` uses.
+A new table rather than a column somewhere: `base`, `preamble` and
+`max_concurrent` are docs/data-model.md's own next three per-repo
+settings, and this is the row they would join. A repo has a row only
+while it has something of its own to say — `PutRepoConfig` deletes rather
+than writing one that says nothing, so "has a row" and "adds something"
+stay one fact and nothing has to filter empty rows back out.
+
+**It is deliberately not the folder `offers` tree**, which the same
+document describes and which stays available for what it is for. An
+offer is a *floor*: unioned in when a task's grants are resolved, not
+droppable by the task. Everything here is a *seed*: written onto the task
+at creation, visible on it, and untickable on the form that files it.
+Mixing the two silently is the failure worth avoiding in both directions
+— a human unticking a capability and getting it anyway, or an operator
+setting what they think is a floor and watching tasks file without it —
+so they compose at different moments and neither feeds the other.
+
+**The two layers union, deployment-wide first, and a repo can only
+widen.** `(*ui.Client).defaultCapabilities` is still the one place a new
+task's starting set resolves; it now takes the target repo
+`CreateTask` has already parsed, defaults and `NoRepo` included. A
+`NoRepo` task has nothing to key the second layer on and gets the
+deployment's set alone; a task that named no repo is filed against
+`Config.DefaultTarget` and gets *that* repo's defaults, because the layer
+is keyed on the repo the task ends up targeting rather than on whether
+the request spelled it out.
+
+Whether a repo can *subtract* — "everything except `gcp-key` here" — is
+the same "except here" question docs/data-model.md defers for ceilings,
+and it gets the same answer: not yet, and the first person who needs it
+is the signal. Until then the deployment-wide set is for what genuinely
+belongs everywhere, a repo lists what it needs, and whoever files a task
+can untick any of it on the form.
+
+**What Settings reports had to gain a second axis.**
+`CapabilityStatus.Default` used to mean "this deployment defaults this",
+and with two layers a single flag would describe a deployment-wide
+default that only some tasks actually get. So `Default` keeps exactly its
+old meaning — every task, wherever it points — and
+`CapabilityStatus.DefaultRepos` names the repos that default it on their
+own. The Capabilities tab shows both, `grain settings` prints both, and a
+repo that restates something the deployment already gives appears in
+both, since dropping the deployment-wide entry leaves the repo's own
+standing.
+
+Editing lives where the thing being edited does: the deployment-wide set
+on Settings' Capabilities tab, a repo's own on the repos page next to
+that repo (`GET`/`PUT /api/repos/{owner}/{name}/capabilities`). The
+new-task form resolves the union itself, from `GET /api/config`'s
+`repoDefaultCapabilities`, so changing the repo picker re-ticks the boxes
+for the repo now targeted — unless the picker has been touched by hand,
+after which the ticks are the human's and a re-seed that put back
+something they had just unticked would file a task with what they had
+already said no to.
+
+**Schedules, templates and suites still are not seeded**, and this is the
+second time that has been decided rather than merely deferred. Each
+carries a grant set somebody authored once, in a form of its own, and
+those forms edit an existing set as often as they create one. Seeding
+their pickers would write today's defaults into a stored set that then
+never tracks them again: the next save of an unrelated field would
+silently widen a set somebody wrote down, which is the thing task-14
+avoided by seeding at task creation and reading nothing at dispatch. A
+schedule that wants `gcp-key` says so, once, where every task it files
+can be traced back to it.
+
+### A `grain repo` family, and why `-target-repos` stayed put
+
+The layer above left a one-directional surface behind: `grain settings`
+prints what each repo defaults ("default in: `owner/name`", on the
+capability line it already printed) with no way from a shell to act on
+what it just showed. `grain repo` (`cmd/grain/repo.go`, grain/task-36) is
+that missing half — `list`, `capabilities [-set a,b] <owner/name>`, `add`
+and `remove` — over four new `ui.HTTPClient` methods mirroring the
+`ui.Client` ones the repos pane already calls.
+
+**Why this and not schedules, templates or suites**, which are still
+UI-only and stay that way. The CLI's subset was never "tasks only": it is
+task management *plus deployment configuration* — `grain settings`,
+`grain secrets`, `grain config` — because "why did this deployment do
+that" is asked from a shell on the host at least as often as from a
+browser. A repo's own defaults are deployment configuration by that
+reading, and were the one member of the category with no spelling here.
+Schedules, templates and suites are authored *content*: written once, in
+a form built for writing them, and docs/schedules.md records their
+absence from the CLI as an open gap waiting on somebody who needs it
+rather than as a decision. Adding a `repo` family does not make them
+next.
+
+**`-target-repos` stays on `grain settings`.** The repos *pane* dropped
+its own copy of that field when bwsalmon/agents#473 moved add/remove onto
+the repo rows, but what it dropped was a comma-separated text box — a bad
+control for a human and a perfectly good flag for a script. The field
+itself is still deployment-wide configuration (`model.Config.
+TargetRepos`), and it is the whole-list form `grain sync`'s own
+`settings` section already speaks verbatim (`ui.UpdateSettingsRequest.
+TargetRepos`); removing the flag would leave the CLI unable to say
+declaratively what a config file next to it can, and break existing
+scripts to buy nothing. So both spellings exist and write the same field:
+`-target-repos` replaces the list, `grain repo add`/`remove` change one
+entry, and `grain repo add` says out loud when the list it prints back
+has exactly one entry — an empty allowlist is what means *unrestricted*,
+so the first repo added to a deployment that never restricted itself
+narrows it rather than widening anything.
+
+**`grain repo list` is composed on the client, from `GET /api/config` and
+`GET /api/tasks`**, rather than served by a `GET /api/repos` of its own.
+A repo is not a stored row: the folder tree is still unbuilt, so "a repo
+grain knows about" is *derived* — whatever `targetRepos` names, union
+whatever a task targets, union whatever carries defaults of its own — and
+`ui/src/state.js`'s `repoRows` already derives it from those same two
+responses. A third derivation on the server would be a second definition
+to keep in step with the first. It does differ from `repoRows` in one
+way, deliberately: a repo that carries defaults while being neither
+allow-listed nor targeted still gets a row, because
+`SetRepoDefaultCapabilities` permits exactly that repo to exist and a
+list whose job includes reporting per-repo defaults must not be the one
+place they are invisible. (The repos *page* still drops such a row; that
+is a UI gap, filed separately, not a difference of opinion.)
 
 ## Write-only secrets access when colocated
 
@@ -1703,7 +2212,8 @@ startup: switching the default in Settings takes effect on the next run,
 not the next restart. A task that names one instead
 (`agentFramework` on `POST /api/tasks`, or the picker under New task ->
 Advanced options) overrides it for that task alone -- the same
-"zero means unset" per-task override `SandboxCPUs`/`SandboxMemoryMB`
+"zero means unset" per-task override
+`SandboxCPUs`/`SandboxMemoryMB`/`SandboxDiskGB`
 already are, for the same reason: a task filed with no choice must
 follow the deployment wherever it is set later, rather than pin itself
 to whatever was configured the moment it was filed.
@@ -1848,6 +2358,162 @@ its own disk, and every mode that ever took a store flag — `grain
 daemon`, and, before #363, the standalone `grain ui` and the CLI itself
 — takes just that one, with no "embedded, or a server" distinction left
 to make.
+
+## A run can open its own pull request
+
+"Letting a run watch its own CI" (above) gave a run `pull_request_status`
+-- what GitHub says about the branch it has pushed. This is the other
+half: the pull request itself.
+
+grain has always opened a pull request for the branch a run pushed --
+after the run had already exited (`orchestrator.ProcessResult` ->
+`salvagePushedBranch` -> `finishWithPullRequest`). That ordering has one
+cost: a check that only ever runs *on a pull request* -- which is most of
+them, `.github/workflows/tests.yml`'s own `on: pull_request` included --
+has nothing to run against until the run is over. A change that builds
+and tests cleanly in a sandbox and then fails the repo's own workflow is
+then a fact nobody learns until a human opens the pull request, and
+fixing it costs a whole second dispatch -- of an agent that has by then
+forgotten everything it knew about the change.
+
+So a run can now ask for its pull request while it is still running, and
+read back what the checks say: the `open_pull_request` tool (`pkg/mcp`'s
+`NewOpenPullRequestTools`). It takes no arguments -- repo, branch, base and
+title are grain's, exactly as they always were -- and it opens *the same*
+pull request the finish path would have (`EnsurePullRequest`, which finds
+an already-open one for the head before opening anything), so the run's
+own ending adopts it rather than colliding with it. Calling it again is
+how an agent watches a check that was still running: it never opens a
+second pull request, and the checks it reports are read fresh
+(`checkRunsFor`, the same reader the merge queue trusts, Actions-workflow
+fallback included).
+
+Two things it deliberately does not do. It does not mark the task
+completed -- that is what would put a still-running task into
+`SyncPullRequests`' merge queue, where a branch the agent is still
+pushing to could be merged out from under it; `CompletedAt` stays the
+finish path's to set. And it does not open anything from the `mcpserver`
+process itself. That process does hold a GitHub client -- the read-only,
+one-branch one `pull_request_status` uses -- but opening a pull request
+is a *write*, and which branch is opened against which base has always
+been grain's decision rather than an agent's. So `-server`/`-task` point
+it at the running daemon's own REST API instead --
+`POST /api/tasks/{id}/pull-request`, one call about one task id, answered
+by `orchestrator.OpenPullRequestForTask` against the daemon's own GitHub
+client. Everything about which repo and which branch that means is read
+from the task's own record, so nothing an agent can put in a tool call
+reaches GitHub as data.
+
+That is a route back from a forked `mcpserver` to the daemon, which "What
+this cost" (above) records as not existing. It is a deliberately narrow
+one: a REST client, one endpoint, one task id, no store handle -- not the
+in-process `*model.Store` `selfrepair.Confirm`'s blocking confirmation
+would still need.
+
+### Telling the run it has it
+
+A tool nobody reads about is a tool nobody calls. `BuildPrompt` names
+`open_pull_request` in the same paragraph as the push/check/repair loop,
+so a run learns it can open its pull request and read CI without having
+studied the roster -- which is the whole failure the tool exists to fix,
+one level up: an agent that finishes and exits never sees its own checks.
+
+It is named only for a run that really has it. Registration turns on
+`-server`/`-task`, and the `-server` half comes from `-ui-addr`
+(`daemonServerURL`), so a deployment serving no UI/API gives its runs no
+such tool -- and a prompt that promised it there would send an agent
+after something that is not on its roster. The one thing that knows is
+the `Framework` itself, which is why it answers for its own runs
+(`agent.PullRequestFramework`, implemented by `pkg/agent/claude` and
+`pkg/agent/antigravity` as "was I built `WithGrainServer`?");
+`RunDispatch` asks, and passes the answer to `BuildPrompt`. A `Framework`
+that does not implement it at all answers no, which is the safe
+direction: a run never told about a tool it happens to have loses one
+convenience, where a run told to call one it does not have burns turns on
+an error it cannot fix.
+
+What that leaves worth measuring, rather than assuming, is whether runs
+actually start calling it, and whether a run that sees a failing check
+fixes it instead of opening the pull request and stopping there.
+
+## A run can rebuild its own sandbox
+
+Every tool a run has runs *inside* its sandbox. That is the whole design
+-- the agent is on the controller, the work is in the guest, and
+`run_command`/`read_file`/`edit_file`/`write_file` are the only crossing
+(`pkg/mcp`). It also means a sandbox broken badly enough takes every one
+of those down with it, and leaves the run with no move at all: a guest
+that has stopped answering, a root filesystem an unlucky build filled, an
+interrupted `apt`/`npm`/`docker` that left a state no command can
+untangle, a process that will not die. The agent then spends whatever
+turns it has left failing at things that have nothing to do with its
+task, and the only recovery was for the run to end and the whole task to
+be redispatched -- which throws away everything the agent had worked out
+along with the broken sandbox.
+
+`recreate_sandbox` (`pkg/mcp`'s `NewRecreateSandboxTools`) is the way
+out. It takes no arguments, destroys this run's sandbox, builds an empty
+one under the same name, and puts back what grain itself had set up in
+the old one: the git credentials pointing at the proxy, whatever the
+task's capabilities placed, the task's attachments, and a fresh clone of
+its repo with its branch checked out. Then the run carries on, in the
+same conversation, in a clean sandbox.
+
+The name is what makes this possible without the run's tools going stale.
+A sandbox is addressed by name -- a directory path, or a kontur VM whose
+container name follows from the VM name (`kontur.PodName`) -- never by a
+handle to the particular filesystem or guest behind it. So the tools the
+run already has, and the ones its forked `mcpserver` holds in a separate
+process that nothing here could reach to replace, address the new sandbox
+the moment it exists. `orchestrator.SandboxRebuilder` is the one method
+that adds: `konturSandbox.Rebuild` reuses Acquire's own create-and-wait
+pair (`create` deletes whatever is under the name first, which is exactly
+the destroy half), and `hostSandbox.Rebuild` its `RemoveAll`/`MkdirAll`
+pair.
+
+What the run cannot get back is its own uncommitted work, and the tool
+says so in the one place an agent reads before deciding to call it: the
+description. Commits already *pushed* are safe, because they are on the
+remote rather than in the sandbox, and the re-clone continues the
+existing remote branch rather than branching over it (`prepareCheckout`)
+-- so a rebuild costs a run its unpushed work and nothing more.
+
+The hop is the same one `open_pull_request` makes, for a sharper version
+of the same reason. The `mcpserver` process could not do this even if it
+were allowed to: creating a sandbox needs the shape this run asked for,
+the proxy token to mint for it, the already-minted capability material to
+place in it and the repo to clone into it, none of which exists on that
+side. So `-server`/`-task` point it at
+`POST /api/tasks/{id}/sandbox/recreate`, one call about one task id,
+answered by `orchestrator.SandboxRecreations` -- a registry each
+dispatched run puts itself in (`runOne`) and takes itself out of when it
+ends. A task with no live run there is told so; nothing a tool call
+carries chooses which sandbox is destroyed, because the task id was fixed
+at process start.
+
+Two details are worth knowing:
+
+- **The capability placements are written back, never materialized
+  again.** Re-materializing would mint a second credential and a second
+  lease behind the back of the single revoke `RunDispatch` performs when
+  the run ends. So `RunDispatch` hands the registry the
+  `model.Materialized` it already has (`setMaterialized`) and the rebuild
+  rewrites that same content, which is idempotent.
+- **Only the rebuild itself can fail the call.** Everything after it
+  comes back as a warning, because by then the old sandbox is gone and
+  what the caller most needs is an account of what it is now sitting in
+  front of -- the same reasoning `PullRequestStatus.ChecksError` follows.
+  A run whose credentials did not come back cannot push, and one whose
+  repo did not clone has an empty directory rather than the checkout
+  everything else it was told assumes, so the rendered answer puts those
+  in their own section rather than folding them in with what worked.
+
+Unlike `open_pull_request`, `BuildPrompt` does not name this one. The
+trigger for reaching for it -- a sandbox that has stopped working -- is
+one an agent cannot miss and does not have to be taught to look for, and
+the description is where it reads what the tool costs. Whether that holds
+is worth watching: the failure mode to look for is a run that grinds on
+against a wedged sandbox without ever trying it.
 
 ## Deploying it
 
@@ -2182,8 +2848,9 @@ interfaces are all gone with the problem they solved. What
 tasks on one sandbox from each other" — is here a property rather than
 something knowingly given up.
 
-**Concurrency is a count.** `Cycle` takes `max_concurrent` and starts
-runs until that many are live. The DB-level backstop that used to be a
+**Concurrency is a count.** `Cycle` takes a limit and starts runs until
+that many are live (two counts since "Merge capacity is its own number"
+below; one, `max_concurrent`, when this was written). The DB-level backstop that used to be a
 unique index on the slot each run claimed (bwsalmon/agents#434, catching
 two overlapping cycles that both thought a slot was free) is now a count
 inside `StartRun`'s own transaction, which rules that race out rather
@@ -2193,7 +2860,7 @@ at most one run in flight, which is what `task_state` already assumed.
 **A run outlives the cycle that started it.** `reconcileDispatch` used
 to wait for every run it dispatched, and `cmd/grain`'s reconcile loop
 waits for a cycle before it ticks again — so one long run held the whole
-controller. Nothing else was dispatched however much of `max_concurrent`
+controller. Nothing else was dispatched however much of the limit
 was free, no pull request was synced, no schedule came due, until that
 agent finished. A deployment configured for several concurrent runs only
 ever reached that number when a single tick happened to find several
@@ -2306,8 +2973,8 @@ leaning on it. Flat mode, the default, ignores both.
 it, and `RunDispatch` — the only thing that finishes a run — is never
 reached when setup fails. Left there, the row stays live forever:
 `task_state` reads it as `running` so the task never returns to `queued`,
-`LiveRunCount` keeps counting it so the deployment loses a unit of
-`max_concurrent`, and `retryEligible` reads *finished* runs so the
+`LiveRunCount` keeps counting it so the deployment loses a unit of its
+worker capacity, and `retryEligible` reads *finished* runs so the
 backoff never retries. Nothing sweeps it — `MaxRunRuntime` is enforced
 inside `RunDispatch`, `RecoverOrphanedRuns` is a startup pass — so it
 lasts until someone restarts the daemon. That was survivable while a
@@ -2366,3 +3033,372 @@ smaller idea than a pool of assignments, and does not bring slots back.
 The sandbox-health pane changed meaning with everything else: it reports
 live sandboxes, so an idle deployment shows nothing rather than a table
 of idle slots.
+
+## Disk is the third dimension of a sandbox's shape
+
+A sandbox VM's size had two knobs — `sandbox-cpus` and
+`sandbox-memory-mb`, deployment-wide in Settings and overridable per task
+— and no third. Its disk was whatever the guest image happened to be:
+`konturctl` gives each VM a copy-on-write qcow2 overlay backed by that
+image, and an overlay is created at exactly the image's own virtual size,
+which `scripts/kontur/build-guest.sh` packs to the rootfs plus 20%
+headroom. That is a few hundred megabytes of slack for every run, and a
+build-heavy checkout spends it: the run fails part way through with a
+disk-full error, on a VM that had CPUs and memory to spare.
+
+`sandbox-disk-gb` is that knob, everywhere the other two already are:
+`model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
+tab in Settings and the shape override under New task -> Advanced
+options, `orchestrator.Shape.DiskGB` resolved per dimension against the
+deployment default, and `konturctl vm create -disk-size-gb` at the one
+moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
+is left off the create entirely, so a deployment that never sets one
+passes exactly the arguments it passed before.
+
+Two things about it are genuinely unlike CPUs and memory, and both are
+visible in the code:
+
+- **There is no default to show.** `ui.Settings` reports
+  `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
+  what is really in effect rather than a misleading literal 0. Disk has
+  no such constant: an unset disk is however large *this deployment's*
+  guest image is, which is a property of an image somebody built, not a
+  number this build can name. The field has no placeholder, and says so
+  in words instead.
+- **A bigger disk is not by itself more space.** The image's filesystem
+  ends where it ended; the extra is unallocated until something grows it.
+  `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
+  runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
+  disk was not enlarged and a one-line grow on one whose was.
+
+**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
+snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
+disk-size field, and `writeQcow2Overlay` — which already takes the
+virtual size as an argument — is called with the source image's size
+unconditionally. Passing the flag against a `konturctl` without it fails
+the create, which is why zero omits it rather than sending an explicit
+size: a deployment that has not set one is unaffected either way, and a
+deployment that sets one has said out loud that it expects the flag to
+work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
+the other half of this, and belongs there rather than as a local patch
+here — see `third_party/kontur/VENDORED.md`.
+
+### Monitoring it
+
+Setting a size is half the ask; the other half is seeing whether it was
+the right one. The sandbox-health pane now reports disk alongside load
+average and memory, from both ends:
+
+- **Per sandbox.** `KonturSandboxes.sandboxHealth` already pulled
+  `/proc/loadavg` and `/proc/meminfo` out of the guest in one command
+  over the same transport a run's own tools use; it now asks for
+  `df -Pk /` in that same command rather than paying a second guest login
+  out of the five-second health budget. `-P` is what makes the parse
+  reliable — one line per filesystem, six columns — and the row is found
+  by shape ("the line whose last field is `/`") rather than by position,
+  so the `/proc` lines sharing the stream cannot be mistaken for it.
+- **For the host.** `pkg/sysstat` gains `DiskUsage`, one `statfs` call,
+  which `hostStats` asks about the daemon's own `-data-dir` rather than
+  about `/`: the daemon runs in a container whose root filesystem is an
+  image layer nobody's runs fill, while the data directory is on the host
+  volume that holds the store *and* every VM's disk overlay. That is the
+  disk a deployment actually runs out of.
+
+Both report 0/0 when there is no reading to be had, which the pane shows
+as a dash and the trend charts skip rather than plotting as an empty
+disk — the same "unavailable is not zero" treatment memory already got.
+
+## Measuring throughput and latency
+
+The previous section ends with "worth measuring before reaching for
+either," and grain could not. Every moment needed to answer *how much is
+this deployment getting done, and where does a task's day actually go?*
+has been in the store since tasks became rows — filed, approved,
+dispatched, finished, completed, closed — and nothing ever read them
+together. `pkg/metrics` does, `GET /api/metrics` serves it, and `grain
+metrics` prints it:
+
+```console
+$ grain metrics -window 7d
+window: 2026-08-27T00:00:00Z -> 2026-09-03T00:00:00Z (168h0m0s)
+
+throughput
+  tasks filed                  42  (6.0/day)
+  tasks completed              38  (5.4/day)
+  tasks closed                  3
+  attempts started             61
+  attempts finished            60  (8.6/day)
+  attempt outcomes         succeeded=45 failed=14 cancelled=1
+  attempts per completion    1.58
+
+capacity
+  mean concurrent runs       0.42 of 3  (14% of the limit)
+  live now                      2
+
+latency (stages that ended inside the window)
+  stage                                        n        p50        p90        max
+  filed -> approved                           12      4m12s     1h2m0s    3h10m0s
+  approved -> attempt started                 38        31s      2m10s       9m0s
+  attempt started -> agent's first turn       57      3m20s      6m41s      11m2s
+  agent's first turn -> attempt finished      57      9m11s     21m30s      48m0s
+  one whole attempt                           60     12m48s     26m10s      52m0s
+  attempt finished -> next attempt started     8       2m0s       4m0s       6m0s
+  first attempt started -> completed          38      9m10s      22m0s      48m0s
+  filed -> completed                          38      12m0s      50m0s    3h10m0s
+
+backlog (right now, not over the window)
+  awaiting_reply=1  proposed=1  queued=4  running=2
+  oldest queued: task 51, waiting 2h14m0s
+```
+
+**Nothing is stored, and nothing is counted on a hot path.** A report is
+derived from the rows every time it is asked for, the same way
+`task_state` is a view rather than a column
+(`docs/data-model.md`: "anything derivable is derived, never stored").
+There is no counter to increment, nothing to reset, and no way for a
+metric to drift from the task it describes — retry a task, close it,
+edit it, and every report from then on says what the record now says.
+The cost is a full scan of `task` and `task_run` per report, which is
+what a single-operator deployment can afford and what a much larger one
+would have to revisit.
+
+**One moment had to start being recorded: `task_run.agent_started_at`.**
+A run's `started_at` is stamped by dispatch, before any sandbox exists
+(`Store.SetRunSandbox`), so `finished_at - started_at` is a VM boot, a
+clone, a capability mint *and* the agent's own work, fused into one
+number that cannot answer the question the previous section asks.
+`RunDispatch` now records the moment it hands the run to
+`agent.Framework.Run`, which splits that in two: **attempt started ->
+agent's first turn** is the setup a golden image or a warm spare would
+cut, and **agent's first turn -> attempt finished** is what the agent
+framework spent, which grain does not control. Writing it can never cost
+a run — a failure there is logged and the dispatch proceeds — and it is a
+nullable column added by an ordinary `ensure*Column` migration, so an
+existing store keeps working and its older runs simply report no split.
+
+**A window bounds measurements, not rows.** A sample belongs to a window
+when the moment it *ended* falls inside it, so a task filed last month
+and completed this morning contributes its whole lead time. That makes
+the report answer "what did this deployment deliver during these dates"
+rather than "what happened entirely within them," which nothing ever
+asks.
+
+**A missing moment is skipped, never guessed**, which is why every stage
+carries its own `n` and two stages of one report legitimately disagree
+about how many samples they have. A run that failed in setup never
+reached an agent, so it has no setup or agent sample — but it was still
+an attempt, and still took time, so it is in `one whole attempt`. A task
+a human filed directly was approved in the instant it was filed, so it is
+left out of `filed -> approved` rather than counted as a zero that would
+drag the percentile of the proposals that really did wait.
+
+**The stages do not sum to the lead time,** and are not meant to. A task
+can sit in `awaiting_reply` for a day, back off between attempts, or wait
+on a dependency, and none of those is a stage anything records the start
+of. Each stage is measured on its own; the lead time is what somebody who
+filed a task actually waited, and the rest are answers to why it is what
+it is.
+
+**Throughput alone cannot say whether a deployment is fast enough,** so
+the report carries the two gauges it has to be read against: the backlog
+(by `task_state`'s own vocabulary, since "not finished" covers queued,
+blocked, awaiting a reply and failed, which are four different problems —
+and counting only the unfinished states, since every task ever completed
+is a census rather than a queue), and occupancy as a fraction of
+`max_concurrent`. Idle capacity next to a
+deep queue is a scheduling problem; saturated capacity next to a deep
+queue is a capacity one. They are the first two numbers any optimization
+here should have to move.
+
+**The UI reads the same report,** as the Metrics tab of the Debugging
+pane — alongside Logs and Sandbox health, since all three are read-only
+views of how the deployment is behaving rather than knobs on it. The
+window picker sends the same strings `-window` takes, the throughput
+buckets are drawn as sparklines, and the two presentation rules above
+are enforced rather than described: the latency stages are a table of
+independent distributions and never a stacked bar, which would draw a
+claim about them adding up that the numbers do not make, and the backlog
+is a section of its own headed "right now, not over the window". Each
+stage's `n` sits beside its percentiles, and a percentile with too few
+samples behind it to mean what its name says — fewer than 10 for a p90,
+100 for a p99 — is dimmed and footnoted rather than shown as if it were
+one. Unlike the panels beside it there is no poll: a report costs a full
+scan every time it is asked for, so it loads once and reloads when the
+window changes or Refresh is clicked.
+
+What this still does not have is a history of its own: because nothing
+is stored, a report can only ever be computed from rows that still
+exist, so a task deleted from the store takes its own past contribution
+with it.
+
+## Measuring the daemon's own tick
+
+The section above ends with the pair worth reading together — idle
+capacity next to a deep queue is a scheduling problem — and leaves the
+next question unanswered. `queue_wait` (approved -> the first attempt
+starting) is the one latency stage that is grain's own scheduling rather
+than anyone's work, and two entirely different causes produce the same
+number:
+
+1. the deployment was at `max_concurrent` and the task genuinely waited
+   for headroom, which `runs.utilization` near 1.0 already shows; or
+2. there was headroom the whole time, and the task waited on the tick —
+   `-poll-interval`, plus however long a `RunCycle` pass itself takes
+   before it reaches the dispatch decision.
+
+Nothing measured the second, so a tick that had quietly grown to minutes
+under a large store looked exactly like a busy deployment. `GET
+/api/metrics` now carries a `cycles` section beside `runs`, and `grain
+metrics` prints it right after capacity, so both causes are on screen
+before the `queue_wait` row is:
+
+```console
+reconcile tick (this daemon, since it started -- not stored, so not over the window)
+  ticks measured              720  (of 5304 run; older ones forgotten)
+                                    p50        p90        max
+  tick duration                    83.4ms      1.42s      4.9s
+  tick to tick                        30s        30s     34.9s
+  cycle start -> dispatch          21.1ms     34.6ms    212.7ms
+  scheduling floor: 30.02s  (tick-to-tick p50 + dispatch p50 -- the queue wait a task pays
+    for grain's own scheduling with no contention at all)
+
+  reconciler         wait p50        p50        p90   failed
+  schedule             1.1ms      2.4ms      8.9ms        0
+  dispatch            21.1ms     11.2ms     48.0ms        0
+  sync                32.4ms     47.1ms      1.31s        3
+```
+
+**The number the section builds to is the scheduling floor.** Ticks do
+not overlap (`cmd/grain`'s `reconcile` waits for one to return before the
+next interval starts), so tick-to-tick is the loop's real period, which
+is the `-poll-interval` only while a tick is fast compared to it. Adding
+the dispatch wait to it gives what a task pays for grain's own scheduling
+with no contention involved at all. A `queue_wait` p50 near that floor is
+the tick; a `queue_wait` p50 far above it is the deployment being full.
+They are opposite problems with opposite fixes — more concurrency for one,
+a faster or better-ordered cycle for the other — and until now the report
+could not tell them apart.
+
+**A per-reconciler breakdown, not one number for the tick.** The
+reconcilers run in order ("Reconcilers, not a pipeline"), so a
+pull-request sync that has grown to a minute is a minute every decision
+behind it did not get to spend, and a single tick duration cannot say
+which one grew. Each reconciler reports how far into the cycle it
+started, how long it took, and how many of those cycles it ended in an
+error — that last one because a reconciler that is fast *because* it
+fails immediately is not a fast reconciler, and a duration alone cannot
+tell the two apart.
+
+**The dispatch wait is recorded by the cycle, not picked out of the list
+by name.** `pkg/orchestrator` is the package that knows which reconciler
+is the decision a queued task is actually waiting for — it names them —
+so it reports that offset as its own field (`CycleTiming.DispatchWait`)
+rather than leaving every consumer to hardcode the string `"dispatch"`.
+
+### Why this one measurement is in memory
+
+Everything else in `pkg/metrics` is derived from rows that already exist,
+and holds to `docs/data-model.md`'s "anything derivable is derived, never
+stored." A tick is the one thing that leaves no row at all: it reads the
+store, decides, and returns. That left two options.
+
+A **row per cycle** would be durable across restarts and queryable over
+any window. It costs a new table, a write on every single tick forever
+(2,880 a day at the default 30s `-poll-interval`) and a growth curve
+nothing prunes — to measure something whose whole purpose is to say
+whether *this process, right now* is dispatching promptly. It would also
+make the measurement change what it measures: a tick that writes a row is
+a tick with a store write in it.
+
+A **ring in the process** — `orchestrator.CycleTimes`, 720 cycles, six
+hours at the default interval — costs bounded memory, no schema, no
+write, and stores nothing, which keeps the doctrine intact rather than
+carving an exception into it. That is what this is. The honest cost is
+that it is lost on restart, and the report says so rather than hiding it:
+the section is scoped to "this daemon, since it started", carries
+`observed` alongside `n` so a truncated ring is visible, and reports
+`first`/`last` as the span it really covers, which is however long the
+ring is rather than however long a window was asked for. Tick history
+belongs to the process that produced it anyway — a daemon that has just
+restarted has a fresh tick, with none of the accumulated store the slow
+tick this exists to catch would have been slow because of.
+
+The wiring follows the same seam the sandbox-health pane already uses:
+`pkg/ui` does not import `pkg/orchestrator`, so `cmd/grain`'s own
+`cycleTimesAdapter` is the one place both types are in scope, and the
+ring is package-level in `cmd/grain` because the UI/API server starts
+before the reconcile loop that writes into it (the same ordering
+`reconcilerDown` and `livePullRequests` already straddle). A UI with no
+reconcile loop behind it reports `"enabled": false` rather than a tick of
+zero: "nobody measured it" and "the tick costs nothing" are opposite
+answers, and only one of them is ever true.
+
+`tests/e2e/loadtest_test.go` had measured `RunCycle` tick duration with
+instrumentation of its own since it was written ("RunCycle tick duration:
+n=… p50=… p95=…"), and no longer does. The harness passes a `CycleTimes`
+into the `Deps` it ticks and reports out of that instead, so the load
+test and a deployment read one measurement taken by one piece of code,
+rather than two that agree only for as long as nobody changes either. It
+is also the more useful of the two: the harness now reports the dispatch
+wait and the per-reconciler breakdown alongside the tick, and fails on
+what a stopwatch around `RunCycle` could not see at all — a cycle that did
+not run every reconciler, and a p95 dispatch wait past a third of the
+per-tick budget, which is a queued task waiting on the tick itself rather
+than on a deployment that was full. A tick growing under a large store is
+the thing a load test is best placed to catch, and that is the shape it
+now catches it in.
+
+## Merge capacity is its own number
+
+Concurrency was one number: `max_concurrent`, the count of runs
+`dispatch.Cycle` would let be in flight. Every kind of run drew on it
+equally, which put the two least alike kinds in direct competition. Most
+runs are new work, at the start of its life. A few are the merge queue's
+own fix tasks (`Origin.Reason == ReasonFix`, `fileFixTask`), filed
+against a pull request that will not land — the last step of work that is
+already committed, pushed and reviewed. A saturated deployment starved
+exactly the second kind, and starving it is expensive twice over: the
+branch a fix targets keeps moving while the fix waits, so a repair
+delayed long enough has to be filed again, and the queue behind it waits
+too.
+
+`model.Limits` is that one number split in two — `MaxWorkers` and
+`MaxMergers`, in the store as `grain_config.max_workers`/`max_mergers`,
+on the daemon as `-max-workers`/`-max-mergers`, in Settings as "Max
+worker agents" and "Max merge agents". The rule they make is
+deliberately asymmetric:
+
+- no more than `MaxWorkers` runs of ordinary work are ever live;
+- no more than `MaxWorkers + MaxMergers` runs are ever live at all.
+
+A merger is bounded only by the second, so it may take a worker's free
+slot; a worker is bounded by both, so it can never take a merger's. With
+3 workers and 2 mergers a deployment can be running five mergers, or
+three workers and two mergers, but never four workers and never six of
+anything. Capacity kept back for finishing work is reachable by work
+that is nearly finished, and by nothing else.
+
+The split lands in the two places the old count did, and nowhere new.
+`Limits.Admits` is the whole rule, written once: `dispatch.Cycle` asks it
+before spending capacity it can see (`Store.LiveRunCounts`, the live
+count split the same way, and `Store.ReadyMergers` to say which ready
+task is which kind), and `Store.StartRun` asks it again inside the
+transaction that records the run, which is where the limit is actually
+enforced — two overlapping cycles cannot both spend the last slot. A
+candidate whose own half is full is passed over rather than ending the
+cycle, the same skip a task still backing off gets, so a queue of
+ordinary work at the head of the backlog no longer hides the fix task
+behind it from the capacity kept for it.
+
+`-max-concurrent` still parses, as the former spelling of
+`-max-workers`: a deployment's unit file is written once by
+`scripts/setup.sh` and the Upgrade button then replaces only the binary,
+so dropping the old flag would stop the daemon at the moment nobody is
+watching. The stored column is migrated rather than reinterpreted
+(`ensureConfigWorkerMergerColumns`): `max_workers` is backfilled from
+`max_concurrent`, which is then dropped, and `max_mergers` starts at
+`model.DefaultMaxMergers` — one — so an upgraded deployment keeps the
+ordinary concurrency it had and gains a single slot the merge queue
+cannot be shut out of. Setting it to 0 puts a deployment back exactly
+where it was: fix tasks contending for worker capacity like anything
+else.

@@ -109,7 +109,10 @@ export default function App() {
   // bwsalmon/agents#473) since config is otherwise only ever fetched
   // once, at mount, and the repos pane's own list (repoRows) reads
   // config.targetRepos to decide which repos to show and which ones it
-  // can offer to remove.
+  // can offer to remove. It reads config.repoDefaultCapabilities for the
+  // same reason, which is why saving a repo's own defaults refreshes
+  // this too: a repo listed only because it carries a set stops being
+  // listed the moment that set is emptied.
   const refreshConfig = useCallback(async () => {
     setConfig(await api("/api/config"));
   }, []);
@@ -148,6 +151,17 @@ export default function App() {
     setOpenTaskId(null);
     setDetail(null);
   }, []);
+
+  // openTaskFromDebug is the one link out of the Debug overlay: the
+  // metrics panel names the oldest queued task, and clicking it should
+  // land on that task. It closes the debug overlay on the way -- both
+  // are dialogs, and DebugOverlay is mounted after DetailOverlay here,
+  // so leaving it open would put the task the click asked for behind
+  // the pane it was clicked in.
+  const openTaskFromDebug = useCallback((id) => {
+    setShowDebug(false);
+    openTask(id);
+  }, [openTask]);
 
   // openRepo is the repo page's row click: scope the task list to that
   // repo and switch back to it, the same as clicking a repo chip
@@ -242,6 +256,17 @@ export default function App() {
     })();
   }, [refreshList, refreshSchedules, refreshTemplates, refreshSuites, showError]);
 
+  // The deployment's name in the browser tab (grain/task-69), beside
+  // the sidebar badge Sidebar.jsx renders it as. A tab strip is where a
+  // staging window and a production window actually get confused, and it
+  // is the one piece of chrome the app cannot draw into -- so the name
+  // goes first, since a narrow tab truncates its title from the end and
+  // "grain — sta..." would say nothing this is for.
+  useEffect(() => {
+    const name = config?.environmentName;
+    document.title = name ? `${name} — grain` : "grain";
+  }, [config?.environmentName]);
+
   useEffect(() => {
     async function poll() {
       if (polling.current || document.visibilityState === "hidden") return;
@@ -257,11 +282,11 @@ export default function App() {
           setDetail(await api(`/api/tasks/${openTaskId}`));
         }
         if (view === "schedules") {
-          // Both, not just schedules: ScheduleOverlay's own "Template"
-          // picker (opened from SchedulesList.jsx) needs an up-to-date
-          // template list too, since it can open at any time while this
-          // pane is on screen.
-          await Promise.all([refreshSchedules(), refreshTemplates()]);
+          // All three, not just schedules: ScheduleOverlay's own
+          // "Template" and "Task suite" pickers (opened from
+          // SchedulesList.jsx) need up-to-date lists too, since either can
+          // open at any time while this pane is on screen.
+          await Promise.all([refreshSchedules(), refreshTemplates(), refreshSuites()]);
         } else if (view === "templates") {
           await refreshTemplates();
         } else if (view === "suites") {
@@ -381,6 +406,7 @@ export default function App() {
             <SchedulesList
               schedules={schedules}
               templates={templates}
+              suites={suites}
               config={config}
               tasks={tasks}
               onRefresh={refreshSchedules}
@@ -446,7 +472,7 @@ export default function App() {
         />
       )}
       {showSettings && <SettingsOverlay onClose={() => setShowSettings(false)} showError={showError} />}
-      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} showError={showError} />}
+      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} onOpenTask={openTaskFromDebug} showError={showError} />}
     </div>
   );
 }

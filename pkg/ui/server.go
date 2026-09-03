@@ -59,10 +59,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)
 	s.mux.HandleFunc("POST /api/tasks/{id}/retry", s.handleRetry)
+	s.mux.HandleFunc("POST /api/tasks/{id}/pull-request", s.handleOpenPullRequest)
+	s.mux.HandleFunc("POST /api/tasks/{id}/sandbox/recreate", s.handleRecreateSandbox)
 	s.mux.HandleFunc("GET /api/tasks/{id}/attempts/{number}/transcript", s.handleGetAttemptTranscript)
 
 	s.mux.HandleFunc("POST /api/repos", s.handleAddTargetRepo)
 	s.mux.HandleFunc("DELETE /api/repos/{owner}/{name}", s.handleRemoveTargetRepo)
+
+	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/capabilities", s.handleGetRepoCapabilities)
+	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/capabilities", s.handleSetRepoCapabilities)
 
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases", s.handleListReleases)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases", s.handleCreateRelease)
@@ -115,6 +120,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/logs/{source}", s.handleGetLogLines)
 
 	s.mux.HandleFunc("GET /api/sandboxes", s.handleGetSandboxHealth)
+
+	s.mux.HandleFunc("GET /api/metrics", s.handleGetMetrics)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {

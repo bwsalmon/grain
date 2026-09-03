@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,7 +42,7 @@ func testClient(t *testing.T) (*ui.Client, *model.Store, context.Context) {
 	client := ui.NewClient(ui.Config{
 		Actor:         ui.DefaultActor("alice"),
 		DefaultTarget: &repo,
-		Capabilities:  ui.DefaultCapabilities(),
+		Capabilities:  ui.OfferedCapabilities(),
 	}, store)
 	client.Now = func() time.Time { return baseTime }
 	return client, store, ctx
@@ -212,7 +213,7 @@ func TestCreateTaskConfigurationKeepsACallerSuppliedTitleAndCapabilities(t *test
 		Configuration: true,
 		Title:         "why is the daemon restarting",
 		Description:   "it keeps crash-looping, please debug",
-		Capabilities:  []string{"gemini-key"},
+		Capabilities:  &[]string{"gemini-key"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +312,7 @@ func TestCreateTaskCarriesCapabilityGrants(t *testing.T) {
 	c, store, ctx := testClient(t)
 
 	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
-		Title: "needs a key", Approved: true, Capabilities: []string{"gemini-key"},
+		Title: "needs a key", Approved: true, Capabilities: &[]string{"gemini-key"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -325,6 +326,291 @@ func TestCreateTaskCarriesCapabilityGrants(t *testing.T) {
 	}
 	if len(stored.Grants) != 1 || stored.Grants[0].Capability != "gemini-key" {
 		t.Fatalf("grants = %+v, want one gemini-key grant", stored.Grants)
+	}
+}
+
+// putDefaultCapabilities stores ids as this deployment's default
+// capability set, the way an operator saving Settings would -- through a
+// full model.Config, since PutConfig writes the row wholesale.
+func putDefaultCapabilities(t *testing.T, ctx context.Context, store *model.Store, ids ...string) {
+	t.Helper()
+	cfg := model.DefaultConfig()
+	cfg.DefaultCapabilities = ids
+	if err := store.PutConfig(ctx, cfg); err != nil {
+		t.Fatalf("storing default capabilities %v: %v", ids, err)
+	}
+}
+
+// grain/task-14: a deployment can say which capabilities every task
+// filed on it starts out holding. The grant lands on the task itself, as
+// GrantByDefault -- not as a deployment-level set read again at dispatch
+// -- which is what makes it visible on the task and detachable from it.
+func TestCreateTaskSeedsDeploymentDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "needs a sandbox key", Approved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(task.Capabilities, "gcp-key") {
+		t.Fatalf("capabilities = %v, want gcp-key among them: the deployment defaults it", task.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 1 || stored.Grants[0].Via != model.GrantByDefault {
+		t.Fatalf("grants = %+v, want one gcp-key grant recorded as %q", stored.Grants, model.GrantByDefault)
+	}
+	// Detachable like any other grant: a default is a starting point, not
+	// something the task is stuck with.
+	if err := c.SetCapability(ctx, task.ID, "gcp-key", false); err != nil {
+		t.Fatalf("detaching a defaulted capability: %v", err)
+	}
+	detached, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detached.Grants) != 0 {
+		t.Fatalf("grants after detaching = %+v, want none", detached.Grants)
+	}
+}
+
+// A request that names its own capabilities names all of them: the
+// defaults seed a task nobody said anything about, and an empty-but-
+// present list is somebody saying "none". The UI's own form always sends
+// a list -- seeded from the defaults -- so unticking a box on it has to
+// mean the task is filed without that capability.
+func TestCreateTaskCapabilitiesOverrideDeploymentDefaults(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+
+	named, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "only this one", Approved: true, Capabilities: &[]string{"gemini-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(named.Capabilities, []string{"gemini-key"}) {
+		t.Errorf("capabilities = %v, want [gemini-key] alone", named.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, named.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 1 || stored.Grants[0].Via != model.GrantByLabel {
+		t.Errorf("grants = %+v, want one gemini-key grant recorded as %q", stored.Grants, model.GrantByLabel)
+	}
+
+	none, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "none at all", Approved: true, Capabilities: &[]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none.Capabilities) != 0 {
+		t.Errorf("capabilities = %v, want none: an empty list is a choice, not an absent one", none.Capabilities)
+	}
+}
+
+// A configuration-agent task gets its own three grants on top of
+// whatever the deployment defaults, rather than either one replacing the
+// other.
+func TestCreateConfigurationTaskKeepsDeploymentDefaults(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Configuration: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"gcp-key", "self-debug", "self-repair", "bootstrap-playbooks"} {
+		if !slices.Contains(task.Capabilities, want) {
+			t.Errorf("capabilities = %v, want %s among them", task.Capabilities, want)
+		}
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 4 {
+		t.Fatalf("grants = %+v, want four", stored.Grants)
+	}
+}
+
+// A stored default this build no longer offers is skipped, not fatal:
+// UpdateSettings validates the set when it is saved, so an id with no
+// row can only be one grain has retired since, and a settings row left
+// behind by an upgrade must not become a deployment where no task can be
+// filed at all ("scratch-repo" is exactly that -- task-10 renamed it to
+// github-sandbox).
+func TestCreateTaskSkipsRetiredDefaultCapability(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "scratch-repo", "gemini-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "still filable", Approved: true})
+	if err != nil {
+		t.Fatalf("filing a task on a deployment defaulting a retired capability: %v", err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key]: the retired id is skipped, the rest still granted",
+			task.Capabilities)
+	}
+}
+
+// putRepoDefaultCapabilities stores ids as one repo's own default
+// capability set, the way an operator saving the repos pane's own
+// per-repo picker would.
+func putRepoDefaultCapabilities(t *testing.T, ctx context.Context, store *model.Store, repo string, ids ...string) {
+	t.Helper()
+	parsed, err := model.ParseRepo(repo)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", repo, err)
+	}
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{Repo: parsed, DefaultCapabilities: ids}); err != nil {
+		t.Fatalf("storing repo default capabilities %v for %s: %v", ids, repo, err)
+	}
+}
+
+// grain/task-24: a repo can default capabilities of its own, on top of
+// whatever the deployment defaults. Union, deployment-wide first -- a
+// repo adds and never subtracts -- and only for the repo the task
+// actually targets.
+func TestCreateTaskUnionsRepoDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gemini-key")
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	here, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "on the repo that adds one", Approved: true, Repo: "acme/widgets",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compared sorted: a task's capabilities come back in the order
+	// Store.grantsOf reads them (by capability), not in the order they
+	// were seeded.
+	if !reflect.DeepEqual(here.Capabilities, []string{"gcp-key", "gemini-key"}) {
+		t.Errorf("capabilities = %v, want both the deployment's gemini-key and the repo's gcp-key",
+			here.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, here.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range stored.Grants {
+		if g.Via != model.GrantByDefault {
+			t.Errorf("grant %+v: want every seeded grant recorded as %q", g, model.GrantByDefault)
+		}
+	}
+
+	// A different repo gets the deployment's set alone -- the repo layer
+	// is keyed on the target, not applied to everything once stored.
+	elsewhere, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "on another repo", Approved: true, Repo: "acme/gadgets",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(elsewhere.Capabilities, []string{"gemini-key"}) {
+		t.Errorf("capabilities = %v, want [gemini-key] alone on a repo with no defaults of its own",
+			elsewhere.Capabilities)
+	}
+}
+
+// A task filed with no repo named at all is filed against
+// Config.DefaultTarget, and it is that repo's defaults it should get:
+// the layer is keyed on the repo the task ends up targeting, not on
+// whether the request happened to spell it out.
+func TestCreateTaskUsesDefaultTargetRepoDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "no repo named", Approved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gcp-key"}) {
+		t.Fatalf("capabilities = %v, want [gcp-key]: the default target repo's own defaults", task.Capabilities)
+	}
+}
+
+// A repo-less task (NoRepo) has no repo to key the second layer on, so
+// it gets the deployment's set and nothing else -- not the default
+// target's, which it deliberately is not filed against.
+func TestCreateTaskWithNoRepoTakesOnlyDeploymentDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gemini-key")
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "nothing to check out", Approved: true, NoRepo: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key] alone", task.Capabilities)
+	}
+}
+
+// The same skip-rather-than-fail rule the deployment-wide set has, on
+// the repo layer: a repo row naming a capability this build retired must
+// not become a repo no task can be filed against.
+func TestCreateTaskSkipsRetiredRepoDefaultCapability(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "scratch-repo", "gemini-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "still filable", Approved: true})
+	if err != nil {
+		t.Fatalf("filing a task against a repo defaulting a retired capability: %v", err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key]", task.Capabilities)
+	}
+}
+
+// A repo restating something the deployment already defaults grants it
+// once, not twice -- the union is a set, and a duplicate grant would be
+// two rows for one capability on the task.
+func TestCreateTaskDeduplicatesOverlappingDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "one key only", Approved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gcp-key"}) {
+		t.Fatalf("capabilities = %v, want [gcp-key] once", task.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 1 {
+		t.Fatalf("grants = %+v, want exactly one", stored.Grants)
+	}
+}
+
+// A request that names its own set still names all of it: the per-repo
+// layer seeds a task nobody said anything about, exactly like the
+// deployment-wide one, and unticking a box on the new-task form has to
+// mean the task is filed without that capability.
+func TestCreateTaskCapabilitiesOverrideRepoDefaults(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "not that one", Approved: true, Capabilities: &[]string{"gemini-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key] alone", task.Capabilities)
 	}
 }
 
@@ -415,12 +701,13 @@ func TestCreateTaskValidates(t *testing.T) {
 
 	for name, req := range map[string]ui.CreateTaskRequest{
 		"empty title":              {Title: "  "},
-		"unknown capability":       {Title: "t", Capabilities: []string{"nope"}},
+		"unknown capability":       {Title: "t", Capabilities: &[]string{"nope"}},
 		"unparseable repo":         {Title: "t", Repo: "not-a-repo"},
 		"unknown dependency":       {Title: "t", DependsOn: []string{"404"}},
 		"unparseable read":         {Title: "t", Reads: []string{"not-a-repo"}},
 		"negative sandbox cpus":    {Title: "t", SandboxCPUs: -1},
 		"sandbox memory below 128": {Title: "t", SandboxMemoryMB: 64},
+		"negative sandbox disk":    {Title: "t", SandboxDiskGB: -1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.CreateTask(ctx, req)
@@ -516,41 +803,49 @@ func TestUpdateTaskEditsEveryField(t *testing.T) {
 	}
 }
 
-// bwsalmon/agents#534: a task's own SandboxCPUs/SandboxMemoryMB override
+// bwsalmon/agents#534, grain/task-41: a task's own SandboxCPUs/
+// SandboxMemoryMB/SandboxDiskGB override
 // round-trips through CreateTask and UpdateTask the same as every other
-// task field, and setting either back to 0 through UpdateTask clears the
-// override (distinct from leaving the request field nil, which leaves it
-// alone -- UpdateTaskRequest's own doc comment).
+// task field, and setting any of them back to 0 through UpdateTask clears
+// that override (distinct from leaving the request field nil, which
+// leaves it alone -- UpdateTaskRequest's own doc comment).
 func TestTaskSandboxShapeOverrideRoundTrips(t *testing.T) {
 	c, _, ctx := testClient(t)
 
 	created, err := c.CreateTask(ctx, ui.CreateTaskRequest{
 		Title: "t", Repo: "acme/widgets", Approved: true,
-		SandboxCPUs: 4, SandboxMemoryMB: 8192,
+		SandboxCPUs: 4, SandboxMemoryMB: 8192, SandboxDiskGB: 40,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.SandboxCPUs != 4 || created.SandboxMemoryMB != 8192 {
-		t.Fatalf("created task sandbox shape = %d/%d, want 4/8192", created.SandboxCPUs, created.SandboxMemoryMB)
+	if created.SandboxCPUs != 4 || created.SandboxMemoryMB != 8192 || created.SandboxDiskGB != 40 {
+		t.Fatalf("created task sandbox shape = %d/%d/%d, want 4/8192/40",
+			created.SandboxCPUs, created.SandboxMemoryMB, created.SandboxDiskGB)
 	}
 
-	cpus, memoryMB := 2, 4096
-	updated, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB})
+	cpus, memoryMB, diskGB := 2, 4096, 20
+	updated, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{
+		SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB, SandboxDiskGB: &diskGB,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.SandboxCPUs != 2 || updated.SandboxMemoryMB != 4096 {
-		t.Fatalf("updated task sandbox shape = %d/%d, want 2/4096", updated.SandboxCPUs, updated.SandboxMemoryMB)
+	if updated.SandboxCPUs != 2 || updated.SandboxMemoryMB != 4096 || updated.SandboxDiskGB != 20 {
+		t.Fatalf("updated task sandbox shape = %d/%d/%d, want 2/4096/20",
+			updated.SandboxCPUs, updated.SandboxMemoryMB, updated.SandboxDiskGB)
 	}
 
 	zero := 0
-	cleared, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{SandboxCPUs: &zero, SandboxMemoryMB: &zero})
+	cleared, err := c.UpdateTask(ctx, created.ID, ui.UpdateTaskRequest{
+		SandboxCPUs: &zero, SandboxMemoryMB: &zero, SandboxDiskGB: &zero,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleared.SandboxCPUs != 0 || cleared.SandboxMemoryMB != 0 {
-		t.Fatalf("cleared task sandbox shape = %d/%d, want 0/0", cleared.SandboxCPUs, cleared.SandboxMemoryMB)
+	if cleared.SandboxCPUs != 0 || cleared.SandboxMemoryMB != 0 || cleared.SandboxDiskGB != 0 {
+		t.Fatalf("cleared task sandbox shape = %d/%d/%d, want 0/0/0",
+			cleared.SandboxCPUs, cleared.SandboxMemoryMB, cleared.SandboxDiskGB)
 	}
 }
 
@@ -590,7 +885,7 @@ func TestUpdateTaskValidates(t *testing.T) {
 	task := create(t, c, ctx)
 
 	blank, bad := "  ", "not-a-repo"
-	negativeCPUs, lowMemory := -1, 64
+	negativeCPUs, lowMemory, negativeDisk := -1, 64, -1
 	for name, req := range map[string]ui.UpdateTaskRequest{
 		"empty title": {Title: &blank},
 		// Clearing the target is rejected rather than allowed: a task with
@@ -601,6 +896,7 @@ func TestUpdateTaskValidates(t *testing.T) {
 		"unparseable read":         {Reads: &[]string{"not-a-repo"}},
 		"negative sandbox cpus":    {SandboxCPUs: &negativeCPUs},
 		"sandbox memory below 128": {SandboxMemoryMB: &lowMemory},
+		"negative sandbox disk":    {SandboxDiskGB: &negativeDisk},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := c.UpdateTask(ctx, task.ID, req)
@@ -723,6 +1019,70 @@ func TestSetCapabilityAttachesAndDetaches(t *testing.T) {
 	// removing an absent label used to do.
 	if err := c.SetCapability(ctx, task.ID, "gemini-key", false); err != nil {
 		t.Fatalf("detaching an absent capability: %v", err)
+	}
+}
+
+// gcp-key and github-sandbox each had a provider cmd/grain/daemon.go
+// registered and no OfferedCapabilities row, so every attempt to attach
+// one -- the only way a model.Grant is ever written -- was rejected as
+// an unknown capability, and no sandbox on any deployment ever got
+// gcpkey.SandboxKeyPath. Both routes a human has are covered here,
+// since both validate against the same listing.
+func TestGCPKeyAndGitHubSandboxCanBeGranted(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "mint me a key", Approved: true,
+		Capabilities: &[]string{"gcp-key", "github-sandbox"},
+	})
+	if err != nil {
+		t.Fatalf("creating a task granting gcp-key and github-sandbox: %v", err)
+	}
+	for _, want := range []string{"gcp-key", "github-sandbox"} {
+		if !slices.Contains(task.Capabilities, want) {
+			t.Errorf("capabilities = %v, want %s among them", task.Capabilities, want)
+		}
+	}
+
+	plain := create(t, c, ctx)
+	for _, id := range []string{"gcp-key", "github-sandbox"} {
+		if err := c.SetCapability(ctx, plain.ID, id, true); err != nil {
+			t.Errorf("attaching %s: %v", id, err)
+		}
+	}
+}
+
+// A task can be holding a grant this deployment no longer offers -- a
+// renamed capability, "scratch-repo" being the one that was here, which
+// fails the task's every dispatch at model.ResolveGrants. Detaching it
+// has to work, or the only route out is the store itself. Attaching one
+// is still refused: that is the check that keeps an unknown id from
+// becoming a grant in the first place.
+func TestSetCapabilityDetachesAnIDNoLongerOffered(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+	if err := store.UpdateTask(ctx, task.ID, func(tk *model.Task) error {
+		tk.Grants = append(tk.Grants, model.Grant{Capability: "scratch-repo", Via: model.GrantByLabel})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.SetCapability(ctx, task.ID, "scratch-repo", false); err != nil {
+		t.Fatalf("detaching a capability this deployment no longer offers: %v", err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Capabilities) != 0 {
+		t.Fatalf("capabilities after detach = %v, want none", got.Capabilities)
+	}
+
+	err = c.SetCapability(ctx, task.ID, "scratch-repo", true)
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("attaching an unknown capability: error = %v, want a ValidationError", err)
 	}
 }
 
@@ -974,7 +1334,7 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "build error"); err != nil {
@@ -983,7 +1343,7 @@ func TestGetTaskListsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r2", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 2, StartedAt: baseTime.Add(time.Hour),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1027,7 +1387,7 @@ func TestGetTaskHidesFailedAttemptsOnceTheTaskHasCompleted(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "failed", "exceeded max turns (2) without a final answer"); err != nil {
@@ -1070,7 +1430,7 @@ func TestRetryClearsAFailedTasksStreak(t *testing.T) {
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: task.ID, Sandbox: "s1",
 			Attempt: i + 1, StartedAt: started,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, started.Add(time.Minute), "failed", "boom"); err != nil {
@@ -1203,7 +1563,7 @@ func TestAttemptTranscript(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(10*time.Minute), "succeeded", ""); err != nil {
@@ -1250,7 +1610,7 @@ func TestAttemptTranscriptPrefersTheLiveTranscriptWhileARunIsStillGoing(t *testi
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1274,7 +1634,7 @@ func TestAttemptTranscriptFallsBackToTheStoreOnceALiveRunFinishes(t *testing.T) 
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", baseTime.Add(time.Minute), "succeeded", ""); err != nil {
@@ -1303,7 +1663,7 @@ func TestAttemptTranscriptFallsBackToTheStoreWhenLiveHasNothingYet(t *testing.T)
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: task.ID, Sandbox: "s1",
 		Attempt: 1, StartedAt: baseTime,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1513,6 +1873,47 @@ func TestReorderValidatesIDsIsNotEmpty(t *testing.T) {
 	}
 }
 
+// AuthorKind is what lets the frontend tell a task somebody filed by
+// hand from one grain or a dispatched run filed for itself -- Author
+// alone cannot, since a login, a run ID and a deployment name are all
+// just strings. state.js's lastBaseForRepo reads it to keep a
+// system-generated task's base branch out of the human's own "Base
+// branch" default.
+func TestAuthorKindCarriesTheFilingPrincipalsKind(t *testing.T) {
+	c, store, ctx := testClient(t)
+	filed := create(t, c, ctx)
+	if filed.AuthorKind != string(model.PrincipalHuman) {
+		t.Fatalf("AuthorKind of a task filed through the client = %q, want human", filed.AuthorKind)
+	}
+
+	id, err := store.NewTaskID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduled := model.Task{
+		ID:     id,
+		Intent: model.IntentImplement,
+		Title:  "nightly sweep",
+		Body:   "filed by a schedule",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+			Reason:      model.ReasonSchedule,
+		},
+		CreatedAt: &baseTime,
+	}
+	if err := store.PutTask(ctx, scheduled); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.Task(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AuthorKind != string(model.PrincipalAutomation) {
+		t.Fatalf("AuthorKind of a scheduled task = %q, want automation", got.AuthorKind)
+	}
+}
+
 // GeneratedFrom is read off the task's own LinkProposedBy link -- the
 // same provenance relayProposedTasks (pkg/orchestrator/finish.go) sets
 // automatically on every task a propose_task call files, surfaced here
@@ -1696,9 +2097,9 @@ func TestGetSettingsIsUnconfiguredOnAFreshStore(t *testing.T) {
 }
 
 func firstSettings() ui.UpdateSettingsRequest {
-	pollInterval, maxConcurrent, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
+	pollInterval, maxWorkers, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
 	return ui.UpdateSettingsRequest{
-		PollInterval: &pollInterval, MaxConcurrent: &maxConcurrent,
+		PollInterval: &pollInterval, MaxWorkers: &maxWorkers,
 		GeminiModel: &geminiModel, ClaudeModel: &claudeModel, GitHubHost: &host,
 	}
 }
@@ -1712,8 +2113,8 @@ func TestUpdateSettingsFirstTimeRequiresTheCoreFields(t *testing.T) {
 	}
 
 	c2, _, ctx2 := testClient(t)
-	maxConcurrent := 1
-	_, err := c2.UpdateSettings(ctx2, ui.UpdateSettingsRequest{MaxConcurrent: &maxConcurrent})
+	maxWorkers := 1
+	_, err := c2.UpdateSettings(ctx2, ui.UpdateSettingsRequest{MaxWorkers: &maxWorkers})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("saving settings for the first time with pollInterval missing: error = %v, want a ValidationError", err)
@@ -1751,6 +2152,41 @@ func TestUpdateSettingsThenGetRoundTrips(t *testing.T) {
 	}
 }
 
+// grain/task-63: a first save that never mentions maxMergers stores
+// model.DefaultConfig's own value for it rather than a zero nobody
+// chose, and a later save can set it -- including back to 0, which means
+// "mergers contend for worker capacity" rather than "unset".
+func TestUpdateSettingsDefaultsAndRoundTripsMaxMergers(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	got, err := c.UpdateSettings(ctx, firstSettings())
+	if err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	if got.MaxMergers != model.DefaultMaxMergers {
+		t.Fatalf("maxMergers after a first save that never mentioned it = %d, want DefaultMaxMergers (%d)",
+			got.MaxMergers, model.DefaultMaxMergers)
+	}
+
+	three := 3
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{MaxMergers: &three})
+	if err != nil {
+		t.Fatalf("setting maxMergers: %v", err)
+	}
+	if got.MaxMergers != 3 || got.MaxWorkers != 1 {
+		t.Fatalf("settings = %+v, want maxMergers 3 with maxWorkers left at 1", got)
+	}
+
+	none := 0
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{MaxMergers: &none})
+	if err != nil {
+		t.Fatalf("clearing maxMergers: %v", err)
+	}
+	if got.MaxMergers != 0 {
+		t.Fatalf("maxMergers = %d after being set to 0, want 0 kept as the choice it is", got.MaxMergers)
+	}
+}
+
 // A later partial update changes only the fields given, leaving
 // everything else -- including fields with no UI equivalent yet, like
 // GCPProject -- exactly as they were, the same UpdateTaskRequest
@@ -1774,45 +2210,53 @@ func TestUpdateSettingsChangesOnlyTheFieldsGiven(t *testing.T) {
 	}
 }
 
-// bwsalmon/agents#534: SandboxCPUs/SandboxMemoryMB (the deployment-wide
+// bwsalmon/agents#534, grain/task-41: SandboxCPUs/SandboxMemoryMB/
+// SandboxDiskGB (the deployment-wide
 // default sandbox shape) round-trip through UpdateSettings/GetSettings
 // the same as every other store-backed field, and 0 -- the "unset, use
 // bwsalmon/kontur's own default" zero value -- is valid, unlike
-// MaxConcurrent's own "must be at least 1".
+// MaxWorkers's own "must be at least 1".
 func TestUpdateSettingsSandboxShapeRoundTrips(t *testing.T) {
 	c, _, ctx := testClient(t)
 	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
 		t.Fatal(err)
 	}
 
-	cpus, memoryMB := 4, 8192
-	got, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB})
+	cpus, memoryMB, diskGB := 4, 8192, 40
+	got, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		SandboxCPUs: &cpus, SandboxMemoryMB: &memoryMB, SandboxDiskGB: &diskGB,
+	})
 	if err != nil {
 		t.Fatalf("setting sandbox shape: %v", err)
 	}
-	if got.SandboxCPUs != 4 || got.SandboxMemoryMB != 8192 {
-		t.Fatalf("sandboxCpus/sandboxMemoryMb = %d/%d, want 4/8192", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 4 || got.SandboxMemoryMB != 8192 || got.SandboxDiskGB != 40 {
+		t.Fatalf("sandboxCpus/sandboxMemoryMb/sandboxDiskGb = %d/%d/%d, want 4/8192/40",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 
 	read, err := c.GetSettings(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.SandboxCPUs != 4 || read.SandboxMemoryMB != 8192 {
-		t.Fatalf("GetSettings sandboxCpus/sandboxMemoryMb = %d/%d, want 4/8192", read.SandboxCPUs, read.SandboxMemoryMB)
+	if read.SandboxCPUs != 4 || read.SandboxMemoryMB != 8192 || read.SandboxDiskGB != 40 {
+		t.Fatalf("GetSettings sandboxCpus/sandboxMemoryMb/sandboxDiskGb = %d/%d/%d, want 4/8192/40",
+			read.SandboxCPUs, read.SandboxMemoryMB, read.SandboxDiskGB)
 	}
 
 	zero := 0
-	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{SandboxCPUs: &zero, SandboxMemoryMB: &zero})
+	got, err = c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		SandboxCPUs: &zero, SandboxMemoryMB: &zero, SandboxDiskGB: &zero,
+	})
 	if err != nil {
 		t.Fatalf("clearing sandbox shape: %v", err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("sandboxCpus/sandboxMemoryMb after clearing = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("sandboxCpus/sandboxMemoryMb/sandboxDiskGb after clearing = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 
-// Unlike MaxConcurrent, an empty TargetRepos is meaningful (unrestricted)
+// Unlike MaxWorkers, an empty TargetRepos is meaningful (unrestricted)
 // rather than rejected -- v1's target_repos "leave empty for a
 // single-repo deployment."
 func TestUpdateSettingsTargetReposRoundTripsIncludingEmpty(t *testing.T) {
@@ -1849,19 +2293,23 @@ func TestUpdateSettingsValidates(t *testing.T) {
 	bad := "not-a-duration"
 	empty := ""
 	negative := -1
-	zeroConcurrent := 0
+	zeroWorkers := 0
+	negativeMergers := -1
 	badRepo := []string{"not-owner-slash-name"}
 	negativeCPUs := -1
 	lowMemory := 64
+	negativeDisk := -1
 	cases := map[string]ui.UpdateSettingsRequest{
 		"unparseable poll interval": {PollInterval: &bad},
-		"zero max concurrent":       {MaxConcurrent: &zeroConcurrent},
+		"zero max workers":          {MaxWorkers: &zeroWorkers},
+		"negative max mergers":      {MaxMergers: &negativeMergers},
 		"blank gemini model":        {GeminiModel: &empty},
 		"blank github host":         {GitHubHost: &empty},
 		"negative max agent turns":  {MaxAgentTurns: &negative},
 		"malformed target repo":     {TargetRepos: &badRepo},
 		"negative sandbox cpus":     {SandboxCPUs: &negativeCPUs},
 		"sandbox memory below 128":  {SandboxMemoryMB: &lowMemory},
+		"negative sandbox disk":     {SandboxDiskGB: &negativeDisk},
 	}
 	for name, req := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -24,14 +24,20 @@ import (
 	"context"
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
+	"github.com/bwsalmon/grain/pkg/metrics"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/upgrade"
 )
 
-// Capability is one attachable, opt-in capability a human toggles on a
-// task -- the CAPABILITY-tier rows of v1's labels.py _STYLES table that
-// were genuinely human-driven.
+// Capability is one attachable capability a human toggles on a task --
+// the CAPABILITY-tier rows of v1's labels.py _STYLES table that were
+// genuinely human-driven. A deployment can start every new task with
+// some of these already ticked (model.Config.DefaultCapabilities), and a
+// repo can add more of its own for the tasks that target it
+// (model.RepoConfig.DefaultCapabilities). Either changes what the picker
+// opens as, not what it can do: every row here is still something a
+// human turns on and off per task.
 //
 // Label is gone from this type. It named the GitHub label that used to
 // carry the grant; a grant is a model.Grant row now, and ID is what it
@@ -45,10 +51,54 @@ type Capability struct {
 	Description string `json:"description"`
 }
 
-// DefaultCapabilities matches labels.py's _STYLES table, human-toggled
-// rows only.
-func DefaultCapabilities() []Capability {
+// OfferedCapabilities is every capability a human can attach to a task,
+// and -- because grantsFor and SetCapability reject an id with no row
+// here as "unknown capability" before a model.Grant is ever written --
+// the only route by which any capability is ever granted at all. It
+// started as labels.py's _STYLES table, human-toggled rows only; it is
+// now kept in step with the set of providers grain ships instead, which
+// is what capabilityCatalog (capability_status.go) enumerates and what
+// TestOfferedCapabilitiesCoversEveryShippedCapability holds to.
+//
+// That drift is why this comment is longer than the table. gcp-key and
+// github-sandbox both had providers cmd/grain/daemon.go registered and
+// no row here, so no task on any deployment, however configured, could
+// ask for either: gcp-key's symptom was that no sandbox ever got
+// gcpkey.SandboxKeyPath, with nothing refused, logged or failed
+// anywhere, because model.ResolveGrants was never reached (an
+// ungrantable capability is rejected a step earlier than a
+// misconfigured one). The reverse drift was here too: "scratch-repo" is
+// v1's label name for what v2's provider calls github-sandbox, so
+// ticking it wrote a grant no provider answers to and
+// prepareCapabilities failed the dispatch outright. The row below
+// carries the provider's own id.
+//
+// The name is Offered, not Default, because this is what a picker may
+// show, not what a task starts with: the second question -- gcp-key,
+// which v1 minted for every sandbox unconditionally
+// (grain/automation/gcp_keys.py) -- is model.Config.DefaultCapabilities,
+// a per-deployment subset of these ids that (*Client).CreateTask seeds
+// every new task's Grants from, plus model.RepoConfig.
+// DefaultCapabilities, the same thing per repo. A row here is what makes
+// an id eligible for either set (UpdateSettings and
+// SetRepoDefaultCapabilities both validate against this listing), so
+// this stays the one gate every grant passes through.
+//
+// Seeding at creation rather than granting at dispatch is what settles
+// the failure mode v1 needed a local `except` for. v1 minted per
+// dispatch and swallowed the failure, so a broken minter degraded one
+// sandbox silently; prepareCapabilities (pkg/orchestrator/run.go) treats
+// a refused resolve or a failed materialize as no dispatch at all, and
+// an always-grant set read at dispatch would have turned an expired
+// minter credential into a standing veto on every task in the
+// deployment. A seeded grant needs no separate policy for that: it is an
+// ordinary grant on an ordinary task, so it fails that one task loudly
+// -- and it can be taken off the task, or out of the default set, by
+// whoever is looking at the failure.
+func OfferedCapabilities() []Capability {
 	return []Capability{
+		{ID: "gcp-key", Name: "GCP key",
+			Description: "Mint a short-lived GCP service-account key for this task and place it in its sandbox"},
 		{ID: "gemini-key", Name: "Gemini key",
 			Description: "Mint a short-lived Gemini API key for this task"},
 		{ID: "self-debug", Name: "Self debug",
@@ -57,8 +107,8 @@ func DefaultCapabilities() []Capability {
 			Description: "Let this task run commands on grain's own host -- restart services, edit config, call the grain CLI -- each one needing a live reply in the task's chat before it runs"},
 		{ID: "bootstrap-playbooks", Name: "Bootstrap playbooks",
 			Description: "Let this task read grain's own bootstrap playbooks -- the runbooks for setting up GCP service accounts, the primary GitHub connection, CloudRun-based IAP access, and test repos -- so it can walk whoever is on the other end of this chat through one of them"},
-		{ID: "scratch-repo", Name: "Scratch repo",
-			Description: "Dispatch this task into its sandbox's own scratch repo instead of /repo"},
+		{ID: "github-sandbox", Name: "GitHub sandbox",
+			Description: "Create a private, single-use GitHub sandbox repo for this task to work in instead of /repo"},
 	}
 }
 
@@ -210,6 +260,74 @@ type Config struct {
 	// ReconcilerDown and AutoMergeDegraded above give, and the honest
 	// answer where there is no running configuration to compare with.
 	RunningConfig func() model.Config
+	// PullRequests, when set, is what POST /api/tasks/{id}/pull-request
+	// calls to open (or find) a task's own pull request and read its
+	// checks -- cmd/grain/daemon.go's pullRequestOpener over
+	// orchestrator.OpenPullRequestForTask and that daemon's GitHub
+	// client. It is how a dispatched run opens its pull request before it
+	// exits, through the open_pull_request tool its own MCP server
+	// exposes: the mcpserver process holds no GitHub credential of its
+	// own (deliberately -- pkg/gitproxy's whole shape is that a run's
+	// route to GitHub is grain's, never the agent's), so it asks the
+	// daemon over this same REST API the CLI already speaks.
+	//
+	// nil means this deployment's UI was not handed one (`grain demo`'s
+	// throwaway UI, or any UI not colocated with a daemon that has a
+	// GitHub client), and the route answers 404 rather than erroring --
+	// the same nil-means-unavailable contract Reboot and Sandboxes above
+	// already give.
+	PullRequests PullRequests
+	// SandboxRecreate, when set, is what
+	// POST /api/tasks/{id}/sandbox/recreate calls to destroy a live run's
+	// sandbox and build an empty one in its place -- cmd/grain/daemon.go's
+	// sandboxRecreateAdapter over the orchestrator.SandboxRecreations its
+	// dispatched runs register themselves in.
+	//
+	// It is how a dispatched run rescues itself from a sandbox it cannot
+	// repair from inside, through the recreate_sandbox tool its own MCP
+	// server exposes: everything else that run has runs *in* the sandbox,
+	// so destroying and rebuilding one is necessarily somebody else's
+	// call to make -- the same hop, and the same reasoning, as
+	// PullRequests above.
+	//
+	// nil means this deployment's UI was not handed one (`grain demo`'s
+	// throwaway UI, or any UI not colocated with the daemon that owns the
+	// runs), and the route answers 404 rather than erroring -- the same
+	// nil-means-unavailable contract PullRequests and Sandboxes above
+	// already give.
+	SandboxRecreate SandboxRecreator
+	// Cycles, when set, is what GET /api/metrics' own "cycles" section
+	// reads to report how long this daemon's RunCycle ticks have been
+	// taking -- cmd/grain/daemon.go's cycleTimesAdapter over the
+	// orchestrator.CycleTimes its reconcile loop writes into. It is the
+	// one part of a metrics report that is not derived from rows,
+	// because a tick leaves none (see pkg/metrics' Cycles), so unlike
+	// every other number there it has to be handed in by the process
+	// that produced it.
+	//
+	// nil means this deployment's UI was not handed one (`grain demo`'s
+	// throwaway UI, or any UI not colocated with a reconcile loop whose
+	// ticks it could speak for), and the section reports itself
+	// unavailable rather than an empty distribution that would read as
+	// "no ticks happened" -- the same nil-means-unavailable contract
+	// Sandboxes and PullRequests above already give.
+	Cycles CycleTimes
+}
+
+// CycleTimes is implemented by whatever can report the RunCycle ticks a
+// daemon has recently run -- cmd/grain/daemon.go's own cycleTimesAdapter
+// over orchestrator.CycleTimes, in a real deployment. Named here and
+// filled there for the same reason SandboxHealth is: this package does
+// not import pkg/orchestrator (see sandbox_health.go's own doc comment),
+// so cmd/grain is the one place both types are ever in scope.
+//
+// It is stated in pkg/metrics' own terms rather than in a third set of
+// types, unlike SandboxHealth: this is not a shape the API renders
+// directly, it is an *input* to the same metrics.Compute call the rest of
+// the report already comes from, and pkg/ui already imports pkg/metrics
+// to make that call.
+type CycleTimes interface {
+	CycleTimes() metrics.CycleHistory
 }
 
 // LiveTranscript is implemented by whatever can read back a still-running

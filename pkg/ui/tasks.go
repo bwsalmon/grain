@@ -27,12 +27,21 @@ import (
 // whose propose_task call filed this one, provenance only, empty for a
 // task nobody proposed.
 type Task struct {
-	ID          string      `json:"id"`
-	Title       string      `json:"title"`
-	Description string      `json:"description"`
-	Author      string      `json:"author"`
-	State       model.State `json:"state"`
-	Repo        string      `json:"repo,omitempty"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Author      string `json:"author"`
+	// AuthorKind is that author's model.PrincipalKind -- "human",
+	// "agent" or "automation", Comment.AuthorKind's own vocabulary for
+	// the same question about a comment. Author alone cannot answer it:
+	// an ID is a GitHub login for a person, a run ID for an agent and a
+	// deployment name for automation, and nothing in the string says
+	// which. The frontend needs the distinction to keep a task nobody
+	// filed by hand from steering a human's own defaults -- see
+	// state.js's lastBaseForRepo.
+	AuthorKind string      `json:"authorKind,omitempty"`
+	State      model.State `json:"state"`
+	Repo       string      `json:"repo,omitempty"`
 	// Reads is every repo this task's run may read but never push to --
 	// model.Task.Reads, rendered as owner/name strings the same way Repo
 	// renders its single Target.
@@ -50,18 +59,20 @@ type Task struct {
 	// frontend can label its chat distinctly from an ordinary interactive
 	// task's.
 	Configuration bool `json:"configuration,omitempty"`
-	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override the
+	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) override the
 	// deployment's default sandbox shape for this task's own dispatch
 	// alone -- model.Task's own fields of the same name. Zero (the
-	// default for both) means "use the deployment default", omitted from
-	// the JSON response the same way Base's own empty string is, since
-	// "no override" is the common case and worth not cluttering every
-	// task response with.
+	// default for all three) means "use the deployment default", omitted
+	// from the JSON response the same way Base's own empty string is,
+	// since "no override" is the common case and worth not cluttering
+	// every task response with.
 	SandboxCPUs     int `json:"sandboxCpus,omitempty"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb,omitempty"`
+	SandboxDiskGB   int `json:"sandboxDiskGb,omitempty"`
 	// AgentFramework is this task's own override of the deployment's
 	// agent framework -- model.Task's own field of the same name.
-	// Omitted, like the two above, for the common "no override" case, so
+	// Omitted, like the three above, for the common "no override" case, so
 	// a frontend reading it back gets the same empty-means-default it
 	// sent.
 	AgentFramework string   `json:"agentFramework,omitempty"`
@@ -98,9 +109,10 @@ type Task struct {
 	Blocked   bool     `json:"blocked"`
 	BlockedBy []string `json:"blockedBy,omitempty"`
 	// MergeQueueBlockedAt mirrors model.Observation's own field: non-nil
-	// once the merge queue has tried and failed to fix this task's pull
-	// request automatically, so it needs a human rather than another
-	// automatic attempt. Alongside PullRequest and AutoMerge, this is
+	// once the merge queue has stopped driving this task's pull request
+	// -- an automatic fix that did not take, or checks that never
+	// finished -- so it needs a human rather than another automatic
+	// attempt. Alongside PullRequest and AutoMerge, this is
 	// what lets the frontend tell a completed task that is merely
 	// waiting on a human's Submit click apart from one already on the
 	// merge queue, or one the queue has given up on -- the distinction
@@ -237,6 +249,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		Title:               t.Title,
 		Description:         t.Body,
 		Author:              t.Origin.Attribution.Actor.ID,
+		AuthorKind:          string(t.Origin.Attribution.Actor.Kind),
 		State:               state,
 		Base:                t.Base,
 		AutoMerge:           t.AutoMerge,
@@ -244,6 +257,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		Configuration:       t.Configuration,
 		SandboxCPUs:         t.SandboxCPUs,
 		SandboxMemoryMB:     t.SandboxMemoryMB,
+		SandboxDiskGB:       t.SandboxDiskGB,
 		AgentFramework:      t.AgentFramework,
 		Capabilities:        []string{},
 		Stacked:             t.Origin.Reason == model.ReasonFix,
@@ -352,12 +366,27 @@ type configResponse struct {
 	// this the moment a list first renders, before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// EnvironmentName mirrors model.Config.EnvironmentName -- what this
+	// deployment is called on screen -- read from the store the same way
+	// ShowClosedByDefault above is. It rides on this response rather than
+	// on GET /api/settings alone because the frontend shows it in the
+	// sidebar and the tab title from the first paint, on every view, and
+	// this is the one call App.jsx makes before rendering anything.
+	//
+	// omitempty: absent and empty both mean an unnamed deployment, and
+	// unlike ui.Settings there is nothing here to merge a cleared value
+	// over -- App.jsx replaces this response wholesale on every poll.
+	EnvironmentName string `json:"environmentName,omitempty"`
 	// ApprovedByDefault and AutoMergeByDefault mirror model.Config's own
 	// fields of the same name (bwsalmon/agents#612), the same
 	// read-straight-from-the-store-not-cached way ShowClosedByDefault
 	// does. NewTaskOverlay.jsx seeds its "Queue immediately" and
 	// "Auto-merge once checks pass" checkboxes from these the moment it
 	// first renders, before Settings has ever been opened this session.
+	//
+	// A deployment with no stored config yet reports model.DefaultConfig's
+	// own values -- both on -- rather than the zero value beside them, the
+	// same reading of "no row yet" AgentFramework below takes.
 	ApprovedByDefault  bool `json:"approvedByDefault"`
 	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 	// ReconcilerDown mirrors Config.ReconcilerDown's own doc comment:
@@ -376,6 +405,38 @@ type configResponse struct {
 	// model.AgentFrameworkAntigravity, the same defaulting ui.Settings
 	// does.
 	AgentFramework string `json:"agentFramework"`
+	// DefaultCapabilities mirrors model.Config's own field of the same
+	// name, read from the store the same way ShowClosedByDefault above
+	// is: the capability ids a task filed here starts out holding.
+	// NewTaskOverlay.jsx seeds its capability picker from this, so the
+	// boxes are already ticked when the form opens and whoever files the
+	// task can untick one they do not want -- the form is where that
+	// choice belongs, since the request it sends is the last word on
+	// which capabilities the task gets (CreateTaskRequest.Capabilities).
+	//
+	// Only ever the form's starting state, like ApprovedByDefault and
+	// AutoMergeByDefault above. What is filed is what the request names;
+	// this is only what it names when nobody has said otherwise.
+	DefaultCapabilities []string `json:"defaultCapabilities"`
+	// RepoDefaultCapabilities is the per-repo layer of the same thing
+	// (model.RepoConfig.DefaultCapabilities, grain/task-24): what each
+	// repo adds to DefaultCapabilities above, keyed by "owner/name". Only
+	// repos that add something appear -- Store.ListRepoConfigs keeps no
+	// row for a repo that says nothing -- so an absent key and an empty
+	// list mean the same thing here.
+	//
+	// Sent with the config rather than fetched per repo because the
+	// new-task form needs it the moment the repo picker changes, on a
+	// form that has not been submitted yet: this is one small map for a
+	// deployment's whole repo list, and re-seeding the capability picker
+	// from a round trip per keystroke would be a request for every
+	// character typed into a repo field. The repos pane, which edits one
+	// repo at a time and has somewhere to show a save failing, reads and
+	// writes GET/PUT /api/repos/{owner}/{name}/capabilities instead.
+	//
+	// Filtered to what this build offers, the same as DefaultCapabilities
+	// above and for the same reason.
+	RepoDefaultCapabilities map[string][]string `json:"repoDefaultCapabilities,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -392,11 +453,49 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		TargetRepos:   s.tasks.targetRepos(),
 	}
 	resp.AgentFramework = model.AgentFrameworkAntigravity
+	// Same reading of "no row yet" the AgentFramework line above takes:
+	// what a form should start as on a deployment that has never stored a
+	// config is the built-in default, not the zero value beside it.
+	def := model.DefaultConfig()
+	resp.ApprovedByDefault, resp.AutoMergeByDefault = def.ApprovedByDefault, def.AutoMergeByDefault
 	if cfg != nil {
 		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
+		resp.EnvironmentName = cfg.EnvironmentName
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
 		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
+		// Filtered to what this build actually offers, the same way
+		// (*Client).defaultCapabilities filters before granting -- the
+		// form should tick what a task would really be filed with, and
+		// a stored id no row answers to is neither.
+		for _, id := range cfg.DefaultCapabilities {
+			if _, ok := s.tasks.capabilityByID(id); ok {
+				resp.DefaultCapabilities = append(resp.DefaultCapabilities, id)
+			}
+		}
+	}
+	// Outside the cfg != nil branch above: a repo can carry defaults of
+	// its own on a deployment that has never saved a settings row, the
+	// same case GetSettings reads this in both of its branches for.
+	repoConfigs, err := s.tasks.Store.ListRepoConfigs(r.Context())
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	for _, rc := range repoConfigs {
+		var ids []string
+		for _, id := range rc.DefaultCapabilities {
+			if _, ok := s.tasks.capabilityByID(id); ok {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		if resp.RepoDefaultCapabilities == nil {
+			resp.RepoDefaultCapabilities = make(map[string][]string, len(repoConfigs))
+		}
+		resp.RepoDefaultCapabilities[rc.Repo.String()] = ids
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()

@@ -3,7 +3,7 @@
 // bwsalmon/agents#540's "the agent should also be able to read the
 // grain source code without permission to do debugging" -- with no
 // confirmation step of any kind, since nothing this package exposes can
-// change anything. ui.DefaultCapabilities' own "self-debug" row has
+// change anything. ui.OfferedCapabilities' own "self-debug" row has
 // named this since before there was anything behind it; this is that
 // provider.
 //
@@ -28,7 +28,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
-// CapabilityName is the grant name ui.DefaultCapabilities lists as
+// CapabilityName is the grant name ui.OfferedCapabilities lists as
 // "self-debug".
 const CapabilityName = "self-debug"
 

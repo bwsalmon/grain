@@ -17,7 +17,7 @@ test("loads directly into each sidebar sub-page from its URL", async ({ page }) 
   await expect(page.locator(".repo-list")).toBeVisible();
 
   await page.goto("/schedules");
-  await expect(page.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Schedules" })).toBeVisible();
 
   await page.goto("/templates");
   await expect(page.getByRole("heading", { name: "Task templates" })).toBeVisible();
@@ -59,7 +59,7 @@ test("updates the URL when navigating the sidebar, and restores the previous pag
   await page.getByRole("button", { name: /^Repos/ }).click();
   await expect(page).toHaveURL(/\/repos$/);
 
-  await page.getByRole("button", { name: /^Scheduled tasks/ }).click();
+  await page.getByRole("button", { name: /^Schedules/ }).click();
   await expect(page).toHaveURL(/\/schedules$/);
 
   await page.goBack();

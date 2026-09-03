@@ -554,6 +554,8 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		}
 	}
 
+	assertGuestHasEgress(t, byName["run_command"], name)
+
 	// A guest command's own exit status has to survive the guest's sshd
 	// -> `kontur exec` -> `docker exec` chain intact. 42 proves the
 	// status is carried rather than collapsed to a success/failure bit;
@@ -635,5 +637,69 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 	if status := string(bytes.TrimSpace(statusOut)); status != "running" {
 		t.Errorf("real VM container status = %q, want %q", status, "running")
+	}
+}
+
+// assertGuestHasEgress checks the one hop nothing else here covers: that
+// the guest can reach anything at all beyond its own segment.
+//
+// A flat-mode guest takes over the identity the container runtime
+// assigned the namespace, and the last piece of that identity is the
+// namespace's default route -- which the guest can only learn from the
+// "ip=" parameter netshim derives for it (its own DiscoverIdentity and
+// FlatGuestConfig, in third_party/kontur). Every other part of the
+// takeover fails loudly: a guest with the wrong address or MAC is a
+// guest `kontur exec` cannot reach, so it never becomes ready and this
+// suite fails on that. A missing gateway fails silently instead. The VM
+// boots, sshd answers over the control link, every tool call in this
+// test passes -- and the run inside it cannot reach the git proxy, a
+// package registry, or GitHub, because the guest's routing table stops
+// at its own subnet.
+//
+// That is exactly what happened: netshim looked for the default route by
+// testing "Dst == nil", which a route read back off the kernel never has
+// (the netlink library synthesizes 0.0.0.0/0 for the missing RTA_DST the
+// way iproute2 does), so every guest booted with an empty gateway field
+// and no egress. It survived because nothing asserted it.
+//
+// The gateway is compared against the one docker itself reports for the
+// VM's own network namespace, rather than a literal, so this says "the
+// guest took over the namespace's default route" rather than "the runner
+// happened to use 172.17.0.1".
+func assertGuestHasEgress(t *testing.T, runCommand *mcp.Tool, vmName string) {
+	t.Helper()
+
+	// Ranged over rather than dot-accessed: a container with no legacy
+	// single-network attachment has no .NetworkSettings.Gateway at all,
+	// and the template would error out ("map has no entry for key")
+	// rather than return empty -- the same trap kontur.DockerPodIP's own
+	// template already hit against a real daemon (bwsalmon/agents#466).
+	// The netns holder is the container docker addressed; the VM
+	// container merely joined its namespace.
+	gwOut, err := exec.Command("docker", "inspect", "-f",
+		`{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}`,
+		"kontur-vm-"+vmName+"-netns").CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect on the netns holder: %v\n%s", err, gwOut)
+	}
+	// Fatal rather than a skip: this suite creates its VMs on docker's
+	// default bridge, which always has one, and a skip here would take
+	// the rest of this test with it (t.SkipNow on the parent) while
+	// reading like coverage -- the exact trade the real-vm job's own
+	// "--- PASS" assertion exists to refuse.
+	gateway := string(bytes.TrimSpace(gwOut))
+	if gateway == "" {
+		t.Fatalf("docker reports no gateway for this VM's network namespace, so the guest has nowhere to route out through at all")
+	}
+
+	result := runCommand.Handler(context.Background(), map[string]any{
+		"command": "ip -4 route show default",
+	})
+	if result.IsError {
+		t.Fatalf("reading the guest's default route: %s", result.Text)
+	}
+	if !strings.Contains(result.Text, "default via "+gateway) {
+		t.Errorf("guest default route = %q, want it to carry %q -- without it the guest has no route off its own segment, and so no egress at all",
+			strings.TrimSpace(result.Text), "default via "+gateway)
 	}
 }

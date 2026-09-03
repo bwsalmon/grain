@@ -329,6 +329,12 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 // DeleteSuite removes a suite outright -- DeleteTaskSuite's own doc
 // comment gives the reasoning: a run already started from it keeps its
 // own snapshot and is untouched.
+//
+// A schedule that still runs this suite on a cadence is the one thing
+// that refuses the delete, DeleteTemplate's own guard for the same
+// situation one level down: deleting the suite anyway would leave that
+// schedule with nothing to fire, surfacing only as a failed firing
+// whenever it next came due.
 func (c *Client) DeleteSuite(ctx context.Context, id string) error {
 	existing, err := c.Store.GetTaskSuite(ctx, id)
 	if err != nil {
@@ -336,6 +342,14 @@ func (c *Client) DeleteSuite(ctx context.Context, id string) error {
 	}
 	if existing == nil {
 		return &suiteNotFoundError{ID: id}
+	}
+	inUse, err := c.Store.SchedulesUsingSuite(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(inUse) > 0 {
+		return validationErrorf(
+			"task suite is used by %d schedule(s); repoint or delete those first", len(inUse))
 	}
 	return c.Store.DeleteTaskSuite(ctx, id)
 }
@@ -359,9 +373,13 @@ type SuiteRunTask struct {
 // wire -- what a "see the status of outstanding task suite runs" view
 // needs (bwsalmon/agents#642).
 type SuiteRun struct {
-	ID              int64  `json:"id"`
-	SuiteID         string `json:"suiteId"`
-	SuiteName       string `json:"suiteName"`
+	ID        int64  `json:"id"`
+	SuiteID   string `json:"suiteId"`
+	SuiteName string `json:"suiteName"`
+	// ScheduleID is the schedule whose firing started this run, empty for
+	// one a human started by hand -- what lets a run say where it came
+	// from, the same way a task a schedule filed carries its firing tag.
+	ScheduleID      string `json:"scheduleId,omitempty"`
 	Repo            string `json:"repo"`
 	Base            string `json:"base"`
 	Mode            string `json:"mode"`
@@ -384,6 +402,7 @@ func suiteRunFrom(r model.TaskSuiteRun) SuiteRun {
 		ID:              r.ID,
 		SuiteID:         r.SuiteID,
 		SuiteName:       r.SuiteName,
+		ScheduleID:      r.ScheduleID,
 		Repo:            r.Target.String(),
 		Base:            r.Base,
 		Mode:            string(r.Mode),

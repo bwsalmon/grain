@@ -93,6 +93,25 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Building the base, booting it and committing the result puts
+      # three multi-gigabyte copies of the guest disk on this runner --
+      # the base image's, the VM container's, and the commit's own layer
+      # -- and a hosted runner does not have room for all of them beside
+      # its preinstalled toolchains. kontur's own KVM job ran out here
+      # first; this is the same step.
+      #
+      # Not $AGENT_TOOLSDIRECTORY (/opt/hostedtoolcache): that is where
+      # actions/setup-go just put the Go this job builds konturctl with.
+      # Deleting it reclaims a couple of GB and costs the toolchain --
+      # "go: command not found", exit 127, from a step that has nothing
+      # to do with disk.
+      - name: Reclaim runner disk
+        run: |
+          echo "before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost || true
+          echo "after:"; df -h /
+
       - name: Require KVM
         run: |
           if [ ! -e /dev/kvm ]; then

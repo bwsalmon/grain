@@ -51,11 +51,21 @@
 // file one; a task is a store row now, and creating one is a write to
 // the store (README, "Input is a model update, not a GitHub issue").
 //
-// Folder and repo *management* (docs/data-model.md's Folder tree, the
-// containment structure a capability's `offers` are attached to) is
-// deliberately absent: README.md already states folders are unbuilt,
-// so there is no store-backed concept yet for a command here to manage.
-// -repo on `create`/`update` only ever sets one task's own target.
+// Folder management (docs/data-model.md's Folder tree, the containment
+// structure a capability's `offers` are attached to) is deliberately
+// absent: README.md already states folders are unbuilt, so there is no
+// store-backed concept yet for a command here to manage. What a repo
+// *does* have stored -- its own default capability set, and whether the
+// deployment's allowlist names it -- is `grain repo` (repo.go, grain/
+// task-36), which is deployment configuration in the same sense `grain
+// settings` and `grain secrets` are, not the containment tree. -repo on
+// `create`/`update` still only ever sets one task's own target.
+//
+// Schedules, templates, suites and qualification plans remain UI-only,
+// and repo.go's own doc comment has why that is not the same question:
+// they are authored content rather than deployment configuration, and
+// docs/schedules.md records their absence here as an open gap waiting on
+// somebody who needs it.
 package main
 
 import (
@@ -70,6 +80,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -154,6 +165,8 @@ Commands:
   retry <id>                           clear a failed task's retry cap so it dispatches again
   config                               show the capabilities this deployment offers
   settings [flags]                     show, or change, the daemon's stored configuration (bwsalmon/agents#320)
+  repo <subcommand> [args]             list repos, and read or change one repo's own settings (see repo.go)
+  metrics [-window 7d]                 throughput and latency over a window (see metrics.go)
 `
 
 const defaultServerURL = "http://127.0.0.1:8420"
@@ -224,8 +237,12 @@ func runCLI(args []string) error {
 		return cmdRetry(ctx, c, out, cmdArgs)
 	case "config":
 		return cmdConfig(ctx, c, out, cmdArgs)
+	case "metrics":
+		return cmdMetrics(ctx, c, out, cmdArgs)
 	case "settings":
 		return cmdSettings(ctx, c, out, cmdArgs)
+	case "repo":
+		return cmdRepo(ctx, c, out, cmdArgs)
 	default:
 		fs.Usage()
 		return fmt.Errorf("unknown command %q", cmd)
@@ -338,8 +355,18 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	}
 	req := ui.CreateTaskRequest{
 		Title: *title, Description: *body, Repo: *repo, NoRepo: *noRepo, Base: *base,
-		AutoMerge: autoMerge, Capabilities: capabilities, Reads: reads, Approved: *approve,
+		AutoMerge: autoMerge, Reads: reads, Approved: *approve,
 		Interactive: *interactive, Attachments: attachments,
+	}
+	// Naming any -capability names the whole set (ui.CreateTaskRequest.
+	// Capabilities); naming none leaves the field unset, so the task is
+	// filed with whatever this deployment attaches by default -- the same
+	// answer the UI's own new-task form starts from. To file one with
+	// nothing at all on a deployment that defaults something, detach it
+	// afterwards (`grain capability <task> <cap> detach`).
+	if len(capabilities) > 0 {
+		ids := []string(capabilities)
+		req.Capabilities = &ids
 	}
 
 	task, err := c.CreateTask(ctx, req)
@@ -569,7 +596,8 @@ func cmdConfig(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain settings", flag.ContinueOnError)
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
-	maxConcurrent := fs.Int("max-concurrent", 0, "maximum number of tasks dispatched at once")
+	maxWorkers := fs.Int("max-workers", 0, "maximum number of ordinary tasks dispatched at once")
+	maxMergers := fs.Int("max-mergers", 0, "capacity on top of -max-workers only the merge queue's own fix tasks may use (0 lets them contend for it like anything else)")
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)")
@@ -578,7 +606,39 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (needs a daemon restart to take effect)")
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
-	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any")
+	// The deployment-wide sandbox VM shape (ui.Settings.SandboxCPUs/
+	// SandboxMemoryMB/SandboxDiskGB, bwsalmon/agents#534,
+	// grain/task-41). 0 is a real value for all three -- "leave the
+	// default in place" -- so an operator shrinking a deployment back to
+	// that default sets the flag to 0 rather than omitting it, the same
+	// way an empty -target-repos clears the allowlist. What that default
+	// is differs for disk: kontur names its own vCPU and memory
+	// defaults, but a VM's disk is however large the guest image behind
+	// it happens to be, which is a property of the image a deployment
+	// built rather than a constant this build could print.
+	sandboxCPUs := fs.Int("sandbox-cpus", 0,
+		"deployment-wide default vCPU count for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
+		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
+		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM; 0 leaves the VM's disk as large as the guest image behind it")
+	// No back quotes in this usage string, here or on any flag below:
+	// flag.PrintDefaults reads the first back-quoted word as the name of
+	// the flag's operand, so "`grain repo add`" would print as
+	// "-target-repos grain repo add".
+	targetRepos := fs.String("target-repos", "",
+		"comma-separated owner/name list a task's repo may name -- empty allows any; replaces the whole list, where \"grain repo add\"/\"remove\" change one entry")
+	defaultCapabilities := fs.String("default-capabilities", "",
+		"comma-separated capability IDs every new task is filed holding -- empty files each task with only what it asks for")
+	// Settable from a shell, not only from the Settings pane, because
+	// naming a deployment is something scripts/setup.sh-style
+	// provisioning wants to do as it brings one up -- "grain settings
+	// -environment-name=staging" beside the rest of the deployment's
+	// configuration, rather than a browser trip afterwards. Empty clears
+	// it back to an unnamed deployment, the same way an empty
+	// -target-repos clears the allowlist.
+	environmentName := fs.String("environment-name", "",
+		"what this deployment is called in the UI, e.g. staging -- empty leaves it unnamed and shows nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -589,9 +649,12 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "poll-interval":
 			v := *pollInterval
 			req.PollInterval = &v
-		case "max-concurrent":
-			v := *maxConcurrent
-			req.MaxConcurrent = &v
+		case "max-workers":
+			v := *maxWorkers
+			req.MaxWorkers = &v
+		case "max-mergers":
+			v := *maxMergers
+			req.MaxMergers = &v
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
@@ -613,9 +676,29 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "gcp-agent-service-account":
 			v := *gcpServiceAccountEmail
 			req.GCPServiceAccountEmail = &v
+		case "sandbox-cpus":
+			v := *sandboxCPUs
+			req.SandboxCPUs = &v
+		case "sandbox-memory-mb":
+			v := *sandboxMemoryMB
+			req.SandboxMemoryMB = &v
+		case "sandbox-disk-gb":
+			v := *sandboxDiskGB
+			req.SandboxDiskGB = &v
+		case "environment-name":
+			v := *environmentName
+			req.EnvironmentName = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
+		case "default-capabilities":
+			// splitRepoList is a comma-separated list with "" meaning
+			// none, which is exactly what this needs too -- an empty
+			// -default-capabilities is how an operator turns the default
+			// set back off, the same way an empty -target-repos clears
+			// the allowlist.
+			v := splitRepoList(*defaultCapabilities)
+			req.DefaultCapabilities = &v
 		}
 	})
 
@@ -726,8 +809,18 @@ func (p *printer) settings(s ui.Settings) {
 		fmt.Println("not configured yet -- nothing here until a daemon starts, or a value is set")
 		return
 	}
+	// First line, and printed even when unset: "which deployment am I
+	// talking to" is the question every line under it is an answer for,
+	// and a CLI pointed at the wrong -server has no sidebar badge to
+	// give it away.
+	if s.EnvironmentName != "" {
+		fmt.Printf("environment:    %s\n", s.EnvironmentName)
+	} else {
+		fmt.Println("environment:    unnamed")
+	}
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
-	fmt.Printf("max concurrent: %d\n", s.MaxConcurrent)
+	fmt.Printf("max workers:    %d\n", s.MaxWorkers)
+	fmt.Printf("max mergers:    %d\n", s.MaxMergers)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
 	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
 	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)
@@ -739,10 +832,31 @@ func (p *printer) settings(s ui.Settings) {
 	if s.GCPServiceAccountEmail != "" {
 		fmt.Printf("gcp agent service account: %s\n", s.GCPServiceAccountEmail)
 	}
+	// The sandbox shape prints what is actually in effect, not the bare
+	// stored value: 0 means "whatever bwsalmon/kontur defaults to", and
+	// printing that literal 0 would read as a deliberately empty VM.
+	// ui.Settings carries kontur's own defaults alongside the stored
+	// values (SandboxCPUsDefault/SandboxMemoryMBDefault) for exactly
+	// this.
+	//
+	// Disk has no such default to name, deliberately: there is no
+	// ui.Settings.SandboxDiskGBDefault because a VM's disk is however
+	// large the guest image behind it happens to be, a property of the
+	// image a deployment built rather than a constant this build could
+	// print. Passing 0 makes an unset disk print as "unset", which is
+	// all that can honestly be said about it here.
+	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault))
+	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault))
+	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, 0))
 	if len(s.TargetRepos) > 0 {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {
 		fmt.Println("target repos:   unrestricted")
+	}
+	if len(s.DefaultCapabilities) > 0 {
+		fmt.Printf("default capabilities: %s\n", strings.Join(s.DefaultCapabilities, ", "))
+	} else {
+		fmt.Println("default capabilities: none")
 	}
 	// Every other setting above is already in effect: the daemon
 	// re-reads this row each reconcile tick (cmd/grain/daemon.go's
@@ -754,6 +868,82 @@ func (p *printer) settings(s ui.Settings) {
 		fmt.Printf("\nsaved, but not running yet -- restart the daemon to apply: %s\n",
 			strings.Join(s.PendingRestart, ", "))
 	}
+	if len(s.Capabilities) > 0 {
+		fmt.Println("\ncapabilities:")
+		for _, cp := range s.Capabilities {
+			fmt.Println(capabilityStatusLine(cp))
+		}
+	}
+}
+
+// sandboxShapeValue renders one dimension of the deployment-wide sandbox
+// VM shape: the stored value when there is one, and otherwise the shape
+// actually in effect -- bwsalmon/kontur's own default -- named as the
+// default rather than printed as the bare 0 that is stored, so that
+// "unset" and "in effect" are both legible from one line. A build whose
+// ui.Settings reports no default to fall back on (0) says only that the
+// setting is unset, which is all it can honestly say.
+func sandboxShapeValue(stored, konturDefault int) string {
+	if stored != 0 {
+		return strconv.Itoa(stored)
+	}
+	if konturDefault != 0 {
+		return fmt.Sprintf("%d (kontur default, unset)", konturDefault)
+	}
+	return "unset"
+}
+
+// capabilityStatusLine renders one ui.CapabilityStatus as a line of
+// `grain settings` -- the CLI's half of the Settings pane's own
+// Capabilities tab, printed here because "why did a task never get the
+// thing it was granted" is a question asked from a shell on the host at
+// least as often as from a browser, and until now the only answer
+// available there was the two GCP fields above, which say nothing about
+// secrets and nothing at all about the two gaps below.
+//
+// Both gaps are named, not just the configuration one, because they are
+// fixed in different places and confusing them costs a debugging
+// session: "needs"/"missing secrets" is this deployment (set it in
+// Settings, or `grain secrets set`), while "NOT GRANTABLE" is grain's
+// own code and cannot be configured around -- see
+// ui.CapabilityStatus.Grantable.
+func capabilityStatusLine(cp ui.CapabilityStatus) string {
+	state := "not ready"
+	if cp.Ready {
+		state = "ready"
+	}
+	var notes []string
+	// First, ahead of the gaps below, for the same reason the pane puts
+	// "not grantable" first: a capability every task is filed holding is
+	// the one whose "not ready" is a deployment-wide problem rather than
+	// a per-task one.
+	if cp.Default {
+		notes = append(notes, "default -- every new task is filed with this")
+	}
+	// The per-repo layer, named as the repos it applies to rather than
+	// as a second bare "default": with two layers, a line that only said
+	// "default" would describe a deployment-wide default that only some
+	// tasks actually get (ui.CapabilityStatus.DefaultRepos). Listed even
+	// alongside the deployment-wide note above, since a repo can restate
+	// one the deployment already gives and dropping it deployment-wide
+	// leaves the repo's own entry standing.
+	if len(cp.DefaultRepos) > 0 {
+		notes = append(notes, "default in: "+strings.Join(cp.DefaultRepos, ", "))
+	}
+	if !cp.Grantable {
+		notes = append(notes, "NOT GRANTABLE -- grain registers a provider for this, but no task can ask for it")
+	}
+	if len(cp.MissingConfig) > 0 {
+		notes = append(notes, "needs: "+strings.Join(cp.MissingConfig, ", "))
+	}
+	if len(cp.MissingSecrets) > 0 {
+		notes = append(notes, "missing secrets: "+strings.Join(cp.MissingSecrets, ", "))
+	}
+	line := fmt.Sprintf("  %-20s %-9s", cp.ID, state)
+	if len(notes) > 0 {
+		line += " " + strings.Join(notes, "; ")
+	}
+	return strings.TrimRight(line, " ")
 }
 
 func (p *printer) encode(v any) {

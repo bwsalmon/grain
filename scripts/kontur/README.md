@@ -203,6 +203,14 @@ authorizing **root** while this guest's sandbox account is `debian`.
 `-kontur-exec-key` and the key staging `scripts/setup.sh` did for it are
 both gone.
 
+What it does read is two variables `build-guest.sh` reads out of the tree
+and splices into the script's own text, immediately after the shebang:
+`GO_VERSION` (from `go.mod`) and `GRAIN_DEP_MANIFESTS` (the four
+dependency manifests, gzipped and base64'd). See "The Go and Node
+toolchains" below. konturctl runs the setup script with only the guest's
+own environment, so a variable that is not in the script text does not
+reach it.
+
 See "Verified live (bwsalmon/agents#577)" above -- the build has now been
 run and the result booted, for the Debian path.
 
@@ -349,6 +357,71 @@ VM's SSH-exposed sandbox tools from the controller/orchestrator side, not
 on the guest, so there is nothing here worth a credential leak protecting
 in the first place.
 
+### The Go and Node toolchains, and why their caches are the point
+
+A sandbox is where the merge queue's own fix tasks run
+(`orchestrator.fileFixTask`). Every one of them used to end its commit
+message with some version of the same sentence -- *"not built or run:
+this sandbox has no Go toolchain and no network to fetch one"* -- and a
+fix agent that cannot run `go test ./...` is guessing. A merge fix that
+is a guess costs another queue cycle when it turns out not to be the fix,
+which is the whole thing the queue exists to avoid. So the image carries:
+
+- **Go**, at the version `go.mod` asks for. `build-guest.sh` reads it out
+  of `go.mod` with the same `sed` the `Makefile` uses for
+  `Dockerfile.build`, so the image and the module cannot drift apart
+  while only one of them is ever edited, and `GOTOOLCHAIN=local` (also
+  `Dockerfile.build`'s pin, for the same reason) turns a stale image into
+  an error naming both versions rather than a network fetch that cannot
+  succeed here.
+- **Node**, at the major `.github/workflows/tests.yml` pins for the `go`
+  job. Debian's own `nodejs` is 18, and `vitest` -- what `npm test` runs
+  -- needs 20.19 or newer. `tests/deploy` asserts the two files keep
+  naming the same major.
+- **A warm module cache and a warm npm cache**, holding what `go.sum` and
+  `ui/package-lock.json` resolve to at build time. `build-guest.sh`
+  carries the four manifests in (gzipped and base64'd -- see its own
+  comment on why) and `guest-setup.sh` warms both caches into
+  `/home/debian`'s own defaults, so nothing has to point either tool at
+  them and both stay writable by the account that uses them.
+
+These caches were written as the load-bearing half rather than an
+optimization, on the premise that a dispatched sandbox reached nothing
+but the git proxy and a cold cache therefore could not build anything at
+all. That premise was a bug: flat mode derived the guest's `ip=`
+parameter with an empty gateway field, so every sandbox booted without a
+default route and lost the open egress `docs/design.md` says it has. The
+fix is in the runtime image, not this one
+(`third_party/kontur/VENDORED.md`, "Local patches") -- nothing in this
+directory changed. With it, a cold cache is survivable, and the caches
+earn their place the ordinary way: not re-fetching the same module graph
+on every dispatch, and still working if a deployment narrows egress again
+(`egress_policy(allowlist)`).
+
+**Playwright's browsers are deliberately not here.** `npx playwright
+install` is a ~300MB download per image, and the suite it feeds
+(`make test-e2e`) is a separate CI job from the `go` job that merge fixes
+keep tripping over. But `@playwright/test` is in `ui/`'s
+devDependencies, and its install script fetches those browsers -- so a
+plain `npm ci` in `ui/`, which is what `make frontend` and therefore
+`make test` runs, would spend that download on a suite this guest does
+not run (and, before egress worked at all, would fail outright on it).
+The image wraps `npm` to default `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` on
+for exactly that, with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= npm ...` as the
+way back to fetching them.
+
+The cost is disk, and it is charged differently now that this guest is
+provisioned by booting one rather than during an image build. Everything
+`guest-setup.sh` installs has to fit in space `disk.img` was given when
+kontur packed it -- rootfs plus 20% plus `GUEST_DISK_EXTRA_MB`, which
+`build-guest.sh` asks for on the base build -- so the toolchains and
+their caches are roughly a gigabyte of that budget rather than a
+gigabyte the filesystem simply grew to hold. It is paid on every pull of
+the published image. Weighed against a fix agent that can only read a
+diff and reason about what CI would have done with it, that is still the
+cheaper side.
+
+## Running a custom setup script
 ## Customizing this guest
 
 There is no environment variable for it any more, and that is a
@@ -469,8 +542,25 @@ not the one this guest is built to match -- then builds the base out of
 that same tree and runs `konturctl guest build` with `guest-setup.sh` as
 the setup script. It needs docker, `/dev/kvm` and Go.
 
+The disk that comes out is the rootfs plus 20% plus whatever
+`GUEST_DISK_EXTRA_MB` asked for, and that is also the whole of a
+sandbox's disk unless something says otherwise, since `konturctl` gives
+each VM an overlay at exactly its backing image's size. `sandbox-disk-gb`
+(Settings -> Sandbox, or a per-task override) is what says otherwise,
+reaching `konturctl vm create` as `-disk-size-gb`; the guest's own half
+of it is the `grain-growfs` unit `guest-setup.sh` installs, which grows
+the root filesystem onto the larger device on each boot. Nothing about
+the image build changes for it -- a bigger disk is a create-time
+argument, not a different image.
+
+No SSH key is involved anywhere in this. The image carries none
+(bwsalmon/kontur#35 -- kontur generates one per VM boot instead), so
+there is nothing here for `push-secrets.sh` to carry and no keypair for a
+deployment and its guest image to keep in sync.
+
 The base is built too, out of `third_party/kontur`, with the two args
-kontur's CI publishes its `debian12` variant with. It was pulled at
+kontur's CI publishes its `debian12` variant with plus the disk headroom
+this guest installs into (`GUEST_DISK_EXTRA_MB`, above). It was pulled at
 first, by the immutable per-commit tag kontur's CI writes -- which does
 not work from grain's CI at all, for a reason worth recording rather than
 rediscovering: a GitHub Actions `GITHUB_TOKEN` is scoped to its own

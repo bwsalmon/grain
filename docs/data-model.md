@@ -2258,6 +2258,7 @@ class PullRequestRef:
 class PrHealth(Enum):
     UNKNOWN = "unknown"        # GitHub hasn't computed mergeability yet
     CLEAN = "clean"
+    PENDING = "pending"        # checks are still running
     CONFLICTED = "conflicted"
     FAILING = "failing"
     MERGED = "merged"
@@ -2279,6 +2280,84 @@ folded in as an enum instead of a tri-state of booleans. `UNKNOWN` keeps
 the distinction that matters and that `_close_finished_prs` already
 depends on: GitHub computes mergeability asynchronously, so `None` right
 after a push means *check again next cycle*, never *conflicted*.
+
+`PENDING` is the same idea one step further out, for CI rather than for
+mergeability: a check run that has not reached a conclusion is not a
+check that passed, so a pull request with anything still running is
+neither `CLEAN` (nothing merges on it — that is how a queue lands a
+change before its tests have said a word about it) nor yet `FAILING`. It
+differs from `UNKNOWN` in who is missing the answer: `PENDING` is *CI has
+not finished*, and resolves by itself; `UNKNOWN` is *grain could not find
+out*, and may never resolve without an operator granting a permission.
+Neither is acted on, which is what makes waiting the default.
+
+Waiting is the default, not the end of it. "Resolves by itself" is true
+of CI that finishes and false of the CI that does not — a workflow
+waiting on an approval nobody gives, a self-hosted runner that never
+picks the job up, a third-party check whose provider posted `queued` and
+went away — and a queue acts only on its head, so an unbounded wait is a
+whole repo's queue stopped on one pull request with nothing said to
+anyone. `PENDING` therefore has a deadline (`defaultCheckStallDeadline`,
+two hours, measured per head commit over one unbroken run of `PENDING`
+reads, so a re-run hours later is timed from the re-run). Past it the
+merge queue comments on the task naming the checks it was waiting for,
+sets `Observation.MergeQueueBlockedAt`, and moves on. No fix task is
+filed first, unlike a `CONFLICTED` or `FAILING` head: nothing has
+reported a failure, and the usual causes sit outside the pull request
+entirely, so there may be nothing in it for an agent to repair. The
+pull request still merges the moment its checks do finish clean — what
+giving up costs is the queue position and the automatic fix, not the
+merge. `UNKNOWN` gets no such deadline: what produces it cycle after
+cycle is a credential that cannot read checks, which is one fact about
+the deployment rather than something wrong with each of the pull
+requests it would otherwise comment on one at a time.
+
+A `CONFLICTED` or `FAILING` head waits on the same clock for a different
+thing, and needs its own bound for the same reason. Once the queue has
+filed a fix task for it, it does nothing further until that task closes —
+and its own health stays `CONFLICTED`/`FAILING` throughout, so the
+`PENDING` deadline never applies to it, while the fix task's own pull
+request is not a queue member and is never timed either. A fix that never
+finishes (its checks wedged, an agent run that never comes back) would
+therefore hold the head, and everything behind it, forever. So the wait
+has a deadline too (`defaultFixTaskDeadline`, six hours, measured from
+when the fix task was filed): past it the queue says so on the task,
+naming the fix it was waiting for, and moves on the same way. Six hours
+rather than two, because a fix has to be dispatched, run an agent
+(capped at two hours itself) and get its own CI through before it can
+land, and giving up early throws away a repair that might have worked —
+the queue never files a second one.
+
+`PENDING` also covers the state before there is a check to read. GitHub
+creates a workflow run's check runs asynchronously, *after* it has
+processed the push, while the pull request exists from the moment the
+branch lands — so a sync in that gap reads no checks at all, which is
+also exactly what a repo with no CI configured reads as, forever. The
+Checks API cannot tell the two apart and neither can anything built on
+it. `healthFrom` gives the empty list a settling window (its own
+`defaultCheckRegistrationWindow`, two minutes, measured per head commit
+from grain's own clock rather than from a timestamp GitHub stamped) and
+reads it `PENDING` until that elapses. The cost lands entirely on
+deployments with genuinely no CI, which wait it out once per head
+commit; the alternative is that every repo that does have CI can merge a
+change in the seconds before its first check run appears.
+
+**One commit, from the read to the merge.** All of the above is reasoning
+about a *commit*, while a pull request is a moving branch, and the two
+part company whenever a push lands mid-cycle — a human's own "push a fix
+by hand", a fix task merging into the branch it repairs, a redispatched
+task pushing again. So the cycle names the commit at every step rather
+than letting any of them mean "whatever the branch points at now": the
+head sha comes off the pull-request read, the check runs are read for
+that sha (a branch-scoped Checks read would answer for a commit the cycle
+never saw), the settling window above is keyed on it, and the merge
+carries it in GitHub's own `sha` parameter, which refuses the merge with
+`409` if the branch has moved since. A refusal costs one cycle: the task
+keeps its queue position, and the commit that has landed is judged next
+cycle on its own CI, with its own window started afresh. Without the
+pinning, a push arriving in the gap between the verdict and the merge
+lands untested code with grain having had no way to know — the exact
+outcome the `PENDING` rules above exist to prevent.
 
 **The wire types stay separate.** `PullRequestDetail`, `Issue`, and
 `Comment` in `github.py` are projections of GitHub's records, shaped by

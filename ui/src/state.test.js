@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityName, completionPhase, knownRepos, lastBaseForRepo, repoRows } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -51,6 +51,32 @@ describe("capabilityName", () => {
   });
 });
 
+describe("capabilityRows", () => {
+  const offered = [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }];
+
+  it("is the offered listing untouched when everything selected has a row", () => {
+    expect(capabilityRows(offered, ["gcp-key"])).toEqual(offered);
+  });
+
+  it("appends a row for a selected id with none, so it can be unticked", () => {
+    expect(capabilityRows(offered, ["gcp-key", "scratch-repo"])).toEqual([
+      ...offered,
+      { id: "scratch-repo", name: "scratch-repo", description: RETIRED_CAPABILITY_HINT, retired: true },
+    ]);
+  });
+
+  it("appends nothing for an id that is offered but not selected", () => {
+    expect(capabilityRows(offered, [])).toEqual(offered);
+  });
+
+  it("tolerates a missing listing or selection", () => {
+    expect(capabilityRows(undefined, undefined)).toEqual([]);
+    expect(capabilityRows(null, ["scratch-repo"])).toEqual([
+      { id: "scratch-repo", name: "scratch-repo", description: RETIRED_CAPABILITY_HINT, retired: true },
+    ]);
+  });
+});
+
 describe("knownRepos", () => {
   it("unions targetRepos and repos already seen on tasks, sorted and deduped", () => {
     const config = { targetRepos: ["acme/widgets", "acme/other"] };
@@ -93,6 +119,30 @@ describe("lastBaseForRepo", () => {
     expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/1");
   });
 
+  // A schedule, a suite pass, the merge queue and an agent's own
+  // propose_task all pick a base for their own reasons -- none of it is
+  // the human's choice of where the next hand-filed task starts.
+  it("skips a task an agent or automation filed and falls back to an older one", () => {
+    const tasks = [
+      { repo: "acme/widgets", base: "release/1", createdAt: "2026-08-01T00:00:00Z", authorKind: "human" },
+      { repo: "acme/widgets", base: "suite/run-7", createdAt: "2026-08-02T00:00:00Z", authorKind: "automation" },
+      { repo: "acme/widgets", base: "grain/task-3", createdAt: "2026-08-03T00:00:00Z", authorKind: "agent" },
+    ];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/1");
+  });
+
+  it("returns empty when every task on record for the repo was filed by an agent or automation", () => {
+    const tasks = [
+      { repo: "acme/widgets", base: "suite/run-7", createdAt: "2026-08-02T00:00:00Z", authorKind: "automation" },
+    ];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("");
+  });
+
+  it("still suggests a task carrying no authorKind at all", () => {
+    const tasks = [{ repo: "acme/widgets", base: "release/1", createdAt: "2026-08-01T00:00:00Z" }];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/1");
+  });
+
   it("returns empty when no repo is given", () => {
     expect(lastBaseForRepo([{ repo: "acme/widgets", base: "release/1" }], "")).toBe("");
   });
@@ -106,13 +156,15 @@ describe("repoRows", () => {
   it("gives a targetRepos entry with no tasks a zero-count, configured row", () => {
     const config = { targetRepos: ["acme/widgets"] };
     const rows = repoRows(config, []);
-    expect(rows).toEqual([{ repo: "acme/widgets", total: 0, counts: {}, blocked: 0, configured: true }]);
+    expect(rows).toEqual([{ repo: "acme/widgets", total: 0, counts: {}, blocked: 0, configured: true, defaults: false }]);
   });
 
   it("marks a repo only known through its tasks as unconfigured", () => {
     const tasks = [{ repo: "acme/other", state: "queued", blocked: false }];
     const rows = repoRows({ targetRepos: [] }, tasks);
-    expect(rows).toEqual([{ repo: "acme/other", total: 1, counts: { queued: 1 }, blocked: 0, configured: false }]);
+    expect(rows).toEqual([
+      { repo: "acme/other", total: 1, counts: { queued: 1 }, blocked: 0, configured: false, defaults: false },
+    ]);
   });
 
   it("unions targetRepos and task repos, sorted, without duplicating an entry that is both", () => {
@@ -126,10 +178,83 @@ describe("repoRows", () => {
     expect(rows.map((r) => r.repo)).toEqual(["acme/newer", "acme/other", "acme/widgets"]);
 
     const widgets = rows.find((r) => r.repo === "acme/widgets");
-    expect(widgets).toEqual({ repo: "acme/widgets", total: 1, counts: { queued: 1 }, blocked: 1, configured: true });
+    expect(widgets).toEqual({
+      repo: "acme/widgets", total: 1, counts: { queued: 1 }, blocked: 1, configured: true, defaults: false,
+    });
+  });
+
+  // A repo can hold defaults of its own without being allow-listed and
+  // without any task targeting it (ui.(*Client).SetRepoDefaultCapabilities
+  // deliberately doesn't require either), and this page is the only place
+  // that set can be edited -- so it has to have a row here.
+  it("gives a repo that only carries defaults of its own a row of its own", () => {
+    const config = { targetRepos: [], repoDefaultCapabilities: { "acme/orphan": ["gcp-key"] } };
+    const rows = repoRows(config, []);
+    expect(rows).toEqual([
+      { repo: "acme/orphan", total: 0, counts: {}, blocked: 0, configured: false, defaults: true },
+    ]);
+  });
+
+  it("does not duplicate a repo that carries defaults and is also allow-listed or targeted", () => {
+    const config = {
+      targetRepos: ["acme/widgets"],
+      repoDefaultCapabilities: { "acme/widgets": ["gcp-key"], "acme/other": ["gcp-key"] },
+    };
+    const tasks = [{ repo: "acme/other", state: "queued", blocked: false }];
+    const rows = repoRows(config, tasks);
+    expect(rows.map((r) => r.repo)).toEqual(["acme/other", "acme/widgets"]);
+    expect(rows.find((r) => r.repo === "acme/widgets")).toEqual({
+      repo: "acme/widgets", total: 0, counts: {}, blocked: 0, configured: true, defaults: true,
+    });
+    expect(rows.find((r) => r.repo === "acme/other")).toEqual({
+      repo: "acme/other", total: 1, counts: { queued: 1 }, blocked: 0, configured: false, defaults: true,
+    });
+  });
+
+  // An absent key and an empty list mean the same thing on /api/config --
+  // this repo adds nothing -- so an empty one is not a repo to list.
+  it("gives no row to a repoDefaultCapabilities key with an empty set", () => {
+    expect(repoRows({ repoDefaultCapabilities: { "acme/orphan": [] } }, [])).toEqual([]);
   });
 
   it("returns an empty list when nothing is configured or targeted yet", () => {
     expect(repoRows(null, [])).toEqual([]);
+  });
+});
+
+describe("unionCapabilities", () => {
+  it("appends the second layer to the first, deduped and in order", () => {
+    expect(unionCapabilities(["gemini-key"], ["gcp-key", "gemini-key"])).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  it("treats a missing layer as nothing to add", () => {
+    expect(unionCapabilities(undefined, undefined)).toEqual([]);
+    expect(unionCapabilities(["gcp-key"], null)).toEqual(["gcp-key"]);
+  });
+});
+
+describe("defaultCapabilitiesFor", () => {
+  const config = {
+    defaultCapabilities: ["gemini-key"],
+    repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+  };
+
+  it("adds the repo's own defaults to the deployment's", () => {
+    expect(defaultCapabilitiesFor(config, "acme/widgets")).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  it("gives a repo with none of its own the deployment's alone", () => {
+    expect(defaultCapabilitiesFor(config, "acme/gadgets")).toEqual(["gemini-key"]);
+  });
+
+  // No repo picked, or a deliberately repo-less task: there is no second
+  // layer to key on, the same answer CreateTask gives a task whose
+  // Target is nil.
+  it("gives a task with no repo the deployment's alone", () => {
+    expect(defaultCapabilitiesFor(config, "")).toEqual(["gemini-key"]);
+  });
+
+  it("survives a config that has never been loaded", () => {
+    expect(defaultCapabilitiesFor(null, "acme/widgets")).toEqual([]);
   });
 });

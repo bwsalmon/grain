@@ -10,7 +10,8 @@ vi.mock("../api.js", () => ({ default: vi.fn() }));
 const settings = {
   configured: true,
   pollInterval: "30s",
-  maxConcurrent: 2,
+  maxWorkers: 2,
+  maxMergers: 1,
   geminiModel: "gemini-2.5-pro",
   claudeModel: "claude-sonnet-5",
   maxAgentTurns: 40,
@@ -33,7 +34,8 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("2")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Max worker agents/)).toHaveValue(2);
+    expect(screen.getByLabelText(/Max merge agents/)).toHaveValue(1);
   });
 
   it("populates the Agents tab with them", async () => {
@@ -208,6 +210,47 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
   });
 
+  // grain/task-41: the same treatment for the third dimension of that
+  // shape. It has no placeholder default beside it, unlike vCPUs and
+  // memory -- an unset disk is however large the guest image behind it
+  // is, which is not a number the API can name (ui.Settings' own comment
+  // on why there is no sandboxDiskGbDefault).
+  it("sets sandboxDiskGb, with no placeholder default beside it", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    const diskInput = screen.getByLabelText(/Sandbox disk/);
+    expect(diskInput).toHaveValue(null);
+    expect(diskInput).not.toHaveAttribute("placeholder");
+    await user.type(diskInput, "40");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxDiskGb: 40 }),
+    });
+  });
+
+  it("sends an explicit 0 when sandboxDiskGb is cleared back to blank", async () => {
+    api.mockResolvedValueOnce({ ...settings, sandboxDiskGb: 40 }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    expect(screen.getByLabelText(/Sandbox disk/)).toHaveValue(40);
+    await user.clear(screen.getByLabelText(/Sandbox disk/));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxDiskGb: 0 }),
+    });
+  });
+
   // bwsalmon/agents#610: an unset override shows kontur's own default as a
   // placeholder -- fainter than a real value -- rather than a literal 0 that
   // reads as a deliberately zeroed-out sandbox.
@@ -244,6 +287,40 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", {
       method: "PUT",
       body: JSON.stringify({ sandboxCpus: 0, sandboxMemoryMb: 0 }),
+    });
+  });
+
+  // grain/task-69: naming the deployment, so the sidebar and the browser
+  // tab can say which one this is.
+  it("sends environmentName when the deployment is given a name", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.type(screen.getByLabelText(/Environment name/), "staging");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ environmentName: "staging" }),
+    });
+  });
+
+  // Clearing the box is a real change, not "leave it alone": unnaming a
+  // deployment has to be sendable, so "" goes in the payload.
+  it("sends an empty environmentName when a configured name is cleared", async () => {
+    api.mockResolvedValueOnce({ ...settings, environmentName: "staging" }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.clear(screen.getByLabelText(/Environment name/));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ environmentName: "" }),
     });
   });
 
@@ -360,6 +437,84 @@ describe("SettingsOverlay", () => {
 
   it("only includes changed GCP fields in the Capabilities tab's own payload", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.type(screen.getByLabelText(/GCP project/), "acme-proj");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ gcpProject: "acme-proj" }),
+    });
+  });
+
+  // grain/task-14: which capabilities every new task is filed
+  // holding is a deployment setting, chosen on the same tab that reports
+  // whether each one is ready. Only grantable ones are offered -- a
+  // default no task could be granted by hand would fail at every filing.
+  it("picks default capabilities on the Capabilities tab and sends the whole set", async () => {
+    const capabilities = [
+      { id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true },
+      { id: "gemini-key", name: "Gemini key", description: "Mint a Gemini key", ready: true, grantable: true },
+      { id: "retired", name: "Retired", description: "No picker row", ready: true, grantable: false },
+    ];
+    api.mockResolvedValueOnce({ ...settings, capabilities }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.click(screen.getByLabelText("Default capabilities"));
+    expect(screen.queryByRole("option", { name: "Retired" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: "GCP key" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+  });
+
+  // grain/task-43: settings.defaultCapabilities is reported as stored,
+  // retired ids included, so an id whose row this build has dropped
+  // arrives selected with nothing in the listing to untick it. Without a
+  // row of its own it sticks in the selection and every later save of
+  // this tab sends it back, which UpdateSettings refuses as "unknown
+  // capability" -- a pane nobody can save. The extra row is what clears
+  // it.
+  it("offers a row for a stored default capability this build no longer lists", async () => {
+    const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
+    api
+      .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key", "scratch-repo"] })
+      .mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.click(screen.getByLabelText("Default capabilities"));
+    const row = await screen.findByRole("option", { name: /scratch-repo/ });
+    expect(row).toHaveTextContent("No longer offered -- untick to remove it");
+
+    await user.click(row);
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+  });
+
+  it("leaves default capabilities out of the payload when they are not touched", async () => {
+    const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
+    api
+      .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key"] })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");

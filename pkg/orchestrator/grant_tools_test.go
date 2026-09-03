@@ -81,7 +81,7 @@ func TestRunCycleAddsGrantToolsForAnInteractiveTasksGrant(t *testing.T) {
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     orchestrator.StaticFramework(framework),
 		Config:        grantToolsConfig(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -108,7 +108,7 @@ func TestRunCycleDoesNotAddGrantToolsForANonInteractiveTask(t *testing.T) {
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     orchestrator.StaticFramework(framework),
 		Config:        grantToolsConfig(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
@@ -136,7 +136,7 @@ func TestRunCycleAddsNoGrantToolsForAGrantWithNoEntry(t *testing.T) {
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     orchestrator.StaticFramework(framework),
 		Config:        grantToolsConfig(),
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 	}
 
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {

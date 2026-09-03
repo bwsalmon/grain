@@ -88,7 +88,7 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 	if strings.TrimSpace(req.Title) == "" {
 		return Template{}, validationErrorf("title is required")
 	}
-	grants, err := c.grantsFor(req.Capabilities)
+	grants, err := c.grantsFor(req.Capabilities, model.GrantByLabel)
 	if err != nil {
 		return Template{}, err
 	}
@@ -120,7 +120,7 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 // UpdateTemplateRequest is a template's editable fields -- nil means
 // "leave this one alone", UpdateScheduleRequest's own convention.
 // Changing a template that a schedule already points at takes effect the
-// next time that schedule fires (orchestrator.fireScheduledTask resolves
+// next time that schedule fires (orchestrator.fireTaskSchedule resolves
 // TemplateID fresh each time), with no separate step to "push" the change
 // out to every schedule using it.
 type UpdateTemplateRequest struct {
@@ -143,7 +143,7 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 	var grants []model.Grant
 	if req.Capabilities != nil {
 		var err error
-		grants, err = c.grantsFor(*req.Capabilities)
+		grants, err = c.grantsFor(*req.Capabilities, model.GrantByLabel)
 		if err != nil {
 			return Template{}, err
 		}
@@ -196,19 +196,19 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 	return templateFrom(*updated), nil
 }
 
-// DeleteTemplate removes a template outright -- DeleteScheduledTask's own
-// "no history worth keeping" reasoning applies again here, except a
-// template additionally refuses to delete out from under a schedule that
-// still fires from it, a qualification plan (bwsalmon/agents#518) that
-// still schedules from it, or a task suite (bwsalmon/agents#642) that
-// still runs it: unlike editing a template (which every schedule, plan
-// or suite pointing at it is meant to pick up), deleting one out from
-// under any of them would silently strand its next firing -- a
-// schedule's with no content to file, a plan's with no template for
-// CreateQualificationRun to resolve, a suite's with no template for
+// DeleteTemplate removes a template outright -- DeleteSchedule's own "no
+// history worth keeping" reasoning applies again here, except a template
+// additionally refuses to delete out from under a schedule that still
+// fires from it, a qualification plan (bwsalmon/agents#518) that still
+// schedules from it, or a task suite (bwsalmon/agents#642) that still
+// runs it: unlike editing a template (which every schedule, plan or suite
+// pointing at it is meant to pick up), deleting one out from under any of
+// them would silently strand its next firing -- a schedule's with no
+// content to file, a plan's with no template for CreateQualificationRun
+// to resolve, a suite's with no template for
 // CreateTaskSuiteRun/FireNextPass to resolve -- worse than the plain,
-// retried error each would otherwise have to surface days or weeks
-// later. A human wanting to delete it anyway repoints or deletes those
+// retried error each would otherwise have to surface days or weeks later.
+// A human wanting to delete it anyway repoints or deletes those
 // schedules, plans and suites first.
 func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 	existing, err := c.Store.GetTaskTemplate(ctx, id)

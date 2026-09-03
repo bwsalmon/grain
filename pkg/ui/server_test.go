@@ -274,7 +274,7 @@ func TestRetryRouteClearsAFailedTasksStreak(t *testing.T) {
 		started := baseTime.Add(time.Duration(i) * time.Hour)
 		if err := client.Store.StartRun(context.Background(), model.Run{
 			ID: runID, TaskID: id, Sandbox: "s1", Attempt: i + 1, StartedAt: started,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := client.Store.FinishRun(context.Background(), runID, started.Add(time.Minute), "failed", "boom"); err != nil {
@@ -443,6 +443,77 @@ func TestConfigEndpointReportsShowClosedByDefault(t *testing.T) {
 	}
 }
 
+// TestConfigEndpointReportsEnvironmentName is grain/task-69's label
+// reaching the frontend on the one call it makes before rendering
+// anything: unconfigured reports nothing (an unnamed deployment, and the
+// sidebar draws no badge), and naming the deployment through Settings is
+// reflected immediately, the same store round trip
+// TestConfigEndpointReportsShowClosedByDefault covers above.
+func TestConfigEndpointReportsEnvironmentName(t *testing.T) {
+	srv, client := testServer(t)
+
+	type environment struct {
+		EnvironmentName string `json:"environmentName"`
+	}
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	cfg := decode[environment](t, rec)
+	if cfg.EnvironmentName != "" {
+		t.Fatalf("environmentName = %q with nothing configured, want empty", cfg.EnvironmentName)
+	}
+
+	if _, err := client.UpdateSettings(context.Background(), firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	name := "staging"
+	if _, err := client.UpdateSettings(context.Background(), ui.UpdateSettingsRequest{EnvironmentName: &name}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/config", "")
+	cfg = decode[environment](t, rec)
+	if cfg.EnvironmentName != "staging" {
+		t.Fatalf("environmentName = %q after UpdateSettings, want %q", cfg.EnvironmentName, "staging")
+	}
+}
+
+// TestConfigEndpointReportsTaskDefaults is the same round trip for
+// bwsalmon/agents#612's pair, which differs from showClosedByDefault
+// above in what "nothing configured" reports: both default on
+// (model.DefaultConfig), so a deployment with no stored row yet has to
+// say so rather than report the zero value of the field, and an operator
+// turning one off through Settings is reflected immediately.
+func TestConfigEndpointReportsTaskDefaults(t *testing.T) {
+	srv, client := testServer(t)
+
+	type taskDefaults struct {
+		ApprovedByDefault  bool `json:"approvedByDefault"`
+		AutoMergeByDefault bool `json:"autoMergeByDefault"`
+	}
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	cfg := decode[taskDefaults](t, rec)
+	if !cfg.ApprovedByDefault || !cfg.AutoMergeByDefault {
+		t.Fatalf("approvedByDefault/autoMergeByDefault = %v/%v with nothing configured, want true/true",
+			cfg.ApprovedByDefault, cfg.AutoMergeByDefault)
+	}
+
+	if _, err := client.UpdateSettings(context.Background(), firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	if _, err := client.UpdateSettings(context.Background(), ui.UpdateSettingsRequest{ApprovedByDefault: &off}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/config", "")
+	cfg = decode[taskDefaults](t, rec)
+	if cfg.ApprovedByDefault {
+		t.Fatalf("approvedByDefault = true after UpdateSettings turned it off, want false")
+	}
+	if !cfg.AutoMergeByDefault {
+		t.Fatalf("autoMergeByDefault = false after a save that never mentioned it, want true")
+	}
+}
+
 func TestSubmitUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodPost, "/api/tasks/404/submit", ""); rec.Code != http.StatusNotFound {
@@ -465,13 +536,77 @@ func TestConfigEndpointReportsActorAndCapabilities(t *testing.T) {
 	if cfg.Actor != "alice" {
 		t.Fatalf("actor = %+v, want the configured one", cfg.Actor)
 	}
-	if len(cfg.Capabilities) != len(ui.DefaultCapabilities()) {
-		t.Fatalf("capabilities = %d, want %d", len(cfg.Capabilities), len(ui.DefaultCapabilities()))
+	if len(cfg.Capabilities) != len(ui.OfferedCapabilities()) {
+		t.Fatalf("capabilities = %d, want %d", len(cfg.Capabilities), len(ui.OfferedCapabilities()))
 	}
 	// The GitHub label a capability used to carry is gone from the wire
 	// shape along with the labels themselves.
 	if strings.Contains(rec.Body.String(), "grain-gemini-key") {
 		t.Fatalf("config still reports a GitHub label: %s", rec.Body)
+	}
+}
+
+// GET /api/config carries the deployment's default capability set so
+// NewTaskOverlay.jsx can open its picker with those boxes already
+// ticked -- the form is where whoever files the task sees them, and
+// where they untick one they do not want (grain/task-14). A stored
+// id this build no longer offers is filtered out, so the form ticks what
+// the task would really be filed with.
+func TestConfigEndpointReportsDefaultCapabilities(t *testing.T) {
+	srv, client := testServer(t)
+
+	cfg := model.DefaultConfig()
+	cfg.DefaultCapabilities = []string{"gcp-key", "scratch-repo"}
+	if err := client.Store.PutConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := decode[struct {
+		DefaultCapabilities []string `json:"defaultCapabilities"`
+	}](t, rec)
+	if !reflect.DeepEqual(got.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("defaultCapabilities = %v, want [gcp-key]", got.DefaultCapabilities)
+	}
+}
+
+// The per-repo layer travels with the same response, keyed by repo, so
+// the new-task form can re-seed its picker the moment the repo picker
+// changes rather than asking the server once per keystroke
+// (grain/task-24). Filtered the same way, and only repos that add
+// something appear at all.
+func TestConfigEndpointReportsRepoDefaultCapabilities(t *testing.T) {
+	srv, client := testServer(t)
+	ctx := context.Background()
+
+	if err := client.Store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo:                model.RepoRef{Owner: "acme", Name: "widgets"},
+		DefaultCapabilities: []string{"gcp-key", "scratch-repo"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing but a retired id: the repo has nothing this build can
+	// grant, so it is not reported as adding anything.
+	if err := client.Store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo:                model.RepoRef{Owner: "acme", Name: "gadgets"},
+		DefaultCapabilities: []string{"scratch-repo"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := decode[struct {
+		RepoDefaultCapabilities map[string][]string `json:"repoDefaultCapabilities"`
+	}](t, rec)
+	want := map[string][]string{"acme/widgets": {"gcp-key"}}
+	if !reflect.DeepEqual(got.RepoDefaultCapabilities, want) {
+		t.Fatalf("repoDefaultCapabilities = %v, want %v", got.RepoDefaultCapabilities, want)
 	}
 }
 
@@ -487,7 +622,7 @@ func TestSettingsRoutesReadAndWrite(t *testing.T) {
 	}
 
 	rec = do(t, srv, http.MethodPut, "/api/settings",
-		`{"pollInterval":"1m","maxConcurrent":2,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
+		`{"pollInterval":"1m","maxWorkers":2,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put status = %d, want 200: %s", rec.Code, rec.Body)
 	}
@@ -529,7 +664,7 @@ func testServerWithSecrets(t *testing.T) (*ui.Server, *secrets.Store) {
 	t.Helper()
 	_, store, _ := testClient(t)
 	secretStore := secrets.New(t.TempDir())
-	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.DefaultCapabilities(), Secrets: secretStore}
+	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.OfferedCapabilities(), Secrets: secretStore}
 	return ui.NewServer(cfg, store), secretStore
 }
 
@@ -820,7 +955,7 @@ func (f *fakeUpgrader) Status() (upgrade.Status, error) { return f.status, nil }
 func testServerWithUpgrader(t *testing.T, up ui.Upgrader) *ui.Server {
 	t.Helper()
 	_, store, _ := testClient(t)
-	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.DefaultCapabilities(), Upgrader: up}
+	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.OfferedCapabilities(), Upgrader: up}
 	return ui.NewServer(cfg, store)
 }
 

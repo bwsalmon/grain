@@ -61,6 +61,44 @@ describe("RepoList", () => {
     expect(screen.getByText("0 tasks")).toBeInTheDocument();
   });
 
+  // A repo that carries default capabilities of its own is listed even
+  // when nothing else here mentions it: PUT /api/repos/{owner}/{name}/
+  // capabilities never required an allowlist entry, and this page is the
+  // only place that set can be edited.
+  it("also lists a repo that only carries default capabilities of its own", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/orphan",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    const user = userEvent.setup();
+    const config = {
+      targetRepos: [],
+      repoDefaultCapabilities: { "acme/orphan": ["gcp-key"] },
+      capabilities: [{ id: "gcp-key", name: "GCP key" }],
+    };
+    renderList({ config });
+
+    const row = screen.getByText("acme/orphan").closest("li");
+    // Nothing to remove -- it was never on the allowlist -- and the row
+    // says why it is here rather than looking like an empty stray.
+    expect(within(row).queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+    expect(within(row).getByText("Defaults only")).toBeInTheDocument();
+
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/orphan/capabilities");
+    expect(await screen.findByText(/A task filed against acme\/orphan starts with:/)).toHaveTextContent("GCP key");
+  });
+
+  it("does not mark a repo that carries defaults and has tasks of its own as defaults-only", () => {
+    const config = { targetRepos: [], repoDefaultCapabilities: { "acme/gadgets": ["gcp-key"] } };
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    expect(within(row).queryByText("Defaults only")).not.toBeInTheDocument();
+  });
+
   it("filters the list by repo name", async () => {
     const user = userEvent.setup();
     renderList();
@@ -110,6 +148,7 @@ describe("RepoList", () => {
 
   it("adds a repo and refreshes config on success", async () => {
     api.mockResolvedValueOnce({});
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const onRefreshConfig = vi.fn();
     const user = userEvent.setup();
     renderList({ tasks: [], onRefreshConfig });
@@ -119,10 +158,12 @@ describe("RepoList", () => {
 
     expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/widgets" }) });
     expect(onRefreshConfig).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 
   it("reports the error and does not refresh config when adding fails", async () => {
     api.mockRejectedValueOnce(new Error("repo must be owner/name"));
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const onRefreshConfig = vi.fn();
     const showError = vi.fn();
     const user = userEvent.setup();
@@ -133,6 +174,80 @@ describe("RepoList", () => {
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "repo must be owner/name" }));
     expect(onRefreshConfig).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  // grain/task-45: an empty targetRepos means unrestricted, so the first
+  // add narrows the deployment rather than widening it. The pane says so
+  // twice -- standing on the page, and again at the click.
+  it("says the deployment is unrestricted, and what adding the first repo would mean", () => {
+    renderList({ config: { targetRepos: [] } });
+
+    expect(screen.getByText(/an empty allowlist is what means unrestricted/)).toBeInTheDocument();
+    expect(screen.getByText(/restricts it to that one repo/)).toBeInTheDocument();
+  });
+
+  it("says a one-repo allowlist allows only that repo", () => {
+    renderList({ config: { targetRepos: ["acme/widgets"] } });
+
+    expect(screen.getByText(/allows only acme\/widgets/)).toBeInTheDocument();
+    expect(screen.queryByText(/an empty allowlist is what means unrestricted/)).not.toBeInTheDocument();
+  });
+
+  it("drops both notes once the allowlist names more than one repo", () => {
+    renderList({ config: { targetRepos: ["acme/widgets", "acme/gadgets"] } });
+
+    expect(screen.queryByText(/an empty allowlist is what means unrestricted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/allows only/)).not.toBeInTheDocument();
+  });
+
+  it("confirms the first add, naming the repos that would fall off the allowlist", async () => {
+    api.mockResolvedValueOnce({});
+    const confirmed = vi.fn().mockReturnValue(true);
+    vi.stubGlobal("confirm", confirmed);
+    const user = userEvent.setup();
+    renderList({ config: { targetRepos: [] } });
+
+    await user.type(screen.getByPlaceholderText("owner/name"), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Add repo" }));
+
+    const msg = confirmed.mock.calls[0][0];
+    expect(msg).toContain("only repo this deployment allows");
+    // The repo being added is not one of the repos that fall off it.
+    const falling = msg.split("Off the allowlist as of this click: ")[1];
+    expect(falling).toContain("acme/gadgets");
+    expect(falling).not.toContain("acme/widgets");
+    expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/widgets" }) });
+    vi.unstubAllGlobals();
+  });
+
+  it("does not add the first repo when the confirmation is declined", async () => {
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
+    const onRefreshConfig = vi.fn();
+    const user = userEvent.setup();
+    renderList({ config: { targetRepos: [] }, onRefreshConfig });
+
+    await user.type(screen.getByPlaceholderText("owner/name"), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Add repo" }));
+
+    expect(api).not.toHaveBeenCalled();
+    expect(onRefreshConfig).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("does not confirm an add that only widens an allowlist that already restricts", async () => {
+    api.mockResolvedValueOnce({});
+    const confirmed = vi.fn().mockReturnValue(true);
+    vi.stubGlobal("confirm", confirmed);
+    const user = userEvent.setup();
+    renderList({ config: { targetRepos: ["acme/widgets"] } });
+
+    await user.type(screen.getByPlaceholderText("owner/name"), "acme/gadgets");
+    await user.click(screen.getByRole("button", { name: "Add repo" }));
+
+    expect(confirmed).not.toHaveBeenCalled();
+    expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/gadgets" }) });
+    vi.unstubAllGlobals();
   });
 
   it("only offers Remove on a row that is in config.targetRepos", () => {
@@ -290,5 +405,164 @@ describe("RepoList", () => {
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "invalid branch name" }));
     expect(screen.getByPlaceholderText("feature/foo")).toHaveValue("bad name");
+  });
+
+  // grain/task-24: a repo's own default capability set is edited here,
+  // next to the repo it belongs to, rather than on the deployment-wide
+  // Settings pane -- and the form says what a task filed against this
+  // repo would actually start with, which is the union of both layers.
+  it("opens a row's Capabilities form and loads that repo's own defaults", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: ["gemini-key"],
+      effectiveDefaultCapabilities: ["gemini-key", "gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
+    const onOpenRepo = vi.fn();
+    const user = userEvent.setup();
+    renderList({ config, onOpenRepo });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities");
+    expect(await screen.findByText(/A task filed against acme\/gadgets starts with:/)).toHaveTextContent(
+      "Gemini key, GCP key",
+    );
+    expect(onOpenRepo).not.toHaveBeenCalled();
+  });
+
+  // Both sets GET reports come back as stored, retired ids included, so
+  // that one chosen before a build retired it can still be seen and
+  // unticked. What a task starts with is the filtered union, though --
+  // (*Client).defaultCapabilities drops a retired id before any grant is
+  // written -- so this line must not list one.
+  it("leaves a retired id out of what a task filed against the repo starts with", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key", "scratch-repo"],
+      deploymentDefaultCapabilities: ["gemini-key", "old-deployment-key"],
+      effectiveDefaultCapabilities: ["gemini-key", "gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
+    const user = userEvent.setup();
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+
+    const line = await screen.findByText(/A task filed against acme\/gadgets starts with:/);
+    expect(line).toHaveTextContent("Gemini key, GCP key");
+    expect(line).not.toHaveTextContent("scratch-repo");
+    expect(line).not.toHaveTextContent("old-deployment-key");
+  });
+
+  it("says a repo whose only defaults are retired ids starts with nothing", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["scratch-repo"],
+      deploymentDefaultCapabilities: ["old-deployment-key"],
+      effectiveDefaultCapabilities: [],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
+    const user = userEvent.setup();
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+
+    expect(await screen.findByText(/A task filed against acme\/gadgets starts with:/)).toHaveTextContent(
+      "nothing -- only what whoever files it ticks",
+    );
+  });
+
+  it("saves a repo's default capabilities and refreshes the config the new-task form seeds from", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: [],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: [],
+    });
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
+    const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderList({ config, onRefreshConfig });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    await user.click(await screen.findByLabelText("Default capabilities"));
+    await user.click(await screen.findByRole("option", { name: "GCP key" }));
+    await user.keyboard("{Escape}");
+    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities", {
+      method: "PUT", body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+    expect(onRefreshConfig).toHaveBeenCalled();
+  });
+
+  // grain/task-43: the per-repo set is reported as stored too, so a
+  // capability retired since this repo named it arrives ticked with no
+  // row in config.capabilities to untick it -- and PUT rejects the whole
+  // set as "unknown capability" every time this form is saved with it
+  // still there. Its own row is the only way out.
+  it("offers a row for a stored repo default this build no longer lists", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key", "scratch-repo"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
+    const user = userEvent.setup();
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    await user.click(await screen.findByLabelText("Default capabilities"));
+    const retired = await screen.findByRole("option", { name: /scratch-repo/ });
+    expect(retired).toHaveTextContent("No longer offered -- untick to remove it");
+
+    await user.click(retired);
+    await user.keyboard("{Escape}");
+    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities", {
+      method: "PUT", body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+  });
+
+  it("reports the error when saving a repo's default capabilities fails", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: [],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: [],
+    });
+    api.mockRejectedValueOnce(new Error("unknown capability nope"));
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    renderList({ config, showError });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    await screen.findByLabelText("Default capabilities");
+    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
+
+    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "unknown capability nope" }));
   });
 });

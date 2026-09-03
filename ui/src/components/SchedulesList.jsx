@@ -17,14 +17,15 @@ const SORTS = {
 
 // SchedulesList is the schedules page's main pane (bwsalmon/agents#547):
 // a flat list of every schedule's key details -- title, repo, cadence,
-// template, paused state -- with TaskList's own search-and-sort toolbar,
+// the suite or template it fires, paused state -- with TaskList's own
+// search-and-sort toolbar,
 // TemplatesList's own precedent for the same split applied here. Nothing
 // about any one schedule (description, base branch, reads, capabilities,
 // editing, pausing, or deleting) lives here any more; all of that moved
 // into ScheduleOverlay, opened either by the "+ New schedule" button or
 // by clicking a row, the same NewTaskOverlay/DetailOverlay split
 // TemplatesList/TemplateOverlay already draw.
-export default function SchedulesList({ schedules, templates = [], config, tasks, onRefresh, showError }) {
+export default function SchedulesList({ schedules, templates = [], suites = [], config, tasks, onRefresh, showError }) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("title");
   const [showNew, setShowNew] = useState(false);
@@ -39,7 +40,7 @@ export default function SchedulesList({ schedules, templates = [], config, tasks
   return (
     <main>
       <ListHeader
-        title="Scheduled tasks"
+        title="Schedules"
         count={visible.length}
         action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New schedule</Button>}
       />
@@ -56,6 +57,7 @@ export default function SchedulesList({ schedules, templates = [], config, tasks
               <span className="schedule-title">{s.title}</span>
               <Chip size="small" label={s.repo} />
               <Chip size="small" label={describeRecurrence(s.recurrence)} />
+              {s.suiteId && <Chip size="small" variant="outlined" label={`Suite: ${s.suiteName || s.suiteId}`} />}
               {s.templateId && <Chip size="small" variant="outlined" label={`Template: ${s.templateName || s.templateId}`} />}
               {!s.enabled && <Chip size="small" color="error" label="Paused" />}
             </div>
@@ -66,14 +68,14 @@ export default function SchedulesList({ schedules, templates = [], config, tasks
           </li>
         ))}
       </ul>
-      {schedules.length === 0 && <ListEmpty>No scheduled tasks.</ListEmpty>}
+      {schedules.length === 0 && <ListEmpty>No schedules yet.</ListEmpty>}
       {schedules.length > 0 && visible.length === 0 && <ListEmpty>No schedules match your search.</ListEmpty>}
 
       {showNew && (
-        <ScheduleOverlay repoOptions={repoOptions} templates={templates} config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
+        <ScheduleOverlay repoOptions={repoOptions} templates={templates} suites={suites} config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
       )}
       {editing && (
-        <ScheduleOverlay schedule={editing} repoOptions={repoOptions} templates={templates} config={config} onClose={() => setEditing(null)} onSaved={onRefresh} showError={showError} />
+        <ScheduleOverlay schedule={editing} repoOptions={repoOptions} templates={templates} suites={suites} config={config} onClose={() => setEditing(null)} onSaved={onRefresh} showError={showError} />
       )}
     </main>
   );

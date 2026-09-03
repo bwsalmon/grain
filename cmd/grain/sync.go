@@ -168,8 +168,10 @@ func printSettingsDiff(before, after ui.Settings) {
 		afterValue  string
 	}
 	fields := []field{
+		{"environment name", before.EnvironmentName, after.EnvironmentName},
 		{"poll interval", before.PollInterval, after.PollInterval},
-		{"max concurrent", fmt.Sprint(before.MaxConcurrent), fmt.Sprint(after.MaxConcurrent)},
+		{"max workers", fmt.Sprint(before.MaxWorkers), fmt.Sprint(after.MaxWorkers)},
+		{"max mergers", fmt.Sprint(before.MaxMergers), fmt.Sprint(after.MaxMergers)},
 		{"gemini model", before.GeminiModel, after.GeminiModel},
 		{"claude model", before.ClaudeModel, after.ClaudeModel},
 		{"max agent turns", fmt.Sprint(before.MaxAgentTurns), fmt.Sprint(after.MaxAgentTurns)},
@@ -177,6 +179,14 @@ func printSettingsDiff(before, after ui.Settings) {
 		{"github insecure http", fmt.Sprint(before.GitHubInsecureHTTP), fmt.Sprint(after.GitHubInsecureHTTP)},
 		{"gcp project", before.GCPProject, after.GCPProject},
 		{"gcp agent service account", before.GCPServiceAccountEmail, after.GCPServiceAccountEmail},
+		// The sandbox VM shape (bwsalmon/agents#534) is applied like
+		// every other field here -- syncSettings hands UpdateSettings
+		// the whole ui.UpdateSettingsRequest the config file carries --
+		// so leaving it out of this table only made a real change print
+		// as "nothing changed".
+		{"sandbox cpus", fmt.Sprint(before.SandboxCPUs), fmt.Sprint(after.SandboxCPUs)},
+		{"sandbox memory mb", fmt.Sprint(before.SandboxMemoryMB), fmt.Sprint(after.SandboxMemoryMB)},
+		{"sandbox disk gb", fmt.Sprint(before.SandboxDiskGB), fmt.Sprint(after.SandboxDiskGB)},
 	}
 	changed := false
 	for _, f := range fields {

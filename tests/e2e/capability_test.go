@@ -10,7 +10,7 @@
 // the real gcpkey/geminikey providers -- those need real GCP/Gemini
 // credentials this sandbox should not assume it has. It is attached to the
 // task through the real CLI's `capability <id> <cap> attach`, under the one
-// capability ID (self-debug) cmd/grain/main.go's ui.DefaultCapabilities
+// capability ID (self-debug) cmd/grain/main.go's ui.OfferedCapabilities
 // allow-list accepts that needs no such credential, exactly the way an
 // operator would toggle it on -- the orchestrator.Config.Capabilities
 // registry that actually resolves and materializes it, by contrast, is
@@ -145,7 +145,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	// the real CLI binary -- not a seeded store row and not a hand-built
 	// Grant -- the way an operator actually would. self-debug is the
 	// capability ID because it is on cmd/grain/main.go's own
-	// ui.DefaultCapabilities allow-list and needs no real credential; the
+	// ui.OfferedCapabilities allow-list and needs no real credential; the
 	// registry that actually resolves and materializes it below is this
 	// test's own, never the real one a deployment would wire up for it.
 	storeDir := t.TempDir()
@@ -197,7 +197,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(capabilityPushScript(remote, branch, task.ID, placementPath, placementContent)),
 		Config:    orchestrator.Config{Capabilities: model.NewCapabilityRegistry(provider)},
 	}
@@ -297,7 +297,7 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	}
 	assertState(w, "iss-cap", model.StateQueued, false)
 
-	dispatches, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	dispatches, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(dispatches) != 1 || dispatches[0].TaskID != "iss-cap" {
 		t.Fatalf("Cycle: %v, %+v", err, dispatches)
 	}
@@ -356,7 +356,7 @@ func TestRefusedCapabilityGrantFailsTheRunBeforeTheAgentStartsAndRequeues(t *tes
 	// capability leaving the task requeueable, not about how soon after
 	// the refusal that requeue is allowed to happen.
 	clock = clock.Add(time.Minute)
-	second, err := dispatch.Cycle(w.ctx, w.store, 1, clock)
+	second, err := dispatch.Cycle(w.ctx, w.store, model.Limits{Workers: 1}, clock)
 	if err != nil || len(second) != 1 || second[0].Attempt != 2 {
 		t.Fatalf("retry Cycle: %v, %+v, want attempt 2", err, second)
 	}

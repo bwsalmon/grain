@@ -27,8 +27,8 @@ type Config struct {
 	// loop that is already running rather than the next one
 	// (cmd/grain/daemon.go's liveConfig).
 	PollInterval time.Duration
-	// MaxConcurrent is how many runs dispatch.Cycle lets be in flight at
-	// once -- the same count -max-concurrent parses.
+	// MaxWorkers is how many runs of ordinary work dispatch.Cycle lets be
+	// in flight at once -- the same count -max-workers parses.
 	//
 	// bwsalmon/agents#461 replaced named slots (an operator-chosen list,
 	// each entry its own sandbox directory or kontur VM name) with this
@@ -38,7 +38,29 @@ type Config struct {
 	// left for such an identifier to name: this is now read as a limit
 	// and nothing else, by dispatch.Cycle counting live runs against it
 	// and by nobody else at all.
-	MaxConcurrent int
+	//
+	// It was called MaxConcurrent, and was the whole limit, until
+	// grain/task-63 split the merge queue's own repair runs out from
+	// under it -- see MaxMergers below and Limits, which is the pair of
+	// them as everything that enforces a limit reads them. Its column was
+	// renamed with it, max_concurrent to max_workers, by
+	// Store.ensureConfigWorkerMergerColumns.
+	MaxWorkers int
+	// MaxMergers is capacity on top of MaxWorkers that only the merge
+	// queue's own fix tasks may reach (model.Limits' own doc comment has
+	// why they are worth reserving, and exactly how the two numbers
+	// combine: workers never exceed MaxWorkers, nothing exceeds
+	// MaxWorkers+MaxMergers, and a merger may take a free worker slot
+	// while the reverse never happens).
+	//
+	// 0 is a meaningful value rather than an unset one: mergers then
+	// contend for MaxWorkers alongside everything else, exactly as every
+	// deployment behaved before this field existed. DefaultConfig's 1 is
+	// what a deployment that has never chosen gets instead -- one run of
+	// headroom is enough to keep a queue head's repair from waiting out
+	// whatever else is running, and cheap enough that a single-worker
+	// deployment can afford it.
+	MaxMergers int
 	// AgentFramework selects which agent.Framework a run is meant to be
 	// driven by -- AgentFrameworkAntigravity (agent/antigravity, the
 	// Antigravity CLI's `agy` binary as a subprocess) or
@@ -84,7 +106,7 @@ type Config struct {
 	// agent framework's own default in place, which for both frameworks
 	// is no cap at all (agent/claude's defaultMaxTurns has why). A run's
 	// real ceiling is orchestrator.Config.MaxRunRuntime. Re-read by
-	// orchestrator.RunCycle every cycle, the same as MaxConcurrent, so a
+	// orchestrator.RunCycle every cycle, the same as MaxWorkers, so a
 	// changed cap reaches the next run dispatched.
 	MaxAgentTurns int
 	// GitHubHost is the GitHub API host -- overridable to point at a mock
@@ -156,6 +178,23 @@ type Config struct {
 	SandboxCPUs int
 	// SandboxMemoryMB is SandboxCPUs' memory counterpart, in MiB.
 	SandboxMemoryMB int
+	// SandboxDiskGB is the third dimension of that same shape, in GiB:
+	// how large a root disk `konturctl vm create` gives the VM, passed as
+	// `-disk-size-gb`. Zero means the same thing the other two mean --
+	// pass no flag, and take whatever a VM would get anyway, which for
+	// disk is the size of the guest image the overlay is backed by
+	// (scripts/kontur/README.md: kontur's own `guest-image` stage sizes
+	// disk.img to the rootfs plus 20% headroom, so there is no fixed
+	// number to name as its default the way there is for CPUs and
+	// memory).
+	//
+	// Unlike CPUs and memory, this one needs something of the guest as
+	// well as of the hypervisor: a bigger virtual disk is empty space
+	// past the end of the filesystem packed into the image until
+	// something grows that filesystem onto it, which
+	// scripts/kontur/guest-setup.sh's grain-growfs unit does on each
+	// boot.
+	SandboxDiskGB int
 	// ShowClosedByDefault is the deployment-wide default for whether a
 	// task list starts out showing closed tasks (bwsalmon/agents#537):
 	// false, the default, matches "hide closed tasks by default" --
@@ -167,25 +206,123 @@ type Config struct {
 	ShowClosedByDefault bool
 	// ApprovedByDefault is the deployment-wide default for whether a new
 	// task's "Queue immediately" checkbox starts checked (bwsalmon/
-	// agents#612): false, the default, matches grain's original shape --
-	// NewTaskOverlay.jsx's own checkbox starts unchecked, so a task files
-	// as a proposal needing Approve unless someone checks it. true starts
-	// it checked instead, so filing a task takes one fewer click on a
-	// deployment that approves nearly everything anyway. Like
-	// NewestFirst and ShowClosedByDefault, this only ever seeds the
+	// agents#612): true, the default (DefaultConfig), starts it checked,
+	// so filing a task queues it for dispatch rather than parking it for
+	// an Approve nobody was waiting to give -- a deployment that approves
+	// nearly everything it files should not have to say so twice. false
+	// starts it unchecked instead, grain's original shape, where a task
+	// files as a proposal until someone approves it.
+	//
+	// Unlike NewestFirst and ShowClosedByDefault, whose default is also
+	// their Go zero value, false here is a zero value that does not mean
+	// "nobody has chosen". Nothing has to tell those two apart from the
+	// field alone: every path that builds a Config with no stored row
+	// behind it goes through DefaultConfig, and the store's own column
+	// defaults say the same thing in SQL.
+	//
+	// Like NewestFirst and ShowClosedByDefault, this only ever seeds the
 	// form's *starting* state -- whoever is filing a task can still
 	// uncheck it, and CreateTaskRequest.Approved is what actually decides
 	// each task's own Approval, not this.
 	ApprovedByDefault bool
 	// AutoMergeByDefault is ApprovedByDefault's counterpart for
 	// NewTaskOverlay.jsx's "Auto-merge once checks pass" checkbox
-	// (bwsalmon/agents#612): false, the default, keeps a new task's
-	// Task.AutoMerge off unless someone checks it. true starts it checked
-	// instead. Same "starting state only" caveat as ApprovedByDefault --
-	// CreateTaskRequest.AutoMerge, not this, is what a filed task actually
-	// gets.
+	// (bwsalmon/agents#612): true, the default (DefaultConfig), starts a
+	// new task's Task.AutoMerge on, so a run whose checks pass lands
+	// without a human clicking Merge on it; false keeps it off unless
+	// someone checks it. Same "starting state only" caveat as
+	// ApprovedByDefault -- CreateTaskRequest.AutoMerge, not this, is what
+	// a filed task actually gets.
 	AutoMergeByDefault bool
+	// EnvironmentName is what this deployment is called, for whoever is
+	// looking at it: "staging", "dev", a hostname, anything. Empty, the
+	// default, means an unnamed deployment and the UI shows nothing at
+	// all -- the shape grain has always had, and the right one for an
+	// operator running a single deployment who has nothing to tell it
+	// apart from.
+	//
+	// It names nothing the daemon itself does: no dispatch, no sandbox,
+	// no credential is chosen by it, and nothing outside the UI reads it.
+	// It exists for the one failure a single-operator cluster invites --
+	// approving, merging or rebooting on the deployment you thought was
+	// the other one -- which is a question of what the screen says, not
+	// of what the daemon enforces. A deployment that should refuse to
+	// touch a repo wants TargetRepos above; this is a label.
+	//
+	// Free text, deliberately, rather than an enum of "staging"/"prod":
+	// what environments a deployment sits among is the operator's own
+	// vocabulary, and grain has no list of them to validate against.
+	// ui.UpdateSettings bounds its length so it can be rendered somewhere
+	// prominent without a paragraph pasted in taking the pane over, and
+	// trims it so a stray space is not the difference between named and
+	// unnamed.
+	EnvironmentName string
+	// DefaultCapabilities is the set of capability ids a new task is
+	// filed holding, by id -- the deployment-wide answer to "what should
+	// every task here start out able to do", and the reason gcp-key need
+	// not be ticked by hand on every task that wants a service-account
+	// key in its sandbox (grain/task-14, following task-10's picker
+	// rows).
+	//
+	// It seeds a task's own Grants at creation (ui.CreateTask, which
+	// records each as GrantByDefault) rather than being read again at
+	// dispatch. That is the whole difference between this and v1's
+	// unconditional per-dispatch mint: a seeded grant is on the task,
+	// visible in its capability list, and detachable through the same
+	// picker as any other, so whoever files a task can drop one they do
+	// not want and an operator can take one off a task that is failing on
+	// it. The cost of that choice is that turning an entry off here does
+	// not disarm the tasks already holding it -- they keep the grant they
+	// were filed with, which is the same thing that makes it modifiable
+	// in the first place.
+	//
+	// Distinct, too, from docs/data-model.md's "Attaching capabilities to
+	// repos and folders" -- those offers are floors, unioned in at
+	// resolution and not droppable by the task. This is a seed.
+	//
+	// RepoConfig.DefaultCapabilities is the per-repo layer of this same
+	// seed (grain/task-24), and composes with it exactly that way: more
+	// ids in the set a new task starts with, unioned deployment-first in
+	// ui.(*Client).defaultCapabilities. This layer is the one that
+	// applies wherever a task points, including a task with no repo at
+	// all; a repo can add to it and never subtract from it.
+	//
+	// An id here that this build's picker does not offer is skipped at
+	// creation rather than failing it -- ui.UpdateSettings validates the
+	// set on the way in, so that can only be a build that has since
+	// retired a capability, and a stale settings row must not become a
+	// deployment that can file no tasks at all.
+	DefaultCapabilities []string
 }
+
+// DefaultConfig is the configuration a deployment that has never chosen
+// one runs: every field's own zero value, except the three whose default
+// is not it.
+//
+// Every path that builds a Config with nothing stored behind it starts
+// here -- cmd/grain/daemon.go's flag seed for a fresh database,
+// ui.UpdateSettings' first save, and the two API responses that have to
+// describe a deployment whose grain_config row does not exist yet
+// (ui.GetSettings, ui's handleConfig) -- so "on unless somebody turned it
+// off" is one fact in one place rather than a literal true repeated at
+// each of them. schema.go's grain_config DDL, and the store migrations
+// that add these columns to a database predating them, carry the same
+// defaults in SQL for the rows this constructor never touches.
+func DefaultConfig() Config {
+	return Config{
+		ApprovedByDefault:  true,
+		AutoMergeByDefault: true,
+		MaxMergers:         DefaultMaxMergers,
+	}
+}
+
+// DefaultMaxMergers is Config.MaxMergers for a deployment that has never
+// chosen one -- named here rather than repeated at each of the three
+// places that have to agree on it: DefaultConfig above, cmd/grain
+// daemon's own -max-mergers flag default, and schema.go's grain_config
+// DDL (which is also what Store.ensureConfigWorkerMergerColumns
+// backfills a database predating the column with).
+const DefaultMaxMergers = 1
 
 // AgentFramework's own vocabulary -- the two agent.Framework
 // implementations pkg/agent has today (pkg/agent/antigravity,

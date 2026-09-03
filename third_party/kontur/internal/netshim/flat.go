@@ -24,7 +24,9 @@ type Identity struct {
 	// Mask is IP's netmask, and Gateway the namespace's default route.
 	// Gateway may be nil if the namespace has no default route, which is
 	// unusual but not fatal: the guest simply gets no default route
-	// either.
+	// either -- and so, since this is the only thing that ever gives it
+	// one, no way off its own segment. A guest in that state boots and
+	// answers perfectly well; see defaultGateway.
 	Mask    net.IPMask
 	Gateway net.IP
 	MTU     int
@@ -72,14 +74,46 @@ func DiscoverIdentity(iface string) (Identity, error) {
 	if err != nil {
 		return Identity{}, fmt.Errorf("reading routes on %s: %w", iface, err)
 	}
-	for _, r := range routes {
-		if r.Dst == nil && r.Gw != nil {
-			id.Gateway = r.Gw.To4()
-			break
-		}
-	}
+	id.Gateway = defaultGateway(routes)
 
 	return id, nil
+}
+
+// defaultGateway returns the gateway of the first default route in
+// routes, or nil if none of them is one.
+//
+// It matches on the destination's prefix length rather than on a nil
+// Dst, because a nil Dst is not what a route read back off the kernel
+// has. The kernel leaves RTA_DST off a route message whose prefix length
+// is zero, and the netlink library fills that absence back in the way
+// iproute2 does -- deserializeRoute synthesizes 0.0.0.0/0 rather than
+// leaving Dst nil -- so every route in a dump carries a non-nil Dst and
+// a "Dst == nil" test can only ever match a Route a caller built itself.
+//
+// That is not a hypothetical: testing "Dst == nil" is what left every
+// flat-mode guest without a default route (the ip= parameter
+// FlatGuestConfig derives has an empty gateway field when Identity.Gateway
+// is nil), and so with no egress off its own segment at all, while every
+// other part of the identity it took over was correct.
+func defaultGateway(routes []netlink.Route) net.IP {
+	for _, r := range routes {
+		if r.Gw == nil || !isDefaultDst(r.Dst) {
+			continue
+		}
+		return r.Gw.To4()
+	}
+	return nil
+}
+
+// isDefaultDst reports whether dst is a default route's destination:
+// either absent altogether, or the all-zero address with a zero-length
+// prefix (0.0.0.0/0).
+func isDefaultDst(dst *net.IPNet) bool {
+	if dst == nil {
+		return true
+	}
+	ones, _ := dst.Mask.Size()
+	return ones == 0 && dst.IP.IsUnspecified()
 }
 
 // SetupFlat wires up flat mode: the guest is spliced directly onto the

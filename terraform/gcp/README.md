@@ -663,7 +663,9 @@ still a second, independent enforcement boundary underneath this one:
 even a `grain settings` change widening `TargetRepos` past what the PAT
 can reach would still fail at the git proxy. Nothing here keeps the two
 lists in sync automatically; an operator who changes one by hand (via
-`grain settings`, bypassing Terraform) should update the other too.
+`grain settings -target-repos`, `grain repo add`, or the repos page --
+all three write the same field, bypassing Terraform) should update the
+other too.
 
 ## Notes and limits
 

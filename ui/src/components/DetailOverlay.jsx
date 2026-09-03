@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, completionPhase, frameworkLabel } from "../state.js";
+import { STATE_LABELS, capabilityRows, completionPhase, frameworkLabel } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -140,12 +140,14 @@ function Declared({ t }) {
   if (t.base) rows.push(["Base", t.base]);
   if (t.reads && t.reads.length > 0) rows.push(["Reads", t.reads.join(", ")]);
   rows.push(["Auto-merge", String(t.autoMerge)]);
-  // bwsalmon/agents#534: a per-task sandbox shape override, shown only
-  // when set -- most tasks use the deployment default and have neither
-  // field, the same "0 means unset" convention that keeps them out of
-  // the JSON response at all (Task's own omitempty).
+  // bwsalmon/agents#534, grain/task-41: a per-task sandbox shape
+  // override, shown only when set -- most tasks use the deployment
+  // default and have none of the three fields, the same "0 means unset"
+  // convention that keeps them out of the JSON response at all (Task's
+  // own omitempty).
   if (t.sandboxCpus) rows.push(["Sandbox vCPUs", String(t.sandboxCpus)]);
   if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
+  if (t.sandboxDiskGb) rows.push(["Sandbox disk (GiB)", String(t.sandboxDiskGb)]);
   // Same treatment for a per-task agent framework: shown only when this
   // task overrides the deployment's own, which most do not.
   if (t.agentFramework) rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);
@@ -239,20 +241,27 @@ function Actions({ t, config, act }) {
 // added on the backend later still shows up here before this map catches
 // up with it.
 //
-// Both of the non-obvious two are runs that ended without an agent ever
-// finishing: "setup-failed" is one whose sandbox could not be built (a VM
-// that never booted, a token that could not be minted -- dispatch retries
-// the task after its backoff), and "orphaned" is one whose process died
-// mid-run and which the next startup finished on its behalf
-// (RecoverOrphanedRuns). Both take the "failed" badge rather than the
-// fallback's "queued", which would read as "hasn't run yet" for a run
-// that did.
+// The non-obvious ones are all runs that failed somewhere other than the
+// agent's own work, which is exactly why each needs a word of its own:
+// "setup-failed" is one whose sandbox could not be built (a VM that never
+// booted, a token that could not be minted -- dispatch retries the task
+// after its backoff), "orphaned" is one whose process died mid-run and
+// which the next startup finished on its behalf (RecoverOrphanedRuns),
+// "finish-failed" is one whose agent worked but whose result could not be
+// turned into a pull request or a comment (orchestrator.noteFinishFailure
+// -- the branch is pushed and nothing points at it), and "no_action" is
+// one that ran fine and produced nothing to act on at all
+// (orchestrator.ProcessResult). Every one of them takes the "failed"
+// badge rather than the fallback's "queued", which would read as "hasn't
+// run yet" for a run that did.
 const OUTCOME_LABELS = {
   "": "Running",
   succeeded: "Succeeded",
   failed: "Failed",
   cancelled: "Cancelled",
   "setup-failed": "Setup failed",
+  "finish-failed": "Finish failed",
+  no_action: "No action",
   orphaned: "Orphaned",
 };
 const OUTCOME_BADGES = {
@@ -261,6 +270,8 @@ const OUTCOME_BADGES = {
   failed: "failed",
   cancelled: "closed",
   "setup-failed": "failed",
+  "finish-failed": "failed",
+  no_action: "failed",
   orphaned: "failed",
 };
 
@@ -428,6 +439,15 @@ function timelineEvents(t) {
 function CapabilityToggles({ t, config, act }) {
   const capabilities = config?.capabilities || [];
   const selected = t.capabilities || [];
+  // A task can hold a grant the picker no longer offers -- a capability
+  // renamed or dropped since it was attached ("scratch-repo", now
+  // github-sandbox, bwsalmon/agents#612). capabilityRows (state.js)
+  // gives it a row of its own purely to be turned off; without one it is
+  // a chip nothing can untick, and a grant no provider is registered for
+  // fails every run of the task holding it. SetCapability (pkg/ui,
+  // client.go) is the other half -- it validates on attach only, so the
+  // detach this row sends is accepted.
+  const rows = capabilityRows(capabilities, selected);
 
   const handleChange = (e) => {
     const next = e.target.value;
@@ -458,13 +478,13 @@ function CapabilityToggles({ t, config, act }) {
           ) : (
             <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
               {sel.map((id) => {
-                const c = capabilities.find((cap) => cap.id === id);
+                const c = rows.find((cap) => cap.id === id);
                 return <Chip key={id} size="small" label={c ? c.name : id} />;
               })}
             </Box>
           ))}
         >
-          {capabilities.map((c) => (
+          {rows.map((c) => (
             <MenuItem key={c.id} value={c.id} title={c.description}>
               <Checkbox checked={selected.includes(c.id)} size="small" />
               <ListItemText primary={c.name} />
@@ -476,13 +496,30 @@ function CapabilityToggles({ t, config, act }) {
   );
 }
 
+// What a chip cannot fit -- the depended-on task's state, and the tail
+// of a long title -- goes here instead, so hovering a dependency tells
+// you what it is without opening it. dep is missing
+// when the depended-on task is not in the loaded list, and then its id
+// is genuinely all this overlay knows about it.
+function dependencyTooltip(id, dep, blocking) {
+  if (!dep) return blocking ? `${id} — still open` : id;
+  const state = STATE_LABELS[dep.state] || dep.state;
+  return `${id} ${dep.title}${state ? ` — ${state}` : ""}${blocking ? " (blocking this task)" : ""}`;
+}
+
 // Dependencies is the "definition" and "signal" this whole feature is
 // about, together: what a task has declared it depends on (chips,
 // removable), which of those are still open (the "blocked" styling on a
 // chip), and a way to add another -- attach/detach through /depends-on.
+//
+// One full-width chip per line, carrying the depended-on task's title:
+// a wrapped row of id-only chips came out as bubbles a couple of
+// characters wide, which named a dependency without telling you
+// anything about it.
 function Dependencies({ t, tasks, act, onOpenTask }) {
   const dependsOn = t.dependsOn || [];
   const blockedBy = new Set(t.blockedBy || []);
+  const byId = new Map((tasks || []).map((other) => [other.id, other]));
 
   const add = (picked) => act(() => api(`/api/tasks/${t.id}/depends-on`, {
     method: "POST",
@@ -493,26 +530,31 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
     <fieldset>
       <legend>Depends on</legend>
       {dependsOn.length === 0 && <p className="hint">No dependencies.</p>}
-      <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mb: dependsOn.length > 0 ? 1 : 0 }}>
+      <Stack spacing={0.6} sx={{ mb: dependsOn.length > 0 ? 1 : 0 }}>
         {dependsOn.map((id) => {
           const blocking = blockedBy.has(id);
+          // A dependency the loaded list does not carry still gets its
+          // chip, id only: dependsOn records ids, and hiding the row for
+          // want of a title would hide the dependency itself.
+          const dep = byId.get(id);
           return (
-            <Chip
-              key={id}
-              size="small"
-              variant={blocking ? "outlined" : "filled"}
-              color={blocking ? "warning" : "default"}
-              label={`${id}${blocking ? " (open)" : ""}`}
-              onClick={() => onOpenTask(id)}
-              onDelete={() => act(() => api(`/api/tasks/${t.id}/depends-on`, {
-                method: "POST",
-                body: JSON.stringify({ id, attach: false }),
-              }), t.id)}
-              deleteIcon={<span title={`Remove dependency on ${id}`}>×</span>}
-            />
+            <Tooltip key={id} title={dependencyTooltip(id, dep, blocking)} placement="left">
+              <Chip
+                variant={blocking ? "outlined" : "filled"}
+                color={blocking ? "warning" : "default"}
+                label={`${id}${dep ? ` ${dep.title}` : ""}${blocking ? " (open)" : ""}`}
+                onClick={() => onOpenTask(id)}
+                onDelete={() => act(() => api(`/api/tasks/${t.id}/depends-on`, {
+                  method: "POST",
+                  body: JSON.stringify({ id, attach: false }),
+                }), t.id)}
+                deleteIcon={<span title={`Remove dependency on ${id}`}>×</span>}
+                sx={{ width: "100%", justifyContent: "space-between", "& .MuiChip-label": { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } }}
+              />
+            </Tooltip>
           );
         })}
-      </Box>
+      </Stack>
       <TaskPicker
         tasks={tasks || []}
         exclude={[t.id, ...dependsOn]}

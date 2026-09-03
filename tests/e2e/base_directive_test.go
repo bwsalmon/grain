@@ -145,7 +145,7 @@ func TestCLICreateWithBaseOpensPullRequestAgainstThatBranch(t *testing.T) {
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(releaseBranchPushScript(remote, branch, task.ID)),
 	}
 
@@ -190,7 +190,7 @@ func TestCLICreateWithBaseOpensPullRequestAgainstThatBranch(t *testing.T) {
 	userTransport := github.NewRealTransport(githubHost)
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
-	if err := userClient.MergePullRequest(owner, repoName, prNumber); err != nil {
+	if err := userClient.MergePullRequest(owner, repoName, prNumber, ""); err != nil {
 		t.Fatalf("submitting (merging) the pull request: %v", err)
 	}
 

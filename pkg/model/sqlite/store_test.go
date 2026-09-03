@@ -193,7 +193,7 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-1",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	assertState(model.StateRunning)
@@ -293,7 +293,7 @@ func TestLeasesAreQueryableByMintingCredential(t *testing.T) {
 			MintedBy: model.CredentialRef{Name: "gcp-host-service-account"},
 			IssuedAt: now, ExpiresAt: &expires,
 		}},
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -338,7 +338,7 @@ func TestAttemptsCountsRuns(t *testing.T) {
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: "a1b2", Sandbox: "s1",
 			Attempt: i + 1, StartedAt: now,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, now.Add(time.Hour), "requeued", ""); err != nil {
@@ -365,7 +365,7 @@ func TestRunsReturnsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r-second-by-id", TaskID: "a1b2", Sandbox: "s1",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r-second-by-id", now.Add(30*time.Minute), "failed", "build error"); err != nil {
@@ -374,7 +374,7 @@ func TestRunsReturnsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r-first-by-id", TaskID: "a1b2", Sandbox: "s2",
 		Attempt: 2, StartedAt: now.Add(time.Hour),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	// Attempt 2 is left unfinished, to prove a still-running attempt comes
@@ -410,7 +410,7 @@ func TestRunTranscriptRoundTrips(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "s1",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,7 +451,7 @@ func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -486,7 +486,7 @@ func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
@@ -512,7 +512,7 @@ func TestGitCredentialOverrideFollowsTheLiveRunOnASandbox(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -535,7 +535,7 @@ func TestGitCredentialOverrideIsAbsentWithoutAGitCredentialGrant(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1025,7 +1025,7 @@ func TestReadsSeeConsistentStateWhileWritersAreActive(t *testing.T) {
 			writeErrs[i] = store.StartRun(ctx, model.Run{
 				ID: "r-" + id, TaskID: id,
 				Sandbox: fmt.Sprintf("sandbox-%d", i), Attempt: 1, StartedAt: now,
-			}, 0)
+			}, model.Limits{})
 		}(i)
 	}
 	for i := 0; i < readers; i++ {
@@ -1199,7 +1199,7 @@ func TestFailureStreakCountsConsecutiveFailuresAndStopsAtASuccess(t *testing.T) 
 		id := fmt.Sprintf("r%d", i+1)
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: "a1b2", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, at.Add(time.Minute), outcomes[i], "boom"); err != nil {
@@ -1237,7 +1237,7 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 		at := now.Add(time.Duration(i) * time.Hour)
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: "a1b2", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, at.Add(time.Minute), "failed", "boom"); err != nil {
@@ -1281,7 +1281,7 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: freshID, TaskID: "a1b2", Sandbox: "s1",
 		Attempt: model.MaxConsecutiveFailures + 1, StartedAt: freshAt,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, freshID, freshAt.Add(time.Minute), "failed", "boom again"); err != nil {
@@ -1310,12 +1310,12 @@ func TestStartRunRejectsASecondLiveRunOnTheSameTask(t *testing.T) {
 	}
 
 	first := model.Run{ID: "a1b2-1", TaskID: "a1b2", Sandbox: "a1b2-1", Attempt: 1, StartedAt: now}
-	if err := store.StartRun(ctx, first, 0); err != nil {
+	if err := store.StartRun(ctx, first, model.Limits{}); err != nil {
 		t.Fatalf("first StartRun for an idle task: %v", err)
 	}
 
 	second := model.Run{ID: "a1b2-2", TaskID: "a1b2", Sandbox: "a1b2-2", Attempt: 2, StartedAt: now}
-	if err := store.StartRun(ctx, second, 0); err == nil {
+	if err := store.StartRun(ctx, second, model.Limits{}); err == nil {
 		t.Fatal("a second live run on a task that already has one should have failed, not landed")
 	}
 
@@ -1339,7 +1339,7 @@ func TestStartRunRejectsASecondLiveRunOnTheSameTask(t *testing.T) {
 	if err := store.FinishRun(ctx, "a1b2-1", now.Add(time.Hour), "failed", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StartRun(ctx, second, 0); err != nil {
+	if err := store.StartRun(ctx, second, model.Limits{}); err != nil {
 		t.Fatalf("StartRun for a second attempt after the first finished: %v", err)
 	}
 }
@@ -1361,13 +1361,13 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 
 	for _, id := range []string{"a1b2", "c3d4"} {
 		run := model.Run{ID: id + "-1", TaskID: id, Sandbox: id + "-1", Attempt: 1, StartedAt: now}
-		if err := store.StartRun(ctx, run, 2); err != nil {
+		if err := store.StartRun(ctx, run, model.Limits{Workers: 2}); err != nil {
 			t.Fatalf("StartRun for %s within the limit: %v", id, err)
 		}
 	}
 
 	third := model.Run{ID: "e5f6-1", TaskID: "e5f6", Sandbox: "e5f6-1", Attempt: 1, StartedAt: now}
-	err := store.StartRun(ctx, third, 2)
+	err := store.StartRun(ctx, third, model.Limits{Workers: 2})
 	if !errors.Is(err, model.ErrAtCapacity) {
 		t.Fatalf("StartRun past the limit = %v, want ErrAtCapacity", err)
 	}
@@ -1379,15 +1379,163 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 	if err := store.FinishRun(ctx, "a1b2-1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StartRun(ctx, third, 2); err != nil {
+	if err := store.StartRun(ctx, third, model.Limits{Workers: 2}); err != nil {
 		t.Fatalf("StartRun into freed capacity: %v", err)
 	}
 
 	// A limit of zero or less means "no limit of mine to enforce" -- what
 	// a caller with its own reason to record a run passes.
 	fourth := model.Run{ID: "a1b2-2", TaskID: "a1b2", Sandbox: "a1b2-2", Attempt: 2, StartedAt: now.Add(2 * time.Hour)}
-	if err := store.StartRun(ctx, fourth, 0); err != nil {
+	if err := store.StartRun(ctx, fourth, model.Limits{}); err != nil {
 		t.Fatalf("StartRun with no limit: %v", err)
+	}
+}
+
+// fixTask is a task the merge queue filed to repair a stuck queue head
+// (Origin.Reason == ReasonFix) -- the one kind whose runs count against
+// model.Limits.Mergers rather than against the worker ceiling.
+func fixTask(id string) model.Task {
+	t := task(id, true)
+	t.Origin.Reason = model.ReasonFix
+	return t
+}
+
+// TestStartRunCountsMergersAgainstTheirOwnHalfOfTheLimit is
+// grain/task-63 at the only place the limit is really enforced: inside
+// the transaction that records the run. Ordinary work stops at
+// Limits.Workers even with merger capacity free; a merge-queue fix task
+// takes that free capacity *and* a spare worker slot; and nothing of
+// either kind gets past the sum of the two.
+func TestStartRunCountsMergersAgainstTheirOwnHalfOfTheLimit(t *testing.T) {
+	store, _, ctx := openStore(t)
+	for _, id := range []string{"w1", "w2", "f1", "f2"} {
+		tk := task(id, true)
+		if id[0] == 'f' {
+			tk = fixTask(id)
+		}
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limits := model.Limits{Workers: 1, Mergers: 2}
+	start := func(id string) error {
+		return store.StartRun(ctx, model.Run{
+			ID: id + "-1", TaskID: id, Sandbox: id + "-1", Attempt: 1, StartedAt: now,
+		}, limits)
+	}
+
+	if err := start("w1"); err != nil {
+		t.Fatalf("StartRun for the one worker slot: %v", err)
+	}
+	if err := start("w2"); !errors.Is(err, model.ErrAtCapacity) {
+		t.Fatalf("StartRun for a second worker = %v, want ErrAtCapacity -- merger capacity is not a general pool", err)
+	}
+	// Both fix tasks fit: one in a merger slot, one in the other.
+	if err := start("f1"); err != nil {
+		t.Fatalf("StartRun for the first fix task: %v", err)
+	}
+	if err := start("f2"); err != nil {
+		t.Fatalf("StartRun for the second fix task: %v", err)
+	}
+
+	counts, err := store.LiveRunCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Workers != 1 || counts.Mergers != 2 {
+		t.Fatalf("LiveRunCounts = %+v, want one worker and two mergers", counts)
+	}
+	if live, err := store.LiveRunCount(ctx); err != nil || live != counts.Total() {
+		t.Fatalf("LiveRunCount = %d (%v), want the same %d LiveRunCounts totals", live, err, counts.Total())
+	}
+
+	// Everything together is capped at the sum, so with three live there
+	// is nothing left for a fix task either.
+	if err := store.PutTask(ctx, fixTask("f3")); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("f3"); !errors.Is(err, model.ErrAtCapacity) {
+		t.Fatalf("StartRun past the sum of both limits = %v, want ErrAtCapacity", err)
+	}
+
+	// Freeing the worker slot frees it for a merger too -- that is the
+	// direction the asymmetry runs.
+	if err := store.FinishRun(ctx, "w1-1", now.Add(time.Hour), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("f3"); err != nil {
+		t.Fatalf("StartRun for a fix task into a freed worker slot: %v", err)
+	}
+	if counts, err := store.LiveRunCounts(ctx); err != nil || counts.Mergers != 3 || counts.Workers != 0 {
+		t.Fatalf("LiveRunCounts = %+v (%v), want three mergers and no worker", counts, err)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingWorkerMergerColumns is
+// grain/task-63's own migration: a database whose grain_config still has
+// the single max_concurrent count keeps that count as its worker limit
+// (renamed to max_workers, the old column dropped) and gains
+// model.DefaultMaxMergers of merge capacity it never had a way to
+// express.
+func TestInitMigratesAnExistingDatabaseMissingWorkerMergerColumns(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-split grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`) "+
+			"VALUES (1,30000,3,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','')"); err != nil {
+		t.Fatalf("seeding a pre-split config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing max_workers/max_mergers: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.MaxWorkers != 3 {
+		t.Fatalf("MaxWorkers after migrating = %d, want the 3 the old max_concurrent held", got.MaxWorkers)
+	}
+	if got.MaxMergers != model.DefaultMaxMergers {
+		t.Fatalf("MaxMergers after migrating = %d, want DefaultMaxMergers (%d)", got.MaxMergers, model.DefaultMaxMergers)
+	}
+
+	// The old column is gone, not merely ignored -- PutConfig stops
+	// supplying it, so a NOT NULL column left behind would fail every
+	// later write.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	after, err := store.GetConfig(ctx)
+	if err != nil || after == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", after, err)
+	}
+	if !reflect.DeepEqual(*after, want) {
+		t.Fatalf("got %+v, want %+v", *after, want)
 	}
 }
 
@@ -1401,7 +1549,7 @@ func TestGetConfigReturnsNilOnAFreshDatabase(t *testing.T) {
 
 func testConfig() model.Config {
 	return model.Config{
-		PollInterval: 30 * time.Second, MaxConcurrent: 2,
+		PollInterval: 30 * time.Second, MaxWorkers: 2,
 		// AgentFramework is named explicitly rather than left zero
 		// because it is the one Config field that never reads back
 		// exactly as written: GetConfig runs it through
@@ -1412,9 +1560,12 @@ func testConfig() model.Config {
 		GeminiModel:    "gemini-2.5-pro", ClaudeModel: "claude-sonnet-5", MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
-		TargetRepos:     []string{"acme/widgets", "acme/gadgets"},
-		SandboxCPUs:     4,
-		SandboxMemoryMB: 8192,
+		TargetRepos:         []string{"acme/widgets", "acme/gadgets"},
+		SandboxCPUs:         4,
+		SandboxMemoryMB:     8192,
+		SandboxDiskGB:       40,
+		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
+		EnvironmentName:     "staging",
 	}
 }
 
@@ -1433,6 +1584,98 @@ func TestConfigRoundTrips(t *testing.T) {
 	}
 }
 
+// grain/task-24: one repo's own configuration, the per-repo layer of
+// what grain_config says deployment-wide. Round-trips, replaces rather
+// than accumulating, and lists only repos that actually say something.
+func TestRepoConfigRoundTripsAndReplaces(t *testing.T) {
+	store, _, ctx := openStore(t)
+	widgets := model.RepoRef{Owner: "acme", Name: "widgets"}
+	gadgets := model.RepoRef{Owner: "acme", Name: "gadgets"}
+
+	// A repo nobody has configured reads back as nil, with no error --
+	// the same "nothing configured one yet" GetQualificationPlan gives.
+	got, err := store.GetRepoConfig(ctx, widgets)
+	if err != nil {
+		t.Fatalf("get on an unconfigured repo: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("get on an unconfigured repo = %+v, want nil", got)
+	}
+
+	want := model.RepoConfig{Repo: widgets, DefaultCapabilities: []string{"gcp-key", "github-sandbox"}}
+	if err := store.PutRepoConfig(ctx, want); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err = store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+
+	// Replaced wholesale, not merged into.
+	want.DefaultCapabilities = []string{"gemini-key"}
+	if err := store.PutRepoConfig(ctx, want); err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+	got, err = store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo: gadgets, DefaultCapabilities: []string{"gcp-key"},
+	}); err != nil {
+		t.Fatalf("put for a second repo: %v", err)
+	}
+	list, err := store.ListRepoConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	wantList := []model.RepoConfig{
+		{Repo: gadgets, DefaultCapabilities: []string{"gcp-key"}},
+		{Repo: widgets, DefaultCapabilities: []string{"gemini-key"}},
+	}
+	if !reflect.DeepEqual(list, wantList) {
+		t.Fatalf("list = %+v, want %+v, sorted by repo", list, wantList)
+	}
+}
+
+// A config that says nothing leaves no row: "has a row" and "has
+// something of its own to say" are one fact, so a repo whose last
+// default capability is unticked stops being listed at all rather than
+// lingering as an empty entry (model.RepoConfig.Empty).
+func TestPutRepoConfigWithNothingToSayDeletesTheRow(t *testing.T) {
+	store, _, ctx := openStore(t)
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo: repo, DefaultCapabilities: []string{"gcp-key"},
+	}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{Repo: repo}); err != nil {
+		t.Fatalf("put with nothing to say: %v", err)
+	}
+	got, err := store.GetRepoConfig(ctx, repo)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("get = %+v, want nil", got)
+	}
+	list, err := store.ListRepoConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("list = %+v, want no rows left", list)
+	}
+}
+
 // PutConfig replaces the single row wholesale rather than accumulating a
 // second one -- there is exactly one deployment configuration, the same
 // discipline grain_schema holds to.
@@ -1443,7 +1686,7 @@ func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
 	}
 	updated := testConfig()
 	updated.PollInterval = time.Minute
-	updated.MaxConcurrent = 1
+	updated.MaxWorkers = 1
 	if err := store.PutConfig(ctx, updated); err != nil {
 		t.Fatalf("second put: %v", err)
 	}
@@ -1502,8 +1745,8 @@ func TestInitMigratesAnExistingDatabaseMissingTargetRepos(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.GeminiModel != "gemini-2.5-pro" || len(got.TargetRepos) != 0 || got.MaxConcurrent != 2 {
-		t.Fatalf("got %+v, want the pre-existing row intact, targetRepos empty, and maxConcurrent migrated from the old two-name slots column", got)
+	if got.GeminiModel != "gemini-2.5-pro" || len(got.TargetRepos) != 0 || got.MaxWorkers != 2 {
+		t.Fatalf("got %+v, want the pre-existing row intact, targetRepos empty, and maxWorkers migrated from the old two-name slots column", got)
 	}
 
 	// And it's not just readable -- PutConfig can now actually make
@@ -1617,8 +1860,8 @@ func TestInitMigratesAnExistingDatabaseWithNamedSlots(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.GeminiModel != "gemini-2.5-pro" || got.MaxConcurrent != 3 {
-		t.Fatalf("got %+v, want the pre-existing row intact and maxConcurrent migrated from the old three-name slots column", got)
+	if got.GeminiModel != "gemini-2.5-pro" || got.MaxWorkers != 3 {
+		t.Fatalf("got %+v, want the pre-existing row intact and maxWorkers migrated from the old three-name slots column", got)
 	}
 
 	// The old column is gone, not merely ignored -- PutConfig stops
@@ -1858,6 +2101,177 @@ func TestReorderRebalancesWhenNeighboursAreCrowded(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// --- the merge queue at the front of the backlog -------------------------
+
+// putOrdered files tasks at the OrderKey each name maps to, so a test can
+// state the backlog it starts from as the order itself rather than as a
+// sequence of writes.
+func putOrdered(t *testing.T, store *model.Store, ctx context.Context, keys map[string]float64) {
+	t.Helper()
+	for id, key := range keys {
+		tk := task(id, true)
+		tk.OrderKey = key
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func orderKeys(t *testing.T, store *model.Store, ctx context.Context) map[string]float64 {
+	t.Helper()
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	keys := map[string]float64{}
+	for _, tk := range tasks {
+		keys[tk.ID] = tk.OrderKey
+	}
+	return keys
+}
+
+// TestMoveToFrontOfBacklogCarriesTheQueuePastOrdinaryWork is the merge
+// queue making its order visible: the tasks whose pull requests are
+// waiting to land go to the front of the list, keeping the relative order
+// they already had, and everything else keeps its own.
+func TestMoveToFrontOfBacklogCarriesTheQueuePastOrdinaryWork(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued-2": 20, "queued-1": 5})
+
+	// Named in neither backlog nor queue order, to pin that the block
+	// lands in the order the backlog already gave it rather than in the
+	// order the caller happened to list.
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued-2", "queued-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"queued-1", "queued-2", "ordinary"}) {
+		t.Fatalf("backlog = %v, want the two queued tasks in front of the ordinary one", got)
+	}
+}
+
+// TestMoveToFrontOfBacklogStaysBehindAFixTaskAtTheHead is the other half
+// of the ordering: a merge task the queue filed (orchestrator.fileFixTask)
+// sits at the very head, so the queue it repairs goes in front of the
+// ordinary backlog but behind that.
+func TestMoveToFrontOfBacklogStaysBehindAFixTaskAtTheHead(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued": 20})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = -10
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"fix", "queued", "ordinary"}) {
+		t.Fatalf("backlog = %v, want the fix task still at the very head", got)
+	}
+}
+
+// TestMoveToFrontOfBacklogIgnoresAFixTaskInsideTheBacklog is the same
+// question asked of a fix task that is *not* at the head -- dragged down
+// by a human, or filed before fix tasks were placed at all and left at
+// OrderKey's zero value. It bounds nothing: the queue goes to the front
+// of the whole list, which is the only place it can be seen.
+func TestMoveToFrontOfBacklogIgnoresAFixTaskInsideTheBacklog(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued": 30})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = 20
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"queued", "ordinary", "fix"}) {
+		t.Fatalf("backlog = %v, want the queue in front of a fix task sitting inside the backlog", got)
+	}
+}
+
+// TestMoveToFrontOfBacklogWritesNothingWhenTheOrderAlreadyHolds is what
+// makes it safe for orchestrator.SyncPullRequests to call every cycle: an
+// order already correct is left exactly as it is, rather than rewritten to
+// the same order with fresh keys that crowd every later split.
+func TestMoveToFrontOfBacklogWritesNothingWhenTheOrderAlreadyHolds(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"queued-1": 5, "queued-2": 6, "ordinary": 10})
+
+	before := orderKeys(t, store, ctx)
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued-1", "queued-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if after := orderKeys(t, store, ctx); !reflect.DeepEqual(after, before) {
+		t.Fatalf("order keys changed from %v to %v with nothing out of place", before, after)
+	}
+}
+
+// TestMoveToFrontOfBacklogRebalancesWhenTheFrontIsCrowded is Reorder's own
+// backstop reached from here: the gap between the fix task at the head and
+// the first ordinary task is too fine to split two keys out of, so the
+// whole backlog is renumbered first and the move still lands in order.
+func TestMoveToFrontOfBacklogRebalancesWhenTheFrontIsCrowded(t *testing.T) {
+	store, db, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued-1": 20, "queued-2": 30})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = 9.99999999
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+	// Belt and braces, the same as TestReorderRebalancesWhenNeighboursAreCrowded.
+	if _, err := db.ExecContext(ctx, "UPDATE `task` SET `order_key` = 9.99999999 WHERE `id` = 'fix'"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued-1", "queued-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"fix", "queued-1", "queued-2", "ordinary"}) {
+		t.Fatalf("backlog = %v, want the queue landed between a crowded head and the backlog", got)
+	}
+}
+
+func TestMoveToFrontOfBacklogRejectsAnUnknownID(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"gone"}); err == nil {
+		t.Fatal("MoveToFrontOfBacklog with an unknown id succeeded, want an error")
+	}
+}
+
+// TestReadyDispatchesAFixTaskInBacklogOrderLikeAnythingElse pins the
+// carve-out Store.Ready used to make for Origin.Reason == ReasonFix being
+// gone: a fix task is dispatched first because
+// orchestrator.fileFixTask puts it at the head of the backlog, and one a
+// human has since dragged behind other work waits its turn there like
+// anything else. Dispatch order is the order on screen, both ways round.
+func TestReadyDispatchesAFixTaskInBacklogOrderLikeAnythingElse(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = 20
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ordinary", "fix"}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want %v -- a fix task behind other work in the backlog waits behind it", ready, want)
+	}
+}
+
 // --- backlog order settings (bwsalmon/agents#476) ------------------------
 
 func TestInitMigratesAnExistingDatabaseMissingOrderKey(t *testing.T) {
@@ -2010,8 +2424,9 @@ func TestInitMigratesAnExistingDatabaseMissingSandboxShape(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB/SandboxDiskGB after migrating = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 
@@ -2064,6 +2479,273 @@ func TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault(t *testing.T) 
 		// exactly as it does to a fresh one, the same default
 		// ensureConfigShowClosedByDefaultColumn's own doc comment explains.
 		t.Fatalf("ShowClosedByDefault after migrating = true, want false")
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities is the
+// same pattern, applied to grain_config.default_capabilities
+// (grain/task-14): a database from before a deployment could say
+// which capabilities every new task starts with gets the column added by
+// ensureConfigDefaultCapabilitiesColumn, defaulted to '' -- which
+// splitCSV reads back as no defaults, so an upgraded deployment keeps
+// filing tasks with exactly what whoever files them asks for until an
+// operator chooses otherwise.
+func TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-14 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-task-14 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.default_capabilities: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if len(got.DefaultCapabilities) != 0 {
+		t.Fatalf("DefaultCapabilities after migrating = %v, want none", got.DefaultCapabilities)
+	}
+
+	// And writable afterwards: the migration adds a column PutConfig
+	// binds, so a set chosen after the upgrade is durable rather than
+	// failing every save.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(got.DefaultCapabilities, want.DefaultCapabilities) {
+		t.Fatalf("DefaultCapabilities = %v, want %v", got.DefaultCapabilities, want.DefaultCapabilities)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingEnvironmentName is the same
+// pattern, applied to grain_config.environment_name (grain/task-69): a
+// database from before a deployment could be named gets the column added
+// by ensureConfigEnvironmentNameColumn, defaulted to '' -- an unnamed
+// deployment, whose UI looks exactly as it did before the upgrade until
+// an operator names it.
+func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-69 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-task-69 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.environment_name: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.EnvironmentName != "" {
+		t.Fatalf("EnvironmentName after migrating = %q, want empty", got.EnvironmentName)
+	}
+
+	// And writable afterwards, the same as every other added column:
+	// PutConfig binds this one, so naming the deployment after the
+	// upgrade is durable rather than failing every save.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.EnvironmentName != want.EnvironmentName {
+		t.Fatalf("EnvironmentName = %q, want %q", got.EnvironmentName, want.EnvironmentName)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingTaskDefaults is the same
+// pattern, applied to the pair grain_config.approved_by_default/
+// auto_merge_by_default (bwsalmon/agents#612) -- except that what an
+// upgraded row lands on is true rather than the column's Go zero value:
+// both settings default on (model.DefaultConfig), so a deployment
+// upgrading across this migration gets the same "Queue immediately" and
+// "Auto-merge once checks pass" starting state a fresh one does.
+func TestInitMigratesAnExistingDatabaseMissingTaskDefaults(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#612 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-#612 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing the task-default columns: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !got.ApprovedByDefault || !got.AutoMergeByDefault {
+		t.Fatalf("ApprovedByDefault/AutoMergeByDefault after migrating = %v/%v, want true/true",
+			got.ApprovedByDefault, got.AutoMergeByDefault)
+	}
+}
+
+// TestInitTurnsTaskDefaultsOnOnceForARowStoringTheOldDefault is
+// Store.ensureConfigTaskDefaultsOn: a row written by a build whose
+// default for these two was off stores 0 in columns that already exist,
+// so no ensure*Column migration would ever touch it and the new default
+// would reach fresh databases only. The backfill turns both on, exactly
+// once -- an operator who turns either off afterwards has made a
+// deliberate choice, and a restart must not overwrite it.
+func TestInitTurnsTaskDefaultsOnOnceForARowStoringTheOldDefault(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	// grain_config as it stood with both settings present and defaulting
+	// off: the columns are there, so only the backfill can move them.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  `+"`approved_by_default`"+`          INTEGER NOT NULL DEFAULT 0,
+  `+"`auto_merge_by_default`"+`        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the old-default grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`,"+
+			"`approved_by_default`,`auto_merge_by_default`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0,0,0)"); err != nil {
+		t.Fatalf("seeding a config row storing the old default: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against a row storing the old task defaults: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !got.ApprovedByDefault || !got.AutoMergeByDefault {
+		t.Fatalf("ApprovedByDefault/AutoMergeByDefault after backfilling = %v/%v, want true/true",
+			got.ApprovedByDefault, got.AutoMergeByDefault)
+	}
+
+	// An operator turns one back off through Settings, and the daemon
+	// restarts: PutConfig is a REPLACE that doesn't bind the ledger
+	// column, so this is also what pins that re-defaulting it cannot
+	// re-arm the backfill.
+	off := *got
+	off.ApprovedByDefault = false
+	if err := store.PutConfig(ctx, off); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := model.New(db).Init(ctx); err != nil {
+		t.Fatalf("re-Init after an operator turned a task default off: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.ApprovedByDefault {
+		t.Errorf("ApprovedByDefault = true after a restart, want the false an operator chose")
+	}
+	if !got.AutoMergeByDefault {
+		t.Errorf("AutoMergeByDefault = false after a restart, want the true it was left at")
 	}
 }
 
@@ -2179,8 +2861,9 @@ func TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB/SandboxDiskGB after migrating = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 

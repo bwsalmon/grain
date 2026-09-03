@@ -18,16 +18,31 @@ import (
 
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 
-// TestMain turns off branchExistsSettled's re-check backoff for every
-// test in this package -- see orchestrator.DisableBranchExistsSleep for
-// why it is dead time here specifically. The retry behaviour itself is
-// covered by TestBranchExistsSettledReChecksANegative, which stubs the
-// same sleep itself and asserts the call count, so nothing here is left
-// untested by skipping the wall clock.
+// TestMain turns off two waits for every test in this package.
+//
+// branchExistsSettled's re-check backoff -- see
+// orchestrator.DisableBranchExistsSleep for why it is dead time here
+// specifically. The retry behaviour itself is covered by
+// TestBranchExistsSettledReChecksANegative, which stubs the same sleep
+// itself and asserts the call count, so nothing here is left untested by
+// skipping the wall clock.
+//
+// And the check-registration window -- the wait that keeps an empty check
+// list from reading as clean until CI has had time to register (see
+// orchestrator.SetCheckRegistrationWindow). Every test here drives a
+// githubsim with no CI in it whatsoever, so leaving the window on would
+// mean each one either waiting two minutes of real time for a check run
+// that is never coming, or seeding a clock jump into an assertion about
+// something else entirely. The tests that are about the window set it
+// themselves and restore it: the sync_internal_test.go group around
+// TestEmptyChecksSettledWaitsOutTheWindow, and
+// TestSyncPullRequestsWaitsForCiToRegisterBeforeMergingAFreshPullRequest.
 func TestMain(m *testing.M) {
-	restore := orchestrator.DisableBranchExistsSleep()
+	restoreSleep := orchestrator.DisableBranchExistsSleep()
+	restoreWindow := orchestrator.SetCheckRegistrationWindow(0)
 	code := m.Run()
-	restore()
+	restoreWindow()
+	restoreSleep()
 	os.Exit(code)
 }
 
@@ -86,6 +101,20 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "checkout", "-q", "-b", branch)
 	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit")
+	run(t, wd, "git", "push", "-q", "origin", branch)
+}
+
+// pushAnotherCommit lands one more commit on a branch that already
+// exists -- pushBranch creates one, this moves it, which is what a push
+// arriving while the merge queue is mid-cycle does.
+func pushAnotherCommit(t *testing.T, bare, branch string) {
+	t.Helper()
+	dir := t.TempDir()
+	run(t, dir, "git", "clone", "-q", "--branch", branch, bare, "work")
+	wd := filepath.Join(dir, "work")
+	run(t, wd, "git", "config", "user.email", "agent@example.com")
+	run(t, wd, "git", "config", "user.name", "agent")
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "a later push")
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 

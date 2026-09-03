@@ -6,6 +6,11 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 `main` and reaches here by a resync, not by being applied to this copy
 (see "Local patches" below).
 
+**This copy is no longer byte-for-byte upstream.** It carries exactly one
+local patch -- flat mode's default-route discovery, which every sandbox's
+egress depends on -- so a resync has to re-apply it until it lands
+upstream. "Local patches" at the bottom is the whole account.
+
 This snapshot is kontur's `main` at
 `e475be0e24f4c08217bdce2e80383d4daf9a82b3` (2026-09-03), the merge of
 [bwsalmon/kontur#38](https://github.com/bwsalmon/kontur/pull/38) on top of
@@ -216,13 +221,54 @@ safety- or correctness-critical should be confirmed against a live
 
 ## Local patches
 
-None. Keep it that way: grain is kontur's primary consumer, so "upstream
-wouldn't want this" is rarely true here, and a fix made against this copy
-has to be re-diffed and re-applied by hand on every resync. Two of the
-three just retired (`qcow2.go`, `docker.go`) went undocumented in this
-file for a resync or more precisely because they were made against this
-copy directly. Landing a change on `bwsalmon/kontur`'s `main` and
-re-vendoring from it costs a round trip and nothing else.
+One, and it belongs upstream: **flat mode's default-route discovery**, in
+`internal/netshim/flat.go` (`DiscoverIdentity`, `defaultGateway`,
+`isDefaultDst`) plus its coverage in `flat_test.go`.
+
+*What breaks without it.* A flat-mode guest takes over the identity the
+container runtime assigned its namespace, and the last piece of that
+identity is the namespace's default route -- passed to the guest as the
+gateway field of the `ip=` kernel parameter `FlatGuestConfig` derives.
+`DiscoverIdentity` found that route by testing `r.Dst == nil`, which no
+route read back off the kernel ever satisfies: the kernel omits `RTA_DST`
+on a route whose prefix length is zero, and `vishvananda/netlink` fills
+that absence back in the way iproute2 does, synthesizing `0.0.0.0/0`
+(`deserializeRoute`). So the gateway came out nil for every guest, the
+`ip=` parameter carried an empty gateway field, and every sandbox VM
+booted with a routing table that stopped at its own subnet -- no route to
+the git proxy's host, a package registry, GitHub or anything else. The
+guest is otherwise perfectly healthy, which is why this went unnoticed:
+address, MAC and MTU are all correct, `kontur exec` reaches it over the
+control link, and every tool call a run makes succeeds. Only the network
+is gone. NAT mode is unaffected -- there `konturctl` fills the gateway in
+itself, from the bridge CIDR it already knows (`staticpod.VMSpec`).
+
+*How it was confirmed.* On a live grain sandbox guest: `/proc/cmdline`
+carried `ip=172.17.0.4:::255.255.0.0::eth0:off` (an empty third field)
+and `ip route` had no default route; re-running the guest's own
+`/usr/lib/klibc/bin/ipconfig` with the gateway filled in installed
+`default via 172.17.0.1 dev eth0`, after which DNS and HTTPS to the
+internet both worked. `TestDiscoverIdentity_Gateway` reproduces it
+without a VM, against the real kernel: it fails on the old condition and
+passes on the new one.
+
+*Getting rid of it.* This is upstream's bug, not something specific to
+how grain drives kontur, so it should land on `bwsalmon/kontur`'s `main`
+and come back here by a resync -- at which point this section goes back
+to saying "None". The patch is deliberately shaped to make that easy: two
+small unexported helpers, one doc comment and their tests, no
+grain-specific behaviour.
+Until then, re-apply it on any resync that predates the upstream fix, and
+check `internal/netshim/flat.go` after every resync.
+
+Otherwise: keep this section at "None". grain is kontur's primary
+consumer, so "upstream wouldn't want this" is rarely true here, and a fix
+made against this copy has to be re-diffed and re-applied by hand on
+every resync. Two of the three just retired (`qcow2.go`, `docker.go`)
+went undocumented in this file for a resync or more precisely because
+they were made against this copy directly. Landing a change on
+`bwsalmon/kontur`'s `main` and re-vendoring from it costs a round trip
+and nothing else.
 
 If one is genuinely unavoidable -- something specific to how this repo
 drives cloud-hypervisor and wrong for upstream -- record it here with

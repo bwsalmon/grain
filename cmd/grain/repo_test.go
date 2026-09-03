@@ -1,0 +1,231 @@
+package main
+
+// `grain repo`'s own rendering and argument parsing (grain/task-36).
+// The wire calls behind it are pkg/ui's (httpclient_test.go's
+// TestHTTPClientRepoFamilyRoundTrip); what is only decidable here is how
+// a row reads and, in particular, that `-set ""` clears a repo's own
+// defaults while omitting -set reads them -- a distinction that, got
+// wrong, turns every `grain repo capabilities acme/widgets` into a
+// silent wipe of what it was asked to print.
+
+import (
+	"context"
+	"net/http/httptest"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/model/sqlite"
+	"github.com/bwsalmon/grain/pkg/ui"
+)
+
+func TestParseRepoCapabilities(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantRepo string
+		wantSet  *[]string
+		wantErr  bool
+	}{
+		{
+			name:     "no -set at all is a read",
+			args:     []string{"acme/widgets"},
+			wantRepo: "acme/widgets",
+			wantSet:  nil,
+		},
+		{
+			name:     "-set names the whole set",
+			args:     []string{"-set", "gcp-key,self-debug", "acme/widgets"},
+			wantRepo: "acme/widgets",
+			wantSet:  &[]string{"gcp-key", "self-debug"},
+		},
+		{
+			// The case this function exists for: given empty, -set is
+			// still a write, and the only way to turn a repo's own set
+			// back off.
+			name:     "-set given empty clears rather than reads",
+			args:     []string{"-set", "", "acme/widgets"},
+			wantRepo: "acme/widgets",
+			wantSet:  &[]string{},
+		},
+		{
+			name:    "no repo at all is an error",
+			args:    []string{"-set", "gcp-key"},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, set, err := parseRepoCapabilities(tc.args)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseRepoCapabilities(%v) = %q, %v, nil; want an error", tc.args, repo, set)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseRepoCapabilities(%v): %v", tc.args, err)
+			}
+			if repo != tc.wantRepo {
+				t.Errorf("repo = %q, want %q", repo, tc.wantRepo)
+			}
+			if (set == nil) != (tc.wantSet == nil) {
+				t.Fatalf("set = %v, want %v (nil-ness is what says read from write)", set, tc.wantSet)
+			}
+			if set != nil && !reflect.DeepEqual(*set, *tc.wantSet) {
+				t.Errorf("set = %v, want %v", *set, *tc.wantSet)
+			}
+		})
+	}
+}
+
+func TestRepoLine(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		summary ui.RepoSummary
+		want    []string
+		wantNot []string
+	}{
+		{
+			name: "a repo with tasks reports them by state",
+			summary: ui.RepoSummary{
+				Repo: "acme/widgets", Configured: true, Tasks: 3, Blocked: 1,
+				States: map[model.State]int{model.StateQueued: 2, model.StateCompleted: 1},
+			},
+			want: []string{"acme/widgets", "allowlisted", "3 tasks (2 queued, 1 completed)", "1 blocked"},
+		},
+		{
+			// An unrestricted deployment's allowlist is empty, so every
+			// row is unconfigured -- saying so on each would read as a
+			// finding rather than as the absence of a list.
+			name:    "a repo that is not allow-listed says nothing in its place",
+			summary: ui.RepoSummary{Repo: "acme/widgets", Tasks: 1, States: map[model.State]int{model.StateQueued: 1}},
+			wantNot: []string{"allowlist"},
+		},
+		{
+			name:    "a repo with no tasks yet says so rather than printing an empty breakdown",
+			summary: ui.RepoSummary{Repo: "acme/fresh", Configured: true},
+			want:    []string{"acme/fresh", "no tasks"},
+			wantNot: []string{"blocked"},
+		},
+		{
+			name: "a repo's own defaults are on its row",
+			summary: ui.RepoSummary{
+				Repo: "acme/widgets", DefaultCapabilities: []string{"gcp-key", "self-debug"},
+			},
+			want: []string{"defaults: gcp-key, self-debug"},
+		},
+		{
+			// A state RepoStateOrder does not name must not vanish from
+			// a breakdown printed next to a total it would then
+			// contradict.
+			name: "a state the printer does not know is counted as other",
+			summary: ui.RepoSummary{
+				Repo: "acme/widgets", Tasks: 2,
+				States: map[model.State]int{model.StateQueued: 1, model.State("invented"): 1},
+			},
+			want: []string{"2 tasks (1 queued, 1 other)"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := repoLine(tc.summary)
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("line %q does not contain %q", got, want)
+				}
+			}
+			for _, unwanted := range tc.wantNot {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("line %q unexpectedly contains %q", got, unwanted)
+				}
+			}
+		})
+	}
+}
+
+// "none" rather than a blank: an empty line after a label reads as a
+// rendering bug, and this is the common case for two of the three sets
+// `grain repo capabilities` prints.
+func TestCapabilityList(t *testing.T) {
+	if got := capabilityList(nil); got != "none" {
+		t.Errorf("capabilityList(nil) = %q, want %q", got, "none")
+	}
+	if got := capabilityList([]string{"gcp-key", "self-debug"}); got != "gcp-key, self-debug" {
+		t.Errorf("capabilityList = %q", got)
+	}
+}
+
+// repoServer is a real ui.Server over a real embedded SQLite store, with
+// settings already saved -- the first save has to name the core fields
+// (ui.UpdateSettings), and `grain repo add` is a read-modify-write of
+// those same settings, so a store with no row at all would fail for a
+// reason that has nothing to do with repos.
+func repoServer(t *testing.T) string {
+	t.Helper()
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := model.New(db)
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	client := ui.NewClient(ui.Config{
+		Actor:         ui.DefaultActor("tester"),
+		DefaultTarget: &repo,
+		Capabilities:  ui.OfferedCapabilities(),
+	}, store)
+	pollInterval, maxWorkers, geminiModel, claudeModel, host := "30s", 1, "gemini-2.5-pro", "claude-sonnet-5", "github.com"
+	if _, err := client.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		PollInterval: &pollInterval, MaxWorkers: &maxWorkers,
+		GeminiModel: &geminiModel, ClaudeModel: &claudeModel, GitHubHost: &host,
+	}); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+	srv := httptest.NewServer(ui.NewServerWithClient(client))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// The dispatch itself, against a real server: `grain repo` is the only
+// command whose arguments are parsed a second time, and every test above
+// would still pass if runCLI's switch never reached cmdRepo at all.
+func TestRunCLIDispatchesTheRepoFamily(t *testing.T) {
+	server := repoServer(t)
+	for _, args := range [][]string{
+		{"-server", server, "repo", "list"},
+		{"-server", server, "repo", "add", "acme/widgets"},
+		{"-server", server, "repo", "capabilities", "-set", "self-debug", "acme/widgets"},
+		{"-server", server, "repo", "capabilities", "acme/widgets"},
+		{"-server", server, "repo", "remove", "acme/widgets"},
+		{"-json", "-server", server, "repo", "list"},
+	} {
+		if err := runCLI(args); err != nil {
+			t.Fatalf("grain %s: %v", strings.Join(args, " "), err)
+		}
+	}
+
+	// A subcommand is required, and an unrecognized one is an error
+	// rather than a silent listing.
+	if err := runCLI([]string{"-server", server, "repo"}); err == nil {
+		t.Error("`grain repo` with no subcommand returned no error")
+	}
+	if err := runCLI([]string{"-server", server, "repo", "nonesuch"}); err == nil {
+		t.Error("`grain repo nonesuch` returned no error")
+	}
+	// Each of the three that take one needs a repo, and none of them
+	// invents a default from Config.DefaultTarget: acting on a repo
+	// nobody named is exactly the mistake worth failing on.
+	for _, args := range [][]string{
+		{"-server", server, "repo", "capabilities"},
+		{"-server", server, "repo", "add"},
+		{"-server", server, "repo", "remove"},
+	} {
+		if err := runCLI(args); err == nil {
+			t.Errorf("grain %s returned no error, want one naming the missing repo", strings.Join(args, " "))
+		}
+	}
+}

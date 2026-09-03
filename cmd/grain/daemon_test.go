@@ -33,6 +33,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/ui"
 )
 
 func TestReadTrimmedFile(t *testing.T) {
@@ -148,6 +149,44 @@ func TestCapabilityProviders(t *testing.T) {
 	}
 }
 
+// Every provider this deployment registers has to have a
+// ui.OfferedCapabilities row, and every row has to have a provider --
+// the two hand-maintained lists whose drift left gcp-key and
+// github-sandbox with providers no task could ever reach, and
+// "scratch-repo" with a row no provider answered to. pkg/ui's own
+// TestOfferedCapabilitiesCoversEveryShippedCapability ties that listing
+// to the catalog of providers grain ships; this ties it to the registry
+// a real daemon actually builds, which is the pair the gap was in.
+//
+// The config is fully populated on purpose: capabilityProviders gates
+// gcp-key and gemini-key on it (TestCapabilityProviders above covers
+// the gated cases), and gating one off is a deployment being
+// unconfigured, not the picker and the registry disagreeing.
+func TestEveryRegisteredCapabilityIsGrantable(t *testing.T) {
+	cfg := config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"}
+	var registered []string
+	for _, p := range capabilityProviders(cfg) {
+		registered = append(registered, p.Spec().Name)
+	}
+	var offered []string
+	for _, c := range ui.OfferedCapabilities() {
+		offered = append(offered, c.ID)
+	}
+	for _, name := range registered {
+		if !slices.Contains(offered, name) {
+			t.Errorf("capability %q is registered but ui.OfferedCapabilities does not offer it: "+
+				"every attempt to attach it -- from the UI's picker or `grain create -capability` -- is rejected as "+
+				"\"unknown capability\", so no task can be granted it and model.ResolveGrants is never reached", name)
+		}
+	}
+	for _, id := range offered {
+		if !slices.Contains(registered, id) {
+			t.Errorf("ui.OfferedCapabilities offers %q but a fully configured deployment registers no provider for it: "+
+				"a task granted it is refused at dispatch (\"no provider is registered for capability\")", id)
+		}
+	}
+}
+
 func TestOpenStore(t *testing.T) {
 	store, db, err := openStore(t.TempDir())
 	if err != nil {
@@ -219,7 +258,7 @@ func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
 	ctx := context.Background()
 
 	flagCfg := config{
-		maxConcurrent: 2, pollInterval: time.Minute,
+		maxWorkers: 2, pollInterval: time.Minute,
 		// agentFramework is named rather than left zero because it is
 		// the one field that never round-trips verbatim: the store
 		// normalizes it on read (model.NormalizeAgentFramework), so an
@@ -246,6 +285,39 @@ func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
 	}
 }
 
+// TestLoadConfigSeedsTheTaskDefaultsOn covers the two settings the seed
+// above has no flag for: ApprovedByDefault and AutoMergeByDefault default
+// on (model.DefaultConfig), and the row loadConfig writes binds every
+// column, so seeding from flags that say nothing about either has to
+// store what a deployment that has never chosen them runs rather than the
+// Go zero value of the field.
+func TestLoadConfigSeedsTheTaskDefaultsOn(t *testing.T) {
+	store, db, err := openStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	flagCfg := config{
+		maxWorkers: 2, pollInterval: time.Minute,
+		agentFramework: model.AgentFrameworkAntigravity,
+		geminiModel:    "gemini-2.5-pro", githubHost: "github.com",
+	}
+	if _, err := loadConfig(ctx, store, flagCfg); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	stored, err := store.GetConfig(ctx)
+	if err != nil || stored == nil {
+		t.Fatalf("GetConfig after seeding: (%+v, %v)", stored, err)
+	}
+	if !stored.ApprovedByDefault || !stored.AutoMergeByDefault {
+		t.Fatalf("seeded ApprovedByDefault/AutoMergeByDefault = %v/%v, want true/true",
+			stored.ApprovedByDefault, stored.AutoMergeByDefault)
+	}
+}
+
 // TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists is the restart
 // case: a UI or a CLI wrote a config through the store, and the next
 // start must run with that rather than whatever the flags on this
@@ -259,7 +331,7 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 	ctx := context.Background()
 
 	stored := model.Config{
-		MaxConcurrent: 1, PollInterval: 5 * time.Second,
+		MaxWorkers: 1, PollInterval: 5 * time.Second,
 		// Named for the same reason as in the test above: GetConfig
 		// normalizes this field, so a stored "" reads back as
 		// AgentFrameworkAntigravity and would not compare equal.
@@ -273,8 +345,8 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 	}
 
 	flagCfg := config{
-		dataDir:       "/should/be/left/alone",
-		maxConcurrent: 4, pollInterval: time.Hour,
+		dataDir:    "/should/be/left/alone",
+		maxWorkers: 4, pollInterval: time.Hour,
 		geminiModel: "ignored", maxAgentTurns: -1,
 		githubHost: "ignored.example.com", githubInsecureHTTP: true,
 		gcpProject: "ignored-proj", gcpServiceAccountEmail: "ignored@example.com",
@@ -309,7 +381,7 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 	ctx := context.Background()
 
 	stored := model.Config{
-		MaxConcurrent: 1, PollInterval: 5 * time.Second,
+		MaxWorkers: 1, PollInterval: 5 * time.Second,
 		// Named for the same reason as in the test above: GetConfig
 		// normalizes this field, so a stored "" reads back as
 		// AgentFrameworkAntigravity and would not compare equal.
@@ -324,9 +396,9 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 	}
 
 	// Agrees with the store on everything except -github-host and
-	// -max-concurrent, so only those two should be logged.
+	// -max-workers, so only those two should be logged.
 	flagCfg := config{
-		maxConcurrent: 4, pollInterval: stored.PollInterval,
+		maxWorkers: 4, pollInterval: stored.PollInterval,
 		geminiModel: stored.GeminiModel, maxAgentTurns: stored.MaxAgentTurns,
 		githubHost: "ignored.example.com", githubInsecureHTTP: stored.GitHubInsecureHTTP,
 		gcpProject: stored.GCPProject, gcpServiceAccountEmail: stored.GCPServiceAccountEmail,
@@ -343,14 +415,14 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 
 	got := logs.String()
 	for _, want := range []string{
-		"ignoring -max-concurrent=4, stored config already has 1",
+		"ignoring -max-workers=4, stored config already has 1",
 		"ignoring -github-host=ignored.example.com, stored config already has github.com",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("loadConfig log output = %q, want it to contain %q", got, want)
 		}
 	}
-	for _, unwanted := range []string{"-poll-interval", "-gemini-model", "-claude-model", "-max-agent-turns", "-github-insecure-http", "-gcp-project", "-gcp-agent-service-account", "-target-repos"} {
+	for _, unwanted := range []string{"-poll-interval", "-gemini-model", "-claude-model", "-max-agent-turns", "-max-mergers", "-github-insecure-http", "-gcp-project", "-gcp-agent-service-account", "-target-repos"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("loadConfig log output = %q, should not mention %q since the flag and the store agree", got, unwanted)
 		}

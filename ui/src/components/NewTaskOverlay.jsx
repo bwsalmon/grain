@@ -1,9 +1,9 @@
 import { useRef, useState } from "react";
-import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STALE_BASE_STATES, frameworkLabel, knownRepos, lastBaseForRepo } from "../state.js";
+import { defaultCapabilitiesFor, frameworkLabel, knownRepos, lastBaseForRepo, suggestsBase } from "../state.js";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
@@ -41,7 +41,26 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
   const [dependsOn, setDependsOn] = useState([]);
-  const [capabilities, setCapabilities] = useState([]);
+  // capabilities starts as whatever a task against this repo would be
+  // filed holding: this deployment's own default set plus whatever the
+  // picked repo adds to it (defaultCapabilitiesFor, over GET
+  // /api/config's defaultCapabilities and repoDefaultCapabilities) --
+  // ticked, in the picker below, so it is visible before the task is
+  // filed and can be unticked here rather than detached afterwards. The
+  // payload always names the resulting list, so what is ticked when
+  // Create is clicked is exactly what the task is filed with; the server
+  // only falls back to its own defaults for a caller that names no list
+  // at all (ui.CreateTaskRequest.Capabilities).
+  const [capabilities, setCapabilities] = useState(() => defaultCapabilitiesFor(config, defaultRepo || ""));
+  // capabilitiesEdited is Base branch's baseEdited above, for the same
+  // reason: picking a different repo re-seeds this picker from that
+  // repo's own defaults, and must not do so over a choice somebody has
+  // already made. Once the picker has been touched, the ticks are theirs
+  // and changing repo leaves them exactly as they are -- an untick that
+  // silently came back because the repo changed afterwards is the one
+  // failure a re-seed can cause, and it would put a capability on a task
+  // that whoever filed it had already said no to.
+  const capabilitiesEdited = useRef(false);
   // attachments is File objects, not yet read -- AttachmentPicker's own
   // doc comment on why that read is deferred to submit.
   const [attachments, setAttachments] = useState([]);
@@ -56,15 +75,22 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // repo's own last task used (bwsalmon/agents#641), rather than
   // clobbering something the human already typed (baseEdited.current) or
   // a repo with no history to prefill from. That "no history" check is
-  // gated on whether the repo has any (non-stale) task at all, not on
-  // lastBaseForRepo's return value -- that value is "" both when there is
-  // no history and when the most recent task deliberately used the
-  // default branch, and only the former should leave a manually-typed
-  // base alone.
+  // gated on whether the repo has any task suggestsBase counts at all,
+  // not on lastBaseForRepo's return value -- that value is "" both when
+  // there is no history and when the most recent task deliberately used
+  // the default branch, and only the former should leave a
+  // manually-typed base alone.
   const handleRepoChange = (r) => {
     setRepo(r);
+    // Re-seeded unconditionally when the picker is untouched, unlike
+    // Base branch's own "only if the new repo has history" guard: the
+    // resolved set for a repo that adds nothing is the deployment's
+    // alone, which is a real answer rather than the absence of one, and
+    // leaving the previous repo's extra capabilities ticked would file
+    // the task with capabilities this repo never asked for.
+    if (!capabilitiesEdited.current) setCapabilities(defaultCapabilitiesFor(config, r));
     if (baseEdited.current) return;
-    const hasHistory = (tasks || []).some((t) => t.repo === r && !STALE_BASE_STATES.includes(t.state));
+    const hasHistory = (tasks || []).some((t) => t.repo === r && suggestsBase(t));
     if (hasHistory) setBase(lastBaseForRepo(tasks, r));
   };
 
@@ -90,6 +116,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       autoMerge: form.elements.autoMerge.checked,
       sandboxCpus: parseInt(data.get("sandboxCpus"), 10) || 0,
       sandboxMemoryMb: parseInt(data.get("sandboxMemoryMb"), 10) || 0,
+      sandboxDiskGb: parseInt(data.get("sandboxDiskGb"), 10) || 0,
       // "" is the deployment default, not a framework: the server reads
       // an empty agentFramework as "whichever one this deployment is set
       // to when the task dispatches" (model.Task.AgentFramework).
@@ -113,7 +140,8 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       setNoRepo(false);
       setBase(lastBaseForRepo(tasks, defaultRepo || ""));
       setDependsOn([]);
-      setCapabilities([]);
+      setCapabilities(defaultCapabilitiesFor(config, defaultRepo || ""));
+      capabilitiesEdited.current = false;
       setAttachments([]);
       setInteractive(false);
       onClose();
@@ -166,7 +194,16 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             control={
               <Checkbox
                 checked={noRepo}
-                onChange={(e) => { setNoRepo(e.target.checked); if (e.target.checked) setRepo(""); }}
+                onChange={(e) => {
+                  setNoRepo(e.target.checked);
+                  if (!e.target.checked) return;
+                  setRepo("");
+                  // A task with no repo has no per-repo layer to
+                  // resolve, so it starts with the deployment's set
+                  // alone -- the same answer CreateTask gives a task
+                  // whose Target is nil.
+                  if (!capabilitiesEdited.current) setCapabilities(defaultCapabilitiesFor(config, ""));
+                }}
               />
             }
             label="No repo (standalone task -- nothing to check out)"
@@ -205,7 +242,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             label="Capabilities"
             multiple
             value={capabilities}
-            onChange={(e) => setCapabilities(e.target.value)}
+            onChange={(e) => { capabilitiesEdited.current = true; setCapabilities(e.target.value); }}
             renderValue={(selected) => (
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
                 {selected.map((id) => {
@@ -222,21 +259,33 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               </MenuItem>
             ))}
           </Select>
+          {defaultCapabilitiesFor(config, noRepo ? "" : repo).length > 0 && (
+            <FormHelperText>
+              Pre-ticked ones are the defaults for this repo -- this deployment&apos;s (Settings &gt;
+              Capabilities) plus anything the repo itself adds (Repos &gt; Capabilities). Untick any this task
+              should not have.
+            </FormHelperText>
+          )}
         </FormControl>
         <fieldset>
           <legend>Depends on <span className="hint">optional</span></legend>
           {dependsOn.length > 0 && (
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mb: 1 }}>
+            // One full-width chip per line, the shape DetailOverlay's
+            // dependency list uses: a picked task then reads as a row,
+            // rather than a bubble sized by however long its title
+            // happens to be, wrapped in beside the others.
+            <Stack spacing={0.6} sx={{ mb: 1 }}>
               {dependsOn.map((t) => (
-                <Chip
-                  key={t.id}
-                  size="small"
-                  label={`${t.id} ${t.title}`}
-                  onDelete={() => removeDependency(t.id)}
-                  deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
-                />
+                <Tooltip key={t.id} title={`${t.id} ${t.title}`} placement="left">
+                  <Chip
+                    label={`${t.id} ${t.title}`}
+                    onDelete={() => removeDependency(t.id)}
+                    deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
+                    sx={{ width: "100%", justifyContent: "space-between", "& .MuiChip-label": { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } }}
+                  />
+                </Tooltip>
               ))}
-            </Box>
+            </Stack>
           )}
           <TaskPicker
             tasks={tasks || []}
@@ -291,6 +340,17 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               <TextField
                 name="sandboxMemoryMb"
                 label="Memory (MiB)"
+                helperText="blank/0 uses the deployment default"
+                type="number"
+                inputProps={{ min: 0, step: 1 }}
+                autoComplete="off"
+                fullWidth
+                margin="normal"
+                size="small"
+              />
+              <TextField
+                name="sandboxDiskGb"
+                label="Disk (GiB)"
                 helperText="blank/0 uses the deployment default"
                 type="number"
                 inputProps={{ min: 0, step: 1 }}

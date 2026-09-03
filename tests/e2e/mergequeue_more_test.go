@@ -115,7 +115,7 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	bare := filepath.Join(w.upstreamDir, owner, repoName+".git")
 	sim := githubsim.New(owner, repoName, bare, "main")
 	client := github.NewClient(sim, nil)
-	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1}
+	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxWorkers: 1}
 
 	task1 := model.Task{
 		ID: "t1", Intent: model.IntentImplement, Title: "task1",
@@ -140,9 +140,9 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	branch1, branch2 := model.BranchName("t1"), model.BranchName("t2")
 	clock := baseTime
 
-	// Step 1: both push and open pull requests -- task1 first, so it is
-	// the earlier-created (and thus head) entry once both are queue
-	// members.
+	// Step 1: both push and open pull requests -- task1 first, and it
+	// sits ahead of task2 in the backlog, which is where the queue reads
+	// its head from once both are members.
 	deps.Framework = scriptedFramework(configPushScript(w.remote(owner, repoName), branch1, "setting: from-task1"))
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
 		t.Fatalf("RunCycle (t1 push): %v", err)
@@ -286,7 +286,7 @@ func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *te
 	bare := filepath.Join(w.upstreamDir, owner, repoName+".git")
 	sim := githubsim.New(owner, repoName, bare, "main")
 	client := github.NewClient(sim, nil)
-	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1}
+	deps := orchestrator.Deps{Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxWorkers: 1}
 
 	task1 := model.Task{
 		ID: "t1", Intent: model.IntentImplement, Title: "task1",
@@ -412,7 +412,7 @@ func TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood(t *tes
 
 	branch := model.BranchName("t-closed-early")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-closed-early")),
 	}
 	clock := baseTime
@@ -476,7 +476,7 @@ func TestAutoMergeLeavesAPullRequestOfUnknownMergeabilityAloneUntilItResolves(t 
 
 	branch := model.BranchName("t-pending")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-pending")),
 	}
 	clock := baseTime

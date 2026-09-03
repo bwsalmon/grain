@@ -17,7 +17,7 @@ import (
 // message a caller sees names a schedule, not a task.
 type scheduleNotFoundError struct{ ID string }
 
-func (e *scheduleNotFoundError) Error() string { return "no scheduled task " + e.ID }
+func (e *scheduleNotFoundError) Error() string { return "no schedule " + e.ID }
 
 // Recurrence is a schedule's cadence, over the wire -- model.Recurrence's
 // fields, with Kind matching model.RecurrenceKind's own string values
@@ -132,8 +132,18 @@ type Schedule struct {
 	// Repo and Base are never among them: a template carries no target of
 	// its own (model.TaskTemplate's own doc comment on why), so they are
 	// always this schedule's own fields, template-backed or not.
-	TemplateID   string     `json:"templateId,omitempty"`
-	TemplateName string     `json:"templateName,omitempty"`
+	TemplateID   string `json:"templateId,omitempty"`
+	TemplateName string `json:"templateName,omitempty"`
+	// SuiteID and SuiteName are set when this schedule runs a task suite
+	// on its cadence rather than filing a single task -- Title is the
+	// suite's own name in that case (model.Schedule.SuiteID's own doc
+	// comment on the display cache), and
+	// Description/AutoMerge/Reads/Capabilities mean nothing, since a
+	// suite run takes all of those from the suite and its templates. Repo
+	// and Base still decide what the run targets, exactly as they do for
+	// a task.
+	SuiteID      string     `json:"suiteId,omitempty"`
+	SuiteName    string     `json:"suiteName,omitempty"`
 	Capabilities []string   `json:"capabilities"`
 	Recurrence   Recurrence `json:"recurrence"`
 	Enabled      bool       `json:"enabled"`
@@ -142,12 +152,13 @@ type Schedule struct {
 	CreatedAt    time.Time  `json:"createdAt"`
 }
 
-// scheduleFrom renders s -- templateName is the schedule's own
-// TemplateID resolved to a name by the caller (fetched once per list
-// rather than once per row's own doc comment on why this is a parameter
-// rather than a lookup this function does itself), empty when
-// s.TemplateID is nil or the caller has none to offer.
-func scheduleFrom(s model.ScheduledTask, templateName string) Schedule {
+// scheduleFrom renders s -- templateName and suiteName are the
+// schedule's own TemplateID/SuiteID resolved to a name by the caller
+// (fetched once per list rather than once per row's own doc comment on
+// why these are parameters rather than lookups this function does
+// itself), empty when the id in question is nil or the caller has no
+// name to offer.
+func scheduleFrom(s model.Schedule, templateName, suiteName string) Schedule {
 	out := Schedule{
 		ID:           s.ID,
 		Title:        s.Title,
@@ -166,6 +177,10 @@ func scheduleFrom(s model.ScheduledTask, templateName string) Schedule {
 		out.TemplateID = *s.TemplateID
 		out.TemplateName = templateName
 	}
+	if s.SuiteID != nil {
+		out.SuiteID = *s.SuiteID
+		out.SuiteName = suiteName
+	}
 	for _, r := range s.Reads {
 		out.Reads = append(out.Reads, r.String())
 	}
@@ -177,35 +192,44 @@ func scheduleFrom(s model.ScheduledTask, templateName string) Schedule {
 
 // ListSchedules returns every schedule, newest first.
 func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
-	list, err := c.Store.ListScheduledTasks(ctx)
+	list, err := c.Store.ListSchedules(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// Templates are looked up once per distinct id rather than once per
-	// schedule -- more than one schedule pointing at the same template
-	// (the whole point of TemplateID existing) would otherwise repeat the
-	// same GetTaskTemplate call.
-	names := map[string]string{}
+	// Templates and suites are looked up once per distinct id rather than
+	// once per schedule -- more than one schedule pointing at the same
+	// template or suite (the whole point of TemplateID and SuiteID
+	// existing) would otherwise repeat the same store call.
+	templateNames, suiteNames := map[string]string{}, map[string]string{}
 	out := make([]Schedule, 0, len(list))
 	for _, s := range list {
-		var name string
+		var templateName, suiteName string
 		if s.TemplateID != nil {
 			id := *s.TemplateID
-			if cached, ok := names[id]; ok {
-				name = cached
+			if cached, ok := templateNames[id]; ok {
+				templateName = cached
 			} else if t, err := c.Store.GetTaskTemplate(ctx, id); err == nil && t != nil {
-				name = t.Name
-				names[id] = name
+				templateName = t.Name
+				templateNames[id] = templateName
 			}
 		}
-		out = append(out, scheduleFrom(s, name))
+		if s.SuiteID != nil {
+			id := *s.SuiteID
+			if cached, ok := suiteNames[id]; ok {
+				suiteName = cached
+			} else if suite, err := c.Store.GetTaskSuite(ctx, id); err == nil && suite != nil {
+				suiteName = suite.Name
+				suiteNames[id] = suiteName
+			}
+		}
+		out = append(out, scheduleFrom(s, templateName, suiteName))
 	}
 	return out, nil
 }
 
 // CreateScheduleRequest is a new schedule's fields -- CreateTaskRequest's
 // own shape, minus DependsOn and Approved: a schedule fires with no
-// reviewer in the loop each time (see fireScheduledTask's own doc comment
+// reviewer in the loop each time (see fireTaskSchedule's own doc comment
 // on why it needs no approved flag), and a one-shot depends-on link makes
 // no sense against a task this schedule refiles indefinitely, so those
 // two task-only concerns have no home here. Recurrence is always
@@ -224,6 +248,15 @@ func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
 // own per-field overrides, a combination this API deliberately does not
 // support (see CreateSchedule's own doc comment). Left blank, Title is
 // also required, exactly as it always was.
+//
+// SuiteID, given, makes this a schedule that runs a whole task suite on
+// its cadence rather than filing one task: the suite decides everything
+// about what runs (its items, how many passes, approval, auto-merge), so
+// Title/Description/AutoMerge/Capabilities/Reads are ignored the same way
+// a TemplateID makes them ignored, and TemplateID itself may not be given
+// alongside it. Base is required for a suite-backed schedule, matching
+// CreateSuiteRunRequest's own rule: a suite run stacks its tasks against
+// one named branch and has no default to fall back to.
 type CreateScheduleRequest struct {
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`
@@ -233,6 +266,7 @@ type CreateScheduleRequest struct {
 	Capabilities []string   `json:"capabilities"`
 	Reads        []string   `json:"reads"`
 	TemplateID   string     `json:"templateId"`
+	SuiteID      string     `json:"suiteId"`
 	Recurrence   Recurrence `json:"recurrence"`
 	// Enabled, omitted, defaults to true -- a schedule somebody just
 	// created is normally meant to run, not to sit paused until a second
@@ -249,8 +283,13 @@ type CreateScheduleRequest struct {
 // (CreateScheduleRequest's own doc comment on why); a template-backed
 // schedule (req.TemplateID set) needs no Title of its own:
 // scheduleContentFromTemplate below reads it off the template instead,
-// the same field fireScheduledTask itself re-reads from the template on
+// the same field fireTaskSchedule itself re-reads from the template on
 // every firing rather than trusting whatever this call snapshots.
+//
+// A suite-backed schedule (req.SuiteID set) needs no Title either, for
+// the same reason one field further out: the suite's own name stands in
+// as this schedule's display title, re-read by fireSuiteSchedule on every
+// firing rather than trusted from here.
 func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) (Schedule, error) {
 	recurrence, err := parseRecurrence(req.Recurrence)
 	if err != nil {
@@ -264,9 +303,26 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 		return Schedule{}, &ValidationError{err: err}
 	}
 
-	var sched model.ScheduledTask
-	var templateName string
-	if strings.TrimSpace(req.TemplateID) != "" {
+	var sched model.Schedule
+	var templateName, suiteName string
+	if strings.TrimSpace(req.SuiteID) != "" {
+		if strings.TrimSpace(req.TemplateID) != "" {
+			return Schedule{}, validationErrorf(
+				"a schedule fires either a task suite or a task, not both: give suiteId or templateId, not both")
+		}
+		if strings.TrimSpace(req.Base) == "" {
+			return Schedule{}, validationErrorf("base is required: a task suite run has no default branch to fall back to")
+		}
+		suite, err := c.Store.GetTaskSuite(ctx, req.SuiteID)
+		if err != nil {
+			return Schedule{}, err
+		}
+		if suite == nil {
+			return Schedule{}, validationErrorf("unknown task suite %s", req.SuiteID)
+		}
+		sched = model.Schedule{Title: suite.Name, SuiteID: &suite.ID}
+		suiteName = suite.Name
+	} else if strings.TrimSpace(req.TemplateID) != "" {
 		tmpl, err := c.Store.GetTaskTemplate(ctx, req.TemplateID)
 		if err != nil {
 			return Schedule{}, err
@@ -280,7 +336,7 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 		if strings.TrimSpace(req.Title) == "" {
 			return Schedule{}, validationErrorf("title is required")
 		}
-		grants, err := c.grantsFor(req.Capabilities)
+		grants, err := c.grantsFor(req.Capabilities, model.GrantByLabel)
 		if err != nil {
 			return Schedule{}, err
 		}
@@ -288,7 +344,7 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 		if err != nil {
 			return Schedule{}, err
 		}
-		sched = model.ScheduledTask{
+		sched = model.Schedule{
 			Title:     req.Title,
 			Body:      req.Description,
 			AutoMerge: req.AutoMerge,
@@ -304,7 +360,7 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 		enabled = *req.Enabled
 	}
 
-	id, err := c.Store.NewScheduledTaskID(ctx)
+	id, err := c.Store.NewScheduleID(ctx)
 	if err != nil {
 		return Schedule{}, err
 	}
@@ -314,23 +370,23 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	sched.Enabled = enabled
 	sched.NextRunAt = now
 	sched.CreatedAt = now
-	if err := c.Store.PutScheduledTask(ctx, sched); err != nil {
+	if err := c.Store.PutSchedule(ctx, sched); err != nil {
 		return Schedule{}, err
 	}
-	return scheduleFrom(sched, templateName), nil
+	return scheduleFrom(sched, templateName, suiteName), nil
 }
 
-// scheduleContentFromTemplate is the content half of a ScheduledTask that
-// a template actually carries (everything but identity, recurrence,
-// timing, and Target/Base -- a template has no target of its own,
+// scheduleContentFromTemplate is the content half of a Schedule that a
+// template actually carries (everything but identity, recurrence, timing,
+// and Target/Base -- a template has no target of its own,
 // model.TaskTemplate's own doc comment on why) copied from t --
 // CreateSchedule's and UpdateSchedule's shared way of attaching a
-// schedule to a template, and also what fireScheduledTask itself calls
-// each time a template-backed schedule fires, so a schedule's own
-// inline copy never drifts from the template it names for longer than
-// one firing. Callers still need to set Target and Base themselves.
-func scheduleContentFromTemplate(t model.TaskTemplate) model.ScheduledTask {
-	return model.ScheduledTask{
+// schedule to a template, and also what fireTaskSchedule itself calls
+// each time a template-backed schedule fires, so a schedule's own inline
+// copy never drifts from the template it names for longer than one
+// firing. Callers still need to set Target and Base themselves.
+func scheduleContentFromTemplate(t model.TaskTemplate) model.Schedule {
+	return model.Schedule{
 		Title:      t.Title,
 		Body:       t.Body,
 		AutoMerge:  t.AutoMerge,
@@ -361,6 +417,17 @@ func scheduleContentFromTemplate(t model.TaskTemplate) model.ScheduledTask {
 // schedule's current content (most recently synced from whatever
 // template it pointed at) in place as a now-independent copy, editable
 // through those same five fields from then on.
+//
+// SuiteID repoints a suite-backed schedule at a different task suite, and
+// is the one field here that cannot change what *kind* of schedule this
+// is (model.Schedule.SuiteID's own doc comment on why): given on a
+// schedule that fires a task, or given as "" on one that runs a suite, it
+// is refused rather than quietly converting a schedule into something
+// with no content to fire. Everything a suite-backed schedule still
+// decides for itself -- Repo, Base, Recurrence, Enabled -- is editable
+// here exactly as it is for any other schedule;
+// Title/Description/AutoMerge/Reads/Capabilities are ignored, the same as
+// they are while a TemplateID is set.
 type UpdateScheduleRequest struct {
 	Title        *string     `json:"title,omitempty"`
 	Description  *string     `json:"description,omitempty"`
@@ -370,14 +437,59 @@ type UpdateScheduleRequest struct {
 	Capabilities *[]string   `json:"capabilities,omitempty"`
 	Reads        *[]string   `json:"reads,omitempty"`
 	TemplateID   *string     `json:"templateId,omitempty"`
+	SuiteID      *string     `json:"suiteId,omitempty"`
 	Recurrence   *Recurrence `json:"recurrence,omitempty"`
 	Enabled      *bool       `json:"enabled,omitempty"`
 }
 
 // UpdateSchedule edits a schedule's fields in place -- its NextRunAt and
-// LastRunAt are left exactly as they are; only fireScheduledTask ever
+// LastRunAt are left exactly as they are; only fireTaskSchedule ever
 // changes those.
 func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateScheduleRequest) (Schedule, error) {
+	existing, err := c.Store.GetSchedule(ctx, id)
+	if err != nil {
+		return Schedule{}, err
+	}
+	if existing == nil {
+		return Schedule{}, &scheduleNotFoundError{ID: id}
+	}
+	suiteBacked := existing.SuiteID != nil
+
+	// repointing is non-nil only when this suite-backed schedule is being
+	// moved to a different task suite -- the one thing req.SuiteID can
+	// do, since what a schedule fires is fixed when it is created
+	// (UpdateScheduleRequest's own doc comment on why).
+	var repointing *model.TaskSuite
+	if req.SuiteID != nil {
+		wanted := strings.TrimSpace(*req.SuiteID)
+		switch {
+		case !suiteBacked && wanted != "":
+			return Schedule{}, validationErrorf(
+				"this schedule files a task, not a task suite: create a suite-backed schedule instead")
+		case suiteBacked && wanted == "":
+			return Schedule{}, validationErrorf(
+				"a suite-backed schedule cannot be detached from its suite: delete it, or point it at another suite")
+		case suiteBacked:
+			suite, err := c.Store.GetTaskSuite(ctx, wanted)
+			if err != nil {
+				return Schedule{}, err
+			}
+			if suite == nil {
+				return Schedule{}, validationErrorf("unknown task suite %s", wanted)
+			}
+			repointing = suite
+		}
+	}
+	if suiteBacked {
+		if req.TemplateID != nil && strings.TrimSpace(*req.TemplateID) != "" {
+			return Schedule{}, validationErrorf(
+				"this schedule runs a task suite, so it fires no template of its own")
+		}
+		if req.Base != nil && strings.TrimSpace(*req.Base) == "" {
+			return Schedule{}, validationErrorf("base is required: a task suite run has no default branch to fall back to")
+		}
+	}
+
 	// attaching is non-nil only when req.TemplateID names a template to
 	// attach to (the non-empty case) -- content below is populated from
 	// it, and every other content field on req is ignored, the same
@@ -407,13 +519,13 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	}
 	var grants []model.Grant
 	var reads []model.RepoRef
-	if attaching == nil {
+	if attaching == nil && !suiteBacked {
 		if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
 			return Schedule{}, validationErrorf("title cannot be empty")
 		}
 		if req.Capabilities != nil {
 			var err error
-			grants, err = c.grantsFor(*req.Capabilities)
+			grants, err = c.grantsFor(*req.Capabilities, model.GrantByLabel)
 			if err != nil {
 				return Schedule{}, err
 			}
@@ -435,16 +547,15 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 		recurrence = &r
 	}
 
-	existing, err := c.Store.GetScheduledTask(ctx, id)
-	if err != nil {
-		return Schedule{}, err
-	}
-	if existing == nil {
-		return Schedule{}, &scheduleNotFoundError{ID: id}
-	}
-
-	if err := c.Store.UpdateScheduledTask(ctx, id, func(s *model.ScheduledTask) error {
-		if attaching != nil {
+	if err := c.Store.UpdateSchedule(ctx, id, func(s *model.Schedule) error {
+		if s.SuiteID != nil {
+			// A suite-backed schedule carries no content of its own to
+			// edit -- the suite does. Only which suite it runs can change
+			// here, and only to another suite.
+			if repointing != nil {
+				s.SuiteID, s.Title = &repointing.ID, repointing.Name
+			}
+		} else if attaching != nil {
 			content := scheduleContentFromTemplate(*attaching)
 			s.Title, s.Body, s.AutoMerge, s.Reads, s.Grants, s.TemplateID =
 				content.Title, content.Body, content.AutoMerge, content.Reads, content.Grants, content.TemplateID
@@ -492,11 +603,11 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 		return Schedule{}, err
 	}
 
-	updated, err := c.Store.GetScheduledTask(ctx, id)
+	updated, err := c.Store.GetSchedule(ctx, id)
 	if err != nil {
 		return Schedule{}, err
 	}
-	var templateName string
+	var templateName, suiteName string
 	if attaching != nil {
 		templateName = attaching.Name
 	} else if updated.TemplateID != nil {
@@ -504,22 +615,29 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 			templateName = t.Name
 		}
 	}
-	return scheduleFrom(*updated, templateName), nil
+	if repointing != nil {
+		suiteName = repointing.Name
+	} else if updated.SuiteID != nil {
+		if suite, err := c.Store.GetTaskSuite(ctx, *updated.SuiteID); err == nil && suite != nil {
+			suiteName = suite.Name
+		}
+	}
+	return scheduleFrom(*updated, templateName, suiteName), nil
 }
 
-// DeleteSchedule removes a schedule outright -- Store.DeleteScheduledTask's
+// DeleteSchedule removes a schedule outright -- Store.DeleteSchedule's
 // own doc comment gives the reasoning: unlike a task, a schedule is only
 // ever a standing declaration, so there is no history on the row itself
 // worth keeping once a human no longer wants it.
 func (c *Client) DeleteSchedule(ctx context.Context, id string) error {
-	existing, err := c.Store.GetScheduledTask(ctx, id)
+	existing, err := c.Store.GetSchedule(ctx, id)
 	if err != nil {
 		return err
 	}
 	if existing == nil {
 		return &scheduleNotFoundError{ID: id}
 	}
-	return c.Store.DeleteScheduledTask(ctx, id)
+	return c.Store.DeleteSchedule(ctx, id)
 }
 
 // --- handlers ------------------------------------------------------------

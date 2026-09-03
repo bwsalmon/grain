@@ -84,7 +84,13 @@ func (s *syncedSim) firstPullRequestNumber() int {
 // simulated user's own merge push both use -- goes to this package's own
 // gitHTTPBackend (harness_test.go), reused directly since both live in
 // package e2e.
-func githubHostServer(t *testing.T, sim *syncedSim, gitRoot string) string {
+//
+// sim is a github.Transport rather than the *syncedSim every caller here
+// passes, so that a test wanting to see what actually arrived on the wire
+// can wrap one (mcpserver_pull_request_test.go's authRecordingSim, which
+// checks that a token really was sent) without a second copy of this
+// handler.
+func githubHostServer(t *testing.T, sim github.Transport, gitRoot string) string {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +167,7 @@ func runCLIStore(t *testing.T, bin, storeDir string, args ...string) string {
 	t.Helper()
 	var out string
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		cfg := ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.DefaultCapabilities()}
+		cfg := ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.OfferedCapabilities()}
 		srv := httptest.NewServer(ui.NewServer(cfg, store))
 		defer srv.Close()
 		out = runCLI(t, bin, append([]string{"-server", srv.URL}, args...)...)
@@ -271,7 +277,7 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(remote, branch, task.ID)),
 	}
 
@@ -310,7 +316,7 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	userTransport := github.NewRealTransport(githubHost)
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
-	if err := userClient.MergePullRequest(owner, repoName, prNumber); err != nil {
+	if err := userClient.MergePullRequest(owner, repoName, prNumber, ""); err != nil {
 		t.Fatalf("submitting (merging) the pull request: %v", err)
 	}
 

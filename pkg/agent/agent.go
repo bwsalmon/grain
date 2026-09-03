@@ -41,7 +41,44 @@ type RunConfig struct {
 	// at instead of a local directory -- see agent/antigravity's and
 	// agent/claude's Framework.Run.
 	KonturVM string
-	Tools    []mcp.Tool
+	// TaskID is the task this run belongs to -- the one fact a forked
+	// "mcpserver" subprocess needs before it can ask the daemon to act on
+	// this run's behalf rather than only on its sandbox. It is passed as
+	// that subprocess's own -task, alongside the daemon URL the Framework
+	// itself was constructed with (agent/claude's WithGrainServer), and
+	// what it buys is the open_pull_request tool: a run that can open its
+	// own pull request while it still has turns left to react to CI.
+	//
+	// Empty -- a caller that has no task, or a Framework never told where
+	// its daemon is -- simply leaves that tool unregistered, and the run
+	// works exactly as it did before: its branch still becomes a pull
+	// request when orchestrator.ProcessResult finishes the run.
+	//
+	// It is deliberately separate from Repo/Branch below: those say which
+	// branch a run may *read* CI for, and this says which task grain may
+	// be asked to act on. Neither is derived from the other, and neither
+	// is derived from anything the agent can influence.
+	TaskID string
+	// Repo ("owner/name") and Branch are the repository this run pushes
+	// to and the branch it pushes -- model.BranchName's answer for this
+	// task, the same pair BuildPrompt already names in the prompt. A
+	// Framework passes them to its forked "mcpserver" subprocess so
+	// pkg/mcp's pull_request_status can read CI for exactly that branch
+	// and no other (cmd/grain/mcpserver.go's -pr-repo/-pr-branch).
+	//
+	// Both empty is a task with no repo attached, which is a real case
+	// (Target is a pointer, and BuildPrompt has a sentence for it): the
+	// tool then reports that there is nothing to look at rather than
+	// disappearing from the roster.
+	//
+	// They are deliberately not derived from SandboxRoot or from
+	// anything the agent can influence. Where a run's tools may look is
+	// grain's to decide, the same "deterministic, not self-reported"
+	// rule model.BranchName's own doc comment sets out for the branch
+	// itself.
+	Repo   string
+	Branch string
+	Tools  []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
 	// before Run gives up and returns an error, guarding against a run
 	// that never stops asking for tools. Zero means the framework's own
@@ -132,4 +169,29 @@ type Result struct {
 // antigravity.partialResult).
 type Framework interface {
 	Run(ctx context.Context, cfg RunConfig) (*Result, error)
+}
+
+// PullRequestFramework is the optional half of Framework that answers one
+// question about the runs it drives: do they actually get the
+// open_pull_request tool?
+//
+// It exists because that tool is registered on a fact only the Framework
+// holds. A run gets it when its forked mcpserver was passed both -server
+// and -task (cmd/grain/mcpserver.go), which happens when the Framework
+// was built WithGrainServer -- a deployment whose daemon serves a UI/API
+// at all -- and RunConfig.TaskID is set. Nothing downstream of Run can
+// see the first half, and orchestrator.BuildPrompt needs it: a prompt
+// that told every run to call open_pull_request would, on a deployment
+// serving no UI/API, name a tool that is not on the roster.
+//
+// A Framework that does not implement this drives runs with no such tool
+// -- the reading orchestrator.RunDispatch takes -- which is what every
+// test fake and every in-process caller is.
+type PullRequestFramework interface {
+	Framework
+	// CanOpenPullRequest reports whether this Framework gives a run it
+	// drives with a task id the open_pull_request tool. It is a property
+	// of the Framework, not of one run: RunDispatch always passes a task
+	// id, so the per-run half is never the one in doubt.
+	CanOpenPullRequest() bool
 }

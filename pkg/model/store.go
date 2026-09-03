@@ -73,6 +73,12 @@ var ErrSchemaTooOld = errors.New("database schema is older than this build")
 
 // Init creates the schema if absent and stamps the version.
 func (s *Store) Init(ctx context.Context) error {
+	// Before the DDL, not after: renameScheduleTables' own doc comment on
+	// why a rename of a table Statements() also creates has to get there
+	// first.
+	if err := s.renameScheduleTables(ctx); err != nil {
+		return fmt.Errorf("renaming scheduled_task to schedule: %w", err)
+	}
 	for _, stmt := range Statements() {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("applying schema: %w", err)
@@ -84,14 +90,24 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigMaxConcurrentColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	// After ensureConfigMaxConcurrentColumn, not before: the two are one
+	// chain -- slots became max_concurrent, and max_concurrent became
+	// max_workers -- and a database old enough to still hold slots has to
+	// walk both steps in order.
+	if err := s.ensureConfigWorkerMergerColumns(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureTaskApprovedAtColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
 	if err := s.ensureTaskRunTranscriptColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_run: %w", err)
 	}
-	if err := s.ensureScheduledTaskRecurrenceColumns(ctx); err != nil {
-		return fmt.Errorf("migrating scheduled_task: %w", err)
+	if err := s.ensureTaskRunAgentStartedAtColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_run: %w", err)
+	}
+	if err := s.ensureScheduleRecurrenceColumns(ctx); err != nil {
+		return fmt.Errorf("migrating schedule: %w", err)
 	}
 	if err := s.ensureTaskOrderKeyColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
@@ -108,13 +124,22 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigTaskDefaultsColumns(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
-	if err := s.ensureScheduledTaskTemplateColumn(ctx); err != nil {
-		return fmt.Errorf("migrating scheduled_task: %w", err)
+	if err := s.ensureConfigTaskDefaultsOn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
+	if err := s.ensureScheduleTemplateColumn(ctx); err != nil {
+		return fmt.Errorf("migrating schedule: %w", err)
 	}
 	if err := s.ensureConfigSandboxShapeColumns(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
 	if err := s.ensureTaskSandboxShapeColumns(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
+	if err := s.ensureConfigSandboxDiskColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
+	if err := s.ensureTaskSandboxDiskColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
 	if err := s.ensureTaskInteractiveColumn(ctx); err != nil {
@@ -131,6 +156,18 @@ func (s *Store) Init(ctx context.Context) error {
 	}
 	if err := s.ensureTaskTemplateNoTargetColumns(ctx); err != nil {
 		return fmt.Errorf("migrating task_template: %w", err)
+	}
+	if err := s.ensureScheduleSuiteColumn(ctx); err != nil {
+		return fmt.Errorf("migrating schedule: %w", err)
+	}
+	if err := s.ensureTaskSuiteRunScheduleColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_suite_run: %w", err)
+	}
+	if err := s.ensureConfigDefaultCapabilitiesColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
+	if err := s.ensureConfigEnvironmentNameColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
 	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
@@ -192,6 +229,15 @@ func (s *Store) ensureConfigTargetReposColumn(ctx context.Context) error {
 // still NOT NULL with no default, would break every later PutConfig,
 // which stops supplying it.
 func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
+	// max_workers means this database is already past the step *after*
+	// this one (ensureConfigWorkerMergerColumns, which renamed
+	// max_concurrent to it) -- including every database created fresh
+	// from schema.go's own DDL, which has never had a max_concurrent
+	// column at all. Re-adding one here would leave a column nothing
+	// reads and every later migration has to step around.
+	if rows, err := s.db.QueryContext(ctx, "SELECT `max_workers` FROM `grain_config` WHERE 1 = 0"); err == nil {
+		return rows.Close()
+	}
 	if rows, err := s.db.QueryContext(ctx, "SELECT `max_concurrent` FROM `grain_config` WHERE 1 = 0"); err == nil {
 		return rows.Close()
 	}
@@ -213,6 +259,62 @@ func (s *Store) ensureConfigMaxConcurrentColumn(ctx context.Context) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `slots`")
+	return err
+}
+
+// ensureConfigWorkerMergerColumns splits grain_config's single
+// max_concurrent count into the pair model.Limits is now made of
+// (grain/task-63): max_workers, the ordinary-run ceiling max_concurrent
+// already was, and max_mergers, the extra capacity only a merge-queue fix
+// task may reach. Same probe-then-ALTER shape as every migration above,
+// and for the same reason: CREATE TABLE IF NOT EXISTS never alters a
+// table that is already there.
+//
+// max_workers is backfilled from max_concurrent, so a deployment keeps
+// exactly the ordinary concurrency it was already running -- a rename in
+// everything but SQL's inability to do one portably. The old column is
+// then dropped for the reason its own predecessor's was: leaving a NOT
+// NULL column with no default behind would break every later PutConfig,
+// which stops supplying it.
+//
+// max_mergers is not backfilled from anything, because there is nothing
+// it could be backfilled from: no deployment has ever expressed a merge
+// capacity. It takes DefaultMaxMergers, the same value a fresh database
+// gets from the DDL and a fresh Config from DefaultConfig -- so an
+// upgraded deployment gains that one merger slot rather than silently
+// keeping the "mergers contend for worker capacity" behaviour its stored
+// row predates.
+func (s *Store) ensureConfigWorkerMergerColumns(ctx context.Context) error {
+	mergers, err := s.db.QueryContext(ctx, "SELECT `max_mergers` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		if err := mergers.Close(); err != nil {
+			return err
+		}
+	} else if _, err := s.db.ExecContext(ctx,
+		fmt.Sprintf("ALTER TABLE `grain_config` ADD COLUMN `max_mergers` INTEGER NOT NULL DEFAULT %d",
+			DefaultMaxMergers)); err != nil {
+		return err
+	}
+	if rows, err := s.db.QueryContext(ctx, "SELECT `max_workers` FROM `grain_config` WHERE 1 = 0"); err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `max_workers` INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT `max_concurrent` FROM `grain_config` WHERE 1 = 0")
+	if err != nil {
+		// No max_concurrent to carry over -- a database whose
+		// grain_config was created after the split -- so the DEFAULT
+		// above already leaves max_workers where it belongs.
+		return nil
+	}
+	rows.Close()
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE `grain_config` SET `max_workers` = `max_concurrent`"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `grain_config` DROP COLUMN `max_concurrent`")
 	return err
 }
 
@@ -245,7 +347,98 @@ func (s *Store) ensureTaskRunTranscriptColumn(ctx context.Context) error {
 	return err
 }
 
-// ensureScheduledTaskRecurrenceColumns replaces scheduled_task's original
+// ensureTaskRunAgentStartedAtColumn adds task_run.agent_started_at
+// (schema.go's own DDL comment on the table has the reasoning) to a
+// database created before this build, the same probe-then-ALTER approach
+// ensureTaskRunTranscriptColumn already uses for the same reason: CREATE
+// TABLE IF NOT EXISTS never alters a table that is already there.
+//
+// No SchemaVersion bump goes with it: the column is nullable and added
+// here, so an existing database migrates into the new shape rather than
+// being one this build "cannot simply be re-created into" (SchemaVersion's
+// own doc comment). Every run recorded before it existed reads back with
+// no agent_started_at, which pkg/metrics already has to handle for a run
+// that never reached its agent at all -- such a run contributes to no
+// setup or agent latency rather than to a wrong one.
+func (s *Store) ensureTaskRunAgentStartedAtColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `agent_started_at` FROM `task_run` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `agent_started_at` DATETIME NULL")
+	return err
+}
+
+// renameScheduleTables carries a database written before this build's
+// rename of the feature -- "scheduled tasks" everywhere, now just
+// schedules (docs/schedules.md) -- onto the table names that rename
+// leaves: scheduled_task and its three companions become schedule,
+// schedule_sequence, schedule_read and schedule_grant, and the child
+// tables' scheduled_task_id column becomes schedule_id. Nothing about a
+// row changes; only what the tables holding them are called.
+//
+// Unlike every ensure* migration below, this one runs *before* Init
+// applies the DDL, and has to: Statements() would otherwise create an
+// empty schedule table beside the populated scheduled_task one, leaving
+// the rename with nowhere to go and every schedule an operator had
+// silently gone. Running first also means the column migrations below see
+// one table under one name, whichever name the database arrived with,
+// rather than each having to know about both.
+//
+// Each step is guarded on the old name being there and the new one not,
+// so this is idempotent and safe to interrupt: a database already renamed
+// skips every step, and one interrupted part-way through finishes the
+// steps it has left. No SchemaVersion bump goes with it, for the reason
+// ensureConfigWorkerMergerColumns' own rename did not need one: an
+// existing database migrates into the new shape here rather than being
+// one this build "cannot simply be re-created into" (SchemaVersion's own
+// doc comment).
+func (s *Store) renameScheduleTables(ctx context.Context) error {
+	for _, rename := range []struct{ from, to string }{
+		{"scheduled_task", "schedule"},
+		{"scheduled_task_sequence", "schedule_sequence"},
+		{"scheduled_task_read", "schedule_read"},
+		{"scheduled_task_grant", "schedule_grant"},
+	} {
+		if !s.has(ctx, "SELECT 1 FROM `"+rename.from+"` WHERE 1 = 0") ||
+			s.has(ctx, "SELECT 1 FROM `"+rename.to+"` WHERE 1 = 0") {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"ALTER TABLE `"+rename.from+"` RENAME TO `"+rename.to+"`"); err != nil {
+			return err
+		}
+	}
+	for _, table := range []string{"schedule_read", "schedule_grant"} {
+		if !s.has(ctx, "SELECT `scheduled_task_id` FROM `"+table+"` WHERE 1 = 0") {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"ALTER TABLE `"+table+"` RENAME COLUMN `scheduled_task_id` TO `schedule_id`"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// has reports whether probe -- a zero-row SELECT of a table or a column,
+// the probe every migration in this file already open-codes -- runs at
+// all, which is what "that table/column is there" looks like without a
+// dialect-specific PRAGMA or information_schema query
+// (ensureConfigTargetReposColumn's own doc comment gives the reasoning
+// for probing this way). The driver's error is deliberately dropped:
+// nothing portably distinguishes "no such table" from "no such column",
+// and either answer means the same thing to every caller here.
+func (s *Store) has(ctx context.Context, probe string) bool {
+	rows, err := s.db.QueryContext(ctx, probe)
+	if err != nil {
+		return false
+	}
+	rows.Close()
+	return true
+}
+
+// ensureScheduleRecurrenceColumns replaces schedule's original
 // interval_ms (every N hours since it last fired, no wall-clock
 // alignment) with model.Recurrence's own columns (bwsalmon/agents#464),
 // the same probe-then-ALTER approach ensureConfigMaxConcurrentColumn
@@ -255,48 +448,78 @@ func (s *Store) ensureTaskRunTranscriptColumn(ctx context.Context) error {
 // nearest whole hour (minimum 1) -- the same cadence it already had,
 // expressed as hours rather than milliseconds, since bwsalmon/agents#464
 // only ever asks for hour granularity on this cadence.
-func (s *Store) ensureScheduledTaskRecurrenceColumns(ctx context.Context) error {
+func (s *Store) ensureScheduleRecurrenceColumns(ctx context.Context) error {
 	if rows, err := s.db.QueryContext(ctx,
-		"SELECT `recurrence_kind` FROM `scheduled_task` WHERE 1 = 0"); err == nil {
+		"SELECT `recurrence_kind` FROM `schedule` WHERE 1 = 0"); err == nil {
 		return rows.Close()
 	}
 	for _, stmt := range []string{
-		"ALTER TABLE `scheduled_task` ADD COLUMN `recurrence_kind` TEXT NOT NULL DEFAULT 'everyNHours'",
-		"ALTER TABLE `scheduled_task` ADD COLUMN `every_n_hours` INTEGER NULL",
-		"ALTER TABLE `scheduled_task` ADD COLUMN `time_of_day_minutes` INTEGER NULL",
-		"ALTER TABLE `scheduled_task` ADD COLUMN `weekday` INTEGER NULL",
-		"ALTER TABLE `scheduled_task` ADD COLUMN `day_of_month` INTEGER NULL",
+		"ALTER TABLE `schedule` ADD COLUMN `recurrence_kind` TEXT NOT NULL DEFAULT 'everyNHours'",
+		"ALTER TABLE `schedule` ADD COLUMN `every_n_hours` INTEGER NULL",
+		"ALTER TABLE `schedule` ADD COLUMN `time_of_day_minutes` INTEGER NULL",
+		"ALTER TABLE `schedule` ADD COLUMN `weekday` INTEGER NULL",
+		"ALTER TABLE `schedule` ADD COLUMN `day_of_month` INTEGER NULL",
 	} {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}
-	if rows, err := s.db.QueryContext(ctx, "SELECT `interval_ms` FROM `scheduled_task` WHERE 1 = 0"); err == nil {
+	if rows, err := s.db.QueryContext(ctx, "SELECT `interval_ms` FROM `schedule` WHERE 1 = 0"); err == nil {
 		rows.Close()
 		if _, err := s.db.ExecContext(ctx,
-			"UPDATE `scheduled_task` SET `every_n_hours` = MAX(1, `interval_ms` / 3600000)"); err != nil {
+			"UPDATE `schedule` SET `every_n_hours` = MAX(1, `interval_ms` / 3600000)"); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, "ALTER TABLE `scheduled_task` DROP COLUMN `interval_ms`"); err != nil {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE `schedule` DROP COLUMN `interval_ms`"); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// ensureScheduledTaskTemplateColumn adds scheduled_task.template_id
+// ensureScheduleTemplateColumn adds schedule.template_id
 // (bwsalmon/agents#516, schema.go's own DDL comment on the table has the
-// reasoning) to a database created before task_template existed, the
-// same probe-then-ALTER approach every ensure* migration in this file
-// already uses. NULL for every existing row, matching every schedule
-// already on it: none of them can have pointed at a template that did
-// not yet exist to point at.
-func (s *Store) ensureScheduledTaskTemplateColumn(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT `template_id` FROM `scheduled_task` WHERE 1 = 0")
+// reasoning) to a database created before task_template existed, the same
+// probe-then-ALTER approach every ensure* migration in this file already
+// uses. NULL for every existing row, matching every schedule already on
+// it: none of them can have pointed at a template that did not yet exist
+// to point at.
+func (s *Store) ensureScheduleTemplateColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `template_id` FROM `schedule` WHERE 1 = 0")
 	if err == nil {
 		return rows.Close()
 	}
-	_, err = s.db.ExecContext(ctx, "ALTER TABLE `scheduled_task` ADD COLUMN `template_id` TEXT NULL")
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `schedule` ADD COLUMN `template_id` TEXT NULL")
+	return err
+}
+
+// ensureScheduleSuiteColumn adds schedule.suite_id
+// (model.Schedule.SuiteID's own doc comment has the reasoning) to a
+// database created before a schedule could fire a task suite, the same
+// probe-then-ALTER approach ensureScheduleTemplateColumn already uses for
+// the column beside it. NULL for every existing row: a schedule already
+// on such a database files a single task, which is exactly what NULL
+// means here.
+func (s *Store) ensureScheduleSuiteColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `suite_id` FROM `schedule` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `schedule` ADD COLUMN `suite_id` TEXT NULL")
+	return err
+}
+
+// ensureTaskSuiteRunScheduleColumn adds task_suite_run.schedule_id
+// (schema.go's own DDL comment on the table has the reasoning) to a
+// database created before a schedule could fire a task suite. NULL for
+// every existing run, matching what every one of them was: started by a
+// human, not by a schedule.
+func (s *Store) ensureTaskSuiteRunScheduleColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `schedule_id` FROM `task_suite_run` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_suite_run` ADD COLUMN `schedule_id` TEXT NULL")
 	return err
 }
 
@@ -395,6 +618,44 @@ func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task` ADD COLUMN `sandbox_memory_mb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureConfigSandboxDiskColumn adds grain_config.sandbox_disk_gb, the
+// third dimension of the same VM shape (model.Config.SandboxDiskGB,
+// grain/task-41), to a database created before it existed.
+//
+// Its own migration rather than a third column in
+// ensureConfigSandboxShapeColumns above: that one's probe finds
+// sandbox_cpus/sandbox_memory_mb already present on every database
+// migrated by an earlier build and returns without adding anything, so a
+// column appended to it would only ever reach a database that had none
+// of the three. Defaults to 0, SandboxDiskGB's own "unset, take whatever
+// size the guest image gives it" zero value.
+func (s *Store) ensureConfigSandboxDiskColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `sandbox_disk_gb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureTaskSandboxDiskColumn is ensureConfigSandboxDiskColumn's
+// per-task counterpart -- task.sandbox_disk_gb, Task.SandboxDiskGB's own
+// column -- added separately from ensureTaskSandboxShapeColumns for the
+// reason that function's doc comment gives. Defaults to 0, the "use the
+// deployment default" zero value, so every task already stored reads
+// back deferring to the deployment exactly as it did before a task could
+// ask for a disk size at all.
+func (s *Store) ensureTaskSandboxDiskColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `sandbox_disk_gb` INTEGER NOT NULL DEFAULT 0")
 	return err
 }
 
@@ -499,10 +760,10 @@ func (s *Store) ensureConfigAgentFrameworkColumn(ctx context.Context) error {
 // own doc comments have the reasoning -- bwsalmon/agents#612) to a
 // database created before these columns existed, the same probe-then-ALTER
 // approach ensureConfigSandboxShapeColumns already uses for a pair of
-// columns at once. Both default to 0, matching Config's own zero value, so
-// an upgraded deployment's "Queue immediately"/"Auto-merge once checks
-// pass" checkboxes keep starting unchecked exactly as they always have,
-// until an operator opts into a different starting state through Settings.
+// columns at once. Both default to 1, matching model.DefaultConfig, so an
+// upgraded deployment lands on the same "Queue immediately"/"Auto-merge
+// once checks pass" starting state a fresh one does rather than on the
+// zero value of a column it has never seen.
 func (s *Store) ensureConfigTaskDefaultsColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT `approved_by_default`, `auto_merge_by_default` FROM `grain_config` WHERE 1 = 0")
@@ -510,11 +771,52 @@ func (s *Store) ensureConfigTaskDefaultsColumns(ctx context.Context) error {
 		return rows.Close()
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"ALTER TABLE `grain_config` ADD COLUMN `approved_by_default` INTEGER NOT NULL DEFAULT 0"); err != nil {
+		"ALTER TABLE `grain_config` ADD COLUMN `approved_by_default` INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		"ALTER TABLE `grain_config` ADD COLUMN `auto_merge_by_default` INTEGER NOT NULL DEFAULT 0")
+		"ALTER TABLE `grain_config` ADD COLUMN `auto_merge_by_default` INTEGER NOT NULL DEFAULT 1")
+	return err
+}
+
+// ensureConfigTaskDefaultsOn turns both task defaults on for the one row
+// of a database that already carries these columns from when their
+// default was off, and records that it has done so.
+//
+// Changing model.DefaultConfig alone would not reach such a database:
+// grain_config's single row is written wholesale by PutConfig with every
+// column bound, so the 0 it stores was seeded by a build whose default
+// was off, and it reads back afterwards indistinguishably from an
+// operator having chosen off. Between those two readings, "seeded" is the
+// only one any deployment can actually have: these two settings are days
+// old (bwsalmon/agents#612), off was never anything a deployment opted
+// into so much as what it got, and a deployment that had deliberately
+// turned them off is not one asking for them to default on. Left alone,
+// the new default would apply to fresh databases and to nobody currently
+// running.
+//
+// It must not run twice, though -- an operator who turns either setting
+// off after this lands has made exactly the deliberate choice the
+// paragraph above says nobody had made yet, and a backfill re-running at
+// the next restart would quietly overwrite it. The presence of
+// task_defaults_on_backfilled is what records that, added in the same
+// step as the UPDATE: probe-then-ALTER as usual, except that what the
+// probe answers is "has this migration run" rather than "does this
+// setting have a column". Its value is never read (schema.go's own note
+// on the column: PutConfig doesn't bind it, so REPLACE re-defaults it on
+// every settings save).
+func (s *Store) ensureConfigTaskDefaultsOn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `task_defaults_on_backfilled` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `task_defaults_on_backfilled` INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		"UPDATE `grain_config` SET `approved_by_default` = 1, `auto_merge_by_default` = 1")
 	return err
 }
 
@@ -537,19 +839,55 @@ func (s *Store) ensureConfigClaudeModelColumn(ctx context.Context) error {
 	return err
 }
 
-// ensureTaskTemplateNoTargetColumns drops task_template's old target_owner/
-// target_name/base columns (schema.go's own DDL comment on the table has
-// the reasoning: which repo and branch a firing targets is a property of
-// the caller using a template, not of the template itself) from a
-// database created before that split. Unlike every ensure*Column
+// ensureConfigDefaultCapabilitiesColumn adds grain_config.
+// default_capabilities (model.Config.DefaultCapabilities' own doc
+// comment has the reasoning) to a database created before this column
+// existed, the same probe-then-ALTER approach
+// ensureConfigClaudeModelColumn above uses. It defaults to the empty
+// string, which splitCSV reads back as no defaults at all: a deployment
+// upgraded across this migration keeps filing tasks with exactly the
+// capabilities whoever filed them asked for, until an operator chooses a
+// default set through Settings.
+func (s *Store) ensureConfigDefaultCapabilitiesColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `default_capabilities` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `default_capabilities` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureConfigEnvironmentNameColumn adds grain_config.environment_name
+// (model.Config.EnvironmentName's own doc comment has the reasoning) to
+// a database created before this column existed, the same
+// probe-then-ALTER approach ensureConfigDefaultCapabilitiesColumn above
+// uses. It defaults to the empty string, which reads back as an unnamed
+// deployment: an upgraded deployment's UI looks exactly as it did until
+// an operator names it through Settings.
+func (s *Store) ensureConfigEnvironmentNameColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `environment_name` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `environment_name` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureTaskTemplateNoTargetColumns drops task_template's old
+// target_owner/target_name/base columns (schema.go's own DDL comment on
+// the table has the reasoning: which repo and branch a firing targets is
+// a property of the caller using a template, not of the template itself)
+// from a database created before that split. Unlike every ensure*Column
 // migration above, which probes for a column's absence and adds it, this
 // probes for the old columns' presence and removes them -- the same
 // direction ensureConfigMaxConcurrentColumn's own slots removal and
-// ensureScheduledTaskRecurrenceColumns' own interval_ms removal already
-// go, since target_owner and target_name are NOT NULL and Init's own
-// CREATE TABLE IF NOT EXISTS never alters a table that already exists:
-// left in place, they would fail every PutTaskTemplate, which stops
-// supplying them.
+// ensureScheduleRecurrenceColumns' own interval_ms removal already go,
+// since target_owner and target_name are NOT NULL and Init's own CREATE
+// TABLE IF NOT EXISTS never alters a table that already exists: left in
+// place, they would fail every PutTaskTemplate, which stops supplying
+// them.
 func (s *Store) ensureTaskTemplateNoTargetColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `target_owner` FROM `task_template` WHERE 1 = 0")
 	if err != nil {
@@ -692,13 +1030,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`, `agent_framework`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `configuration`, `agent_framework`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.Interactive, t.Configuration,
+		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.SandboxDiskGB, t.Interactive, t.Configuration,
 		t.AgentFramework,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
@@ -974,7 +1312,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`," +
+	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`interactive`,`configuration`," +
 	"`agent_framework`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
@@ -991,7 +1329,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration,
+		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.SandboxDiskGB, &t.Interactive, &t.Configuration,
 		&t.AgentFramework); err != nil {
 		return Task{}, err
 	}
@@ -1283,42 +1621,73 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 }
 
 // ErrAtCapacity is what StartRun returns instead of recording a run when
-// maxConcurrent runs are already live. It is an ordinary outcome, not a
-// fault: dispatch.Cycle counts live runs before it decides what to start,
-// so seeing this means another caller started one in between -- the race
-// this exists to lose safely. A caller treats it as "no free capacity
-// this tick" and tries again on the next one.
+// the limits it was given already admit no run of this one's kind. It is
+// an ordinary outcome, not a fault: dispatch.Cycle counts live runs
+// before it decides what to start, so seeing this means another caller
+// started one in between -- the race this exists to lose safely. A caller
+// treats it as "no free capacity this tick" and tries again on the next
+// one.
 var ErrAtCapacity = errors.New("model: the concurrency limit is already reached")
 
-// StartRun records a run and its leases together, so long as fewer than
-// maxConcurrent runs are already live.
+// StartRun records a run and its leases together, so long as limits still
+// admit one more run of this one's kind -- worker or merger, decided from
+// the task's own origin reason (OriginReason.Merger). Limits' own doc
+// comment is the rule the two numbers make; Limits.Admits is the one
+// implementation of it, shared with the caller's own look-before-you-leap
+// check so the two cannot drift.
 //
 // The capacity check happens here, inside the same transaction as the
 // insert, rather than in the caller that decided to start this run --
-// which is the whole reason it takes a limit at all. dispatch.Cycle reads
-// the live-run count and task_ready outside any single transaction and
+// which is the whole reason it takes limits at all. dispatch.Cycle reads
+// the live-run counts and task_ready outside any single transaction and
 // then issues a StartRun per unit of headroom it found, so nothing in Go
 // stops two overlapping Cycle calls from both seeing the same headroom
 // and both spending it. Under slots, a unique index on the slot each run
 // claimed caught that after the fact (bwsalmon/agents#434); with nothing
-// left to claim, the count and the insert simply happen together
-// instead, which rules the race out rather than detecting it. A maxConcurrent of 0 or less disables the check --
-// for a caller with no limit of its own to enforce, such as a test
-// starting a run directly.
-func (s *Store) StartRun(ctx context.Context, r Run, maxConcurrent int) error {
+// left to claim, the counts and the insert simply happen together
+// instead, which rules the race out rather than detecting it. Limits that
+// bound nothing (Limits.Unlimited, which the zero value is) disable the
+// check -- for a caller with no limit of its own to enforce, such as a
+// test starting a run directly, or dispatch's own configuration agent.
+func (s *Store) StartRun(ctx context.Context, r Run, limits Limits) error {
 	return s.write(ctx, "start run "+r.ID+" for task "+r.TaskID, func(tx *sql.Tx) error {
-		if maxConcurrent > 0 {
-			var live int
-			if err := tx.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM `task_run` WHERE `finished_at` IS NULL").Scan(&live); err != nil {
-				return fmt.Errorf("counting live runs: %w", err)
+		if !limits.Unlimited() {
+			live, err := liveRunCounts(ctx, tx)
+			if err != nil {
+				return err
 			}
-			if live >= maxConcurrent {
+			merger, err := taskIsMerger(ctx, tx, r.TaskID)
+			if err != nil {
+				return err
+			}
+			if !limits.Admits(live, merger) {
 				return ErrAtCapacity
 			}
 		}
 		return startRun(ctx, tx, r)
 	})
+}
+
+// taskIsMerger answers OriginReason.Merger for one task id, from the
+// column rather than from a whole Task: this runs inside StartRun's own
+// transaction, where the only thing worth reading is the one field the
+// capacity check turns on.
+//
+// A task id with no row is not a merger. StartRun has no business being
+// called for one, and a foreign key on task_run.task_id is what actually
+// rejects it a statement later -- guessing "merger" for a task nobody can
+// see would be the one reading that spends the reserved capacity.
+func taskIsMerger(ctx context.Context, tx *sql.Tx, taskID string) (bool, error) {
+	var reason string
+	err := tx.QueryRowContext(ctx,
+		"SELECT `origin_reason` FROM `task` WHERE `id` = ?", taskID).Scan(&reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading task %s's origin reason: %w", taskID, err)
+	}
+	return OriginReason(reason).Merger(), nil
 }
 
 // startRun uses INSERT rather than REPLACE, unlike most writes in this
@@ -1364,9 +1733,9 @@ func (s *Store) FinishRun(ctx context.Context, runID string, at time.Time, outco
 // SetRunOutcome overrides a run's outcome and detail after FinishRun has
 // already recorded one -- the one case FinishRun's own caller cannot yet
 // know: RunDispatch judges outcome purely from whether the agent made a
-// harmless tool call at all (outcomeOf), before ProcessResult has checked
+// tool call at all (outcomeOf), before ProcessResult has checked
 // whether that tool call amounted to anything -- a push, a question, a
-// closing comment. A run that made only harmless calls but produced none
+// closing comment. A run that made calls but produced none
 // of those would otherwise read "succeeded" forever, which both
 // misreports what happened and would let it dodge FailureStreak's own
 // cap indefinitely (bwsalmon/agents#403).
@@ -1398,6 +1767,26 @@ func (s *Store) SetRunSandbox(ctx context.Context, runID, sandbox string) error 
 	return s.write(ctx, "set run "+runID+" sandbox", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE `task_run` SET `sandbox` = ? WHERE `id` = ?", sandbox, runID)
+		return err
+	})
+}
+
+// SetRunAgentStarted records the moment a run's agent actually got its
+// first turn -- everything before it (a sandbox built, a repo cloned, a
+// capability minted) is this run's setup, and everything after it is the
+// agent's own work. It is its own write, after StartRun, for the same
+// reason SetRunSandbox is: the two moments are genuinely different, and
+// how far apart they are is the measurement (schema.go's own DDL comment
+// on agent_started_at, and pkg/metrics).
+//
+// Recording it must never cost a run: the caller (orchestrator.
+// RunDispatch) logs a failure here and dispatches anyway, since a
+// measurement that cannot be taken is not a reason to refuse the work
+// being measured.
+func (s *Store) SetRunAgentStarted(ctx context.Context, runID string, at time.Time) error {
+	return s.write(ctx, "set run "+runID+" agent start", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `agent_started_at` = ? WHERE `id` = ?", at.UTC(), runID)
 		return err
 	})
 }
@@ -1599,23 +1988,60 @@ func (s *Store) State(ctx context.Context, taskID string) (State, error) {
 // Ready is every task dispatchable right now: approved, not running, with
 // no open blocker -- in dispatch order, which is the backlog's own order
 // (bwsalmon/agents#476): ascending OrderKey, the same order ListTasks
-// hands a UI or CLI before any newest-first display flip. A fix task
-// (Origin.Reason == ReasonFix) sorts before everything else: it exists
-// only because orchestrator.queueHeads found its repo's merge queue head
-// broken, and queueHeads already guarantees at most one such task per
-// repo at a time, so there is never more than a handful competing for
-// this and nothing else to weigh them against. Leaving one to wait behind
-// unrelated new work is what bwsalmon/agents#389 asks to avoid: the
-// longer a queue head's repair sits queued, the more likely something
-// else lands on the branch it targets first and the fix has to be
-// refiled rather than simply merged. Ties within each group still break
-// on task ID, the same stable tiebreak as before.
+// hands a UI or CLI before any newest-first display flip, ties broken on
+// task ID.
+//
+// That is the whole rule, with no carve-out for any kind of task. A fix
+// task the merge queue filed (Origin.Reason == ReasonFix) used to sort
+// ahead of everything else here regardless of where the backlog put it --
+// bwsalmon/agents#389's "a queue head's repair must not wait behind
+// unrelated new work", since the longer it waits the more likely
+// something else lands on the branch it targets and the fix has to be
+// refiled rather than simply merged. That priority is a position now
+// rather than a sort: orchestrator.fileFixTask files the task at the very
+// head of the backlog (OrderKeyForNewTask, atFront), where a human can
+// see it sitting first, see why the queue behind it is waiting, and drag
+// it elsewhere if they disagree. A rule that lived only in this ORDER BY
+// could do none of that -- the list said one thing and the dispatcher did
+// another -- and two orderings that have to agree but are computed in
+// different places are the kind that quietly stop agreeing.
 func (s *Store) Ready(ctx context.Context) ([]string, error) {
 	var out []string
 	err := each(ctx, s.db,
 		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
-			"ORDER BY (`t`.`origin_reason` = ?) DESC, `t`.`order_key`, `r`.`task_id`",
+			"ORDER BY `t`.`order_key`, `r`.`task_id`",
+		nil,
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out = append(out, id)
+			return nil
+		})
+	return out, err
+}
+
+// ReadyMergers is Ready narrowed to the merge queue's own fix tasks
+// (Origin.Reason == ReasonFix, OriginReason.Merger) -- the ready tasks
+// whose runs are mergers, and so bounded by Limits.Mergers on top of
+// Limits.Workers rather than by the worker ceiling alone.
+//
+// It is a second, narrower query rather than a kind returned alongside
+// each entry of Ready because that is all its caller needs: dispatch.
+// Cycle walks Ready in Ready's order and asks of each candidate only
+// "which of the two limits does this one spend", which membership of this
+// set answers. Ready keeps its own shape, and the order the two agree on
+// stays the one order task_ready and the backlog already define -- there
+// is no second ordering here to disagree with it.
+func (s *Store) ReadyMergers(ctx context.Context) ([]string, error) {
+	var out []string
+	err := each(ctx, s.db,
+		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
+			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
+			"WHERE `t`.`origin_reason` = ? "+
+			"ORDER BY `t`.`order_key`, `r`.`task_id`",
 		[]any{string(ReasonFix)},
 		func(rows *sql.Rows) error {
 			var id string
@@ -1631,10 +2057,11 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 // ReadyConfiguration is Ready narrowed to the configuration agent
 // (Task.Configuration, bwsalmon/agents#621): every such task
 // dispatchable right now, in the same backlog order Ready itself uses
-// (ascending OrderKey, task ID the tiebreak) -- there is no fix-task
-// carve-out to make here, since a configuration task is never one.
+// (ascending OrderKey, task ID the tiebreak), and with no carve-out of
+// its own for the same reason Ready has none: position in the backlog is
+// the whole of the order, here as there.
 //
-// dispatch.Cycle calls this before it ever looks at MaxConcurrent, and
+// dispatch.Cycle calls this before it ever looks at any limit, and
 // starts every task it returns unconditionally: the configuration agent
 // exists precisely for a person to reach for when something -- possibly
 // the deployment's own concurrency limit having no headroom left -- is
@@ -1732,7 +2159,7 @@ func (s *Store) Reorder(ctx context.Context, ids []string, afterID, beforeID *st
 		return nil
 	}
 	return s.write(ctx, "reorder tasks", func(tx *sql.Tx) error {
-		ordered, err := sortByOrderKey(ctx, tx, ids)
+		ordered, _, err := sortByOrderKey(ctx, tx, ids)
 		if err != nil {
 			return err
 		}
@@ -1758,21 +2185,159 @@ func (s *Store) Reorder(ctx context.Context, ids []string, afterID, beforeID *st
 	})
 }
 
+// MoveToFrontOfBacklog places ids at the front of the backlog: ahead of
+// every other task, and behind nothing but the merge tasks
+// (Origin.Reason == ReasonFix) already scheduled at the very head of it.
+// They keep their existing relative order among themselves, the same
+// guarantee a multi-select drag gets from Reorder and against the same
+// OrderKey column, so this is a move a human could have made by hand
+// rather than a second ordering rule layered on top of theirs.
+//
+// It is the merge queue making its own order visible
+// (orchestrator.SyncPullRequests): a pull request waiting to land is the
+// work closest to done, and which of them lands next used to be a
+// comparison the queue made inside one cycle and never wrote down.
+// Putting them at the front, in the order they will land, lets a list
+// answer "what is grain about to finish" without anyone opening a task --
+// and, because the queue reads its own head back off this same order
+// (orchestrator.queueHeads), dragging one of those tasks above another
+// really does change which merges first. An order a human can see and an
+// order a human can set are the same fact here, deliberately.
+//
+// Nothing is written when ids already sit there in that order, which is
+// what lets a reconciler call this every cycle. A task dragged out of the
+// block altogether does come back to it next cycle -- while it is in the
+// queue its position belongs to the queue -- but it comes back where the
+// drag left it relative to the others, so "merge this one last" still
+// lands.
+//
+// An id naming no task is an error, the same as Reorder's own and for the
+// same reason: every key here is read inside this call's transaction, so
+// missing one means the caller's view was already stale.
+func (s *Store) MoveToFrontOfBacklog(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return s.write(ctx, "move tasks to the front of the backlog", func(tx *sql.Tx) error {
+		ordered, keys, err := sortByOrderKey(ctx, tx, ids)
+		if err != nil {
+			return err
+		}
+		lower, upper, err := frontOfBacklogBounds(ctx, tx, ordered)
+		if err != nil {
+			return err
+		}
+		if alreadyAtFrontOfBacklog(ordered, keys, lower, upper) {
+			return nil
+		}
+		if !orderKeysFitBetween(lower, upper, len(ordered)) {
+			if err := rebalanceOrderKeys(ctx, tx); err != nil {
+				return err
+			}
+			if lower, upper, err = frontOfBacklogBounds(ctx, tx, ordered); err != nil {
+				return err
+			}
+		}
+		for i, key := range splitOrderKeys(lower, upper, len(ordered)) {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE `task` SET `order_key` = ? WHERE `id` = ?", key, ordered[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// frontOfBacklogBounds is the interval MoveToFrontOfBacklog moves ids
+// into: below the first task of the ordinary backlog, above whatever
+// merge tasks are already scheduled at the very head of it. Either side
+// is nil when there is nothing on it -- a deployment whose whole backlog
+// is the merge queue, or one with no fix task filed -- which
+// splitOrderKeys reads as "step away from the other side" the same way
+// Reorder's own unbounded drops do.
+//
+// The head is decided by position, not by state: only a fix task that
+// actually sits ahead of the whole ordinary backlog bounds the block from
+// below. One dragged down into the middle of the backlog since, or filed
+// before fix tasks had a place of their own and left at OrderKey's zero
+// value, is just another task there -- pinning the merge queue behind it
+// would put the block somewhere nobody is looking, which is the opposite
+// of what moving it to the front is for.
+func frontOfBacklogBounds(ctx context.Context, tx *sql.Tx, ids []string) (lower, upper *float64, err error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, string(ReasonFix))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	var ordinary sql.NullFloat64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT MIN(`order_key`) FROM `task` "+
+			"WHERE `origin_reason` <> ? AND `id` NOT IN ("+placeholders+")",
+		args...).Scan(&ordinary); err != nil {
+		return nil, nil, fmt.Errorf("reading the first task of the backlog: %w", err)
+	}
+
+	q := "SELECT MAX(`order_key`) FROM `task` " +
+		"WHERE `origin_reason` = ? AND `id` NOT IN (" + placeholders + ")"
+	if ordinary.Valid {
+		q += " AND `order_key` < ?"
+		args = append(args, ordinary.Float64)
+	}
+	var head sql.NullFloat64
+	if err := tx.QueryRowContext(ctx, q, args...).Scan(&head); err != nil {
+		return nil, nil, fmt.Errorf("reading the merge tasks at the head of the backlog: %w", err)
+	}
+
+	if head.Valid {
+		lower = &head.Float64
+	}
+	if ordinary.Valid {
+		upper = &ordinary.Float64
+	}
+	return lower, upper, nil
+}
+
+// alreadyAtFrontOfBacklog reports whether ordered already holds distinct,
+// ascending OrderKey values strictly inside (lower, upper) -- exactly what
+// MoveToFrontOfBacklog would otherwise write, so writing it would move
+// nothing. It is asked before every one of those writes because the
+// reconciler calling it has nothing to do on almost every cycle, and a
+// write that changes no order still narrows the gaps the next one has to
+// split.
+func alreadyAtFrontOfBacklog(ordered []string, keys map[string]float64, lower, upper *float64) bool {
+	first, last := keys[ordered[0]], keys[ordered[len(ordered)-1]]
+	if lower != nil && first <= *lower {
+		return false
+	}
+	if upper != nil && last >= *upper {
+		return false
+	}
+	for i := 1; i < len(ordered); i++ {
+		if keys[ordered[i]] <= keys[ordered[i-1]] {
+			return false
+		}
+	}
+	return true
+}
+
 // sortByOrderKey returns ids sorted ascending by each task's current
-// OrderKey -- Reorder's own "the block keeps its existing relative order"
-// guarantee.
-func sortByOrderKey(ctx context.Context, tx *sql.Tx, ids []string) ([]string, error) {
+// OrderKey, alongside the keys it read to do it -- Reorder's own "the
+// block keeps its existing relative order" guarantee, and the same order
+// MoveToFrontOfBacklog carries to the front of the backlog.
+func sortByOrderKey(ctx context.Context, tx *sql.Tx, ids []string) ([]string, map[string]float64, error) {
 	keys := make(map[string]float64, len(ids))
 	for _, id := range ids {
 		k, err := orderKeyOf(ctx, tx, id)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		keys[id] = k
 	}
 	ordered := append([]string(nil), ids...)
 	sort.SliceStable(ordered, func(i, j int) bool { return keys[ordered[i]] < keys[ordered[j]] })
-	return ordered, nil
+	return ordered, keys, nil
 }
 
 // orderKeyBounds resolves Reorder's afterID/beforeID to the OrderKey
@@ -1890,7 +2455,7 @@ func rebalanceOrderKeys(ctx context.Context, tx *sql.Tx) error {
 // needed was the difference between a fixed pool and the part of it in
 // use. There is no pool to difference against any more: a sandbox is
 // created for a run and destroyed with it, so the only question left is
-// how many are in flight against MaxConcurrent.
+// how many are in flight against model.Limits.
 //
 // It is deliberately not what StartRun enforces the limit with -- see
 // that method's own doc comment on why the check has to happen inside the
@@ -1903,6 +2468,42 @@ func (s *Store) LiveRunCount(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("counting live runs: %w", err)
 	}
 	return n, nil
+}
+
+// LiveRunCounts is LiveRunCount split the way Limits is (grain/task-63):
+// the same live rows, counted as mergers (a run of a merge-queue fix
+// task) and workers (everything else) separately, since the two are
+// bounded differently and a caller deciding what to dispatch has to know
+// which of the two it has room for.
+//
+// Everything LiveRunCount's own doc comment says about re-reading rather
+// than remembering applies here unchanged; this is that count with the
+// one distinction the limits draw, not a second notion of what is live.
+func (s *Store) LiveRunCounts(ctx context.Context) (RunCounts, error) {
+	return liveRunCounts(ctx, s.db)
+}
+
+// liveRunCounts is LiveRunCounts against either the store's own handle or
+// one transaction -- StartRun needs exactly this count inside the same
+// transaction as its insert, which is the only way the limit is enforced
+// at all rather than merely checked.
+//
+// LEFT JOIN, not JOIN: a live run whose task row has somehow gone still
+// occupies a sandbox and still has to be counted against the total. It
+// counts as a worker, which is the same "don't spend the merge queue's
+// reserved capacity on a task nobody can see" reading taskIsMerger takes.
+func liveRunCounts(ctx context.Context, q querier) (RunCounts, error) {
+	var c RunCounts
+	var mergers, total int
+	if err := q.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(CASE WHEN `t`.`origin_reason` = ? THEN 1 ELSE 0 END), 0), COUNT(*) "+
+			"FROM `task_run` AS `r` LEFT JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
+			"WHERE `r`.`finished_at` IS NULL",
+		string(ReasonFix)).Scan(&mergers, &total); err != nil {
+		return RunCounts{}, fmt.Errorf("counting live runs: %w", err)
+	}
+	c.Mergers, c.Workers = mergers, total-mergers
+	return c, nil
 }
 
 // LiveRuns is every task_run row with no `finished_at` -- the same rows
@@ -2098,23 +2699,26 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 	return &c, nil
 }
 
-const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
+const configColumns = "`poll_interval_ms`,`max_workers`,`max_mergers`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
-	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`,`agent_framework`," +
-	"`approved_by_default`,`auto_merge_by_default`,`claude_model`"
+	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
+	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`,`environment_name`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
 	var pollMS int64
 	var targetRepos string
-	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
+	var defaultCapabilities string
+	if err := scan(&pollMS, &c.MaxWorkers, &c.MaxMergers, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault,
-		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel); err != nil {
+		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
+		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
+		&defaultCapabilities, &c.EnvironmentName); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
 	c.TargetRepos = splitCSV(targetRepos)
+	c.DefaultCapabilities = splitCSV(defaultCapabilities)
 	// A row written before agent/antigravity replaced the home-grown
 	// Gemini runtime still says "gemini"; folding that in here rather
 	// than migrating the row is what ensureConfigAgentFrameworkColumn's
@@ -2130,11 +2734,12 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			c.PollInterval.Milliseconds(), c.MaxWorkers, c.MaxMergers, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault,
-			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel)
+			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
+			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,
+			joinCSV(c.DefaultCapabilities), c.EnvironmentName)
 		return err
 	})
 }
@@ -2143,6 +2748,10 @@ func (s *Store) PutConfig(ctx context.Context, c Config) error {
 // never contain a comma) through the same comma-separated shape the
 // daemon's own -target-repos flag already parses, so a value written by
 // one reads back identically through the other.
+//
+// Config.DefaultCapabilities is stored the same way, for the same reason:
+// a capability id is a bare word (ui.OfferedCapabilities' own rows), with
+// no more room for a comma in it than a repo name has.
 func joinCSV(items []string) string { return strings.Join(items, ",") }
 
 func splitCSV(s string) []string {
@@ -2152,51 +2761,54 @@ func splitCSV(s string) []string {
 	return strings.Split(s, ",")
 }
 
-// --- scheduled tasks ---------------------------------------------------
+// --- schedules -------------------------------------------------------
 
-// NewScheduledTaskID allocates a schedule identity from its own sequence,
+// NewScheduleID allocates a schedule identity from its own sequence,
 // distinct from task_sequence -- so a schedule's id (e.g. "sched-3") is
 // never mistaken for one of the tasks it files, the same "not the GitHub
 // issue it was filed from" reasoning NewTaskID's own doc comment gives.
-func (s *Store) NewScheduledTaskID(ctx context.Context) (id string, err error) {
-	err = s.write(ctx, "allocate a scheduled task id", func(tx *sql.Tx) error {
-		id, err = newScheduledTaskID(ctx, tx)
+func (s *Store) NewScheduleID(ctx context.Context) (id string, err error) {
+	err = s.write(ctx, "allocate a schedule id", func(tx *sql.Tx) error {
+		id, err = newScheduleID(ctx, tx)
 		return err
 	})
 	return id, err
 }
 
-func newScheduledTaskID(ctx context.Context, tx *sql.Tx) (string, error) {
+func newScheduleID(ctx context.Context, tx *sql.Tx) (string, error) {
 	res, err := tx.ExecContext(ctx,
-		"INSERT INTO `scheduled_task_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
+		"INSERT INTO `schedule_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
 	if err != nil {
-		return "", fmt.Errorf("allocating a scheduled task id: %w", err)
+		return "", fmt.Errorf("allocating a schedule id: %w", err)
 	}
 	n, err := res.LastInsertId()
 	if err != nil {
-		return "", fmt.Errorf("reading the allocated scheduled task id: %w", err)
+		return "", fmt.Errorf("reading the allocated schedule id: %w", err)
 	}
 	return "sched-" + strconv.FormatInt(n, 10), nil
 }
 
-const scheduledTaskColumns = "`id`,`title`,`body`,`target_owner`,`target_name`,`base`," +
-	"`auto_merge`,`template_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`," +
+const scheduleColumns = "`id`,`title`,`body`,`target_owner`,`target_name`,`base`," +
+	"`auto_merge`,`template_id`,`suite_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`," +
 	"`enabled`,`next_run_at`,`last_run_at`,`created_at`"
 
-func scanScheduledTask(scan func(...any) error) (ScheduledTask, error) {
-	var t ScheduledTask
-	var base, templateID sql.NullString
+func scanSchedule(scan func(...any) error) (Schedule, error) {
+	var t Schedule
+	var base, templateID, suiteID sql.NullString
 	var kind string
 	var everyNHours, timeOfDay, weekday, dayOfMonth sql.NullInt64
 	var lastRun sql.NullTime
 	if err := scan(&t.ID, &t.Title, &t.Body, &t.Target.Owner, &t.Target.Name, &base,
-		&t.AutoMerge, &templateID, &kind, &everyNHours, &timeOfDay, &weekday, &dayOfMonth,
+		&t.AutoMerge, &templateID, &suiteID, &kind, &everyNHours, &timeOfDay, &weekday, &dayOfMonth,
 		&t.Enabled, &t.NextRunAt, &lastRun, &t.CreatedAt); err != nil {
-		return ScheduledTask{}, err
+		return Schedule{}, err
 	}
 	t.Base = base.String
 	if templateID.Valid {
 		t.TemplateID = &templateID.String
+	}
+	if suiteID.Valid {
+		t.SuiteID = &suiteID.String
 	}
 	t.Recurrence = Recurrence{
 		Kind:        RecurrenceKind(kind),
@@ -2209,15 +2821,15 @@ func scanScheduledTask(scan func(...any) error) (ScheduledTask, error) {
 	return t, nil
 }
 
-// PutScheduledTask inserts or replaces a schedule wholesale -- putTask's
-// own multi-table dance, now that Reads and Grants give a schedule child
-// rows of its own (bwsalmon/agents#464).
-func (s *Store) PutScheduledTask(ctx context.Context, t ScheduledTask) error {
-	return s.write(ctx, "put scheduled task "+t.ID,
-		func(tx *sql.Tx) error { return putScheduledTask(ctx, tx, t) })
+// PutSchedule inserts or replaces a schedule wholesale -- putTask's own
+// multi-table dance, now that Reads and Grants give a schedule child rows
+// of its own (bwsalmon/agents#464).
+func (s *Store) PutSchedule(ctx context.Context, t Schedule) error {
+	return s.write(ctx, "put schedule "+t.ID,
+		func(tx *sql.Tx) error { return putSchedule(ctx, tx, t) })
 }
 
-func putScheduledTask(ctx context.Context, tx *sql.Tx, t ScheduledTask) error {
+func putSchedule(ctx context.Context, tx *sql.Tx, t Schedule) error {
 	r := t.Recurrence
 	var everyNHours, timeOfDay, weekday, dayOfMonth any
 	switch r.Kind {
@@ -2230,34 +2842,34 @@ func putScheduledTask(ctx context.Context, tx *sql.Tx, t ScheduledTask) error {
 	case RecurrenceMonthly:
 		timeOfDay, dayOfMonth = r.TimeOfDay, r.DayOfMonth
 	}
-	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`scheduled_task`"+` (
+	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`schedule`"+` (
   `+"`id`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
-		"`auto_merge`,`template_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`,"+
+		"`auto_merge`,`template_id`,`suite_id`,`recurrence_kind`,`every_n_hours`,`time_of_day_minutes`,`weekday`,`day_of_month`,"+
 		"`enabled`,`next_run_at`,`last_run_at`,`created_at`"+`
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, t.Title, t.Body, t.Target.Owner, t.Target.Name, nullable(t.Base),
-		t.AutoMerge, stringOf(t.TemplateID), string(r.Kind), everyNHours, timeOfDay, weekday, dayOfMonth,
+		t.AutoMerge, stringOf(t.TemplateID), stringOf(t.SuiteID), string(r.Kind), everyNHours, timeOfDay, weekday, dayOfMonth,
 		t.Enabled, t.NextRunAt.UTC(), timeOf(t.LastRunAt), t.CreatedAt.UTC())
 	if err != nil {
-		return fmt.Errorf("writing scheduled task %s: %w", t.ID, err)
+		return fmt.Errorf("writing schedule %s: %w", t.ID, err)
 	}
 
-	for _, table := range []string{"scheduled_task_read", "scheduled_task_grant"} {
+	for _, table := range []string{"schedule_read", "schedule_grant"} {
 		if _, err := tx.ExecContext(ctx,
-			"DELETE FROM `"+table+"` WHERE `scheduled_task_id` = ?", t.ID); err != nil {
+			"DELETE FROM `"+table+"` WHERE `schedule_id` = ?", t.ID); err != nil {
 			return err
 		}
 	}
 	for _, r := range t.Reads {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `scheduled_task_read` (`scheduled_task_id`, `owner`, `name`) VALUES (?,?,?)",
+			"INSERT INTO `schedule_read` (`schedule_id`, `owner`, `name`) VALUES (?,?,?)",
 			t.ID, r.Owner, r.Name); err != nil {
 			return err
 		}
 	}
 	for _, g := range t.Grants {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `scheduled_task_grant` (`scheduled_task_id`, `capability`, `via`, `folder`) VALUES (?,?,?,?)",
+			"INSERT INTO `schedule_grant` (`schedule_id`, `capability`, `via`, `folder`) VALUES (?,?,?,?)",
 			t.ID, g.Capability, string(g.Via), folderOf(g.Folder)); err != nil {
 			return err
 		}
@@ -2265,13 +2877,13 @@ func putScheduledTask(ctx context.Context, tx *sql.Tx, t ScheduledTask) error {
 	return nil
 }
 
-// scheduledReadsOf and scheduledGrantsOf are a schedule's Reads and
-// Grants, read straight off their own tables -- task.go's grantsOf and
-// GetTask's own reads query, ported onto scheduled_task_id.
-func scheduledReadsOf(ctx context.Context, q querier, id string) ([]RepoRef, error) {
+// scheduleReadsOf and scheduleGrantsOf are a schedule's Reads and Grants,
+// read straight off their own tables -- task.go's grantsOf and GetTask's
+// own reads query, ported onto schedule_id.
+func scheduleReadsOf(ctx context.Context, q querier, id string) ([]RepoRef, error) {
 	var reads []RepoRef
 	err := each(ctx, q,
-		"SELECT `owner`,`name` FROM `scheduled_task_read` WHERE `scheduled_task_id` = ? ORDER BY `owner`,`name`",
+		"SELECT `owner`,`name` FROM `schedule_read` WHERE `schedule_id` = ? ORDER BY `owner`,`name`",
 		id, func(rows *sql.Rows) error {
 			var r RepoRef
 			if err := rows.Scan(&r.Owner, &r.Name); err != nil {
@@ -2283,10 +2895,10 @@ func scheduledReadsOf(ctx context.Context, q querier, id string) ([]RepoRef, err
 	return reads, err
 }
 
-func scheduledGrantsOf(ctx context.Context, q querier, id string) ([]Grant, error) {
+func scheduleGrantsOf(ctx context.Context, q querier, id string) ([]Grant, error) {
 	var grants []Grant
 	err := each(ctx, q,
-		"SELECT `capability`,`via`,`folder` FROM `scheduled_task_grant` WHERE `scheduled_task_id` = ? ORDER BY `capability`",
+		"SELECT `capability`,`via`,`folder` FROM `schedule_grant` WHERE `schedule_id` = ? ORDER BY `capability`",
 		id, func(rows *sql.Rows) error {
 			var g Grant
 			var via string
@@ -2301,54 +2913,54 @@ func scheduledGrantsOf(ctx context.Context, q querier, id string) ([]Grant, erro
 	return grants, err
 }
 
-// hydrateScheduledTask fills in t's Reads and Grants, read off their own
-// tables -- scanScheduledTask itself only ever reads scheduled_task's own
-// columns, the same split scanning a Task's own row has from grantsOf/its
-// reads query.
-func hydrateScheduledTask(ctx context.Context, q querier, t *ScheduledTask) error {
-	reads, err := scheduledReadsOf(ctx, q, t.ID)
+// hydrateSchedule fills in t's Reads and Grants, read off their own
+// tables -- scanSchedule itself only ever reads schedule's own columns,
+// the same split scanning a Task's own row has from grantsOf/its reads
+// query.
+func hydrateSchedule(ctx context.Context, q querier, t *Schedule) error {
+	reads, err := scheduleReadsOf(ctx, q, t.ID)
 	if err != nil {
-		return fmt.Errorf("reading reads of scheduled task %s: %w", t.ID, err)
+		return fmt.Errorf("reading reads of schedule %s: %w", t.ID, err)
 	}
-	grants, err := scheduledGrantsOf(ctx, q, t.ID)
+	grants, err := scheduleGrantsOf(ctx, q, t.ID)
 	if err != nil {
-		return fmt.Errorf("reading grants of scheduled task %s: %w", t.ID, err)
+		return fmt.Errorf("reading grants of schedule %s: %w", t.ID, err)
 	}
 	t.Reads, t.Grants = reads, grants
 	return nil
 }
 
-func getScheduledTask(ctx context.Context, q querier, id string) (*ScheduledTask, error) {
-	t, err := scanScheduledTask(q.QueryRowContext(ctx,
-		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` WHERE `id` = ?", id).Scan)
+func getSchedule(ctx context.Context, q querier, id string) (*Schedule, error) {
+	t, err := scanSchedule(q.QueryRowContext(ctx,
+		"SELECT "+scheduleColumns+" FROM `schedule` WHERE `id` = ?", id).Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	if err := hydrateScheduledTask(ctx, q, &t); err != nil {
+	if err := hydrateSchedule(ctx, q, &t); err != nil {
 		return nil, err
 	}
 	return &t, nil
 }
 
-// GetScheduledTask returns a schedule, or nil if there is none with that ID.
-func (s *Store) GetScheduledTask(ctx context.Context, id string) (*ScheduledTask, error) {
-	return getScheduledTask(ctx, s.db, id)
+// GetSchedule returns a schedule, or nil if there is none with that ID.
+func (s *Store) GetSchedule(ctx context.Context, id string) (*Schedule, error) {
+	return getSchedule(ctx, s.db, id)
 }
 
-// ListScheduledTasks returns every schedule, newest first -- ListTasks'
-// own "the whole table" reasoning applies again at this size.
-func (s *Store) ListScheduledTasks(ctx context.Context) ([]ScheduledTask, error) {
+// ListSchedules returns every schedule, newest first -- ListTasks' own
+// "the whole table" reasoning applies again at this size.
+func (s *Store) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` ORDER BY `created_at` DESC, `id` DESC")
+		"SELECT "+scheduleColumns+" FROM `schedule` ORDER BY `created_at` DESC, `id` DESC")
 	if err != nil {
-		return nil, fmt.Errorf("listing scheduled tasks: %w", err)
+		return nil, fmt.Errorf("listing schedules: %w", err)
 	}
-	var out []ScheduledTask
+	var out []Schedule
 	for rows.Next() {
-		t, err := scanScheduledTask(rows.Scan)
+		t, err := scanSchedule(rows.Scan)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -2362,27 +2974,27 @@ func (s *Store) ListScheduledTasks(ctx context.Context) ([]ScheduledTask, error)
 	rows.Close()
 
 	for i := range out {
-		if err := hydrateScheduledTask(ctx, s.db, &out[i]); err != nil {
+		if err := hydrateSchedule(ctx, s.db, &out[i]); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-// DueScheduledTasks is every enabled schedule whose next run has come --
-// what the orchestrator's schedule reconciler fires each cycle. Ordered
-// by id for a deterministic firing order, the same reasoning v1's own
+// DueSchedules is every enabled schedule whose next run has come -- what
+// the orchestrator's schedule reconciler fires each cycle. Ordered by id
+// for a deterministic firing order, the same reasoning v1's own
 // ScheduledJobsConfig.load gives for sorting by name.
-func (s *Store) DueScheduledTasks(ctx context.Context, now time.Time) ([]ScheduledTask, error) {
+func (s *Store) DueSchedules(ctx context.Context, now time.Time) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` "+
+		"SELECT "+scheduleColumns+" FROM `schedule` "+
 			"WHERE `enabled` = 1 AND `next_run_at` <= ? ORDER BY `id`", now.UTC())
 	if err != nil {
-		return nil, fmt.Errorf("listing due scheduled tasks: %w", err)
+		return nil, fmt.Errorf("listing due schedules: %w", err)
 	}
-	var out []ScheduledTask
+	var out []Schedule
 	for rows.Next() {
-		t, err := scanScheduledTask(rows.Scan)
+		t, err := scanSchedule(rows.Scan)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -2396,22 +3008,22 @@ func (s *Store) DueScheduledTasks(ctx context.Context, now time.Time) ([]Schedul
 	rows.Close()
 
 	for i := range out {
-		if err := hydrateScheduledTask(ctx, s.db, &out[i]); err != nil {
+		if err := hydrateSchedule(ctx, s.db, &out[i]); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-// UpdateScheduledTask reads a schedule, applies mutate, and writes it
-// back -- UpdateTask's own read-modify-write-and-retry shape, for the
-// same reason: mutate may run more than once, on a schedule freshly read
+// UpdateSchedule reads a schedule, applies mutate, and writes it back --
+// UpdateTask's own read-modify-write-and-retry shape, for the same
+// reason: mutate may run more than once, on a schedule freshly read
 // inside each attempt.
-func (s *Store) UpdateScheduledTask(ctx context.Context, id string, mutate func(*ScheduledTask) error) error {
+func (s *Store) UpdateSchedule(ctx context.Context, id string, mutate func(*Schedule) error) error {
 	var missing bool
-	err := s.write(ctx, "update scheduled task "+id, func(tx *sql.Tx) error {
+	err := s.write(ctx, "update schedule "+id, func(tx *sql.Tx) error {
 		missing = false
-		t, err := getScheduledTask(ctx, tx, id)
+		t, err := getSchedule(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -2422,27 +3034,26 @@ func (s *Store) UpdateScheduledTask(ctx context.Context, id string, mutate func(
 		if err := mutate(t); err != nil {
 			return err
 		}
-		return putScheduledTask(ctx, tx, *t)
+		return putSchedule(ctx, tx, *t)
 	})
 	if err != nil {
 		return err
 	}
 	if missing {
-		return fmt.Errorf("updating scheduled task %s: no such scheduled task", id)
+		return fmt.Errorf("updating schedule %s: no such schedule", id)
 	}
 	return nil
 }
 
-// DeleteScheduledTask removes a schedule -- unlike a task (Close's own
-// doc comment: "a task that ran is a record of a dispatch that
-// happened"), a schedule is only ever a standing declaration with no
-// history of its own worth keeping once a human no longer wants it, so
-// deleting it outright (rather than adding a closed-like flag) loses
-// nothing: every task it already filed remains exactly where it always
-// was, untouched by this.
-func (s *Store) DeleteScheduledTask(ctx context.Context, id string) error {
-	return s.write(ctx, "delete scheduled task "+id, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "DELETE FROM `scheduled_task` WHERE `id` = ?", id)
+// DeleteSchedule removes a schedule -- unlike a task (Close's own doc
+// comment: "a task that ran is a record of a dispatch that happened"), a
+// schedule is only ever a standing declaration with no history of its own
+// worth keeping once a human no longer wants it, so deleting it outright
+// (rather than adding a closed-like flag) loses nothing: every task it
+// already filed remains exactly where it always was, untouched by this.
+func (s *Store) DeleteSchedule(ctx context.Context, id string) error {
+	return s.write(ctx, "delete schedule "+id, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM `schedule` WHERE `id` = ?", id)
 		return err
 	})
 }
@@ -2470,9 +3081,9 @@ func (s *Store) HasOpenTaskWithTag(ctx context.Context, tag string) (bool, error
 // --- task templates ----------------------------------------------------
 
 // NewTaskTemplateID allocates a template identity from its own sequence,
-// distinct from task_sequence and scheduled_task_sequence -- the same
-// "not mistaken for one of the things that use it" reasoning
-// NewScheduledTaskID's own doc comment gives.
+// distinct from task_sequence and schedule_sequence -- the same "not
+// mistaken for one of the things that use it" reasoning NewScheduleID's
+// own doc comment gives.
 func (s *Store) NewTaskTemplateID(ctx context.Context) (id string, err error) {
 	err = s.write(ctx, "allocate a task template id", func(tx *sql.Tx) error {
 		id, err = newTaskTemplateID(ctx, tx)
@@ -2504,8 +3115,9 @@ func scanTaskTemplate(scan func(...any) error) (TaskTemplate, error) {
 	return t, nil
 }
 
-// PutTaskTemplate inserts or replaces a template wholesale -- putScheduledTask's
-// own multi-table dance, ported onto task_template's own child tables.
+// PutTaskTemplate inserts or replaces a template wholesale --
+// putSchedule's own multi-table dance, ported onto task_template's own
+// child tables.
 func (s *Store) PutTaskTemplate(ctx context.Context, t TaskTemplate) error {
 	return s.write(ctx, "put task template "+t.ID,
 		func(tx *sql.Tx) error { return putTaskTemplate(ctx, tx, t) })
@@ -2544,7 +3156,7 @@ func putTaskTemplate(ctx context.Context, tx *sql.Tx, t TaskTemplate) error {
 }
 
 // hydrateTaskTemplate fills in t's Reads and Grants, read off their own
-// tables -- hydrateScheduledTask's own split-scan reasoning applies again
+// tables -- hydrateSchedule's own split-scan reasoning applies again
 // here.
 func hydrateTaskTemplate(ctx context.Context, q querier, t *TaskTemplate) error {
 	var reads []RepoRef
@@ -2600,8 +3212,9 @@ func (s *Store) GetTaskTemplate(ctx context.Context, id string) (*TaskTemplate, 
 	return getTaskTemplate(ctx, s.db, id)
 }
 
-// ListTaskTemplates returns every template, newest first -- ListScheduledTasks'
-// own "the whole table" reasoning applies again at this size.
+// ListTaskTemplates returns every template, newest first --
+// ListSchedules' own "the whole table" reasoning applies again at this
+// size.
 func (s *Store) ListTaskTemplates(ctx context.Context) ([]TaskTemplate, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT "+taskTemplateColumns+" FROM `task_template` ORDER BY `created_at` DESC, `id` DESC")
@@ -2632,8 +3245,8 @@ func (s *Store) ListTaskTemplates(ctx context.Context) ([]TaskTemplate, error) {
 }
 
 // UpdateTaskTemplate reads a template, applies mutate, and writes it back
-// -- UpdateScheduledTask's own read-modify-write-and-retry shape, for the
-// same reason: mutate may run more than once, on a template freshly read
+// -- UpdateSchedule's own read-modify-write-and-retry shape, for the same
+// reason: mutate may run more than once, on a template freshly read
 // inside each attempt.
 func (s *Store) UpdateTaskTemplate(ctx context.Context, id string, mutate func(*TaskTemplate) error) error {
 	var missing bool
@@ -2661,8 +3274,8 @@ func (s *Store) UpdateTaskTemplate(ctx context.Context, id string, mutate func(*
 	return nil
 }
 
-// DeleteTaskTemplate removes a template outright -- DeleteScheduledTask's
-// own doc comment gives the reasoning: a template is only ever a standing
+// DeleteTaskTemplate removes a template outright -- DeleteSchedule's own
+// doc comment gives the reasoning: a template is only ever a standing
 // declaration, so there is no history on the row itself worth keeping
 // once nobody wants it. Callers that must not orphan a schedule still
 // pointing at this template (ui.Client.DeleteTemplate) check
@@ -2680,15 +3293,27 @@ func (s *Store) DeleteTaskTemplate(ctx context.Context, id string) error {
 // what ui.Client.DeleteTemplate checks before deleting one out from under
 // a schedule that still fires from it, and what a template's own "used by
 // N schedules" display reads.
-func (s *Store) SchedulesUsingTemplate(ctx context.Context, id string) ([]ScheduledTask, error) {
+func (s *Store) SchedulesUsingTemplate(ctx context.Context, id string) ([]Schedule, error) {
+	return s.schedulesUsing(ctx, "`template_id`", "template", id)
+}
+
+// SchedulesUsingSuite returns every schedule whose SuiteID is id -- what
+// ui.Client.DeleteSuite checks before deleting a suite out from under a
+// schedule that still runs it, SchedulesUsingTemplate's own reasoning
+// applied to the other thing a schedule can point at.
+func (s *Store) SchedulesUsingSuite(ctx context.Context, id string) ([]Schedule, error) {
+	return s.schedulesUsing(ctx, "`suite_id`", "task suite", id)
+}
+
+func (s *Store) schedulesUsing(ctx context.Context, column, what, id string) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+scheduledTaskColumns+" FROM `scheduled_task` WHERE `template_id` = ? ORDER BY `id`", id)
+		"SELECT "+scheduleColumns+" FROM `schedule` WHERE "+column+" = ? ORDER BY `id`", id)
 	if err != nil {
-		return nil, fmt.Errorf("listing schedules using template %s: %w", id, err)
+		return nil, fmt.Errorf("listing schedules using %s %s: %w", what, id, err)
 	}
-	var out []ScheduledTask
+	var out []Schedule
 	for rows.Next() {
-		t, err := scanScheduledTask(rows.Scan)
+		t, err := scanSchedule(rows.Scan)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -2702,7 +3327,7 @@ func (s *Store) SchedulesUsingTemplate(ctx context.Context, id string) ([]Schedu
 	rows.Close()
 
 	for i := range out {
-		if err := hydrateScheduledTask(ctx, s.db, &out[i]); err != nil {
+		if err := hydrateSchedule(ctx, s.db, &out[i]); err != nil {
 			return nil, err
 		}
 	}

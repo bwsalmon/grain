@@ -272,7 +272,7 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, config{
-			dataDir: dataDir, sandboxDir: t.TempDir(), maxConcurrent: 1, pollInterval: 5 * time.Second,
+			dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: 5 * time.Second,
 			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
 			githubHost: githubHost, githubInsecureHTTP: true,
 		})

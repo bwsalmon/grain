@@ -22,7 +22,7 @@ import (
 // grain_config seeded from them.
 func startupConfig() config {
 	return config{
-		pollInterval: 30 * time.Second, maxConcurrent: 1,
+		pollInterval: 30 * time.Second, maxWorkers: 1,
 		agentFramework: model.AgentFrameworkAntigravity,
 		geminiModel:    "gemini-2.5-pro", claudeModel: "claude-sonnet-5",
 		githubHost: "github.com",
@@ -158,11 +158,23 @@ func TestLiveConfigPushesAChangedSandboxShapeToTheBackend(t *testing.T) {
 	changed := cfg.toModelConfig()
 	changed.SandboxCPUs = 4
 	changed.SandboxMemoryMB = 8192
+	changed.SandboxDiskGB = 40
 	putConfig(t, store, changed)
 	live.refresh(ctx, &deps)
 
-	if want := (orchestrator.Shape{CPUs: 4, MemoryMB: 8192}); sandboxes.shape != want {
+	if want := (orchestrator.Shape{CPUs: 4, MemoryMB: 8192, DiskGB: 40}); sandboxes.shape != want {
 		t.Fatalf("default shape = %+v, want %+v", sandboxes.shape, want)
+	}
+
+	// And a change to the disk alone reaches the backend too: the three
+	// dimensions are compared independently (liveConfig's own reshape
+	// check), not as one all-or-nothing pair of CPU and memory.
+	changed.SandboxDiskGB = 80
+	putConfig(t, store, changed)
+	live.refresh(ctx, &deps)
+
+	if want := (orchestrator.Shape{CPUs: 4, MemoryMB: 8192, DiskGB: 80}); sandboxes.shape != want {
+		t.Fatalf("default shape after a disk-only change = %+v, want %+v", sandboxes.shape, want)
 	}
 }
 
@@ -202,8 +214,8 @@ func TestLiveConfigKeepsStartupValuesForUnsetStoredFields(t *testing.T) {
 	live.refresh(ctx, &deps)
 
 	now := live.current()
-	if now.pollInterval != 30*time.Second || now.maxConcurrent != 1 {
-		t.Fatalf("poll interval/max concurrent = %s/%d, want the startup 30s/1", now.pollInterval, now.maxConcurrent)
+	if now.pollInterval != 30*time.Second || now.maxWorkers != 1 {
+		t.Fatalf("poll interval/max workers = %s/%d, want the startup 30s/1", now.pollInterval, now.maxWorkers)
 	}
 	if now.geminiModel != "gemini-2.5-pro" || now.claudeModel != "claude-sonnet-5" {
 		t.Fatalf("models = %q/%q, want the startup ones", now.geminiModel, now.claudeModel)

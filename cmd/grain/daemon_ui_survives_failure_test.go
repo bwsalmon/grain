@@ -61,7 +61,7 @@ func TestRunKeepsTheUIServerUpWhenTheRestOfTheDaemonFails(t *testing.T) {
 	}
 
 	cfg := config{
-		dataDir: dataDir, sandboxDir: t.TempDir(), maxConcurrent: 1, pollInterval: time.Hour,
+		dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: time.Hour,
 		githubHost: "127.0.0.1:0", githubInsecureHTTP: true,
 		uiAddr: uiAddr, actor: "tester",
 	}

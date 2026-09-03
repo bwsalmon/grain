@@ -112,7 +112,7 @@ func TestCLICommentAnswersAParkedQuestionAndResumesTheTask(t *testing.T) {
 	// comment on the task -- no CLI subprocess yet, since nothing but the
 	// scripted agent's own turn happens here.
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(askScript("should this touch the public API or stay internal?")),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
@@ -182,7 +182,7 @@ func TestCLICommentAnswersAParkedQuestionAndResumesTheTask(t *testing.T) {
 	userTransport := github.NewRealTransport(githubHost)
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
-	if err := userClient.MergePullRequest(owner, repoName, prNumber); err != nil {
+	if err := userClient.MergePullRequest(owner, repoName, prNumber, ""); err != nil {
 		t.Fatalf("submitting (merging) the pull request: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func TestCLIClosingAQueuedTaskThenReopeningItDispatchesForReal(t *testing.T) {
 
 	// A closed task is not dispatchable, however free the slot.
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(remote, model.BranchName(task.ID), task.ID)),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
@@ -329,7 +329,7 @@ func TestCLIClosingAQueuedTaskThenReopeningItDispatchesForReal(t *testing.T) {
 	userTransport := github.NewRealTransport(githubHost)
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
-	if err := userClient.MergePullRequest(owner, repoName, prNumber); err != nil {
+	if err := userClient.MergePullRequest(owner, repoName, prNumber, ""); err != nil {
 		t.Fatalf("submitting (merging) the reopened task's pull request: %v", err)
 	}
 
@@ -437,7 +437,7 @@ func TestCLICapabilityAttachAndDetachControlWhatARealDispatchMaterializes(t *tes
 
 	deps := orchestrator.Deps{
 		Client: client, Sandboxes: sandboxes, Config: cfg,
-		MaxConcurrent: 1,
+		MaxWorkers: 1,
 		Framework:     scriptedFramework(pushScript(remote, model.BranchName(taskA.ID), taskA.ID)),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
@@ -570,7 +570,7 @@ func TestCLIUpdateChangesBaseAndAutoMergeBeforeDispatchAndBothTakeEffect(t *test
 
 	branch := model.BranchName(task.ID)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(releaseBranchPushScript(remote, branch, task.ID)),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {

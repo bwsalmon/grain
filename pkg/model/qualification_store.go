@@ -236,7 +236,7 @@ func (s *Store) QualifiableActiveCandidates(ctx context.Context) ([]Candidate, e
 // real tasks -- the issue's own "schedule these tasks and run them
 // through against the rc". Every item's TaskTemplate is resolved fresh
 // from the store here, not from whatever content a UI had in hand when
-// the plan was last saved (fireScheduledTask's own "not a stale copy"
+// the plan was last saved (fireTaskSchedule's own "not a stale copy"
 // discipline for bwsalmon/agents#516, applied again): a template edited
 // since is what actually gets filed, and a template deleted out from
 // under a plan (ui.Client.DeleteTemplate tries to prevent this, but
@@ -259,7 +259,7 @@ func (s *Store) QualifiableActiveCandidates(ctx context.Context) ([]Candidate, e
 //
 // Approval is unconditional at creation, never a question this call
 // itself answers -- RequireApproval false lands every instance already
-// approved (fireScheduledTask's own "the schedule is itself the standing
+// approved (fireTaskSchedule's own "the schedule is itself the standing
 // approval," here read off the plan instead), and true leaves every
 // instance unapproved for ApproveQualificationRun to act on later as one
 // bulk decision, the issue's own "require the user to approve submitting

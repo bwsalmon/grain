@@ -33,7 +33,7 @@ export function completionPhase(t) {
     return {
       label: "Merge blocked",
       color: "error",
-      title: "The merge queue tried to land this automatically and gave up -- push a fix by hand, or close it.",
+      title: "The merge queue gave up on landing this automatically -- its own comment says why. Sort it out by hand, or close it.",
     };
   }
   if (!t.autoMerge) {
@@ -47,12 +47,100 @@ export function capabilityName(config, id) {
   return c ? c.name : id;
 }
 
-// repoRows unions config.targetRepos with every repo a task's write
-// target names (Task.Repo, never Reads -- a read-only repo grants
-// nothing and is not what a task "belongs to") into one row per repo,
-// sorted alphabetically, for the repo page and its per-state counts.
-// Tasks with no target (a proposal nobody has pointed at a repo yet) are
-// omitted rather than grouped under a blank name.
+// RETIRED_CAPABILITY_HINT labels a capability that is selected somewhere
+// but no longer offered -- worded as an instruction because turning it
+// off is the only thing its row is there for (capabilityRows below).
+export const RETIRED_CAPABILITY_HINT = "No longer offered -- untick to remove it";
+
+// capabilityRows is the listing any capability picker has to be built
+// from: the rows this build offers, plus a row of its own for each
+// selected id that has none.
+//
+// Every stored capability set -- a task's own grants, the deployment's
+// defaults (model.Config.DefaultCapabilities) and a repo's
+// (model.RepoConfig.DefaultCapabilities) -- is reported as stored, so an
+// id retired since somebody chose it stays in the set an operator is
+// looking at (ui.OfferedCapabilities' own "scratch-repo", now
+// github-sandbox). That is deliberate: ui.Settings.DefaultCapabilities
+// says as much, "an operator can only clear one they can see". But a MUI
+// multiple Select only ever deselects a value through that value's own
+// MenuItem, so an id with no row is a chip nothing can untick, and it is
+// sent straight back on the next save -- which ui.UpdateSettings and
+// ui.SetRepoDefaultCapabilities both refuse outright as "unknown
+// capability", pinning the whole pane until the id goes away. The extra
+// row exists purely to be turned off, which is what makes that save
+// possible again.
+//
+// `retired` is set on those rows so a picker can label one as something
+// to switch off rather than something to switch on. It is a function of
+// its own because all three pickers need the same rows for the same
+// reason, and one that quietly stopped adding them would be a pane
+// nobody could save.
+export function capabilityRows(offered, selected) {
+  const rows = offered || [];
+  return rows.concat(
+    (selected || [])
+      .filter((id) => !rows.some((c) => c.id === id))
+      .map((id) => ({ id, name: id, description: RETIRED_CAPABILITY_HINT, retired: true })),
+  );
+}
+
+// unionCapabilities composes the two layers of default capabilities the
+// way ui.(*Client).defaultCapabilities does server-side: base (the
+// deployment's own set) with extra (one repo's) appended, deduped,
+// deployment-first.
+//
+// Union is the whole composition rule, and the only one -- a repo adds
+// to what the deployment defaults and can never subtract from it
+// (model.RepoConfig.DefaultCapabilities has why "everything except
+// gcp-key here" is deferred rather than spelled some other way). It is a
+// function of its own so the new-task form (which resolves a repo out of
+// the config it already has) and the repos page (which resolves the same
+// union from unsaved ticks, to say what Save is about to do) cannot
+// drift into two different answers.
+export function unionCapabilities(base, extra) {
+  const ids = [...(base || [])];
+  for (const id of extra || []) {
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+// defaultCapabilitiesFor is the set of capability ids a task filed
+// against repo would start out holding -- the frontend's own reading of
+// what ui.(*Client).defaultCapabilities resolves server-side, from the
+// two layers GET /api/config reports: config.defaultCapabilities (the
+// deployment's, chosen on Settings > Capabilities) and
+// config.repoDefaultCapabilities[repo] (that repo's own, chosen on the
+// repos page).
+//
+// Union, deployment first, deduped: a repo adds to what the deployment
+// defaults and can never subtract from it (model.RepoConfig.
+// DefaultCapabilities has why "everything except gcp-key here" is
+// deferred rather than spelled some other way here). A falsy repo -- no
+// repo picked yet, or a deliberately repo-less task -- has no second
+// layer to add, which is the same answer CreateTask gives a task whose
+// Target is nil.
+//
+// This is only ever a form's starting state. What a task is filed with is
+// what the request names (ui.CreateTaskRequest.Capabilities); computing
+// the same union here is what lets the boxes be ticked, and unticked,
+// before the task exists.
+export function defaultCapabilitiesFor(config, repo) {
+  return unionCapabilities(
+    config?.defaultCapabilities,
+    repo ? config?.repoDefaultCapabilities?.[repo] : null,
+  );
+}
+
+// repoRows unions the three things that can make this deployment know a
+// repo at all -- config.targetRepos, every repo a task's write target
+// names (Task.Repo, never Reads: a read-only repo grants nothing and is
+// not what a task "belongs to"), and every repo carrying defaults of its
+// own in config.repoDefaultCapabilities -- into one row per repo, sorted
+// alphabetically, for the repo page and its per-state counts. Tasks with
+// no target (a proposal nobody has pointed at a repo yet) are omitted
+// rather than grouped under a blank name.
 //
 // A targetRepos entry with no tasks yet still gets a (zero-count) row --
 // bwsalmon/agents#473 moved adding/removing a target repo onto this
@@ -62,17 +150,49 @@ export function capabilityName(config, id) {
 // repos pane only offers to remove the former, since there is nothing to
 // remove otherwise -- an unrestricted deployment's targetRepos is always
 // empty, so every row it has is `configured: false`.
+//
+// The third source is there for the same reason, one step further out.
+// ui.(*Client).SetRepoDefaultCapabilities does not require a repo to be
+// allow-listed (its own doc comment: a repo can be configured before it
+// is allowed, and keeps its configuration after it is removed), so a
+// repo can hold a stored default set while matching neither of the other
+// two -- and this page is the only place that set can be edited, so
+// dropping the row would leave it real, really seeded onto every task
+// filed there, and unreachable. `grain repo list` (grain/task-36) reads
+// the same three sources for the same reason; the page and the CLI are
+// meant to agree on which repos this deployment knows about.
+//
+// `defaults` is whether the repo carries a set of its own, which on a
+// row that is neither configured nor targeted is the only reason it is
+// here at all -- the repos pane says so rather than leaving an empty row
+// with nothing to explain it.
 export function repoRows(config, tasks) {
   const byRepo = new Map();
+  const row = (repo) => {
+    if (!byRepo.has(repo)) {
+      byRepo.set(repo, {
+        repo,
+        total: 0,
+        counts: {},
+        blocked: 0,
+        configured: false,
+        defaults: (config?.repoDefaultCapabilities?.[repo] || []).length > 0,
+      });
+    }
+    return byRepo.get(repo);
+  };
   for (const repo of config?.targetRepos || []) {
-    byRepo.set(repo, { repo, total: 0, counts: {}, blocked: 0, configured: true });
+    row(repo).configured = true;
+  }
+  // An absent key and an empty list mean the same thing here (nothing
+  // added), the way ui.configResponse.RepoDefaultCapabilities says they
+  // do, so an empty one is not a repo to put a row up for.
+  for (const [repo, ids] of Object.entries(config?.repoDefaultCapabilities || {})) {
+    if ((ids || []).length > 0) row(repo);
   }
   for (const t of tasks) {
     if (!t.repo) continue;
-    if (!byRepo.has(t.repo)) {
-      byRepo.set(t.repo, { repo: t.repo, total: 0, counts: {}, blocked: 0, configured: false });
-    }
-    const entry = byRepo.get(t.repo);
+    const entry = row(t.repo);
     entry.total += 1;
     entry.counts[t.state] = (entry.counts[t.state] || 0) + 1;
     if (t.blocked) entry.blocked += 1;
@@ -87,6 +207,13 @@ export function repoRows(config, tasks) {
 // deployment still gets a useful dropdown once it has filed at least one
 // task, rather than staying a bare text field forever. Sorted and
 // deduped the same way repoRows already sorts its own rows.
+//
+// Two sources, not repoRows' three: a repo that only carries defaults of
+// its own is not somewhere a task can be filed today (targeting a repo
+// off a non-empty allowlist parks it before it dispatches,
+// ui.(*Client).parkOffAllowlist), and offering it here would read as
+// this deployment inviting a task it is going to park. It still gets a
+// row on the repos page, which is where its defaults are edited.
 export function knownRepos(config, tasks) {
   const repos = new Set(config?.targetRepos || []);
   for (const t of tasks || []) {
@@ -106,6 +233,32 @@ export function knownRepos(config, tasks) {
 // branch forever, and every task filed from it is dead on arrival.
 export const STALE_BASE_STATES = ["failed", "closed"];
 
+// suggestsBase reports whether a task is evidence of where a repo's work
+// currently lives -- the filter behind both lastBaseForRepo below and
+// NewTaskOverlay's own "does this repo have any history to prefill
+// from?" check, which have to agree on what counts or the overlay
+// prefills from a task lastBaseForRepo already looked past.
+//
+// Two kinds of task are no evidence. One is a task in a
+// STALE_BASE_STATES state (above). The other is a task nobody filed by
+// hand: a schedule firing, a suite pass, the merge queue stacking a fix,
+// an agent's own propose_task. Those pick a base for their own reasons
+// -- a suite run stacks every task in a pass against one throwaway
+// branch, a stacked fix targets the branch of the pull request it
+// repairs -- and none of it says anything about where the human filing
+// the next task means to start. Letting them set the suggestion means a
+// scheduled job that ran overnight silently redirects tomorrow morning's
+// hand-filed task onto a branch nobody chose.
+//
+// authorKind is model.PrincipalKind on the wire (Task.AuthorKind).
+// Missing is treated as human: a task from a store or a caller that
+// never recorded one is unknown provenance, not known-automated, and
+// dropping it would quietly discard history rather than protect it.
+export function suggestsBase(task) {
+  if (STALE_BASE_STATES.includes(task.state)) return false;
+  return !task.authorKind || task.authorKind === "human";
+}
+
 // lastBaseForRepo is the branch NewTaskOverlay prefills "Base branch"
 // with once a repo is picked (bwsalmon/agents#641): whatever base the
 // most recently created task targeting that repo used, so a repo whose
@@ -119,14 +272,14 @@ export const STALE_BASE_STATES = ["failed", "closed"];
 // It is a suggestion, not a check: nothing here can know whether a
 // branch still exists on GitHub -- that is a fact only GitHub holds, and
 // this package deliberately never asks it. What it can do is not repeat
-// a base that has already failed, which is what STALE_BASE_STATES above
-// is for.
+// a base that has already failed, or one no human chose in the first
+// place, which is what suggestsBase above is for.
 export function lastBaseForRepo(tasks, repo) {
   if (!repo) return "";
   let latest = null;
   for (const t of tasks || []) {
     if (t.repo !== repo) continue;
-    if (STALE_BASE_STATES.includes(t.state)) continue;
+    if (!suggestsBase(t)) continue;
     if (!latest || new Date(t.createdAt || 0) > new Date(latest.createdAt || 0)) latest = t;
   }
   return latest ? latest.base || "" : "";

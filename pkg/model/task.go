@@ -160,6 +160,26 @@ const (
 	GrantByDirective GrantSource = "directive" // a trusted author wrote it
 	GrantByFolder    GrantSource = "folder"    // a folder's offers granted it
 	GrantByGrain     GrantSource = "grain"     // grain applied it to itself
+	// GrantByDefault records a grant a task was filed with because it was
+	// listed as a default -- by the deployment
+	// (Config.DefaultCapabilities) or by the repo the task targets
+	// (RepoConfig.DefaultCapabilities), unioned at creation. Nobody
+	// ticked it for this task in particular; it is what filing a task
+	// here, against that repo, starts out with (ui.CreateTask).
+	//
+	// One source for both layers, deliberately: which of the two attached
+	// it is a question the two panes that own them answer, and nothing
+	// about a task changes with the answer.
+	//
+	// It is provenance only, exactly like the four above: nothing reads
+	// Via to decide what a grant lets a task do, and a default-sourced
+	// grant is in every other way an ordinary one -- it sits on the task,
+	// shows in its capability list, is detached through the same picker,
+	// and fails the same way at ResolveGrants/MaterializeGrants if the
+	// capability behind it is misconfigured. That is deliberate: a
+	// deployment-wide grant applied at dispatch instead would have no
+	// task to be visible on and no way to be taken off one.
+	GrantByDefault GrantSource = "default"
 )
 
 type Provision string
@@ -387,7 +407,7 @@ type Task struct {
 	//
 	// It also changes how dispatch.Cycle schedules the task: unlike an
 	// ordinary Interactive task, which still waits its turn for
-	// Config.MaxConcurrent headroom the same as anything else, a
+	// Config.MaxWorkers headroom the same as anything else, a
 	// Configuration task is dispatched unconditionally, on top of
 	// whatever the deployment's concurrency limit already has in flight.
 	// A person reaching for this because something is already wrong --
@@ -395,17 +415,19 @@ type Task struct {
 	// tool meant to help stuck behind the very saturation it might need
 	// to diagnose.
 	Configuration bool
-	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) override
-	// Config.SandboxCPUs/SandboxMemoryMB for this task's own dispatch
-	// only -- the per-job escape hatch alongside the deployment-wide
-	// setting, for a task that is known ahead of time to need more (or
-	// less) than the default shape, e.g. a build-heavy repo or a task
-	// deliberately run on a constrained VM to reproduce a memory-pressure
-	// bug. Zero, the default for both, means "use the deployment
-	// default" -- the same "zero means unset" contract
-	// Config.SandboxCPUs/SandboxMemoryMB itself uses, chosen so a task
-	// created before this field existed reads back as unset rather than
-	// as an explicit "shrink this VM to nothing."
+	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) override
+	// Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB for this task's
+	// own dispatch only -- the per-job escape hatch alongside the
+	// deployment-wide setting, for a task that is known ahead of time to
+	// need more (or less) than the default shape, e.g. a build-heavy repo
+	// whose checkout and toolchain do not fit the guest image's own disk,
+	// or a task deliberately run on a constrained VM to reproduce a
+	// memory-pressure bug. Zero, the default for all three, means "use
+	// the deployment default" -- the same "zero means unset" contract
+	// Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB itself uses,
+	// chosen so a task created before these fields existed reads back as
+	// unset rather than as an explicit "shrink this VM to nothing."
 	//
 	// Applied by orchestrator.runOne, once per dispatch, immediately
 	// before the sandbox is handed to the run: a slot's sandbox is
@@ -415,7 +437,7 @@ type Task struct {
 	// moment the sandbox is created, which is the only moment its size is
 	// decided now that one is built per run (orchestrator.Shape, passed to
 	// Sandboxes.Acquire). Only orchestrator.KonturSandboxes can honour it
-	// -- a task with either field set,
+	// -- a task with any of the three set,
 	// dispatched onto the default orchestrator.HostSandboxes backend
 	// (no VM to resize), fails that dispatch outright rather than
 	// silently running at whatever shape the host itself happens to be,
@@ -424,6 +446,7 @@ type Task struct {
 	// local directory to place it in.
 	SandboxCPUs     int
 	SandboxMemoryMB int
+	SandboxDiskGB   int
 	// AgentFramework overrides Config.AgentFramework for this task's own
 	// dispatch only -- the per-task escape hatch alongside the
 	// deployment-wide default, for a task better suited to one framework
@@ -455,6 +478,14 @@ type Task struct {
 	// step past whichever extreme is currently in play, and Store.Reorder
 	// (a drag-and-drop move) rewrites it directly, so two tasks created
 	// or moved in the same instant still compare distinctly.
+	//
+	// It is also where grain writes down its own ordering, rather than
+	// keeping a second one to itself: Store.MoveToFrontOfBacklog puts the
+	// tasks waiting on a repo's merge queue at the front of the backlog in
+	// the order they will land, and orchestrator.fileFixTask files a
+	// repair at the very head of it. Everything that decides what happens
+	// next -- Ready, ListTasks, orchestrator.queueOrder -- then reads that
+	// one column, which is the one a human can see and drag.
 	OrderKey float64
 }
 
@@ -472,15 +503,20 @@ type Observation struct {
 	// a fresh read is compared. Losing one degrades rather than corrupts.
 	PendingQuestionCommentID *int64
 	BaselineCommentID        *int64
-	// MergeQueueBlockedAt is set once the merge queue has tried and failed
-	// to fix this task's own PR automatically (a LinkFixTask task ran and
-	// closed, but the PR is still conflicted or failing) -- see
-	// orchestrator.SyncPullRequests. A non-nil value means the merge queue
-	// has stopped driving this task: it no longer counts as any repo's
-	// queue head (so a stuck PR cannot block the ones behind it) and gets
-	// no second automatic fix, but it is still merged the moment it reads
-	// clean, the same as a fix task itself, in case a human pushes the
-	// fix by hand.
+	// MergeQueueBlockedAt is set once the merge queue has stopped driving
+	// this task, for any of the three reasons it ever does: the automatic
+	// fix it filed ran and closed and the PR is still conflicted or
+	// failing, or that fix never finished at all within the time a fix is
+	// given (orchestrator.defaultFixTaskDeadline), or the PR's checks
+	// stayed unfinished for longer than the queue is willing to wait on
+	// CI that may never report
+	// (orchestrator.defaultCheckStallDeadline). The task's own thread
+	// says which -- see orchestrator.SyncPullRequests. Either way
+	// it no longer counts as any repo's queue head (so a stuck PR cannot
+	// block the ones behind it) and gets no automatic fix from here on,
+	// but it is still merged the moment it reads clean, the same as a fix
+	// task itself, in case a human pushes the fix by hand or the checks
+	// it was waiting on turn up green after all.
 	MergeQueueBlockedAt *time.Time
 	ObservedAt          *time.Time
 	// RetryRequestedAt is a human's "clear the failure streak and let it
@@ -546,6 +582,13 @@ type Run struct {
 	// task) can see why a run failed from `grain get` without reading
 	// graind's own stdout, which per README's security design is not
 	// necessarily somewhere they can reach at all.
+	//
+	// A succeeded run fills it in too, with the tools it called and how
+	// often (orchestrator.outcomeOf). "How Outcome was reached" is the
+	// honest reading of the field, not "why it went wrong", and success is
+	// the ending where nothing else survives: agent.Result is discarded,
+	// so without this there was no stored answer to "did this run ever
+	// call the tool we built for it" for the runs that worked.
 	//
 	// Its own transcript -- the agent framework's full narrative record of
 	// the run, agent.Result.Transcript -- is not a field here: unlike

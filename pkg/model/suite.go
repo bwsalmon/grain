@@ -15,7 +15,7 @@ var SuitePrincipal = Principal{Kind: PrincipalAutomation, ID: "task-suite"}
 // TaskSuiteItem is one TaskTemplate (bwsalmon/agents#516) a suite runs,
 // referenced by id rather than copied -- content lives on the template,
 // and a run resolves it fresh every time a pass fires, the same "not a
-// stale copy" discipline fireScheduledTask and CreateQualificationRun
+// stale copy" discipline fireTaskSchedule and CreateQualificationRun
 // already hold TemplateID to.
 type TaskSuiteItem struct {
 	TemplateID string
@@ -44,11 +44,11 @@ func (m TaskSuiteMode) Valid() bool {
 	return false
 }
 
-// TaskSuite is a saved combination of task templates plus how to run
-// them against a repo and branch (bwsalmon/agents#642) -- a template a
-// human builds once, then runs any number of times, the same declared/
-// instantiated split every other "run this against a repo" mechanism
-// here already has (TaskTemplate -> ScheduledTask/QualificationRun,
+// TaskSuite is a saved combination of task templates plus how to run them
+// against a repo and branch (bwsalmon/agents#642) -- a template a human
+// builds once, then runs any number of times, the same
+// declared/instantiated split every other "run this against a repo"
+// mechanism here already has (TaskTemplate -> Schedule/QualificationRun,
 // here TaskSuite -> TaskSuiteRun).
 //
 // RequireApproval and AutoMerge are QualificationPlan's own two switches
@@ -157,7 +157,15 @@ type TaskSuiteRun struct {
 	ID        int64
 	SuiteID   string
 	SuiteName string // snapshot, QualificationTaskStatus.TemplateName's own reasoning
-	Target    RepoRef
+	// ScheduleID is the Schedule (schedule.go) whose firing started this
+	// run, or empty for a run a human started by hand. It is both how a
+	// run says where it came from and, through
+	// Store.HasActiveRunForSchedule, the idempotency check that keeps a
+	// schedule from starting a second run on top of one still in flight
+	// -- the firing tag every task-filing schedule already carries, in
+	// the form a run can wear.
+	ScheduleID string
+	Target     RepoRef
 	// Base is the branch every task this run files targets, and (through
 	// AutoMerge) the branch every one of them lands back on --
 	// bwsalmon/agents#642's own "tasks created from the task suite should

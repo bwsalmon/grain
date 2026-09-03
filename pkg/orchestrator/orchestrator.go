@@ -67,8 +67,9 @@ type Sandboxes interface {
 }
 
 // Shape is how big a sandbox a run asked for -- model.Task's own
-// SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534), or the zero value
-// for a run content with the deployment default.
+// SandboxCPUs/SandboxMemoryMB/SandboxDiskGB (bwsalmon/agents#534,
+// grain/task-41), or the zero value for a run content with the
+// deployment default.
 //
 // It is passed to Acquire rather than applied afterwards because a
 // sandbox is now built per run: the one moment its size is decided is
@@ -76,14 +77,22 @@ type Sandboxes interface {
 // used to expose a Reshape for exactly that gap -- a `konturctl vm
 // update` against a long-lived slot VM already sized from the deployment
 // default at create time, undone by the next recreate -- and it is gone
-// with the gap.
+// with the gap. Disk is the one dimension that could never have been
+// applied afterwards even then: a VM's root disk is a qcow2 overlay
+// created with the VM, and growing one under a running guest is not
+// something `konturctl vm update` offers.
 type Shape struct {
 	CPUs, MemoryMB int
+	// DiskGB is the VM's root disk size, in GiB -- the third dimension,
+	// added by grain/task-41 alongside the other two rather than as a
+	// type of its own so every path that already carries a requested
+	// size carries this one too.
+	DiskGB int
 }
 
 // IsZero reports whether a shape asks for nothing in particular, which is
-// what a task with neither override set produces.
-func (s Shape) IsZero() bool { return s.CPUs == 0 && s.MemoryMB == 0 }
+// what a task with no override at all produces.
+func (s Shape) IsZero() bool { return s.CPUs == 0 && s.MemoryMB == 0 && s.DiskGB == 0 }
 
 // orDefault fills each dimension this shape leaves at zero from def --
 // how a run that asked for no size of its own (or asked in only one
@@ -97,6 +106,9 @@ func (s Shape) orDefault(def Shape) Shape {
 	}
 	if s.MemoryMB == 0 {
 		s.MemoryMB = def.MemoryMB
+	}
+	if s.DiskGB == 0 {
+		s.DiskGB = def.DiskGB
 	}
 	return s
 }
@@ -198,7 +210,7 @@ type Config struct {
 	// Whatever a caller sets here is only the starting value on a
 	// deployment with a store: RunCycle re-reads model.Config.
 	// MaxAgentTurns out of grain_config every cycle, alongside
-	// Deps.MaxConcurrent, so a change made in Settings reaches the next
+	// Deps.MaxWorkers/MaxMergers, so a change made in Settings reaches the next
 	// run dispatched rather than the next restart.
 	MaxAgentTurns int
 	// GitRemoteBase is the base URL of this deployment's git proxy
@@ -250,13 +262,15 @@ type Config struct {
 	// instead of switching this off.
 	MaxRunRuntime time.Duration
 
-	// Now reads the current time, and exists for the one timestamp
-	// RunDispatch cannot take from its caller: when a run finished.
-	// Every other moment this package records is the `at` RunCycle hands
-	// down -- the moment the cycle began -- and a run's finish is the one
-	// that is genuinely later than that, by however long the agent
-	// worked. Stamping finished_at with `at` too made every run ever
-	// recorded read back as zero seconds long.
+	// Now reads the current time, and exists for the timestamps
+	// RunDispatch cannot take from its caller: when a run's agent got its
+	// first turn, and when the run finished. Every other moment this
+	// package records is the `at` RunCycle hands down -- the moment the
+	// cycle began -- and those two are genuinely later than that, by
+	// however long setup and then the agent took. Stamping finished_at
+	// with `at` too made every run ever recorded read back as zero
+	// seconds long; the agent's own start is the line pkg/metrics splits
+	// that duration at (Store.SetRunAgentStarted).
 	//
 	// nil is the wall clock, which is what a real deployment wants. A
 	// test driving this package off a fake clock sets it so a run's
@@ -308,6 +322,18 @@ type Config struct {
 	// handed an in-process registry. See selfrepair.Confirm's own doc
 	// comment for what closing that gap would take.
 	GrantTools map[string]func(store *model.Store, taskID string) []mcp.Tool
+	// SandboxRecreations, when non-nil, is the registry each dispatched
+	// run parks itself in so that it can later ask for its own sandbox to
+	// be destroyed and rebuilt -- the daemon-side half of pkg/mcp's
+	// recreate_sandbox tool. See SandboxRecreations' own doc comment for
+	// why the request has to come back to the daemon at all rather than
+	// being something the run does inside its sandbox.
+	//
+	// nil registers nothing and answers every request with "no live run",
+	// which is the honest answer for a caller (a test, a one-shot cycle,
+	// `grain demo`) that has no UI/API route for such a request to arrive
+	// over in the first place.
+	SandboxRecreations *SandboxRecreations
 }
 
 func (c Config) cancelPollInterval() time.Duration {
@@ -365,13 +391,14 @@ func NewHostSandboxes(baseDir string) *HostSandboxes {
 // for the run.
 //
 // A non-zero shape is refused rather than ignored. A local directory has
-// no CPU or memory of its own to size, so a task that asked for a
-// specific one would silently get the host's instead -- the same refusal
-// this backend gave before, when a shape override went looking for a
-// Reshape it does not implement.
+// no CPU, memory or disk of its own to size -- it is a path on the host's
+// own filesystem -- so a task that asked for a specific one would
+// silently get the host's instead: the same refusal this backend gave
+// before, when a shape override went looking for a Reshape it does not
+// implement.
 func (h *HostSandboxes) Acquire(ctx context.Context, name string, shape Shape) (Sandbox, error) {
 	if !shape.IsZero() {
-		return nil, fmt.Errorf("orchestrator: sandbox %q asks for %d vCPU/%d MiB but a host-directory sandbox has no shape of its own", name, shape.CPUs, shape.MemoryMB)
+		return nil, fmt.Errorf("orchestrator: sandbox %q asks for %d vCPU/%d MiB/%d GiB but a host-directory sandbox has no shape of its own", name, shape.CPUs, shape.MemoryMB, shape.DiskGB)
 	}
 	root := filepath.Join(h.baseDir, name)
 	// A directory left behind by a previous process using this same
@@ -491,6 +518,28 @@ func (s *hostSandbox) Tools(ctx context.Context) ([]mcp.Tool, error) {
 // method of the same name has to reach into a VM's guest to do it.
 func (s *hostSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, token string) error {
 	return mcp.ConfigureGitCredentials(s.root, remoteURL, token)
+}
+
+// Rebuild implements SandboxRebuilder: remove this run's directory and
+// make an empty one again at the same path -- Acquire's own
+// RemoveAll/MkdirAll pair, which is already exactly "destroy whatever is
+// under this name and start clean".
+//
+// It is worth having here even though a host directory cannot break the
+// way a VM can (there is no guest to stop answering, no disk of its own
+// to fill). What it can be is *wrong* -- a build left half-finished, a
+// dependency tree in a state the agent cannot reason about -- and
+// starting over is the same answer to that whichever backend a
+// deployment runs. A run that reaches for this on one backend and is
+// refused on the other would be the more surprising outcome.
+func (s *hostSandbox) Rebuild(ctx context.Context) error {
+	if err := os.RemoveAll(s.root); err != nil {
+		return fmt.Errorf("orchestrator: removing sandbox directory %q to rebuild it: %w", s.root, err)
+	}
+	if err := os.MkdirAll(s.root, 0o755); err != nil {
+		return fmt.Errorf("orchestrator: recreating sandbox directory %q: %w", s.root, err)
+	}
+	return nil
 }
 
 // Release removes the directory. Unlike a kontur VM's own Release there

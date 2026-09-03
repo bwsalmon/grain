@@ -67,7 +67,7 @@ describe("DetailOverlay", () => {
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(
       <DetailOverlay
-        task={{ ...baseTask, sandboxCpus: 4, sandboxMemoryMb: 8192 }}
+        task={{ ...baseTask, sandboxCpus: 4, sandboxMemoryMb: 8192, sandboxDiskGb: 40 }}
         tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
       />
     );
@@ -75,10 +75,13 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("Sandbox memory (MiB)")).toBeInTheDocument();
     expect(screen.getByText("8192")).toBeInTheDocument();
+    expect(screen.getByText("Sandbox disk (GiB)")).toBeInTheDocument();
+    expect(screen.getByText("40")).toBeInTheDocument();
 
     rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.queryByText("Sandbox vCPUs")).not.toBeInTheDocument();
     expect(screen.queryByText("Sandbox memory (MiB)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sandbox disk (GiB)")).not.toBeInTheDocument();
   });
 
   // bwsalmon/agents#539: an interactive task's Timeline reads as a chat.
@@ -318,6 +321,26 @@ describe("DetailOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/tasks/12/capabilities", {
       method: "POST",
       body: JSON.stringify({ id: "web-search", attach: true }),
+    });
+  });
+
+  // A capability the picker stopped listing since the task was granted
+  // it ("scratch-repo", renamed to github-sandbox in
+  // bwsalmon/agents#612) still needs a row of its own, or the chip for
+  // it has nothing to untick and the grant -- which fails every run of
+  // the task holding it -- can never be removed.
+  it("offers a row for a granted capability the picker no longer lists", async () => {
+    const act = vi.fn((mutate) => mutate());
+    const user = userEvent.setup();
+    const task = { ...baseTask, capabilities: ["scratch-repo"] };
+    render(<DetailOverlay task={task} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "scratch-repo" }));
+
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/capabilities", {
+      method: "POST",
+      body: JSON.stringify({ id: "scratch-repo", attach: false }),
     });
   });
 
@@ -606,6 +629,40 @@ describe("DetailOverlay", () => {
     expect(item.querySelector(".badge")).toHaveClass("badge-failed");
   });
 
+  // The one a task retried over and over is most likely to be sitting
+  // on: the agent worked, the branch is pushed, and the call that turns
+  // it into a pull request is what failed. Through the raw-string
+  // fallback it read "Finish-failed" under a "queued" badge, which is
+  // the opposite of what a reader needs from an attempt that is the
+  // reason the task keeps coming back.
+  it("labels an attempt whose result could not be turned into a pull request", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:02:00Z",
+              outcome: "finish-failed",
+              detail:
+                "this run's result could not be turned into a pull request or a comment: 422 Validation Failed",
+            },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const item = screen.getByText("Finish failed").closest(".timeline-item");
+    expect(item.querySelector(".badge")).toHaveClass("badge-failed");
+  });
+
   // The fallback still has to work: an outcome added on the backend
   // before this map catches up shows up rather than disappearing.
   it("falls back to the raw outcome for one it does not recognise", () => {
@@ -660,6 +717,41 @@ describe("DetailOverlay", () => {
 
     await user.click(screen.getByText("10"));
     expect(onOpenTask).toHaveBeenCalledWith("10");
+  });
+
+  it("labels a dependency chip with the depended-on task's title, and the whole task on hover", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, dependsOn: ["9"], blockedBy: ["9"] }}
+        tasks={[{ id: "9", title: "Add dark mode", state: "running" }]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const chip = screen.getByText("9 Add dark mode (open)");
+    await user.hover(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("9 Add dark mode — Running (blocking this task)");
+  });
+
+  it("falls back to the id for a dependency the task list does not carry", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, dependsOn: ["9"] }}
+        tasks={[{ id: "20", title: "Add dark mode", state: "queued" }]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    await user.hover(screen.getByText("9"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("9");
   });
 
   it("adds a dependency picked from the task picker", async () => {
