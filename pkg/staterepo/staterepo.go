@@ -351,6 +351,61 @@ func (r *Repo) Head(ctx context.Context) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// loadedHeadFile is where the commit this host last loaded or wrote is
+// recorded: inside the git directory, so it is neither part of the
+// working tree nor something a commit, a clone or a push can carry. That
+// placement is the point -- the marker answers "has this repository moved
+// under *this* host", which is a question about the host and not about
+// the repository, and a clone onto a new machine must arrive without one.
+const loadedHeadFile = "grain-loaded-head"
+
+// loadedHead reads the marker, reporting "" when there is none.
+func (r *Repo) loadedHead(ctx context.Context) (string, error) {
+	path, err := r.loadedHeadPath(ctx)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("staterepo: reading %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func (r *Repo) setLoadedHead(ctx context.Context, commit string) error {
+	path, err := r.loadedHeadPath(ctx)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(commit+"\n"), 0o600); err != nil {
+		return fmt.Errorf("staterepo: writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// recordLoadedHead records wherever the working tree is now.
+func (r *Repo) recordLoadedHead(ctx context.Context) error {
+	head, err := r.Head(ctx)
+	if err != nil {
+		return err
+	}
+	return r.setLoadedHead(ctx, head)
+}
+
+// loadedHeadPath asks git where the git directory is rather than
+// assuming <dir>/.git: that is a file, not a directory, in a worktree,
+// and writing into it would corrupt the repository.
+func (r *Repo) loadedHeadPath(ctx context.Context) (string, error) {
+	out, err := r.git(ctx, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(strings.TrimSpace(out), loadedHeadFile), nil
+}
+
 // git runs one git command in the working tree.
 func (r *Repo) git(ctx context.Context, args ...string) (string, error) {
 	return r.run(ctx, nil, args...)

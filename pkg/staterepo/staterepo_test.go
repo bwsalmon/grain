@@ -313,6 +313,88 @@ func TestSetRemoteConvertsALocalRepository(t *testing.T) {
 	}
 }
 
+// A restart must not undo what the process before it did in the seconds
+// after its last export. The export runs on a timer, so the database is
+// routinely ahead of the repository, and a Load that imported
+// unconditionally would roll those writes back -- which is exactly what a
+// container stopped shortly after a task was filed looks like, and what
+// tests/container's own "a task survives the container that created it"
+// caught.
+func TestARestartDoesNotImportOverANewerDatabase(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	// First start: an empty database, exported as an empty dump.
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	// A task is filed, and the process dies before the next sync tick.
+	if err := store.PutTask(ctx, task("filed-just-before-the-stop")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	// Second start, same data directory, same repository.
+	reopened, err := staterepo.Open(ctx, staterepo.Config{Dir: dir})
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	if err := staterepo.Load(ctx, reopened, db, model.SchemaVersion); err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	got, err := store.GetTask(ctx, "filed-just-before-the-stop")
+	if err != nil {
+		t.Fatalf("reading: %v", err)
+	}
+	if got == nil {
+		t.Fatal("restarting imported a stale dump over the database and lost the task")
+	}
+	// And the next sync writes it out, so the repository catches up rather
+	// than staying behind forever.
+	if _, err := staterepo.Sync(ctx, reopened, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+	if !strings.Contains(read(t, filepath.Join(dir, staterepo.TablesDir, "task.json")), "filed-just-before-the-stop") {
+		t.Fatal("the task never reached the repository")
+	}
+}
+
+// The other direction of the same decision: a working tree cloned onto a
+// host that has never loaded it is a restore, and must import.
+func TestACloneOntoANewHostImports(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// Somewhere else entirely: a fresh machine, an empty database, a
+	// clone of that repository.
+	otherStore, otherDB := openDB(t)
+	otherDir := filepath.Join(t.TempDir(), "state")
+	other, err := staterepo.Open(ctx, staterepo.Config{Dir: otherDir, Remote: remote})
+	if err != nil {
+		t.Fatalf("cloning: %v", err)
+	}
+	if err := staterepo.Load(ctx, other, otherDB, model.SchemaVersion); err != nil {
+		t.Fatalf("loading the clone: %v", err)
+	}
+	if got, err := otherStore.GetTask(ctx, "a1b2"); err != nil || got == nil {
+		t.Fatalf("a clone onto a new host did not restore the database: %v %v", got, err)
+	}
+}
+
 func TestARepositoryFromANewerBuildIsRefused(t *testing.T) {
 	ctx := context.Background()
 	_, db := openDB(t)

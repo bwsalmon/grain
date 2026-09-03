@@ -121,6 +121,64 @@ func TestDaemonPushesItsDatabaseToTheStateRepository(t *testing.T) {
 	}
 }
 
+// TestATaskSurvivesARestartWithAStateRepository is tests/container's own
+// "a task survives the container that created it", at the level the state
+// repository actually lives at -- and it is the regression that shipped
+// with the first cut of this: the exporter runs on a timer, so a task
+// filed seconds before a stop exists only in the database, and a start
+// that imported the repository unconditionally rolled it straight back
+// out again.
+func TestATaskSurvivesARestartWithAStateRepository(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "secrets", "github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "secrets", "github", "credentials.json"),
+		[]byte(`{"*": "anonymous"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// First daemon: file a task, then stop straight away -- before the
+	// sync timer has ticked, which is the whole point.
+	uiAddr := freeTCPAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, config{
+			dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: time.Hour,
+			githubHost: "127.0.0.1:0", githubInsecureHTTP: true, uiAddr: uiAddr, actor: "tester",
+		})
+	}()
+	client := ui.NewHTTPClient("http://" + uiAddr)
+	waitForUI(t, ctx, client)
+	created, err := client.CreateTask(ctx, ui.CreateTaskRequest{Title: "Filed just before the stop", Repo: "owner/payments-api"})
+	if err != nil {
+		t.Fatalf("filing a task: %v", err)
+	}
+	cancel()
+	<-runErr
+
+	// Second daemon, same data directory: the task has to still be there.
+	secondAddr := freeTCPAddr(t)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	runErr2 := make(chan error, 1)
+	go func() {
+		runErr2 <- run(ctx2, config{
+			dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: time.Hour,
+			githubHost: "127.0.0.1:0", githubInsecureHTTP: true, uiAddr: secondAddr, actor: "tester",
+		})
+	}()
+	defer func() {
+		cancel2()
+		<-runErr2
+	}()
+	second := ui.NewHTTPClient("http://" + secondAddr)
+	waitForUI(t, ctx2, second)
+	if _, err := second.Task(ctx2, created.ID); err != nil {
+		t.Fatalf("the task did not survive the restart: %v", err)
+	}
+}
+
 func waitForUI(t *testing.T, ctx context.Context, client *ui.HTTPClient) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)

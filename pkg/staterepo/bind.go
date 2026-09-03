@@ -27,16 +27,33 @@ var ErrSchemaTooOld = errors.New("state repository was written by an older build
 // Load makes the repository and the database agree, in whichever
 // direction has something to say.
 //
-// A repository that already holds a dump wins: it is the source of
-// truth, and the database is a materialisation of it that this rebuilds
-// outright. That is what makes a merged pull request take effect, and
-// what makes "clone the repository onto a new host" a complete restore.
+// Which direction that is, is the whole of this function, and getting it
+// wrong loses data. The repository is the source of truth for changes
+// made *to the repository* -- a merged pull request against a template,
+// a commit someone pushed while grain was down -- and importing one is
+// how those take effect. But the database is the source of truth for
+// everything grain itself did, and it is routinely ahead: the export
+// runs on a timer, so every write since the last tick exists only in the
+// database. A process that imported unconditionally at start would
+// therefore undo whatever the previous one did in its last few seconds,
+// which is exactly what a container stopped shortly after a task was
+// filed looks like.
 //
-// A repository with no dump is seeded from the database instead, which
-// covers both a brand new install (an empty database, exported as empty
-// files) and pointing a running grain at a fresh empty repository, where
-// what is already in the database is exactly what should land in the
-// first commit.
+// So the question is not "does the repository hold a dump" but "has the
+// repository moved since this host last agreed with it". The commit grain
+// last loaded or wrote is recorded beside the repository (loadedHead),
+// inside the git directory so it is never committed and never travels to
+// the remote:
+//
+//   - no dump at all: seed the repository from the database. A brand new
+//     install, or a running grain pointed at a fresh empty repository.
+//   - no marker: this working tree was cloned onto a host that has never
+//     loaded it. Import -- which is what makes "clone the repository onto
+//     a new machine" a complete restore.
+//   - HEAD is not the commit we recorded: something arrived. Import.
+//   - otherwise: the repository is exactly where we left it, so the
+//     database is authoritative and nothing is imported. The next sync
+//     exports whatever has happened since.
 func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if _, err := r.Pull(ctx); err != nil {
 		return err
@@ -44,6 +61,11 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if !HasDump(r.Dir()) {
 		return Seed(ctx, r, db, version)
 	}
+	// Checked before anything else, and whether or not this ends up
+	// importing: a dump at a schema this build does not know is a
+	// deployment that must stop and say so, not one that quietly exports
+	// today's schema over yesterday's rows -- or, in the other direction,
+	// over a newer build's.
 	found, err := ReadSchemaVersion(r.Dir())
 	if err != nil {
 		return err
@@ -54,7 +76,21 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	case found < version:
 		return fmt.Errorf("%w: repository is at schema %d, this build knows %d", ErrSchemaTooOld, found, version)
 	}
-	return Import(ctx, db, r.Dir())
+	head, err := r.Head(ctx)
+	if err != nil {
+		return err
+	}
+	marker, err := r.loadedHead(ctx)
+	if err != nil {
+		return err
+	}
+	if marker != "" && marker == head {
+		return nil
+	}
+	if err := Import(ctx, db, r.Dir()); err != nil {
+		return err
+	}
+	return r.setLoadedHead(ctx, head)
 }
 
 // Seed writes the database out as the repository's first content: the
@@ -74,6 +110,9 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 		"grain exports its database here as JSON, one file per table, so its\n"+
 		"settings can be read and changed through pull requests like anything\n"+
 		"else. See README.md."); err != nil {
+		return err
+	}
+	if err := r.recordLoadedHead(ctx); err != nil {
 		return err
 	}
 	return r.Push(ctx)
@@ -108,6 +147,14 @@ func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
 	}
 	if !changed {
 		return false, nil
+	}
+	// Recorded before the push, not after: the commit exists either way,
+	// and a push that fails (an expired credential, an unreachable
+	// remote) must not leave the next start believing the repository has
+	// moved on without it and importing its own stale dump back over a
+	// database that is ahead.
+	if err := r.recordLoadedHead(ctx); err != nil {
+		return true, err
 	}
 	return true, r.Push(ctx)
 }
