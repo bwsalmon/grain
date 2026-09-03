@@ -60,6 +60,21 @@
 #                                      for a deployment whose agent framework is (or may
 #                                      be set to) "codex" -- the same counterpart again,
 #                                      optional on the same terms
+#   GRAIN_SECRETS_KEY                  this deployment's secrets private key
+#                                      (pkg/secrets) -- the one value here that is not a
+#                                      credential to some other service but grain's own,
+#                                      and the one file a redeploy must carry: nothing
+#                                      else can read the encrypted secrets file beside it,
+#                                      so a host restored onto a fresh data directory with
+#                                      a freshly minted key of its own cannot read a line
+#                                      of it; pkg/secrets reports that as the unrecoverable
+#                                      state it is rather than starting over silently.
+#                                      Leave it unset on a first deploy -- the host mints
+#                                      its own, and `grain state status` on that host
+#                                      prints the file to go and keep a copy of. Set it
+#                                      when standing a deployment back up from its
+#                                      repository: scripts/setup.sh seeds it once, and a
+#                                      key already on the host always wins
 #   GRAIN_IMAGE_PULL_TOKEN             the password half of a `docker login` against the
 #                                      registry grain_image lives in, for a deployment
 #                                      running a private image (a GitHub PAT with
@@ -100,6 +115,13 @@ push_secret "grain-github-app-private-key" "${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
 push_secret "grain-claude-oauth-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
 push_secret "grain-openai-api-key" "${GRAIN_OPENAI_API_KEY:-}"
+# grain's own key rather than a credential to anything else: what
+# decrypts the encrypted secrets file under the data directory. Pushed only
+# when a rebuilt host has to be given back the key its predecessor
+# minted -- setup.sh seeds it once and never overwrites a key already on
+# the host, so pushing it again is harmless and pushing it never is what
+# costs a redeploy every secret it had.
+push_secret "grain-secrets-key" "${GRAIN_SECRETS_KEY:-}"
 # Only for a deployment whose grain_image lives in a registry that needs
 # credentials -- ghcr.io/bwsalmon/grain's own package is public and pulls
 # anonymously, so this is empty (and skipped) in the ordinary case. The

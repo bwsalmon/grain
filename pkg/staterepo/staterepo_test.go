@@ -396,6 +396,63 @@ func TestACloneOntoANewHostImports(t *testing.T) {
 	}
 }
 
+// A deployed host does not hand this package an empty directory.
+//
+// scripts/setup.sh creates the working tree before the daemon starts,
+// writes the encrypted secrets file into it (its minter-key seed runs
+// `grain secrets set` on a host that has never cloned anything), and
+// carries that same file across by hand when a schema bump moves the old
+// tree aside. `git clone` refuses a destination that is not empty, so
+// Open has to reach the remote's contents another way -- and the file
+// that was already there must end up as the remote's own copy of it,
+// not shadowing it.
+func TestOpeningARemoteIntoADirectoryThatAlreadyHasFilesInIt(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "secrets.enc"), []byte("from the remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+
+	// The redeployed host: the same repository, and a working tree
+	// setup.sh has already put a file into.
+	otherStore, otherDB := openDB(t)
+	otherDir := filepath.Join(t.TempDir(), "state")
+	if err := os.MkdirAll(otherDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherDir, "secrets.enc"), []byte("written before the clone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other, err := staterepo.Open(ctx, staterepo.Config{Dir: otherDir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening over a directory with files in it: %v", err)
+	}
+	if err := staterepo.Load(ctx, other, otherDB, model.SchemaVersion); err != nil {
+		t.Fatalf("loading onto the redeployed host: %v", err)
+	}
+	if got, err := otherStore.GetTask(ctx, "a1b2"); err != nil || got == nil {
+		t.Fatalf("the repository was not imported onto the redeployed host: %v %v", got, err)
+	}
+	if got := read(t, filepath.Join(otherDir, "secrets.enc")); got != "from the remote\n" {
+		t.Fatalf("the remote's own secrets file did not arrive: %q", got)
+	}
+}
+
 func TestARepositoryFromANewerBuildIsRefused(t *testing.T) {
 	ctx := context.Background()
 	_, db := openDB(t)

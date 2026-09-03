@@ -166,12 +166,35 @@ func Open(ctx context.Context, cfg Config) (*Repo, error) {
 		if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 			return nil, fmt.Errorf("staterepo: preparing %s: %w", cfg.Dir, err)
 		}
-		if cfg.Remote != "" {
+		empty, err := isEmptyDir(cfg.Dir)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case cfg.Remote != "" && empty:
 			if err := r.clone(ctx); err != nil {
 				return nil, err
 			}
-		} else if err := r.init(ctx); err != nil {
-			return nil, err
+		default:
+			// A remote with files already in the directory inits instead
+			// of cloning, because `git clone` refuses a destination that
+			// is not empty ("destination path already exists and is not
+			// an empty directory") -- and that directory is the ordinary
+			// case on a deployed host, not a corner one: scripts/setup.sh
+			// writes the encrypted secrets file into this tree before the
+			// daemon has ever started (its minter-key seed), and carries
+			// it across by hand when a schema bump moves the old tree
+			// aside. Refusing there would leave a deployment that cannot
+			// start over a file grain itself put there.
+			//
+			// Nothing is lost by not cloning: configure adds origin
+			// below, and Load's first Pull fetches the branch and resets
+			// a repository with no commits onto it -- which brings the
+			// remote's own copy of every file down over whatever was
+			// sitting here, exactly as a clone would have.
+			if err := r.init(ctx); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if err := r.configure(ctx); err != nil {
@@ -193,6 +216,16 @@ func isRepo(dir string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("staterepo: inspecting %s: %w", dir, err)
+}
+
+// isEmptyDir reports whether dir holds nothing at all, which is the
+// question `git clone` asks of a destination it is given.
+func isEmptyDir(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("staterepo: inspecting %s: %w", dir, err)
+	}
+	return len(entries) == 0, nil
 }
 
 func (r *Repo) init(ctx context.Context) error {

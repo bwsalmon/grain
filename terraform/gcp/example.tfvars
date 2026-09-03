@@ -49,6 +49,21 @@ create_iap_brand = false
 
 grain_ref = "main" # pin a tag or SHA for a reproducible staging build
 
+# -- Where this deployment's state lives --------------------------------
+#
+# The repository grain keeps its database in, as text: settings,
+# templates, suites and the encrypted secrets file, imported at startup
+# and exported back on a timer. Set it and the host comes up pointed at
+# it, with nobody opening the UI's bootstrap pane to say where state
+# goes. Left empty (the default) state stays in a local-only repository
+# on the host, which a rebuilt VM does not get back.
+#
+# The secrets key is the one file that repository cannot carry for you --
+# it is what decrypts the secrets *in* it. See this directory's README,
+# "The secrets key is the one file a redeploy must carry."
+# state_repo_url    = "https://github.com/CHANGE-ME/grain-state"
+# state_repo_branch = "main"
+
 # -- Storage -----------------------------------------------------------
 #
 # Everything a sandbox writes -- docker's data root, and so the sandbox
