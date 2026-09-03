@@ -285,6 +285,22 @@ bridge netfilter, veth, ...) will want. The newest `/boot/vmlinuz-*` and
 `/boot/initrd.img-*` in the rootfs are what get published; a guest with
 no kernel package installed produces neither.
 
+`GUEST_DISK_EXTRA_MB` adds headroom to that disk, and an image built to
+be derived from wants it. The 20% the sizing above adds is space for logs
+and runtime growth on a guest that is already finished; a guest
+customized by `konturctl guest build` is provisioned *after* the
+filesystem is packed, and cannot grow it. Without headroom an
+`apt-get install` of anything substantial fails with "You don't have
+enough free space in `/var/cache/apt/archives/`" after a completely
+clean boot -- which reads as a broken setup script rather than a disk
+sized before anyone knew what would go on it. It is not free, and the cost
+is easy to misjudge: `truncate` leaves the extra as a hole and a pushed
+layer of zeros compresses to almost nothing, but extracting a layer
+materializes the hole, so every GB here is a GB on disk on every machine
+that pulls the image. Size it against what the guest installs. kontur's
+own published `debian12` variant uses 2GB, which is more free space than
+the 20% gave and small enough not to dominate the image.
+
 The same pair is copied into the final image beside the disk, and
 `internal/config` boots whichever is there: the guest's own kernel when
 the image has one, `fetch-kernel`'s `vmlinux` when it doesn't. So a

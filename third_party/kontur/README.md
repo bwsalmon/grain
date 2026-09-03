@@ -452,7 +452,8 @@ less commonly-run-as-a-guest distro. See
 guest disk image build (`guest-image`/`guest-rootfs-*` stages), how the
 two variants differ beyond package manager, and their own build args
 (`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`,
-`GUEST_SETUP_SCRIPT`, `GUEST_KERNEL_PACKAGE`, `GUEST_CONSOLE_WRAP`).
+`GUEST_SETUP_SCRIPT`, `GUEST_KERNEL_PACKAGE`, `GUEST_CONSOLE_WRAP`,
+`GUEST_DISK_EXTRA_MB`).
 
 `GUEST_SETUP_SCRIPT` is worth calling out here, since it's what makes
 that guest more than a reference one: it holds a shell script's own text,

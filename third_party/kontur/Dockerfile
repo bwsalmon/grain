@@ -82,6 +82,36 @@ ARG GUEST_KERNEL_PACKAGE=""
 # it costs a caller that parses command output rather than reading it.
 ARG GUEST_CONSOLE_WRAP=1
 
+# GUEST_DISK_EXTRA_MB adds headroom to the guest disk, on top of the 20%
+# the guest-image stage sizes it with.
+#
+# That 20% is sized against the rootfs being packed, which is the right
+# answer for an image whose guest is finished at build time: it is space
+# for logs and runtime growth, not for installing anything.
+#
+# An image built to be *derived from* -- customized by
+# `konturctl guest build`, which boots it and provisions the running
+# guest -- needs room for what that provisioning installs, and by then
+# the filesystem is packed and cannot grow. A guest with 200MB free
+# fails an `apt-get install` of anything substantial with "You don't have
+# enough free space in /var/cache/apt/archives/", after booting
+# perfectly, which reads as a broken setup script rather than a disk that
+# was sized before anyone knew what would go on it.
+#
+# It is not free, though, and the cost is easy to misjudge. `truncate`
+# leaves the extra as a hole, and a pushed layer of zeros compresses to
+# almost nothing -- but a docker layer is a tar, and extracting one
+# materializes the hole. Every GB here is a GB on disk on every machine
+# that pulls the image. Size it against what the guest actually installs
+# rather than against what feels safe.
+#
+# The way to get real headroom without paying for it in the image is to
+# grow the disk at boot instead: `truncate` the raw file larger before
+# cloud-hypervisor opens it and let the guest `resize2fs` onto it. That
+# keeps the image sized to its rootfs and makes headroom a per-VM
+# setting. Worth doing if the amounts here ever get large.
+ARG GUEST_DISK_EXTRA_MB=0
+
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -408,9 +438,10 @@ FROM debian:bookworm-slim AS guest-image
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=guest-customized / /rootfs
+ARG GUEST_DISK_EXTRA_MB
 RUN set -eux; \
     size_kb=$(du -sk /rootfs | cut -f1); \
-    img_kb=$(( (size_kb * 12 / 10) + 65536 )); \
+    img_kb=$(( (size_kb * 12 / 10) + 65536 + (${GUEST_DISK_EXTRA_MB:-0} * 1024) )); \
     truncate -s "${img_kb}K" /disk.img; \
     mke2fs -F -t ext4 -L kontur-root -d /rootfs /disk.img
 

@@ -120,12 +120,25 @@ jobs:
           # cloud-hypervisor's CI promises) and no console wrapper
           # forcing every "kontur exec" session through a pty. Same
           # rootfs as "debian"; the two differ only in those args.
+          #
+          # And disk headroom, because this is the variant published to
+          # be derived from: "guest build" provisions a booted guest,
+          # which cannot grow the filesystem it installs into.
+          #
+          # 2GB, not more, and the number is not comfort. A docker layer
+          # materializes holes: `truncate` leaves the extra as a hole,
+          # and the tar that carries it does not, so every GB here is a
+          # GB extracted on every runner and every deployment host. 8GB
+          # was tried first and made this job's outcome depend on how
+          # much of the runner's ~14GB was free -- it passed once and
+          # failed once on identical inputs.
           - variant: debian12
             moving_tag: debian12
             build_args: |
               GUEST_DISTRO=debian
               GUEST_KERNEL_PACKAGE=linux-image-amd64
               GUEST_CONSOLE_WRAP=0
+              GUEST_DISK_EXTRA_MB=2048
     steps:
       - uses: actions/checkout@v4
 
@@ -190,8 +203,32 @@ jobs:
           fi
           ls -l /dev/kvm
 
+      # This job builds a multi-gigabyte image, boots it, and commits
+      # another one. A GitHub runner has roughly 14GB free and about
+      # 20GB of preinstalled toolchains nothing here uses, so reclaiming
+      # them is the difference between "fits" and "fits depending on how
+      # much the cache happened to keep" -- which is what the debian12
+      # image job looked like at 8GB of guest headroom: it passed once
+      # and failed once on identical inputs. df is printed either side so
+      # a future failure says how much room there actually was rather
+      # than leaving it to be inferred.
+      - name: Reclaim runner disk
+        run: |
+          echo "before:"; df -h /
+          # Not $AGENT_TOOLSDIRECTORY: that is /opt/hostedtoolcache,
+          # where actions/setup-go put the Go this job builds konturctl
+          # with one step earlier. Deleting it reclaims a couple of GB
+          # and costs the toolchain -- "go: command not found", exit
+          # 127, from a step that has nothing to do with disk.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost || true
+          echo "after:"; df -h /
+
       # The same variant the image job publishes, loaded into the local
       # daemon rather than pushed, and sharing that job's layer cache.
+      # The same args the image job publishes this variant with, headroom
+      # included -- the setup script below installs into the guest, which
+      # is exactly what that headroom is for.
       - name: Build the debian12 guest image
         uses: docker/build-push-action@v6
         with:
@@ -200,6 +237,7 @@ jobs:
             GUEST_DISTRO=debian
             GUEST_KERNEL_PACKAGE=linux-image-amd64
             GUEST_CONSOLE_WRAP=0
+            GUEST_DISK_EXTRA_MB=2048
           load: true
           tags: kontur:debian12
           cache-from: type=gha,scope=debian12
@@ -220,6 +258,13 @@ jobs:
           systemctl start systemd-journald
           cat /etc/machine-id > /etc/kontur-build-machine-id
           echo provisioned > /etc/kontur-guest-build-ok
+          # Installing something real is the point of provisioning a
+          # booted guest, and it is what GUEST_DISK_EXTRA_MB exists for:
+          # without headroom this fails with "You don't have enough free
+          # space in /var/cache/apt/archives/" after a perfect boot.
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential
           EOF
 
       - name: konturctl guest build

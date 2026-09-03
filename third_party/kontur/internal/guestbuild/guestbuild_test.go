@@ -186,6 +186,27 @@ func TestBuildDoesNotCommitAKilledGuest(t *testing.T) {
 	}
 }
 
+func TestBuildRefusesAnUncleanExit(t *testing.T) {
+	// Any non-zero exit means the supervisor did not bring the VM down
+	// the way it was asked to, and the console will show a guest that
+	// looks perfectly healthy -- the number is the only evidence, so it
+	// has to reach the caller rather than being swallowed on the way to
+	// a commit.
+	opts, calls := testOptions(t)
+	t.Setenv("FAKEDOCKER_EXIT", "2")
+
+	err := Build(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected an error for a container that exited uncleanly, got nil")
+	}
+	if !strings.Contains(err.Error(), "exited 2") {
+		t.Errorf("error = %v, want it to name the exit code", err)
+	}
+	if c := find(calls(), "commit"); c != nil {
+		t.Errorf("committed despite an unclean exit: %v", c)
+	}
+}
+
 func TestBuildCleansUpAfterAFailedSetupScript(t *testing.T) {
 	opts, calls := testOptions(t)
 	t.Setenv("FAKEDOCKER_FAIL_CONTAINS", setupPath)

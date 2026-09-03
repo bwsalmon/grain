@@ -233,8 +233,12 @@ func Build(ctx context.Context, opts Options) error {
 		if opts.KeepOnFailure {
 			return fmt.Errorf("%w (left running for inspection: docker logs %s; docker exec %s kontur exec)", err, container, container)
 		}
+		// Console first, error last. An error with 40 lines of boot log
+		// appended is an error nobody reads: `tail` on the job log shows
+		// the guest reaching multi-user.target and hides the sentence
+		// that says what actually went wrong.
 		if logs, lerr := d.output(context.WithoutCancel(ctx), "logs", "--tail", "40", container); lerr == nil && strings.TrimSpace(logs) != "" {
-			return fmt.Errorf("%w\nlast lines of the guest console:\n%s", err, logs)
+			return fmt.Errorf("guest console, last 40 lines:\n%s\n%w", logs, err)
 		}
 		return err
 	}
@@ -273,8 +277,17 @@ func Build(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fail("reading the guest container's exit status: %w", err)
 	}
-	if strings.TrimSpace(code) == "137" {
+	switch exit := strings.TrimSpace(code); exit {
+	case "0":
+	case "137":
 		return fail("the guest did not power off within %s and was killed, so its filesystem may be inconsistent -- raise -shutdown-timeout, or check whether the setup script left something that blocks shutdown", opts.ShutdownTimeout)
+	default:
+		// Anything else: the VM supervisor itself failed on the way
+		// down. Committing would capture whatever state that left.
+		// Reported with the code rather than swallowed, because the
+		// console above will show a guest that looks perfectly healthy
+		// and the number is the only thing that says otherwise.
+		return fail("the guest container exited %s rather than powering off cleanly, so its filesystem may be inconsistent", exit)
 	}
 
 	// commit carries the base image's own config forward -- entrypoint,

@@ -7,8 +7,9 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 (see "Local patches" below).
 
 This snapshot is kontur's `main` at
-`e2b8b4506babe9c787f6b3943d8a20cfd549eeb1` (2026-09-03), the merge of
-[bwsalmon/kontur#37](https://github.com/bwsalmon/kontur/pull/37) on top of
+`e475be0e24f4c08217bdce2e80383d4daf9a82b3` (2026-09-03), the merge of
+[bwsalmon/kontur#38](https://github.com/bwsalmon/kontur/pull/38) on top of
+[#37](https://github.com/bwsalmon/kontur/pull/37) and
 [#36](https://github.com/bwsalmon/kontur/pull/36).
 
 The guest base image grain builds on comes from this same tree:
@@ -46,7 +47,7 @@ and fully re-synced to `9a43152b09807814ba1a364fab313a72183f9bac`
 
 ## This resync: container-capable guests, built by booting one
 
-Two changes, both driven by grain needing a guest that runs docker and
+Three changes, all driven by grain needing a guest that runs docker and
 `kind` and a deployment that pulls one rather than building it.
 
 **#36 — a guest can bring its own kernel, and be derived from a
@@ -81,6 +82,31 @@ image up on the guest's first write, on every VM start.
 `CHV_DISK_MODE=overlay|persistent|readonly` replaces the boolean, with
 `overlay` the default. What this deletes on grain's side is the whole
 `-images-hostpath`/`-disk-hostpath` apparatus in `scripts/setup.sh`.
+
+**#38 — a derivable guest gets room to be provisioned into.**
+`GUEST_DISK_EXTRA_MB` adds headroom to the guest disk on top of the 20%
+the `guest-image` stage sizes it with. That 20% is the right answer for
+an image whose guest is finished at build time -- space for logs and
+runtime growth, not for installing anything -- but a guest customized by
+`konturctl guest build` is provisioned *after* the filesystem is packed
+and cannot grow it. `scripts/kontur/build-guest.sh` installs docker,
+containerd, `kind`, Go and a toolchain into that guest, which without
+headroom fails on `apt-get install` with "You don't have enough free
+space in `/var/cache/apt/archives/`" after a completely clean boot --
+reading as a broken setup script rather than a disk sized before anyone
+knew what would go on it. grain passes 2048, and the number is not
+arbitrary: `truncate` leaves the extra as a hole and a layer of zeros
+pushes as almost nothing, but extracting a layer materializes the hole,
+so every GB here is a GB of runner disk on every pull. 8192 was tried
+first and made CI flaky on identical inputs; 2048 leaves the guest about
+the free space the old build-time-provisioned image had.
+
+The same PR also fixed `konturctl guest build`'s own diagnostics, which
+grain's CI depends on to say anything useful when a guest build fails:
+the console excerpt now comes before the error rather than after it (a
+log tail otherwise shows the guest reaching `multi-user.target` and hides
+the sentence saying what went wrong), and any non-zero exit from the VM
+container is reported rather than only 137.
 
 Note the two deprecated spellings map to *different* modes on purpose:
 `CHV_DISK_READONLY=false` (read inside the container) always meant
