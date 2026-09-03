@@ -131,11 +131,11 @@ func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T
 // waiting there: it is not new work taking its turn but the repair of a
 // change already finished and stuck in the merge queue, and it is the
 // one task nobody can drag anywhere else -- the frontend gives it no
-// handle at all, pinning it to the head of the list to match. Ready
-// (bwsalmon/agents#389) already dispatches a fix first whatever its
-// OrderKey; this is the same answer in the order everything else reads
-// the backlog in, where the zero value used to leave it wherever zero
-// happened to fall among the keys already assigned.
+// handle at all, pinning it to the head of the list to match. It is
+// ahead of the merge queue itself, which showQueueAtFrontOfBacklog has
+// already moved to the front by the time a fix is filed, where OrderKey's
+// zero value used to leave it wherever zero happened to fall among the
+// keys already assigned.
 func TestSyncPullRequestsFilesTheFixAtTheHeadOfTheBacklog(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
