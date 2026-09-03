@@ -370,6 +370,105 @@ func TestDryRunClientPassesGetBranchHeadThrough(t *testing.T) {
 	}
 }
 
+func TestCompareCommitsReturnsEachCommitOldestFirst(t *testing.T) {
+	body := mustJSON(t, map[string]any{"commits": []any{
+		map[string]any{
+			"sha":     "aaa",
+			"commit":  map[string]any{"message": "Add the parser\n\nWhy it was needed."},
+			"parents": []any{map[string]any{"sha": "base"}},
+		},
+		map[string]any{
+			"sha":     "bbb",
+			"commit":  map[string]any{"message": "Merge main into grain/issue-1"},
+			"parents": []any{map[string]any{"sha": "aaa"}, map[string]any{"sha": "main"}},
+		},
+	}})
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: body})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	commits, err := client.CompareCommits("o", "r", "main", "grain/issue-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("got %+v", commits)
+	}
+	if commits[0].SHA != "aaa" || commits[0].Message != "Add the parser\n\nWhy it was needed." || commits[0].Merge {
+		t.Fatalf("got %+v", commits[0])
+	}
+	// Two parents is the only thing that makes a commit a merge, and the
+	// caller building a description drops exactly those.
+	if !commits[1].Merge {
+		t.Fatalf("expected a merge commit, got %+v", commits[1])
+	}
+}
+
+// A branch name's own "/" stays a "/" in the compare path: both refs
+// live in one path segment separated by "...", the way github.com's own
+// compare URLs spell it.
+func TestCompareCommitsKeepsSlashesInRefs(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte(`{"commits":[]}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if _, err := client.CompareCommits("o", "r", "main", "grain/issue-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.Calls[0].Path; got != "/repos/o/r/compare/main...grain/issue-1" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestCompareCommitsRaisesOnANon200(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 404, Body: []byte("no such ref")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if _, err := client.CompareCommits("o", "r", "main", "gone"); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+func TestUpdatePullRequestBodyPatchesTheBodyAlone(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte("{}")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.UpdatePullRequestBody("o", "r", 7, "a real description"); err != nil {
+		t.Fatal(err)
+	}
+	call := transport.Calls[0]
+	if call.Method != "PATCH" || call.Path != "/repos/o/r/pulls/7" {
+		t.Fatalf("got %+v", call)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(call.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["body"] != "a real description" {
+		t.Fatalf("got %+v", body)
+	}
+	// Nothing else: a title (or a state) this call never meant to touch
+	// would be sent as its zero value and overwrite what is there.
+	if len(body) != 1 {
+		t.Fatalf("expected the body field alone, got %+v", body)
+	}
+}
+
+func TestUpdatePullRequestBodyRaisesOnANon200(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 500, Body: []byte("boom")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.UpdatePullRequestBody("o", "r", 7, "x"); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
+// A dry run reads commits for real (it is a read) but never rewrites a
+// description, the same split every other mutation here makes.
+func TestDryRunClientDoesNotRewriteADescription(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte("{}")})
+	dry := DryRunClient{Inner: NewClient(transport, StaticToken{strPtr("t")})}
+	if err := dry.UpdatePullRequestBody("o", "r", 7, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(transport.Calls) != 0 {
+		t.Fatalf("expected no request, got %+v", transport.Calls)
+	}
+}
+
 func TestCreateBranchPostsTheRefAndSha(t *testing.T) {
 	transport := NewFakeTransport(ApiResponse{Status: 201, Body: []byte(`{"ref":"refs/heads/release/3.1-rc1"}`)})
 	client := NewClient(transport, StaticToken{strPtr("t")})

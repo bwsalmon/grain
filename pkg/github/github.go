@@ -327,6 +327,23 @@ type BranchHead struct {
 	Message string
 }
 
+// Commit is one commit a branch carries that its base does not, as
+// CompareCommits reports it -- its sha and its own message, which is
+// where the agent that wrote it explained the change, and the one place
+// a pull request description can be built from something other than
+// metadata.
+//
+// Merge says the commit has more than one parent. It is carried rather
+// than filtered here because only the caller knows whether it wants
+// them: a description wants the commits that say what changed, and
+// "Merge branch 'main' into grain/task-12" says nothing about the change
+// at all.
+type Commit struct {
+	SHA     string
+	Message string
+	Merge   bool
+}
+
 // PullRequestDetail is enough of a PR object to dispatch against it --
 // title/body for the prompt, HeadRef for the branch to check out and push
 // back to. Deliberately a separate type from PullRequest: widening that
@@ -604,9 +621,11 @@ type Client interface {
 	UpdateIssue(owner, repo string, number int, title, body *string) error
 	BranchExists(owner, repo, branch string) (bool, error)
 	GetBranchHead(owner, repo, branch string) (*BranchHead, error)
+	CompareCommits(owner, repo, base, head string) ([]Commit, error)
 	CreateBranch(owner, repo, branch, sha string) error
 	UpdateBranch(owner, repo, branch, sha string, force bool) error
 	CreatePullRequest(owner, repo, head, base, title, body string) (PullRequest, error)
+	UpdatePullRequestBody(owner, repo string, number int, body string) error
 	FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error)
 	CreateIssue(owner, repo, title, body string, labels []string) (Issue, error)
 	MergePullRequest(owner, repo string, number int, headSHA string) error
@@ -933,6 +952,60 @@ func (c *RESTClient) GetBranchHead(owner, repo, branch string) (*BranchHead, err
 	return &BranchHead{SHA: data.Commit.SHA, Message: data.Commit.Commit.Message}, nil
 }
 
+// CompareCommits returns the commits head carries that base does not,
+// oldest first -- git's own `base..head`, which is exactly the set of
+// commits a pull request from head into base would contain, and so
+// exactly the set whose messages describe it.
+//
+// Two refs, not one branch head: a description built from the tip commit
+// alone is at the mercy of whatever the last push happened to be, and on
+// grain's own push/check/repair loop that is routinely "Fix the vet
+// warning" rather than the commit that explains the change.
+//
+// GitHub caps this response at 250 commits and pages beyond that; no
+// pagination here, because a caller reading commit messages for a
+// description has long since had more than it can use by then, and a
+// grain branch that carries 250 commits has a bigger problem than its
+// description.
+func (c *RESTClient) CompareCommits(owner, repo, base, head string) ([]Commit, error) {
+	// quoteKeepSlash, not quoteAll: the compare endpoint takes both refs
+	// in one path segment separated by "...", and a branch name's own "/"
+	// (grain/task-12, the shape model.BranchName produces) is a literal
+	// slash there, the same way github.com's own compare URLs spell it.
+	path := fmt.Sprintf("/repos/%s/%s/compare/%s...%s",
+		owner, repo, quoteKeepSlash(base), quoteKeepSlash(head))
+	resp, err := c.get(owner, repo, path)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != 200 {
+		return nil, &Error{Status: resp.Status, Body: resp.Body}
+	}
+	var data struct {
+		Commits []struct {
+			SHA    string `json:"sha"`
+			Commit struct {
+				Message string `json:"message"`
+			} `json:"commit"`
+			Parents []struct {
+				SHA string `json:"sha"`
+			} `json:"parents"`
+		} `json:"commits"`
+	}
+	if err := json.Unmarshal(resp.Body, &data); err != nil {
+		return nil, err
+	}
+	commits := make([]Commit, 0, len(data.Commits))
+	for _, item := range data.Commits {
+		commits = append(commits, Commit{
+			SHA:     item.SHA,
+			Message: item.Commit.Message,
+			Merge:   len(item.Parents) > 1,
+		})
+	}
+	return commits, nil
+}
+
 // CreateBranch creates branch pointing at sha -- release management's own
 // "cut" (bwsalmon/agents#398): a fresh, never-before-existing ref, via
 // GitHub's git-database API rather than the higher-level "create from" a
@@ -1001,6 +1074,31 @@ func (c *RESTClient) CreatePullRequest(owner, repo, head, base, title, body stri
 		return PullRequest{}, err
 	}
 	return PullRequest{Number: data.Number, HTMLURL: data.HTMLURL}, nil
+}
+
+// UpdatePullRequestBody rewrites a pull request's description in place,
+// leaving its title, base and everything else untouched -- the pulls
+// endpoint rather than the issues one, since a body is the only thing
+// here that is ever rewritten and PATCH .../pulls/{n} is where GitHub
+// documents it.
+//
+// It exists for a pull request grain opened before the run that owns it
+// had finished pushing (OpenPullRequestForTask): the description written
+// then describes the commits that existed then, and the run's later
+// commits are the ones a reviewer needs to read about.
+func (c *RESTClient) UpdatePullRequestBody(owner, repo string, number int, body string) error {
+	payload, _ := json.Marshal(map[string]string{"body": body})
+	resp, err := c.Transport.Request(
+		"PATCH", fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repo, number),
+		c.headers(owner, repo, true), payload,
+	)
+	if err != nil {
+		return err
+	}
+	if resp.Status != 200 {
+		return &Error{Status: resp.Status, Body: resp.Body}
+	}
+	return nil
 }
 
 // FindOpenPullRequestForBranch returns the open PR whose head is branch,
@@ -1673,6 +1771,15 @@ func (d DryRunClient) BranchExists(owner, repo, branch string) (bool, error) {
 
 func (d DryRunClient) GetBranchHead(owner, repo, branch string) (*BranchHead, error) {
 	return d.Inner.GetBranchHead(owner, repo, branch)
+}
+
+func (d DryRunClient) CompareCommits(owner, repo, base, head string) ([]Commit, error) {
+	return d.Inner.CompareCommits(owner, repo, base, head)
+}
+
+func (d DryRunClient) UpdatePullRequestBody(owner, repo string, number int, body string) error {
+	fmt.Printf("+ rewrite the description of PR %s/%s#%d (%d bytes)\n", owner, repo, number, len(body))
+	return nil
 }
 
 func (d DryRunClient) FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error) {

@@ -747,6 +747,13 @@ func observeField(ctx context.Context, store *model.Store, taskID string, now ti
 // crashed after CreatePullRequest but before the link was recorded) must
 // not try to open a second one.
 //
+// Either way it ends with a description built from the branch's own
+// commit messages (description.go): written at creation, and refreshed on
+// a pull request that was already there, since the one a run opened
+// mid-flight was described before it had finished pushing. Neither can
+// fail this call -- see describeBranch and refreshDescription on why a
+// description is never worth failing a finish over.
+//
 // The store is here for one reason: a base branch that is no longer
 // there. pullRequestBase retargets that at the repo's default branch and
 // noteBaseRetarget writes down that it did, on the task itself -- see
@@ -759,6 +766,7 @@ func EnsurePullRequest(ctx context.Context, store *model.Store, client github.Cl
 	if existing, err := client.FindOpenPullRequestForBranch(task.Target.Owner, task.Target.Name, branch); err != nil {
 		return github.PullRequest{}, err
 	} else if existing != nil {
+		refreshDescription(client, task, existing.Number)
 		return *existing, nil
 	}
 
@@ -776,9 +784,7 @@ func EnsurePullRequest(ctx context.Context, store *model.Store, client github.Cl
 	if title == "" {
 		title = "grain: " + task.ID
 	}
-	// The task id, not an issue reference: a task has no issue to point a
-	// reader at any more, and its id is what `grain get` takes.
-	body := fmt.Sprintf("Automated change for grain task %s.", task.ID)
+	body := pullRequestBody(describeBranch(client, *task.Target, base, branch), task.ID)
 	return client.CreatePullRequest(task.Target.Owner, task.Target.Name, branch, base, title, body)
 }
 

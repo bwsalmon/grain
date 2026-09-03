@@ -70,6 +70,9 @@ func (g *loadGitHub) BranchExists(owner, repo, branch string) (bool, error) {
 func (g *loadGitHub) GetBranchHead(owner, repo, branch string) (*github.BranchHead, error) {
 	return nil, g.unsupported("GetBranchHead")
 }
+func (g *loadGitHub) CompareCommits(owner, repo, base, head string) ([]github.Commit, error) {
+	return nil, g.unsupported("CompareCommits")
+}
 func (g *loadGitHub) CreateBranch(owner, repo, branch, sha string) error {
 	return g.unsupported("CreateBranch")
 }
@@ -78,6 +81,9 @@ func (g *loadGitHub) UpdateBranch(owner, repo, branch, sha string, force bool) e
 }
 func (g *loadGitHub) CreatePullRequest(owner, repo, head, base, title, body string) (github.PullRequest, error) {
 	return github.PullRequest{}, g.unsupported("CreatePullRequest")
+}
+func (g *loadGitHub) UpdatePullRequestBody(owner, repo string, number int, body string) error {
+	return g.unsupported("UpdatePullRequestBody")
 }
 func (g *loadGitHub) FindOpenPullRequestForBranch(owner, repo, branch string) (*github.PullRequest, error) {
 	return nil, g.unsupported("FindOpenPullRequestForBranch")

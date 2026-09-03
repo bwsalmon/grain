@@ -529,3 +529,87 @@ func TestSimRecordsEveryCall(t *testing.T) {
 		t.Fatalf("got %+v", sim.Calls)
 	}
 }
+
+// pushCommit lands one commit carrying message on branch, creating the
+// branch if it is not there yet -- what a run's own git push does, and
+// the only way a test can say what a commit message says.
+func pushCommit(t *testing.T, bare, branch, message string) {
+	t.Helper()
+	dir := t.TempDir()
+	wd := filepath.Join(dir, "work")
+	run(t, dir, "git", "clone", "-q", bare, wd)
+	run(t, wd, "git", "config", "user.email", "agent@example.com")
+	run(t, wd, "git", "config", "user.name", "agent")
+	if err := exec.Command("git", "-C", wd, "checkout", "-q", branch).Run(); err != nil {
+		run(t, wd, "git", "checkout", "-q", "-b", branch)
+	}
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", message)
+	run(t, wd, "git", "push", "-q", "origin", branch)
+}
+
+// Compare is answered against the real repository, so what comes back is
+// the commits an agent really pushed, in git's own order, with the base
+// branch's own history left out.
+func TestSimCompareCommitsReturnsTheBranchesOwnCommits(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushCommit(t, sim.BareRepo, "grain/task-1", "Add the parser\n\nWhy it was needed.")
+	pushCommit(t, sim.BareRepo, "grain/task-1", "Fix the vet warning")
+
+	commits, err := client.CompareCommits("acme", "widgets", "main", "grain/task-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("got %+v", commits)
+	}
+	if commits[0].Message != "Add the parser\n\nWhy it was needed." {
+		t.Fatalf("expected the oldest commit first, got %+v", commits)
+	}
+	if commits[1].Message != "Fix the vet warning" {
+		t.Fatalf("got %+v", commits[1])
+	}
+	if commits[0].Merge || commits[1].Merge {
+		t.Fatalf("neither commit is a merge, got %+v", commits)
+	}
+	if commits[0].SHA == "" || commits[0].SHA == commits[1].SHA {
+		t.Fatalf("expected two distinct shas, got %+v", commits)
+	}
+}
+
+func TestSimCompareCommitsIs404ForAMissingRef(t *testing.T) {
+	_, client := newSim(t, "main")
+	if _, err := client.CompareCommits("acme", "widgets", "main", "grain/never-pushed"); err == nil {
+		t.Fatal("expected an error for a branch that does not exist")
+	}
+}
+
+func TestSimUpdatePullRequestBodyRewritesItInPlace(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/task-1")
+	pr, err := client.CreatePullRequest("acme", "widgets", "grain/task-1", "main", "a title", "opened early")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.UpdatePullRequestBody("acme", "widgets", pr.Number, "the finished change"); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := client.GetPullRequest("acme", "widgets", pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Body != "the finished change" {
+		t.Fatalf("got %q", detail.Body)
+	}
+	// The title it was never sent is the title it still has.
+	if detail.Title != "a title" {
+		t.Fatalf("got %q", detail.Title)
+	}
+}
+
+func TestSimUpdatePullRequestBodyIs404ForAnUnknownPullRequest(t *testing.T) {
+	_, client := newSim(t, "main")
+	if err := client.UpdatePullRequestBody("acme", "widgets", 4242, "x"); err == nil {
+		t.Fatal("expected an error for a pull request that does not exist")
+	}
+}
