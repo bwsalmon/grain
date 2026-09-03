@@ -71,6 +71,31 @@ resource "google_compute_disk" "data" {
   }
 }
 
+# Everything a sandbox writes, and nothing else: docker's data root --
+# the sandbox image and the qcow2 overlay each kontur VM's container
+# writes its root filesystem into (bwsalmon/kontur#37) -- and
+# HostSandboxes' per-run checkouts, which files/startup.sh bind-mounts
+# from here onto scripts/setup.sh's own $GRAIN_SANDBOX_DIR. Where the
+# bulk of this host's storage lives, by design.
+#
+# The point is not capacity but blast radius: with all of that on the
+# boot disk, one task that writes a hundred gigabytes takes down the OS,
+# the journal, config-sync and the daemon with it. On its own volume it
+# costs the tasks running at the time and nothing else -- the host stays
+# up, the deploy still runs, and the UI still says so.
+#
+# No prevent_destroy, unlike the data disk above: everything here is
+# rebuilt by the next deploy (a re-pulled image) or belongs to a run that
+# is already over.
+resource "google_compute_disk" "sandbox" {
+  count  = var.sandbox_disk_gb > 0 ? 1 : 0
+  name   = "${var.name_prefix}-sandbox"
+  type   = var.sandbox_disk_type
+  zone   = var.zone
+  size   = var.sandbox_disk_gb
+  labels = var.labels
+}
+
 resource "google_compute_instance" "host" {
   name         = "${var.name_prefix}-host"
   machine_type = var.machine_type
@@ -105,6 +130,19 @@ resource "google_compute_instance" "host" {
     source      = google_compute_disk.data.id
     device_name = "grain-data"
     mode        = "READ_WRITE"
+  }
+
+  # device_name is the whole contract with files/startup.sh: it is what
+  # the guest's /dev/disk/by-id/google-<device_name> link is named, and
+  # that link is the only stable way to tell the two attached disks
+  # apart from inside the VM.
+  dynamic "attached_disk" {
+    for_each = google_compute_disk.sandbox
+    content {
+      source      = attached_disk.value.id
+      device_name = "grain-sandbox"
+      mode        = "READ_WRITE"
+    }
   }
 
   network_interface {
@@ -163,6 +201,16 @@ resource "google_compute_instance" "host" {
     grain-deploy-script      = file("${path.module}/files/deploy.sh")
 
     grain-config = jsonencode(local.grain_config)
+
+    # Whether files/startup.sh should expect a second disk at all. Read
+    # there rather than inferred from the device showing up, so a disk
+    # that was declared and then failed to attach is a warning in the
+    # boot log instead of a deployment that silently fills its boot disk
+    # again -- and so that turning sandbox_disk_gb back to 0 tells the
+    # host to undo the docker configuration that goes with the volume.
+    # Not part of grain-config: nothing inside the container needs it,
+    # and it is not worth a rollout of its own.
+    grain-sandbox-disk = var.sandbox_disk_gb > 0 ? "true" : "false"
 
     # Changing this is what triggers a rollout -- see variables.tf's
     # deploy_generation. Folded together with a hash of grain_config

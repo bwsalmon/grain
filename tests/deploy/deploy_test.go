@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -829,6 +830,138 @@ func TestTheGuestBuildScriptsAreSyntacticallyValid(t *testing.T) {
 		}
 		if out, err := exec.Command(shell, "-n", path).CombinedOutput(); err != nil {
 			t.Errorf("%s -n scripts/kontur/%s: %v\n%s", shell, script, err, out)
+		}
+	}
+}
+
+// --- the sandbox volume -------------------------------------------------
+//
+// terraform/gcp gives sandboxes a disk of their own: docker's data root
+// (the sandbox image, and every kontur VM's writable root, which is a
+// qcow2 overlay inside that VM's own container) and HostSandboxes'
+// per-run checkouts, so a task that fills a disk costs the runs in flight
+// rather than the OS, the store, config-sync and the UI. Three files have
+// to agree for that to be true, and none of them can see the others:
+// instance.tf attaches the disk, files/startup.sh mounts it and points
+// docker at it, and scripts/setup.sh decides where the daemon looks for
+// its checkouts.
+
+func startupScript(t *testing.T) string {
+	return read(t, "terraform", "gcp", "files", "startup.sh")
+}
+
+// startupPaths reads every `readonly NAME="..."` out of startup.sh with
+// references to earlier ones expanded, so an assertion can be about the
+// paths the script actually uses rather than the text it spells them
+// with.
+func startupPaths(t *testing.T, text string) map[string]string {
+	t.Helper()
+	vals := map[string]string{}
+	for _, m := range regexp.MustCompile(`(?m)^readonly ([A-Z_]+)="([^"]*)"`).FindAllStringSubmatch(text, -1) {
+		value := m[2]
+		// Longest name first: "$DOCKER_DROPIN_DIR" also starts with
+		// "$DOCKER_DROPIN", and substituting the shorter one into it
+		// would produce a path that appears nowhere on the host.
+		names := make([]string, 0, len(vals))
+		for name := range vals {
+			names = append(names, name)
+		}
+		sort.Slice(names, func(i, j int) bool { return len(names[i]) > len(names[j]) })
+		for _, name := range names {
+			value = strings.ReplaceAll(value, "$"+name, vals[name])
+		}
+		vals[m[1]] = value
+	}
+	// A second pass, for a value that names one declared below it -- the
+	// expansion above only knows about the ones it has already read.
+	for name, value := range vals {
+		for other, known := range vals {
+			if other != name {
+				value = strings.ReplaceAll(value, "$"+other, known)
+			}
+		}
+		vals[name] = value
+	}
+	return vals
+}
+
+// under reports whether path is dir itself or anything inside it.
+func under(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, strings.TrimSuffix(dir, "/")+"/")
+}
+
+func TestTheSandboxDiskTerraformAttachesIsTheOneTheHostMounts(t *testing.T) {
+	instance := read(t, "terraform", "gcp", "instance.tf")
+	startup := startupScript(t)
+	paths := startupPaths(t, startup)
+
+	// The by-id link is derived from attached_disk's device_name, and is
+	// the only stable way to tell the two disks apart inside the VM.
+	for device, mount := range map[string]string{"grain-data": "DATA_MNT", "grain-sandbox": "SANDBOX_MNT"} {
+		contains(t, instance, `device_name = "`+device+`"`)
+		if paths[mount] == "" {
+			t.Errorf("startup.sh declares no %s to mount %s at", mount, device)
+		}
+		contains(t, startup, "/dev/disk/by-id/google-"+device)
+	}
+
+	// Whether there is a second disk at all is metadata, not a guess: a
+	// declared disk that failed to attach has to be a warning rather than
+	// a host quietly filling its boot disk again.
+	contains(t, instance, "grain-sandbox-disk = var.sandbox_disk_gb > 0")
+	contains(t, startup, "instance/attributes/grain-sandbox-disk")
+
+	// dockerd must not start before the volume it stores everything on is
+	// mounted: without this it wins the race often enough to create its
+	// data root on the boot disk and have the mount hide it. Written
+	// either as the variable or as the path it holds.
+	if !strings.Contains(startup, "RequiresMountsFor=$SANDBOX_MNT") &&
+		!strings.Contains(startup, "RequiresMountsFor="+paths["SANDBOX_MNT"]) {
+		t.Errorf("nothing makes docker.service wait for %s, so dockerd can start before the volume is mounted and put its data root on the boot disk", paths["SANDBOX_MNT"])
+	}
+}
+
+func TestTheSandboxVolumeHoldsDockersStoreAndTheCheckoutsButNeverOneInsideTheOther(t *testing.T) {
+	startup := startupScript(t)
+	paths := startupPaths(t, startup)
+
+	docker, work, mnt := paths["SANDBOX_DOCKER_DIR"], paths["SANDBOX_WORK_DIR"], paths["SANDBOX_MNT"]
+	if !under(docker, mnt) {
+		t.Errorf("docker's data root (%s) is not on the sandbox volume (%s), so the sandbox image and every VM's overlay stay on the boot disk", docker, mnt)
+	}
+	if !under(work, mnt) {
+		t.Errorf("the per-run checkouts (%s) are not on the sandbox volume (%s)", work, mnt)
+	}
+	// The one arrangement that looks tidy and destroys the deployment:
+	// orchestrator.HostSandboxes.ReapOrphans removes *everything* under
+	// its base directory at startup, docker's whole store included.
+	if under(docker, work) {
+		t.Errorf("docker's data root (%s) is inside the directory HostSandboxes.ReapOrphans empties (%s)", docker, work)
+	}
+
+	// The bind mount is what makes the checkouts land there with no
+	// -sandbox-dir override anywhere: it has to be the path setup.sh
+	// already defaults to.
+	sandboxDir := regexp.MustCompile(`GRAIN_SANDBOX_DIR="\$\{GRAIN_SANDBOX_DIR:-([^}]*)\}"`).FindStringSubmatch(setupText(t))
+	if sandboxDir == nil {
+		t.Fatal("scripts/setup.sh no longer defaults GRAIN_SANDBOX_DIR to anything")
+	}
+	if paths["HOST_SANDBOX_MNT"] != sandboxDir[1] {
+		t.Errorf("startup.sh bind-mounts the sandbox volume onto %s but setup.sh points the daemon at %s", paths["HOST_SANDBOX_MNT"], sandboxDir[1])
+	}
+	contains(t, stripComments(startup), `"data-root": "%s"`)
+}
+
+// startup.sh grew real branching with the sandbox volume (a mount that is
+// allowed to fail, and a configuration to undo when the volume is turned
+// off), and it is the one script here that only ever runs on a real GCE
+// boot -- a syntax error in it is a host that never installs config-sync
+// and so never deploys at all.
+func TestTheHostBootScriptsAreSyntacticallyValidBash(t *testing.T) {
+	for _, script := range []string{"startup.sh", "config-sync.sh", "deploy.sh"} {
+		path := filepath.Join(repoRoot(t), "terraform", "gcp", "files", script)
+		if out, err := exec.Command("bash", "-n", path).CombinedOutput(); err != nil {
+			t.Errorf("bash -n terraform/gcp/files/%s: %v\n%s", script, err, out)
 		}
 	}
 }

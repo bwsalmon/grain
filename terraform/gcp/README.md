@@ -3,11 +3,14 @@
 Deploys one small VM running `grain daemon` (`README.md`,
 "Deploying it"), exposed at a fixed DNS name through an IAP-protected
 HTTPS load balancer, with a separate persistent disk for its state so the
-VM itself is disposable (bwsalmon/agents#394).
+VM itself is disposable (bwsalmon/agents#394) and another for everything
+its sandboxes write, so a task that fills a disk does not take the host
+down with it ("Sandboxes get a disk of their own").
 
 ```
-  terraform apply ──▶ the VM, its data disk, its network, its load
-        │              balancer, its service accounts and IAM grants
+  terraform apply ──▶ the VM, its data and sandbox disks, its network,
+        │              its load balancer, its service accounts and IAM
+        │              grants
         │
         ▼
   push-secrets.sh ──▶ instance metadata (a GitHub PAT, a Gemini API key,
@@ -29,7 +32,7 @@ grain has no host adapter yet and its daemon already dispatches onto plain
 host directories by default (`README.md`, "What this does not have
 yet"), so there is no fleet to generalize over here -- just the one VM
 `scripts/setup.sh` already knows how to install and update, with the
-staging-specific pieces (the data disk split, the load balancer, IAP, the
+staging-specific pieces (the disk split, the load balancer, IAP, the
 IAM grants) wrapped around it.
 
 ## Use it
@@ -245,10 +248,10 @@ touch. `--pool`/`--provider` override it for a pool shared deliberately.
 
 Everything else that collides is a *project-level* name. Per-host names
 do not: the guest attribute namespace (`grain`), the
-`grain-config-sync.service` unit, and the `grain-data` disk device all
-live on one instance, and `gcloud compute instances get-guest-attributes`
-reads the instance you name, so two deployments never see each other's
-status through them.
+`grain-config-sync.service` unit, and the `grain-data`/`grain-sandbox`
+disk devices all live on one instance, and `gcloud compute instances
+get-guest-attributes` reads the instance you name, so two deployments
+never see each other's status through them.
 
 What has to differ, per deployment:
 
@@ -461,6 +464,12 @@ several VMs on a host share one copy of it. `konturctl`'s own default is
 read-only, which a dispatched task cannot use. The host directories this
 used to need -- one for the shared image, one for the overlays -- are
 gone with it.
+
+Which is also why the sandbox volume is docker's data root rather than a
+directory of its own: with the overlay inside the VM's container, "how
+much disk can a task use" is a question about docker's storage, and
+`sandbox_disk_gb` is the answer to it (see "Sandboxes get a disk of their
+own").
 
 A freshly created VM's container/pod getting an IP is not the same moment
 as its nested guest actually accepting SSH connections -- confirmed by
@@ -731,11 +740,45 @@ other too.
 - **Destroying it is deliberately awkward.** The data disk carries
   `prevent_destroy` (`instance.tf`) -- it holds the SQLite store and the
   secrets database, the state a wipe or redeploy must not lose. Remove
-  that block first if you really mean to lose it. The sandbox working
-  directories `orchestrator.HostSandboxes` clones each task's repo into
-  live on the boot disk instead, deliberately (`boot_disk_gb`'s own doc
-  comment, bwsalmon/agents#587), so they go with the rest of the host on
-  a wipe rather than surviving it.
+  that block first if you really mean to lose it. The sandbox disk
+  carries no such block and needs none: everything on it is a re-pullable
+  image or a finished run's leftovers (see "Sandboxes get a disk of their
+  own"), so it goes with the rest of the host on a wipe.
+- **Sandboxes get a disk of their own.** `sandbox_disk_gb` (100 GB by
+  default) is attached as `grain-sandbox` and mounted by `files/startup.sh`
+  at `/mnt/grain-sandbox`, which then holds both of the things that grow
+  with the work this host does:
+
+  - **docker's data root**, moved there with an `/etc/docker/daemon.json`
+    the startup script writes. That is where the sandbox image lives and,
+    less obviously, where every kontur VM's writable root lives too: a VM
+    gets its disk as a qcow2 overlay created *inside* its own container
+    (bwsalmon/kontur#37), so a guest's writes are docker's storage, not a
+    host directory anything else could have mounted.
+  - **the per-run checkouts** `orchestrator.HostSandboxes` makes when
+    `enable_kontur_sandboxes` is off -- `/mnt/grain-sandbox/sandboxes`,
+    bind-mounted onto `scripts/setup.sh`'s own `$GRAIN_SANDBOX_DIR`
+    (`/var/lib/grain-sandbox`) so the daemon needs no override to find
+    them there.
+
+  The boot disk keeps the OS, the journal and the grain checkout, and
+  the data disk keeps the store and secrets. So a task that fills its
+  disk -- a runaway build, a clone of something enormous -- costs the
+  runs in flight and nothing else: the host stays up, `config-sync` still
+  deploys, and the UI is still there to say what happened. A
+  `docker.service` drop-in carries `RequiresMountsFor=/mnt/grain-sandbox`,
+  so `dockerd` waits for the volume rather than racing it and quietly
+  filling the boot disk under a mount point.
+
+  On an existing deployment the volume arrives at the host's next boot,
+  since the startup script is what mounts it (or run it by hand:
+  `sudo google_metadata_script_runner startup`). That boot moves docker's
+  data root, so the host re-pulls its images -- the startup script clears
+  `config-sync`'s deploy state to force exactly that -- and leaves the
+  old `/var/lib/docker` behind, unused, for you to delete once satisfied.
+  `sandbox_disk_gb = 0` puts everything back on the boot disk and undoes
+  the docker configuration that went with the volume; size `boot_disk_gb`
+  accordingly if you do that.
 - **The load balancer can front a Cloud Run proxy instead of the VM
   directly.** Set `use_cloudrun_iap_proxy = true` (needs
   `expose_ui_publicly = true`) and `google_compute_backend_service.ui`
@@ -754,13 +797,13 @@ versions.tf     provider/backend requirements
 variables.tf    every knob, with why it exists
 network.tf      VPC, firewall rules (IAP-tunnel SSH, load-balancer/connector-to-UI), optional Cloud NAT
 iam.tf          the host/agent/minter service accounts and their roles
-instance.tf     the VM, the data disk, non-secret config as instance metadata
+instance.tf     the VM, the data and sandbox disks, non-secret config as instance metadata
 dns.tf          the reserved static IP and the fixed DNS name
 iap.tf          the load balancer chain and IAP itself
 cloudrun-proxy.tf  optional Cloud Run proxy backing the load balancer instead of the VM directly (use_cloudrun_iap_proxy)
 outputs.tf      instance name, zone, service accounts, URL, ssh command
 files/
-  startup.sh      boot: mount the data disk, start config-sync
+  startup.sh      boot: mount the data and sandbox disks, put docker's data root on the latter, start config-sync
   config-sync.sh  watch metadata, run a deploy when it changes
   deploy.sh       translate this deployment's config into a scripts/setup.sh call
 bootstrap-gcp.sh   one-time: state bucket, deployer service account, optional WIF
