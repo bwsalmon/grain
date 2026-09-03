@@ -1380,6 +1380,15 @@ setup_data_dir() {
   # adds another <name>.token/.app.json by hand; this script only ever
   # seeds the one default, as either kind (never both for the same name:
   # CredentialSet.load prefers .app.json when present).
+  #
+  # These files are the whole mechanism, and the only one: unlike the
+  # agent credentials below, a GitHub credential is never read out of the
+  # secrets database (grain/task-137 settled that deliberately -- see
+  # pkg/gitproxy/credentials.go's own doc comment). What did change is
+  # who else can write one: Settings -> GitHub in the UI adds and removes
+  # a <name>.token here, so an extra named token no longer needs shell
+  # access to this host. It still needs the daemon restarted afterwards,
+  # the same as everything else in this directory.
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
      && { [ -n "$GRAIN_GITHUB_TOKEN" ] || [ -n "$GRAIN_GITHUB_APP_ID" ]; }; then
     printf '{"*":"%s"}\n' "$GRAIN_GITHUB_CREDENTIAL_NAME" > "$GRAIN_DATA_DIR/secrets/github/credentials.json"
@@ -2124,8 +2133,13 @@ report_readiness() {
   agy_cli="$(report_agent_cli agy "$GRAIN_AGY_PATH" GRAIN_AGY_PATH)"
   codex_cli="$(report_agent_cli codex "$GRAIN_CODEX_PATH" GRAIN_CODEX_PATH)"
 
+  # Either file shape counts, the same way CredentialSet.load reads
+  # either: seed_github_app_credential above writes the .app.json one, so
+  # asking only about .token reported a perfectly working App-backed
+  # deployment as having no GitHub credential at all.
   if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
-     && [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ]; then
+     && { [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ] \
+          || [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.app.json" ]; }; then
     github="present as '${GRAIN_GITHUB_CREDENTIAL_NAME}'"
   fi
   [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] && gemini="present"

@@ -735,6 +735,24 @@ a file under `/data/secrets` and restart the one service that reads it"
 this whole directory follows. A task holding two named tokens pushes with
 one of them, chosen deterministically rather than refused.
 
+Adding a file no longer means shell access to the host, though. Settings
+→ GitHub lists these credentials and writes one — the same file, in the
+same directory, mode 0600 — so defining a token is as reachable as
+ticking it (`GET`/`PUT`/`DELETE /api/github-tokens/{name}`,
+`gitproxy.CredentialSet.SetToken`). It stays a file rather than a row in
+the SQLite secrets store the rest of the UI writes: a GitHub App
+credential is a three-value file shape that would have to be re-invented
+as secret rows, the ladder is loaded by more processes than the daemon
+(`grain mcp-server` builds one too), and two stores that could each
+answer "what is credential X" is a state an operator has to reason about
+the moment they disagree. The restart is not papered over either — the
+pane reports what is on disk beside what the running process actually
+started with, and says which tokens are waiting on a restart to become
+grantable. Editing `credentials.json` is still host work: which repos
+fall back to which credential is a deployment-wide decision, and
+deleting a credential a pattern still names is refused rather than
+allowed to fail every push it covers.
+
 ### Scopes to withhold
 
 `delete_repo` is a separate classic scope — never grant it. No `admin:*`,
