@@ -27,10 +27,22 @@
 // exactly the wrong shape here: two runs dispatched concurrently against
 // two different sandboxes would share one registration, and whichever
 // wrote it last would decide where both runs' tools landed. So Run gives
-// each run its own private HOME (a temp directory holding just the config
-// file agy reads) instead of registering anything globally -- see
-// writeMCPSettings. That keeps the per-run sandbox binding the dispatch
+// each run its own private HOME (a temp directory holding just the two
+// files agy reads out of one) instead of registering anything globally --
+// see writeAgyHome. That keeps the per-run sandbox binding the dispatch
 // model depends on, and leaves the controller's real ~/.gemini untouched.
+//
+// A private HOME also decides how a run authenticates. agy's own
+// credential is an OAuth session it stores under the HOME it was started
+// with, which a run given a fresh directory by definition does not have;
+// what it does have is the deployment's Gemini API key. agy reads that
+// key from GEMINI_API_KEY, but only for a session whose settings file
+// asks for it -- with no "modelProvider": "gemini" in
+// ~/.gemini/antigravity-cli/settings.json it ignores the variable
+// entirely, falls through to its interactive browser login, and (with a
+// prompt on stdin rather than a terminal) exits 1 with "authentication
+// required. Run 'agy' to log in, then retry." So writeAgyHome writes that
+// setting alongside the MCP config whenever grain has a key to pass.
 //
 // agy also has no --max-turns. The cap RunConfig.MaxTurns asks for is
 // therefore enforced here rather than by the binary: Run counts completed
@@ -40,7 +52,7 @@
 //
 // agy does cap a single MCP tool call, and there is no environment
 // variable for it the way MCP_TOOL_TIMEOUT is for claude: the cap is a
-// per-server "timeoutSeconds" key in the same config file, which is why
+// per-server "timeoutSeconds" key in the MCP config above, which is why
 // mcpToolTimeoutSeconds writes one rather than Run adding to the
 // subprocess environment. See that function for the measured default and
 // why wait_for_checks makes leaving it alone the wrong answer.
@@ -69,7 +81,16 @@ const (
 	// defaults to"; naming it here keeps a deployment's runs reproducible
 	// across agy upgrades the same way the former gemini package's own
 	// DefaultModel did.
-	DefaultModel = "gemini-3.1-pro"
+	//
+	// The reasoning effort is part of the name rather than a separate
+	// --effort flag because that is the vocabulary agy's own catalog uses
+	// (`agy models` lists gemini-3.1-pro-high and gemini-3.1-pro-low, not
+	// a bare gemini-3.1-pro), and it refuses either half on its own: a
+	// bare "gemini-3.1-pro" fails the run before it starts with "--model
+	// gemini-3.1-pro requires --effort", and a suffixed name passed
+	// alongside --effort fails as a conflict. A deployment overriding
+	// this (`grain settings -gemini-model`) names a model the same way.
+	DefaultModel = "gemini-3.1-pro-high"
 
 	// defaultMaxTurns is the cap on agentic turns a run may take before
 	// turnCap stops it, and zero means no cap at all -- the same default
@@ -123,7 +144,7 @@ type execRunner struct {
 func (r execRunner) Run(ctx context.Context, args []string, stdin string, env []string, dir string, tee io.Writer) (string, error) {
 	cmd := exec.CommandContext(ctx, r.agyPath, args...)
 	// agy forks its own MCP child once it loads the settings written by
-	// writeMCPSettings; a plain exec.CommandContext cancel only kills agy
+	// writeAgyHome; a plain exec.CommandContext cancel only kills agy
 	// itself and leaves that child (and anything run_command's own
 	// `bash -c` spawned under it) running as an orphan. procgroup.Prepare
 	// makes cancelling ctx kill that whole tree instead -- which is also
@@ -188,8 +209,10 @@ func WithMaxTurns(n int) Option {
 // environment -- never as a command-line argument, so it never lands in
 // `ps` output (the same reasoning as claude.WithOAuthToken, and v1's
 // CONTROLLER_AGENT_TOKEN_PATH before it). This is also what makes the
-// private HOME writeMCPSettings hands agy workable: a run authenticating
-// by env var needs nothing out of the real ~/.gemini it no longer sees.
+// private HOME writeAgyHome hands agy workable: a run authenticating by
+// env var needs nothing out of the real ~/.gemini it no longer sees --
+// but only together with the settings file writeAgyHome writes for it,
+// since agy ignores the variable unless it is asked to use it.
 func WithAPIKey(key string) Option {
 	return WithAPIKeyFunc(func(context.Context) (string, error) { return key, nil })
 }
@@ -435,15 +458,15 @@ func mcpToolTimeoutSeconds() int {
 	return int((mcp.MaxWaitForChecksTimeout + mcpToolTimeoutSlack).Seconds())
 }
 
-// mcpSettingsJSON is the content of the config file agy reads its MCP
-// servers from: grainBinaryPath spawned with mcpArgs (built by
-// mcpServerArgs above) -- the "mcpserver" argument selects the same
-// subcommand mcpserver.go implements, so agy forking this exact command
-// is what actually starts an MCP server, rather than needing a separately
-// built binary on disk. The schema is Gemini CLI's own mcpServers map,
-// which agy inherited along with the ~/.gemini config directory, plus the
+// mcpConfigJSON is the content of the file agy reads its MCP servers
+// from: grainBinaryPath spawned with mcpArgs (built by mcpServerArgs
+// above) -- the "mcpserver" argument selects the same subcommand
+// mcpserver.go implements, so agy forking this exact command is what
+// actually starts an MCP server, rather than needing a separately built
+// binary on disk. The schema is Gemini CLI's own mcpServers map, which
+// agy inherited along with the ~/.gemini config directory, plus the
 // per-server timeoutSeconds agy added to it.
-func mcpSettingsJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
+func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"mcpServers": map[string]any{
 			mcpServerName: map[string]any{
@@ -455,45 +478,84 @@ func mcpSettingsJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	})
 }
 
-// mcpConfigRelPath is where, inside the private HOME writeMCPSettings
-// builds, agy looks for the config file above -- the same
-// ~/.gemini/config/mcp_config.json `agy mcp add` writes and `agy mcp
-// list` reads, not the CLI's own ~/.gemini/antigravity-cli/settings.json,
-// which agy does not read MCP servers from at all. Named once, here,
-// because it is the single piece of this package that depends on agy's
-// own on-disk layout rather than on its command line or its output: if a
-// future agy moves the file, this constant is the whole change.
-var mcpConfigRelPath = filepath.Join(".gemini", "config", "mcp_config.json")
+// apiKeySettingsJSON is the content of agy's own settings file for a run
+// that authenticates with a Gemini API key: the one setting that makes
+// agy read GEMINI_API_KEY at all rather than expecting the OAuth session
+// a private HOME cannot have (see this package's doc comment).
+//
+// Nothing else is written into it. agy merges what it finds with its own
+// defaults, so naming only the setting this package actually depends on
+// leaves every other CLI behaviour at whatever the installed binary
+// chose.
+func apiKeySettingsJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{"modelProvider": apiKeyModelProvider})
+}
 
-// writeMCPSettings builds the private HOME one run gets: a fresh
-// directory containing nothing but the config file naming this run's own
-// MCP server. It returns that directory and a cleanup func the caller
+// The two paths, inside the private HOME writeAgyHome builds, that agy
+// reads its MCP servers and its own settings from. Named once, here,
+// because they are the whole of what this package depends on in agy's
+// on-disk layout rather than in its command line or its output: if a
+// future agy moves either file, these two vars are the change.
+//
+// They are two different files in two different directories on purpose,
+// not an oversight: agy keeps MCP servers in ~/.gemini/config/
+// mcp_config.json (what `agy mcp add` edits and `agy mcp list` reads)
+// and CLI settings in ~/.gemini/antigravity-cli/settings.json. Written
+// anywhere else -- ~/.gemini/settings.json, say, which is where Gemini
+// CLI kept both -- they are silently ignored: `agy mcp list` reports "No
+// MCP servers configured", and a run authenticates as though no API key
+// had been configured at all.
+var (
+	mcpConfigRelPath   = filepath.Join(".gemini", "config", "mcp_config.json")
+	cliSettingsRelPath = filepath.Join(".gemini", "antigravity-cli", "settings.json")
+)
+
+// apiKeyModelProvider is the "modelProvider" value that turns
+// GEMINI_API_KEY into a working credential. agy's other providers are
+// its own hosted backends, reached with an OAuth session instead.
+const apiKeyModelProvider = "gemini"
+
+// writeAgyHome builds the private HOME one run gets: a fresh directory
+// containing the config naming this run's own MCP server and, when this
+// run has an API key to authenticate with, the settings file that makes
+// agy use it. It returns that directory and a cleanup func the caller
 // defers.
 //
 // A private HOME rather than `agy mcp add` is the whole point -- see this
 // package's own doc comment on why a per-user registration cannot express
 // a per-run sandbox binding. It has the same effect claude's
 // --strict-mcp-config has there: the only MCP server this run can see is
-// the one written here, because there is no other config file in the HOME
-// it was given to find one in.
-func writeMCPSettings(grainBinaryPath string, mcpArgs []string) (home string, cleanup func(), err error) {
-	settings, err := mcpSettingsJSON(grainBinaryPath, mcpArgs)
+// the one written here, because there is no other config file in the
+// HOME it was given to find one in.
+func writeAgyHome(grainBinaryPath string, mcpArgs []string, apiKeyAuth bool) (home string, cleanup func(), err error) {
+	mcpConfig, err := mcpConfigJSON(grainBinaryPath, mcpArgs)
 	if err != nil {
-		return "", nil, fmt.Errorf("antigravity: building mcp settings: %w", err)
+		return "", nil, fmt.Errorf("antigravity: building agy's mcp config: %w", err)
 	}
+	files := map[string][]byte{mcpConfigRelPath: mcpConfig}
+	if apiKeyAuth {
+		settings, err := apiKeySettingsJSON()
+		if err != nil {
+			return "", nil, fmt.Errorf("antigravity: building agy's settings: %w", err)
+		}
+		files[cliSettingsRelPath] = settings
+	}
+
 	home, err = os.MkdirTemp("", "grain-agy-home-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("antigravity: creating agy home: %w", err)
 	}
 	cleanup = func() { os.RemoveAll(home) }
-	path := filepath.Join(home, mcpConfigRelPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("antigravity: creating agy config dir: %w", err)
-	}
-	if err := os.WriteFile(path, settings, 0o600); err != nil {
-		cleanup()
-		return "", nil, fmt.Errorf("antigravity: writing agy mcp settings: %w", err)
+	for rel, content := range files {
+		path := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("antigravity: creating agy config dir: %w", err)
+		}
+		if err := os.WriteFile(path, content, 0o600); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("antigravity: writing %s: %w", rel, err)
+		}
 	}
 	return home, cleanup, nil
 }
@@ -575,7 +637,15 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		maxTurns = cfg.MaxTurns
 	}
 
-	home, cleanup, err := writeMCPSettings(f.grainBinaryPath, mcpArgs)
+	// Read before the HOME is built rather than just before the exec:
+	// whether this run has a key of its own decides what goes into that
+	// HOME, since a key agy is never told to look for is a key it does
+	// not use (see writeAgyHome).
+	apiKey, err := f.resolveAPIKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	home, cleanup, err := writeAgyHome(f.grainBinaryPath, mcpArgs, apiKey != "")
 	if err != nil {
 		return nil, err
 	}
@@ -618,14 +688,15 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	}
 
 	env := []string{"HOME=" + home}
-	if f.apiKey != nil {
-		apiKey, err := f.apiKey(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("antigravity: reading the API key: %w", err)
-		}
-		if apiKey != "" {
-			env = append(env, "GEMINI_API_KEY="+apiKey)
-		}
+	if apiKey != "" {
+		// GOOGLE_API_KEY is cleared alongside, rather than left as the
+		// controller's own environment has it: agy reads both and prefers
+		// GOOGLE_API_KEY when the two are set ("Warning: Both
+		// GOOGLE_API_KEY and GEMINI_API_KEY are set. Using
+		// GOOGLE_API_KEY."), so an unrelated key exported on the
+		// controller would quietly become the credential every run bills
+		// against, instead of the one this deployment configured.
+		env = append(env, "GEMINI_API_KEY="+apiKey, "GOOGLE_API_KEY=")
 	}
 
 	stdin, err := userEvent(cfg.Prompt)
@@ -675,6 +746,21 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	}
 	result.Transcript = appendRosterNote(result.Transcript, verifyToolRoster(stdout))
 	return result, nil
+}
+
+// resolveAPIKey reads this run's Gemini API key, or "" for a deployment
+// that configured none and means agy to authenticate from its own
+// ambient environment (see WithAPIKeyFunc, whose contract this keeps: an
+// error is a key that could not be read, which is not the same thing).
+func (f *Framework) resolveAPIKey(ctx context.Context) (string, error) {
+	if f.apiKey == nil {
+		return "", nil
+	}
+	key, err := f.apiKey(ctx)
+	if err != nil {
+		return "", fmt.Errorf("antigravity: reading the API key: %w", err)
+	}
+	return key, nil
 }
 
 // partialResult is what Run hands back alongside an error: whatever the
