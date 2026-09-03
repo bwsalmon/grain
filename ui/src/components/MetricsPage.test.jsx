@@ -1,0 +1,368 @@
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import MetricsPage, { backlogRows, formatSeconds, isThinPercentile, sortedOutcomes } from "./MetricsPage.jsx";
+import api from "../api.js";
+
+vi.mock("../api.js", () => ({ default: vi.fn() }));
+
+// stage builds one entry of the report's latency list. The API sends
+// every stage every time -- a stage nothing was measured for comes back
+// as n: 0 rather than as an absent entry -- so the default here is a
+// stage that measured nothing, and each test fills in only the numbers
+// it is about.
+function stage(name, over = {}) {
+  return {
+    stage: name,
+    label: name,
+    description: `what ${name} measures`,
+    n: 0,
+    minSeconds: 0, p50Seconds: 0, p90Seconds: 0, p99Seconds: 0, maxSeconds: 0, meanSeconds: 0,
+    ...over,
+  };
+}
+
+// report is roughly the worked example in README's "Measuring throughput
+// and latency", so the numbers here are ones a reader can check against
+// the `grain metrics` output printed there.
+function report(over = {}) {
+  return {
+    since: "2026-08-27T00:00:00Z",
+    until: "2026-09-03T00:00:00Z",
+    windowSeconds: 604800,
+    throughput: {
+      tasksFiled: 42, tasksCompleted: 38, tasksClosed: 3,
+      runsStarted: 61, runsFinished: 60,
+      filedPerDay: 6, completedPerDay: 5.4, runsFinishedPerDay: 8.6,
+      buckets: [
+        { since: "2026-08-27T00:00:00Z", until: "2026-08-29T08:00:00Z", filed: 10, completed: 8, runsFinished: 15 },
+        { since: "2026-08-29T08:00:00Z", until: "2026-08-31T16:00:00Z", filed: 14, completed: 12, runsFinished: 20 },
+        { since: "2026-08-31T16:00:00Z", until: "2026-09-03T00:00:00Z", filed: 18, completed: 18, runsFinished: 25 },
+      ],
+    },
+    latency: [
+      stage("filed -> approved", { n: 12, p50Seconds: 252, p90Seconds: 3720, p99Seconds: 11400, maxSeconds: 11400 }),
+      stage("approved -> attempt started", { n: 38, p50Seconds: 31, p90Seconds: 130, p99Seconds: 540, maxSeconds: 540 }),
+      stage("one whole attempt", { n: 60, p50Seconds: 768, p90Seconds: 1570, p99Seconds: 3120, maxSeconds: 3120 }),
+      stage("attempt finished -> next attempt started", { n: 4, p50Seconds: 120, p90Seconds: 240, p99Seconds: 360, maxSeconds: 360 }),
+      stage("filed -> completed", { n: 38, p50Seconds: 720, p90Seconds: 3000, p99Seconds: 11400, maxSeconds: 11400 }),
+    ],
+    runs: {
+      outcomes: { succeeded: 45, failed: 14, cancelled: 1 },
+      attemptsPerCompletion: 1.58,
+      meanConcurrent: 0.42, maxConcurrent: 3, utilization: 0.14, live: 2,
+    },
+    backlog: {
+      byState: { queued: 4, running: 2, proposed: 1, awaiting_reply: 1 },
+      queued: 4,
+      oldestQueuedSeconds: 8040,
+      oldestQueuedTaskId: "51",
+    },
+    ...over,
+  };
+}
+
+describe("formatSeconds", () => {
+  it("renders a duration rather than a bare second count", () => {
+    expect(formatSeconds(31)).toBe("31s");
+    expect(formatSeconds(252)).toBe("4m 12s");
+    expect(formatSeconds(11400)).toBe("3h 10m");
+  });
+
+  it("gets coarser the longer the duration is", () => {
+    expect(formatSeconds(90000)).toBe("1d 1h");
+  });
+
+  it("renders a missing number as a dash, but a real zero as a zero", () => {
+    expect(formatSeconds(null)).toBe("—");
+    expect(formatSeconds(undefined)).toBe("—");
+    expect(formatSeconds(0)).toBe("0s");
+  });
+});
+
+// The whole reason `n` is a column: a percentile only says something the
+// maximum did not once at least one sample can fall in the tail it
+// names, which takes 100/(100-p) samples.
+describe("isThinPercentile", () => {
+  it("calls a p99 over a handful of samples what it is", () => {
+    expect(isThinPercentile(4, 99)).toBe(true);
+    expect(isThinPercentile(99, 99)).toBe(true);
+    expect(isThinPercentile(100, 99)).toBe(false);
+  });
+
+  it("holds a p90 to a tenth of the bar a p99 gets", () => {
+    expect(isThinPercentile(9, 90)).toBe(true);
+    expect(isThinPercentile(10, 90)).toBe(false);
+  });
+
+  it("asks almost nothing of a median", () => {
+    expect(isThinPercentile(1, 50)).toBe(true);
+    expect(isThinPercentile(2, 50)).toBe(false);
+  });
+
+  it("says nothing about a stage with no samples at all", () => {
+    expect(isThinPercentile(0, 99)).toBe(false);
+  });
+});
+
+describe("sortedOutcomes", () => {
+  it("puts the ending that dominates the window first, breaking ties by name", () => {
+    expect(sortedOutcomes({ failed: 14, succeeded: 45, cancelled: 1 }))
+      .toEqual([["succeeded", 45], ["failed", 14], ["cancelled", 1]]);
+    expect(sortedOutcomes({ zebra: 2, alpha: 2 })).toEqual([["alpha", 2], ["zebra", 2]]);
+  });
+
+  it("survives a report with no outcomes at all", () => {
+    expect(sortedOutcomes(undefined)).toEqual([]);
+  });
+});
+
+describe("backlogRows", () => {
+  it("orders the backlog the way the sidebar orders states", () => {
+    expect(backlogRows({ running: 2, queued: 4, proposed: 1 }).map((r) => r.state))
+      .toEqual(["proposed", "queued", "running"]);
+  });
+
+  it("keeps a state this UI does not know about rather than dropping it", () => {
+    expect(backlogRows({ queued: 1, hibernating: 3 }).map((r) => r.state)).toEqual(["queued", "hibernating"]);
+  });
+
+  it("leaves out states nothing is sitting in", () => {
+    expect(backlogRows({ queued: 2, running: 0 }).map((r) => r.state)).toEqual(["queued"]);
+  });
+});
+
+describe("MetricsPage", () => {
+  afterEach(() => {
+    api.mockReset();
+  });
+
+  it("asks for the default window, the one `grain metrics` prints with no flags", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+
+    expect(await screen.findByText("Throughput")).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith("/api/metrics?window=7d&buckets=24");
+  });
+
+  it("shows the throughput counts and their daily rates", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Throughput");
+
+    expect(screen.getByText("Tasks filed")).toBeInTheDocument();
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByText("6.0/day")).toBeInTheDocument();
+    expect(screen.getByText("5.4/day")).toBeInTheDocument();
+    expect(screen.getByText("1.58")).toBeInTheDocument();
+  });
+
+  it("draws the bucketed series as trend lines", async () => {
+    api.mockResolvedValue(report());
+    const { container } = render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Throughput");
+
+    // One line per series -- filed, completed, attempts finished -- each
+    // a polyline through every bucket rather than an empty placeholder.
+    const polylines = container.querySelectorAll("polyline");
+    expect(polylines).toHaveLength(3);
+    expect(polylines[0].getAttribute("points").trim().split(" ")).toHaveLength(3);
+  });
+
+  it("shows occupancy against the configured concurrency limit", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Capacity");
+
+    expect(screen.getByText("0.42 of 3")).toBeInTheDocument();
+    expect(screen.getByText("14% of the limit")).toBeInTheDocument();
+  });
+
+  it("says so rather than dividing by nothing when no concurrency limit is set", async () => {
+    api.mockResolvedValue(report({
+      runs: { outcomes: {}, attemptsPerCompletion: 0, meanConcurrent: 0.42, maxConcurrent: 0, utilization: 0, live: 0 },
+    }));
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Capacity");
+
+    expect(screen.getByText("0.42")).toBeInTheDocument();
+    expect(screen.getByText(/no concurrency limit configured/i)).toBeInTheDocument();
+  });
+
+  it("lists the attempt outcomes, commonest first", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Capacity");
+
+    expect(screen.getByText("succeeded 45")).toBeInTheDocument();
+    expect(screen.getByText("failed 14")).toBeInTheDocument();
+    expect(screen.getByText("cancelled 1")).toBeInTheDocument();
+  });
+
+  it("keeps the latency stages in the order the API sent them", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Latency");
+
+    const rows = screen.getAllByRole("row").slice(1); // drop the header row
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual([
+      "filed -> approved",
+      "approved -> attempt started",
+      "one whole attempt",
+      "attempt finished -> next attempt started",
+      "filed -> completed",
+    ]);
+  });
+
+  it("shows each stage's own n beside its percentiles", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Latency");
+
+    const row = screen.getByText("filed -> approved").closest("tr");
+    expect(within(row).getAllByRole("cell").map((c) => c.textContent))
+      .toEqual(["filed -> approved", "12", "4m 12s", "1h 2m", "3h 10m*", "3h 10m"]);
+  });
+
+  // README, "Measuring throughput and latency": a p99 over four samples
+  // is the maximum wearing a percentile's name, so it is not shown as if
+  // it were a p99.
+  it("marks the percentiles a stage has too few samples to support", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Latency");
+
+    // Four samples support neither a p90 nor a p99; both are the max.
+    const retries = screen.getByText("attempt finished -> next attempt started").closest("tr");
+    expect(within(retries).getAllByRole("cell").map((c) => c.textContent))
+      .toEqual(["attempt finished -> next attempt started", "4", "2m 0s", "4m 0s*", "6m 0s*", "6m 0s"]);
+
+    // Sixty clears the p90 bar (10 samples) but not the p99 one (100).
+    const attempt = screen.getByText("one whole attempt").closest("tr");
+    expect(within(attempt).getByText("26m 10s")).toBeInTheDocument();
+    expect(within(attempt).getByText("52m 0s*")).toBeInTheDocument();
+
+    expect(screen.getByText(/maximum under another name/i)).toBeInTheDocument();
+  });
+
+  // The stages are independent measurements: they are drawn as a table
+  // of distributions, never a stacked bar, and the pane says why right
+  // where the numbers are.
+  it("says the stages do not add up to the lead time", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Latency");
+
+    expect(screen.getByText(/do not add up to the lead time/i)).toBeInTheDocument();
+  });
+
+  it("shows nothing to report rather than a table of dashes when no stage has samples", async () => {
+    api.mockResolvedValue(report({ latency: [stage("filed -> completed")] }));
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Latency");
+
+    expect(screen.getByText(/no latency to report yet/i)).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  // The backlog is a gauge read at the report's own moment, not
+  // something measured over the window, and the pane has to say which.
+  it("labels the backlog as a reading taken now rather than over the window", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Backlog");
+
+    expect(screen.getByText(/right now, not over the window/i)).toBeInTheDocument();
+    expect(screen.getByText("Queued 4")).toBeInTheDocument();
+    expect(screen.getByText("Awaiting reply 1")).toBeInTheDocument();
+  });
+
+  it("links the oldest queued task through to its own page", async () => {
+    api.mockResolvedValue(report());
+    const onOpenTask = vi.fn();
+    const user = userEvent.setup();
+    render(<MetricsPage showError={() => {}} onOpenTask={onOpenTask} />);
+    await screen.findByText("Backlog");
+
+    expect(screen.getByText(/waiting 2h 14m/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "task 51" }));
+
+    expect(onOpenTask).toHaveBeenCalledWith("51");
+  });
+
+  it("leaves the oldest-queued line out when nothing is queued", async () => {
+    api.mockResolvedValue(report({
+      backlog: { byState: { running: 1 }, queued: 0, oldestQueuedSeconds: 0, oldestQueuedTaskId: "" },
+    }));
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Backlog");
+
+    expect(screen.queryByText(/oldest queued/i)).not.toBeInTheDocument();
+  });
+
+  it("re-fetches over the window the picker asks for", async () => {
+    api.mockResolvedValue(report());
+    const user = userEvent.setup();
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Throughput");
+
+    await user.click(screen.getByLabelText(/Window/));
+    await user.click(await screen.findByRole("option", { name: "Last 30 days" }));
+
+    await waitFor(() => expect(api).toHaveBeenLastCalledWith("/api/metrics?window=30d&buckets=24"));
+  });
+
+  it("re-fetches the same window on Refresh", async () => {
+    api.mockResolvedValue(report());
+    const user = userEvent.setup();
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Throughput");
+    expect(api).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+    expect(api).toHaveBeenLastCalledWith("/api/metrics?window=7d&buckets=24");
+  });
+
+  // A report costs a full scan of `task` and `task_run` every time it is
+  // asked for, so unlike the Logs and Sandbox health panels beside it,
+  // this one loads once and then waits to be asked again.
+  it("does not poll on a timer", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Throughput");
+
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(api).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("hands a failed report to showError rather than blanking the pane", async () => {
+    api.mockRejectedValue(new Error("reading task timings: no such table"));
+    const showError = vi.fn();
+    render(<MetricsPage showError={showError} />);
+
+    await waitFor(() => expect(showError).toHaveBeenCalledWith(new Error("reading task timings: no such table")));
+  });
+
+  it("points at a longer window when the one asked for is empty", async () => {
+    api.mockResolvedValue(report({
+      throughput: {
+        tasksFiled: 0, tasksCompleted: 0, tasksClosed: 0, runsStarted: 0, runsFinished: 0,
+        filedPerDay: 0, completedPerDay: 0, runsFinishedPerDay: 0, buckets: [],
+      },
+      latency: [stage("filed -> completed")],
+      backlog: { byState: {}, queued: 0, oldestQueuedSeconds: 0, oldestQueuedTaskId: "" },
+    }));
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Throughput");
+
+    expect(screen.getByText(/nothing was filed or attempted inside this window/i)).toBeInTheDocument();
+    expect(screen.getByText(/the backlog is empty/i)).toBeInTheDocument();
+  });
+});

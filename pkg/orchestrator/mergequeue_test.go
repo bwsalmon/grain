@@ -659,6 +659,128 @@ func TestSyncPullRequestsFilesAFixOnceRunningChecksFinishFailing(t *testing.T) {
 	}
 }
 
+// Naming the failing job is where the fix task used to stop, and for the
+// agent it dispatches that is barely a starting point: a sandbox is not a
+// CI runner, and this deployment's sandboxes reach nothing but the git
+// proxy, so an agent told "the `go` job is red" cannot go and read what
+// the `go` job said. It has to arrive with the task. That is the
+// difference between a fix and a guess, and a merge fix that is a guess
+// costs the queue another cycle.
+func TestSyncPullRequestsPutsTheFailingJobsOwnLogIntoTheFixTask(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task, branch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+
+	setMergeable(sim, true)
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "go", Status: "completed", Conclusion: strPtr("failure")},
+		{Name: "terraform", Status: "completed", Conclusion: strPtr("success")},
+	}
+	// Seeded under the branch name, the same key the check runs above
+	// use: the Actions endpoints are called with the head sha, which
+	// githubsim resolves against its own bare repo.
+	sim.WorkflowJobs[branch] = []githubsim.WorkflowJob{
+		{Name: "go", Conclusion: "failure", Log: "" +
+			"2026-01-02T03:04:05.1234567Z --- FAIL: TestQueueHead (0.01s)\n" +
+			"2026-01-02T03:04:05.1234567Z     sync_test.go:42: got 3, want 4\n" +
+			"2026-01-02T03:04:05.1234567Z FAIL\tgithub.com/bwsalmon/grain/pkg/orchestrator\n"},
+		{Name: "terraform", Conclusion: "success", Log: "terraform: no changes\n"},
+	}
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests once CI failed: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixTaskID, ok := fixTaskLinkOf(got)
+	if !ok {
+		t.Fatalf("expected a fix task for the failing queue head, links: %+v", got.Links)
+	}
+	fixTask, err := store.GetTask(ctx, fixTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixTask == nil {
+		t.Fatal("fix task not filed in the store")
+	}
+	for _, want := range []string{
+		"--- FAIL: TestQueueHead",
+		"sync_test.go:42: got 3, want 4",
+	} {
+		if !strings.Contains(fixTask.Body, want) {
+			t.Errorf("fix task body does not carry %q from the failing job's log:\n%s", want, fixTask.Body)
+		}
+	}
+	// Actions stamps every line with the same timestamp. It says nothing
+	// about the failure and costs about a quarter of every line.
+	if strings.Contains(fixTask.Body, "2026-01-02T03:04:05") {
+		t.Errorf("fix task body kept Actions' per-line timestamps:\n%s", fixTask.Body)
+	}
+	// The job that passed is not evidence of anything, and its log is
+	// never fetched: FailedJobLogs filters at every step.
+	if strings.Contains(fixTask.Body, "terraform: no changes") {
+		t.Errorf("fix task body carries a passing job's log:\n%s", fixTask.Body)
+	}
+}
+
+// logsUnreadable is a client whose FailedJobLogs is refused -- the shape
+// of a deployment whose credential can read checks but not Actions, and
+// of a repo whose CI is not Actions at all.
+type logsUnreadable struct {
+	github.Client
+}
+
+func (c logsUnreadable) FailedJobLogs(owner, repo, headSHA string) ([]github.JobLog, error) {
+	return nil, errors.New("403 Forbidden")
+}
+
+// The log is an annotation on the fix task, not the fix task. Failing the
+// cycle over an unreadable log would cost the queue head the one
+// automatic fix it gets, over the part of the body that is a bonus --
+// so the read is best effort, and its failure leaves exactly the fix
+// task this queue filed before logs were ever fetched.
+func TestSyncPullRequestsStillFilesAFixWhenTheJobLogsCannotBeRead(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task, branch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+
+	setMergeable(sim, true)
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "go", Status: "completed", Conclusion: strPtr("failure")},
+	}
+
+	if err := orchestrator.SyncPullRequests(ctx, store, logsUnreadable{client}, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests with unreadable job logs: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixTaskID, ok := fixTaskLinkOf(got)
+	if !ok {
+		t.Fatalf("no fix task was filed when the job logs could not be read, links: %+v", got.Links)
+	}
+	fixTask, err := store.GetTask(ctx, fixTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixTask == nil {
+		t.Fatal("fix task not filed in the store")
+	}
+	if !strings.Contains(fixTask.Body, "its checks are failing (`go`)") {
+		t.Errorf("fix task body no longer names the failing check:\n%s", fixTask.Body)
+	}
+	if strings.Contains(fixTask.Body, "What CI printed") {
+		t.Errorf("fix task body has an empty log section:\n%s", fixTask.Body)
+	}
+}
+
 // The narrower half of the same race, and the one an empty check list
 // hides. GitHub creates a workflow run's check runs asynchronously, after
 // it has processed the push, while the pull request exists the instant

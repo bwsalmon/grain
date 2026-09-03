@@ -148,6 +148,7 @@ describe("RepoList", () => {
 
   it("adds a repo and refreshes config on success", async () => {
     api.mockResolvedValueOnce({});
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const onRefreshConfig = vi.fn();
     const user = userEvent.setup();
     renderList({ tasks: [], onRefreshConfig });
@@ -157,10 +158,12 @@ describe("RepoList", () => {
 
     expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/widgets" }) });
     expect(onRefreshConfig).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 
   it("reports the error and does not refresh config when adding fails", async () => {
     api.mockRejectedValueOnce(new Error("repo must be owner/name"));
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const onRefreshConfig = vi.fn();
     const showError = vi.fn();
     const user = userEvent.setup();
@@ -171,6 +174,80 @@ describe("RepoList", () => {
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "repo must be owner/name" }));
     expect(onRefreshConfig).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  // grain/task-45: an empty targetRepos means unrestricted, so the first
+  // add narrows the deployment rather than widening it. The pane says so
+  // twice -- standing on the page, and again at the click.
+  it("says the deployment is unrestricted, and what adding the first repo would mean", () => {
+    renderList({ config: { targetRepos: [] } });
+
+    expect(screen.getByText(/an empty allowlist is what means unrestricted/)).toBeInTheDocument();
+    expect(screen.getByText(/restricts it to that one repo/)).toBeInTheDocument();
+  });
+
+  it("says a one-repo allowlist allows only that repo", () => {
+    renderList({ config: { targetRepos: ["acme/widgets"] } });
+
+    expect(screen.getByText(/allows only acme\/widgets/)).toBeInTheDocument();
+    expect(screen.queryByText(/an empty allowlist is what means unrestricted/)).not.toBeInTheDocument();
+  });
+
+  it("drops both notes once the allowlist names more than one repo", () => {
+    renderList({ config: { targetRepos: ["acme/widgets", "acme/gadgets"] } });
+
+    expect(screen.queryByText(/an empty allowlist is what means unrestricted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/allows only/)).not.toBeInTheDocument();
+  });
+
+  it("confirms the first add, naming the repos that would fall off the allowlist", async () => {
+    api.mockResolvedValueOnce({});
+    const confirmed = vi.fn().mockReturnValue(true);
+    vi.stubGlobal("confirm", confirmed);
+    const user = userEvent.setup();
+    renderList({ config: { targetRepos: [] } });
+
+    await user.type(screen.getByPlaceholderText("owner/name"), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Add repo" }));
+
+    const msg = confirmed.mock.calls[0][0];
+    expect(msg).toContain("only repo this deployment allows");
+    // The repo being added is not one of the repos that fall off it.
+    const falling = msg.split("Off the allowlist as of this click: ")[1];
+    expect(falling).toContain("acme/gadgets");
+    expect(falling).not.toContain("acme/widgets");
+    expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/widgets" }) });
+    vi.unstubAllGlobals();
+  });
+
+  it("does not add the first repo when the confirmation is declined", async () => {
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
+    const onRefreshConfig = vi.fn();
+    const user = userEvent.setup();
+    renderList({ config: { targetRepos: [] }, onRefreshConfig });
+
+    await user.type(screen.getByPlaceholderText("owner/name"), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Add repo" }));
+
+    expect(api).not.toHaveBeenCalled();
+    expect(onRefreshConfig).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("does not confirm an add that only widens an allowlist that already restricts", async () => {
+    api.mockResolvedValueOnce({});
+    const confirmed = vi.fn().mockReturnValue(true);
+    vi.stubGlobal("confirm", confirmed);
+    const user = userEvent.setup();
+    renderList({ config: { targetRepos: ["acme/widgets"] } });
+
+    await user.type(screen.getByPlaceholderText("owner/name"), "acme/gadgets");
+    await user.click(screen.getByRole("button", { name: "Add repo" }));
+
+    expect(confirmed).not.toHaveBeenCalled();
+    expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/gadgets" }) });
+    vi.unstubAllGlobals();
   });
 
   it("only offers Remove on a row that is in config.targetRepos", () => {
