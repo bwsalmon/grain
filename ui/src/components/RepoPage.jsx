@@ -7,8 +7,9 @@ import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, capabilityUn
 // {name} -- the repo-side counterpart of a task's own /tasks/{id} page.
 // Everything that is a property of one repo lives here: its task counts,
 // the branches grain has been asked to create in it, the default
-// capabilities every task filed against it starts with, the way into its
-// releases, and removing it from the deployment's allowlist.
+// capabilities every task filed against it starts with, the standing
+// instructions every run against it is given, the way into its releases,
+// and removing it from the deployment's allowlist.
 //
 // That is the whole point of it. Each of those used to be a button on
 // the repo *list* row (bwsalmon/agents#459, #473, #474, #638), which
@@ -35,6 +36,15 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   // would look like "this repo adds nothing".
   const [caps, setCaps] = useState(null);
   const [capsSelection, setCapsSelection] = useState([]);
+  // prompt/promptText are that same shape again, for this repo's own
+  // prompt extension (grain/task-114): what GET /api/repos/{owner}/
+  // {name}/prompt-extension last said -- the repo's own text, the
+  // deployment's, and the two as a run would actually be given them --
+  // and the unsaved edit. prompt is null while that read is in flight,
+  // since an empty box would otherwise look like "this repo says
+  // nothing", which is a real and different state.
+  const [prompt, setPrompt] = useState(null);
+  const [promptText, setPromptText] = useState("");
 
   // The row this repo would have on the list page: its per-state counts,
   // whether it is on the allowlist (which is what makes Remove worth
@@ -65,11 +75,23 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
     }
   }, [owner, name, showError]);
 
-  // Both reads happen on landing rather than behind a toggle the way the
-  // list page's own fold-out forms did: this page is *about* this repo,
-  // so there is nothing else the two GETs could be competing with.
+  const loadPromptExtension = useCallback(async () => {
+    try {
+      const loaded = await api(`/api/repos/${owner}/${name}/prompt-extension`);
+      setPrompt(loaded);
+      setPromptText(loaded.promptExtension || "");
+    } catch (err) {
+      showError(err);
+    }
+  }, [owner, name, showError]);
+
+  // All three reads happen on landing rather than behind a toggle the
+  // way the list page's own fold-out forms did: this page is *about*
+  // this repo, so there is nothing else the GETs could be competing
+  // with.
   useEffect(() => { loadBranches(); }, [loadBranches]);
   useEffect(() => { loadCapabilities(); }, [loadCapabilities]);
+  useEffect(() => { loadPromptExtension(); }, [loadPromptExtension]);
 
   // capsEffective is what a task filed against this repo would actually
   // start out holding -- the line the capabilities form ends on. The
@@ -143,6 +165,26 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
     }
   };
 
+  // savePromptExtension replaces this repo's own text wholesale (PUT's
+  // whole body is the new text, ui.SetRepoPromptExtensionRequest). No
+  // onRefreshConfig after it, unlike saveCapabilities: nothing the
+  // new-task form seeds itself from changes here -- a repo's own text is
+  // read at dispatch, not written onto the task -- so there is nothing
+  // cached to go stale.
+  const savePromptExtension = async (evt) => {
+    evt.preventDefault();
+    try {
+      const updated = await api(`/api/repos/${owner}/${name}/prompt-extension`, {
+        method: "PUT",
+        body: JSON.stringify({ promptExtension: promptText.trim() }),
+      });
+      setPrompt(updated);
+      setPromptText(updated.promptExtension || "");
+    } catch (err) {
+      showError(err);
+    }
+  };
+
   return (
     <div className="main-column">
       <div className="repo-page-header">
@@ -172,15 +214,16 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
         </Stack>
 
         {/* A repo with no tasks that is off the allowlist is known to
-            this deployment only because it carries defaults of its own
-            (repoRows' third source). Without saying so the page reads as
-            being about a repo nothing here has anything to do with, and
-            the capabilities form below is the only thing that put it
+            this deployment only because it carries configuration of its
+            own (repoRows' third source). Without saying so the page reads
+            as being about a repo nothing here has anything to do with,
+            and the two forms below are the only things that put it
             here. */}
         {row.defaults && !row.configured && row.total === 0 && (
           <Alert severity="info">
             No tasks, and not on this deployment&apos;s target repos -- {repo} is known here only because it
-            carries default capabilities of its own, below.
+            carries configuration of its own -- default capabilities, standing instructions, or both --
+            below.
           </Alert>
         )}
 
@@ -283,6 +326,43 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
               </Typography>
               <Stack direction="row" justifyContent="flex-end">
                 <Button type="submit" variant="contained" size="small">Save capabilities</Button>
+              </Stack>
+            </Stack>
+          )}
+        </Box>
+
+        <Box>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Prompt extension</Typography>
+          {prompt === null ? (
+            <Typography variant="body2" color="text.secondary">Loading prompt extension…</Typography>
+          ) : (
+            <Stack component="form" spacing={1} onSubmit={savePromptExtension}>
+              <TextField
+                name="repoPromptExtension"
+                label={`Prompt extension for ${repo}`}
+                helperText="Added to this deployment's own standing instructions for a run against this repo, never replacing them. A task can replace both for itself (New task -> Advanced options). Leave empty for a repo that adds nothing."
+                value={promptText}
+                onChange={(e) => setPromptText(e.target.value)}
+                multiline
+                minRows={4}
+                autoComplete="off"
+                fullWidth
+                size="small"
+              />
+              {/* What the deployment already says, read-only and shown
+                  whether or not this repo adds anything: text appended to
+                  instructions nobody can see from here cannot be written
+                  sensibly, and this is the layer somebody editing here is
+                  appending to (ui.RepoDefaults.
+                  DeploymentPromptExtension). */}
+              <Typography variant="body2" color="text.secondary">
+                Deployment-wide, set in Settings &rarr; Agents:{" "}
+                {prompt.deploymentPromptExtension
+                  ? <Box component="span" sx={{ whiteSpace: "pre-wrap" }}>{prompt.deploymentPromptExtension}</Box>
+                  : "nothing"}
+              </Typography>
+              <Stack direction="row" justifyContent="flex-end">
+                <Button type="submit" variant="contained" size="small">Save prompt extension</Button>
               </Stack>
             </Stack>
           )}

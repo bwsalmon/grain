@@ -149,11 +149,12 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
       <ul className="repo-list">
         {visible.map((r) => {
           // A row with no tasks, off the allowlist, is on this page only
-          // because the repo carries default capabilities of its own
+          // because the repo carries configuration of its own -- a
+          // default capability set, standing instructions, or both
           // (repoRows' third source). It has no counts to show, so
           // without saying so it would read as an empty row nobody asked
-          // for -- and its page is the only way to reach the set that put
-          // it here.
+          // for -- and its page is the only way to reach what put it
+          // here.
           const defaultsOnly = r.defaults && !r.configured && r.total === 0;
           return (
             <li key={r.repo}>
@@ -174,7 +175,7 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
                       size="small"
                       variant="outlined"
                       label="Defaults only"
-                      title="No tasks, and not on this deployment's target repos -- listed here because it has default capabilities of its own, which its own page edits."
+                      title="No tasks, and not on this deployment's target repos -- listed here because it has configuration of its own, which its own page edits."
                     />
                   )}
                 </span>

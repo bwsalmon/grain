@@ -74,6 +74,18 @@ describe("RepoList", () => {
     expect(within(row).getByText("Defaults only")).toBeInTheDocument();
   });
 
+  // The same argument for the other kind of per-repo configuration
+  // (grain/task-114): a repo whose only presence here is standing
+  // instructions of its own, which reach every run against it and can
+  // only be read or edited from its page.
+  it("also lists a repo known only for its own prompt extension", () => {
+    const config = { targetRepos: [], reposWithPromptExtension: ["acme/prompt-only"] };
+    renderList({ config });
+
+    const row = screen.getByText("acme/prompt-only").closest("li");
+    expect(within(row).getByText("Defaults only")).toBeInTheDocument();
+  });
+
   it("does not mark a repo that carries defaults and has tasks of its own as defaults-only", () => {
     const config = { targetRepos: [], repoDefaultCapabilities: { "acme/gadgets": ["gcp-key"] } };
     renderList({ config });

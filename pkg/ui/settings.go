@@ -125,6 +125,22 @@ type Settings struct {
 	// to arrive as present-and-empty rather than as an absent key leaving
 	// the old one on screen.
 	EnvironmentName string `json:"environmentName"`
+	// PromptExtension is model.Config's own field of the same name
+	// (grain/task-114): the standing instructions every run dispatched
+	// here is given on top of the prompt grain builds for it. Empty adds
+	// nothing. Deployment-wide only -- a repo adds its own on the repos
+	// pane (RepoDefaults.PromptExtension) and a task overrides both on
+	// the new-task form, neither of which is folded in here, for the same
+	// reason DefaultCapabilities does not fold in the per-repo layer: a
+	// field that mixed the two would describe a deployment-wide setting
+	// that only some runs actually get.
+	//
+	// Deliberately not omitempty, like EnvironmentName above and for the
+	// same reason: the frontend merges an update response over the
+	// settings it already has, so text cleared back to nothing has to
+	// arrive as present-and-empty rather than as an absent key leaving
+	// the old value on screen.
+	PromptExtension string `json:"promptExtension"`
 	// Capabilities is every capability grain ships a provider for, with
 	// this deployment's own readiness computed against it -- capability_
 	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
@@ -349,6 +365,7 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		SandboxDiskGBDefault:          kontur.DefaultDiskGB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		EnvironmentName:               cfg.EnvironmentName,
+		PromptExtension:               cfg.PromptExtension,
 		Capabilities:                  c.capabilityStatuses(cfg, repoConfigs),
 		DefaultCapabilities:           cfg.DefaultCapabilities,
 		ApprovedByDefault:             cfg.ApprovedByDefault,
@@ -468,6 +485,12 @@ type UpdateSettingsRequest struct {
 	ApprovedByDefault      *bool     `json:"approvedByDefault"`
 	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
 	AgentFramework         *string   `json:"agentFramework"`
+	// PromptExtension replaces this deployment's standing instructions
+	// wholesale -- there is one block of text, so a present value is
+	// exactly what every run will be told from now on, and an empty one
+	// turns the feature back off. Trimmed on the way in, so a box someone
+	// cleared to a stray newline stores as the nothing it looks like.
+	PromptExtension *string `json:"promptExtension"`
 	// DefaultCapabilities replaces the whole default set, the same way
 	// TargetRepos above replaces the whole allowlist: a present list is
 	// exactly the ids every new task will be filed with, and an empty one
@@ -659,6 +682,16 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			return Settings{}, validationErrorf("environmentName cannot contain line breaks or tabs")
 		}
 		cfg.EnvironmentName = name
+	}
+	if req.PromptExtension != nil {
+		// Trimmed and nothing else: this is prose handed to an agent,
+		// exactly like a task's own description, so there is no shape to
+		// validate it against -- and unlike EnvironmentName, which is
+		// rendered into a badge, there is nowhere here a line break would
+		// break anything. Trimming is what keeps "cleared" and "a
+		// newline" the same setting (model.PromptExtensionFor trims
+		// again on the way out, for a row this never saw).
+		cfg.PromptExtension = strings.TrimSpace(*req.PromptExtension)
 	}
 	if req.ApprovedByDefault != nil {
 		cfg.ApprovedByDefault = *req.ApprovedByDefault

@@ -121,6 +121,10 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       // an empty agentFramework as "whichever one this deployment is set
       // to when the task dispatches" (model.Task.AgentFramework).
       agentFramework: data.get("agentFramework") || "",
+      // "" is "no override" here too, not "tell this run nothing": with
+      // it empty the run gets whatever the deployment and the repo say
+      // (model.Task.PromptExtension).
+      promptExtension: data.get("promptExtension") || "",
       capabilities,
       dependsOn: dependsOn.map((t) => t.id),
       reads,
@@ -332,6 +336,30 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               <MenuItem value="claude">Claude</MenuItem>
               <MenuItem value="codex">Codex</MenuItem>
             </TextField>
+            {/* The task layer of model/prompt_extension.go's three, and
+                the only one that replaces rather than adds: what the
+                deployment and the repo would otherwise say is dropped
+                for this task. config.promptExtension is shown under it
+                so that choice is made while looking at what it would
+                replace -- the deployment's half of it, at least; a
+                repo's own is on the Repos pane, one repo at a time,
+                rather than in the config every poll fetches. */}
+            <TextField
+              name="promptExtension"
+              label="Prompt extension override"
+              helperText="Replaces this deployment's and the repo's standing instructions for this task alone. Leave empty to use them."
+              multiline
+              minRows={3}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+              size="small"
+            />
+            {config?.promptExtension && (
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2, whiteSpace: "pre-wrap" }}>
+                Deployment-wide, used when the box above is empty: {config.promptExtension}
+              </Typography>
+            )}
             <fieldset>
               <legend>Sandbox shape override <span className="hint">optional, kontur-managed deployments only</span></legend>
               <TextField

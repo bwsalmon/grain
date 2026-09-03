@@ -44,10 +44,11 @@ test("reaches a repo's branches, capabilities and releases from its page", async
   const repoName = await row.locator(".repo-list-name").innerText();
   await row.click();
 
-  // Both forms are on the page itself rather than behind a toggle, and
-  // each is filled in by a read that has to have landed.
+  // All three forms are on the page itself rather than behind a toggle,
+  // and each is filled in by a read that has to have landed.
   await expect(page.getByLabel("New branch name")).toBeVisible();
   await expect(page.getByText(`A task filed against ${repoName} starts with:`)).toBeVisible();
+  await expect(page.getByLabel(new RegExp(`Prompt extension for ${repoName}`))).toBeVisible();
 
   await page.getByRole("button", { name: "Releases" }).click();
   await expect(page.getByRole("heading", { name: `${repoName} releases` })).toBeVisible();

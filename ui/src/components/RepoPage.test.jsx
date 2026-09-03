@@ -20,14 +20,22 @@ const noCaps = {
   effectiveDefaultCapabilities: [],
 };
 
-// routeApi answers the two GETs the page issues on mount -- its branch
-// list and its capability sets -- and leaves anything else to the
-// per-test mockResolvedValueOnce queue, so a test only has to say what
-// it is actually about.
-function routeApi({ branches = [], caps = noCaps } = {}) {
+const noPrompt = {
+  repo: "acme/widgets",
+  promptExtension: "",
+  deploymentPromptExtension: "",
+  effectivePromptExtension: "",
+};
+
+// routeApi answers the three GETs the page issues on mount -- its branch
+// list, its capability sets and its prompt extension -- and leaves
+// anything else to the per-test mockResolvedValueOnce queue, so a test
+// only has to say what it is actually about.
+function routeApi({ branches = [], caps = noCaps, prompt = noPrompt } = {}) {
   api.mockImplementation((path, opts) => {
     if (!opts && /\/branches$/.test(path)) return Promise.resolve(branches);
     if (!opts && /\/capabilities$/.test(path)) return Promise.resolve(caps);
+    if (!opts && /\/prompt-extension$/.test(path)) return Promise.resolve(prompt);
     return Promise.resolve({});
   });
 }
@@ -321,5 +329,71 @@ describe("RepoPage", () => {
 
     expect(screen.getByText(/known here only because it/)).toBeInTheDocument();
     await screen.findByLabelText("Default capabilities");
+  });
+
+  // grain/task-114: a repo's own standing instructions, edited here for
+  // the same reason its capabilities are -- on the page of the repo they
+  // belong to -- and shown alongside the deployment-wide text they are
+  // appended to, which is the thing somebody writing them is writing
+  // after.
+  it("loads this repo's own prompt extension and the deployment text it is appended to", async () => {
+    routeApi({
+      prompt: {
+        repo: "acme/widgets",
+        promptExtension: "Migrations live in db/.",
+        deploymentPromptExtension: "Run `make lint` before you push.",
+        effectivePromptExtension: "Run `make lint` before you push.\n\nMigrations live in db/.",
+      },
+    });
+    renderPage();
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/prompt-extension");
+    expect(await screen.findByLabelText(/Prompt extension for acme\/widgets/))
+      .toHaveValue("Migrations live in db/.");
+    expect(screen.getByText(/Run `make lint` before you push./)).toBeInTheDocument();
+  });
+
+  it("says so when the deployment adds nothing of its own", async () => {
+    routeApi();
+    renderPage();
+
+    await screen.findByLabelText(/Prompt extension for acme\/widgets/);
+    expect(screen.getByText(/Deployment-wide, set in Settings/)).toHaveTextContent("nothing");
+  });
+
+  it("saves the repo's own prompt extension", async () => {
+    routeApi();
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.type(
+      await screen.findByLabelText(/Prompt extension for acme\/widgets/),
+      "Migrations live in db/.",
+    );
+
+    api.mockImplementationOnce(() => Promise.resolve({
+      repo: "acme/widgets",
+      promptExtension: "Migrations live in db/.",
+      deploymentPromptExtension: "",
+      effectivePromptExtension: "Migrations live in db/.",
+    }));
+    await user.click(screen.getByRole("button", { name: "Save prompt extension" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/prompt-extension", {
+      method: "PUT", body: JSON.stringify({ promptExtension: "Migrations live in db/." }),
+    });
+  });
+
+  it("reports the error when saving the repo's prompt extension fails", async () => {
+    routeApi();
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    renderPage({ showError });
+    await screen.findByLabelText(/Prompt extension for acme\/widgets/);
+
+    api.mockImplementationOnce(() => Promise.reject(new Error("store is down")));
+    await user.click(screen.getByRole("button", { name: "Save prompt extension" }));
+
+    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "store is down" }));
   });
 });

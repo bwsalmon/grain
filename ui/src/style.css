@@ -747,7 +747,12 @@ fieldset legend {
 .declared { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.1rem; }
 .declared-row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.82rem; }
 .declared-key { color: var(--text-tertiary); }
-.declared-value { color: var(--text-secondary); text-align: right; word-break: break-word; }
+/* pre-wrap because one of these values is prose rather than a word: a
+   task's own prompt extension override (grain/task-114) can be several
+   lines, and collapsing them would run its sentences together. Every
+   other value here is a single token, which pre-wrap leaves exactly as
+   it was. */
+.declared-value { color: var(--text-secondary); text-align: right; word-break: break-word; white-space: pre-wrap; }
 
 .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0 0 1.1rem; }
 .detail-side .actions { flex-direction: column; }

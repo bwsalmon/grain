@@ -286,7 +286,7 @@ func (c *HTTPClient) ListRepos(ctx context.Context) ([]RepoSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	return repoSummaries(cfg.TargetRepos, tasks, cfg.RepoDefaultCapabilities), nil
+	return repoSummaries(cfg.TargetRepos, tasks, cfg.RepoDefaultCapabilities, cfg.ReposWithPromptExtension), nil
 }
 
 // RepoDefaults reads repo's own default capability set, alongside the
@@ -316,6 +316,23 @@ func (c *HTTPClient) SetRepoDefaultCapabilities(ctx context.Context, repo string
 	}
 	var defaults RepoDefaults
 	if err := c.do(ctx, http.MethodPut, path, SetRepoCapabilitiesRequest{DefaultCapabilities: ids}, &defaults); err != nil {
+		return RepoDefaults{}, err
+	}
+	return defaults, nil
+}
+
+// SetRepoPromptExtension replaces repo's own standing instructions --
+// Client.SetRepoPromptExtension over the wire. An empty text is how a
+// repo goes back to adding nothing of its own, the same as clearing the
+// box on the repos pane; everything else about the repo, its default
+// capabilities included, is left exactly as it was.
+func (c *HTTPClient) SetRepoPromptExtension(ctx context.Context, repo, text string) (RepoDefaults, error) {
+	path, err := repoAPIPath(repo, "/prompt-extension")
+	if err != nil {
+		return RepoDefaults{}, err
+	}
+	var defaults RepoDefaults
+	if err := c.do(ctx, http.MethodPut, path, SetRepoPromptExtensionRequest{PromptExtension: text}, &defaults); err != nil {
 		return RepoDefaults{}, err
 	}
 	return defaults, nil

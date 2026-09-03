@@ -662,6 +662,14 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	// -target-repos clears the allowlist.
 	environmentName := fs.String("environment-name", "",
 		"what this deployment is called in the UI, e.g. staging -- empty leaves it unnamed and shows nothing")
+	// Settable from a shell for the same reason -environment-name is,
+	// and rather more so: standing instructions for every run here are
+	// exactly the kind of thing a provisioning script writes once, and
+	// the kind of thing an operator wants to read back from the host
+	// while working out why every run is doing something unexpected.
+	// Empty clears it, the same as every other whole-value flag here.
+	promptExtension := fs.String("prompt-extension", "",
+		"standing instructions appended to every run's prompt on this deployment -- empty adds nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -714,6 +722,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "environment-name":
 			v := *environmentName
 			req.EnvironmentName = &v
+		case "prompt-extension":
+			v := *promptExtension
+			req.PromptExtension = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -881,6 +892,13 @@ func (p *printer) settings(s ui.Settings) {
 	} else {
 		fmt.Println("default capabilities: none")
 	}
+	// Printed in full rather than summarised as "set"/"none": it is the
+	// text every run on this deployment is given, and "why is every agent
+	// doing X" is answered by reading the words, not by learning that
+	// some words exist. Indented onto its own lines because it is the one
+	// setting here that is prose and may be several lines of it -- see
+	// promptExtensionBlock.
+	fmt.Print(promptExtensionBlock("prompt extension", s.PromptExtension))
 	// Every other setting above is already in effect: the daemon
 	// re-reads this row each reconcile tick (cmd/grain/daemon.go's
 	// liveConfig). These are the ones that are not, so saying so here is
@@ -897,6 +915,30 @@ func (p *printer) settings(s ui.Settings) {
 			fmt.Println(capabilityStatusLine(cp))
 		}
 	}
+}
+
+// promptExtensionBlock renders one layer of the prompt extension
+// (model/prompt_extension.go) as lines of CLI output: "label: none" when
+// there is nothing to show, and otherwise the label on its own line with
+// the text indented under it.
+//
+// Indented rather than printed after the label, unlike every other
+// setting `grain settings` prints, because this one is prose: a
+// multi-line value written after "prompt extension: " would put its
+// first line in the column and the rest hard against the left margin,
+// which reads as though the output had ended and something else began.
+// The trailing newline is included, so a caller prints this and nothing
+// else.
+func promptExtensionBlock(label, text string) string {
+	if strings.TrimSpace(text) == "" {
+		return label + ": none\n"
+	}
+	var b strings.Builder
+	b.WriteString(label + ":\n")
+	for _, line := range strings.Split(text, "\n") {
+		b.WriteString("  " + line + "\n")
+	}
+	return b.String()
 }
 
 // sandboxShapeValue renders one dimension of the deployment-wide sandbox
