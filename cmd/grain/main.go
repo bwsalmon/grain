@@ -80,6 +80,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -601,6 +602,22 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (needs a daemon restart to take effect)")
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+	// The deployment-wide sandbox VM shape (ui.Settings.SandboxCPUs/
+	// SandboxMemoryMB/SandboxDiskGB, bwsalmon/agents#534,
+	// grain/task-41). 0 is a real value for all three -- "leave the
+	// default in place" -- so an operator shrinking a deployment back to
+	// that default sets the flag to 0 rather than omitting it, the same
+	// way an empty -target-repos clears the allowlist. What that default
+	// is differs for disk: kontur names its own vCPU and memory
+	// defaults, but a VM's disk is however large the guest image behind
+	// it happens to be, which is a property of the image a deployment
+	// built rather than a constant this build could print.
+	sandboxCPUs := fs.Int("sandbox-cpus", 0,
+		"deployment-wide default vCPU count for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
+		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
+		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM; 0 leaves the VM's disk as large as the guest image behind it")
 	// No back quotes in this usage string, here or on any flag below:
 	// flag.PrintDefaults reads the first back-quoted word as the name of
 	// the flag's operand, so "`grain repo add`" would print as
@@ -643,6 +660,15 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "gcp-agent-service-account":
 			v := *gcpServiceAccountEmail
 			req.GCPServiceAccountEmail = &v
+		case "sandbox-cpus":
+			v := *sandboxCPUs
+			req.SandboxCPUs = &v
+		case "sandbox-memory-mb":
+			v := *sandboxMemoryMB
+			req.SandboxMemoryMB = &v
+		case "sandbox-disk-gb":
+			v := *sandboxDiskGB
+			req.SandboxDiskGB = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -777,6 +803,22 @@ func (p *printer) settings(s ui.Settings) {
 	if s.GCPServiceAccountEmail != "" {
 		fmt.Printf("gcp agent service account: %s\n", s.GCPServiceAccountEmail)
 	}
+	// The sandbox shape prints what is actually in effect, not the bare
+	// stored value: 0 means "whatever bwsalmon/kontur defaults to", and
+	// printing that literal 0 would read as a deliberately empty VM.
+	// ui.Settings carries kontur's own defaults alongside the stored
+	// values (SandboxCPUsDefault/SandboxMemoryMBDefault) for exactly
+	// this.
+	//
+	// Disk has no such default to name, deliberately: there is no
+	// ui.Settings.SandboxDiskGBDefault because a VM's disk is however
+	// large the guest image behind it happens to be, a property of the
+	// image a deployment built rather than a constant this build could
+	// print. Passing 0 makes an unset disk print as "unset", which is
+	// all that can honestly be said about it here.
+	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault))
+	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault))
+	fmt.Printf("sandbox disk gb: %s\n", sandboxShapeValue(s.SandboxDiskGB, 0))
 	if len(s.TargetRepos) > 0 {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {
@@ -803,6 +845,23 @@ func (p *printer) settings(s ui.Settings) {
 			fmt.Println(capabilityStatusLine(cp))
 		}
 	}
+}
+
+// sandboxShapeValue renders one dimension of the deployment-wide sandbox
+// VM shape: the stored value when there is one, and otherwise the shape
+// actually in effect -- bwsalmon/kontur's own default -- named as the
+// default rather than printed as the bare 0 that is stored, so that
+// "unset" and "in effect" are both legible from one line. A build whose
+// ui.Settings reports no default to fall back on (0) says only that the
+// setting is unset, which is all it can honestly say.
+func sandboxShapeValue(stored, konturDefault int) string {
+	if stored != 0 {
+		return strconv.Itoa(stored)
+	}
+	if konturDefault != 0 {
+		return fmt.Sprintf("%d (kontur default, unset)", konturDefault)
+	}
+	return "unset"
 }
 
 // capabilityStatusLine renders one ui.CapabilityStatus as a line of
