@@ -102,6 +102,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 	"github.com/bwsalmon/grain/pkg/secrets"
+	"github.com/bwsalmon/grain/pkg/staterepo"
 	"github.com/bwsalmon/grain/pkg/sysstat"
 	"github.com/bwsalmon/grain/pkg/systemlog"
 	"github.com/bwsalmon/grain/pkg/ui"
@@ -597,6 +598,25 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer db.Close()
 
+	// The state repository is opened and loaded into the database before
+	// anything reads a row out of it: what is in the repository is what
+	// this deployment is configured with, including whatever an agent's
+	// merged pull request changed since the last start, and loadConfig
+	// immediately below is the first thing that would read a stale
+	// answer. See staterepo.go for the direction of travel and why the
+	// import only happens here rather than on every tick.
+	stateRepo, err := openStateRepo(ctx, cfg.dataDir)
+	if err != nil {
+		return fmt.Errorf("opening the state repository: %w", err)
+	}
+	if err := staterepo.Load(ctx, stateRepo, db, model.SchemaVersion); err != nil {
+		return fmt.Errorf("loading the state repository: %w", err)
+	}
+	syncState := func(ctx context.Context) (bool, error) {
+		return staterepo.Sync(ctx, stateRepo, db, model.SchemaVersion)
+	}
+	go stateSyncLoop(ctx, syncState)
+
 	cfg, err = loadConfig(ctx, store, cfg)
 	if err != nil {
 		return fmt.Errorf("loading deployment configuration: %w", err)
@@ -791,7 +811,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	// into, and the one orchestrator.Config.Credentials below already
 	// resolves a capability's own secrets through -- the same directory,
 	// opened once and shared by both.
-	secretStore := secrets.New(filepath.Join(cfg.dataDir, "secrets"))
+	secretStore := openSecrets(cfg.dataDir)
 
 	// Built per dispatch now rather than here (agentFrameworks' own doc
 	// comment), so nothing about a missing or not-yet-pasted agent
@@ -2320,7 +2340,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// the matching providers from, so every id the picker offers is
 		// one a dispatch can actually resolve.
 		Capabilities: append(ui.OfferedCapabilities(), ui.GitHubTokenCapabilities(live.gitHubTokens())...),
-		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
+		Secrets:      openSecrets(cfg.dataDir),
 		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,
 		Credentials:  uiCredentials,

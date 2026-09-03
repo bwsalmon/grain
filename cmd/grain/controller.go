@@ -193,17 +193,17 @@ func bootstrapGitHubApp(args []string) error {
 }
 
 // writeAppCredentials stores appID and privateKey in the same
-// pkg/secrets database (<data-dir>/secrets/secrets.db) that
+// pkg/secrets file (secretsConfig's own two paths) that
 // githubsandbox.Provider.Resolve -- and `grain secrets` -- read from,
 // under the one "github-app" secret's "app-id" and "private-key" keys:
 // exactly the pair DefaultAppIDCredential and DefaultPrivateKeyCredential
 // name. Earlier, this command wrote plain files under <secrets-dir>/
 // github-app/ instead, which nothing that resolves credentials through
-// pkg/secrets.Store (a SQLite database, not a directory of files) ever
+// pkg/secrets.Store (one encrypted file, not a directory of files) ever
 // read -- an operator had to separately run `grain secrets set` by hand
 // for bootstrap-github-app's output to take effect at all.
 func writeAppCredentials(dataDir, appID, privateKey string) error {
-	store := secrets.New(filepath.Join(dataDir, "secrets"))
+	store := secrets.Open(secretsConfig(dataDir))
 	if err := store.Set("github-app", "app-id", []byte(appID)); err != nil {
 		return fmt.Errorf("writing app-id: %w", err)
 	}

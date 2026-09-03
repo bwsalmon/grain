@@ -87,6 +87,14 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 // text; a message that tried to summarise it would be a second, worse
 // answer that could disagree with the first.
 func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
+	// Rewritten on every sync, not only at Seed: a repository an operator
+	// adopted, or one whose README a merge dropped, still has to explain
+	// itself to whoever opens it next, and this is the cheapest place to
+	// make that true rather than a thing that is true only if the
+	// repository was created here.
+	if err := writeReadme(r.Dir()); err != nil {
+		return false, err
+	}
 	if err := Export(ctx, db, r.Dir()); err != nil {
 		return false, err
 	}
