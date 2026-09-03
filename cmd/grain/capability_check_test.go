@@ -10,10 +10,15 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/capability/gcpkey"
+	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/model/sqlite"
+	"github.com/bwsalmon/grain/pkg/ui"
 )
 
 // noCredentials is a resolver with nothing in it -- a deployment where
@@ -107,4 +112,83 @@ func TestCapabilityCheckRefusesACapabilityWithNoCredential(t *testing.T) {
 	if _, err := adapter.CheckCapability(context.Background(), "self-debug"); err == nil {
 		t.Fatal("expected self-debug, which holds no credential, to be refused")
 	}
+}
+
+// --- the CLI side ------------------------------------------------------
+
+// `grain settings -check-capability <id>` is the same question asked
+// from the host, which is where whoever is reading a failed task's error
+// usually already is. A refused credential prints a verdict and the
+// provider's sentence -- it is not a failure of the command, so it is
+// not an error return either.
+func TestCmdSettingsChecksACapabilityCredential(t *testing.T) {
+	ctx := context.Background()
+	srv := checkerTestServer(t, &stubChecker{result: ui.CapabilityCheckResult{
+		Credentials: []string{"gcp-key-minter"},
+	}, err: errors.New("GCP will not issue a token for the minter credential held in the `gcp-key-minter` secret")})
+	c := ui.NewHTTPClient(srv.URL)
+
+	out := captureStdout(t, func() {
+		if err := cmdSettings(ctx, c, &printer{}, []string{"-check-capability", "gcp-key"}); err != nil {
+			t.Errorf("cmdSettings -check-capability: %v", err)
+		}
+	})
+	for _, want := range []string{"gcp-key: REFUSED", "checked as:  gcp-key-minter", "will not issue a token"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output %q does not contain %q", out, want)
+		}
+	}
+}
+
+// The listing itself keeps saying "ready", which means configured -- so
+// where anything can be tested it also says where to go and test it.
+func TestCmdSettingsPointsAtTheCredentialCheck(t *testing.T) {
+	ctx := context.Background()
+	srv := checkerTestServer(t, &stubChecker{})
+	c := ui.NewHTTPClient(srv.URL)
+
+	out := captureStdout(t, func() {
+		if err := cmdSettings(ctx, c, &printer{}, nil); err != nil {
+			t.Errorf("cmdSettings: %v", err)
+		}
+	})
+	if !strings.Contains(out, "grain settings -check-capability <id>") {
+		t.Errorf("output %q does not name the command that tests a stored credential", out)
+	}
+}
+
+// stubChecker is ui.CapabilityChecker with a fixed answer -- the daemon
+// adapter's place, with no provider and no cloud behind it.
+type stubChecker struct {
+	result ui.CapabilityCheckResult
+	err    error
+}
+
+func (s *stubChecker) CheckCapability(ctx context.Context, id string) (ui.CapabilityCheckResult, error) {
+	return s.result, s.err
+}
+
+func checkerTestServer(t *testing.T, checker ui.CapabilityChecker) *httptest.Server {
+	t.Helper()
+	db, err := sqlite.Open(sqlite.DefaultConfig(filepath.Join(t.TempDir(), "data")))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := model.New(db)
+	if err := store.Init(context.Background()); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+	cfg := ui.Config{
+		Actor:            ui.DefaultActor("operator"),
+		Capabilities:     ui.OfferedCapabilities(),
+		CapabilityChecks: checker,
+	}
+	srv := httptest.NewServer(ui.NewServer(cfg, store))
+	t.Cleanup(srv.Close)
+	if _, err := ui.NewHTTPClient(srv.URL).UpdateSettings(context.Background(),
+		*settingsRequest("30s", 2, "gemini-test", "claude-test", "github.example")); err != nil {
+		t.Fatalf("seeding settings: %v", err)
+	}
+	return srv
 }

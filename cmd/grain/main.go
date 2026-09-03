@@ -81,6 +81,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -935,6 +936,17 @@ func (p *printer) settings(s ui.Settings) {
 		fmt.Println("\ncapabilities:")
 		for _, cp := range s.Capabilities {
 			fmt.Println(capabilityStatusLine(cp))
+		}
+		// "ready" above is the whole of what this listing can honestly
+		// claim: it says a project, an account and a secret are set, and
+		// nothing it reads can see whether the key inside that secret is
+		// one the service still accepts (README.md's "Testing a
+		// credential, from the pane that calls it Ready"). Printed only
+		// where some capability can actually be tested, so it never
+		// names a command this deployment would refuse.
+		if slices.ContainsFunc(s.Capabilities, func(cp ui.CapabilityStatus) bool { return cp.Checkable }) {
+			fmt.Println("\n\"ready\" means configured -- to ask the service whether a stored credential still\n" +
+				"works, run: grain settings -check-capability <id>")
 		}
 	}
 }
