@@ -74,6 +74,25 @@ describe("Sidebar", () => {
     expect(onOpenDebug).toHaveBeenCalledTimes(1);
   });
 
+  // grain/task-115: Settings and Debugging open a pane beside this rail
+  // rather than a box over the middle of the screen, so the rail is
+  // still on screen while one is open and has to say which of the two
+  // it is -- the same way the nav entries above mark the current view.
+  it("marks the footer entry whose pane is open", () => {
+    const { rerender } = render(<Sidebar {...baseProps} config={null} tasks={[]} />);
+
+    expect(screen.getByRole("button", { name: "Settings" })).not.toHaveClass("Mui-selected");
+    expect(screen.getByRole("button", { name: "Debugging" })).not.toHaveClass("Mui-selected");
+
+    rerender(<Sidebar {...baseProps} config={null} tasks={[]} showSettings />);
+    expect(screen.getByRole("button", { name: "Settings" })).toHaveClass("Mui-selected");
+    expect(screen.getByRole("button", { name: "Debugging" })).not.toHaveClass("Mui-selected");
+
+    rerender(<Sidebar {...baseProps} config={null} tasks={[]} showDebug />);
+    expect(screen.getByRole("button", { name: "Settings" })).not.toHaveClass("Mui-selected");
+    expect(screen.getByRole("button", { name: "Debugging" })).toHaveClass("Mui-selected");
+  });
+
   it("switches to the schedules view and shows its count when clicked", async () => {
     const onSetView = vi.fn();
     const schedules = [{ id: "sched-1" }, { id: "sched-2" }];

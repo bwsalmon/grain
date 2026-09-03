@@ -243,6 +243,14 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 // is protected either way; all that remains is a pull request visible on
 // a task somebody just closed.
 //
+// What remains is now also *said*, on the task and on the pull request
+// itself, rather than only being true: noteOrphanedPullRequests, on both
+// sides of the finish -- for a close this function found, and for one
+// that landed just after it looked. The decision is unchanged (nothing is
+// closed, nothing is merged, nothing is unlinked); what changed is that
+// nobody has to work it out for themselves from a pull request that has
+// simply gone quiet.
+//
 // It is also the answer already given to the same question one moment
 // later in a task's life -- a task closed after its pull request was
 // opened at the finish keeps that pull request open and unmerged forever
@@ -269,9 +277,12 @@ func salvagePushedBranch(ctx context.Context, store *model.Store, client github.
 		return true, err
 	}
 	if closed {
-		return true, nil
+		return true, noteOrphanedPullRequests(ctx, store, client, task.ID, now)
 	}
-	return true, finishWithPullRequest(ctx, store, client, task, now)
+	if err := finishWithPullRequest(ctx, store, client, task, now); err != nil {
+		return true, err
+	}
+	return true, noteOrphanedIfClosed(ctx, store, client, task.ID, now)
 }
 
 // noActionDetail says what the run did, not only what it did not do.
@@ -683,7 +694,7 @@ func argStrings(v any) []string {
 func finishWithPullRequest(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, now time.Time) error {
 
-	pr, err := EnsurePullRequest(client, task)
+	pr, err := EnsurePullRequest(ctx, store, client, task, now)
 	if err != nil {
 		return fmt.Errorf("orchestrator: opening a pull request for %s: %w", task.ID, err)
 	}
@@ -735,7 +746,15 @@ func observeField(ctx context.Context, store *model.Store, taskID string, now ti
 // most one open PR per head branch and a retried finish (this cycle
 // crashed after CreatePullRequest but before the link was recorded) must
 // not try to open a second one.
-func EnsurePullRequest(client github.Client, task model.Task) (github.PullRequest, error) {
+//
+// The store is here for one reason: a base branch that is no longer
+// there. pullRequestBase retargets that at the repo's default branch and
+// noteBaseRetarget writes down that it did, on the task itself -- see
+// both of their doc comments for why the work is opened rather than
+// refused, and why the retarget is never silent.
+func EnsurePullRequest(ctx context.Context, store *model.Store, client github.Client,
+	task model.Task, now time.Time) (github.PullRequest, error) {
+
 	branch := model.BranchName(task.ID)
 	if existing, err := client.FindOpenPullRequestForBranch(task.Target.Owner, task.Target.Name, branch); err != nil {
 		return github.PullRequest{}, err
@@ -743,13 +762,14 @@ func EnsurePullRequest(client github.Client, task model.Task) (github.PullReques
 		return *existing, nil
 	}
 
-	base := task.Base
-	if base == "" {
-		b, err := client.DefaultBranch(task.Target.Owner, task.Target.Name)
-		if err != nil {
+	base, gone, err := pullRequestBase(client, task)
+	if err != nil {
+		return github.PullRequest{}, err
+	}
+	if gone != "" {
+		if err := noteBaseRetarget(ctx, store, task, gone, base, now); err != nil {
 			return github.PullRequest{}, err
 		}
-		base = b
 	}
 
 	title := task.Title
@@ -760,4 +780,129 @@ func EnsurePullRequest(client github.Client, task model.Task) (github.PullReques
 	// reader at any more, and its id is what `grain get` takes.
 	body := fmt.Sprintf("Automated change for grain task %s.", task.ID)
 	return client.CreatePullRequest(task.Target.Owner, task.Target.Name, branch, base, title, body)
+}
+
+// pullRequestBase is the branch task's pull request opens against: its
+// own Base when that is still a branch on the remote, and otherwise the
+// repo's default branch -- returned alongside the base it replaced ("" on
+// the ordinary path, where nothing was replaced).
+//
+// task.Base used to be passed to CreatePullRequest unread, and GitHub
+// answers a base that does not exist with a 422 every time. A task
+// pointed at a dead base could then never be finished at all: the agent
+// cloned, worked, committed and pushed, the branch was real on the
+// remote, and the one call that would turn it into a pull request was
+// refused -- so the task stayed un-completed, dispatch offered it again
+// after its backoff, and the next attempt did the same thing on top of
+// the same branch, forever.
+//
+// A task pointed at a dead base is not exotic. New task prefills Base
+// from the repo's last task (bwsalmon/agents#641), so a branch that
+// merges between one task being filed and the next being dispatched
+// leaves a task pointed at nothing -- prepareCheckout's own doc comment
+// makes the same point about the clone.
+//
+// Retargeting rather than refusing is a decision about *when* this runs.
+// By the time anything here is called the work exists: it is committed
+// and pushed to a branch on the remote, and refusing it forever helps
+// nobody. The overwhelmingly likely reason a base vanished is that it
+// merged, in which case its commits are in the default branch already and
+// the pull request's diff is the same either way. When it is not -- a
+// misspelled base, or work that was abandoned -- the pull request is
+// aimed at the wrong branch, which is exactly why noteBaseRetarget says
+// so on the task rather than letting this be a quiet fallback. The place
+// to catch that case cheaply is before any work happens, and
+// prepareCheckout still does: it refuses to start a run whose base is
+// gone and there is nothing pushed yet to lose.
+//
+// The DefaultBranch call is also what keeps a broken client from being
+// read as a vanished branch. BranchExists reports a 404 as "no such
+// branch", and every other way of failing to reach a repo -- a transport
+// aimed at the wrong host, a token that lost its scope, a repo turned
+// private -- 404s identically (branchExistsSettled's own doc comment has
+// the history). A client that cannot see the repo cannot read its default
+// branch either, so that read fails and this reports the failure instead
+// of retargeting a base that is perfectly fine.
+func pullRequestBase(client github.Client, task model.Task) (base, retargetedFrom string, err error) {
+	if task.Base != "" {
+		exists, err := client.BranchExists(task.Target.Owner, task.Target.Name, task.Base)
+		if err != nil {
+			return "", "", fmt.Errorf("orchestrator: checking %s's base branch %q: %w", task.ID, task.Base, err)
+		}
+		if exists {
+			return task.Base, "", nil
+		}
+	}
+	def, err := client.DefaultBranch(task.Target.Owner, task.Target.Name)
+	if err != nil {
+		return "", "", err
+	}
+	if task.Base == "" {
+		return def, "", nil
+	}
+	return def, task.Base, nil
+}
+
+// noteBaseRetarget records that task's pull request was opened against
+// `to` because `from`, the base it asked for, is no longer on the remote.
+//
+// Both halves matter. The task's own row is changed, so that everything
+// downstream of it agrees with the pull request that is about to exist:
+// BuildPrompt tells a run to keep merging its base into its branch and
+// would otherwise send the next attempt at a branch that is not there,
+// prepareCheckout would refuse that attempt outright, and the task's Base
+// as shown in the UI would name a branch nobody can look at. And a
+// comment says what happened in the human's own conversation, because
+// changing a field somebody set, without saying so, is how a task quietly
+// ends up meaning something other than what it was filed as. The comment
+// names the branch that went missing, so the change is legible and
+// reversible by hand.
+//
+// It is attributed to grain itself rather than on behalf of the agent
+// (relayComment's attribution): the run said nothing about any of this,
+// grain decided it.
+//
+// The row is only rewritten while it still says `from`, and the comment
+// only follows a row that this call actually changed -- so a retried
+// finish that reaches here twice leaves one comment, not two.
+func noteBaseRetarget(ctx context.Context, store *model.Store, task model.Task,
+	from, to string, now time.Time) error {
+
+	changed := false
+	if err := store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+		if t.Base == from {
+			t.Base, changed = to, true
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("orchestrator: retargeting %s at %q: %w", task.ID, to, err)
+	}
+	if !changed {
+		return nil
+	}
+
+	log.Printf("orchestrator: task %s's base branch %q is gone from %s; opening its pull request against %q instead",
+		task.ID, from, task.Target, to)
+
+	body := fmt.Sprintf(
+		"This task's base branch `%s` no longer exists on %s, so its pull request "+
+			"was opened against `%s`, the repository's default branch, and the task's "+
+			"own base was changed to match.\n\n"+
+			"A base branch usually disappears because it merged and was deleted, in "+
+			"which case its commits are in `%s` already and this pull request's diff "+
+			"is the same either way. If `%s` went missing for some other reason -- a "+
+			"typo, or work that was abandoned -- then this pull request is aimed at "+
+			"the wrong branch: retarget it on GitHub, or close it and point this task "+
+			"at a branch that exists.",
+		from, task.Target, to, to, from,
+	)
+	if _, err := store.AddComment(ctx, model.Comment{
+		TaskID:    task.ID,
+		Author:    model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+		Body:      body,
+		CreatedAt: now,
+	}); err != nil {
+		return fmt.Errorf("orchestrator: recording %s's retargeted base: %w", task.ID, err)
+	}
+	return nil
 }

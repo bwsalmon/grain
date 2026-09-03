@@ -88,7 +88,7 @@ func mergedPullRequestTask(t *testing.T, ctx context.Context, store *model.Store
 	task := filedTask(t, ctx, store, id, repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatalf("opening a pull request for %s: %v", id, err)
 	}

@@ -633,6 +633,21 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			if err := json.Unmarshal(body, &payload); err != nil {
 				return github.ApiResponse{}, err
 			}
+			// Real GitHub refuses a base that is not a branch, every
+			// time, with exactly this 422 -- and that refusal is the
+			// whole reason orchestrator.pullRequestBase exists: a task
+			// whose base merged and was deleted could never be finished,
+			// because the one call that turns its pushed branch into a
+			// pull request was declined on every attempt. A sim that
+			// accepted any base at all was why nothing here ever saw it.
+			if !s.branchExists(payload.Base) {
+				return jsonResponse(422, map[string]any{
+					"message": "Validation Failed",
+					"errors": []map[string]any{{
+						"resource": "PullRequest", "field": "base", "code": "invalid",
+					}},
+				}), nil
+			}
 			number := 9000 + len(s.PullRequests)
 			pr := PullRequest{
 				Number: number, Title: payload.Title, Body: payload.Body,

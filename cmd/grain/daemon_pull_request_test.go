@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -378,6 +379,95 @@ func TestDaemonPullRequestsReportsWhatTheOpenerOpened(t *testing.T) {
 	// tests/e2e/mcpserver_open_pull_request_test.go drives through the
 	// real tool against a real subprocess -- the half of the chain that
 	// cannot be reached from in here.
+}
+
+// The other end of the same glue: closing a task that has a pull request
+// open says so on the pull request itself, through the same
+// pullRequestOpener and the same GitHub client (ui.Config.
+// PullRequestComments). pkg/ui proves the note is written and pkg/model
+// proves it is written once; what is only true here is that the ref
+// pkg/ui hands over as "owner/name#123" reaches the right repo and the
+// right number on GitHub, which no fake standing in for this conversion
+// could have shown.
+//
+// Driven over real HTTP, like TestDaemonPullRequestsReportsWhatTheOpener
+// Opened above, because `grain close` is an HTTPClient call in every
+// deployment -- pkg/ui's own Close is never reached directly.
+func TestClosingATaskSaysSoOnThePullRequestItOrphans(t *testing.T) {
+	w := newPullRequestWorld(t, "t1")
+	ctx := context.Background()
+
+	// The pull request a run of this task would have opened, linked onto
+	// the task the way its own finish would leave it.
+	status, err := orchestrator.OpenPullRequestForTask(ctx, w.store, w.client, w.task)
+	if err != nil {
+		t.Fatalf("OpenPullRequestForTask: %v", err)
+	}
+
+	wire := &syncedSim{sim: w.sim}
+	opener := &pullRequestOpener{store: w.store, client: github.NewClient(wire, nil)}
+	srv := httptest.NewServer(ui.NewServer(ui.Config{
+		Actor:               ui.DefaultActor("tester"),
+		Capabilities:        ui.OfferedCapabilities(),
+		PullRequestComments: opener,
+	}, w.store))
+	t.Cleanup(srv.Close)
+
+	if err := ui.NewHTTPClient(srv.URL).Close(ctx, w.task.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	wire.mu.Lock()
+	posted := append([]github.Comment(nil), wire.sim.Comments[status.PullRequest.Number]...)
+	wire.mu.Unlock()
+	ref := prWorldOwner + "/" + prWorldRepo + "#" + strconv.Itoa(status.PullRequest.Number)
+	if len(posted) != 1 || !strings.Contains(posted[0].Body, "grain has stopped watching "+ref) {
+		t.Fatalf("comments on the pull request = %+v, want grain's own note about %s", posted, ref)
+	}
+
+	comments, err := w.store.Comments(ctx, w.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0].Body, ref) {
+		t.Fatalf("comments on the task = %+v, want the same note", comments)
+	}
+	if !strings.Contains(comments[0].Body, "left this note on the pull request itself too") {
+		t.Fatalf("note = %q, want it to record that GitHub was told", comments[0].Body)
+	}
+}
+
+// A close arriving before runDaemon has built a GitHub client cannot be
+// told to wait -- the task is closed either way. The gate's refusal ends
+// up quoted in the note left on the task instead, which is where somebody
+// wondering why the pull request was never told can read it.
+func TestClosingATaskBeforeTheGateHasAClientStillNotesTheOrphan(t *testing.T) {
+	t.Cleanup(func() { livePullRequests.Store(nil) })
+	livePullRequests.Store(nil)
+
+	w := newPullRequestWorld(t, "t1")
+	ctx := context.Background()
+	if _, err := orchestrator.OpenPullRequestForTask(ctx, w.store, w.client, w.task); err != nil {
+		t.Fatalf("OpenPullRequestForTask: %v", err)
+	}
+
+	srv := httptest.NewServer(ui.NewServer(ui.Config{
+		Actor:               ui.DefaultActor("tester"),
+		Capabilities:        ui.OfferedCapabilities(),
+		PullRequestComments: pullRequestGate{},
+	}, w.store))
+	t.Cleanup(srv.Close)
+
+	if err := ui.NewHTTPClient(srv.URL).Close(ctx, w.task.ID); err != nil {
+		t.Fatalf("Close: %v -- a daemon with no GitHub client yet must still close a task", err)
+	}
+	comments, err := w.store.Comments(ctx, w.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0].Body, "reconcile loop") {
+		t.Fatalf("comments on the task = %+v, want the note to quote the gate's own refusal", comments)
+	}
 }
 
 func strPointer(s string) *string { return &s }

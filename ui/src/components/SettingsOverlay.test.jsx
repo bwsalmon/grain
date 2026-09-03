@@ -39,6 +39,22 @@ describe("SettingsOverlay", () => {
     expect(screen.getByLabelText(/Max merge agents/)).toHaveValue(1);
   });
 
+  // grain/task-115: a full-height pane beside the sidebar, not a
+  // centered dialog -- with the tab strip in the pane's fixed header, so
+  // switching tabs never means scrolling back up past a long tab's
+  // fields to find them.
+  it("fills the pane beside the sidebar, with its tabs in the fixed header", async () => {
+    api.mockResolvedValueOnce(settings);
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
+    const head = document.querySelector(".overlay-pane-header");
+    expect(head).toContainElement(screen.getByRole("tab", { name: "Capabilities" }));
+    expect(head).toContainElement(screen.getByRole("heading", { name: "Settings" }));
+    expect(document.querySelector(".overlay-pane .pane-form")).toBeInTheDocument();
+  });
+
   it("populates the Agents tab with them", async () => {
     api.mockResolvedValueOnce(settings);
     const user = userEvent.setup();

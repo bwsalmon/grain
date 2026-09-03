@@ -1419,6 +1419,25 @@ func (a sandboxRecreateAdapter) RecreateForTask(ctx context.Context, taskID stri
 	}, nil
 }
 
+// Comment is ui.Config.PullRequestComments over the same client: what
+// closing a task says on the pull request that close has orphaned (see
+// model.OrphanedPullRequestNote). Here rather than on a type of its own
+// because it needs exactly what OpenForTask already holds, and the same
+// gate below already answers "has this daemon got a GitHub client yet?"
+// for both.
+//
+// ref arrives as a task_link target ("owner/name#123") because that is
+// the only spelling pkg/ui has for a pull request; parsing it back is
+// this side's job for the same reason converting the status shape is.
+func (o *pullRequestOpener) Comment(ctx context.Context, ref, body string) error {
+	pr, err := model.ParsePullRequestRef(ref)
+	if err != nil {
+		return err
+	}
+	_, err = o.client.CreateComment(pr.Repo.Owner, pr.Repo.Name, pr.Number, body)
+	return err
+}
+
 // pullRequestGate is the ui.Config.PullRequests the UI/API server is
 // given: whatever livePullRequests holds by the time a request actually
 // arrives, or a plain refusal until runDaemon has put one there.
@@ -1432,6 +1451,20 @@ func (pullRequestGate) OpenForTask(ctx context.Context, taskID string) (ui.PullR
 				"its reconcile loop has not started (or has failed -- check the daemon log)")
 	}
 	return opener.OpenForTask(ctx, taskID)
+}
+
+// Comment is the same gate for ui.Config.PullRequestComments. Its refusal
+// is not thrown away: it ends up quoted in the note grain leaves on the
+// task, which is exactly where somebody wondering why the pull request
+// was never told should read it.
+func (pullRequestGate) Comment(ctx context.Context, ref, body string) error {
+	opener := livePullRequests.Load()
+	if opener == nil {
+		return errors.New(
+			"this daemon has no GitHub client yet: " +
+				"its reconcile loop has not started (or has failed -- check the daemon log)")
+	}
+	return opener.Comment(ctx, ref, body)
 }
 
 // reapInterval is how often reconcile calls reapCapabilities -- not
@@ -2282,6 +2315,13 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// UI survives a reconcile loop that never comes up at all -- and
 		// livePullRequests is what closes that gap once it does.
 		PullRequests: pullRequestGate{},
+		// PullRequestComments is how closing a task says so on the pull
+		// request that close just orphaned (ui.Config.PullRequestComments'
+		// own doc comment). Behind the same gate, and for the same reason
+		// -- and where PullRequests turns a missing client into a refused
+		// request, this one turns it into a line in the note left on the
+		// task saying the pull request itself was not told.
+		PullRequestComments: pullRequestGate{},
 		// SandboxRecreate is how a dispatched run gets out of a sandbox
 		// it has broken beyond what it can fix from inside one
 		// (ui.Config.SandboxRecreate's own doc comment): its mcpserver
