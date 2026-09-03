@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,13 +31,22 @@ const otherTemplate = {
 
 const noop = () => {};
 
+// Which template is open is App.jsx's state now, so that the URL can
+// name it (/templates/:id, grain/task-139) -- SchedulesList.test.jsx's
+// own wrapper standing in for App with the smallest thing that holds
+// that one piece of state.
+function ControlledTemplatesList(props) {
+  const [openTemplateId, setOpenTemplateId] = useState(null);
+  return <TemplatesList openTemplateId={openTemplateId} onOpenTemplate={setOpenTemplateId} {...props} />;
+}
+
 describe("TemplatesList", () => {
   afterEach(() => {
     api.mockReset();
   });
 
   it("lists the templates it is given, showing just their key details", () => {
-    render(<TemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
+    render(<ControlledTemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("Dependency bump")).toBeInTheDocument();
     expect(screen.getByText("Bump dependencies")).toBeInTheDocument();
@@ -46,7 +56,7 @@ describe("TemplatesList", () => {
   });
 
   it("shows an empty message when there are none", () => {
-    render(<TemplatesList templates={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledTemplatesList templates={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("No task templates.")).toBeInTheDocument();
     // Nothing to search or sort when the list is empty.
@@ -55,7 +65,7 @@ describe("TemplatesList", () => {
 
   it("filters the list by name or title", async () => {
     const user = userEvent.setup();
-    render(<TemplatesList templates={[template, otherTemplate]} onRefresh={noop} showError={noop} />);
+    render(<ControlledTemplatesList templates={[template, otherTemplate]} onRefresh={noop} showError={noop} />);
 
     await user.type(screen.getByPlaceholderText("Search templates…"), "security");
 
@@ -65,7 +75,7 @@ describe("TemplatesList", () => {
 
   it("shows a message when a search matches nothing", async () => {
     const user = userEvent.setup();
-    render(<TemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
+    render(<ControlledTemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
 
     await user.type(screen.getByPlaceholderText("Search templates…"), "nope");
 
@@ -76,7 +86,7 @@ describe("TemplatesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<TemplatesList templates={[]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledTemplatesList templates={[]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New template" }));
     expect(screen.getByRole("heading", { name: "New template" })).toBeInTheDocument();
@@ -105,7 +115,7 @@ describe("TemplatesList", () => {
   // one result across all four lists.
   it("opens a template as a full pane", async () => {
     const user = userEvent.setup();
-    render(<TemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
+    render(<ControlledTemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByText("Dependency bump"));
 
@@ -117,7 +127,7 @@ describe("TemplatesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<TemplatesList templates={[template]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledTemplatesList templates={[template]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByText("Dependency bump"));
     expect(screen.getByRole("heading", { name: "Edit template" })).toBeInTheDocument();
@@ -149,7 +159,7 @@ describe("TemplatesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<TemplatesList templates={[template]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledTemplatesList templates={[template]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByText("Dependency bump"));
     await user.click(screen.getByRole("button", { name: "Delete" }));
@@ -161,7 +171,7 @@ describe("TemplatesList", () => {
 
   it("cancels an edit without saving", async () => {
     const user = userEvent.setup();
-    render(<TemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
+    render(<ControlledTemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByText("Dependency bump"));
     expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
@@ -176,7 +186,7 @@ describe("TemplatesList", () => {
     api.mockRejectedValueOnce(new Error("unknown capability not-a-real-capability"));
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<TemplatesList templates={[]} onRefresh={noop} showError={showError} />);
+    render(<ControlledTemplatesList templates={[]} onRefresh={noop} showError={showError} />);
 
     await user.click(screen.getByRole("button", { name: "+ New template" }));
     await user.type(screen.getByLabelText(/Name/), "x");

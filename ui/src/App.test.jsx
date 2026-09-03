@@ -38,10 +38,11 @@ const metricsReport = {
 // overlays it can open touch, backed by a mutable task list so actions
 // that mutate (create, approve, ...) are reflected the next time the
 // list is refetched -- the same way the real store behaves.
-function setupApi(tasks = initialTasks, schedules = [], templates = []) {
+function setupApi(tasks = initialTasks, schedules = [], templates = [], suites = []) {
   let tasksState = [...tasks];
   let schedulesState = [...schedules];
   let templatesState = [...templates];
+  const suitesState = [...suites];
   api.mockImplementation((path, opts) => {
     const method = opts?.method || "GET";
     if (path === "/api/config") return Promise.resolve(config);
@@ -139,7 +140,7 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
     // fake's own null default instead would set App's suites state to
     // null, and Sidebar's `suites = []` parameter default only covers
     // undefined, so `suites.length` would take the whole app down.
-    if (path === "/api/suites" && method === "GET") return Promise.resolve([]);
+    if (path === "/api/suites" && method === "GET") return Promise.resolve(suitesState);
     if (path === "/api/suite-runs" && method === "GET") return Promise.resolve([]);
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
     if (path === "/api/logs") return Promise.resolve({ enabled: false });
@@ -404,6 +405,74 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(await screen.findByText("Weekly dependency bump")).toBeInTheDocument();
+  });
+
+  // grain/task-139: a schedule, a template and a suite are addressable
+  // in their own right, the way a task already was -- which one is open
+  // lives here in App rather than inside the list component, so
+  // paths.js can name it. The URL going stale (an item deleted, or a
+  // link to one that never existed) is App's to correct, since App is
+  // what holds the list the id has to be in.
+  it("gives an open schedule its own URL, and clears it again on close", async () => {
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    setupApi(initialTasks, [schedule]);
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
+    await user.click(await screen.findByText("Nightly dependency bump"));
+
+    expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/schedules/sched-1");
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
+    expect(window.location.pathname).toBe("/schedules");
+  });
+
+  it("opens the schedule /schedules/:id names on a fresh load", async () => {
+    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    window.history.replaceState(null, "", "/schedules/sched-1");
+    setupApi(initialTasks, [schedule]);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
+    expect(screen.getByLabelText(/Title/)).toHaveValue("Nightly dependency bump");
+    expect(window.location.pathname).toBe("/schedules/sched-1");
+  });
+
+  it("opens the template /templates/:id names on a fresh load", async () => {
+    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", autoMerge: false, capabilities: [] };
+    window.history.replaceState(null, "", "/templates/template-1");
+    setupApi(initialTasks, [], [template]);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Edit template" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/templates/template-1");
+  });
+
+  it("opens the suite /suites/:id names on a fresh load", async () => {
+    const suite = { id: "suite-1", name: "Nightly sweep", items: [], mode: "until_clean", maxPasses: 5, requireApproval: false, autoMerge: true };
+    window.history.replaceState(null, "", "/suites/suite-1");
+    setupApi(initialTasks, [], [], [suite]);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Edit task suite" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/suites/suite-1");
+  });
+
+  it("falls back to the plain list when the URL names a schedule that isn't there", async () => {
+    window.history.replaceState(null, "", "/schedules/gone");
+    setupApi(initialTasks, []);
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Schedules" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
+    // The stale id is dropped once the list it named has landed, so the
+    // address bar stops pointing at a pane that isn't open.
+    await waitFor(() => expect(window.location.pathname).toBe("/schedules"));
   });
 
   it("switches to the templates pane, showing its own list and count in the sidebar", async () => {

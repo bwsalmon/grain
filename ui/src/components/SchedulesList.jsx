@@ -25,12 +25,18 @@ const SORTS = {
 // into ScheduleOverlay, opened either by the "+ New schedule" button or
 // by clicking a row, the same NewTaskOverlay/DetailOverlay split
 // TemplatesList/TemplateOverlay already draw.
-export default function SchedulesList({ schedules, templates = [], suites = [], config, tasks, onRefresh, showError }) {
+//
+// Which schedule is open is App.jsx's state (openScheduleId), not this
+// component's, so the URL can name it -- /schedules/sched-1, the way
+// /tasks/42 already names an open task (grain/task-139). Everything
+// else here stays local: search, sort, and the blank "+ New schedule"
+// pane, which has no schedule to name yet.
+export default function SchedulesList({ schedules, templates = [], suites = [], config, tasks, openScheduleId, onOpenSchedule, onRefresh, showError }) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("title");
   const [showNew, setShowNew] = useState(false);
-  const [editing, setEditing] = useState(null);
   const repoOptions = knownRepos(config, tasks);
+  const editing = schedules.find((s) => s.id === openScheduleId) || null;
 
   const q = search.trim().toLowerCase();
   const matches = (s) => q === "" || s.title.toLowerCase().includes(q) || s.repo.toLowerCase().includes(q);
@@ -52,7 +58,7 @@ export default function SchedulesList({ schedules, templates = [], suites = [], 
       )}
       <ul className="schedules-list">
         {visible.map((s) => (
-          <li className="schedule-row" key={s.id} onClick={() => setEditing(s)}>
+          <li className="schedule-row" key={s.id} onClick={() => onOpenSchedule(s.id)}>
             <div className="schedule-summary">
               <span className="schedule-title">{s.title}</span>
               <Chip size="small" label={s.repo} />
@@ -75,7 +81,7 @@ export default function SchedulesList({ schedules, templates = [], suites = [], 
         <ScheduleOverlay repoOptions={repoOptions} templates={templates} suites={suites} config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
       )}
       {editing && (
-        <ScheduleOverlay schedule={editing} repoOptions={repoOptions} templates={templates} suites={suites} config={config} onClose={() => setEditing(null)} onSaved={onRefresh} showError={showError} />
+        <ScheduleOverlay schedule={editing} repoOptions={repoOptions} templates={templates} suites={suites} config={config} onClose={() => onOpenSchedule(null)} onSaved={onRefresh} showError={showError} />
       )}
     </main>
   );

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +24,15 @@ const schedule = {
 
 const noop = () => {};
 
+// Which schedule is open is App.jsx's state now, so that the URL can
+// name it (/schedules/:id, grain/task-139) -- these tests stand in for
+// App with the smallest wrapper that holds that one piece of state, so
+// clicking a row still opens the pane the way it does in the app.
+function ControlledSchedulesList(props) {
+  const [openScheduleId, setOpenScheduleId] = useState(null);
+  return <SchedulesList openScheduleId={openScheduleId} onOpenSchedule={setOpenScheduleId} {...props} />;
+}
+
 // The body api was last called with, parsed rather than compared as a
 // string. ScheduleOverlay builds a save payload in two steps -- repo and
 // base in the object literal, title and description assigned onto it
@@ -38,7 +48,7 @@ describe("SchedulesList", () => {
   });
 
   it("lists the schedules it is given, showing just their key details", () => {
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("Nightly dependency bump")).toBeInTheDocument();
     expect(screen.getByText("acme/widgets")).toBeInTheDocument();
@@ -52,7 +62,7 @@ describe("SchedulesList", () => {
     const daily = { ...schedule, id: "sched-daily", recurrence: { kind: "daily", timeOfDay: "09:00" } };
     const weekly = { ...schedule, id: "sched-weekly", recurrence: { kind: "weekly", timeOfDay: "14:30", weekday: "friday" } };
     const monthly = { ...schedule, id: "sched-monthly", recurrence: { kind: "monthly", timeOfDay: "00:00", dayOfMonth: 31 } };
-    render(<SchedulesList schedules={[daily, weekly, monthly]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[daily, weekly, monthly]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("daily at 09:00")).toBeInTheDocument();
     expect(screen.getByText("Fridays at 14:30")).toBeInTheDocument();
@@ -60,13 +70,13 @@ describe("SchedulesList", () => {
   });
 
   it("shows a Paused chip for a disabled schedule", () => {
-    render(<SchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("Paused")).toBeInTheDocument();
   });
 
   it("shows an empty message when there are none", () => {
-    render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("No schedules yet.")).toBeInTheDocument();
     // Nothing to search or sort when the list is empty.
@@ -76,7 +86,7 @@ describe("SchedulesList", () => {
   it("filters the list by title or repo", async () => {
     const other = { ...schedule, id: "sched-2", title: "Weekly digest", repo: "acme/other" };
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule, other]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule, other]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.type(screen.getByPlaceholderText("Search schedules…"), "digest");
 
@@ -86,7 +96,7 @@ describe("SchedulesList", () => {
 
   it("shows a message when a search matches nothing", async () => {
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.type(screen.getByPlaceholderText("Search schedules…"), "nope");
 
@@ -97,7 +107,7 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     expect(screen.getByRole("heading", { name: "New schedule" })).toBeInTheDocument();
@@ -125,7 +135,7 @@ describe("SchedulesList", () => {
   it("submits a daily recurrence with the chosen time", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Morning report");
@@ -144,7 +154,7 @@ describe("SchedulesList", () => {
   it("submits a weekly recurrence with the chosen day and time", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Weekly digest");
@@ -165,7 +175,7 @@ describe("SchedulesList", () => {
   it("submits a monthly recurrence with the chosen day of month and time", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Monthly cleanup");
@@ -185,7 +195,7 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const config = { capabilities: [{ id: "gemini-key", name: "Gemini key" }, { id: "self-debug", name: "Self debug" }] };
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} config={config} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} config={config} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
@@ -205,7 +215,7 @@ describe("SchedulesList", () => {
   // the same as opening a task, a template or a suite.
   it("opens a schedule as a full pane", async () => {
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByText("Nightly dependency bump"));
 
@@ -217,7 +227,7 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByText("Nightly dependency bump"));
     expect(screen.getByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
@@ -247,7 +257,7 @@ describe("SchedulesList", () => {
 
   it("cancels an edit without saving", async () => {
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByText("Nightly dependency bump"));
     expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
@@ -262,7 +272,7 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByText("Nightly dependency bump"));
     await user.click(screen.getByRole("button", { name: "Pause" }));
@@ -277,7 +287,7 @@ describe("SchedulesList", () => {
 
   it("shows Resume as the pause/resume action for a disabled schedule", async () => {
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByText("Nightly dependency bump"));
 
@@ -289,7 +299,7 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByText("Nightly dependency bump"));
     await user.click(screen.getByRole("button", { name: "Delete" }));
@@ -304,7 +314,7 @@ describe("SchedulesList", () => {
     const config = { targetRepos: ["acme/widgets", "acme/other"] };
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} config={config} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} config={config} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Nightly dependency bump");
@@ -319,7 +329,7 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const templates = [{ id: "template-1", name: "Dependency bump" }];
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Template"));
@@ -346,7 +356,7 @@ describe("SchedulesList", () => {
     const templates = [{ id: "template-1", name: "Dependency bump" }];
     const templateBacked = { ...schedule, templateId: "template-1", templateName: "Dependency bump" };
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[templateBacked]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[templateBacked]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByText("Nightly dependency bump"));
     const templateSelect = screen.getByLabelText("Template");
@@ -368,7 +378,7 @@ describe("SchedulesList", () => {
     api.mockRejectedValueOnce(new Error("everyNHours must be positive"));
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={showError} />);
+    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={showError} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "x");
@@ -388,7 +398,7 @@ describe("SchedulesList", () => {
   };
 
   it("shows which suite a suite-backed schedule runs", () => {
-    render(<SchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
 
     expect(screen.getByText("Suite: Bug sweep")).toBeInTheDocument();
   });
@@ -397,7 +407,7 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={onRefresh} showError={noop} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Fires"));
@@ -429,7 +439,7 @@ describe("SchedulesList", () => {
   it("refuses to submit a suite-backed schedule with no suite chosen", async () => {
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={noop} showError={showError} />);
+    render(<ControlledSchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={noop} showError={showError} />);
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Fires"));
@@ -449,7 +459,7 @@ describe("SchedulesList", () => {
   it("repoints an existing suite-backed schedule at another suite", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(<ControlledSchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
 
     await user.click(screen.getByText("Bug sweep"));
     expect(screen.queryByLabelText("Fires")).not.toBeInTheDocument();
