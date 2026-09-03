@@ -865,6 +865,23 @@ is opened. The PR's base branch comes from the target repo's own
 one global `base_branch` setting stopped being a defensible guess once one
 deployment dispatches into many repos.
 
+**A `/base` that no longer exists is answered differently at each end of a
+run**, because what it costs differs. GitHub refuses a pull request whose
+base is not a branch, with a 422, every time — so a task pointed at a base
+that merged and was deleted (New task prefills `Base` from the repo's last
+task, so this happens on its own) could never be finished at all: it
+pushed, was refused, was offered again, and pushed more commits onto the
+same branch. Before the work exists, `prepareCheckout` refuses to start
+such a run and says which branch is missing and where; nothing is pushed
+yet, and a human retargeting the task is cheapest there. After it exists,
+`EnsurePullRequest` opens the pull request against the default branch
+instead — a base almost always vanishes because it merged, in which case
+its commits are in the default branch already and the diff is the same
+either way — and records the retarget on the task, both as a comment and
+on the task's own `Base`, since the other reasons a base goes missing (a
+typo, work that was abandoned) leave the pull request aimed at the wrong
+branch and only a human can tell which happened.
+
 Polling, not `OpenHands/automation` — see
 [Agent runtime: Claude Code, not OpenHands](#agent-runtime-claude-code-not-openhands).
 `grain/automation/core.py` is the loop; `grain automation run-once`,

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/github"
 	"github.com/bwsalmon/grain/pkg/model"
@@ -93,7 +94,11 @@ func OpenPullRequestForTask(ctx context.Context, store *model.Store, client gith
 			"orchestrator: task %s was closed, so no pull request is being opened for %s", task.ID, branch)
 	}
 
-	pr, err := EnsurePullRequest(client, task)
+	// time.Now, where the finish path passes the cycle's own now: this
+	// call is a live one, made by a run mid-flight through the
+	// open_pull_request tool, and the only thing the timestamp reaches is
+	// a comment noteBaseRetarget may write about a vanished base.
+	pr, err := EnsurePullRequest(ctx, store, client, task, time.Now().UTC())
 	if err != nil {
 		return PullRequestStatus{}, fmt.Errorf("orchestrator: opening a pull request for %s: %w", task.ID, err)
 	}

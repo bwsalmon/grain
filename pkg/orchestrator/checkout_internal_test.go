@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -240,5 +241,76 @@ func TestPrepareCheckoutNamesABaseBranchThatNoLongerExists(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "pathspec") {
 		t.Errorf("error = %v; want grain's own explanation, not git's raw pathspec message", err)
+	}
+}
+
+// The other arm of the same check, which used not to be checked at all:
+// from the second attempt onward the run's branch is already on the
+// remote, so nothing looked at the base again until GitHub refused the
+// pull request at the very end. An existing branch is exactly the case
+// where a vanished base has already bitten once.
+//
+// It is not fatal here, though. The base is not used on this arm -- the
+// branch's own history is what the attempt continues -- and failing the
+// checkout would strand commits that are already pushed, since a run that
+// never reaches its agent never has its branch salvaged into a pull
+// request either. So the attempt goes ahead, and the diagnosis goes to
+// the journal at the start of it rather than surfacing as a 422 nobody
+// sees at the end.
+func TestPrepareCheckoutContinuesAnExistingBranchWhenTheBaseIsGone(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seed := seedRemote(t, remoteBase, repo)
+	branch := model.BranchName("t1")
+
+	git(t, seed, "checkout", "--quiet", "-b", branch)
+	if err := os.WriteFile(filepath.Join(seed, "ATTEMPT1"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, seed, "add", "ATTEMPT1")
+	git(t, seed, "commit", "--quiet", "-m", "first attempt")
+	git(t, seed, "push", "--quiet", "origin", branch)
+
+	var journal strings.Builder
+	log.SetOutput(&journal)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	root := t.TempDir()
+	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task); err != nil {
+		t.Fatalf("prepareCheckout over a branch that already exists: %v", err)
+	}
+	work := filepath.Join(root, CheckoutDir)
+	if _, err := os.Stat(filepath.Join(work, "ATTEMPT1")); err != nil {
+		t.Fatalf("the previous attempt's commit is missing from the redispatch's checkout: %v", err)
+	}
+	if got := git(t, work, "rev-parse", "--abbrev-ref", "HEAD"); got != branch {
+		t.Fatalf("checked-out branch = %q, want %q", got, branch)
+	}
+	for _, want := range []string{"grain/issue-642", "acme/widgets", "does not exist", "default branch"} {
+		if !strings.Contains(journal.String(), want) {
+			t.Errorf("journal = %q; want it to mention %q", journal.String(), want)
+		}
+	}
+}
+
+// And nothing is said about a base that is where it should be -- the
+// journal line above is a diagnosis, not a running commentary.
+func TestPrepareCheckoutSaysNothingAboutABaseThatIsStillThere(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+
+	var journal strings.Builder
+	log.SetOutput(&journal)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	root := t.TempDir()
+	task := model.Task{ID: "t1", Target: &repo, Base: "main"}
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task); err != nil {
+		t.Fatalf("prepareCheckout: %v", err)
+	}
+	if journal.String() != "" {
+		t.Errorf("journal = %q, want silence", journal.String())
 	}
 }
