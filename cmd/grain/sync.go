@@ -158,74 +158,110 @@ func syncSettings(ctx context.Context, req ui.UpdateSettingsRequest, server stri
 	return nil
 }
 
+// settingsDiffRow is one line printSettingsDiff can print: which setting
+// a config file changed, what to call it, and how to read it back off the
+// settings the daemon reported before and after.
+type settingsDiffRow struct {
+	// field is the ui.UpdateSettingsRequest JSON name of the setting this
+	// row reports -- the very key a config file's "settings" section
+	// spells it with. It is what keeps the table honest rather than
+	// merely well-intentioned: settingsDiffRowsCoverEveryUpdatableSetting
+	// reflects over that struct and fails naming any field no row here
+	// claims, so a new setting cannot become syncable without a line of
+	// output to go with it.
+	field string
+	// name is what a workflow log calls the setting -- prose, not the
+	// JSON key, since this is read by whoever is looking at the run.
+	name string
+	// value reads the setting out of one side of the diff. Printed and
+	// compared through fmt.Sprint, so a row may return whatever type the
+	// setting is (or a string it has composed, as the two list settings
+	// below do).
+	value func(ui.Settings) any
+}
+
+// settingsDiffRows is every setting `grain sync` can change, in the order
+// a diff prints them.
+//
+// Keyed by ui.UpdateSettingsRequest's own JSON names because that struct
+// is already the definition of "what a config file can set": syncSettings
+// hands UpdateSettings the whole request the file carries, so anything
+// with a field there is syncable whether or not anyone remembered this
+// table. It was a hand-written list of names for long enough to go
+// silently stale twice -- the sandbox VM shape (bwsalmon/agents#534)
+// first, then seven more at once (target repos, default capabilities,
+// agent framework, newest first, show closed by default, approved by
+// default and auto merge by default) -- and the cost each time was the
+// worst one this command has: `grain sync` narrowing a deployment's
+// target repos, or turning auto-merge on for every task filed after it,
+// and printing "already up to date, nothing changed". A sync that changes
+// something has to say what.
+var settingsDiffRows = []settingsDiffRow{
+	{"environmentName", "environment name", func(s ui.Settings) any { return s.EnvironmentName }},
+	{"pollInterval", "poll interval", func(s ui.Settings) any { return s.PollInterval }},
+	{"maxWorkers", "max workers", func(s ui.Settings) any { return s.MaxWorkers }},
+	{"maxMergers", "max mergers", func(s ui.Settings) any { return s.MaxMergers }},
+	{"geminiModel", "gemini model", func(s ui.Settings) any { return s.GeminiModel }},
+	{"claudeModel", "claude model", func(s ui.Settings) any { return s.ClaudeModel }},
+	{"codexModel", "codex model", func(s ui.Settings) any { return s.CodexModel }},
+	{"maxAgentTurns", "max agent turns", func(s ui.Settings) any { return s.MaxAgentTurns }},
+	{"githubHost", "github host", func(s ui.Settings) any { return s.GitHubHost }},
+	{"githubInsecureHttp", "github insecure http", func(s ui.Settings) any { return s.GitHubInsecureHTTP }},
+	{"gcpProject", "gcp project", func(s ui.Settings) any { return s.GCPProject }},
+	{"gcpServiceAccountEmail", "gcp agent service account", func(s ui.Settings) any { return s.GCPServiceAccountEmail }},
+	{"sandboxCpus", "sandbox cpus", func(s ui.Settings) any { return s.SandboxCPUs }},
+	{"sandboxMemoryMb", "sandbox memory mb", func(s ui.Settings) any { return s.SandboxMemoryMB }},
+	{"sandboxDiskGb", "sandbox disk gb", func(s ui.Settings) any { return s.SandboxDiskGB }},
+	// Printed the same %q way as everything else despite being the one
+	// setting here that can be several lines long: a diff is where the
+	// change is worth seeing whole, and %q keeps a multi-line value on one
+	// line of output rather than breaking the two-column shape of every
+	// line around it.
+	{"promptExtension", "prompt extension", func(s ui.Settings) any { return s.PromptExtension }},
+	// The two lists are joined rather than printed as Go slices: this is
+	// output a workflow log is read in, and ["a" "b"] is not how anything
+	// else here names a set. Joining is also what they are compared on, so
+	// two equal lists read as the no change they are.
+	{"targetRepos", "target repos", func(s ui.Settings) any { return strings.Join(s.TargetRepos, ", ") }},
+	{"defaultCapabilities", "default capabilities", func(s ui.Settings) any { return strings.Join(s.DefaultCapabilities, ", ") }},
+	{"agentFramework", "agent framework", func(s ui.Settings) any { return s.AgentFramework }},
+	{"newestFirst", "newest first", func(s ui.Settings) any { return s.NewestFirst }},
+	{"showClosedByDefault", "show closed by default", func(s ui.Settings) any { return s.ShowClosedByDefault }},
+	{"approvedByDefault", "approved by default", func(s ui.Settings) any { return s.ApprovedByDefault }},
+	{"autoMergeByDefault", "auto merge by default", func(s ui.Settings) any { return s.AutoMergeByDefault }},
+}
+
+// settingsDiffExceptions names any ui.UpdateSettingsRequest field that
+// deliberately has no row above, and why -- the one place a gap in the
+// table is allowed to be recorded, so that a setting missing from the
+// diff is a decision somebody wrote a reason for rather than the
+// oversight it has twice been.
+//
+// Empty today: every setting a config file can set is reported back by
+// GetSettings, so every one of them has something to diff. A field that
+// genuinely has nothing to compare against -- one UpdateSettings accepts
+// but ui.Settings never reports back, say -- belongs here with the reason
+// it cannot be diffed. The test rejects a stale entry too, so an
+// exception outliving the field it excuses fails rather than quietly
+// excusing nothing.
+var settingsDiffExceptions = map[string]string{}
+
 // printSettingsDiff prints only what actually changed -- a sync run
 // against a config file whose "settings" section already matches the
 // store (the common case, once a deployment is settled) should say so
 // plainly rather than re-printing every field on every run.
 func printSettingsDiff(before, after ui.Settings) {
-	type field struct {
-		name        string
-		beforeValue string
-		afterValue  string
-	}
-	fields := []field{
-		{"environment name", before.EnvironmentName, after.EnvironmentName},
-		{"poll interval", before.PollInterval, after.PollInterval},
-		{"max workers", fmt.Sprint(before.MaxWorkers), fmt.Sprint(after.MaxWorkers)},
-		{"max mergers", fmt.Sprint(before.MaxMergers), fmt.Sprint(after.MaxMergers)},
-		{"gemini model", before.GeminiModel, after.GeminiModel},
-		{"claude model", before.ClaudeModel, after.ClaudeModel},
-		{"codex model", before.CodexModel, after.CodexModel},
-		{"max agent turns", fmt.Sprint(before.MaxAgentTurns), fmt.Sprint(after.MaxAgentTurns)},
-		{"github host", before.GitHubHost, after.GitHubHost},
-		{"github insecure http", fmt.Sprint(before.GitHubInsecureHTTP), fmt.Sprint(after.GitHubInsecureHTTP)},
-		{"gcp project", before.GCPProject, after.GCPProject},
-		{"gcp agent service account", before.GCPServiceAccountEmail, after.GCPServiceAccountEmail},
-		// The sandbox VM shape (bwsalmon/agents#534) is applied like
-		// every other field here -- syncSettings hands UpdateSettings
-		// the whole ui.UpdateSettingsRequest the config file carries --
-		// so leaving it out of this table only made a real change print
-		// as "nothing changed".
-		{"sandbox cpus", fmt.Sprint(before.SandboxCPUs), fmt.Sprint(after.SandboxCPUs)},
-		{"sandbox memory mb", fmt.Sprint(before.SandboxMemoryMB), fmt.Sprint(after.SandboxMemoryMB)},
-		{"sandbox disk gb", fmt.Sprint(before.SandboxDiskGB), fmt.Sprint(after.SandboxDiskGB)},
-		// Listed for the same reason the sandbox shape is, and printed
-		// the same %q way despite being the one field here that can be
-		// several lines long: a diff is where the change is worth seeing
-		// whole, and %q keeps a multi-line value on one line of output
-		// rather than breaking the two-column shape of every line
-		// around it.
-		{"prompt extension", before.PromptExtension, after.PromptExtension},
-		// The rest of what a config file can set. Every one of them was
-		// missing here for the same reason the sandbox shape was -- the
-		// table was written once and each new setting was added to
-		// UpdateSettingsRequest without it -- and the cost is the same and
-		// worse for these: `grain sync` narrowing a deployment's target
-		// repos, or turning auto-merge on for every task filed after it,
-		// printed "already up to date, nothing changed". A sync that
-		// changes something has to say what.
-		//
-		// The two lists are joined rather than printed as Go slices: this
-		// is output a workflow log is read in, and ["a" "b"] is not how
-		// anything else here names a set.
-		{"target repos", strings.Join(before.TargetRepos, ", "), strings.Join(after.TargetRepos, ", ")},
-		{"default capabilities", strings.Join(before.DefaultCapabilities, ", "), strings.Join(after.DefaultCapabilities, ", ")},
-		{"agent framework", before.AgentFramework, after.AgentFramework},
-		{"newest first", fmt.Sprint(before.NewestFirst), fmt.Sprint(after.NewestFirst)},
-		{"show closed by default", fmt.Sprint(before.ShowClosedByDefault), fmt.Sprint(after.ShowClosedByDefault)},
-		{"approved by default", fmt.Sprint(before.ApprovedByDefault), fmt.Sprint(after.ApprovedByDefault)},
-		{"auto merge by default", fmt.Sprint(before.AutoMergeByDefault), fmt.Sprint(after.AutoMergeByDefault)},
-	}
 	changed := false
-	for _, f := range fields {
-		if f.beforeValue == f.afterValue {
+	for _, row := range settingsDiffRows {
+		beforeValue, afterValue := fmt.Sprint(row.value(before)), fmt.Sprint(row.value(after))
+		if beforeValue == afterValue {
 			continue
 		}
 		if !changed {
 			fmt.Println("settings changed:")
 			changed = true
 		}
-		fmt.Printf("  %s: %q -> %q\n", f.name, f.beforeValue, f.afterValue)
+		fmt.Printf("  %s: %q -> %q\n", row.name, beforeValue, afterValue)
 	}
 	if !changed {
 		fmt.Println("settings: already up to date, nothing changed")

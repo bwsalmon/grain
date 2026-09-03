@@ -291,6 +291,12 @@ type restartOnlySetting struct {
 // annotate it, so this and that are the two ends of one contract:
 // nothing may be applied live and listed here, and nothing may be listed
 // nowhere and left needing a restart in silence.
+//
+// The second half of that is what settings_restart_drift_test.go holds
+// this list to: every UpdateSettingsRequest field has to be named here or
+// named in that file's own settingsAppliedLive list, along with the piece
+// that applies it, so a setting cannot be added without somebody deciding
+// which of the two it is.
 var restartOnlySettings = []restartOnlySetting{
 	{
 		Key:     "githubHost",
