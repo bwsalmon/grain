@@ -387,6 +387,43 @@ describe("RepoList", () => {
     expect(onRefreshConfig).toHaveBeenCalled();
   });
 
+  // grain/task-43: the per-repo set is reported as stored too, so a
+  // capability retired since this repo named it arrives ticked with no
+  // row in config.capabilities to untick it -- and PUT rejects the whole
+  // set as "unknown capability" every time this form is saved with it
+  // still there. Its own row is the only way out.
+  it("offers a row for a stored repo default this build no longer lists", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key", "scratch-repo"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
+    const user = userEvent.setup();
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    await user.click(await screen.findByLabelText("Default capabilities"));
+    const retired = await screen.findByRole("option", { name: /scratch-repo/ });
+    expect(retired).toHaveTextContent("No longer offered -- untick to remove it");
+
+    await user.click(retired);
+    await user.keyboard("{Escape}");
+    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities", {
+      method: "PUT", body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+  });
+
   it("reports the error when saving a repo's default capabilities fails", async () => {
     api.mockResolvedValueOnce({
       repo: "acme/gadgets",

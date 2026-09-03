@@ -4,7 +4,7 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import { Box, Button, Checkbox, Chip, FormControl, FormHelperText, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS, STATE_ORDER, capabilityName, repoRows, unionCapabilities } from "../state.js";
+import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, repoRows, unionCapabilities } from "../state.js";
 import { TaskRow } from "./TaskList.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
 
@@ -348,21 +348,33 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                               own default-capabilities picker offers, and
                               for the same reason: a default no task can
                               be granted by hand would fail at every
-                              filing, and PUT rejects one anyway. A
-                              capability the deployment already defaults
-                              is still offered rather than hidden --
-                              ticking it here is how a repo keeps it if
-                              the deployment-wide entry is later dropped
-                              -- and says so in its own row, so nobody
-                              reads a blank box as "not on here". */}
-                          {(config?.capabilities || []).map((c) => (
+                              filing, and PUT rejects one anyway. It
+                              needs no filter of its own to say that,
+                              unlike Settings' settings.capabilities:
+                              config.capabilities *is*
+                              ui.OfferedCapabilities, which is what
+                              "grantable" means, where that one reports
+                              every provider grain ships and flags the
+                              ungrantable ones. A capability the
+                              deployment already defaults is still
+                              offered rather than hidden -- ticking it
+                              here is how a repo keeps it if the
+                              deployment-wide entry is later dropped --
+                              and says so in its own row, so nobody reads
+                              a blank box as "not on here". An id this
+                              repo stored before the build retired it
+                              gets a row too, purely so it can be
+                              unticked (capabilityRows, state.js). */}
+                          {capabilityRows(config?.capabilities, capsSelection).map((c) => (
                             <MenuItem key={c.id} value={c.id} title={c.description}>
                               <Checkbox checked={capsSelection.includes(c.id)} size="small" />
                               <ListItemText
                                 primary={c.name}
-                                secondary={(caps.deploymentDefaultCapabilities || []).includes(c.id)
-                                  ? "already a deployment default -- on here either way"
-                                  : null}
+                                secondary={c.retired
+                                  ? c.description
+                                  : (caps.deploymentDefaultCapabilities || []).includes(c.id)
+                                    ? "already a deployment default -- on here either way"
+                                    : null}
                               />
                             </MenuItem>
                           ))}
