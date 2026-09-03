@@ -1713,6 +1713,96 @@ second copy of the number on `RunConfig` to drift out of step with the
 context that actually ends the run. A context with no deadline passes no
 flag, and those runs' tool results read exactly as they always have.
 
+## What `run_command` says when it, not the command, ended it
+
+Every `run_command` is bounded. `mcp.defaultRunCommandTimeout` is five
+minutes and applies even when the call passed no `timeout` at all, which
+is the whole point of it — and until now neither transport said so when
+that bound was what ended the command. Locally the answer was `exit=-1`,
+which is also exactly what "the command could not be started" looks like
+(a process killed by a signal has no exit status of its own). Remotely it
+was a bare `exit=124` out of the guest's own `timeout` coreutil. Neither
+named the number, and when the number is the default it is one the run
+never chose and cannot see, so the move that follows is re-running the
+same long command verbatim, twice, before concluding the sandbox is
+broken.
+
+Both now append a line: `Killed after 300s by run_command's default
+bound, which this call did not choose — it passed no timeout … Pass a
+larger timeout (milliseconds, up to 600000) or narrow the command.` A
+caller that did choose the bound is told that instead, because sending
+that run to look for a grain default that had nothing to do with it is
+its own wasted turn. Locally the trigger is `ctx.Err()` being
+`DeadlineExceeded` *and* the bound having actually elapsed, so a run
+whose two-hour wall clock fired first is not told the wrong number;
+remotely it is `timeout`'s own reserved 124.
+
+The remote bound is also a bound now, which it was not. Measured on a
+real grain guest: plain `timeout N` against a command that traps SIGTERM
+waits for that command to finish of its own accord — sixty seconds, for a
+sixty-second sleep — and only then reports 124, so a `run_command` whose
+command ignores SIGTERM held its tool call open for as long as it liked,
+and a run only advances a turn when its current call returns. It gets
+`--kill-after=5s`, and the `exit=137` that escalation produces gets its
+own explanation, hedged, since 128+SIGKILL is also what the kernel's OOM
+killer leaves behind. It deliberately does *not* get `--foreground`:
+plain `timeout` runs the command in its own process group and signals the
+whole group, which is `procgroup.Prepare`'s guarantee for the local
+transport arriving by another route — confirmed on a real guest, where a
+backgrounded grandchild does not survive the bound — and `--foreground`
+means, in its own documentation's words, that "children of COMMAND will
+not be timed out".
+
+What the remote path genuinely lacked is a bound on the *call* rather
+than on the command: nothing on this side can make a guest answer. So it
+now also carries a local deadline of the bound plus 30s
+(`sshRunCommandGrace`), whose notice says the guest never answered, that
+what the command did is therefore unknown, and that `recreate_sandbox` is
+the escape hatch if it repeats. The hang that was suspected to need it —
+a command backgrounding something that inherits the channel's stdout,
+which is enough to wedge an OpenSSH client waiting for EOF — does not
+happen here: `./bgtest.sh &` returns in about two milliseconds on a real
+guest, because the Go SSH client `kontur exec` uses returns on the
+exit-status message rather than waiting for the streams to close.
+
+## No single answer may eat the run's context
+
+`run_command` returned the whole of stdout and stderr; `read_file` with
+no `limit` returned the whole file, line-numbered. One `go test ./...` on
+a failing suite, one `git log -p`, one `grep -r` that matched more than
+expected, one 250 KB README — each was a large fraction of a run's
+context spent in one turn, and the run cannot get it back.
+
+Past that point the behaviour was whichever CLI happens to be driving the
+run: `claude` caps an MCP tool's output itself and rejects a result that
+exceeds the cap, so an oversized answer costs the run the wall clock the
+command took and buys it nothing at all; antigravity is a different CLI
+with its own answer. grain already reaches into exactly this set of knobs
+where it needs a guarantee — `mcpToolTimeout` sets `MCP_TOOL_TIMEOUT` so
+a `wait_for_checks` call is not killed before it can report — and set
+nothing for size. So the point at which a tool result stopped working was
+a per-framework default grain had not chosen, did not know, and could not
+explain to the agent when it was hit.
+
+`mcp.maxToolResultBytes` is that choice: 64 KB, applied where the answer
+is formatted, so it holds for every framework at once. Both `run_command`
+streams share the one budget rather than getting one each — a build that
+fails prints kilobytes of stderr and megabytes of stdout, or the reverse,
+and a stream that fits keeps all of it and lends the rest to the other.
+The head and the tail are kept, never just the head: a command's verdict
+is in its last lines and its invocation in the first, and the middle is
+what nobody needed. What goes between them is the part only the server
+can write — how much was dropped, that grain dropped it rather than the
+command, and the next call that gets it back: narrow the command or
+redirect it to a file, and for `read_file` the `cat -n` numbering either
+side of the cut is exactly the `offset` and `limit` to ask for. The cut
+snaps to line boundaries so that numbering stays whole.
+
+64 KB is a starting guess — about 16k tokens, enough for a failing suite's
+summary and far short of an unbounded `git log -p`. The result-size
+telemetry in `docs/agent-ergonomics.md`'s finding 11 is what should
+eventually set it from what runs actually ask for, rather than taste.
+
 ## Reaching a sandbox guest without a route into it
 
 A slot's VM guest is reached by exec'ing into that VM's own container:
