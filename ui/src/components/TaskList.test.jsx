@@ -215,32 +215,53 @@ describe("TaskList", () => {
       expect(onOpenTask).not.toHaveBeenCalled();
     });
 
-    // A stacked task renders nested under the task it fixes, so it has
-    // no backlog position to drag it to and gets no handle. The column
-    // it would occupy stays open all the same: without it the nested row
-    // rendered a handle's width left of the parent's own contents, the
-    // opposite of the indent the nesting is meant to read as.
+    // A stacked task -- the merge queue's own fix, filed under the task
+    // it repairs -- has no backlog position of its own, so it moves by
+    // moving the stack. Its row sits inside the parent's draggable <li>
+    // and already did that; what it lacked was any sign of it, a blank
+    // column beside every neighbour's handle that read as a row grain
+    // would not let you move.
     describe("a stacked task nested under its parent", () => {
       const stacked = [
         threeTasks[0],
+        threeTasks[1],
         { id: 4, title: "Fix First's PR", state: "queued", capabilities: [], blocked: false, stacked: true, generatedFrom: 1 },
       ];
 
-      it("holds the drag handle's column open, without a handle of its own", () => {
+      it("shows a drag handle naming the parent it moves with", () => {
         renderList({ tasks: stacked, onReorder: vi.fn() });
         const child = screen.getByText("Fix First's PR").closest(".task-row");
 
         expect(child.closest(".task-sublist")).toBeInTheDocument();
-        expect(child.querySelector(".task-drag-handle")).not.toBeInTheDocument();
-        expect(child.querySelector(".task-drag-spacer")).toBeInTheDocument();
-        expect(rowFor("First").querySelector(".task-drag-handle")).toBeInTheDocument();
+        expect(child.querySelector(".task-drag-handle")).toBeInTheDocument();
+        expect(screen.getByTitle("Drag to reorder with 1")).toBeInTheDocument();
       });
 
-      it("leaves the column out when the list is not reorderable at all", () => {
+      it("shows no handle when the list is not reorderable at all", () => {
         renderList({ tasks: stacked });
         const child = screen.getByText("Fix First's PR").closest(".task-row");
 
-        expect(child.querySelector(".task-drag-spacer")).not.toBeInTheDocument();
+        expect(child.querySelector(".task-drag-handle")).not.toBeInTheDocument();
+      });
+
+      it("drags the parent's whole stack when grabbed", () => {
+        const onReorder = vi.fn();
+        renderList({ tasks: stacked, onReorder });
+
+        // Grabbing the nested row starts the parent's own drag, which
+        // is what carries the stack to its new backlog position.
+        fireEvent.dragStart(rowFor("Fix First's PR"));
+        fireEvent.drop(document.querySelector(".task-drop-end"));
+
+        expect(onReorder).toHaveBeenCalledWith([1], 2, null);
+      });
+
+      it("fades with the parent while the stack is being dragged", () => {
+        renderList({ tasks: stacked, onReorder: vi.fn() });
+
+        fireEvent.dragStart(rowFor("First"));
+
+        expect(screen.getByText("Fix First's PR").closest(".task-row")).toHaveClass("task-row-dragging");
       });
     });
 

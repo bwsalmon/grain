@@ -181,8 +181,17 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
               <ul className="task-sublist">
                 {children.get(t.id).map((c) => (
                   <li key={c.id}>
+                    {/* A stacked task has no backlog position of its own,
+                        but it is not stuck either: it sits inside the
+                        parent's draggable <li>, so grabbing it already
+                        starts that parent's drag and moves the whole
+                        stack. It gets a handle saying so, rather than a
+                        blank column that reads as a row you cannot move,
+                        and fades with the parent while that drag is in
+                        flight since it travels with it. */}
                     <TaskRow t={c} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
-                      reserveDragSpace={reorderEnabled} />
+                      draggable={reorderEnabled} dragTitle={`Drag to reorder with ${t.id}`}
+                      dragging={dragIds?.includes(t.id) ?? false} />
                   </li>
                 ))}
               </ul>
@@ -218,27 +227,22 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // pane, again) just omits onToggleSelect/draggable and gets a plain row
 // with no checkbox or drag handle rather than a dead one.
 //
-// reserveDragSpace is for the third case: a row that sits *inside* a
-// reorderable list but has no backlog position to drag it to -- a
-// stacked task, which always renders under the task it fixes. Dropping
-// the handle entirely would slide such a row's contents a handle's width
-// to the left of every draggable row around it, so the nested rows ended
-// up hanging left of their own parent instead of indented under it. It
-// keeps the handle's column, empty.
-export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, reserveDragSpace }) {
+// dragTitle names what grabbing the handle actually moves, for the row
+// whose answer is not "this task": a nested stacked task drags the
+// parent it is stacked on, since that is the row holding the backlog
+// position the whole stack travels by.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, dragTitle }) {
   const phase = completionPhase(t);
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
-      {draggable ? (
+      {draggable && (
         <DragIndicatorIcon
           className="task-drag-handle"
           fontSize="small"
-          titleAccess="Drag to reorder"
+          titleAccess={dragTitle || "Drag to reorder"}
           onClick={(e) => e.stopPropagation()}
         />
-      ) : reserveDragSpace ? (
-        <span className="task-drag-spacer" aria-hidden="true" />
-      ) : null}
+      )}
       {onToggleSelect && (
         <Checkbox
           size="small"
