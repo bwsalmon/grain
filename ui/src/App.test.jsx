@@ -13,6 +13,27 @@ const initialTasks = [
   { id: "2", title: "Add feature", state: "proposed", repo: "acme/other", blocked: false, capabilities: [], reads: [] },
 ];
 
+// metricsReport is the shape GET /api/metrics returns (pkg/ui's own
+// MetricsReport), trimmed to what the Metrics panel of the Debug
+// overlay reads. Its oldest queued task is "Fix bug", the one task in
+// initialTasks that is actually queued, so the link out of the backlog
+// has somewhere real to land.
+const metricsReport = {
+  since: "2026-08-27T00:00:00Z",
+  until: "2026-09-03T00:00:00Z",
+  windowSeconds: 604800,
+  throughput: {
+    tasksFiled: 2, tasksCompleted: 1, tasksClosed: 0, runsStarted: 2, runsFinished: 1,
+    filedPerDay: 0.3, completedPerDay: 0.1, runsFinishedPerDay: 0.1, buckets: [],
+  },
+  latency: [{
+    stage: "lead_time", label: "filed -> completed", description: "the whole of what whoever filed the task waited",
+    n: 1, minSeconds: 60, p50Seconds: 60, p90Seconds: 60, p99Seconds: 60, maxSeconds: 60, meanSeconds: 60,
+  }],
+  runs: { outcomes: { succeeded: 1 }, attemptsPerCompletion: 1, meanConcurrent: 0.1, maxConcurrent: 3, utilization: 0.03, live: 0 },
+  backlog: { byState: { queued: 1, proposed: 1 }, queued: 1, oldestQueuedSeconds: 3600, oldestQueuedTaskId: "1" },
+};
+
 // setupApi wires a routing fake covering every endpoint App and the
 // overlays it can open touch, backed by a mutable task list so actions
 // that mutate (create, approve, ...) are reflected the next time the
@@ -115,6 +136,7 @@ function setupApi(tasks = initialTasks, schedules = [], templates = []) {
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
     if (path === "/api/logs") return Promise.resolve({ enabled: false });
     if (path === "/api/sandboxes") return Promise.resolve({ enabled: false });
+    if (path.startsWith("/api/metrics")) return Promise.resolve(metricsReport);
     return Promise.resolve(null);
   });
   return {
@@ -447,6 +469,24 @@ describe("App", () => {
     await user.click(screen.getByRole("tab", { name: "Sandbox health" }));
 
     expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
+  });
+
+  // The metrics report's backlog names the oldest queued task, and the
+  // useful thing to do with that is go and look at it. Two stacked
+  // dialogs would put the task behind the pane the click came from, so
+  // App closes the Debug overlay on the way through.
+  it("opens the oldest queued task from the Metrics panel, leaving the Debug overlay behind", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "Debugging" }));
+    await user.click(await screen.findByRole("tab", { name: "Metrics" }));
+    await user.click(await screen.findByRole("button", { name: "task 1" }));
+
+    expect(await screen.findByText("1 Fix bug")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Metrics" })).not.toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {
