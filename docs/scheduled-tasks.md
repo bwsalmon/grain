@@ -568,3 +568,49 @@ when there is one to name.
 
 Tests: `TaskList.test.jsx` (the suite chip, and the merge-fix chip
 present in each un-nested case but absent under a parent).
+
+## Update: a merge fix sits at the head of the backlog, not under its parent (bwsalmon/agents#378 revisited)
+
+Nesting a stacked task under the task it repairs answered "what is this
+row?" and left "where is it?" unanswered. In a list ordered by hand
+(`Store.Reorder`, the drag handles from bwsalmon/agents#476) the nested
+row was the one with no handle -- nobody drags a task grain files for
+itself -- so it read as a row that had lost something, sitting a
+handle's width off from every row around it, in a position nothing had
+chosen.
+
+No handle is the right answer; the position was not. A fix task is now
+placed at the *head* of the backlog and shown there:
+
+**Backend.** `orchestrator.fileFixTask` takes its `OrderKey` from
+`Store.OrderKeyForNewTask(ctx, true)` -- the head-of-backlog placement
+`ui.Client.CreateTask` already gives an interactive task -- rather than
+leaving the field at its zero value, which fell wherever zero happened
+to fall among the keys already handed out. This is the same thing
+dispatch has said since bwsalmon/agents#389: `Store.Ready`'s `ReasonFix`
+carve-out runs a fix ahead of everything else whatever its key. Now the
+order tasks are *read* in agrees with the order they are run in.
+`cmd/grain/demo.go` seeds its own fix through the same call, so `grain
+demo` shows the list a real merge queue produces.
+
+**UI.** `groupByStack` and `TaskRow`'s `nested` prop are gone, and with
+them the `.task-sublist` inside `TaskList` (the rule stays -- the repo
+pane's per-repo list, bwsalmon/agents#474, still folds tasks out under a
+row). `partitionPinned` splits the stacked rows off instead and renders
+them above the orderable ones, whichever sort the toolbar is showing:
+they are neither draggable nor drop targets, since there is nothing to
+land between up there, and a drop at the top of the orderable rows names
+no preceding task rather than naming a pinned one. `TaskRow`'s new
+`reserveDragSpace` holds the handle's column open (`.task-drag-spacer`)
+on those rows, so a pinned row's checkbox, badge and title line up with
+the draggable rows below. Every stacked row carries the `merge fix` chip
+now -- there is no nesting left to explain it -- and its tooltip still
+names the task being repaired when `GeneratedFrom` has one.
+
+Tests: `pkg/orchestrator/mergequeue_test.go` (a filed fix leads the
+backlog, ahead of both the task it repairs and work already queued),
+`cmd/grain/demo_test.go` (the seeded fix leads it too), and
+`TaskList.test.jsx` (no handle but the column held open, the column left
+out entirely when the list is not reorderable, pinned above every
+orderable task under each sort, starting no drag and accepting no drop,
+still selectable and counted, and chipped).
