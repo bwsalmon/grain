@@ -2470,6 +2470,19 @@ pair (`create` deletes whatever is under the name first, which is exactly
 the destroy half), and `hostSandbox.Rebuild` its `RemoveAll`/`MkdirAll`
 pair.
 
+Both halves of that are driven rather than argued.
+`tests/e2e/mcpserver_recreate_sandbox_test.go` puts a real `grain
+mcpserver -server/-task` subprocess in front of a real `ui.Server` over a
+real `SandboxRecreations` with a live `RunCycle` run registered in it,
+rebuilds that run's sandbox mid-run, and then commits and pushes from the
+clone that came back — through the same tool handles it held before the
+rebuild, with the credentials grain re-minted for the same sandbox name.
+`pkg/orchestrator/kontur_docker_real_test.go` (the `GRAIN_REAL_VM_TESTS`
+job) makes the harder version of the argument on the other backend: a
+`Rebuild` between two `run_command` calls on a real VM, checking that the
+container really was replaced, that what is behind it is a new guest, and
+that the second call still lands.
+
 What the run cannot get back is its own uncommitted work, and the tool
 says so in the one place an agent reads before deciding to call it: the
 description. Commits already *pushed* are safe, because they are on the

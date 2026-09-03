@@ -674,6 +674,8 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		}
 	}
 
+	assertRebuildKeepsTheRunReachable(t, sb, byName["run_command"], name, remotePath)
+
 	// The VM container should still be running: the guest booted all the
 	// way to sshd and cloud-hypervisor supervises it rather than exiting
 	// once it has -- the same end state the SSH test asserts, reached
@@ -685,6 +687,95 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	if status := string(bytes.TrimSpace(statusOut)); status != "running" {
 		t.Errorf("real VM container status = %q, want %q", status, "running")
 	}
+}
+
+// assertRebuildKeepsTheRunReachable drives konturSandbox.Rebuild -- the
+// SandboxRebuilder half of the recreate_sandbox tool (pkg/mcp), the one
+// move a run has left when its sandbox has stopped being usable -- against
+// a real VM, between two run_command calls made through the *same* tool
+// handle.
+//
+// That is the claim Rebuild's own doc comment makes and that nothing
+// else in this repo can check. Nothing replaces the transport a run is
+// already holding, because a sandbox is addressed by name: `kontur exec`
+// reaches a guest by exec'ing into the VM's own container, whose name
+// follows from the VM name alone (kontur.PodName), so the runner this
+// sandbox holds -- and the separate one the run's forked `grain
+// mcpserver` holds in another process, which the daemon could not reach
+// to replace even if it wanted to -- address whatever now answers to
+// that name. Every other test of this feature stands on that being true:
+// if it were not, a run that rebuilt its sandbox would come back to a VM
+// it could not run a single command in, which is strictly worse than the
+// wedged one it asked to be rid of. tests/e2e/mcpserver_recreate_sandbox_
+// test.go makes the same argument for the host backend, where the name
+// is a directory path.
+//
+// So this asserts three things a hand-written konturctl double cannot:
+// that the container really was replaced (a different container id under
+// the same name), that what is behind it is a genuinely new guest (the
+// file written to the old one's root filesystem is gone), and that the
+// handle taken before the rebuild still lands in it.
+func assertRebuildKeepsTheRunReachable(t *testing.T, sb orchestrator.Sandbox, runCommand *mcp.Tool, vmName, writtenPath string) {
+	t.Helper()
+
+	rebuilder, ok := sb.(orchestrator.SandboxRebuilder)
+	if !ok {
+		t.Fatalf("a real kontur sandbox (%T) does not implement orchestrator.SandboxRebuilder, "+
+			"so no run on this backend could ever rebuild its own sandbox", sb)
+	}
+	before := dockerInspect(t, "kontur-vm-"+vmName, "{{.Id}}")
+
+	start := time.Now()
+	if err := rebuilder.Rebuild(context.Background()); err != nil {
+		t.Fatalf("Rebuild against a real konturctl/docker/cloud-hypervisor VM: %v", err)
+	}
+	t.Logf("rebuilt the real VM %q in %s", vmName, time.Since(start).Round(time.Second))
+
+	if after := dockerInspect(t, "kontur-vm-"+vmName, "{{.Id}}"); after == before {
+		t.Errorf("the VM container id is unchanged (%s) -- Rebuild deletes this VM and creates "+
+			"another under the same name, rather than restarting one", before)
+	}
+
+	// The same handle, taken before the rebuild and never replaced. It
+	// needs no retry loop for the same reason the first tool call in this
+	// test does not: Rebuild does not return until runnerFor has run a
+	// command in the new guest, exactly as Acquire does.
+	result := runCommand.Handler(context.Background(), map[string]any{
+		"command": "echo grain-kontur-rebuild-marker; id -un",
+	})
+	if result.IsError {
+		t.Fatalf("run_command through the handle this run already held failed once its VM had been "+
+			"rebuilt: %s", result.Text)
+	}
+	for _, want := range []string{"grain-kontur-rebuild-marker", "debian"} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("run_command output after the rebuild = %q, want it to contain %q", result.Text, want)
+		}
+	}
+
+	// And it really is a new guest rather than the old one restarted:
+	// what the guest wrote to its own (overlay-backed) root filesystem
+	// before the rebuild is gone. That is the operation itself, not a
+	// detail of it -- a sandbox worth throwing away is thrown away whole,
+	// which is what lets a run trust that nothing it had broken came
+	// back with it.
+	if gone := runCommand.Handler(context.Background(), map[string]any{
+		"command": "test ! -e " + writtenPath,
+	}); gone.IsError {
+		t.Errorf("%s survived the rebuild (%s), want a guest carrying nothing of the old one's filesystem",
+			writtenPath, gone.Text)
+	}
+}
+
+// dockerInspect reads one Go-template field off a container, failing the
+// test if docker cannot see the container at all.
+func dockerInspect(t *testing.T, container, format string) string {
+	t.Helper()
+	out, err := exec.Command("docker", "inspect", "-f", format, container).CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker inspect -f %s %s: %v\n%s", format, container, err, out)
+	}
+	return string(bytes.TrimSpace(out))
 }
 
 // assertGuestHasEgress checks the one hop nothing else here covers: that
