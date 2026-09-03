@@ -678,11 +678,14 @@ fieldset legend {
 /* A fenced block keeps its own alignment and scrolls sideways rather
    than wrapping: a diff or a stack trace rewrapped is unreadable. The
    <code> inside drops the inline chip styling it would otherwise
-   inherit, since the <pre> already carries the box. */
+   inherit, since the <pre> already carries the box. surface-hover, the
+   same tint an inline chip gets, rather than canvas: a description is
+   itself a canvas-coloured box, and a block that matched it would read
+   as a hairline border around nothing. */
 .markdown pre {
   margin: 0 0 0.6rem;
   padding: 0.6rem 0.75rem;
-  background: var(--canvas);
+  background: var(--surface-hover);
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow-x: auto;
