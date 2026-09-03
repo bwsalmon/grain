@@ -314,6 +314,18 @@ read off the very ctx `framework.Run` is given
 drift from the one that actually cancels the run. See README.md's
 "Telling a run how long it has".
 
+**Also done** (grain/task-156): `wait_for_checks` acts on that deadline
+instead of only reporting it. The registry puts it on the ctx each
+handler runs under, and the wait is clamped to what is left of the run
+less two minutes to act on the answer — a run eight minutes from the
+wall that asked for fifteen used to spend the whole of its remaining
+life inside one tool call and be cancelled mid-wait, having seen no
+verdict. The clamp is stated on the report, a clamped wait that times
+out is told the run's clock ran out rather than to retry with a longer
+one, and a call with no room left for a wait at all answers immediately
+with "there is no time to wait on CI" instead of blocking for thirty
+seconds and reporting nothing.
+
 ## 8. Attempt N is told nothing about attempt N−1
 
 A redispatch gets the task, the conversation (`commentThreadSection`),
