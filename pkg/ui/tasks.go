@@ -107,9 +107,10 @@ type Task struct {
 	Blocked   bool     `json:"blocked"`
 	BlockedBy []string `json:"blockedBy,omitempty"`
 	// MergeQueueBlockedAt mirrors model.Observation's own field: non-nil
-	// once the merge queue has tried and failed to fix this task's pull
-	// request automatically, so it needs a human rather than another
-	// automatic attempt. Alongside PullRequest and AutoMerge, this is
+	// once the merge queue has stopped driving this task's pull request
+	// -- an automatic fix that did not take, or checks that never
+	// finished -- so it needs a human rather than another automatic
+	// attempt. Alongside PullRequest and AutoMerge, this is
 	// what lets the frontend tell a completed task that is merely
 	// waiting on a human's Submit click apart from one already on the
 	// merge queue, or one the queue has given up on -- the distinction
@@ -390,6 +391,19 @@ type configResponse struct {
 	// model.AgentFrameworkAntigravity, the same defaulting ui.Settings
 	// does.
 	AgentFramework string `json:"agentFramework"`
+	// DefaultCapabilities mirrors model.Config's own field of the same
+	// name, read from the store the same way ShowClosedByDefault above
+	// is: the capability ids a task filed here starts out holding.
+	// NewTaskOverlay.jsx seeds its capability picker from this, so the
+	// boxes are already ticked when the form opens and whoever files the
+	// task can untick one they do not want -- the form is where that
+	// choice belongs, since the request it sends is the last word on
+	// which capabilities the task gets (CreateTaskRequest.Capabilities).
+	//
+	// Only ever the form's starting state, like ApprovedByDefault and
+	// AutoMergeByDefault above. What is filed is what the request names;
+	// this is only what it names when nobody has said otherwise.
+	DefaultCapabilities []string `json:"defaultCapabilities"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -416,6 +430,15 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
 		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
+		// Filtered to what this build actually offers, the same way
+		// (*Client).defaultCapabilities filters before granting -- the
+		// form should tick what a task would really be filed with, and
+		// a stored id no row answers to is neither.
+		for _, id := range cfg.DefaultCapabilities {
+			if _, ok := s.tasks.capabilityByID(id); ok {
+				resp.DefaultCapabilities = append(resp.DefaultCapabilities, id)
+			}
+		}
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()

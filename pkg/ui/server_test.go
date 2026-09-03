@@ -503,13 +503,40 @@ func TestConfigEndpointReportsActorAndCapabilities(t *testing.T) {
 	if cfg.Actor != "alice" {
 		t.Fatalf("actor = %+v, want the configured one", cfg.Actor)
 	}
-	if len(cfg.Capabilities) != len(ui.DefaultCapabilities()) {
-		t.Fatalf("capabilities = %d, want %d", len(cfg.Capabilities), len(ui.DefaultCapabilities()))
+	if len(cfg.Capabilities) != len(ui.OfferedCapabilities()) {
+		t.Fatalf("capabilities = %d, want %d", len(cfg.Capabilities), len(ui.OfferedCapabilities()))
 	}
 	// The GitHub label a capability used to carry is gone from the wire
 	// shape along with the labels themselves.
 	if strings.Contains(rec.Body.String(), "grain-gemini-key") {
 		t.Fatalf("config still reports a GitHub label: %s", rec.Body)
+	}
+}
+
+// GET /api/config carries the deployment's default capability set so
+// NewTaskOverlay.jsx can open its picker with those boxes already
+// ticked -- the form is where whoever files the task sees them, and
+// where they untick one they do not want (grain/task-14). A stored
+// id this build no longer offers is filtered out, so the form ticks what
+// the task would really be filed with.
+func TestConfigEndpointReportsDefaultCapabilities(t *testing.T) {
+	srv, client := testServer(t)
+
+	cfg := model.DefaultConfig()
+	cfg.DefaultCapabilities = []string{"gcp-key", "scratch-repo"}
+	if err := client.Store.PutConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := decode[struct {
+		DefaultCapabilities []string `json:"defaultCapabilities"`
+	}](t, rec)
+	if !reflect.DeepEqual(got.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("defaultCapabilities = %v, want [gcp-key]", got.DefaultCapabilities)
 	}
 }
 
@@ -567,7 +594,7 @@ func testServerWithSecrets(t *testing.T) (*ui.Server, *secrets.Store) {
 	t.Helper()
 	_, store, _ := testClient(t)
 	secretStore := secrets.New(t.TempDir())
-	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.DefaultCapabilities(), Secrets: secretStore}
+	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.OfferedCapabilities(), Secrets: secretStore}
 	return ui.NewServer(cfg, store), secretStore
 }
 
@@ -858,7 +885,7 @@ func (f *fakeUpgrader) Status() (upgrade.Status, error) { return f.status, nil }
 func testServerWithUpgrader(t *testing.T, up ui.Upgrader) *ui.Server {
 	t.Helper()
 	_, store, _ := testClient(t)
-	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.DefaultCapabilities(), Upgrader: up}
+	cfg := ui.Config{Actor: ui.DefaultActor("alice"), Capabilities: ui.OfferedCapabilities(), Upgrader: up}
 	return ui.NewServer(cfg, store)
 }
 

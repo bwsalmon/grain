@@ -925,11 +925,34 @@ dropped. `add_review_comment` calls from a run are recorded (`agent.
 Result.ToolCalls` carries them, the same seam `ProcessResult` reads
 `ask_question`/`comment_on_issue`/`propose_task` off of) but never turned
 into a real `CreateReview` call for the same reason: nothing yet dispatches
-with review intent for one to attach to. `propose_task`'s `depends_on`
-also files today without resolving a same-run local `id` to the real issue
-number GitHub assigned it — each proposal lands as its own issue, with
-`depends_on` printed into nothing yet, since resolving it needs holding a
-whole batch open and rewriting cross-references after every one is filed.
+with review intent for one to attach to. `propose_task`'s `depends_on` is
+resolved now: `relayProposedTasks` files each entry as a real
+`model.LinkDependsOn`, against an existing task id (the proposing task's
+own included, which is what a piece split out of the work in hand names)
+or the local `id` of an *earlier* `propose_task` call in the same run —
+earlier, not any, since a batch resolved in call order cannot contain a
+cycle, and a `depends-on` cycle is two tasks neither of which is ever
+dispatchable again. An entry naming neither is kept in the proposal's own
+body for a human instead of filed as a link: `task_blocked` inner-joins
+`task` on the target and so ignores a dangling one, while `model.IsBlocked`
+counts it as open forever, and a proposal blocked by something that does
+not exist has nothing that could ever unblock it.
+
+Resolving it is half of it; an agent has to be told to write one at all,
+and told the two facts it needs to. `propose_task`'s description now asks
+for `depends_on` in so many words — a proposal that names nothing is
+unblocked the moment a human approves it and can be dispatched beside the
+work it was meant to follow — and `BuildPrompt` names the running task's
+own id, which an agent otherwise could only reverse out of its branch
+name. The same schema carries `auto_merge`: a proposal inherits the
+proposing task's setting as before (bwsalmon/agents#345), an explicit
+`false` opts a proposal out of that inheritance for work an agent judges
+deserves its own review, and an explicit `true` is still capped at what
+the proposing task itself holds (`proposedAutoMerge`) — a run that could
+mark its own proposals auto-merge would be granting itself the unreviewed
+merge a human withheld. `BuildPrompt` mentions `auto_merge` only to a task
+that is itself an auto-merge job, since there is nothing another task
+could do with it.
 
 Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
@@ -955,7 +978,17 @@ sync landing in the gap between the push and that sees nothing — and
 nothing is also what a repo with no CI configured answers, forever, with
 no way to tell the two apart from the Checks API. The window is the only
 thing that can, and a deployment with genuinely no CI pays it once per
-head commit. A conflicted or failing head gets a fix task filed straight
+head commit. Nor does it wait for CI that is never coming: a head that
+has read `PENDING` for longer than `defaultCheckStallDeadline` (two
+hours, timed per head commit over one unbroken run of pending reads) is
+given up on — a comment naming the checks that never finished,
+`Observation.MergeQueueBlockedAt` set, the queue moved on — since a
+workflow waiting on an approval nobody gives, or a provider that posted
+"queued" and went away, would otherwise hold its repo's whole queue for
+the life of the deployment with nothing said to anyone. No fix task is
+filed for that one: nothing has failed, and a check that never finishes
+is usually waiting on something outside the pull request, so there may
+be nothing in it to repair. A conflicted or failing head gets a fix task filed straight
 into the store already approved (`Task.Approval` set by
 `PrincipalAutomation`, `LinkFixTask` recording which one) rather than
 `core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`
@@ -1162,7 +1195,7 @@ make. It proves the pieces already built compose correctly; it does not
 close the gap above, since nothing there is wired to run on its own yet.
 
 `self-debug` and `self-repair` (bwsalmon/agents#540, "configuration
-mode") went from `ui.DefaultCapabilities` names with nothing behind them
+mode") went from `ui.OfferedCapabilities` names with nothing behind them
 to real `model.CapabilityProvider`s -- `pkg/capability/selfdebug` and
 `pkg/capability/selfrepair` -- but what each one grants is not material
 in a sandbox or text in a prompt, `model.CapabilityProvider`'s only two
@@ -1684,7 +1717,8 @@ the whole question, and the half it left out is the one that is harder to
 see.
 
 Which capabilities a task can be granted at all is decided somewhere
-else entirely: `ui.DefaultCapabilities` (`pkg/ui/labels.go`) is the
+else entirely: `ui.OfferedCapabilities` (`pkg/ui/labels.go`, named
+`DefaultCapabilities` when this was written) is the
 picker's listing, and `grantsFor`/`SetCapability` reject any id it has no
 row for as "unknown capability" before a `model.Grant` is ever written.
 The set of capabilities `cmd/grain/daemon.go`'s `capabilityProviders`
@@ -1716,6 +1750,65 @@ the picker, or be granted to every dispatch the way v1 minted one
 unconditionally per sandbox (`gcp_keys.py`: "every sandbox, every
 dispatch... rather than a task label"), is a design question this leaves
 open; what changes here is that a deployment in that state now says so.
+
+### A default set of capabilities, seeded onto the task
+
+Both. `gcp-key` and `github-sandbox` got picker rows first, and
+`model.Config.DefaultCapabilities` is the other half: a deployment-wide
+set of capability ids, chosen on the Settings pane's Capabilities tab,
+that every new task is filed already holding. A deployment that wants a
+service-account key in every sandbox — v1's shape — ticks `gcp-key` once
+and stops thinking about it.
+
+What it is *not* is v1's per-dispatch mint restored. The set is read at
+creation, by `ui.CreateTask`, and written onto the task as ordinary
+`model.Grant`s (`GrantByDefault`, provenance only — nothing reads `Via`
+to decide what a grant does). It is never consulted again at dispatch.
+That one choice answers the whole question the picker rows left open:
+
+- **The default is modifiable, which is what was actually asked for.**
+  The new-task form opens with those boxes already ticked (`GET
+  /api/config`'s `defaultCapabilities`) and sends the resulting list, so
+  unticking one files the task without it. Afterwards it detaches from
+  the task like any other grant. A deployment-level set read at dispatch
+  could be neither seen on the task nor taken off one.
+- **A failed mint stays a failed dispatch, and needs no degrade tier.**
+  `prepareCapabilities` treats a refused resolve or a failed materialize
+  as no dispatch at all, and that stays true for a defaulted grant.
+  v1 needed its local `except` because nothing held the request: the
+  mint happened per dispatch, for every sandbox, with nowhere to record
+  that it had failed, so swallowing the error was the only way a broken
+  minter did not stop the deployment. Here the grant is on one task, the
+  failure is that task's, and the fix — repair the capability, detach it
+  from the task, or drop it from the default set — is reachable from the
+  failure. Running an agent while quietly withholding a capability its
+  task is recorded as holding would trade a loud stop for a run that
+  does the wrong work.
+- **`Grantable` keeps its meaning.** A capability must have a picker row
+  to be defaulted at all (`UpdateSettings` validates the set against
+  `OfferedCapabilities`, which is what `DefaultCapabilities` was renamed
+  to, since the two names now mean different things). That row is also
+  what lets a human drop it from one task. `CapabilityStatus.Default` is
+  reported next to `Ready`/`Grantable` rather than folded into either:
+  the Capabilities tab and `grain settings` both flag a defaulted
+  capability that is not ready, because that is a deployment-wide
+  problem — every task filed will fail on it — rather than a per-task
+  one.
+
+The cost, stated plainly: turning an entry off does not disarm the tasks
+already filed with it, since they hold their own grants. That is the
+same property that makes a default modifiable in the first place.
+
+A stored id this build no longer offers (a renamed capability, the way
+`scratch-repo` became `github-sandbox`) is skipped at creation rather
+than failing it — `UpdateSettings` refuses an unknown id on the way in,
+so a stale entry can only come from an upgrade, and a settings row left
+behind must not become a deployment where no task can be filed at all.
+Per-repo defaults are the next step and resolve in the same place
+(`(*ui.Client).defaultCapabilities`); they compose as more ids in the
+set a new task starts with, which is a different thing from
+docs/data-model.md's folder `offers`, those being floors a task cannot
+drop rather than a seed it can.
 
 ## Write-only secrets access when colocated
 

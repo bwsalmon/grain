@@ -12,6 +12,7 @@ package ui_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -173,6 +174,85 @@ func TestUpdateSettingsRoundTripsTaskDefaults(t *testing.T) {
 	}
 	if read.AutoMergeByDefault {
 		t.Fatalf("AutoMergeByDefault = true after UpdateSettings, want false")
+	}
+}
+
+// grain/task-14: the default capability set round-trips like every
+// other setting, and the Capabilities tab's own per-capability status
+// says which ones it names -- a capability every task is filed holding
+// is the one whose readiness an operator most needs to see.
+func TestUpdateSettingsRoundTripsDefaultCapabilities(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.DefaultCapabilities) != 0 {
+		t.Fatalf("DefaultCapabilities = %v with nothing set, want none", read.DefaultCapabilities)
+	}
+
+	// Repeated deliberately: a picker can produce a duplicate, and this
+	// is a set.
+	defaults := []string{"gcp-key", "gcp-key"}
+	saved, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{DefaultCapabilities: &defaults})
+	if err != nil {
+		t.Fatalf("setting default capabilities: %v", err)
+	}
+	if !reflect.DeepEqual(saved.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("DefaultCapabilities = %v, want [gcp-key] with the repeat dropped", saved.DefaultCapabilities)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("DefaultCapabilities = %v after a re-read, want [gcp-key]", read.DefaultCapabilities)
+	}
+	for _, status := range read.Capabilities {
+		if want := status.ID == "gcp-key"; status.Default != want {
+			t.Errorf("capability %s: Default = %t, want %t", status.ID, status.Default, want)
+		}
+	}
+
+	// Empty is a value, not "leave it alone": it is how the set is turned
+	// back off.
+	none := []string{}
+	cleared, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{DefaultCapabilities: &none})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cleared.DefaultCapabilities) != 0 {
+		t.Fatalf("DefaultCapabilities = %v after clearing, want none", cleared.DefaultCapabilities)
+	}
+}
+
+// Defaulting a capability no task could be granted by hand would be a
+// setting that failed silently at every filing, so it is refused while
+// whoever chose it is still looking at it -- unlike a stored id grain
+// has since retired, which CreateTask skips (TestCreateTaskSkipsRetired
+// DefaultCapability).
+func TestUpdateSettingsRejectsUnknownDefaultCapability(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	defaults := []string{"not-a-real-capability"}
+	_, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{DefaultCapabilities: &defaults})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a validation error", err)
+	}
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.DefaultCapabilities) != 0 {
+		t.Fatalf("DefaultCapabilities = %v after a refused save, want none stored", read.DefaultCapabilities)
 	}
 }
 

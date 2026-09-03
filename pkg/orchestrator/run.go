@@ -104,6 +104,12 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // with no target) and gets its own sentence explaining why, rather than
 // silently reading like a clone that simply failed.
 //
+// The one thing here that is advice rather than fact is
+// proposalSection's follow-on task etiquette, and it is here for the same
+// reason the rest is: the facts it stands on (this run's task id, whether
+// that task auto-merges) are grain's own, and an agent told neither
+// cannot fill in a proposal's depends_on or decide its auto_merge at all.
+//
 // task.Reads is mentioned but not enforced here: the git proxy already
 // allows a fetch against any of them and refuses a push to any but
 // task.Target (gitproxy/authorize.go), so this line is purely
@@ -173,7 +179,45 @@ func BuildPrompt(task model.Task, checkoutDir string) string {
 			strings.Join(names, ", "),
 		)
 	}
+	prompt += proposalSection(task)
 	return prompt
+}
+
+// proposalSection is the follow-on task etiquette every dispatch is told,
+// and the two facts an agent cannot work out for itself that it needs to
+// follow it: which task it is running as, and whether that task is an
+// auto-merge job.
+//
+// Both are grain's own facts, the same reason BuildPrompt names the
+// branch rather than letting an agent pick one. Without the task id, an
+// agent splitting a piece out of the work it is doing has nothing to put
+// in that proposal's depends_on -- it would have to reverse the id out of
+// the branch name -- and relayProposedTasks resolves depends_on against
+// real task ids, so a proposal that names nothing is filed unblocked and
+// can be approved and dispatched beside the task it was meant to follow.
+// Without knowing its own task auto-merges, an agent has no way to tell
+// whether propose_task's auto_merge is even open to it: proposedAutoMerge
+// caps a proposal at the proposing task's own setting, so the sentence is
+// omitted, rather than negated, for a task that is not one -- there is
+// nothing an agent could usefully do with "you may not ask for this".
+func proposalSection(task model.Task) string {
+	s := fmt.Sprintf(
+		"\n\nYou are running as task %s. Anything you split out with propose_task "+
+			"should say what it has to wait on in depends_on: task %s itself, when "+
+			"the follow-up only makes sense once this task's own change has landed, "+
+			"and the id you gave an earlier proposal in this same run that it builds "+
+			"on. A proposal that names nothing is unblocked the moment a human "+
+			"approves it, and can be dispatched beside work it was supposed to "+
+			"follow.",
+		task.ID, task.ID,
+	)
+	if task.AutoMerge {
+		s += " This task is an auto-merge job: its pull request merges on its own " +
+			"once its checks pass, with no human review. A proposal that is a piece " +
+			"of this same task inherits that -- pass auto_merge: false on one that " +
+			"is separate work and deserves a human's own review."
+	}
+	return s
 }
 
 // commentThreadSection renders task's conversation into a prompt section,
@@ -549,6 +593,20 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // agent whose capability request was refused must not run at all, since
 // the task it would work almost always depends on it. Ported from
 // pkg/orchestrate's own prepare (bwsalmon/agents#254).
+//
+// That rule holds for every grant, including one a task was filed with
+// because the deployment attaches it to everything
+// (model.Config.DefaultCapabilities, model.GrantByDefault). There is no
+// "degrade rather than fail" tier here, and it is not an oversight: v1
+// needed one because it minted a GCP key per dispatch for every sandbox,
+// with no task holding the request and nowhere to record that it had
+// failed, so swallowing the error was the only way a broken minter did
+// not stop the deployment. A default here is instead seeded onto the
+// task at creation, so a failed mint fails one task, says so on it, and
+// is fixed either by fixing the capability or by detaching it -- from
+// that task, or from the default set, whichever the operator meant.
+// Silently running an agent without a capability its task is recorded as
+// holding would trade that for a run that quietly does the wrong work.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
 	attachments []model.Attachment, checkoutDir string) (materialized []model.Materialized, prompt string, err error) {

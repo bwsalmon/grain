@@ -1412,9 +1412,10 @@ func testConfig() model.Config {
 		GeminiModel:    "gemini-2.5-pro", ClaudeModel: "claude-sonnet-5", MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
-		TargetRepos:     []string{"acme/widgets", "acme/gadgets"},
-		SandboxCPUs:     4,
-		SandboxMemoryMB: 8192,
+		TargetRepos:         []string{"acme/widgets", "acme/gadgets"},
+		SandboxCPUs:         4,
+		SandboxMemoryMB:     8192,
+		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
 	}
 }
 
@@ -2064,6 +2065,74 @@ func TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault(t *testing.T) 
 		// exactly as it does to a fresh one, the same default
 		// ensureConfigShowClosedByDefaultColumn's own doc comment explains.
 		t.Fatalf("ShowClosedByDefault after migrating = true, want false")
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities is the
+// same pattern, applied to grain_config.default_capabilities
+// (grain/task-14): a database from before a deployment could say
+// which capabilities every new task starts with gets the column added by
+// ensureConfigDefaultCapabilitiesColumn, defaulted to '' -- which
+// splitCSV reads back as no defaults, so an upgraded deployment keeps
+// filing tasks with exactly what whoever files them asks for until an
+// operator chooses otherwise.
+func TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-14 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-task-14 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.default_capabilities: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if len(got.DefaultCapabilities) != 0 {
+		t.Fatalf("DefaultCapabilities after migrating = %v, want none", got.DefaultCapabilities)
+	}
+
+	// And writable afterwards: the migration adds a column PutConfig
+	// binds, so a set chosen after the upgrade is durable rather than
+	// failing every save.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(got.DefaultCapabilities, want.DefaultCapabilities) {
+		t.Fatalf("DefaultCapabilities = %v, want %v", got.DefaultCapabilities, want.DefaultCapabilities)
 	}
 }
 
