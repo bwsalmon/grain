@@ -3120,7 +3120,17 @@ reconcile loop behind it reports `"enabled": false` rather than a tick of
 zero: "nobody measured it" and "the tick costs nothing" are opposite
 answers, and only one of them is ever true.
 
-`tests/e2e/loadtest_test.go` has measured `RunCycle` tick duration in-test
-since it was written ("RunCycle tick duration: n=… p50=… p95=…"). This is
-that measurement, in the deployment rather than in the harness, and split
-per reconciler.
+`tests/e2e/loadtest_test.go` had measured `RunCycle` tick duration with
+instrumentation of its own since it was written ("RunCycle tick duration:
+n=… p50=… p95=…"), and no longer does. The harness passes a `CycleTimes`
+into the `Deps` it ticks and reports out of that instead, so the load
+test and a deployment read one measurement taken by one piece of code,
+rather than two that agree only for as long as nobody changes either. It
+is also the more useful of the two: the harness now reports the dispatch
+wait and the per-reconciler breakdown alongside the tick, and fails on
+what a stopwatch around `RunCycle` could not see at all — a cycle that did
+not run every reconciler, and a p95 dispatch wait past a third of the
+per-tick budget, which is a queued task waiting on the tick itself rather
+than on a deployment that was full. A tick growing under a large store is
+the thing a load test is best placed to catch, and that is the shape it
+now catches it in.

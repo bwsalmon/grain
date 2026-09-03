@@ -354,7 +354,11 @@ type loadMetrics struct {
 	writeErrs int
 	writeOps  int
 
-	tickDur []time.Duration
+	// How long a tick took is not here: RunCycle measures that itself,
+	// into the orchestrator.CycleTimes ring loadtest_test.go hands its
+	// Deps (reportCycles). All this counts is how many ticks were driven,
+	// which is what reportCycles checks that ring against.
+	ticks int
 
 	outcomes map[loadOutcomeKind]int
 
@@ -424,10 +428,16 @@ func (m *loadMetrics) recordWrite(d time.Duration, err error) {
 	}
 }
 
-func (m *loadMetrics) recordTick(d time.Duration) {
+func (m *loadMetrics) tickRan() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.tickDur = append(m.tickDur, d)
+	m.ticks++
+}
+
+func (m *loadMetrics) tickCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ticks
 }
 
 func (m *loadMetrics) recordOutcome(k loadOutcomeKind) {
@@ -517,7 +527,6 @@ type loadMetricsSnapshot struct {
 	stillUnresolved     int
 	write               durationStats
 	writeErrs, writeOps int
-	tick                durationStats
 	outcomes            map[loadOutcomeKind]int
 }
 
@@ -536,7 +545,6 @@ func (m *loadMetrics) snapshot() loadMetricsSnapshot {
 		write:           statsOf(m.writeLat),
 		writeErrs:       m.writeErrs,
 		writeOps:        m.writeOps,
-		tick:            statsOf(m.tickDur),
 		outcomes:        outcomes,
 	}
 }
