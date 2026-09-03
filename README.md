@@ -140,7 +140,12 @@ pkg/staterepo/  grain's database as a git repository: every table
                 diff an agent can propose. Import is the other direction
                 and is a wholesale replacement -- that is how a merged
                 pull request, including one that deletes a row, becomes
-                the running configuration. The remote is optional by
+                the running configuration. Load imports the whole of it
+                at startup; Apply imports the settings tables of it into
+                a daemon that is already running, so a merged change
+                takes effect on the next tick rather than on the next
+                restart, without replacing the task and run rows a live
+                run holds ids from. The remote is optional by
                 construction: no Remote is `git init` under the data
                 directory, which is what a local install with no GitHub
                 account gets
@@ -2430,22 +2435,37 @@ every cycle forever, burying the changes that matter.
 
 ### One writer, so no merges
 
-The traffic is one-directional at runtime, and that is what keeps it
-simple. The repository is imported into the database once, at startup,
-and exported back out on a timer after that. grain is the only writer of
-these files while it runs -- the UI and the CLI reach the daemon over
-REST rather than opening the store, which is what makes that claim true
--- so a sync is a commit and a push and never a resolve, and a pull is
-fast-forward only. Divergence means something this model does not
-describe, and failing loudly beats resolving a conflict in a database
-dump by guesswork.
+grain is the only writer of these files while it runs -- the UI and the
+CLI reach the daemon over REST rather than opening the store, which is
+what makes that claim true -- so a sync is a commit and a push and never
+a resolve, and a pull is fast-forward only. Divergence means something
+this model does not describe, and failing loudly beats resolving a
+conflict in a database dump by guesswork.
 
 A change an agent makes arrives the other way: a pull request against
-the state repository, reviewed and merged like any other, which the next
-start pulls and imports. The import is a wholesale replacement of every
-row -- which is exactly what makes a merged deletion delete something --
-and that is why it happens at startup rather than on every tick: it is
-not an operation to run underneath live runs holding ids.
+the state repository, reviewed and merged like any other, which the
+daemon pulls on the same thirty-second timer it exports on. What it does
+with what arrives is asymmetric, and deliberately so. The whole-database
+import is a wholesale replacement of every row -- which is exactly what
+makes a merged deletion delete something -- and it happens only at
+startup, because clearing `task` and `task_run` underneath live runs
+holding those very ids is not something to do to a daemon that is
+working. On a tick, only the settings tables are imported
+(`staterepo.SettingsTables`: the deployment's config row, repo
+configuration, templates, suites, schedules, qualification plans), and
+they are imported the same wholesale way, so a merged deletion of a
+template still deletes it. Those are the tables an agent proposes
+changes to and the tables grain does not write for itself, which is what
+makes them safe to replace live. A merged change to a task or a run is
+not applied, and the next export writes the database's own version of it
+back out: the database is authoritative for what grain itself did.
+
+If a pull arrives that cannot be applied -- a dump stamped with a schema
+this build does not know, or rows that will not insert -- the daemon
+stops exporting until it can. Writing the database over those files
+would commit a revert of somebody's merged pull request and push it,
+which is a worse answer than sitting still with the failure named in the
+bootstrap pane.
 
 Schema changes are destructive here, deliberately. A dump this build
 cannot read is no more importable than a database it cannot open, so
@@ -2471,14 +2491,25 @@ askpass script rather than argv or the remote URL: argv is world-readable
 through `ps`, and a URL with a token in it would persist in
 `.git/config`, inside the very repository being pushed.
 
-### Secrets go in it, encrypted
+### Secrets are encrypted, and they are not in it
 
-Secrets live in the same repository -- one thing to clone, one thing to
-back up -- as `secrets.enc`, the only file in there that is ciphertext.
+Secrets live under `<data-dir>/secrets`, as `secrets.enc` beside the
+private key that opens it. They used to live in the state repository
+itself -- one thing to clone, one thing to back up -- and that stopped
+being safe the moment a task could be dispatched at that repository (see
+"A task can change the settings", below): the git proxy authorizes per
+repository and streams a packfile it does not parse, so a sandbox that
+may clone the state repository gets every object in it. Ciphertext an
+agent can carry off is still ciphertext an agent can carry off.
+
+Nothing is lost by the move. The private key was never in the repository
+and is copied nowhere, so an off-host clone could never decrypt anything
+anyway; a restore always needed `<data-dir>/secrets`, and that directory
+is now the whole of what a restore needs.
+
 It is sealed to a public key whose private half grain reads from one file
-under `<data-dir>/secrets` and copies nowhere else, so cloning the
-repository gets everything grain knows and nothing it can authenticate
-as. The scheme is X25519 to an ephemeral key pair, HKDF-SHA256 for the
+under `<data-dir>/secrets` and copies nowhere else. The scheme is X25519
+to an ephemeral key pair, HKDF-SHA256 for the
 message key and AES-256-GCM over the plaintext, built out of the standard
 library: adding a dependency to encrypt one file grain alone ever reads
 is a larger commitment than composing three primitives that ship with
@@ -2487,23 +2518,32 @@ the compiler. Neither values nor secret names appear in the ciphertext.
 Agents cannot read it, and nothing about this changed that: a run still
 gets a secret only through the secret input a human asked for.
 
+An installation written by an earlier build has its copy moved out
+automatically, the first time anything opens the secret store. That
+removes the file from the tip of the branch and not from the history,
+which a clone reads just as easily -- so the git proxy refuses a state
+repository that has ever held one to every sandbox, whatever a task's
+scope says (`gitproxy.ModelAuthorizer.Forbidden`, wired from
+`forbiddenRepos`). Dispatching settings changes at such a repository
+means adopting one that has never carried the file.
+
 A fresh install mints its own key, which is what lets a local-only grain
 start with no input from anybody. A key that goes missing while an
 encrypted file remains is reported as the unrecoverable state it is,
 never replaced with a new one -- minting silently there would leave an
 undecryptable file behind and look like it had worked.
 
-The key travels by hand or not at all, and that is the point of it: a
-repository cloned onto a new host arrives with every secret grain has in
-a form nothing on that host can open. So the key is something an
-operator can put back -- `grain state key import`, `grain state adopt
--secrets-key-file`, or the field in the pane, each reading it from a file
-or a form and never from a command line anyone with `ps` can read. A key
-that cannot open the file is refused rather than installed, naming both
-public halves so an operator holding several knows which one this
-repository wants; a key it replaces is kept beside it with a timestamped
-name, because key material is the one thing here that cannot be
-regenerated. Whether this host can read its own secrets is reported at
+The key travels by hand or not at all, and that is the point of it:
+`<data-dir>/secrets` restored onto a new host without it is every secret
+grain has in a form nothing on that host can open. So the key is
+something an operator can put back -- `grain state key import`, `grain
+state adopt -secrets-key-file`, or the field in the pane, each reading it
+from a file or a form and never from a command line anyone with `ps` can
+read. A key that cannot open the file is refused rather than installed,
+naming both public halves so an operator holding several knows which one
+this deployment wants; a key it replaces is kept beside it with a
+timestamped name, because key material is the one thing here that cannot
+be regenerated. Whether this host can read its own secrets is reported at
 startup, by `grain state status` and in the pane -- not left to surface
 later as a run that could not resolve a credential.
 
@@ -2520,35 +2560,79 @@ the source of truth, and adopting one means taking its answer -- so the
 previous working tree is moved aside with a timestamped name rather than
 deleted, and the pane says as much before you press the button.
 
-One file crosses from that archived tree into the new one: `secrets.enc`,
-and only when the repository being adopted has none of its own.
-Everything else in there is a materialisation of a database that is still
-right here, and that file is not -- so seeding an empty repository used
-to leave every secret the deployment held behind in a directory nothing
-reads again, and to do it silently, since a store with no file reports no
-secrets rather than reporting anything wrong. A repository that does
-carry its own secrets keeps them: they are the adopted installation's
-source of truth exactly as its tables are, and the key to read them is
-what the import above is for.
+Nothing has to be carried out of that archived tree. Everything in it is
+a materialisation of a database that is still right here, and the one
+file that was not -- `secrets.enc` -- lives under `<data-dir>/secrets`
+now rather than in the repository, so adopting leaves this installation's
+secrets exactly where they were. What an adopted repository can still
+need is the key: a deployment restored onto this host from somewhere else
+has its secrets sealed to a key that did not come with the tables, which
+is what `-secrets-key-file` and the pane's own field are for.
+
+### A task can change the settings
+
+The point of all of the above is a settings change that arrives the way
+every other change does. `grain create -repo owner/grain-state ...`
+files a task against the state repository; the run clones it through the
+same git proxy every other dispatch uses, branches, and opens a pull
+request against grain's own configuration, which a human reviews and
+merges. The next daemon start imports it.
+
+Three things make that work rather than merely be possible.
+
+The prompt says what the tree is. A checkout holding `tables/` beside a
+`schema-version` stamp is a state repository and nothing else looks like
+one, so a dispatch into it carries a paragraph naming the layout (one
+file per table, one object per row, columns in the table's declared
+order, rows by primary key), and -- the part no file in there states --
+which tables are settings and which are grain's own record of what it
+did. The settings list is `staterepo.SettingsTables` itself, not a copy
+of it: `template`, `suite`, `schedule`, `repo_config`, the qualification
+plan tables and `grain_config`, which is the same list `Apply` imports
+into a running daemon, so the prompt cannot call a table settings that
+grain will not treat as such. `task`, `task_run`, `task_comment`,
+`task_observation`, `lease`, `branch` and `release` are observations, and
+a run that edits one produces a diff that is either overwritten by the
+next export or merged into a history that then disagrees with what
+happened.
+
+`grain state check DIR` says whether the result will load. It imports
+the directory into a database it throws away and reports what broke, by
+file and by row. `staterepo.Import` was always the validator -- one
+transaction, rolled back whole on any inconsistency -- but the only
+thing that ever ran it was a daemon starting up, so a malformed dump or
+a row missing a NOT NULL column failed after the merge, on the
+deployment. As a CI step in the state repository (`grain state check .`
+needs no `-data-dir`, no store and no daemon) it fails the pull request
+instead.
+
+And the encrypted secrets file is not in there any more, for the reason
+the section above gives: a repository a sandbox may clone is a
+repository a sandbox may read whole.
 
 ### A merged change is not something to commit over
 
 The export runs on a timer, so the daemon is writing to the repository
-while a pull request against it is open. If one is merged, the remote has
-a commit this deployment does not -- and grain committing its own dump on
-top of that used to strand the installation: the push rejected as a
-non-fast-forward on that tick and on every tick afterwards, and a next
-start that finds the two diverged and refuses to load at all. A grain
-that will not come up because somebody merged the change it asked for is
-a bad answer to the mechanism this whole repository exists to allow.
+while a pull request against it is open. A tick pulls before it exports,
+and that is usually the whole story: the merge arrives, its settings go
+live, and the export commits on top of it. This is about the tick where
+the pull does not get that far -- a history that will not fast-forward,
+or a merge that lands in the seconds between the pull and the push. The
+remote then holds a commit this deployment does not, and grain committing
+its own dump on top of that used to strand the installation: the push
+rejected as a non-fast-forward on that tick and on every tick afterwards,
+and a next start that finds the two diverged and refuses to load at all.
+A grain that will not come up because somebody merged the change it asked
+for is a bad answer to the mechanism this whole repository exists to
+allow.
 
-So each sync asks the remote first, which costs one `ls-remote`, and
-declines to export at all while something is waiting. The database is
-still the live state and grain goes on running against it, unaffected;
-what is waiting is applied at the next start, for the reason the import
-happens there and not on a tick. The pane says so in those terms -- a
-merge to load and a restart to load it with -- rather than showing a git
-error, and the journal says it once rather than every thirty seconds.
+So the export asks the remote first, which costs one `ls-remote`, and
+declines to run at all while something is waiting. The database is still
+the live state and grain goes on running against it, unaffected; what is
+waiting is loaded at the next start, whole, the way every other thing a
+tick could not apply is. The pane says so in those terms -- a merge to
+load and a restart to load it with -- rather than showing a git error,
+and the journal says it once rather than every thirty seconds.
 
 ## Deployment configuration lives in the store too
 
@@ -3005,6 +3089,79 @@ reaping a key exactly as it breaks minting one. This is the third thing
 about `gcp-key` that no configuration pane can see — the tab reads
 **Ready** throughout, because the secret is set and only GCP knows the
 key inside it stopped working.
+
+### Testing a credential, from the pane that calls it Ready
+
+That last sentence is what task-172 is about. Every fix above improves
+what an operator is told *once something has already failed*; none of
+them lets anyone find out before a task does. **Ready** on Settings →
+Capabilities means configured — a project, an agent service account and
+a `gcp-key-minter` secret are all set — and presence is the whole of
+what a configuration pane can see. So a capability row now carries an
+action as well as a badge: `POST /api/capabilities/{id}/check`, which
+authenticates as that capability's standing credential, makes one cheap
+and harmless call with it, and reports what came back.
+
+**The check is each provider's own**, through `model.CredentialChecker`
+— an optional interface shaped exactly like `model.Reaper`, implemented
+by the three capabilities that hold a standing credential and skipped by
+the ones that hold none. `gcp-key` lists the agent account's own keys
+(`Minter.ListKeys`, which `Reap` already calls hourly and which needs no
+permission minting does not); `gemini-key` lists the project's API keys,
+which also answers the pair of 403s `advise` exists to tell apart — a
+minter that may not administer API keys, and a project where
+`apikeys.googleapis.com` was never enabled — on a deployment whose
+minter key is perfectly live; `github-sandbox` asks GitHub which
+installation its App has, the same `FindInstallation` every
+`Materialize` starts with. None of them mints, writes or deletes
+anything, because this is a button somebody is expected to press twice.
+Doing it three ways rather than one is deliberate: only the provider
+knows which call is cheap, which is harmless, and which sentence to
+answer a refusal with — `explainRefusedCredential`'s, naming the dead
+secret and the two places a current key is pasted, rather than Google's
+bare `invalid_grant`.
+
+**On demand, not on a timer.** A background poll would keep the badge
+itself truthful, which is the more appealing design right up until the
+costs are written down: a request to somebody else's API per capability
+per tick, forever, whether or not anyone is looking; and a **Ready**
+that changes with nobody touching Settings, so a badge found red carries
+no answer to "compared to when, and did anything here change?". A button
+costs one round trip a human asked for and gives an answer stamped with
+the moment it was true. The answer is deliberately not stored and not
+folded back into `Ready`: a reload clears it, because a remembered
+"checked ok" is the same unfalsifiable reassurance the badge alone
+already was.
+
+**A refusal reads as this deployment's, not as grain's.** It comes back
+as an ordinary 200 with `ok: false` and the provider's sentence, because
+a configured deployment whose credential the far end refused is a real
+answer to the question asked and has a remedy on this pane — the same
+reasoning that keeps `Grantable` reported beside `Ready` rather than
+folded into it, one naming a gap configuration fixes and the other a gap
+it cannot. The errors that *are* grain's — an unwired UI, an id no build
+knows, a capability with nothing standing behind it — stay errors, 404
+and 400.
+
+`CapabilityStatus.Checkable` is what decides whether a pane offers the
+action at all: grain ships a check for this capability *and* this
+deployment is wired to something that can run one (`ui.Config.
+CapabilityChecks`, the same nil-means-unavailable contract every other
+optional field there has). Two drift tests hold the two halves together
+— every capability with a `Requires` entry owes a checker, and every
+capability without one must not claim to have a check — so a fourth
+capability that grows a standing credential cannot quietly go back to
+being a **Ready** badge and nothing else. `grain settings
+-check-capability <id>` asks the same question from the host, which is
+where whoever is reading a failed task's error is usually already
+standing.
+
+The one standing credential still unchecked is a named GitHub token
+(`github-credential:<name>`): those rows are reported `Ready` by
+construction, since a row exists only because an operator's own file
+does, and a revoked token behind one goes stale exactly the way the
+three above do. That capability holds no API client of its own to check
+through, so it is left for its own change.
 
 ### The same set, per repo
 
@@ -4525,8 +4682,9 @@ it is.
 the report carries the two gauges it has to be read against: the backlog
 (by `task_state`'s own vocabulary, since "not finished" covers queued,
 blocked, awaiting a reply and failed, which are four different problems —
-and counting only the unfinished states, since every task ever completed
-is a census rather than a queue), and occupancy as a fraction of
+and counting only the unfinished states, since every task whose run is
+over, submitted or not, is a census rather than a queue), and occupancy
+as a fraction of
 `max_concurrent`. Idle capacity next to a
 deep queue is a scheduling problem; saturated capacity next to a deep
 queue is a capacity one. They are the first two numbers any optimization
@@ -4669,6 +4827,117 @@ per-tick budget, which is a queued task waiting on the tick itself rather
 than on a deployment that was full. A tick growing under a large store is
 the thing a load test is best placed to catch, and that is the shape it
 now catches it in.
+
+## Measuring what a run does with its tools
+
+The two sections above measure the outside of a run: when it started, how
+long it took, how it was recorded. Everything that makes a run *hard* is
+on the inside of it — a tool that answers unhelpfully, a search-and-edit
+loop that keeps missing, a command that gets killed by a bound nobody
+chose, a CI wait that never resolves — and none of it was measured
+anywhere. `docs/agent-ergonomics.md` is a whole review of that surface
+argued entirely from code-reading and single transcripts, because there
+was no aggregate to argue from.
+
+The counting was already happening. `orchestrator.toolCallSummary` has
+always tallied every tool a run called and how many of those calls came
+back as errors, for every run including the successful ones — and then
+rendered it into English in `task_run.detail`, a column a human reads one
+row at a time. Nothing could aggregate it, because it was prose.
+
+So the census is stored as data, and `grain metrics` prints it under the
+latency table:
+
+```console
+tool use (37 run(s) in the window recorded what they called)
+  calls                      4127  (98 per run at the median, 212 at p90)
+  errored calls               372  (9.0% of them -- a handful is the ordinary shape of this work)
+  tool                 runs    calls   errors timed out  mean bytes   p95 bytes
+  run_command            37     2894       7%    12 (0%)        1841     <=65535
+  edit_file              31      704      22%         -          118       <=511
+  read_file              29      402       4%         -        4210     <=32767
+  wait_for_checks        18       84       0%         -        1024      <=2047
+  (p95 bytes is an upper bound: sizes are kept in base-2 buckets, so the real
+   number is inside the octave below it. It is what should size the tool-result cap.)
+
+CI waits (84 wait(s) across 18 run(s))
+  verdicts                 passed=41 failed=28 timed_out=13 no_checks=2
+  blocked                  p50 3m20s, p90 14m0s, max 15m0s
+  pushes before green      2.4 on average, 7 at worst (over 16 run(s) that went green)
+```
+
+**This is the one measurement that had to be stored,** and it is stored
+because it is not derivable from anything that survives the run.
+`agent.Result` carries every call and every answer, and is discarded when
+`RunDispatch` returns; the transcript is per-framework prose that a
+tool's own output can forge (`orchestrator.outcomeOf` says why counting
+calls out of it would be unsound); `task_run.detail` is a sentence. Two
+tables, written once per run after its outcome, best-effort and logged
+rather than surfaced on failure — a measurement that cannot be taken is
+not a reason to fail the run being measured. `task_run_tool` is the
+census, one row per run per tool; `task_run_check_wait` is one row per
+`wait_for_checks` call, because the CI loop is a sequence rather than a
+total. Neither needed a `SchemaVersion` bump: `CREATE TABLE IF NOT
+EXISTS` creates a *missing* table on an existing store perfectly well,
+and an older store simply starts filling them.
+
+**Counts and sizes only.** No argument, no result and no fragment of
+output crosses into a measurement table. What a run's commands said stays
+in the transcript, which has its own bounds and its own reasons to exist.
+
+**A result-size percentile is a bound, and says so.** An exact one needs
+every sample, which means a stored row per tool *call* — hundreds a run,
+read whole on every report. Each census row instead carries a base-2
+histogram of its result sizes, so `p95 <=65535` means "95% of those
+answers were at most 64 KB", with the real number inside the octave
+below. That is precise enough for the question it exists to answer: what
+should `mcp.maxToolResultBytes` be, which is currently a defensible guess
+at 64 KB and deliberately a `var` until this says otherwise.
+
+**Two facts had to be read back out of a tool's own text,** because
+nothing else carries them: whether a `run_command` was ended by its bound
+rather than by the command (a bounded-out call is an error like any
+other), and which of its four verdicts a `wait_for_checks` reached (every
+wait_for_checks answer is a success). `mcp.RunCommandTimedOut` and
+`mcp.ReadCheckWait` live beside the code that writes those sentences and
+match markers that the sentences are *built* from, which is the only
+arrangement where rewording one cannot silently zero the other. Only
+grain's own trailing notices are searched, so a command whose output
+quotes the notice is not a command that timed out; the hedged `exit=137`
+notice (which may be the OOM killer) and the stalled-transport notice are
+counted as neither, since neither is a bound running out.
+
+**Attempt outcomes are also split by what they mean.** `task_run.outcome`
+is coarse enough that `cancelled` is both "a human closed the task" and
+"the run hit its two-hour wall", and `failed` is both "the CLI died" and
+"the run exhausted `-max-agent-turns`" — pairs with different fixes,
+distinguishable only by the sentence recorded beside them. `grain
+metrics` prints a second line under the outcomes for how those attempts
+actually ended, `no_action` among them: a run that had tools, used them
+and produced nothing is the purest measure of this surface failing, and
+it used to be one key in a map beside `succeeded`. The sentences are
+built in `pkg/model` and read back there (`model.EndingOf`), so the
+writer and the reader cannot drift apart.
+
+**The CI loop is measured end to end** because the prompt sends every run
+around it: push, `wait_for_checks`, fix, push again. A deployment where
+most waits end `timed_out` has `mcp.DefaultWaitForChecksTimeout` set
+wrong for its CI; one where most end `no_checks` is sending runs to wait
+for CI that does not exist; and "pushes before green" is what the loop
+costs in rework — 1.0 is CI right first time. A push is counted from the
+`git push` in a `run_command`'s own arguments, and only from a call that
+did not error, because a rejected push is not a push: it under-counts
+rather than over-counts, which is the right direction for a number whose
+point is how much rework there was.
+
+**Everything else about it follows this package's existing rules.** A
+census row has no moment of its own, so it belongs to a window when its
+*run* finished inside it. A run that recorded none contributes to nothing
+rather than to a zero — which is why `tool use` states how many runs are
+behind it, and why neither section renders at all, in the CLI or the UI,
+until something has recorded one. A deployment upgraded into this reports
+no tool use for its older runs, and that is the honest answer: nobody was
+measuring.
 
 ## Merge capacity is its own number
 

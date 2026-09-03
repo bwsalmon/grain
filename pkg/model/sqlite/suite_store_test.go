@@ -1,14 +1,14 @@
 package sqlite_test
 
-// Task suites' own store tests (bwsalmon/agents#642), against a real
+// Suites' own store tests (bwsalmon/agents#642), against a real
 // embedded SQLite database -- qualification_store_test.go's own
-// reasoning applied to the second "declared template, instantiated
-// run" mechanism built on TaskTemplate. What matters here and cannot be
-// seen from pkg/orchestrator's own reconciler tests is the store half:
-// that a run snapshots its suite rather than reading it live, that a
-// pass files one task per item in order, and that the reads
-// SyncTaskSuites decides from (OpenedPullRequest, Proposed, State)
-// come back off the joins that produce them.
+// reasoning applied to the second "declared template, instantiated run"
+// mechanism built on Template. What matters here and cannot be seen
+// from pkg/orchestrator's own reconciler tests is the store half: that
+// a run snapshots its suite rather than reading it live, that a pass
+// files one task per item in order, and that the reads SyncSuites
+// decides from (OpenedPullRequest, Proposed, State) come back off the
+// joins that produce them.
 
 import (
 	"context"
@@ -20,16 +20,16 @@ import (
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 )
 
-func smokeTemplate(id string) model.TaskTemplate {
-	return model.TaskTemplate{
+func smokeTemplate(id string) model.Template {
+	return model.Template{
 		ID: id, Name: "Smoke", Title: "Smoke test", Body: "run the smoke suite",
 		Reads:  []model.RepoRef{gadgets},
 		Grants: []model.Grant{{Capability: "run-tests", Via: model.GrantByLabel}}, CreatedAt: now,
 	}
 }
 
-func lintTemplate(id string) model.TaskTemplate {
-	return model.TaskTemplate{
+func lintTemplate(id string) model.Template {
+	return model.Template{
 		ID: id, Name: "Lint", Title: "Lint", Body: "go vet ./...",
 		CreatedAt: now,
 	}
@@ -37,43 +37,43 @@ func lintTemplate(id string) model.TaskTemplate {
 
 // putSuite writes a two-item suite through the store's own id
 // allocation, the way ui.Client.CreateSuite does.
-func putSuite(t *testing.T, ctx context.Context, store *model.Store, suite model.TaskSuite) model.TaskSuite {
+func putSuite(t *testing.T, ctx context.Context, store *model.Store, suite model.Suite) model.Suite {
 	t.Helper()
-	if err := store.PutTaskTemplate(ctx, smokeTemplate("template-smoke")); err != nil {
+	if err := store.PutTemplate(ctx, smokeTemplate("template-smoke")); err != nil {
 		t.Fatalf("put smoke template: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, lintTemplate("template-lint")); err != nil {
+	if err := store.PutTemplate(ctx, lintTemplate("template-lint")); err != nil {
 		t.Fatalf("put lint template: %v", err)
 	}
-	id, err := store.NewTaskSuiteID(ctx)
+	id, err := store.NewSuiteID(ctx)
 	if err != nil {
-		t.Fatalf("NewTaskSuiteID: %v", err)
+		t.Fatalf("NewSuiteID: %v", err)
 	}
 	suite.ID = id
-	if err := store.PutTaskSuite(ctx, suite); err != nil {
+	if err := store.PutSuite(ctx, suite); err != nil {
 		t.Fatalf("put suite: %v", err)
 	}
 	return suite
 }
 
-func twoItemSuite() model.TaskSuite {
-	return model.TaskSuite{
+func twoItemSuite() model.Suite {
+	return model.Suite{
 		Name: "nightly",
-		Items: []model.TaskSuiteItem{
+		Items: []model.SuiteItem{
 			{TemplateID: "template-smoke"}, {TemplateID: "template-lint"},
 		},
-		Mode: model.TaskSuiteCount, Count: 2, MaxPasses: 0,
+		Mode: model.SuiteCount, Count: 2, MaxPasses: 0,
 		RequireApproval: false, AutoMerge: true, CreatedAt: now,
 	}
 }
 
-func TestNewTaskSuiteIDsAreDistinctAndPrefixed(t *testing.T) {
+func TestNewSuiteIDsAreDistinctAndPrefixed(t *testing.T) {
 	store, _, ctx := openStore(t)
 	seen := map[string]bool{}
 	for i := 0; i < 3; i++ {
-		id, err := store.NewTaskSuiteID(ctx)
+		id, err := store.NewSuiteID(ctx)
 		if err != nil {
-			t.Fatalf("NewTaskSuiteID: %v", err)
+			t.Fatalf("NewSuiteID: %v", err)
 		}
 		if len(id) < len("suite-") || id[:len("suite-")] != "suite-" {
 			t.Fatalf("got id %q, want a suite- prefix", id)
@@ -85,19 +85,19 @@ func TestNewTaskSuiteIDsAreDistinctAndPrefixed(t *testing.T) {
 	}
 }
 
-func TestGetTaskSuiteReturnsNilOnAFreshDatabase(t *testing.T) {
+func TestGetSuiteReturnsNilOnAFreshDatabase(t *testing.T) {
 	store, _, ctx := openStore(t)
-	got, err := store.GetTaskSuite(ctx, "suite-1")
+	got, err := store.GetSuite(ctx, "suite-1")
 	if err != nil || got != nil {
 		t.Fatalf("want (nil, nil) for a suite that was never created, got (%+v, %v)", got, err)
 	}
 }
 
-func TestTaskSuiteRoundTripsWithItsItemsInOrder(t *testing.T) {
+func TestSuiteRoundTripsWithItsItemsInOrder(t *testing.T) {
 	store, _, ctx := openStore(t)
 	want := putSuite(t, ctx, store, twoItemSuite())
 
-	got, err := store.GetTaskSuite(ctx, want.ID)
+	got, err := store.GetSuite(ctx, want.ID)
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
@@ -106,15 +106,15 @@ func TestTaskSuiteRoundTripsWithItsItemsInOrder(t *testing.T) {
 	}
 }
 
-func TestPutTaskSuiteReplacesItemsRatherThanAppendingThem(t *testing.T) {
+func TestPutSuiteReplacesItemsRatherThanAppendingThem(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
 
-	suite.Items = []model.TaskSuiteItem{{TemplateID: "template-lint"}}
-	if err := store.PutTaskSuite(ctx, suite); err != nil {
+	suite.Items = []model.SuiteItem{{TemplateID: "template-lint"}}
+	if err := store.PutSuite(ctx, suite); err != nil {
 		t.Fatalf("second put: %v", err)
 	}
-	got, err := store.GetTaskSuite(ctx, suite.ID)
+	got, err := store.GetSuite(ctx, suite.ID)
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
@@ -123,7 +123,7 @@ func TestPutTaskSuiteReplacesItemsRatherThanAppendingThem(t *testing.T) {
 	}
 }
 
-func TestListTaskSuitesIsNewestFirstAndCarriesItems(t *testing.T) {
+func TestListSuitesIsNewestFirstAndCarriesItems(t *testing.T) {
 	store, _, ctx := openStore(t)
 	older := putSuite(t, ctx, store, twoItemSuite())
 	newer := twoItemSuite()
@@ -131,7 +131,7 @@ func TestListTaskSuitesIsNewestFirstAndCarriesItems(t *testing.T) {
 	newer.CreatedAt = now.Add(time.Hour)
 	newer = putSuite(t, ctx, store, newer)
 
-	got, err := store.ListTaskSuites(ctx)
+	got, err := store.ListSuites(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -148,82 +148,82 @@ func TestListTaskSuitesIsNewestFirstAndCarriesItems(t *testing.T) {
 	}
 }
 
-func TestUpdateTaskSuiteAppliesMutateAndRefusesAMissingSuite(t *testing.T) {
+func TestUpdateSuiteAppliesMutateAndRefusesAMissingSuite(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
 
-	if err := store.UpdateTaskSuite(ctx, suite.ID, func(s *model.TaskSuite) error {
+	if err := store.UpdateSuite(ctx, suite.ID, func(s *model.Suite) error {
 		s.Name = "renamed"
-		s.Mode, s.MaxPasses = model.TaskSuiteUntilClean, 4
+		s.Mode, s.MaxPasses = model.SuiteUntilClean, 4
 		return nil
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got, err := store.GetTaskSuite(ctx, suite.ID)
+	got, err := store.GetSuite(ctx, suite.ID)
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.Name != "renamed" || got.Mode != model.TaskSuiteUntilClean || got.MaxPasses != 4 {
+	if got.Name != "renamed" || got.Mode != model.SuiteUntilClean || got.MaxPasses != 4 {
 		t.Fatalf("got %+v, want the mutated name/mode/maxPasses", *got)
 	}
-	if err := store.UpdateTaskSuite(ctx, "suite-nope", func(*model.TaskSuite) error { return nil }); err == nil {
+	if err := store.UpdateSuite(ctx, "suite-nope", func(*model.Suite) error { return nil }); err == nil {
 		t.Fatal("updating a suite that does not exist succeeded, want an error")
 	}
 }
 
-func TestDeleteTaskSuiteRemovesItsItemsToo(t *testing.T) {
-	// task_suite_item has no foreign key onto task_suite, so deleting
-	// only the parent row would leave every item behind -- rows
-	// TaskSuitesUsingTemplate would go on finding forever.
+func TestDeleteSuiteRemovesItsItemsToo(t *testing.T) {
+	// suite_item has no foreign key onto suite, so deleting only the
+	// parent row would leave every item behind -- rows
+	// SuitesUsingTemplate would go on finding forever.
 	store, db, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
 
-	if err := store.DeleteTaskSuite(ctx, suite.ID); err != nil {
+	if err := store.DeleteSuite(ctx, suite.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	got, err := store.GetTaskSuite(ctx, suite.ID)
+	got, err := store.GetSuite(ctx, suite.ID)
 	if err != nil || got != nil {
 		t.Fatalf("get after delete: (%+v, %v), want (nil, nil)", got, err)
 	}
 	var items int
 	if err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM `task_suite_item` WHERE `suite_id` = ?", suite.ID).Scan(&items); err != nil {
+		"SELECT COUNT(*) FROM `suite_item` WHERE `suite_id` = ?", suite.ID).Scan(&items); err != nil {
 		t.Fatalf("counting items: %v", err)
 	}
 	if items != 0 {
 		t.Fatalf("got %d item rows left behind after deleting %s, want 0", items, suite.ID)
 	}
-	using, err := store.TaskSuitesUsingTemplate(ctx, "template-smoke")
+	using, err := store.SuitesUsingTemplate(ctx, "template-smoke")
 	if err != nil {
-		t.Fatalf("TaskSuitesUsingTemplate: %v", err)
+		t.Fatalf("SuitesUsingTemplate: %v", err)
 	}
 	if len(using) != 0 {
 		t.Fatalf("got %d suites still using template-smoke after the only one was deleted, want 0", len(using))
 	}
 }
 
-func TestTaskSuitesUsingTemplateFindsEverySuiteNamingIt(t *testing.T) {
+func TestSuitesUsingTemplateFindsEverySuiteNamingIt(t *testing.T) {
 	store, _, ctx := openStore(t)
 	both := putSuite(t, ctx, store, twoItemSuite())
 	lintOnly := twoItemSuite()
-	lintOnly.Items = []model.TaskSuiteItem{{TemplateID: "template-lint"}}
+	lintOnly.Items = []model.SuiteItem{{TemplateID: "template-lint"}}
 	lintOnly = putSuite(t, ctx, store, lintOnly)
 
-	using, err := store.TaskSuitesUsingTemplate(ctx, "template-smoke")
+	using, err := store.SuitesUsingTemplate(ctx, "template-smoke")
 	if err != nil {
-		t.Fatalf("TaskSuitesUsingTemplate: %v", err)
+		t.Fatalf("SuitesUsingTemplate: %v", err)
 	}
 	if len(using) != 1 || using[0].ID != both.ID {
 		t.Fatalf("got %+v, want only %s", using, both.ID)
 	}
-	using, err = store.TaskSuitesUsingTemplate(ctx, "template-lint")
+	using, err = store.SuitesUsingTemplate(ctx, "template-lint")
 	if err != nil {
-		t.Fatalf("TaskSuitesUsingTemplate: %v", err)
+		t.Fatalf("SuitesUsingTemplate: %v", err)
 	}
 	if len(using) != 2 {
 		t.Fatalf("got %d suites using template-lint, want both %s and %s", len(using), both.ID, lintOnly.ID)
 	}
-	using, err = store.TaskSuitesUsingTemplate(ctx, "template-unused")
+	using, err = store.SuitesUsingTemplate(ctx, "template-unused")
 	if err != nil || len(using) != 0 {
 		t.Fatalf("got (%+v, %v) for a template no suite names, want none", using, err)
 	}
@@ -231,15 +231,15 @@ func TestTaskSuitesUsingTemplateFindsEverySuiteNamingIt(t *testing.T) {
 
 // --- runs ----------------------------------------------------------------
 
-func TestCreateTaskSuiteRunFilesOneTaskPerItemInTheFirstPass(t *testing.T) {
+func TestCreateSuiteRunFilesOneTaskPerItemInTheFirstPass(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
 
-	run, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "release-1", now)
+	run, err := store.CreateSuiteRun(ctx, suite, widgets, "release-1", now)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
-	if run.Status != model.TaskSuiteRunActive || run.SuiteID != suite.ID || run.SuiteName != "nightly" {
+	if run.Status != model.SuiteRunActive || run.SuiteID != suite.ID || run.SuiteName != "nightly" {
 		t.Fatalf("got %+v, want an active run naming its suite", run)
 	}
 	if run.Target != widgets || run.Base != "release-1" {
@@ -291,13 +291,13 @@ func TestCreateTaskSuiteRunFilesOneTaskPerItemInTheFirstPass(t *testing.T) {
 	}
 }
 
-func TestCreateTaskSuiteRunLeavesTasksUnapprovedWhenTheSuiteAsks(t *testing.T) {
+func TestCreateSuiteRunLeavesTasksUnapprovedWhenTheSuiteAsks(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := twoItemSuite()
 	suite.RequireApproval, suite.AutoMerge = true, false
 	suite = putSuite(t, ctx, store, suite)
 
-	run, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	run, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -318,43 +318,43 @@ func TestCreateTaskSuiteRunLeavesTasksUnapprovedWhenTheSuiteAsks(t *testing.T) {
 	}
 }
 
-func TestCreateTaskSuiteRunRefusesAMissingTemplate(t *testing.T) {
+func TestCreateSuiteRunRefusesAMissingTemplate(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
-	suite.Items = append(suite.Items, model.TaskSuiteItem{TemplateID: "template-gone"})
+	suite.Items = append(suite.Items, model.SuiteItem{TemplateID: "template-gone"})
 
-	if _, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now); err == nil {
+	if _, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now); err == nil {
 		t.Fatal("creating a run whose item names no template succeeded, want an error")
 	}
 }
 
-func TestATaskSuiteRunIsASnapshotOfTheSuiteThatStartedIt(t *testing.T) {
+func TestASuiteRunIsASnapshotOfTheSuiteThatStartedIt(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
-	run, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	run, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
 
 	// Edit the suite out from under the run: fewer items, a different
 	// mode, and the opposite of both switches.
-	if err := store.UpdateTaskSuite(ctx, suite.ID, func(s *model.TaskSuite) error {
-		s.Items = []model.TaskSuiteItem{{TemplateID: "template-lint"}}
-		s.Mode, s.MaxPasses, s.Count = model.TaskSuiteUntilClean, 9, 0
+	if err := store.UpdateSuite(ctx, suite.ID, func(s *model.Suite) error {
+		s.Items = []model.SuiteItem{{TemplateID: "template-lint"}}
+		s.Mode, s.MaxPasses, s.Count = model.SuiteUntilClean, 9, 0
 		s.RequireApproval, s.AutoMerge = true, false
 		return nil
 	}); err != nil {
 		t.Fatalf("update suite: %v", err)
 	}
 
-	got, err := store.GetTaskSuiteRun(ctx, run.ID)
+	got, err := store.GetSuiteRun(ctx, run.ID)
 	if err != nil || got == nil {
 		t.Fatalf("get run: (%+v, %v)", got, err)
 	}
 	if !reflect.DeepEqual(got.Items, suite.Items) {
 		t.Errorf("got items %+v, want the two the run was created with", got.Items)
 	}
-	if got.Mode != model.TaskSuiteCount || got.Count != 2 {
+	if got.Mode != model.SuiteCount || got.Count != 2 {
 		t.Errorf("got mode %q count %d, want the snapshot count/2", got.Mode, got.Count)
 	}
 	if got.RequireApproval || !got.AutoMerge {
@@ -374,7 +374,7 @@ func TestATaskSuiteRunIsASnapshotOfTheSuiteThatStartedIt(t *testing.T) {
 func TestFireNextPassAddsAPassWithoutDisturbingTheLastOne(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
-	run, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	run, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -400,13 +400,13 @@ func TestFireNextPassAddsAPassWithoutDisturbingTheLastOne(t *testing.T) {
 	}
 }
 
-func TestTaskSuiteRunTasksReportPullRequestsAndProposals(t *testing.T) {
+func TestSuiteRunTasksReportPullRequestsAndProposals(t *testing.T) {
 	// The two reads OutcomeOfPass' "clean" decision is built from, taken
 	// straight off task_link the way finishWithPullRequest and
 	// relayProposedTasks write them.
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
-	run, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	run, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now)
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -435,11 +435,11 @@ func TestTaskSuiteRunTasksReportPullRequestsAndProposals(t *testing.T) {
 		t.Fatalf("filing the follow-up task: %v", err)
 	}
 
-	got, err := store.GetTaskSuiteRun(ctx, run.ID)
+	got, err := store.GetSuiteRun(ctx, run.ID)
 	if err != nil || got == nil {
 		t.Fatalf("get run: (%+v, %v)", got, err)
 	}
-	by := map[string]model.TaskSuiteTaskStatus{}
+	by := map[string]model.SuiteTaskStatus{}
 	for _, ts := range got.PassTasks(1) {
 		by[ts.TaskID] = ts
 	}
@@ -456,19 +456,19 @@ func TestTaskSuiteRunTasksReportPullRequestsAndProposals(t *testing.T) {
 	}
 }
 
-func TestActiveTaskSuiteRunsAndCompleteTaskSuiteRun(t *testing.T) {
+func TestActiveSuiteRunsAndCompleteSuiteRun(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
-	first, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	first, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now)
 	if err != nil {
 		t.Fatalf("create first run: %v", err)
 	}
-	second, err := store.CreateTaskSuiteRun(ctx, suite, gadgets, "main", now.Add(time.Minute))
+	second, err := store.CreateSuiteRun(ctx, suite, gadgets, "main", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("create second run: %v", err)
 	}
 
-	active, err := store.ActiveTaskSuiteRuns(ctx)
+	active, err := store.ActiveSuiteRuns(ctx)
 	if err != nil {
 		t.Fatalf("active: %v", err)
 	}
@@ -477,10 +477,10 @@ func TestActiveTaskSuiteRunsAndCompleteTaskSuiteRun(t *testing.T) {
 	}
 
 	done := now.Add(time.Hour)
-	if err := store.CompleteTaskSuiteRun(ctx, first.ID, model.TaskSuiteRunFailed, "a task failed", done); err != nil {
+	if err := store.CompleteSuiteRun(ctx, first.ID, model.SuiteRunFailed, "a task failed", done); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	active, err = store.ActiveTaskSuiteRuns(ctx)
+	active, err = store.ActiveSuiteRuns(ctx)
 	if err != nil {
 		t.Fatalf("active: %v", err)
 	}
@@ -488,11 +488,11 @@ func TestActiveTaskSuiteRunsAndCompleteTaskSuiteRun(t *testing.T) {
 		t.Fatalf("got %+v, want only the still-active run %d", active, second.ID)
 	}
 
-	got, err := store.GetTaskSuiteRun(ctx, first.ID)
+	got, err := store.GetSuiteRun(ctx, first.ID)
 	if err != nil || got == nil {
 		t.Fatalf("get run: (%+v, %v)", got, err)
 	}
-	if got.Status != model.TaskSuiteRunFailed || got.LastError != "a task failed" {
+	if got.Status != model.SuiteRunFailed || got.LastError != "a task failed" {
 		t.Fatalf("got status %q error %q, want failed / a task failed", got.Status, got.LastError)
 	}
 	if got.CompletedAt == nil || !got.CompletedAt.Equal(done) {
@@ -500,14 +500,14 @@ func TestActiveTaskSuiteRunsAndCompleteTaskSuiteRun(t *testing.T) {
 	}
 
 	// A succeeded run carries no error at all.
-	if err := store.CompleteTaskSuiteRun(ctx, second.ID, model.TaskSuiteRunSucceeded, "", done); err != nil {
+	if err := store.CompleteSuiteRun(ctx, second.ID, model.SuiteRunSucceeded, "", done); err != nil {
 		t.Fatalf("complete second: %v", err)
 	}
-	got, err = store.GetTaskSuiteRun(ctx, second.ID)
+	got, err = store.GetSuiteRun(ctx, second.ID)
 	if err != nil || got == nil {
 		t.Fatalf("get second run: (%+v, %v)", got, err)
 	}
-	if got.Status != model.TaskSuiteRunSucceeded || got.LastError != "" {
+	if got.Status != model.SuiteRunSucceeded || got.LastError != "" {
 		t.Fatalf("got status %q error %q, want succeeded and no error", got.Status, got.LastError)
 	}
 }
@@ -515,12 +515,13 @@ func TestActiveTaskSuiteRunsAndCompleteTaskSuiteRun(t *testing.T) {
 // A run a schedule fired records the schedule it came from, and
 // HasActiveRunForSchedule reads it back -- the idempotency gate
 // orchestrator.fireSuiteSchedule needs, and the exact counterpart of
-// HasOpenTaskWithTag for a schedule that files a task instead. A database
-// created before a schedule could fire a suite has a task_suite_run with
-// no schedule_id column, which CREATE TABLE IF NOT EXISTS never adds --
-// Store.Init's own migration step (ensureTaskSuiteRunScheduleColumn) is
-// what does, leaving every run already on it reading as what it was:
-// started by a human, not by a schedule.
+// HasOpenTaskWithTag for a schedule that files a task instead. A
+// database created before a schedule could fire a suite has a suite_run
+// with no schedule_id column, which CREATE TABLE IF NOT EXISTS never
+// adds -- Store.Init's own migration step
+// (ensureSuiteRunScheduleColumn) is what does, leaving every run
+// already on it reading as what it was: started by a human, not by a
+// schedule.
 func TestInitMigratesAnExistingDatabaseWithNoRunScheduleColumn(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
@@ -529,7 +530,7 @@ func TestInitMigratesAnExistingDatabaseWithNoRunScheduleColumn(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 
-	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_suite_run`"+` (
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`suite_run`"+` (
   `+"`id`"+`                INTEGER PRIMARY KEY AUTOINCREMENT,
   `+"`suite_id`"+`          TEXT     NOT NULL,
   `+"`suite_name`"+`        TEXT     NOT NULL,
@@ -546,10 +547,10 @@ func TestInitMigratesAnExistingDatabaseWithNoRunScheduleColumn(t *testing.T) {
   `+"`created_at`"+`        DATETIME NOT NULL,
   `+"`completed_at`"+`      DATETIME NULL
 )`); err != nil {
-		t.Fatalf("creating the pre-schedule task_suite_run table: %v", err)
+		t.Fatalf("creating the pre-schedule suite_run table: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
-		"INSERT INTO `task_suite_run` (`suite_id`,`suite_name`,`owner`,`repo`,`base`,`mode`,`count`,"+
+		"INSERT INTO `suite_run` (`suite_id`,`suite_name`,`owner`,`repo`,`base`,`mode`,`count`,"+
 			"`max_passes`,`require_approval`,`auto_merge`,`status`,`created_at`) "+
 			"VALUES ('suite-1','nightly','acme','widgets','main','count',2,0,0,1,'active',?)", now); err != nil {
 		t.Fatalf("seeding a pre-schedule run row: %v", err)
@@ -560,7 +561,7 @@ func TestInitMigratesAnExistingDatabaseWithNoRunScheduleColumn(t *testing.T) {
 		t.Fatalf("Init against an existing database with no schedule_id: %v", err)
 	}
 
-	got, err := store.GetTaskSuiteRun(ctx, 1)
+	got, err := store.GetSuiteRun(ctx, 1)
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
@@ -580,7 +581,7 @@ func TestCreateScheduledSuiteRunRecordsItsSchedule(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
 
-	byHand, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	byHand, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now)
 	if err != nil {
 		t.Fatalf("create by hand: %v", err)
 	}
@@ -611,7 +612,7 @@ func TestCreateScheduledSuiteRunRecordsItsSchedule(t *testing.T) {
 	}
 
 	// Once that run finishes, the schedule is free to fire again.
-	if err := store.CompleteTaskSuiteRun(ctx, fired.ID, model.TaskSuiteRunSucceeded, "", now.Add(time.Hour)); err != nil {
+	if err := store.CompleteSuiteRun(ctx, fired.ID, model.SuiteRunSucceeded, "", now.Add(time.Hour)); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	active, err = store.HasActiveRunForSchedule(ctx, "sched-1")
@@ -623,18 +624,18 @@ func TestCreateScheduledSuiteRunRecordsItsSchedule(t *testing.T) {
 	}
 }
 
-func TestListTaskSuiteRunsIsNewestFirst(t *testing.T) {
+func TestListSuiteRunsIsNewestFirst(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
-	older, err := store.CreateTaskSuiteRun(ctx, suite, widgets, "main", now)
+	older, err := store.CreateSuiteRun(ctx, suite, widgets, "main", now)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	newer, err := store.CreateTaskSuiteRun(ctx, suite, gadgets, "main", now.Add(time.Hour))
+	newer, err := store.CreateSuiteRun(ctx, suite, gadgets, "main", now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	got, err := store.ListTaskSuiteRuns(ctx)
+	got, err := store.ListSuiteRuns(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -647,10 +648,203 @@ func TestListTaskSuiteRunsIsNewestFirst(t *testing.T) {
 	}
 }
 
-func TestGetTaskSuiteRunReturnsNilForAnUnknownID(t *testing.T) {
+func TestGetSuiteRunReturnsNilForAnUnknownID(t *testing.T) {
 	store, _, ctx := openStore(t)
-	got, err := store.GetTaskSuiteRun(ctx, 404)
+	got, err := store.GetSuiteRun(ctx, 404)
 	if err != nil || got != nil {
 		t.Fatalf("want (nil, nil) for a run that does not exist, got (%+v, %v)", got, err)
+	}
+}
+
+// The feature was called "task suites" before it was called suites
+// (docs/schedules.md), and its six tables were named for it. This
+// simulates a database built under the old names -- directly rather
+// than through Store, since Store no longer knows how to write one --
+// and checks Store.Init's own renameTemplateAndSuiteTables step carries
+// it onto the new ones with every row, child row, sequence position and
+// index intact.
+func TestInitRenamesTheOldTaskSuiteTables(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		"CREATE TABLE `task_suite` (" +
+			"`id` TEXT NOT NULL, `name` TEXT NOT NULL, `mode` TEXT NOT NULL," +
+			"`count` INTEGER NOT NULL, `max_passes` INTEGER NOT NULL," +
+			"`require_approval` INTEGER NOT NULL, `auto_merge` INTEGER NOT NULL," +
+			"`created_at` DATETIME NOT NULL, PRIMARY KEY (`id`))",
+		"CREATE TABLE `task_suite_sequence` (" +
+			"`id` INTEGER PRIMARY KEY AUTOINCREMENT, `issued_at` DATETIME NOT NULL)",
+		"CREATE TABLE `task_suite_item` (" +
+			"`id` INTEGER PRIMARY KEY AUTOINCREMENT, `suite_id` TEXT NOT NULL," +
+			"`template_id` TEXT NOT NULL, `order_key` REAL NOT NULL)",
+		"CREATE INDEX `task_suite_item_suite` ON `task_suite_item` (`suite_id`, `order_key`)",
+		"CREATE TABLE `task_suite_run` (" +
+			"`id` INTEGER PRIMARY KEY AUTOINCREMENT, `suite_id` TEXT NOT NULL," +
+			"`suite_name` TEXT NOT NULL, `schedule_id` TEXT NULL, `owner` TEXT NOT NULL," +
+			"`repo` TEXT NOT NULL, `base` TEXT NOT NULL, `mode` TEXT NOT NULL," +
+			"`count` INTEGER NOT NULL, `max_passes` INTEGER NOT NULL," +
+			"`require_approval` INTEGER NOT NULL, `auto_merge` INTEGER NOT NULL," +
+			"`status` TEXT NOT NULL, `last_error` TEXT NULL," +
+			"`created_at` DATETIME NOT NULL, `completed_at` DATETIME NULL)",
+		"CREATE INDEX `task_suite_run_status` ON `task_suite_run` (`status`)",
+		"CREATE TABLE `task_suite_run_item` (" +
+			"`id` INTEGER PRIMARY KEY AUTOINCREMENT, `run_id` INTEGER NOT NULL," +
+			"`template_id` TEXT NOT NULL, `order_key` REAL NOT NULL)",
+		"CREATE INDEX `task_suite_run_item_run` ON `task_suite_run_item` (`run_id`, `order_key`)",
+		"CREATE TABLE `task_suite_run_task` (" +
+			"`id` INTEGER PRIMARY KEY AUTOINCREMENT, `run_id` INTEGER NOT NULL," +
+			"`task_id` TEXT NOT NULL, `template_id` TEXT NOT NULL," +
+			"`template_name` TEXT NOT NULL, `pass_number` INTEGER NOT NULL)",
+		"CREATE INDEX `task_suite_run_task_run` ON `task_suite_run_task` (`run_id`)",
+		"CREATE UNIQUE INDEX `task_suite_run_task_task` ON `task_suite_run_task` (`task_id`)",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("creating the pre-rename tables: %v", err)
+		}
+	}
+	for _, seed := range []struct {
+		what string
+		stmt string
+		args []any
+	}{
+		{"suite", "INSERT INTO `task_suite` (`id`,`name`,`mode`,`count`,`max_passes`," +
+			"`require_approval`,`auto_merge`,`created_at`) " +
+			"VALUES ('suite-2','nightly','count',2,0,0,1,?)", []any{now}},
+		{"suite item", "INSERT INTO `task_suite_item` (`suite_id`,`template_id`,`order_key`) " +
+			"VALUES ('suite-2','template-smoke',1.0)", nil},
+		{"run", "INSERT INTO `task_suite_run` (`suite_id`,`suite_name`,`owner`,`repo`,`base`," +
+			"`mode`,`count`,`max_passes`,`require_approval`,`auto_merge`,`status`,`created_at`) " +
+			"VALUES ('suite-2','nightly','acme','widgets','main','count',2,0,0,1,'active',?)", []any{now}},
+		{"run item", "INSERT INTO `task_suite_run_item` (`run_id`,`template_id`,`order_key`) " +
+			"VALUES (1,'template-smoke',1.0)", nil},
+		{"run task", "INSERT INTO `task_suite_run_task` (`run_id`,`task_id`,`template_id`," +
+			"`template_name`,`pass_number`) VALUES (1,'task-1','template-smoke','Smoke',1)", nil},
+	} {
+		if _, err := db.ExecContext(ctx, seed.stmt, seed.args...); err != nil {
+			t.Fatalf("seeding a pre-rename %s: %v", seed.what, err)
+		}
+	}
+	// Two ids already issued, so the sequence has somewhere to carry
+	// from: an id allocated after the rename must not collide with
+	// suite-2 above.
+	for i := 0; i < 2; i++ {
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO `task_suite_sequence` (`issued_at`) VALUES (?)", now); err != nil {
+			t.Fatalf("seeding the pre-rename sequence: %v", err)
+		}
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against a database written before the rename: %v", err)
+	}
+
+	got, err := store.GetSuite(ctx, "suite-2")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.Name != "nightly" || got.Mode != model.SuiteCount || got.Count != 2 ||
+		len(got.Items) != 1 || got.Items[0].TemplateID != "template-smoke" {
+		t.Fatalf("got %+v, want the pre-rename suite intact under the new table name", got)
+	}
+
+	// The run came across whole: its own snapshot of the suite's items,
+	// and the task its first pass filed -- which needs suite_run_task to
+	// have arrived with it, since that is what the task is read through.
+	if err := store.PutTask(ctx, task("task-1", true)); err != nil {
+		t.Fatalf("put the run's own task: %v", err)
+	}
+	run, err := store.GetSuiteRun(ctx, 1)
+	if err != nil || run == nil {
+		t.Fatalf("get run: (%+v, %v)", run, err)
+	}
+	if run.SuiteName != "nightly" || len(run.Items) != 1 ||
+		len(run.Tasks) != 1 || run.Tasks[0].TaskID != "task-1" || run.Tasks[0].PassNumber != 1 {
+		t.Fatalf("got %+v, want the pre-rename run, its items and its tasks intact", run)
+	}
+
+	// SQLite carries an index across a table rename under its own old
+	// name, so the rename drops the five old ones and lets the DDL
+	// create them again: the old names are gone, and task_id is still
+	// unique on suite_run_task.
+	for _, index := range []string{"task_suite_item_suite", "task_suite_run_status",
+		"task_suite_run_item_run", "task_suite_run_task_run", "task_suite_run_task_task"} {
+		var name string
+		err := db.QueryRowContext(ctx,
+			"SELECT `name` FROM `sqlite_master` WHERE `type` = 'index' AND `name` = ?",
+			index).Scan(&name)
+		if err == nil {
+			t.Errorf("index %s is still there under its pre-rename name", index)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `suite_run_task` (`run_id`,`task_id`,`template_id`,`template_name`,`pass_number`) "+
+			"VALUES (1,'task-1','template-smoke','Smoke',2)"); err == nil {
+		t.Error("a second suite_run_task row for task-1 was accepted, so the unique index is gone")
+	}
+
+	// The sequence came across too, rather than restarting at 1 and
+	// handing out an id suite-2 already has.
+	id, err := store.NewSuiteID(ctx)
+	if err != nil {
+		t.Fatalf("allocating an id after the rename: %v", err)
+	}
+	if id != "suite-3" {
+		t.Errorf("NewSuiteID after the rename = %q, want suite-3", id)
+	}
+}
+
+// The actor a suite run attributes its tasks to was "task-suite" while
+// the feature was called task suites, and is plain "suite" now that it
+// is not. This seeds a task carrying the old actor -- in both places a
+// run writes one, its origin and the approval it stamps itself -- and
+// checks Store.Init's own renameSuitePrincipal step brings it onto the
+// new id, so a task filed before the rename and one filed after it read
+// as the same mechanism's work.
+func TestInitRenamesTheOldSuitePrincipal(t *testing.T) {
+	store, _, ctx := openStore(t)
+
+	old := model.Principal{Kind: model.PrincipalAutomation, ID: "task-suite"}
+	filed := task("task-1", false)
+	filed.Origin = model.Origin{
+		Attribution: model.Attribution{Actor: old},
+		Reason:      model.ReasonSuite,
+	}
+	filed.Approval = &model.Attribution{Actor: old}
+	if err := store.PutTask(ctx, filed); err != nil {
+		t.Fatalf("put a task filed before the rename: %v", err)
+	}
+	// A task nothing about suites filed, to check the migration stays on
+	// its own rows.
+	if err := store.PutTask(ctx, task("task-2", true)); err != nil {
+		t.Fatalf("put an unrelated task: %v", err)
+	}
+
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against a database written before the rename: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, "task-1")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.Origin.Attribution.Actor != model.SuitePrincipal {
+		t.Errorf("origin actor = %+v, want SuitePrincipal", got.Origin.Attribution.Actor)
+	}
+	if got.Approval == nil || got.Approval.Actor != model.SuitePrincipal {
+		t.Errorf("approval actor = %+v, want SuitePrincipal", got.Approval)
+	}
+
+	other, err := store.GetTask(ctx, "task-2")
+	if err != nil || other == nil {
+		t.Fatalf("get: (%+v, %v)", other, err)
+	}
+	if other.Origin.Attribution.Actor == model.SuitePrincipal {
+		t.Errorf("origin actor = %+v, want the human who actually filed it", other.Origin.Attribution.Actor)
 	}
 }

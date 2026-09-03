@@ -1,12 +1,12 @@
 package model_test
 
-// Task suites' own model tests (bwsalmon/agents#642) -- TaskSuite.
-// Validate and the pass reductions SyncTaskSuites decides from, the
-// same discipline qualification_test.go already holds
-// QualificationPlan.Validate and QualificationStatus to. Nothing here
-// touches a store: every function under test is a pure reduction over
-// values, which is exactly why it is worth pinning down here rather
-// than only through the reconciler's own end-to-end tests.
+// Suites' own model tests (bwsalmon/agents#642) -- Suite. Validate and
+// the pass reductions SyncSuites decides from, the same discipline
+// qualification_test.go already holds QualificationPlan.Validate and
+// QualificationStatus to. Nothing here touches a store: every function
+// under test is a pure reduction over values, which is exactly why it
+// is worth pinning down here rather than only through the reconciler's
+// own end-to-end tests.
 
 import (
 	"testing"
@@ -14,36 +14,36 @@ import (
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
-func countSuite() model.TaskSuite {
-	return model.TaskSuite{
+func countSuite() model.Suite {
+	return model.Suite{
 		Name:  "smoke",
-		Items: []model.TaskSuiteItem{{TemplateID: "template-smoke"}},
-		Mode:  model.TaskSuiteCount, Count: 3,
+		Items: []model.SuiteItem{{TemplateID: "template-smoke"}},
+		Mode:  model.SuiteCount, Count: 3,
 	}
 }
 
-func untilCleanSuite() model.TaskSuite {
-	return model.TaskSuite{
+func untilCleanSuite() model.Suite {
+	return model.Suite{
 		Name:  "sweep",
-		Items: []model.TaskSuiteItem{{TemplateID: "template-sweep"}},
-		Mode:  model.TaskSuiteUntilClean, MaxPasses: 5,
+		Items: []model.SuiteItem{{TemplateID: "template-sweep"}},
+		Mode:  model.SuiteUntilClean, MaxPasses: 5,
 	}
 }
 
-func TestTaskSuiteModeValid(t *testing.T) {
-	for _, m := range []model.TaskSuiteMode{model.TaskSuiteCount, model.TaskSuiteUntilClean} {
+func TestSuiteModeValid(t *testing.T) {
+	for _, m := range []model.SuiteMode{model.SuiteCount, model.SuiteUntilClean} {
 		if !m.Valid() {
 			t.Errorf("%q.Valid() = false, want true", m)
 		}
 	}
-	for _, m := range []model.TaskSuiteMode{"", "COUNT", "untilclean", "forever"} {
+	for _, m := range []model.SuiteMode{"", "COUNT", "untilclean", "forever"} {
 		if m.Valid() {
 			t.Errorf("%q.Valid() = true, want false", m)
 		}
 	}
 }
 
-func TestTaskSuiteValidateAcceptsBothModes(t *testing.T) {
+func TestSuiteValidateAcceptsBothModes(t *testing.T) {
 	if err := countSuite().Validate(); err != nil {
 		t.Errorf("count suite: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestTaskSuiteValidateAcceptsBothModes(t *testing.T) {
 	}
 }
 
-func TestTaskSuiteValidateRejectsNoItems(t *testing.T) {
+func TestSuiteValidateRejectsNoItems(t *testing.T) {
 	s := countSuite()
 	s.Items = nil
 	if err := s.Validate(); err == nil {
@@ -60,15 +60,15 @@ func TestTaskSuiteValidateRejectsNoItems(t *testing.T) {
 	}
 }
 
-func TestTaskSuiteValidateRejectsABlankTemplateID(t *testing.T) {
+func TestSuiteValidateRejectsABlankTemplateID(t *testing.T) {
 	s := countSuite()
-	s.Items = []model.TaskSuiteItem{{TemplateID: "template-smoke"}, {TemplateID: ""}}
+	s.Items = []model.SuiteItem{{TemplateID: "template-smoke"}, {TemplateID: ""}}
 	if err := s.Validate(); err == nil {
 		t.Fatal("a suite item with no template validated, want an error")
 	}
 }
 
-func TestTaskSuiteValidateRejectsCountBelowOne(t *testing.T) {
+func TestSuiteValidateRejectsCountBelowOne(t *testing.T) {
 	s := countSuite()
 	for _, n := range []int{0, -1} {
 		s.Count = n
@@ -78,7 +78,7 @@ func TestTaskSuiteValidateRejectsCountBelowOne(t *testing.T) {
 	}
 }
 
-func TestTaskSuiteValidateRejectsMaxPassesBelowOne(t *testing.T) {
+func TestSuiteValidateRejectsMaxPassesBelowOne(t *testing.T) {
 	s := untilCleanSuite()
 	for _, n := range []int{0, -1} {
 		s.MaxPasses = n
@@ -88,7 +88,7 @@ func TestTaskSuiteValidateRejectsMaxPassesBelowOne(t *testing.T) {
 	}
 }
 
-func TestTaskSuiteValidateIgnoresTheOtherModesBound(t *testing.T) {
+func TestSuiteValidateIgnoresTheOtherModesBound(t *testing.T) {
 	// Count is meaningless to an until_clean suite and MaxPasses to a
 	// count one -- ui.CreateSuite leaves whichever the form did not ask
 	// for at zero, so Validate must not read it.
@@ -104,7 +104,7 @@ func TestTaskSuiteValidateIgnoresTheOtherModesBound(t *testing.T) {
 	}
 }
 
-func TestTaskSuiteValidateRejectsAnUnknownMode(t *testing.T) {
+func TestSuiteValidateRejectsAnUnknownMode(t *testing.T) {
 	s := countSuite()
 	s.Mode = "forever"
 	if err := s.Validate(); err == nil {
@@ -113,14 +113,14 @@ func TestTaskSuiteValidateRejectsAnUnknownMode(t *testing.T) {
 }
 
 // passTask is one instance in a pass, in whatever state a case needs.
-func passTask(pass int, state model.State) model.TaskSuiteTaskStatus {
-	return model.TaskSuiteTaskStatus{
+func passTask(pass int, state model.State) model.SuiteTaskStatus {
+	return model.SuiteTaskStatus{
 		TaskID: "task-" + string(state), PassNumber: pass, State: state,
 	}
 }
 
 func TestCurrentPassIsTheHighestPassNumber(t *testing.T) {
-	run := model.TaskSuiteRun{Tasks: []model.TaskSuiteTaskStatus{
+	run := model.SuiteRun{Tasks: []model.SuiteTaskStatus{
 		passTask(1, model.StateCompleted), passTask(2, model.StateCompleted), passTask(3, model.StateRunning),
 	}}
 	if got := run.CurrentPass(); got != 3 {
@@ -129,16 +129,16 @@ func TestCurrentPassIsTheHighestPassNumber(t *testing.T) {
 }
 
 func TestCurrentPassIsZeroBeforeAnyPassHasFired(t *testing.T) {
-	if got := (model.TaskSuiteRun{}).CurrentPass(); got != 0 {
+	if got := (model.SuiteRun{}).CurrentPass(); got != 0 {
 		t.Fatalf("CurrentPass() = %d on a run with no tasks, want 0", got)
 	}
 }
 
 func TestPassTasksReturnsOnlyThatPass(t *testing.T) {
-	a := model.TaskSuiteTaskStatus{TaskID: "task-1", PassNumber: 1, State: model.StateCompleted}
-	b := model.TaskSuiteTaskStatus{TaskID: "task-2", PassNumber: 2, State: model.StateCompleted}
-	c := model.TaskSuiteTaskStatus{TaskID: "task-3", PassNumber: 2, State: model.StateRunning}
-	run := model.TaskSuiteRun{Tasks: []model.TaskSuiteTaskStatus{a, b, c}}
+	a := model.SuiteTaskStatus{TaskID: "task-1", PassNumber: 1, State: model.StateCompleted}
+	b := model.SuiteTaskStatus{TaskID: "task-2", PassNumber: 2, State: model.StateCompleted}
+	c := model.SuiteTaskStatus{TaskID: "task-3", PassNumber: 2, State: model.StateRunning}
+	run := model.SuiteRun{Tasks: []model.SuiteTaskStatus{a, b, c}}
 
 	got := run.PassTasks(2)
 	if len(got) != 2 || got[0].TaskID != "task-2" || got[1].TaskID != "task-3" {
@@ -150,7 +150,7 @@ func TestPassTasksReturnsOnlyThatPass(t *testing.T) {
 }
 
 func TestOutcomeOfPassCleanOnceEveryTaskCompletesWithNothingToShow(t *testing.T) {
-	tasks := []model.TaskSuiteTaskStatus{passTask(1, model.StateCompleted), passTask(1, model.StateCompleted)}
+	tasks := []model.SuiteTaskStatus{passTask(1, model.StateCompleted), passTask(1, model.StateCompleted)}
 	if got := model.OutcomeOfPass(tasks); got != model.PassClean {
 		t.Fatalf("OutcomeOfPass = %v, want PassClean", got)
 	}
@@ -159,19 +159,19 @@ func TestOutcomeOfPassCleanOnceEveryTaskCompletesWithNothingToShow(t *testing.T)
 func TestOutcomeOfPassChangedOnAPullRequestOrAProposal(t *testing.T) {
 	opened := passTask(1, model.StateCompleted)
 	opened.OpenedPullRequest = true
-	if got := model.OutcomeOfPass([]model.TaskSuiteTaskStatus{passTask(1, model.StateCompleted), opened}); got != model.PassChanged {
+	if got := model.OutcomeOfPass([]model.SuiteTaskStatus{passTask(1, model.StateCompleted), opened}); got != model.PassChanged {
 		t.Fatalf("OutcomeOfPass with a pull request = %v, want PassChanged", got)
 	}
 	proposed := passTask(1, model.StateCompleted)
 	proposed.Proposed = true
-	if got := model.OutcomeOfPass([]model.TaskSuiteTaskStatus{passTask(1, model.StateCompleted), proposed}); got != model.PassChanged {
+	if got := model.OutcomeOfPass([]model.SuiteTaskStatus{passTask(1, model.StateCompleted), proposed}); got != model.PassChanged {
 		t.Fatalf("OutcomeOfPass with a proposal = %v, want PassChanged", got)
 	}
 }
 
 func TestOutcomeOfPassPendingWhileAnyTaskIsStillInFlight(t *testing.T) {
 	for _, state := range []model.State{model.StateProposed, model.StateQueued, model.StateRunning, model.StateAwaitingReply} {
-		tasks := []model.TaskSuiteTaskStatus{passTask(1, model.StateCompleted), passTask(1, state)}
+		tasks := []model.SuiteTaskStatus{passTask(1, model.StateCompleted), passTask(1, state)}
 		if got := model.OutcomeOfPass(tasks); got != model.PassPending {
 			t.Errorf("OutcomeOfPass alongside a %s task = %v, want PassPending", state, got)
 		}
@@ -180,7 +180,7 @@ func TestOutcomeOfPassPendingWhileAnyTaskIsStillInFlight(t *testing.T) {
 
 func TestOutcomeOfPassFailedOnAFailureOrACloseWithoutCompleting(t *testing.T) {
 	for _, state := range []model.State{model.StateFailed, model.StateClosed} {
-		tasks := []model.TaskSuiteTaskStatus{passTask(1, model.StateCompleted), passTask(1, state)}
+		tasks := []model.SuiteTaskStatus{passTask(1, model.StateCompleted), passTask(1, state)}
 		if got := model.OutcomeOfPass(tasks); got != model.PassFailed {
 			t.Errorf("OutcomeOfPass alongside a %s task = %v, want PassFailed", state, got)
 		}
@@ -193,10 +193,10 @@ func TestOutcomeOfPassFailureOutranksAStragglerInEitherOrder(t *testing.T) {
 	// and it must read the same whichever order the two come back in,
 	// rather than letting the straggler hide a failure already known.
 	failed, running := passTask(1, model.StateFailed), passTask(1, model.StateRunning)
-	if got := model.OutcomeOfPass([]model.TaskSuiteTaskStatus{failed, running}); got != model.PassFailed {
+	if got := model.OutcomeOfPass([]model.SuiteTaskStatus{failed, running}); got != model.PassFailed {
 		t.Errorf("failure first: got %v, want PassFailed", got)
 	}
-	if got := model.OutcomeOfPass([]model.TaskSuiteTaskStatus{running, failed}); got != model.PassFailed {
+	if got := model.OutcomeOfPass([]model.SuiteTaskStatus{running, failed}); got != model.PassFailed {
 		t.Errorf("straggler first: got %v, want PassFailed", got)
 	}
 }
@@ -204,16 +204,16 @@ func TestOutcomeOfPassFailureOutranksAStragglerInEitherOrder(t *testing.T) {
 func TestOutcomeOfPassFailureOutranksAChange(t *testing.T) {
 	changed := passTask(1, model.StateCompleted)
 	changed.OpenedPullRequest = true
-	tasks := []model.TaskSuiteTaskStatus{changed, passTask(1, model.StateFailed)}
+	tasks := []model.SuiteTaskStatus{changed, passTask(1, model.StateFailed)}
 	if got := model.OutcomeOfPass(tasks); got != model.PassFailed {
 		t.Fatalf("OutcomeOfPass = %v, want PassFailed", got)
 	}
 }
 
 func TestOutcomeOfPassOfNoTasksIsClean(t *testing.T) {
-	// Unreachable through the store -- CreateTaskSuiteRun always files a
-	// pass, and a suite always has at least one item -- but a zero value
-	// must not read as pending, which would strand a run forever.
+	// Unreachable through the store -- CreateSuiteRun always files a
+	// pass, and a suite always has at least one item -- but a zero
+	// value must not read as pending, which would strand a run forever.
 	if got := model.OutcomeOfPass(nil); got != model.PassClean {
 		t.Fatalf("OutcomeOfPass(nil) = %v, want PassClean", got)
 	}

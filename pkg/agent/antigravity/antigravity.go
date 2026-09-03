@@ -735,8 +735,7 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		// cancellation rather than a fault of agy's -- report the cap.
 		// result is whatever the run managed before it was stopped, and
 		// is returned alongside the error, never instead of it.
-		return partialResult(result, stdout),
-			fmt.Errorf("antigravity: exceeded max turns (%d) without a final answer", maxTurns)
+		return partialResult(result, stdout), agent.MaxTurnsExceeded("antigravity", maxTurns)
 	case limit != nil:
 		// Ahead of both branches below, which would otherwise render
 		// this as "running agy: exit status 1" or as agy's own generic

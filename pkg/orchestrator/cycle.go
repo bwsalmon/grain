@@ -366,14 +366,14 @@ func reconcileQualifications(ctx context.Context, deps Deps, now time.Time) erro
 	return SyncQualifications(ctx, deps.Store, now)
 }
 
-// reconcileSuites advances every task suite run still in flight
+// reconcileSuites advances every suite run still in flight
 // (bwsalmon/agents#642), firing its next pass or stopping it once its
 // own Mode says to. Runs last, after "qualifications", for the same
-// latency reason that one runs right after "releases": nothing else here
-// produces or consumes a task suite run, so its own position among the
+// latency reason that one runs right after "releases": nothing else
+// here produces or consumes a suite run, so its own position among the
 // rest is a preference, not a dependency.
 func reconcileSuites(ctx context.Context, deps Deps, now time.Time) error {
-	return SyncTaskSuites(ctx, deps.Store, now)
+	return SyncSuites(ctx, deps.Store, now)
 }
 
 // reconcileDispatch lets dispatch.Cycle decide what runs, then runs every

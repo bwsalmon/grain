@@ -122,26 +122,27 @@ type Schedule struct {
 	// every task this schedule files carries them, the same as one filed
 	// by hand through CreateTaskRequest.
 	Reads []string `json:"reads,omitempty"`
-	// TemplateID and TemplateName are set when this schedule fires from a
-	// TaskTemplate (bwsalmon/agents#516) rather than its own inline
+	// TemplateID and TemplateName are set when this schedule fires from
+	// a Template (bwsalmon/agents#516) rather than its own inline
 	// content -- Title/Description/AutoMerge/Reads/Capabilities above
 	// still reflect that template's content (kept in sync each time the
 	// schedule fires, or is itself saved), so a UI that only wants to
-	// render a summary needs no separate template lookup; TemplateName is
-	// only for a UI that wants to say which template, e.g. to link to it.
-	// Repo and Base are never among them: a template carries no target of
-	// its own (model.TaskTemplate's own doc comment on why), so they are
-	// always this schedule's own fields, template-backed or not.
+	// render a summary needs no separate template lookup; TemplateName
+	// is only for a UI that wants to say which template, e.g. to link
+	// to it. Repo and Base are never among them: a template carries no
+	// target of its own (model.Template's own doc comment on why), so
+	// they are always this schedule's own fields, template-backed or
+	// not.
 	TemplateID   string `json:"templateId,omitempty"`
 	TemplateName string `json:"templateName,omitempty"`
-	// SuiteID and SuiteName are set when this schedule runs a task suite
-	// on its cadence rather than filing a single task -- Title is the
+	// SuiteID and SuiteName are set when this schedule runs a suite on
+	// its cadence rather than filing a single task -- Title is the
 	// suite's own name in that case (model.Schedule.SuiteID's own doc
 	// comment on the display cache), and
 	// Description/AutoMerge/Reads/Capabilities mean nothing, since a
-	// suite run takes all of those from the suite and its templates. Repo
-	// and Base still decide what the run targets, exactly as they do for
-	// a task.
+	// suite run takes all of those from the suite and its templates.
+	// Repo and Base still decide what the run targets, exactly as they
+	// do for a task.
 	SuiteID      string     `json:"suiteId,omitempty"`
 	SuiteName    string     `json:"suiteName,omitempty"`
 	Capabilities []string   `json:"capabilities"`
@@ -208,7 +209,7 @@ func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
 			id := *s.TemplateID
 			if cached, ok := templateNames[id]; ok {
 				templateName = cached
-			} else if t, err := c.Store.GetTaskTemplate(ctx, id); err == nil && t != nil {
+			} else if t, err := c.Store.GetTemplate(ctx, id); err == nil && t != nil {
 				templateName = t.Name
 				templateNames[id] = templateName
 			}
@@ -217,7 +218,7 @@ func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
 			id := *s.SuiteID
 			if cached, ok := suiteNames[id]; ok {
 				suiteName = cached
-			} else if suite, err := c.Store.GetTaskSuite(ctx, id); err == nil && suite != nil {
+			} else if suite, err := c.Store.GetSuite(ctx, id); err == nil && suite != nil {
 				suiteName = suite.Name
 				suiteNames[id] = suiteName
 			}
@@ -235,28 +236,30 @@ func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
 // two task-only concerns have no home here. Recurrence is always
 // required: a schedule with no cadence cannot ever fire.
 //
-// Repo and Base are always this request's own fields, template-backed or
-// not: a template carries no target of its own (model.TaskTemplate's own
+// Repo and Base are always this request's own fields, template-backed
+// or not: a template carries no target of its own (model.Template's own
 // doc comment on why), so which repo and branch this schedule fires
 // against is decided here, at the point of use, exactly as bwsalmon/
 // agents#516 asks. Repo is always required.
 //
-// TemplateID, given, takes over Title/Description/AutoMerge/Capabilities/
-// Reads entirely (bwsalmon/agents#516) -- CreateSchedule copies the named
-// TaskTemplate's own content in and ignores those five fields on this
-// request outright, rather than letting a caller mix a template with its
-// own per-field overrides, a combination this API deliberately does not
+// TemplateID, given, takes over
+// Title/Description/AutoMerge/Capabilities/Reads entirely
+// (bwsalmon/agents#516) -- CreateSchedule copies the named Template's
+// own content in and ignores those five fields on this request
+// outright, rather than letting a caller mix a template with its own
+// per-field overrides, a combination this API deliberately does not
 // support (see CreateSchedule's own doc comment). Left blank, Title is
 // also required, exactly as it always was.
 //
-// SuiteID, given, makes this a schedule that runs a whole task suite on
-// its cadence rather than filing one task: the suite decides everything
-// about what runs (its items, how many passes, approval, auto-merge), so
-// Title/Description/AutoMerge/Capabilities/Reads are ignored the same way
-// a TemplateID makes them ignored, and TemplateID itself may not be given
-// alongside it. Base is required for a suite-backed schedule, matching
-// CreateSuiteRunRequest's own rule: a suite run stacks its tasks against
-// one named branch and has no default to fall back to.
+// SuiteID, given, makes this a schedule that runs a whole suite on its
+// cadence rather than filing one task: the suite decides everything
+// about what runs (its items, how many passes, approval, auto-merge),
+// so Title/Description/AutoMerge/Capabilities/Reads are ignored the
+// same way a TemplateID makes them ignored, and TemplateID itself may
+// not be given alongside it. Base is required for a suite-backed
+// schedule, matching CreateSuiteRunRequest's own rule: a suite run
+// stacks its tasks against one named branch and has no default to fall
+// back to.
 type CreateScheduleRequest struct {
 	Title        string     `json:"title"`
 	Description  string     `json:"description"`
@@ -308,22 +311,22 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	if strings.TrimSpace(req.SuiteID) != "" {
 		if strings.TrimSpace(req.TemplateID) != "" {
 			return Schedule{}, validationErrorf(
-				"a schedule fires either a task suite or a task, not both: give suiteId or templateId, not both")
+				"a schedule fires either a suite or a task, not both: give suiteId or templateId, not both")
 		}
 		if strings.TrimSpace(req.Base) == "" {
-			return Schedule{}, validationErrorf("base is required: a task suite run has no default branch to fall back to")
+			return Schedule{}, validationErrorf("base is required: a suite run has no default branch to fall back to")
 		}
-		suite, err := c.Store.GetTaskSuite(ctx, req.SuiteID)
+		suite, err := c.Store.GetSuite(ctx, req.SuiteID)
 		if err != nil {
 			return Schedule{}, err
 		}
 		if suite == nil {
-			return Schedule{}, validationErrorf("unknown task suite %s", req.SuiteID)
+			return Schedule{}, validationErrorf("unknown suite %s", req.SuiteID)
 		}
 		sched = model.Schedule{Title: suite.Name, SuiteID: &suite.ID}
 		suiteName = suite.Name
 	} else if strings.TrimSpace(req.TemplateID) != "" {
-		tmpl, err := c.Store.GetTaskTemplate(ctx, req.TemplateID)
+		tmpl, err := c.Store.GetTemplate(ctx, req.TemplateID)
 		if err != nil {
 			return Schedule{}, err
 		}
@@ -377,15 +380,15 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 }
 
 // scheduleContentFromTemplate is the content half of a Schedule that a
-// template actually carries (everything but identity, recurrence, timing,
-// and Target/Base -- a template has no target of its own,
-// model.TaskTemplate's own doc comment on why) copied from t --
+// template actually carries (everything but identity, recurrence,
+// timing, and Target/Base -- a template has no target of its own,
+// model.Template's own doc comment on why) copied from t --
 // CreateSchedule's and UpdateSchedule's shared way of attaching a
 // schedule to a template, and also what fireTaskSchedule itself calls
-// each time a template-backed schedule fires, so a schedule's own inline
-// copy never drifts from the template it names for longer than one
-// firing. Callers still need to set Target and Base themselves.
-func scheduleContentFromTemplate(t model.TaskTemplate) model.Schedule {
+// each time a template-backed schedule fires, so a schedule's own
+// inline copy never drifts from the template it names for longer than
+// one firing. Callers still need to set Target and Base themselves.
+func scheduleContentFromTemplate(t model.Template) model.Schedule {
 	return model.Schedule{
 		Title:      t.Title,
 		Body:       t.Body,
@@ -404,7 +407,7 @@ func scheduleContentFromTemplate(t model.TaskTemplate) model.Schedule {
 //
 // Repo and Base follow the plain nil-means-leave-alone rule regardless
 // of TemplateID: a template carries no target of its own
-// (model.TaskTemplate's own doc comment on why), so attaching one never
+// (model.Template's own doc comment on why), so attaching one never
 // touches this schedule's own Target/Base, and either can still be
 // edited on the same request that attaches or detaches a template.
 //
@@ -418,16 +421,16 @@ func scheduleContentFromTemplate(t model.TaskTemplate) model.Schedule {
 // template it pointed at) in place as a now-independent copy, editable
 // through those same five fields from then on.
 //
-// SuiteID repoints a suite-backed schedule at a different task suite, and
-// is the one field here that cannot change what *kind* of schedule this
-// is (model.Schedule.SuiteID's own doc comment on why): given on a
-// schedule that fires a task, or given as "" on one that runs a suite, it
-// is refused rather than quietly converting a schedule into something
-// with no content to fire. Everything a suite-backed schedule still
-// decides for itself -- Repo, Base, Recurrence, Enabled -- is editable
-// here exactly as it is for any other schedule;
-// Title/Description/AutoMerge/Reads/Capabilities are ignored, the same as
-// they are while a TemplateID is set.
+// SuiteID repoints a suite-backed schedule at a different suite, and is
+// the one field here that cannot change what *kind* of schedule this is
+// (model.Schedule.SuiteID's own doc comment on why): given on a
+// schedule that fires a task, or given as "" on one that runs a suite,
+// it is refused rather than quietly converting a schedule into
+// something with no content to fire. Everything a suite-backed schedule
+// still decides for itself -- Repo, Base, Recurrence, Enabled -- is
+// editable here exactly as it is for any other schedule;
+// Title/Description/AutoMerge/Reads/Capabilities are ignored, the same
+// as they are while a TemplateID is set.
 type UpdateScheduleRequest struct {
 	Title        *string     `json:"title,omitempty"`
 	Description  *string     `json:"description,omitempty"`
@@ -455,27 +458,27 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	}
 	suiteBacked := existing.SuiteID != nil
 
-	// repointing is non-nil only when this suite-backed schedule is being
-	// moved to a different task suite -- the one thing req.SuiteID can
+	// repointing is non-nil only when this suite-backed schedule is
+	// being moved to a different suite -- the one thing req.SuiteID can
 	// do, since what a schedule fires is fixed when it is created
 	// (UpdateScheduleRequest's own doc comment on why).
-	var repointing *model.TaskSuite
+	var repointing *model.Suite
 	if req.SuiteID != nil {
 		wanted := strings.TrimSpace(*req.SuiteID)
 		switch {
 		case !suiteBacked && wanted != "":
 			return Schedule{}, validationErrorf(
-				"this schedule files a task, not a task suite: create a suite-backed schedule instead")
+				"this schedule files a task, not a suite: create a suite-backed schedule instead")
 		case suiteBacked && wanted == "":
 			return Schedule{}, validationErrorf(
 				"a suite-backed schedule cannot be detached from its suite: delete it, or point it at another suite")
 		case suiteBacked:
-			suite, err := c.Store.GetTaskSuite(ctx, wanted)
+			suite, err := c.Store.GetSuite(ctx, wanted)
 			if err != nil {
 				return Schedule{}, err
 			}
 			if suite == nil {
-				return Schedule{}, validationErrorf("unknown task suite %s", wanted)
+				return Schedule{}, validationErrorf("unknown suite %s", wanted)
 			}
 			repointing = suite
 		}
@@ -483,10 +486,10 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	if suiteBacked {
 		if req.TemplateID != nil && strings.TrimSpace(*req.TemplateID) != "" {
 			return Schedule{}, validationErrorf(
-				"this schedule runs a task suite, so it fires no template of its own")
+				"this schedule runs a suite, so it fires no template of its own")
 		}
 		if req.Base != nil && strings.TrimSpace(*req.Base) == "" {
-			return Schedule{}, validationErrorf("base is required: a task suite run has no default branch to fall back to")
+			return Schedule{}, validationErrorf("base is required: a suite run has no default branch to fall back to")
 		}
 	}
 
@@ -494,9 +497,9 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	// attach to (the non-empty case) -- content below is populated from
 	// it, and every other content field on req is ignored, the same
 	// "template wins outright" rule CreateSchedule applies.
-	var attaching *model.TaskTemplate
+	var attaching *model.Template
 	if req.TemplateID != nil && strings.TrimSpace(*req.TemplateID) != "" {
-		tmpl, err := c.Store.GetTaskTemplate(ctx, *req.TemplateID)
+		tmpl, err := c.Store.GetTemplate(ctx, *req.TemplateID)
 		if err != nil {
 			return Schedule{}, err
 		}
@@ -611,14 +614,14 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	if attaching != nil {
 		templateName = attaching.Name
 	} else if updated.TemplateID != nil {
-		if t, err := c.Store.GetTaskTemplate(ctx, *updated.TemplateID); err == nil && t != nil {
+		if t, err := c.Store.GetTemplate(ctx, *updated.TemplateID); err == nil && t != nil {
 			templateName = t.Name
 		}
 	}
 	if repointing != nil {
 		suiteName = repointing.Name
 	} else if updated.SuiteID != nil {
-		if suite, err := c.Store.GetTaskSuite(ctx, *updated.SuiteID); err == nil && suite != nil {
+		if suite, err := c.Store.GetSuite(ctx, *updated.SuiteID); err == nil && suite != nil {
 			suiteName = suite.Name
 		}
 	}

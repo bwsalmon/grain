@@ -151,8 +151,8 @@ func TestRunCycleLeavesASuccessfulFinishAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit: the finish stood, and its pull request is waiting on a Submit click", st)
 	}
 	// The whole point of the outcome above: nothing about this task now
 	// reads as a failure to back off from.

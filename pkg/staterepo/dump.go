@@ -25,11 +25,20 @@ const (
 	// written by, so a build that would misread it can say so instead of
 	// importing rows into a schema they do not fit.
 	SchemaVersionFile = "schema-version"
-	// SecretsFile is the encrypted secrets blob (pkg/secrets). It lives
-	// in the same repository as everything else on purpose -- one thing
-	// to back up, one thing to clone -- and is the only file here that is
-	// not plain text, because it is the only one whose contents nobody
-	// but the holder of the private key may read.
+	// SecretsFile is the encrypted secrets blob (pkg/secrets). It used to
+	// live in this repository -- one thing to clone, one thing to back up
+	// -- and no longer does: the state repository is now somewhere agents
+	// are dispatched to work, and a repository a sandbox can clone is a
+	// repository a sandbox can read every byte of, ciphertext included.
+	// It sits beside the private key under <data-dir>/secrets instead
+	// (cmd/grain's secretsConfig), which is the one directory an operator
+	// already had to back up, since the key was never in here either.
+	//
+	// The name stays here because this package is still what knows about
+	// it: EnsureIgnored keeps a stray copy from being committed, and
+	// HasSecrets asks whether a repository is one an earlier build wrote
+	// it into -- which is a question about history, and history does not
+	// forget.
 	SecretsFile = "secrets.enc"
 	// ReadmeFile explains the repository to whoever opens it next.
 	ReadmeFile = "README.md"
@@ -209,6 +218,50 @@ func Import(ctx context.Context, db *sql.DB, dir string) error {
 	if err != nil {
 		return err
 	}
+	return importInto(ctx, db, dir, tables)
+}
+
+// ImportTables is Import over a named subset: the rows of those tables
+// are replaced by what dir holds and every other table is left exactly
+// as it is.
+//
+// This is what makes a merged change applicable to a daemon that is
+// already running (Apply, in bind.go). A whole-database Import cannot
+// be: it clears task and task_run too, underneath a reconcile loop
+// holding the very ids it is deleting. A subset that names only tables
+// the daemon does not write for itself can be, and is replacement
+// within that subset for exactly the reason Import is replacement
+// overall -- a merge that deleted a template has to delete it here.
+//
+// A name no table in db has is skipped rather than refused, the same
+// way importTable treats a file the dump does not have: the set of
+// settings tables is a constant in this package, and a build whose
+// schema does not have one of them yet must not fail to import the
+// rest.
+func ImportTables(ctx context.Context, db *sql.DB, dir string, tables []string) error {
+	present, err := tableNames(ctx, db)
+	if err != nil {
+		return err
+	}
+	has := map[string]bool{}
+	for _, t := range present {
+		has[t] = true
+	}
+	var wanted []string
+	for _, t := range tables {
+		if has[t] {
+			wanted = append(wanted, t)
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	return importInto(ctx, db, dir, wanted)
+}
+
+// importInto is Import's and ImportTables' shared body: clear the named
+// tables and refill them from the dump, all in one transaction.
+func importInto(ctx context.Context, db *sql.DB, dir string, tables []string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -224,14 +277,14 @@ func Import(ctx context.Context, db *sql.DB, dir string) error {
 		}
 	}
 	for _, t := range tables {
-		if err := importTable(ctx, tx, db, dir, t); err != nil {
+		if err := importTable(ctx, tx, dir, t); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func importTable(ctx context.Context, tx *sql.Tx, db *sql.DB, dir, table string) error {
+func importTable(ctx context.Context, tx *sql.Tx, dir, table string) error {
 	path := filepath.Join(dir, TablesDir, table+".json")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -243,7 +296,7 @@ func importTable(ctx context.Context, tx *sql.Tx, db *sql.DB, dir, table string)
 	if err != nil {
 		return fmt.Errorf("staterepo: reading %s: %w", path, err)
 	}
-	cols, err := columns(ctx, db, table)
+	cols, err := columns(ctx, tx, table)
 	if err != nil {
 		return err
 	}
@@ -337,7 +390,16 @@ type column struct {
 	pk       int // 1-based position in the primary key, 0 if not part of one
 }
 
-func columns(ctx context.Context, db *sql.DB, table string) ([]column, error) {
+// querier is whatever can run a read: a *sql.DB, or the *sql.Tx an
+// import is already inside. The distinction matters to more than tidiness
+// -- a caller that has pinned its pool to one connection (Check) would
+// deadlock the moment a statement inside the transaction reached for a
+// second one.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func columns(ctx context.Context, db querier, table string) ([]column, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+quote(table)+")")
 	if err != nil {
 		return nil, fmt.Errorf("staterepo: describing %s: %w", table, err)
@@ -390,7 +452,7 @@ func orderBy(cols []column) []string {
 // excluded by sqlite_master's own type column: pkg/model derives
 // task_state as a view precisely so that nothing writes it, and a dump
 // that carried one would invite exactly that.
-func tableNames(ctx context.Context, db *sql.DB) ([]string, error) {
+func tableNames(ctx context.Context, db querier) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
 	if err != nil {

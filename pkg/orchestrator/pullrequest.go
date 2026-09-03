@@ -57,8 +57,8 @@ type PullRequestStatus struct {
 // could merge a branch the agent is still pushing to. Ending the task is
 // finishWithPullRequest's job, on the finish path, once the run is
 // actually over. (Store.OpenPullRequestLinks only returns links belonging
-// to a completed task, so a pull request opened here is not synced or
-// merged by anything until that has happened.)
+// to a task whose run is over, so a pull request opened here is not
+// synced or merged by anything until that has happened.)
 //
 // A branch that is there but empty is answered in the same spirit and
 // for the same reason, a little further down: "commit something first"

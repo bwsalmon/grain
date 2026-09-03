@@ -80,7 +80,7 @@ const (
 	ReasonReview        OriginReason = "review"        // review threads asked for it
 	ReasonProposal      OriginReason = "proposal"      // an agent or parent proposed it
 	ReasonQualification OriginReason = "qualification" // a release candidate's qualification plan fired it
-	ReasonSuite         OriginReason = "suite"         // a task suite run fired it (bwsalmon/agents#642)
+	ReasonSuite         OriginReason = "suite"         // a suite run fired it (bwsalmon/agents#642)
 )
 
 func (r OriginReason) Valid() bool {
@@ -373,7 +373,27 @@ const (
 	// selects 'queued', so nothing here retries automatically, and a
 	// human has to set Observation.RetryRequestedAt (Store.Retry) before
 	// it is eligible for another attempt.
-	StateFailed    State = "failed"
+	StateFailed State = "failed"
+	// StateAwaitingSubmit is a task whose run is over and whose pull
+	// request nobody has submitted: it has a LinkFixes pull request and
+	// AutoMerge is not set, so the merge queue is not driving it and
+	// nothing will ever land it on its own. Like StateAwaitingReply, and
+	// unlike every other post-run state, the task does not leave this one
+	// by itself -- somebody has to click Submit (ui.Client.Submit, which
+	// is what sets AutoMerge) or close it.
+	//
+	// It was a chip beside the state badge before it was a state
+	// (ui/src/state.js's completionPhase, bwsalmon/agents#494), which
+	// meant the badge itself said "Queued for merge" about a task that
+	// was on no queue at all -- the one reading that is never true of it.
+	// A state of its own is what makes the wait countable: it gets its
+	// own sidebar entry and its own filter, so "what is sitting here
+	// waiting on me?" is a question the task list can answer.
+	StateAwaitingSubmit State = "awaiting_submit"
+	// StateCompleted is a task whose run is over and which needs nobody:
+	// its pull request is on the merge queue (AutoMerge set), or it
+	// produced no pull request at all. StateOf holds it here until that
+	// pull request merges or the task is closed.
 	StateCompleted State = "completed"
 	StateClosed    State = "closed"
 )

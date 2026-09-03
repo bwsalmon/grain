@@ -103,8 +103,9 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             </span>
             {/* Both chips read as annotations beside the state dot, not a
                 replacement for it -- a blocked task is still queued
-                (docs/data-model.md), and a completed task's PR phase is
-                still "completed" as far as model.State goes. */}
+                (docs/data-model.md), and a task whose pull request the
+                merge queue gave up on is still "completed" as far as
+                model.State goes. */}
             {phase && <Chip size="small" color={phase.color} title={phase.title} label={phase.label} />}
             {t.blocked && <Chip size="small" color="error" label="Blocked" />}
           </div>

@@ -7,8 +7,10 @@ import api from "../api.js";
 // grain's database is a git repository now (pkg/staterepo): every table
 // exported as JSON, so a template, a suite or a repo's configuration can
 // be changed through a pull request like anything else, with grain
-// pulling the merged result back in. This pane is the bootstrap for
-// that, and it is deliberately only the bootstrap -- there are three
+// pulling the merged result back in on its own timer -- "Sync now" below
+// is that same cycle, both directions, for an operator who does not want
+// to wait for the tick. This pane is the bootstrap for that, and it is
+// deliberately only the bootstrap -- there are three
 // answers to "where does the repository live" and nothing here edits
 // what is *in* it, because the repository is the place to do that.
 //
@@ -29,11 +31,11 @@ export default function StateRepoPanel({ showError }) {
   const [remote, setRemote] = useState("");
   const [branch, setBranch] = useState("main");
   const [token, setToken] = useState("");
-  // The private key of the installation being adopted. It is the third
-  // input "point grain at an existing repository" needs and the one the
-  // repository deliberately cannot carry: the clone brings the sealed
-  // secrets file, and nothing here can open it until its key arrives by
-  // some other route than the repository itself.
+  // The private key this host's secrets file is sealed to. It is the
+  // third input "point grain at an existing repository" needs, for a
+  // deployment moved here from somewhere else: the tables arrive through
+  // the clone, the sealed file through a restore of the data directory,
+  // and the key by hand or not at all.
   const [secretsKey, setSecretsKey] = useState("");
   // The same key, arriving later: a repository can be adopted before
   // whoever runs it has fetched their key out of wherever they keep it,
@@ -87,6 +89,12 @@ export default function StateRepoPanel({ showError }) {
         tasks and metrics can be read and changed through pull requests. Secrets go there too, in one file encrypted
         to the key below; nothing else in the repository is encrypted, and no agent ever reads that file.
       </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        A merged change to the settings tables &mdash; templates, suites, schedules, repo and deployment
+        configuration &mdash; is pulled in and live within half a minute, with no restart. Tasks, runs and metrics
+        are grain&apos;s own record of what it did and are only replaced when grain starts, so nothing here rewrites
+        rows a run in flight is holding.
+      </Typography>
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }} flexWrap="wrap">
         <Chip
@@ -103,9 +111,10 @@ export default function StateRepoPanel({ showError }) {
 
       {status.remoteAhead && (
         <Alert severity="info" sx={{ mt: 2 }}>
-          Somebody merged a change into this repository. grain applies what is waiting when it starts &mdash;
-          restart it to load this one. Until then it stops exporting rather than committing over the merge, so
-          the database keeps running as it is and nothing here is lost.
+          This repository holds a commit grain has not been able to take up &mdash; somebody merged a change that a
+          tick could not apply on its own. grain loads what is waiting when it starts, so restart it to load this
+          one. Until then it stops exporting rather than committing over the merge, so the database keeps running
+          as it is and nothing here is lost.
         </Alert>
       )}
       {status.error && <Alert severity="warning" sx={{ mt: 2 }}>{status.error}</Alert>}
@@ -131,10 +140,10 @@ export default function StateRepoPanel({ showError }) {
 
       <Typography variant="subtitle2" sx={{ mt: 3 }}>Point grain at a repository</Typography>
       <Typography variant="body2" color="text.secondary">
-        An existing grain state repository replaces this installation&apos;s database with its contents &mdash; give it
-        the secrets key below as well, or its secrets stay unreadable here. To start from scratch, create an empty
-        repository on GitHub and paste its URL: grain seeds that one from what it has now, secrets and all. Either
-        way the previous working tree is kept on disk, not deleted.
+        An existing grain state repository replaces this installation&apos;s database with its contents. To start from
+        scratch, create an empty repository on GitHub and paste its URL: grain seeds that one from what it has now.
+        Either way the previous working tree is kept on disk, not deleted, and this host&apos;s secrets stay where they
+        are &mdash; they live beside their key under the data directory, not in the repository.
       </Typography>
       <TextField label="Repository URL" value={remote} onChange={(e) => setRemote(e.target.value)}
         placeholder="https://github.com/owner/grain-state.git" autoComplete="off" fullWidth margin="normal" size="small" />
@@ -144,8 +153,8 @@ export default function StateRepoPanel({ showError }) {
         helperText="Leave empty to push with this deployment's own GitHub credential. Stored on the host, never shown again."
         type="password" autoComplete="off" fullWidth margin="normal" size="small" />
       <TextField label="Secrets key (optional)" value={secretsKey} onChange={(e) => setSecretsKey(e.target.value)}
-        helperText={"The private key that repository's secrets are encrypted to. Needed only when adopting an " +
-          "installation this host has not run before; an empty repository keeps the key below."}
+        helperText={"The private key this host's secrets file is encrypted to. Needed only when the data " +
+          "directory was restored from an installation this host has not run before; otherwise the key below stays."}
         type="password" autoComplete="off" fullWidth margin="normal" size="small" />
       <Button type="button" variant="contained" size="small" disabled={busy || !remote.trim()}
         onClick={() => act("/api/state-repo", {
@@ -166,7 +175,7 @@ export default function StateRepoPanel({ showError }) {
 
       {status.secretsError && (
         <Alert severity="error" sx={{ mt: 2 }}>
-          grain cannot read the secrets in this repository: {status.secretsError}
+          grain cannot read this host&apos;s secrets file: {status.secretsError}
           {status.secretsFileRecipient && (
             <>
               {" "}They are encrypted to <code>{status.secretsFileRecipient}</code>; paste that key&apos;s private
@@ -176,7 +185,7 @@ export default function StateRepoPanel({ showError }) {
         </Alert>
       )}
       <TextField label="Import a private key" value={importKey} onChange={(e) => setImportKey(e.target.value)}
-        helperText={"Installs a key you already hold, so a repository sealed to another installation becomes " +
+        helperText={"Installs a key you already hold, so a secrets file sealed by another installation becomes " +
           "readable here. A key that cannot open the file is refused, and the key it replaces is kept on disk."}
         type="password" autoComplete="off" fullWidth margin="normal" size="small" />
       <Button type="button" size="small" variant="outlined" disabled={busy || !importKey.trim()}

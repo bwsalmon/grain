@@ -212,6 +212,11 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	}
 	completedTask.Links = append(completedTask.Links,
 		model.Link{Kind: model.LinkFixes, Target: "https://github.com/acme/widgets/pull/101"})
+	// Submitted: model.StateAwaitingSubmit is what an unsubmitted pull
+	// request reads as, so this is the field that makes this card the
+	// "Queued for merge" one rather than a second copy of the card
+	// seeded below it.
+	completedTask.AutoMerge = true
 	if err := store.PutTask(ctx, *completedTask); err != nil {
 		return fmt.Errorf("seeding a completed task: %w", err)
 	}
@@ -220,6 +225,35 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		o.CompletedAt = &completedAt
 	}); err != nil {
 		return fmt.Errorf("seeding a completed task: %w", err)
+	}
+
+	// The other post-run state: a run that finished and opened a pull
+	// request nobody has submitted, which is where a task sits until a
+	// human clicks Submit (model.StateAwaitingSubmit). Every seeded state
+	// gets a card so the demo shows the whole vocabulary, and this one is
+	// the state a deployment that does not auto-merge lives in.
+	awaitingSubmit, err := create(ago(6*time.Hour), ui.CreateTaskRequest{
+		Title:       "Cache the capability readiness probe",
+		Description: "Settings' Capabilities tab re-probes every render; cache it for a minute.",
+		Approved:    true,
+	})
+	if err != nil {
+		return err
+	}
+	awaitingSubmitTask, err := store.GetTask(ctx, awaitingSubmit.ID)
+	if err != nil {
+		return err
+	}
+	awaitingSubmitTask.Links = append(awaitingSubmitTask.Links,
+		model.Link{Kind: model.LinkFixes, Target: "https://github.com/acme/widgets/pull/102"})
+	if err := store.PutTask(ctx, *awaitingSubmitTask); err != nil {
+		return fmt.Errorf("seeding a task awaiting submit: %w", err)
+	}
+	awaitingSubmitAt := ago(5 * time.Hour)
+	if err := store.ObserveField(ctx, awaitingSubmit.ID, awaitingSubmitAt, func(o *model.Observation) {
+		o.CompletedAt = &awaitingSubmitAt
+	}); err != nil {
+		return fmt.Errorf("seeding a task awaiting submit: %w", err)
 	}
 
 	stacked, err := create(ago(50*time.Minute), ui.CreateTaskRequest{
@@ -236,6 +270,12 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	}
 	stackedTask.Links = append(stackedTask.Links,
 		model.Link{Kind: model.LinkFixes, Target: "https://github.com/acme/widgets/pull/104"})
+	// Submitted, like the completed card above and for a stronger reason:
+	// the merge queue only ever files a fix task for one of its own
+	// members (orchestrator.isQueueMember, which is AutoMerge), so a
+	// parent carrying a fix task and no AutoMerge would be a shape no
+	// real deployment produces.
+	stackedTask.AutoMerge = true
 	if err := store.PutTask(ctx, *stackedTask); err != nil {
 		return fmt.Errorf("seeding a task with a stacked fix: %w", err)
 	}

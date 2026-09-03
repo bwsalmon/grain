@@ -175,10 +175,10 @@ func TestDecryptRejectsATamperedFile(t *testing.T) {
 	}
 }
 
-// The restore path: a repository cloned onto a new host arrives with an
-// encrypted file and no key, which is the correct security property and
+// The restore path: a file restored onto a new host arrives encrypted
+// and without its key, which is the correct security property and
 // useless unless the operator can put their key back.
-func TestImportingTheKeyMakesAClonedFileReadable(t *testing.T) {
+func TestImportingTheKeyMakesARestoredFileReadable(t *testing.T) {
 	origin := t.TempDir()
 	store := New(origin)
 	if err := store.Set("db", "password", []byte("hunter2")); err != nil {
@@ -189,7 +189,7 @@ func TestImportingTheKeyMakesAClonedFileReadable(t *testing.T) {
 		t.Fatalf("reading the operator's key: %v", err)
 	}
 
-	// The clone: the encrypted file travels, the key does not.
+	// The restore: the encrypted file travels, the key does not.
 	host := t.TempDir()
 	sealed, err := os.ReadFile(filepath.Join(origin, DefaultFileName))
 	if err != nil {

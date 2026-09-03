@@ -149,8 +149,8 @@ func TestSyncPullRequestsLeavesAnOpenCleanPullRequestAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want still completed (not yet closed)", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want it still watched and not yet closed", st)
 	}
 	obs, err := store.GetObservation(ctx, task.ID)
 	if err != nil {

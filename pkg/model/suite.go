@@ -5,51 +5,51 @@ import (
 	"time"
 )
 
-// SuitePrincipal is the automation actor every task a task suite run
-// files is attributed to -- its own actor, distinct from scheduler
+// SuitePrincipal is the automation actor every task a suite run files
+// is attributed to -- its own actor, distinct from scheduler
 // (schedule.go) and QualificationPrincipal (qualification.go), so a
 // task's own conversation and origin make plain which mechanism filed
 // it.
-var SuitePrincipal = Principal{Kind: PrincipalAutomation, ID: "task-suite"}
+var SuitePrincipal = Principal{Kind: PrincipalAutomation, ID: "suite"}
 
-// TaskSuiteItem is one TaskTemplate (bwsalmon/agents#516) a suite runs,
+// SuiteItem is one Template (bwsalmon/agents#516) a suite runs,
 // referenced by id rather than copied -- content lives on the template,
 // and a run resolves it fresh every time a pass fires, the same "not a
 // stale copy" discipline fireTaskSchedule and CreateQualificationRun
 // already hold TemplateID to.
-type TaskSuiteItem struct {
+type SuiteItem struct {
 	TemplateID string
 }
 
-// TaskSuiteMode decides when a run's passes stop.
-type TaskSuiteMode string
+// SuiteMode decides when a run's passes stop.
+type SuiteMode string
 
 const (
-	// TaskSuiteCount runs the suite's items exactly Count times, whatever
+	// SuiteCount runs the suite's items exactly Count times, whatever
 	// each pass produces.
-	TaskSuiteCount TaskSuiteMode = "count"
-	// TaskSuiteUntilClean re-runs the suite's items pass after pass until
+	SuiteCount SuiteMode = "count"
+	// SuiteUntilClean re-runs the suite's items pass after pass until
 	// one pass opens no pull request and proposes no follow-up task --
 	// bwsalmon/agents#642's own "run the tasks until they generate no
 	// issues or repo changes" -- or until MaxPasses passes have run
 	// without ever reaching one, whichever comes first.
-	TaskSuiteUntilClean TaskSuiteMode = "until_clean"
+	SuiteUntilClean SuiteMode = "until_clean"
 )
 
-func (m TaskSuiteMode) Valid() bool {
+func (m SuiteMode) Valid() bool {
 	switch m {
-	case TaskSuiteCount, TaskSuiteUntilClean:
+	case SuiteCount, SuiteUntilClean:
 		return true
 	}
 	return false
 }
 
-// TaskSuite is a saved combination of task templates plus how to run them
+// Suite is a saved combination of templates plus how to run them
 // against a repo and branch (bwsalmon/agents#642) -- a template a human
 // builds once, then runs any number of times, the same
 // declared/instantiated split every other "run this against a repo"
-// mechanism here already has (TaskTemplate -> Schedule/QualificationRun,
-// here TaskSuite -> TaskSuiteRun).
+// mechanism here already has (Template -> Schedule/QualificationRun,
+// here Suite -> SuiteRun).
 //
 // RequireApproval and AutoMerge are QualificationPlan's own two switches
 // (bwsalmon/agents#518), read the same way here: RequireApproval leaves
@@ -60,77 +60,76 @@ func (m TaskSuiteMode) Valid() bool {
 // moment it reads clean, with no separate review of the change itself.
 // The issue's own "by default they should auto queue and auto merge" is
 // RequireApproval false and AutoMerge true, CreateSuite's own default.
-type TaskSuite struct {
+type Suite struct {
 	ID              string
 	Name            string
-	Items           []TaskSuiteItem
-	Mode            TaskSuiteMode
-	Count           int // TaskSuiteCount only; always >= 1
-	MaxPasses       int // TaskSuiteUntilClean only; always >= 1
+	Items           []SuiteItem
+	Mode            SuiteMode
+	Count           int // SuiteCount only; always >= 1
+	MaxPasses       int // SuiteUntilClean only; always >= 1
 	RequireApproval bool
 	AutoMerge       bool
 	CreatedAt       time.Time
 }
 
 // Validate reports whether a suite's own fields make sense to run --
-// checked once here, the same as QualificationPlan.Validate, rather than
-// left for CreateTaskSuiteRun to discover mid-way through filing a pass.
-// It does not check that any item's TemplateID names a template that
-// still exists -- that is a store lookup, left to ui.Client.CreateSuite/
-// UpdateSuite and to CreateTaskSuiteRun, which each resolve every item
-// fresh at the moment they need its content.
-func (s TaskSuite) Validate() error {
+// checked once here, the same as QualificationPlan.Validate, rather
+// than left for CreateSuiteRun to discover mid-way through filing a
+// pass. It does not check that any item's TemplateID names a template
+// that still exists -- that is a store lookup, left to
+// ui.Client.CreateSuite/UpdateSuite and to CreateSuiteRun, which each
+// resolve every item fresh at the moment they need its content.
+func (s Suite) Validate() error {
 	if len(s.Items) == 0 {
-		return fmt.Errorf("a task suite needs at least one task template")
+		return fmt.Errorf("a suite needs at least one template")
 	}
 	for _, it := range s.Items {
 		if it.TemplateID == "" {
-			return fmt.Errorf("a task suite item needs a template")
+			return fmt.Errorf("a suite item needs a template")
 		}
 	}
 	switch s.Mode {
-	case TaskSuiteCount:
+	case SuiteCount:
 		if s.Count < 1 {
 			return fmt.Errorf("count must be at least 1")
 		}
-	case TaskSuiteUntilClean:
+	case SuiteUntilClean:
 		if s.MaxPasses < 1 {
 			return fmt.Errorf("max passes must be at least 1")
 		}
 	default:
-		return fmt.Errorf("unknown task suite mode %q", s.Mode)
+		return fmt.Errorf("unknown suite mode %q", s.Mode)
 	}
 	return nil
 }
 
-// TaskSuiteRunStatus is a run's own progress -- unlike
+// SuiteRunStatus is a run's own progress -- unlike
 // QualificationRunStatus, not purely derived from its tasks on every
 // read, since deciding whether to stop or fire another pass is a
-// judgement SyncTaskSuites itself makes once (was the last pass clean?
-// has Count or MaxPasses been reached?) and records here.
-type TaskSuiteRunStatus string
+// judgement SyncSuites itself makes once (was the last pass clean? has
+// Count or MaxPasses been reached?) and records here.
+type SuiteRunStatus string
 
 const (
-	// TaskSuiteRunActive means a pass is still in flight, or the next one
+	// SuiteRunActive means a pass is still in flight, or the next one
 	// is waiting on this cycle's reconciler to fire it.
-	TaskSuiteRunActive TaskSuiteRunStatus = "active"
-	// TaskSuiteRunSucceeded means the run stopped on its own terms:
-	// TaskSuiteCount finished every pass, or TaskSuiteUntilClean reached
-	// a pass that opened no pull request and proposed no follow-up task.
-	TaskSuiteRunSucceeded TaskSuiteRunStatus = "succeeded"
-	// TaskSuiteRunFailed means a pass's task failed or closed without
-	// completing, or (TaskSuiteUntilClean only) MaxPasses ran out with no
+	SuiteRunActive SuiteRunStatus = "active"
+	// SuiteRunSucceeded means the run stopped on its own terms:
+	// SuiteCount finished every pass, or SuiteUntilClean reached a pass
+	// that opened no pull request and proposed no follow-up task.
+	SuiteRunSucceeded SuiteRunStatus = "succeeded"
+	// SuiteRunFailed means a pass's task failed or closed without
+	// completing, or (SuiteUntilClean only) MaxPasses ran out with no
 	// pass ever reading clean.
-	TaskSuiteRunFailed TaskSuiteRunStatus = "failed"
+	SuiteRunFailed SuiteRunStatus = "failed"
 )
 
-// TaskSuiteTaskStatus is one task instance a run's pass instantiated,
-// with enough of its current progress to tell whether that pass has
-// finished and, once it has, whether it was clean --
-// QualificationTaskStatus's own shape, with PassNumber in place of
-// InstanceIndex/Repeat since a suite run repeats whole passes rather
-// than individual items.
-type TaskSuiteTaskStatus struct {
+// SuiteTaskStatus is one task instance a run's pass instantiated, with
+// enough of its current progress to tell whether that pass has finished
+// and, once it has, whether it was clean -- QualificationTaskStatus's
+// own shape, with PassNumber in place of InstanceIndex/Repeat since a
+// suite run repeats whole passes rather than individual items.
+type SuiteTaskStatus struct {
 	TaskID       string
 	TemplateID   string
 	TemplateName string
@@ -140,20 +139,20 @@ type TaskSuiteTaskStatus struct {
 	// OpenedPullRequest is this task's own LinkFixes -- true once its run
 	// pushed a branch and grain opened (or found) a pull request for it.
 	OpenedPullRequest bool
-	// Proposed is true if this task's run proposed at least one follow-up
-	// task (a LinkProposedBy pointing back at it) -- the other half of
-	// what a TaskSuiteUntilClean pass's own "clean" reading is built
-	// from, alongside OpenedPullRequest.
+	// Proposed is true if this task's run proposed at least one
+	// follow-up task (a LinkProposedBy pointing back at it) -- the
+	// other half of what a SuiteUntilClean pass's own "clean" reading
+	// is built from, alongside OpenedPullRequest.
 	Proposed bool
 }
 
-// TaskSuiteRun is one run of a suite against a repo and branch --
+// SuiteRun is one run of a suite against a repo and branch --
 // bwsalmon/agents#642's own "run the template against a repo and
 // branch." Every field a run's own behaviour depends on (Items, Mode,
 // Count, MaxPasses, RequireApproval, AutoMerge) is snapshotted from the
 // suite at creation, not read live from it, so editing a suite never
 // changes how a run already in flight behaves.
-type TaskSuiteRun struct {
+type SuiteRun struct {
 	ID        int64
 	SuiteID   string
 	SuiteName string // snapshot, QualificationTaskStatus.TemplateName's own reasoning
@@ -166,37 +165,37 @@ type TaskSuiteRun struct {
 	// the form a run can wear.
 	ScheduleID string
 	Target     RepoRef
-	// Base is the branch every task this run files targets, and (through
-	// AutoMerge) the branch every one of them lands back on --
-	// bwsalmon/agents#642's own "tasks created from the task suite should
+	// Base is the branch every task this run files targets, and
+	// (through AutoMerge) the branch every one of them lands back on --
+	// bwsalmon/agents#642's own "tasks created from the suite should
 	// stack against the source branch": every task's pull request bases
-	// off Base, and once it merges the next task to run (the next item in
-	// this pass, or the first item of the next pass) sees that change
-	// simply by cloning Base's own current tip -- the same stacking trick
-	// fileFixTask already uses with one task's own branch as Base,
-	// applied here with a fixed Base every task in the run shares
-	// instead.
+	// off Base, and once it merges the next task to run (the next item
+	// in this pass, or the first item of the next pass) sees that
+	// change simply by cloning Base's own current tip -- the same
+	// stacking trick fileFixTask already uses with one task's own
+	// branch as Base, applied here with a fixed Base every task in the
+	// run shares instead.
 	Base            string
-	Items           []TaskSuiteItem
-	Mode            TaskSuiteMode
+	Items           []SuiteItem
+	Mode            SuiteMode
 	Count           int
 	MaxPasses       int
 	RequireApproval bool
 	AutoMerge       bool
-	Status          TaskSuiteRunStatus
+	Status          SuiteRunStatus
 	LastError       string
 	CreatedAt       time.Time
 	CompletedAt     *time.Time
 	// Tasks is every pass's own instances, oldest first -- PassNumber
 	// groups them, the same way QualificationRun.Tasks groups by
 	// InstanceIndex.
-	Tasks []TaskSuiteTaskStatus
+	Tasks []SuiteTaskStatus
 }
 
 // CurrentPass returns run's own highest PassNumber, or 0 if it has no
-// tasks yet -- unreachable once created, since CreateTaskSuiteRun always
+// tasks yet -- unreachable once created, since CreateSuiteRun always
 // files a first pass, but a safe zero value all the same.
-func (r TaskSuiteRun) CurrentPass() int {
+func (r SuiteRun) CurrentPass() int {
 	max := 0
 	for _, t := range r.Tasks {
 		if t.PassNumber > max {
@@ -207,8 +206,8 @@ func (r TaskSuiteRun) CurrentPass() int {
 }
 
 // PassTasks returns the tasks belonging to pass n only.
-func (r TaskSuiteRun) PassTasks(n int) []TaskSuiteTaskStatus {
-	var out []TaskSuiteTaskStatus
+func (r SuiteRun) PassTasks(n int) []SuiteTaskStatus {
+	var out []SuiteTaskStatus
 	for _, t := range r.Tasks {
 		if t.PassNumber == n {
 			out = append(out, t)
@@ -217,8 +216,8 @@ func (r TaskSuiteRun) PassTasks(n int) []TaskSuiteTaskStatus {
 	return out
 }
 
-// PassOutcome is what SyncTaskSuites reads off a pass's own tasks to
-// decide what to do next.
+// PassOutcome is what SyncSuites reads off a pass's own tasks to decide
+// what to do next.
 type PassOutcome int
 
 const (
@@ -239,16 +238,21 @@ const (
 )
 
 // OutcomeOfPass reduces one pass's own task instances to what
-// SyncTaskSuites needs to decide whether to stop or fire another pass.
-// A failure found anywhere outranks everything else, the same
-// precedence QualificationStatus gives anyFailed over allCompleted --
-// a straggler elsewhere does not hide a failure already known, and
-// nothing here waits for every instance to settle before reporting one.
-func OutcomeOfPass(tasks []TaskSuiteTaskStatus) PassOutcome {
+// SyncSuites needs to decide whether to stop or fire another pass. A
+// failure found anywhere outranks everything else, the same precedence
+// QualificationStatus gives anyFailed over allCompleted -- a straggler
+// elsewhere does not hide a failure already known, and nothing here
+// waits for every instance to settle before reporting one.
+func OutcomeOfPass(tasks []SuiteTaskStatus) PassOutcome {
 	changed, anyFailed, anyPending := false, false, false
 	for _, t := range tasks {
 		switch t.State {
-		case StateCompleted:
+		// StateAwaitingSubmit counts as completed here for the reason
+		// QualificationStatus gives: a pass measures whether its tasks ran
+		// and what they produced, and a pull request nobody has submitted
+		// yet is a pull request all the same -- OpenedPullRequest below is
+		// exactly the case that makes a task read that way.
+		case StateCompleted, StateAwaitingSubmit:
 			if t.OpenedPullRequest || t.Proposed {
 				changed = true
 			}
@@ -265,8 +269,8 @@ func OutcomeOfPass(tasks []TaskSuiteTaskStatus) PassOutcome {
 		// sees: a pass fires every item at once, so a failure in one
 		// item and a second item still running is the ordinary shape of
 		// a pass going wrong. Reporting PassPending there would leave
-		// the run active -- firing further passes, in TaskSuiteCount
-		// mode -- on a pass already known to have failed.
+		// the run active -- firing further passes, in SuiteCount mode
+		// -- on a pass already known to have failed.
 		return PassFailed
 	case anyPending:
 		return PassPending

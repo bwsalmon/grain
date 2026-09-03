@@ -3,10 +3,13 @@ package geminikey
 import (
 	"context"
 	"errors"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/api/googleapi"
 
 	"github.com/bwsalmon/grain/pkg/model"
 )
@@ -414,6 +417,19 @@ var refusedCredentialError = errors.New(
 		`?alt=json&prettyPrint=false": auth: cannot fetch token: 400 Response: ` +
 		`{"error":"invalid_grant","error_description":"Invalid JWT Signature."}`)
 
+// forbiddenError is the API Keys API's own 403, as advise reads one:
+// the status code, plus a body carrying the ErrorInfo reason that
+// separates "this API was never enabled" from "the minter may not
+// administer keys here". reason is that word, or "" for the IAM refusal
+// which carries none.
+func forbiddenError(reason string) error {
+	return &googleapi.Error{
+		Code:    http.StatusForbidden,
+		Message: "Permission 'apikeys.keys.list' denied on resource (or it may not exist).",
+		Body:    `{"error":{"code":403,"details":[{"reason":"` + reason + `"}]}}`,
+	}
+}
+
 // namesTheDeadSecret is the whole of what this explanation owes an
 // operator, checked the same way on every path that can hit it: which
 // secret holds the key GCP refused, the command that replaces it, and
@@ -486,6 +502,85 @@ func TestReapNamesTheSecretWhenGCPRefusesTheMinterCredential(t *testing.T) {
 
 	_, err := c.Reap(context.Background(), fakeResolver{"test-gcp-credential": "the-minter-key-material"}, time.Now())
 	namesTheDeadSecret(t, err)
+}
+
+// A check is the one call an operator makes deliberately, from a pane
+// that has already told them this capability is **Ready** -- so what it
+// says back has to be evidence rather than a repeat of that badge: which
+// credential answered, in which project, and what it saw there.
+func TestCheckCredentialReportsWhatGCPAnswered(t *testing.T) {
+	fm := newFakeMinter()
+	fm.keys["k1"] = mintedKey{Name: "k1", DisplayName: displayNamePrefix + "run-1", CreateTime: time.Now()}
+	fm.keys["k2"] = mintedKey{Name: "k2", DisplayName: "somebody-elses-key", CreateTime: time.Now()}
+	c := testCapability(fm)
+
+	check, err := c.CheckCredential(context.Background(), fakeResolver{"test-gcp-credential": "the-minter-key-material"})
+	if err != nil {
+		t.Fatalf("CheckCredential: %v", err)
+	}
+	if len(check.Credentials) != 1 || check.Credentials[0] != "test-gcp-credential" {
+		t.Errorf("Credentials = %v, want the minter credential this capability mints under", check.Credentials)
+	}
+	if !strings.Contains(check.Detail, "2 API key(s)") || !strings.Contains(check.Detail, "1 of them grain's") {
+		t.Errorf("detail %q does not say what the listing actually returned", check.Detail)
+	}
+	if !strings.Contains(check.Detail, "test-project") {
+		t.Errorf("detail %q does not name the project that was listed", check.Detail)
+	}
+	// Nothing minted, nothing deleted: a button somebody presses twice
+	// must not be a button that leaves keys behind.
+	if len(fm.keys) != 2 || len(fm.deleted) != 0 {
+		t.Errorf("the check changed the project's keys: keys=%v deleted=%v", fm.keys, fm.deleted)
+	}
+}
+
+// The same dead minter key that breaks gcp-key breaks this, since both
+// mint under it -- so the check has to name the secret rather than hand
+// back Google's `invalid_grant`.
+func TestCheckCredentialNamesTheSecretWhenGCPRefusesIt(t *testing.T) {
+	fm := newFakeMinter()
+	fm.listErr = refusedCredentialError
+	c := testCapability(fm)
+
+	check, err := c.CheckCredential(context.Background(), fakeResolver{"test-gcp-credential": "the-minter-key-material"})
+	namesTheDeadSecret(t, err)
+	if len(check.Credentials) != 1 || check.Credentials[0] != "test-gcp-credential" {
+		t.Errorf("Credentials = %v, want the checked credential named even on failure", check.Credentials)
+	}
+}
+
+// The second thing only this API can answer, and the reason gemini-key
+// is worth checking separately from gcp-key even though the two share a
+// credential: a live minter key that may not administer API keys here,
+// or a project where the API was never enabled. Both arrive as a 403
+// advise exists to tell apart, and the check has to carry that sentence
+// through rather than reporting a bare permission error.
+func TestCheckCredentialAdvisesOnAForbiddenListing(t *testing.T) {
+	fm := newFakeMinter()
+	fm.listErr = forbiddenError("SERVICE_DISABLED")
+	c := testCapability(fm)
+
+	_, err := c.CheckCredential(context.Background(), fakeResolver{"test-gcp-credential": "the-minter-key-material"})
+	if err == nil {
+		t.Fatal("expected a forbidden listing to fail the check")
+	}
+	if !strings.Contains(err.Error(), "not enabled in project test-project") {
+		t.Errorf("error %q does not say the API Keys API was never enabled", err)
+	}
+	if !strings.Contains(err.Error(), "grain setup gcp") {
+		t.Errorf("error %q does not name the command that fixes it", err)
+	}
+}
+
+func TestCheckCredentialFailsWhenUnconfigured(t *testing.T) {
+	c := New("", model.CredentialRef{})
+	if _, err := c.CheckCredential(context.Background(), fakeResolver{}); err == nil {
+		t.Fatal("expected a check against an unconfigured deployment to fail")
+	}
+}
+
+func TestCapabilitySatisfiesCredentialChecker(t *testing.T) {
+	var _ model.CredentialChecker = (*Capability)(nil)
 }
 
 // Anything else is passed through as it is: wrapping every failure in

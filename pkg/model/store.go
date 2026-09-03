@@ -79,6 +79,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.renameScheduleTables(ctx); err != nil {
 		return fmt.Errorf("renaming scheduled_task to schedule: %w", err)
 	}
+	if err := s.renameTemplateAndSuiteTables(ctx); err != nil {
+		return fmt.Errorf("renaming task_template/task_suite to template/suite: %w", err)
+	}
 	for _, stmt := range Statements() {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("applying schema: %w", err)
@@ -160,14 +163,17 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigCodexModelColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
-	if err := s.ensureTaskTemplateNoTargetColumns(ctx); err != nil {
-		return fmt.Errorf("migrating task_template: %w", err)
+	if err := s.ensureTemplateNoTargetColumns(ctx); err != nil {
+		return fmt.Errorf("migrating template: %w", err)
 	}
 	if err := s.ensureScheduleSuiteColumn(ctx); err != nil {
 		return fmt.Errorf("migrating schedule: %w", err)
 	}
-	if err := s.ensureTaskSuiteRunScheduleColumn(ctx); err != nil {
-		return fmt.Errorf("migrating task_suite_run: %w", err)
+	if err := s.ensureSuiteRunScheduleColumn(ctx); err != nil {
+		return fmt.Errorf("migrating suite_run: %w", err)
+	}
+	if err := s.renameSuitePrincipal(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
 	}
 	if err := s.ensureConfigDefaultCapabilitiesColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
@@ -488,6 +494,75 @@ func (s *Store) renameScheduleTables(ctx context.Context) error {
 	return nil
 }
 
+// renameTemplateAndSuiteTables carries a database written before this
+// build's rename of the two features -- "task templates" and "task
+// suites" everywhere, now just templates and suites (docs/schedules.md)
+// -- onto the table names that rename leaves: task_template and its
+// three companions become template, template_sequence, template_read
+// and template_grant, the child tables' task_template_id column becomes
+// template_id, and task_suite and its five companions become suite,
+// suite_sequence, suite_item, suite_run, suite_run_item and
+// suite_run_task. Nothing about a row changes; only what the tables
+// holding them are called.
+//
+// renameScheduleTables' own doc comment gives the reasoning for all
+// three of this one's properties: it runs before Init applies the DDL,
+// since Statements() would otherwise create empty tables beside the
+// populated ones and leave the rename with nowhere to go; each step is
+// guarded on the old name being there and the new one not, so it is
+// idempotent and safe to interrupt; and no SchemaVersion bump goes with
+// it, since an existing database migrates into the new shape here.
+//
+// SQLite carries an index across ALTER TABLE RENAME under its own old
+// name, which no CREATE INDEX IF NOT EXISTS in Statements() would ever
+// match -- so the five renamed indexes are dropped here rather than
+// renamed, and the DDL immediately after creates them again under the
+// names schema.go now declares.
+func (s *Store) renameTemplateAndSuiteTables(ctx context.Context) error {
+	for _, rename := range []struct{ from, to string }{
+		{"task_template", "template"},
+		{"task_template_sequence", "template_sequence"},
+		{"task_template_read", "template_read"},
+		{"task_template_grant", "template_grant"},
+		{"task_suite", "suite"},
+		{"task_suite_sequence", "suite_sequence"},
+		{"task_suite_item", "suite_item"},
+		{"task_suite_run", "suite_run"},
+		{"task_suite_run_item", "suite_run_item"},
+		{"task_suite_run_task", "suite_run_task"},
+	} {
+		if !s.has(ctx, "SELECT 1 FROM `"+rename.from+"` WHERE 1 = 0") ||
+			s.has(ctx, "SELECT 1 FROM `"+rename.to+"` WHERE 1 = 0") {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"ALTER TABLE `"+rename.from+"` RENAME TO `"+rename.to+"`"); err != nil {
+			return err
+		}
+	}
+	for _, table := range []string{"template_read", "template_grant"} {
+		if !s.has(ctx, "SELECT `task_template_id` FROM `"+table+"` WHERE 1 = 0") {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx,
+			"ALTER TABLE `"+table+"` RENAME COLUMN `task_template_id` TO `template_id`"); err != nil {
+			return err
+		}
+	}
+	for _, index := range []string{
+		"task_suite_item_suite",
+		"task_suite_run_status",
+		"task_suite_run_item_run",
+		"task_suite_run_task_run",
+		"task_suite_run_task_task",
+	} {
+		if _, err := s.db.ExecContext(ctx, "DROP INDEX IF EXISTS `"+index+"`"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // has reports whether probe -- a zero-row SELECT of a table or a column,
 // the probe every migration in this file already open-codes -- runs at
 // all, which is what "that table/column is there" looks like without a
@@ -545,12 +620,12 @@ func (s *Store) ensureScheduleRecurrenceColumns(ctx context.Context) error {
 }
 
 // ensureScheduleTemplateColumn adds schedule.template_id
-// (bwsalmon/agents#516, schema.go's own DDL comment on the table has the
-// reasoning) to a database created before task_template existed, the same
-// probe-then-ALTER approach every ensure* migration in this file already
-// uses. NULL for every existing row, matching every schedule already on
-// it: none of them can have pointed at a template that did not yet exist
-// to point at.
+// (bwsalmon/agents#516, schema.go's own DDL comment on the table has
+// the reasoning) to a database created before template existed, the
+// same probe-then-ALTER approach every ensure* migration in this file
+// already uses. NULL for every existing row, matching every schedule
+// already on it: none of them can have pointed at a template that did
+// not yet exist to point at.
 func (s *Store) ensureScheduleTemplateColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `template_id` FROM `schedule` WHERE 1 = 0")
 	if err == nil {
@@ -562,11 +637,11 @@ func (s *Store) ensureScheduleTemplateColumn(ctx context.Context) error {
 
 // ensureScheduleSuiteColumn adds schedule.suite_id
 // (model.Schedule.SuiteID's own doc comment has the reasoning) to a
-// database created before a schedule could fire a task suite, the same
-// probe-then-ALTER approach ensureScheduleTemplateColumn already uses for
-// the column beside it. NULL for every existing row: a schedule already
-// on such a database files a single task, which is exactly what NULL
-// means here.
+// database created before a schedule could fire a suite, the same
+// probe-then-ALTER approach ensureScheduleTemplateColumn already uses
+// for the column beside it. NULL for every existing row: a schedule
+// already on such a database files a single task, which is exactly what
+// NULL means here.
 func (s *Store) ensureScheduleSuiteColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `suite_id` FROM `schedule` WHERE 1 = 0")
 	if err == nil {
@@ -576,17 +651,17 @@ func (s *Store) ensureScheduleSuiteColumn(ctx context.Context) error {
 	return err
 }
 
-// ensureTaskSuiteRunScheduleColumn adds task_suite_run.schedule_id
-// (schema.go's own DDL comment on the table has the reasoning) to a
-// database created before a schedule could fire a task suite. NULL for
-// every existing run, matching what every one of them was: started by a
-// human, not by a schedule.
-func (s *Store) ensureTaskSuiteRunScheduleColumn(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT `schedule_id` FROM `task_suite_run` WHERE 1 = 0")
+// ensureSuiteRunScheduleColumn adds suite_run.schedule_id (schema.go's
+// own DDL comment on the table has the reasoning) to a database created
+// before a schedule could fire a suite. NULL for every existing run,
+// matching what every one of them was: started by a human, not by a
+// schedule.
+func (s *Store) ensureSuiteRunScheduleColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `schedule_id` FROM `suite_run` WHERE 1 = 0")
 	if err == nil {
 		return rows.Close()
 	}
-	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_suite_run` ADD COLUMN `schedule_id` TEXT NULL")
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `suite_run` ADD COLUMN `schedule_id` TEXT NULL")
 	return err
 }
 
@@ -1027,21 +1102,21 @@ func (s *Store) ensureConfigEnvironmentNameColumn(ctx context.Context) error {
 	return err
 }
 
-// ensureTaskTemplateNoTargetColumns drops task_template's old
+// ensureTemplateNoTargetColumns drops template's old
 // target_owner/target_name/base columns (schema.go's own DDL comment on
-// the table has the reasoning: which repo and branch a firing targets is
-// a property of the caller using a template, not of the template itself)
-// from a database created before that split. Unlike every ensure*Column
-// migration above, which probes for a column's absence and adds it, this
-// probes for the old columns' presence and removes them -- the same
-// direction ensureConfigMaxConcurrentColumn's own slots removal and
-// ensureScheduleRecurrenceColumns' own interval_ms removal already go,
-// since target_owner and target_name are NOT NULL and Init's own CREATE
-// TABLE IF NOT EXISTS never alters a table that already exists: left in
-// place, they would fail every PutTaskTemplate, which stops supplying
-// them.
-func (s *Store) ensureTaskTemplateNoTargetColumns(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT `target_owner` FROM `task_template` WHERE 1 = 0")
+// the table has the reasoning: which repo and branch a firing targets
+// is a property of the caller using a template, not of the template
+// itself) from a database created before that split. Unlike every
+// ensure*Column migration above, which probes for a column's absence
+// and adds it, this probes for the old columns' presence and removes
+// them -- the same direction ensureConfigMaxConcurrentColumn's own
+// slots removal and ensureScheduleRecurrenceColumns' own interval_ms
+// removal already go, since target_owner and target_name are NOT NULL
+// and Init's own CREATE TABLE IF NOT EXISTS never alters a table that
+// already exists: left in place, they would fail every PutTemplate,
+// which stops supplying them.
+func (s *Store) ensureTemplateNoTargetColumns(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `target_owner` FROM `template` WHERE 1 = 0")
 	if err != nil {
 		// Already gone -- either a fresh database (Statements() above
 		// never created it) or one already migrated past this point.
@@ -1050,7 +1125,32 @@ func (s *Store) ensureTaskTemplateNoTargetColumns(ctx context.Context) error {
 	rows.Close()
 	for _, col := range []string{"target_owner", "target_name", "base"} {
 		if _, err := s.db.ExecContext(ctx,
-			"ALTER TABLE `task_template` DROP COLUMN `"+col+"`"); err != nil {
+			"ALTER TABLE `template` DROP COLUMN `"+col+"`"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// renameSuitePrincipal carries the tasks an earlier build's suite runs
+// filed onto SuitePrincipal's own new id: the actor was "task-suite"
+// while the feature was called task suites, and is plain "suite" now
+// that it is not (QualificationPrincipal's own "qualification" is the
+// shape it matches). Unlike the table renames above this is a value in
+// rows rather than a name in the schema, so it is a plain UPDATE of the
+// two columns a suite run ever writes that actor to -- a task's origin,
+// and the approval a run stamps on the tasks it files itself.
+//
+// Kept narrow on purpose: only rows whose kind is automation and whose
+// id is exactly the old string, so nothing a human or another mechanism
+// wrote is touched, and running it again on an already-migrated
+// database matches nothing.
+func (s *Store) renameSuitePrincipal(ctx context.Context) error {
+	for _, col := range []string{"origin", "approval"} {
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE `task` SET `"+col+"_actor_id` = ? "+
+				"WHERE `"+col+"_actor_kind` = ? AND `"+col+"_actor_id` = ?",
+			SuitePrincipal.ID, string(PrincipalAutomation), "task-suite"); err != nil {
 			return err
 		}
 	}
@@ -2873,8 +2973,9 @@ func grantsOf(ctx context.Context, q querier, taskID string) ([]Grant, error) {
 }
 
 // TaskPullRequestLink is one task_link row of kind LinkFixes, belonging to
-// a task whose state is 'completed' — a run pushed and a PR was opened or
-// found for it, and grain has not yet observed that PR finish.
+// a task whose run is over and whose pull request has not finished — a run
+// pushed and a PR was opened or found for it, and grain has not yet
+// observed that PR merge or close.
 type TaskPullRequestLink struct {
 	TaskID string
 	// PullRequest is the link's own target, a model.PullRequestRef's
@@ -2882,20 +2983,28 @@ type TaskPullRequestLink struct {
 	PullRequest string
 }
 
-// OpenPullRequestLinks returns every fixes-link on a completed task —
-// what a GitHub-sync component polls each cycle to find a PR whose health
-// it should refresh, without needing a table of its own: task_link and
-// task_state already carry everything this needs, and task_state already
-// stops returning 'completed' the moment task_observation's closed_at is
-// set, so a closed-out task drops out of this list with no extra
-// bookkeeping.
+// OpenPullRequestLinks returns every fixes-link on a task whose run has
+// finished and which has not closed — what a GitHub-sync component polls
+// each cycle to find a PR whose health it should refresh, without needing
+// a table of its own: task_link and task_state already carry everything
+// this needs, and task_state stops returning either post-run state the
+// moment task_observation's closed_at is set, so a closed-out task drops
+// out of this list with no extra bookkeeping.
+//
+// Both post-run states, not only 'completed'. A task nobody has submitted
+// reads 'awaiting_submit' (StateAwaitingSubmit) and its pull request is
+// every bit as real: somebody may merge or close it on GitHub by hand,
+// and that is precisely the observation SyncPullRequests exists to make.
+// Narrowing this to 'completed' would leave such a task showing a pull
+// request grain had quietly stopped watching, open forever after it had
+// already merged.
 func (s *Store) OpenPullRequestLinks(ctx context.Context) ([]TaskPullRequestLink, error) {
 	var out []TaskPullRequestLink
 	err := each(ctx, s.db,
 		"SELECT `l`.`task_id`, `l`.`target` FROM `task_link` AS `l` "+
 			"JOIN `task_state` AS `st` ON `st`.`task_id` = `l`.`task_id` "+
-			"WHERE `l`.`kind` = ? AND `st`.`state` = 'completed' ORDER BY `l`.`task_id`",
-		string(LinkFixes),
+			"WHERE `l`.`kind` = ? AND `st`.`state` IN (?, ?) ORDER BY `l`.`task_id`",
+		[]any{string(LinkFixes), string(StateCompleted), string(StateAwaitingSubmit)},
 		func(rows *sql.Rows) error {
 			var l TaskPullRequestLink
 			if err := rows.Scan(&l.TaskID, &l.PullRequest); err != nil {
@@ -3314,76 +3423,75 @@ func (s *Store) HasOpenTaskWithTag(ctx context.Context, tag string) (bool, error
 	return n > 0, nil
 }
 
-// --- task templates ----------------------------------------------------
+// --- templates ----------------------------------------------------
 
-// NewTaskTemplateID allocates a template identity from its own sequence,
+// NewTemplateID allocates a template identity from its own sequence,
 // distinct from task_sequence and schedule_sequence -- the same "not
 // mistaken for one of the things that use it" reasoning NewScheduleID's
 // own doc comment gives.
-func (s *Store) NewTaskTemplateID(ctx context.Context) (id string, err error) {
-	err = s.write(ctx, "allocate a task template id", func(tx *sql.Tx) error {
-		id, err = newTaskTemplateID(ctx, tx)
+func (s *Store) NewTemplateID(ctx context.Context) (id string, err error) {
+	err = s.write(ctx, "allocate a template id", func(tx *sql.Tx) error {
+		id, err = newTemplateID(ctx, tx)
 		return err
 	})
 	return id, err
 }
 
-func newTaskTemplateID(ctx context.Context, tx *sql.Tx) (string, error) {
+func newTemplateID(ctx context.Context, tx *sql.Tx) (string, error) {
 	res, err := tx.ExecContext(ctx,
-		"INSERT INTO `task_template_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
+		"INSERT INTO `template_sequence` (`issued_at`) VALUES (?)", time.Now().UTC())
 	if err != nil {
-		return "", fmt.Errorf("allocating a task template id: %w", err)
+		return "", fmt.Errorf("allocating a template id: %w", err)
 	}
 	n, err := res.LastInsertId()
 	if err != nil {
-		return "", fmt.Errorf("reading the allocated task template id: %w", err)
+		return "", fmt.Errorf("reading the allocated template id: %w", err)
 	}
 	return "template-" + strconv.FormatInt(n, 10), nil
 }
 
-const taskTemplateColumns = "`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"
+const templateColumns = "`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"
 
-func scanTaskTemplate(scan func(...any) error) (TaskTemplate, error) {
-	var t TaskTemplate
+func scanTemplate(scan func(...any) error) (Template, error) {
+	var t Template
 	if err := scan(&t.ID, &t.Name, &t.Title, &t.Body, &t.AutoMerge, &t.CreatedAt); err != nil {
-		return TaskTemplate{}, err
+		return Template{}, err
 	}
 	return t, nil
 }
 
-// PutTaskTemplate inserts or replaces a template wholesale --
-// putSchedule's own multi-table dance, ported onto task_template's own
-// child tables.
-func (s *Store) PutTaskTemplate(ctx context.Context, t TaskTemplate) error {
-	return s.write(ctx, "put task template "+t.ID,
-		func(tx *sql.Tx) error { return putTaskTemplate(ctx, tx, t) })
+// PutTemplate inserts or replaces a template wholesale -- putSchedule's
+// own multi-table dance, ported onto template's own child tables.
+func (s *Store) PutTemplate(ctx context.Context, t Template) error {
+	return s.write(ctx, "put template "+t.ID,
+		func(tx *sql.Tx) error { return putTemplate(ctx, tx, t) })
 }
 
-func putTaskTemplate(ctx context.Context, tx *sql.Tx, t TaskTemplate) error {
-	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`task_template`"+` (
+func putTemplate(ctx context.Context, tx *sql.Tx, t Template) error {
+	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`template`"+` (
   `+"`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"+`
 ) VALUES (?,?,?,?,?,?)`,
 		t.ID, t.Name, t.Title, t.Body, t.AutoMerge, t.CreatedAt.UTC())
 	if err != nil {
-		return fmt.Errorf("writing task template %s: %w", t.ID, err)
+		return fmt.Errorf("writing template %s: %w", t.ID, err)
 	}
 
-	for _, table := range []string{"task_template_read", "task_template_grant"} {
+	for _, table := range []string{"template_read", "template_grant"} {
 		if _, err := tx.ExecContext(ctx,
-			"DELETE FROM `"+table+"` WHERE `task_template_id` = ?", t.ID); err != nil {
+			"DELETE FROM `"+table+"` WHERE `template_id` = ?", t.ID); err != nil {
 			return err
 		}
 	}
 	for _, r := range t.Reads {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `task_template_read` (`task_template_id`, `owner`, `name`) VALUES (?,?,?)",
+			"INSERT INTO `template_read` (`template_id`, `owner`, `name`) VALUES (?,?,?)",
 			t.ID, r.Owner, r.Name); err != nil {
 			return err
 		}
 	}
 	for _, g := range t.Grants {
 		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO `task_template_grant` (`task_template_id`, `capability`, `via`, `folder`) VALUES (?,?,?,?)",
+			"INSERT INTO `template_grant` (`template_id`, `capability`, `via`, `folder`) VALUES (?,?,?,?)",
 			t.ID, g.Capability, string(g.Via), folderOf(g.Folder)); err != nil {
 			return err
 		}
@@ -3391,13 +3499,13 @@ func putTaskTemplate(ctx context.Context, tx *sql.Tx, t TaskTemplate) error {
 	return nil
 }
 
-// hydrateTaskTemplate fills in t's Reads and Grants, read off their own
+// hydrateTemplate fills in t's Reads and Grants, read off their own
 // tables -- hydrateSchedule's own split-scan reasoning applies again
 // here.
-func hydrateTaskTemplate(ctx context.Context, q querier, t *TaskTemplate) error {
+func hydrateTemplate(ctx context.Context, q querier, t *Template) error {
 	var reads []RepoRef
 	if err := each(ctx, q,
-		"SELECT `owner`,`name` FROM `task_template_read` WHERE `task_template_id` = ? ORDER BY `owner`,`name`",
+		"SELECT `owner`,`name` FROM `template_read` WHERE `template_id` = ? ORDER BY `owner`,`name`",
 		t.ID, func(rows *sql.Rows) error {
 			var r RepoRef
 			if err := rows.Scan(&r.Owner, &r.Name); err != nil {
@@ -3406,11 +3514,11 @@ func hydrateTaskTemplate(ctx context.Context, q querier, t *TaskTemplate) error 
 			reads = append(reads, r)
 			return nil
 		}); err != nil {
-		return fmt.Errorf("reading reads of task template %s: %w", t.ID, err)
+		return fmt.Errorf("reading reads of template %s: %w", t.ID, err)
 	}
 	var grants []Grant
 	if err := each(ctx, q,
-		"SELECT `capability`,`via`,`folder` FROM `task_template_grant` WHERE `task_template_id` = ? ORDER BY `capability`",
+		"SELECT `capability`,`via`,`folder` FROM `template_grant` WHERE `template_id` = ? ORDER BY `capability`",
 		t.ID, func(rows *sql.Rows) error {
 			var g Grant
 			var via string
@@ -3422,44 +3530,43 @@ func hydrateTaskTemplate(ctx context.Context, q querier, t *TaskTemplate) error 
 			grants = append(grants, g)
 			return nil
 		}); err != nil {
-		return fmt.Errorf("reading grants of task template %s: %w", t.ID, err)
+		return fmt.Errorf("reading grants of template %s: %w", t.ID, err)
 	}
 	t.Reads, t.Grants = reads, grants
 	return nil
 }
 
-func getTaskTemplate(ctx context.Context, q querier, id string) (*TaskTemplate, error) {
-	t, err := scanTaskTemplate(q.QueryRowContext(ctx,
-		"SELECT "+taskTemplateColumns+" FROM `task_template` WHERE `id` = ?", id).Scan)
+func getTemplate(ctx context.Context, q querier, id string) (*Template, error) {
+	t, err := scanTemplate(q.QueryRowContext(ctx,
+		"SELECT "+templateColumns+" FROM `template` WHERE `id` = ?", id).Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	if err := hydrateTaskTemplate(ctx, q, &t); err != nil {
+	if err := hydrateTemplate(ctx, q, &t); err != nil {
 		return nil, err
 	}
 	return &t, nil
 }
 
-// GetTaskTemplate returns a template, or nil if there is none with that ID.
-func (s *Store) GetTaskTemplate(ctx context.Context, id string) (*TaskTemplate, error) {
-	return getTaskTemplate(ctx, s.db, id)
+// GetTemplate returns a template, or nil if there is none with that ID.
+func (s *Store) GetTemplate(ctx context.Context, id string) (*Template, error) {
+	return getTemplate(ctx, s.db, id)
 }
 
-// ListTaskTemplates returns every template, newest first --
-// ListSchedules' own "the whole table" reasoning applies again at this
-// size.
-func (s *Store) ListTaskTemplates(ctx context.Context) ([]TaskTemplate, error) {
+// ListTemplates returns every template, newest first -- ListSchedules'
+// own "the whole table" reasoning applies again at this size.
+func (s *Store) ListTemplates(ctx context.Context) ([]Template, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT "+taskTemplateColumns+" FROM `task_template` ORDER BY `created_at` DESC, `id` DESC")
+		"SELECT "+templateColumns+" FROM `template` ORDER BY `created_at` DESC, `id` DESC")
 	if err != nil {
-		return nil, fmt.Errorf("listing task templates: %w", err)
+		return nil, fmt.Errorf("listing templates: %w", err)
 	}
-	var out []TaskTemplate
+	var out []Template
 	for rows.Next() {
-		t, err := scanTaskTemplate(rows.Scan)
+		t, err := scanTemplate(rows.Scan)
 		if err != nil {
 			rows.Close()
 			return nil, err
@@ -3473,22 +3580,22 @@ func (s *Store) ListTaskTemplates(ctx context.Context) ([]TaskTemplate, error) {
 	rows.Close()
 
 	for i := range out {
-		if err := hydrateTaskTemplate(ctx, s.db, &out[i]); err != nil {
+		if err := hydrateTemplate(ctx, s.db, &out[i]); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-// UpdateTaskTemplate reads a template, applies mutate, and writes it back
-// -- UpdateSchedule's own read-modify-write-and-retry shape, for the same
-// reason: mutate may run more than once, on a template freshly read
-// inside each attempt.
-func (s *Store) UpdateTaskTemplate(ctx context.Context, id string, mutate func(*TaskTemplate) error) error {
+// UpdateTemplate reads a template, applies mutate, and writes it back
+// -- UpdateSchedule's own read-modify-write-and-retry shape, for the
+// same reason: mutate may run more than once, on a template freshly
+// read inside each attempt.
+func (s *Store) UpdateTemplate(ctx context.Context, id string, mutate func(*Template) error) error {
 	var missing bool
-	err := s.write(ctx, "update task template "+id, func(tx *sql.Tx) error {
+	err := s.write(ctx, "update template "+id, func(tx *sql.Tx) error {
 		missing = false
-		t, err := getTaskTemplate(ctx, tx, id)
+		t, err := getTemplate(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -3499,18 +3606,18 @@ func (s *Store) UpdateTaskTemplate(ctx context.Context, id string, mutate func(*
 		if err := mutate(t); err != nil {
 			return err
 		}
-		return putTaskTemplate(ctx, tx, *t)
+		return putTemplate(ctx, tx, *t)
 	})
 	if err != nil {
 		return err
 	}
 	if missing {
-		return fmt.Errorf("updating task template %s: no such task template", id)
+		return fmt.Errorf("updating template %s: no such template", id)
 	}
 	return nil
 }
 
-// DeleteTaskTemplate removes a template outright -- DeleteSchedule's own
+// DeleteTemplate removes a template outright -- DeleteSchedule's own
 // doc comment gives the reasoning: a template is only ever a standing
 // declaration, so there is no history on the row itself worth keeping
 // once nobody wants it. Callers that must not orphan a schedule still
@@ -3518,9 +3625,9 @@ func (s *Store) UpdateTaskTemplate(ctx context.Context, id string, mutate func(*
 // SchedulesUsingTemplate first; the store itself enforces nothing here,
 // the same way it enforces nothing about a task naming a repo nobody
 // configured.
-func (s *Store) DeleteTaskTemplate(ctx context.Context, id string) error {
-	return s.write(ctx, "delete task template "+id, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, "DELETE FROM `task_template` WHERE `id` = ?", id)
+func (s *Store) DeleteTemplate(ctx context.Context, id string) error {
+	return s.write(ctx, "delete template "+id, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM `template` WHERE `id` = ?", id)
 		return err
 	})
 }
@@ -3538,7 +3645,7 @@ func (s *Store) SchedulesUsingTemplate(ctx context.Context, id string) ([]Schedu
 // schedule that still runs it, SchedulesUsingTemplate's own reasoning
 // applied to the other thing a schedule can point at.
 func (s *Store) SchedulesUsingSuite(ctx context.Context, id string) ([]Schedule, error) {
-	return s.schedulesUsing(ctx, "`suite_id`", "task suite", id)
+	return s.schedulesUsing(ctx, "`suite_id`", "suite", id)
 }
 
 func (s *Store) schedulesUsing(ctx context.Context, column, what, id string) ([]Schedule, error) {

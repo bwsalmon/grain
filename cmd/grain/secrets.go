@@ -77,7 +77,7 @@ func runSecrets(args []string) error {
 		return errors.New("a command is required")
 	}
 
-	store := secrets.Open(secretsConfig(*dataDir))
+	store := openSecrets(*dataDir)
 	cmd, cmdArgs := rest[0], rest[1:]
 	switch cmd {
 	case "list":

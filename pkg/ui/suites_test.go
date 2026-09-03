@@ -175,7 +175,7 @@ func TestCreateSuiteRunStartsARunAgainstARepoAndBranch(t *testing.T) {
 		t.Errorf("pass = %d, want 1 immediately after creation", run.Pass)
 	}
 	// Every task in the run stacks against the run's own base branch --
-	// bwsalmon/agents#642's own "tasks created from the task suite should
+	// bwsalmon/agents#642's own "tasks created from the suite should
 	// stack against the source branch."
 	if len(run.Tasks) != 1 {
 		t.Fatalf("got %d tasks, want 1", len(run.Tasks))

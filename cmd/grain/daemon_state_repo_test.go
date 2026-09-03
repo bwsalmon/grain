@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -179,6 +180,138 @@ func TestATaskSurvivesARestartWithAStateRepository(t *testing.T) {
 	}
 }
 
+// The other direction, live: a change merged into the state repository
+// while the daemon is running has to take effect in the daemon that is
+// running, not in the next one (bwsalmon/grain#184). What must *not*
+// happen alongside it is the rest of the import: the task filed here is
+// the stand-in for every row a live run holds an id from, and it has to
+// still be there afterwards.
+func TestAMergedSettingsChangeTakesEffectWithoutARestart(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "secrets", "github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "secrets", "github", "credentials.json"),
+		[]byte(`{"*": "anonymous"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(t.TempDir(), "state.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
+		t.Fatalf("creating the remote: %v: %s", err, out)
+	}
+	if err := staterepo.SaveSettings(dataDir, staterepo.Settings{Remote: remote}); err != nil {
+		t.Fatal(err)
+	}
+
+	uiAddr := freeTCPAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	defer func() {
+		cancel()
+		<-runErr
+	}()
+	go func() {
+		runErr <- run(ctx, config{
+			dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: time.Hour,
+			githubHost: "127.0.0.1:0", githubInsecureHTTP: true,
+			uiAddr: uiAddr, actor: "tester",
+		})
+	}()
+	client := ui.NewHTTPClient("http://" + uiAddr)
+	waitForUI(t, ctx, client)
+
+	// A template this deployment already has, so the repository holds a
+	// row to change rather than only a file to create.
+	if code, body := postBody(t, "http://"+uiAddr+"/api/templates",
+		`{"name":"nightly","title":"Run the nightly sweep"}`); code != http.StatusCreated {
+		t.Fatalf("creating a template returned %d: %s", code, body)
+	}
+	created, err := client.CreateTask(ctx, ui.CreateTaskRequest{Title: "A task a run is holding", Repo: "owner/payments-api"})
+	if err != nil {
+		t.Fatalf("filing a task: %v", err)
+	}
+	if code, body := post(t, "http://"+uiAddr+"/api/state-repo/sync"); code != http.StatusOK {
+		t.Fatalf("sync returned %d: %s", code, body)
+	}
+
+	// An agent's pull request against the repository, merged: the
+	// template is retitled and a second one is added.
+	work := filepath.Join(t.TempDir(), "clone")
+	if out, err := exec.Command("git", "clone", "--quiet", remote, work).CombinedOutput(); err != nil {
+		t.Fatalf("cloning the remote: %v: %s", err, out)
+	}
+	path := filepath.Join(work, staterepo.TablesDir, "template.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the dump: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatalf("parsing the dump: %v: %s", err, data)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("the dump does not hold the template: %s", data)
+	}
+	rows[0]["title"] = "Run the nightly sweep, twice"
+	added := map[string]any{}
+	for k, v := range rows[0] {
+		added[k] = v
+	}
+	added["id"] = "tpl-proposed-by-an-agent"
+	added["name"] = "proposed"
+	added["title"] = "Filed by a merged pull request"
+	rows = append(rows, added)
+	merged, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(merged, '\n'), 0o644); err != nil {
+		t.Fatalf("writing the merged dump: %v", err)
+	}
+	for _, args := range [][]string{
+		{"-c", "user.email=agent@grain", "-c", "user.name=agent", "commit", "-am", "Change the templates"},
+		{"push", "--quiet", "origin", "main"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = work
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	// One cycle of the daemon's own loop, reached through the same
+	// endpoint the pane's "Sync now" uses -- rather than waiting out the
+	// thirty-second timer that would get there on its own.
+	if code, body := post(t, "http://"+uiAddr+"/api/state-repo/sync"); code != http.StatusOK {
+		t.Fatalf("sync returned %d: %s", code, body)
+	}
+
+	code, body := get(t, "http://"+uiAddr+"/api/templates")
+	if code != http.StatusOK {
+		t.Fatalf("listing templates returned %d: %s", code, body)
+	}
+	var templates []ui.Template
+	if err := json.Unmarshal([]byte(body), &templates); err != nil {
+		t.Fatalf("decoding the templates: %v: %s", err, body)
+	}
+	titles := map[string]bool{}
+	for _, tmpl := range templates {
+		titles[tmpl.Title] = true
+	}
+	if !titles["Run the nightly sweep, twice"] {
+		t.Fatalf("the merged edit is not live in the running daemon: %s", body)
+	}
+	if !titles["Filed by a merged pull request"] {
+		t.Fatalf("the merged addition is not live in the running daemon: %s", body)
+	}
+
+	// And nothing else came with it: the task is still there, with the id
+	// a live run would be holding.
+	if _, err := client.Task(ctx, created.ID); err != nil {
+		t.Fatalf("applying a settings change took a task with it: %v", err)
+	}
+}
+
 func waitForUI(t *testing.T, ctx context.Context, client *ui.HTTPClient) {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -196,14 +329,21 @@ func waitForUI(t *testing.T, ctx context.Context, client *ui.HTTPClient) {
 
 func post(t *testing.T, url string) (int, string) {
 	t.Helper()
-	resp, err := http.Post(url, "application/json", strings.NewReader("{}"))
+	return postBody(t, url, "{}")
+}
+
+func postBody(t *testing.T, url, body string) (int, string) {
+	t.Helper()
+	resp, err := http.Post(url, "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
 	defer resp.Body.Close()
-	body := make([]byte, 4096)
-	n, _ := resp.Body.Read(body)
-	return resp.StatusCode, string(body[:n])
+	// Read to the end rather than into a fixed buffer: a caller here
+	// decodes the body as JSON, and a truncated one fails in a way that
+	// says nothing about what is being tested.
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(out)
 }
 
 func get(t *testing.T, url string) (int, string) {
@@ -213,7 +353,6 @@ func get(t *testing.T, url string) (int, string) {
 		t.Fatalf("GET %s: %v", url, err)
 	}
 	defer resp.Body.Close()
-	body := make([]byte, 4096)
-	n, _ := resp.Body.Read(body)
-	return resp.StatusCode, string(body[:n])
+	body, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(body)
 }

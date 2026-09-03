@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
-  it("returns null for a task that is not completed", () => {
+  it("returns null for a task whose run is not over", () => {
     expect(completionPhase({ state: "queued", pullRequest: "acme/widgets#1" })).toBeNull();
   });
 
@@ -10,14 +10,16 @@ describe("completionPhase", () => {
     expect(completionPhase({ state: "completed", pullRequest: "" })).toBeNull();
   });
 
-  it("reports awaiting submit for a completed task with a PR and no auto-merge", () => {
-    const phase = completionPhase({ state: "completed", pullRequest: "acme/widgets#1", autoMerge: false });
-    expect(phase.label).toBe("Awaiting submit");
+  // Waiting on a human's Submit click is a state now
+  // (STATE_LABELS.awaiting_submit), not a chip: the badge says it, so
+  // there is nothing left for a chip beside it to correct.
+  it("puts up no chip for a task waiting on a Submit click", () => {
+    expect(completionPhase({ state: "awaiting_submit", pullRequest: "acme/widgets#1", autoMerge: false })).toBeNull();
   });
 
   // The state badge beside it already reads "Queued for merge"
   // (STATE_LABELS.completed), so the ordinary case has no correction to
-  // make and puts up no chip.
+  // make and puts up no chip either.
   it("returns null once auto-merge is set and the queue has it", () => {
     expect(completionPhase({ state: "completed", pullRequest: "acme/widgets#1", autoMerge: true })).toBeNull();
   });

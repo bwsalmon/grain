@@ -82,11 +82,17 @@ func maxTimeoutMillis() int {
 	return int(maxRunCommandTimeout / time.Millisecond)
 }
 
+// runCommandKilledMarker opens the notice below, and is what
+// RunCommandTimedOut recognises it by afterwards -- shared rather than
+// repeated, so that rewording the notice cannot silently stop a
+// deployment's run_command timeout rate from being measured.
+const runCommandKilledMarker = "[grain] Killed after "
+
 // timedOutNotice is the line for a command the bound killed: the local
 // ctx deadline firing, or the guest-side `timeout` exiting 124.
 func (b runCommandBound) timedOutNotice() string {
 	return fmt.Sprintf(
-		"[grain] Killed after %s by %s. The command did not finish, so nothing above is "+
+		runCommandKilledMarker+"%s by %s. The command did not finish, so nothing above is "+
 			"its verdict -- and re-running it unchanged will be killed at the same point. "+
 			"Pass a larger `timeout` (milliseconds, up to %d) or narrow the command.",
 		b.human(), b.source(), maxTimeoutMillis())

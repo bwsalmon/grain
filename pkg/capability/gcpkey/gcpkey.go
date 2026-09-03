@@ -291,6 +291,56 @@ func explainRefusedCredential(err error, credential string) error {
 		credential, credential, err)
 }
 
+// CheckCredential implements model.CredentialChecker: it authenticates
+// as the minter credential and lists the agent account's own keys, which
+// is the cheapest call this package makes that proves GCP still accepts
+// that credential.
+//
+// ListKeys rather than anything else because Reap already makes exactly
+// this call hourly, it needs no permission a mint does not already need
+// (roles/iam.serviceAccountKeyAdmin covers both), and it changes
+// nothing: a check an operator is expected to press should not leave a
+// key behind that something else then has to reap.
+//
+// This is the answer to the failure "Debugging `gcp-key` again"
+// (README.md) took a whole debugging session to reach: a deployment
+// whose Settings pane read **Ready** the entire time -- a project, an
+// agent account and a `gcp-key-minter` secret are all set -- while every
+// mint failed with `invalid_grant`, because the key inside that secret
+// had been rotated away in GCP. Presence is all a configuration pane can
+// see; this is the one thing that can see validity, and it says so in
+// explainRefusedCredential's own words, naming the secret to replace.
+func (p *Provider) CheckCredential(ctx context.Context, creds model.CredentialResolver) (model.CredentialCheck, error) {
+	credential := p.minterCredential()
+	check := model.CredentialCheck{Credentials: []string{credential}}
+	if p.Config.ProjectID == "" || p.Config.ServiceAccountEmail == "" {
+		return check, fmt.Errorf(
+			"gcpkey: this deployment has no GCP project and agent service account set, so " +
+				"there is no account to check the minter credential against (Settings -> " +
+				"Capabilities, or `grain settings -gcp-project <project> " +
+				"-gcp-agent-service-account <email>`)")
+	}
+	if creds == nil {
+		return check, fmt.Errorf("gcpkey: no credential resolver to resolve %q with", credential)
+	}
+	minterKey, err := creds.Resolve(ctx, credential)
+	if err != nil {
+		return check, fmt.Errorf("gcpkey: resolving minter credential %q: %w", credential, err)
+	}
+	minter, err := p.newMinter(ctx, minterKey)
+	if err != nil {
+		return check, err
+	}
+	keys, err := minter.ListKeys(ctx, p.account())
+	if err != nil {
+		return check, explainRefusedCredential(err, credential)
+	}
+	check.Detail = fmt.Sprintf(
+		"GCP accepted the key held in `%s` and listed %d user-managed key(s) on %s.",
+		credential, len(keys), p.Config.ServiceAccountEmail)
+	return check, nil
+}
+
 func (p *Provider) Materialize(ctx context.Context, cc model.CapabilityContext) (model.Materialization, error) {
 	credential := p.minterCredential()
 	minterKey, err := cc.Credentials.Resolve(ctx, credential)

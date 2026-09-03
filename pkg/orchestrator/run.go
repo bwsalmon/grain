@@ -16,6 +16,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/dispatch"
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/staterepo"
 )
 
 // errTaskClosed is what context.Cause(runCtx) reads once
@@ -492,6 +493,74 @@ func setupSection(r *SetupResult) string {
 		r.ExitCode, r.Command, r.Output)
 }
 
+// stateRepoSection is what a run working in a grain state repository
+// (pkg/staterepo) is told about the thing it has just been handed: not
+// source code but grain's own database, written out as text.
+//
+// Every fact here is one the checkout does not volunteer. The files are
+// JSON, so their shape is discoverable, but nothing in them says that
+// grain rewrites all of them from its database on a timer -- which is
+// what makes formatting a matter of correctness rather than taste -- and
+// nothing in them distinguishes a settings table an operator would be
+// glad to see a pull request against from a table that is grain's own
+// record of what it did. A run that cannot tell those apart edits
+// task_run to "fix" a failed attempt, and produces a diff that is at
+// best overwritten by the next export and at worst merged, making
+// grain's history disagree with what happened.
+//
+// The state repository's own README.md says some of this, and a careful
+// run would find it. This says it before the first turn instead, for the
+// same reason BuildPrompt names the branch rather than leaving it to be
+// deduced: a fact stated in the prompt is one nobody spends a turn
+// rediscovering, and one nobody rediscovers wrongly.
+//
+// The check at the end is the whole reason `grain state check` exists
+// (cmd/grain/state.go): staterepo.Import is the only real answer to "is
+// this loadable", and a run that never runs it finds out through a
+// deployment that will not start after the merge.
+//
+// The settings tables are named from staterepo.SettingsTables rather
+// than written out here, and that is not only to save keeping two lists
+// in step. That list is the one grain acts on -- it decides what Apply
+// imports into a running daemon -- so naming it here means the prompt
+// cannot tell a run that a table is settings when grain will not treat
+// it as such. A rename in pkg/model would otherwise leave this
+// paragraph confidently naming tables that no longer exist.
+func stateRepoSection(prepared checkout) string {
+	if !prepared.StateRepo {
+		return ""
+	}
+	return "\n\nThis repo is grain's own state: its database, exported as text. " +
+		"`tables/<name>.json` is one file per table, holding a JSON array with one " +
+		"object per row and that table's columns in their declared order, rows sorted " +
+		"by primary key. grain rewrites every one of those files from its database on " +
+		"a timer, so keep that shape exactly -- a file that comes back in a different " +
+		"shape is a diff against grain's next export rather than a change to it. " +
+		"`schema-version` stamps the schema the dump was written by; leave it alone, " +
+		"and never touch `secrets.enc`, which is grain's encrypted secret store and " +
+		"nothing a task has business editing.\n\n" +
+		"The tables that are settings -- the ones a task is normally asked to change, " +
+		"and the only ones a merge applies to a running grain -- are exactly these: " +
+		strings.Join(staterepo.SettingsTables, ", ") + ". They are templates, suites, " +
+		"schedules, per-repo configuration, qualification plans and the deployment's " +
+		"own config row (`grain_config`, which carries the prompt extension every run " +
+		"is given), together with the `_read`, `_grant` and `_sequence` tables that " +
+		"belong to them.\n\n" +
+		"Everything else is grain's own record of what it has already done -- `task`, " +
+		"`task_run`, `task_comment`, `task_observation`, `task_attachment`, `lease`, " +
+		"`branch`, `release`, `qualification_run`, the `suite_run` tables and their " +
+		"like. Leave those alone: they are observations, not settings, and editing one " +
+		"either loses to grain's next export or, worse, survives as a record of " +
+		"something that never happened.\n\n" +
+		"Check what you propose before it merges: `grain state check .` loads the whole " +
+		"directory into a throwaway database and reports what breaks. A malformed file, " +
+		"or a row missing a column the schema requires, otherwise fails when grain next " +
+		"reads the repository, which is the worst place to find out. A merged change to " +
+		"a settings table is pulled in and applied within the minute, without a restart; " +
+		"everything else waits for one. Either way the import is a replacement, so a row " +
+		"you delete is a row that is gone."
+}
+
 // promptExtensionSection is how that text is handed to the agent: named
 // as standing instructions, so a run can tell something somebody chose
 // for work here in general apart from the task it was filed under and
@@ -661,7 +730,8 @@ const maxBranchCommits = 10
 // diagnosis attempt 1 already paid for; the dearest is re-attempting
 // precisely the thing that hit the wall clock -- an ending a branch
 // cannot reveal and the detail says outright ("the run exceeded its 2h0m0s
-// wall-clock limit", recorded on RunDispatch's errRunTimedOut arm).
+// wall-clock limit" -- model.RuntimeCapDetail, recorded on RunDispatch's
+// errRunTimedOut arm, and read back by model.EndingOf).
 //
 // Bounded on purpose, by maxPreviousAttempts, maxAttemptDetail and
 // maxBranchCommits: this is orientation, not a transcript store. The
@@ -1144,11 +1214,15 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errUsageLimit)
 		case runErr != nil && errors.Is(context.Cause(agentCtx), errTaskClosed):
 			outcome = "cancelled"
-			detail = "the task was closed while this run was still live"
+			// Both cancellations record "cancelled", and the sentence
+			// beside it is the only thing that says which -- so both
+			// sentences are model's (RunEnding), which is what reads
+			// them back.
+			detail = model.TaskClosedDetail
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errTaskClosed)
 		case runErr != nil && errors.Is(context.Cause(agentCtx), errRunTimedOut):
 			outcome = "cancelled"
-			detail = fmt.Sprintf("the run exceeded its %s wall-clock limit", cfg.maxRunRuntime()) + partialWorkSuffix(result)
+			detail = model.RuntimeCapDetail(cfg.maxRunRuntime()) + partialWorkSuffix(result)
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errRunTimedOut)
 		case runErr != nil:
 			// runErr's own text, not the wrapped form below: that form
@@ -1188,6 +1262,17 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		// whose own outcome failed to record is not worth a second write
 		// attempt on top of it.
 		finishErr = store.SetRunTranscript(ctx, d.RunID, result.Transcript)
+	}
+	// The run's own census, from the one place it exists: agent.Result,
+	// which is about to be discarded (census.go). A separate write again,
+	// after the outcome this run is judged on, and logged rather than
+	// surfaced on failure -- a measurement that cannot be taken is not a
+	// reason to fail the run being measured, the same rule
+	// Store.SetRunAgentStarted's own doc comment states.
+	if telemetry := runTelemetry(result); !telemetry.Empty() {
+		if err := store.RecordRunTelemetry(ctx, d.RunID, telemetry); err != nil {
+			log.Printf("orchestrator: run %s: recording what it did with its tools: %v", d.RunID, err)
+		}
 	}
 	// Only now, with the store already carrying whatever final story this
 	// run has to tell (FinishRun and SetRunTranscript, just above), does
@@ -1410,6 +1495,14 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 
 	extension := promptExtensionSection(promptExtension)
 	prompt = BuildPrompt(cc.Task, prepared.Dir, canOpenPullRequest, maxRuntime, history, prepared.Setup)
+	// Right after the prompt that describes the checkout, and before
+	// anything about capabilities or attachments: it is a fact about the
+	// directory those sentences just pointed at, the same placement
+	// setupSection has inside BuildPrompt for the same reason. Not inside
+	// BuildPrompt itself because what it turns on is not a fact about the
+	// task at all -- it is what prepareCheckout found in the tree, which
+	// only this path has.
+	prompt += stateRepoSection(prepared)
 	attachmentsSection, err := placeAttachments(ctx, tools, attachments)
 	if err != nil {
 		return nil, "", err

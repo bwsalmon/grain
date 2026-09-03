@@ -102,10 +102,10 @@ type Task struct {
 	// already gives model.ReasonFix, so a task that appeared with nobody
 	// having filed it by hand reads as expected rather than as a mystery.
 	Scheduled bool `json:"scheduled,omitempty"`
-	// SuiteRun is true for a task a task suite run filed automatically
+	// SuiteRun is true for a task a suite run filed automatically
 	// (model.ReasonSuite, bwsalmon/agents#642) -- Scheduled's own badge
-	// treatment, so a pass of tasks that appeared with nobody filing them
-	// by hand reads as expected rather than as a mystery.
+	// treatment, so a pass of tasks that appeared with nobody filing
+	// them by hand reads as expected rather than as a mystery.
 	SuiteRun  bool       `json:"suiteRun,omitempty"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	// DependsOn is every task this one has declared a depends-on link to,
@@ -121,12 +121,14 @@ type Task struct {
 	// once the merge queue has stopped driving this task's pull request
 	// -- an automatic fix that did not take, or checks that never
 	// finished -- so it needs a human rather than another automatic
-	// attempt. Alongside PullRequest and AutoMerge, this is
-	// what lets the frontend tell a completed task that is merely
-	// waiting on a human's Submit click apart from one already on the
-	// merge queue, or one the queue has given up on -- the distinction
-	// bwsalmon/agents#494 asked for, since State itself stops at
-	// "completed" for a task's entire post-run life.
+	// attempt. It is what lets the frontend put a "Merge blocked" chip
+	// beside the state badge of a task whose pull request is on the queue
+	// in name only (ui/src/state.js's completionPhase).
+	//
+	// The other half of the distinction bwsalmon/agents#494 asked for is
+	// no longer a chip: a task waiting on a human's Submit click has its
+	// own State now (model.StateAwaitingSubmit), so the badge says it
+	// rather than contradicting it.
 	MergeQueueBlockedAt *time.Time `json:"mergeQueueBlockedAt,omitempty"`
 }
 
