@@ -507,6 +507,126 @@ func TestSyncPullRequestsFilesAFixOnceRunningChecksFinishFailing(t *testing.T) {
 	}
 }
 
+// The narrower half of the same race, and the one an empty check list
+// hides. GitHub creates a workflow run's check runs asynchronously, after
+// it has processed the push, while the pull request exists the instant
+// the branch lands -- so a sync landing in that gap sees no checks at
+// all, which is also precisely what a repo with no CI looks like. Merging
+// on it lands the change before CI has said a word.
+//
+// The window (orchestrator.SetCheckRegistrationWindow) is what tells the
+// two apart, and the only thing that can: this test is the whole shape of
+// it, a pull request that does not merge on the cycle it was opened on
+// and does merge once its head commit has sat there long enough that CI
+// would have shown up by now.
+func TestSyncPullRequestsWaitsForCiToRegisterBeforeMergingAFreshPullRequest(t *testing.T) {
+	window := 2 * time.Minute
+	defer orchestrator.SetCheckRegistrationWindow(window)()
+
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+
+	// Everything GitHub has answered so far says merge me: mergeability
+	// computed and clean, and not one check run reported against the
+	// commit. Only time distinguishes that from a green repo with no CI.
+	setMergeable(sim, true)
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests on a just-opened pull request: %v", err)
+	}
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("the pull request merged on the cycle it was opened on, before CI could register a check")
+		}
+	}
+	// Waiting, not giving up: an unregistered check is not a broken one.
+	got, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fixTaskLinkOf(got); ok {
+		t.Fatal("a fix task was filed for a pull request whose CI had not reported yet")
+	}
+	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 0 {
+		t.Fatalf("expected no comments while simply waiting for CI to register, got %q", bodies)
+	}
+
+	// Half a window later it is still waiting, and the entry is still the
+	// head of its queue rather than having been passed over.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(window/2)); err != nil {
+		t.Fatalf("SyncPullRequests inside the window: %v", err)
+	}
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("the pull request merged inside the registration window")
+		}
+	}
+
+	// Nothing ever reported, so there was nothing to report: this repo
+	// has no CI, and its pull requests still have to merge.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(window)); err != nil {
+		t.Fatalf("SyncPullRequests once the window had elapsed: %v", err)
+	}
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed: a repo with no CI at all must still merge", st)
+	}
+}
+
+// The window costs a repo that does have CI nothing. The moment a check
+// exists there is a real signal to read, and the answer comes from that
+// check rather than from a clock -- so a green one merges without sitting
+// out the rest of a window it only ever existed to fill.
+func TestSyncPullRequestsMergesOnARegisteredCheckWithoutWaitingOutTheWindow(t *testing.T) {
+	window := time.Hour
+	defer orchestrator.SetCheckRegistrationWindow(window)()
+
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task, branch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	setMergeable(sim, true)
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests before CI registered: %v", err)
+	}
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("merged before CI registered anything")
+		}
+	}
+
+	// CI registers, runs, and passes -- all well inside the window.
+	sim.CheckRuns[branch] = []github.CheckRun{{Name: "tests", Status: "queued"}}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests with CI queued: %v", err)
+	}
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("merged with a queued check")
+		}
+	}
+
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "tests", Status: "completed", Conclusion: strPtr("success")},
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(2*time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests once CI passed: %v", err)
+	}
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed: a passing check answers on its own, window or no window", st)
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 func fixTaskLinkOf(task *model.Task) (string, bool) {

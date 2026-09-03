@@ -358,6 +358,14 @@ type PullRequestDetail struct {
 	// the older commit statuses decides whether trusting it would
 	// auto-merge a PR with red CI. Confirm that against a live PR with a
 	// deliberately failing check before any caller reads it as passing.
+	//
+	// It stays unread even for the narrower question of whether a check
+	// list that came back empty is going to fill in ("blocked"/"unstable"
+	// against "clean"), which would need no such trust, because the same
+	// confirmation is what says whether it can answer that either --
+	// orchestrator.healthFrom waits that one out on a clock instead
+	// (defaultCheckRegistrationWindow). Confirming the above is what
+	// would let this replace the wait.
 	MergeableState string
 }
 

@@ -2291,6 +2291,20 @@ not finished*, and resolves by itself; `UNKNOWN` is *grain could not find
 out*, and may never resolve without an operator granting a permission.
 Neither is acted on, which is what makes waiting the default.
 
+`PENDING` also covers the state before there is a check to read. GitHub
+creates a workflow run's check runs asynchronously, *after* it has
+processed the push, while the pull request exists from the moment the
+branch lands — so a sync in that gap reads no checks at all, which is
+also exactly what a repo with no CI configured reads as, forever. The
+Checks API cannot tell the two apart and neither can anything built on
+it. `healthFrom` gives the empty list a settling window (its own
+`defaultCheckRegistrationWindow`, two minutes, measured per head commit
+from grain's own clock rather than from a timestamp GitHub stamped) and
+reads it `PENDING` until that elapses. The cost lands entirely on
+deployments with genuinely no CI, which wait it out once per head
+commit; the alternative is that every repo that does have CI can merge a
+change in the seconds before its first check run appears.
+
 **The wire types stay separate.** `PullRequestDetail`, `Issue`, and
 `Comment` in `github.py` are projections of GitHub's records, shaped by
 what GitHub's endpoints return, and `github.py`'s own docstrings already

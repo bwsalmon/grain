@@ -18,16 +18,31 @@ import (
 
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 
-// TestMain turns off branchExistsSettled's re-check backoff for every
-// test in this package -- see orchestrator.DisableBranchExistsSleep for
-// why it is dead time here specifically. The retry behaviour itself is
-// covered by TestBranchExistsSettledReChecksANegative, which stubs the
-// same sleep itself and asserts the call count, so nothing here is left
-// untested by skipping the wall clock.
+// TestMain turns off two waits for every test in this package.
+//
+// branchExistsSettled's re-check backoff -- see
+// orchestrator.DisableBranchExistsSleep for why it is dead time here
+// specifically. The retry behaviour itself is covered by
+// TestBranchExistsSettledReChecksANegative, which stubs the same sleep
+// itself and asserts the call count, so nothing here is left untested by
+// skipping the wall clock.
+//
+// And the check-registration window -- the wait that keeps an empty check
+// list from reading as clean until CI has had time to register (see
+// orchestrator.SetCheckRegistrationWindow). Every test here drives a
+// githubsim with no CI in it whatsoever, so leaving the window on would
+// mean each one either waiting two minutes of real time for a check run
+// that is never coming, or seeding a clock jump into an assertion about
+// something else entirely. The tests that are about the window set it
+// themselves and restore it: the sync_internal_test.go group around
+// TestEmptyChecksSettledWaitsOutTheWindow, and
+// TestSyncPullRequestsWaitsForCiToRegisterBeforeMergingAFreshPullRequest.
 func TestMain(m *testing.M) {
-	restore := orchestrator.DisableBranchExistsSleep()
+	restoreSleep := orchestrator.DisableBranchExistsSleep()
+	restoreWindow := orchestrator.SetCheckRegistrationWindow(0)
 	code := m.Run()
-	restore()
+	restoreWindow()
+	restoreSleep()
 	os.Exit(code)
 }
 

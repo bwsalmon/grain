@@ -47,12 +47,21 @@ func ParsePullRequestRef(s string) (PullRequestRef, error) {
 // reading UNKNOWN means "check again next cycle," never "conflicted."
 //
 // PrPending is CI still running: at least one check has not reached a
-// conclusion yet, so neither "clean" nor "failing" is known. It is
-// distinct from UNKNOWN, which is "grain could not find out" (GitHub has
-// not computed mergeability, or the credential cannot read checks at
-// all) -- PENDING is a definite answer that resolves by itself, given
-// time. Nothing merges on it: a PR whose tests have not finished is
-// exactly the PR the merge queue must wait on rather than merge.
+// conclusion yet, so neither "clean" nor "failing" is known. It also
+// covers the case before that one, where nothing has been reported at
+// all -- GitHub creates a workflow run's check runs asynchronously after
+// it processes a push, and an empty check list on a commit pushed
+// seconds ago is CI that has not registered yet at least as often as it
+// is a repo with no CI. orchestrator.healthFrom holds an empty list
+// PENDING until enough time has passed to tell those apart (its own
+// defaultCheckRegistrationWindow).
+//
+// It is distinct from UNKNOWN, which is "grain could not find out"
+// (GitHub has not computed mergeability, or the credential cannot read
+// checks at all) -- PENDING is a definite answer that resolves by
+// itself, given time. Nothing merges on it: a PR whose tests have not
+// finished, or have not started, is exactly the PR the merge queue must
+// wait on rather than merge.
 //
 // PrMerged is orchestrator.healthFrom's answer for a closed PR GitHub's
 // own Merged field says merged, as opposed to PrClosed for one that

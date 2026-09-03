@@ -237,6 +237,22 @@ func (s *Sim) branchHead(branch string) (sha, message string, ok bool) {
 	return strings.TrimSpace(string(shaOut)), strings.TrimRight(string(msgOut), "\n"), true
 }
 
+// branchSHA is branchHead's first half on its own: branch's tip, or ""
+// if there is no such branch. Separate because the pull-request detail
+// endpoint needs the sha on every read and nothing else -- branchHead
+// would fork git three times (an existence check, rev-parse, and a log
+// for a commit message with no reader) where `rev-parse --verify` on its
+// own answers both questions in one, and a load test reading a pull
+// request in a loop pays that difference.
+func (s *Sim) branchSHA(branch string) string {
+	out, err := exec.Command("git", "--git-dir", s.BareRepo,
+		"rev-parse", "-q", "--verify", "refs/heads/"+branch).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // setBranch points branch at sha -- update-ref both creates a ref that
 // doesn't yet exist and moves one that does, which is what lets Sim
 // answer CreateBranch and UpdateBranch with the same underlying command;
@@ -357,7 +373,7 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			if !ok {
 				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
 			}
-			return jsonResponse(200, pullRequestDetailJSON(pr)), nil
+			return jsonResponse(200, pullRequestDetailJSON(pr, s.branchSHA(pr.Head))), nil
 		}
 		if m := pullCommentsRe.FindStringSubmatch(p); m != nil {
 			s.mustOwn(m[1], m[2])
@@ -641,7 +657,15 @@ func (s *Sim) findOpenPullRequestsForHead(head string) []map[string]any {
 // decodes -- head/base as nested {"ref": ...} objects, not the bare
 // strings CreatePullRequest's own response uses, matching GitHub's own
 // (inconsistent, but real) shape between the two endpoints.
-func pullRequestDetailJSON(pr PullRequest) map[string]any {
+//
+// headSHA is the head branch's current tip, read out of the bare repo by
+// the caller (there is no other record of it here: this sim stores a pull
+// request's head as a branch name, and git is where that name resolves).
+// Empty when the branch is gone -- a merged pull request whose head was
+// deleted -- which is the same empty GitHub's own response can carry, and
+// which orchestrator.checkRunsFor already reads as "no commit to scope
+// to."
+func pullRequestDetailJSON(pr PullRequest, headSHA string) map[string]any {
 	state := pr.State
 	if state == "" {
 		state = "open"
@@ -649,7 +673,7 @@ func pullRequestDetailJSON(pr PullRequest) map[string]any {
 	out := map[string]any{
 		"number": pr.Number, "title": pr.Title, "body": pr.Body, "html_url": pr.HTMLURL,
 		"state":     state,
-		"head":      map[string]string{"ref": pr.Head},
+		"head":      map[string]string{"ref": pr.Head, "sha": headSHA},
 		"base":      map[string]string{"ref": pr.Base},
 		"mergeable": pr.Mergeable,
 		"merged":    pr.Merged,
