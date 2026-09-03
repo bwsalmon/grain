@@ -36,7 +36,18 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
-                propose_task, add_review_comment). NewSandboxTools runs
+                propose_task, add_review_comment) -- plus one tool whose
+                effect is real and immediate rather than mocked and
+                deferred, open_pull_request
+                (NewOpenPullRequestTools): a run
+                that has pushed its branch can have grain open its pull
+                request there and then and read back what the repo's own
+                CI makes of it, instead of exiting blind and leaving the
+                pull request to orchestrator's finish path. Opening one
+                is a write, and writes stay grain's: it asks the daemon
+                (pkg/ui's POST /api/tasks/{id}/pull-request) rather than
+                holding a credential of its own -- see "A run can open
+                its own pull request" below. NewSandboxTools runs
                 those four locally, confined to a directory; NewSSHSandboxTools
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
@@ -206,7 +217,12 @@ cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 pkg/kontur, above) for NewSSHSandboxTools against a real
                 kontur-managed VM -- what a running daemon (via
                 pkg/agent/claude) forks *this same binary* to get, rather
-                than needing a second one on disk. "demo" (demo.go,
+                than needing a second one on disk. -server plus -task adds
+                open_pull_request to that roster: the daemon to ask and
+                the task to ask about, so a run can have its own pull
+                request opened while it still has turns left to react to
+                what CI says about it (see "A run can open its own pull
+                request" below). "demo" (demo.go,
                 formerly `grain ui -demo`) is a fifth, smaller mode: a
                 throwaway pkg/ui.Server over fake data and a temp-directory
                 store, for trying out the frontend with no daemon, no
@@ -957,7 +973,8 @@ could do with it.
 Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
 task that asked for `/auto-merge` and still has a PR open. Only the
-queue's head — the earliest submitted, per repo — is ever acted on in a
+queue's head — whichever of a repo's waiting tasks sits first in the
+backlog — is ever acted on in a
 cycle; a fix filed for the second task while the first is still being
 repaired would likely need refiling the moment the first merges and
 changes what the second is based against, so everything behind the head
@@ -978,7 +995,18 @@ sync landing in the gap between the push and that sees nothing — and
 nothing is also what a repo with no CI configured answers, forever, with
 no way to tell the two apart from the Checks API. The window is the only
 thing that can, and a deployment with genuinely no CI pays it once per
-head commit. Nor does it wait for CI that is never coming: a head that
+head commit. And all of that is reasoning about one *commit*, so the
+cycle names it at every step rather than letting any of them mean
+"whatever the branch points at now": the check runs are read for the head
+sha off the pull-request read (a branch-scoped read answers for a commit
+the cycle never saw), the window above is keyed on it, and the merge
+carries it in GitHub's own `sha` parameter, which refuses with `409` if
+the branch has moved since. That closes the gap a push landing mid-cycle
+would otherwise walk through — a human's own "push a fix by hand", a fix
+task merging into the branch it repairs, a redispatched task pushing
+again — and costs one cycle when it happens: the task keeps its queue
+position and the commit that landed is judged next cycle on its own CI.
+Nor does it wait for CI that is never coming: a head that
 has read `PENDING` for longer than `defaultCheckStallDeadline` (two
 hours, timed per head commit over one unbroken run of pending reads) is
 given up on — a comment naming the checks that never finished,
@@ -1005,9 +1033,23 @@ automatically rather than refiling: it comments explaining why, sets
 task in that repo — a blocked task still merges the moment a human's own
 push makes it clean, it just stops being anyone's queue head, so it can
 no longer hold up what's behind it. No new record was needed for the
-queue itself: `queueHeads` derives head-of-queue from `Task.CreatedAt`
-and `Task.AutoMerge` fresh every cycle, the same "derive it, don't store
-it" discipline `TaskState` already holds to.
+queue itself: `queueOrder` derives the whole queue from `Task.AutoMerge`,
+`Origin.Reason` and `MergeQueueBlockedAt` fresh every cycle, and
+`queueHeads` takes each repo's first entry from it — the same "derive it,
+don't store it" discipline `TaskState` already holds to.
+
+What the queue does write down is where it is. Every cycle,
+`showQueueAtFrontOfBacklog` moves the tasks waiting to land to the front
+of the backlog in the order they will land, and `fileFixTask` files a
+repair at the very head of it (`Store.MoveToFrontOfBacklog`,
+`Store.OrderKeyForNewTask`) — so a task list answers "what is grain about
+to finish, and in what order" without anyone opening a task. It is the
+same order in both directions: `queueOrder` reads position back off the
+backlog rather than comparing `Task.CreatedAt` behind everyone's back, so
+dragging one waiting pull request above another really does change which
+merges first, and `Store.Ready` needs no carve-out for a fix task any
+more — being at the head of the list is what dispatches it first, which
+is a thing a human can see and, if they disagree, undo.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
@@ -1230,10 +1272,16 @@ process. `Config.GrantTools` still assembles these tools and
 `RunDispatch` still passes them, but no `Framework` consumes them, so
 `selfrepair`/`selfdebug`'s host tools reach no running agent today.
 Closing that gap means giving the `mcpserver` subcommand a route back to
-the store -- it takes only a sandbox root or a kontur VM name now (see
-`cmd/grain/mcpserver.go`), which is exactly the isolation that makes the
-subprocess frameworks safe, so it is a design question rather than a
-missing flag.
+the store, which is a design question rather than a missing flag: the
+isolation that makes the subprocess frameworks safe is exactly that it
+holds no store handle. What it does hold is deliberately narrow and
+deliberately not that: a read-only GitHub client scoped to one branch
+(`-data-dir`/`-pr-repo`/`-pr-branch`, for `pull_request_status` -- see
+"Letting a run watch its own CI", below), and a REST client of the
+daemon aimed at one endpoint about one task id
+(`-server`/`-task`, for `open_pull_request` -- see "A run can open its
+own pull request"). Neither is a store handle, and neither can answer
+`selfrepair.Confirm`'s blocking read of `Store.Comments`.
 
 bwsalmon/agents#621 turned that pair of capabilities into an explicit
 "configuration agent": an overlay button the frontend keeps reachable in
@@ -1327,10 +1375,13 @@ Interactive task's `run_host_command` confirmation prompt
 (`selfrepair.Confirm`, which blocks on `Store.Comments` from inside a
 tool call) is not reachable by a running agent today. Closing that gap
 means giving the `mcpserver` subcommand a route back to the store, which
-it deliberately does not have: it takes a sandbox root or a kontur VM
-name and nothing else, and that narrowness is exactly what makes the
-subprocess frameworks safe to run. It is a design question, not a missing
-flag, so it is recorded here rather than guessed at.
+it deliberately does not have: besides its sandbox, all it takes is one
+branch to read CI for (`-pr-repo`/`-pr-branch`) and a daemon URL and a
+task id (`-server`/`-task`, for `open_pull_request` -- "A run can open
+its own pull request", below), which is a REST client of one endpoint
+rather than a store handle, and that narrowness is exactly what makes
+the subprocess frameworks safe to run. It is a design question, not a
+missing flag, so it is recorded here rather than guessed at.
 
 ### Operating it
 
@@ -1675,7 +1726,8 @@ is noticed: once per tick, before the cycle, `liveConfig.refresh`
 re-reads `grain_config` and hands each change to whatever it configures
 — its own ticker for `poll-interval`, a rebuilt `model.CapabilityRegistry`
 for `gcp-project`/`gcp-agent-service-account`, and
-`KonturSandboxes.SetDefaultShape` for `sandbox-cpus`/`sandbox-memory-mb`.
+`KonturSandboxes.SetDefaultShape` for
+`sandbox-cpus`/`sandbox-memory-mb`/`sandbox-disk-gb`.
 The rest were already read per cycle or per dispatch, or gained it here:
 `RunCycle` re-reads `max-concurrent` *and* `max-agent-turns`;
 `dispatchConfig` re-reads `agent-framework`, `gemini-model` and
@@ -1887,6 +1939,60 @@ avoided by seeding at task creation and reading nothing at dispatch. A
 schedule that wants `gcp-key` says so, once, where every task it files
 can be traced back to it.
 
+### A `grain repo` family, and why `-target-repos` stayed put
+
+The layer above left a one-directional surface behind: `grain settings`
+prints what each repo defaults ("default in: `owner/name`", on the
+capability line it already printed) with no way from a shell to act on
+what it just showed. `grain repo` (`cmd/grain/repo.go`, grain/task-36) is
+that missing half — `list`, `capabilities [-set a,b] <owner/name>`, `add`
+and `remove` — over four new `ui.HTTPClient` methods mirroring the
+`ui.Client` ones the repos pane already calls.
+
+**Why this and not schedules, templates or suites**, which are still
+UI-only and stay that way. The CLI's subset was never "tasks only": it is
+task management *plus deployment configuration* — `grain settings`,
+`grain secrets`, `grain config` — because "why did this deployment do
+that" is asked from a shell on the host at least as often as from a
+browser. A repo's own defaults are deployment configuration by that
+reading, and were the one member of the category with no spelling here.
+Schedules, templates and suites are authored *content*: written once, in
+a form built for writing them, and docs/scheduled-tasks.md records their
+absence from the CLI as an open gap waiting on somebody who needs it
+rather than as a decision. Adding a `repo` family does not make them
+next.
+
+**`-target-repos` stays on `grain settings`.** The repos *pane* dropped
+its own copy of that field when bwsalmon/agents#473 moved add/remove onto
+the repo rows, but what it dropped was a comma-separated text box — a bad
+control for a human and a perfectly good flag for a script. The field
+itself is still deployment-wide configuration (`model.Config.
+TargetRepos`), and it is the whole-list form `grain sync`'s own
+`settings` section already speaks verbatim (`ui.UpdateSettingsRequest.
+TargetRepos`); removing the flag would leave the CLI unable to say
+declaratively what a config file next to it can, and break existing
+scripts to buy nothing. So both spellings exist and write the same field:
+`-target-repos` replaces the list, `grain repo add`/`remove` change one
+entry, and `grain repo add` says out loud when the list it prints back
+has exactly one entry — an empty allowlist is what means *unrestricted*,
+so the first repo added to a deployment that never restricted itself
+narrows it rather than widening anything.
+
+**`grain repo list` is composed on the client, from `GET /api/config` and
+`GET /api/tasks`**, rather than served by a `GET /api/repos` of its own.
+A repo is not a stored row: the folder tree is still unbuilt, so "a repo
+grain knows about" is *derived* — whatever `targetRepos` names, union
+whatever a task targets, union whatever carries defaults of its own — and
+`ui/src/state.js`'s `repoRows` already derives it from those same two
+responses. A third derivation on the server would be a second definition
+to keep in step with the first. It does differ from `repoRows` in one
+way, deliberately: a repo that carries defaults while being neither
+allow-listed nor targeted still gets a row, because
+`SetRepoDefaultCapabilities` permits exactly that repo to exist and a
+list whose job includes reporting per-repo defaults must not be the one
+place they are invisible. (The repos *page* still drops such a row; that
+is a UI gap, filed separately, not a difference of opinion.)
+
 ## Write-only secrets access when colocated
 
 `pkg/secrets.Store` (above, "no secret store in the model") was
@@ -1975,7 +2081,8 @@ startup: switching the default in Settings takes effect on the next run,
 not the next restart. A task that names one instead
 (`agentFramework` on `POST /api/tasks`, or the picker under New task ->
 Advanced options) overrides it for that task alone -- the same
-"zero means unset" per-task override `SandboxCPUs`/`SandboxMemoryMB`
+"zero means unset" per-task override
+`SandboxCPUs`/`SandboxMemoryMB`/`SandboxDiskGB`
 already are, for the same reason: a task filed with no choice must
 follow the deployment wherever it is set later, rather than pin itself
 to whatever was configured the moment it was filed.
@@ -2120,6 +2227,83 @@ its own disk, and every mode that ever took a store flag — `grain
 daemon`, and, before #363, the standalone `grain ui` and the CLI itself
 — takes just that one, with no "embedded, or a server" distinction left
 to make.
+
+## A run can open its own pull request
+
+"Letting a run watch its own CI" (above) gave a run `pull_request_status`
+-- what GitHub says about the branch it has pushed. This is the other
+half: the pull request itself.
+
+grain has always opened a pull request for the branch a run pushed --
+after the run had already exited (`orchestrator.ProcessResult` ->
+`salvagePushedBranch` -> `finishWithPullRequest`). That ordering has one
+cost: a check that only ever runs *on a pull request* -- which is most of
+them, `.github/workflows/tests.yml`'s own `on: pull_request` included --
+has nothing to run against until the run is over. A change that builds
+and tests cleanly in a sandbox and then fails the repo's own workflow is
+then a fact nobody learns until a human opens the pull request, and
+fixing it costs a whole second dispatch -- of an agent that has by then
+forgotten everything it knew about the change.
+
+So a run can now ask for its pull request while it is still running, and
+read back what the checks say: the `open_pull_request` tool (`pkg/mcp`'s
+`NewOpenPullRequestTools`). It takes no arguments -- repo, branch, base and
+title are grain's, exactly as they always were -- and it opens *the same*
+pull request the finish path would have (`EnsurePullRequest`, which finds
+an already-open one for the head before opening anything), so the run's
+own ending adopts it rather than colliding with it. Calling it again is
+how an agent watches a check that was still running: it never opens a
+second pull request, and the checks it reports are read fresh
+(`checkRunsFor`, the same reader the merge queue trusts, Actions-workflow
+fallback included).
+
+Two things it deliberately does not do. It does not mark the task
+completed -- that is what would put a still-running task into
+`SyncPullRequests`' merge queue, where a branch the agent is still
+pushing to could be merged out from under it; `CompletedAt` stays the
+finish path's to set. And it does not open anything from the `mcpserver`
+process itself. That process does hold a GitHub client -- the read-only,
+one-branch one `pull_request_status` uses -- but opening a pull request
+is a *write*, and which branch is opened against which base has always
+been grain's decision rather than an agent's. So `-server`/`-task` point
+it at the running daemon's own REST API instead --
+`POST /api/tasks/{id}/pull-request`, one call about one task id, answered
+by `orchestrator.OpenPullRequestForTask` against the daemon's own GitHub
+client. Everything about which repo and which branch that means is read
+from the task's own record, so nothing an agent can put in a tool call
+reaches GitHub as data.
+
+That is a route back from a forked `mcpserver` to the daemon, which "What
+this cost" (above) records as not existing. It is a deliberately narrow
+one: a REST client, one endpoint, one task id, no store handle -- not the
+in-process `*model.Store` `selfrepair.Confirm`'s blocking confirmation
+would still need.
+
+### Telling the run it has it
+
+A tool nobody reads about is a tool nobody calls. `BuildPrompt` names
+`open_pull_request` in the same paragraph as the push/check/repair loop,
+so a run learns it can open its pull request and read CI without having
+studied the roster -- which is the whole failure the tool exists to fix,
+one level up: an agent that finishes and exits never sees its own checks.
+
+It is named only for a run that really has it. Registration turns on
+`-server`/`-task`, and the `-server` half comes from `-ui-addr`
+(`daemonServerURL`), so a deployment serving no UI/API gives its runs no
+such tool -- and a prompt that promised it there would send an agent
+after something that is not on its roster. The one thing that knows is
+the `Framework` itself, which is why it answers for its own runs
+(`agent.PullRequestFramework`, implemented by `pkg/agent/claude` and
+`pkg/agent/antigravity` as "was I built `WithGrainServer`?");
+`RunDispatch` asks, and passes the answer to `BuildPrompt`. A `Framework`
+that does not implement it at all answers no, which is the safe
+direction: a run never told about a tool it happens to have loses one
+convenience, where a run told to call one it does not have burns turns on
+an error it cannot fix.
+
+What that leaves worth measuring, rather than assuming, is whether runs
+actually start calling it, and whether a run that sees a failing check
+fixes it instead of opening the pull request and stopping there.
 
 ## Deploying it
 
@@ -2635,3 +2819,77 @@ smaller idea than a pool of assignments, and does not bring slots back.
 The sandbox-health pane changed meaning with everything else: it reports
 live sandboxes, so an idle deployment shows nothing rather than a table
 of idle slots.
+
+## Disk is the third dimension of a sandbox's shape
+
+A sandbox VM's size had two knobs — `sandbox-cpus` and
+`sandbox-memory-mb`, deployment-wide in Settings and overridable per task
+— and no third. Its disk was whatever the guest image happened to be:
+`konturctl` gives each VM a copy-on-write qcow2 overlay backed by that
+image, and an overlay is created at exactly the image's own virtual size,
+which `scripts/kontur/build-guest.sh` packs to the rootfs plus 20%
+headroom. That is a few hundred megabytes of slack for every run, and a
+build-heavy checkout spends it: the run fails part way through with a
+disk-full error, on a VM that had CPUs and memory to spare.
+
+`sandbox-disk-gb` is that knob, everywhere the other two already are:
+`model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
+tab in Settings and the shape override under New task -> Advanced
+options, `orchestrator.Shape.DiskGB` resolved per dimension against the
+deployment default, and `konturctl vm create -disk-size-gb` at the one
+moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
+is left off the create entirely, so a deployment that never sets one
+passes exactly the arguments it passed before.
+
+Two things about it are genuinely unlike CPUs and memory, and both are
+visible in the code:
+
+- **There is no default to show.** `ui.Settings` reports
+  `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
+  what is really in effect rather than a misleading literal 0. Disk has
+  no such constant: an unset disk is however large *this deployment's*
+  guest image is, which is a property of an image somebody built, not a
+  number this build can name. The field has no placeholder, and says so
+  in words instead.
+- **A bigger disk is not by itself more space.** The image's filesystem
+  ends where it ended; the extra is unallocated until something grows it.
+  `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
+  runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
+  disk was not enlarged and a one-line grow on one whose was.
+
+**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
+snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
+disk-size field, and `writeQcow2Overlay` — which already takes the
+virtual size as an argument — is called with the source image's size
+unconditionally. Passing the flag against a `konturctl` without it fails
+the create, which is why zero omits it rather than sending an explicit
+size: a deployment that has not set one is unaffected either way, and a
+deployment that sets one has said out loud that it expects the flag to
+work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
+the other half of this, and belongs there rather than as a local patch
+here — see `third_party/kontur/VENDORED.md`.
+
+### Monitoring it
+
+Setting a size is half the ask; the other half is seeing whether it was
+the right one. The sandbox-health pane now reports disk alongside load
+average and memory, from both ends:
+
+- **Per sandbox.** `KonturSandboxes.sandboxHealth` already pulled
+  `/proc/loadavg` and `/proc/meminfo` out of the guest in one command
+  over the same transport a run's own tools use; it now asks for
+  `df -Pk /` in that same command rather than paying a second guest login
+  out of the five-second health budget. `-P` is what makes the parse
+  reliable — one line per filesystem, six columns — and the row is found
+  by shape ("the line whose last field is `/`") rather than by position,
+  so the `/proc` lines sharing the stream cannot be mistaken for it.
+- **For the host.** `pkg/sysstat` gains `DiskUsage`, one `statfs` call,
+  which `hostStats` asks about the daemon's own `-data-dir` rather than
+  about `/`: the daemon runs in a container whose root filesystem is an
+  image layer nobody's runs fill, while the data directory is on the host
+  volume that holds the store *and* every VM's disk overlay. That is the
+  disk a deployment actually runs out of.
+
+Both report 0/0 when there is no reading to be had, which the pane shows
+as a dash and the trend charts skip rather than plotting as an empty
+disk — the same "unavailable is not zero" treatment memory already got.

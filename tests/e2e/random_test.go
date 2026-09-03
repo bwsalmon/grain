@@ -422,7 +422,7 @@ func githubRound(t *testing.T, rng *rand.Rand, sim *syncedSim, client github.Cli
 		return
 	}
 	pr := open[rng.IntN(len(open))]
-	if err := client.MergePullRequest(clusterRepoOwner, clusterRepoName, pr.Number); err != nil {
+	if err := client.MergePullRequest(clusterRepoOwner, clusterRepoName, pr.Number, ""); err != nil {
 		t.Fatalf("merging pull request #%d (%s): %v", pr.Number, pr.Head, err)
 	}
 	taskID := strings.TrimPrefix(pr.Head, "grain/task-")

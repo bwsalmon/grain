@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -283,6 +284,57 @@ func TestSetRepoDefaultCapabilitiesValidates(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.DefaultCapabilities, []string{"gcp-key"}) {
 		t.Fatalf("defaultCapabilities = %v, want [gcp-key] once", got.DefaultCapabilities)
+	}
+}
+
+// grain/task-43: the per-repo counterpart of TestUpdateSettingsAccepts
+// DroppingARetiredDefaultCapability. A set that drops a stored id this
+// build no longer offers is accepted, though one that adds an unknown id
+// is not (TestSetRepoDefaultCapabilitiesValidates) -- what is validated
+// is the set being written, not the set already there, which is the only
+// reason the repos pane's own picker can offer a retired id a row to be
+// unticked with (capabilityRows, ui/src/state.js) and have the save that
+// follows go through.
+func TestSetRepoDefaultCapabilitiesAcceptsDroppingARetiredOne(t *testing.T) {
+	c, store, ctx := testClient(t)
+	repo, err := model.ParseRepo("acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Written straight to the store: SetRepoDefaultCapabilities itself
+	// would never have accepted "scratch-repo", so this is the state an
+	// upgrade that retired an id leaves behind.
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo: repo, DefaultCapabilities: []string{"gcp-key", "scratch-repo"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.RepoDefaults(ctx, "acme/widgets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read.DefaultCapabilities, []string{"gcp-key", "scratch-repo"}) {
+		t.Fatalf("defaultCapabilities = %v, want it reported as stored: an operator can only clear one they can see",
+			read.DefaultCapabilities)
+	}
+	if !reflect.DeepEqual(read.EffectiveDefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("effectiveDefaultCapabilities = %v, want [gcp-key]: a retired id grants nothing",
+			read.EffectiveDefaultCapabilities)
+	}
+
+	got, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", []string{"gcp-key"})
+	if err != nil {
+		t.Fatalf("dropping a retired default capability: %v", err)
+	}
+	if !reflect.DeepEqual(got.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("defaultCapabilities = %v, want [gcp-key] with the retired id gone", got.DefaultCapabilities)
+	}
+	if read, err = c.RepoDefaults(ctx, "acme/widgets"); err != nil {
+		t.Fatal(err)
+	} else if !reflect.DeepEqual(read.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("defaultCapabilities = %v after a re-read, want [gcp-key]: the retired id is gone for good",
+			read.DefaultCapabilities)
 	}
 }
 

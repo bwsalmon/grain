@@ -23,6 +23,15 @@ const schedule = {
 
 const noop = () => {};
 
+// The body api was last called with, parsed rather than compared as a
+// string. ScheduleOverlay builds a save payload in two steps -- repo and
+// base in the object literal, title and description assigned onto it
+// afterwards -- so the key order JSON.stringify emits is an artifact of
+// that split, not part of the request. Asserting on the serialized string
+// makes a test fail the moment a field moves between the two halves, with
+// the same fields and the same values going over the wire.
+const lastBody = () => JSON.parse(api.mock.lastCall[1].body);
+
 describe("SchedulesList", () => {
   afterEach(() => {
     api.mockReset();
@@ -97,19 +106,17 @@ describe("SchedulesList", () => {
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
-    expect(api).toHaveBeenCalledWith("/api/schedules", {
-      method: "POST",
-      body: JSON.stringify({
-        templateId: "",
-        recurrence: { kind: "everyNHours", everyNHours: 24 },
-        title: "Nightly dependency bump",
-        description: "",
-        repo: "acme/widgets",
-        base: "",
-        autoMerge: false,
-        reads: [],
-        capabilities: [],
-      }),
+    expect(api).toHaveBeenCalledWith("/api/schedules", expect.objectContaining({ method: "POST" }));
+    expect(lastBody()).toEqual({
+      templateId: "",
+      recurrence: { kind: "everyNHours", everyNHours: 24 },
+      title: "Nightly dependency bump",
+      description: "",
+      repo: "acme/widgets",
+      base: "",
+      autoMerge: false,
+      reads: [],
+      capabilities: [],
     });
     expect(onRefresh).toHaveBeenCalled();
     expect(screen.queryByRole("heading", { name: "New schedule" })).not.toBeInTheDocument();
@@ -210,19 +217,17 @@ describe("SchedulesList", () => {
     await user.type(titleField, "Weekly dependency bump");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", {
-      method: "PATCH",
-      body: JSON.stringify({
-        templateId: "",
-        recurrence: { kind: "everyNHours", everyNHours: 24 },
-        title: "Weekly dependency bump",
-        description: "",
-        repo: "acme/widgets",
-        base: "",
-        autoMerge: false,
-        reads: [],
-        capabilities: [],
-      }),
+    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", expect.objectContaining({ method: "PATCH" }));
+    expect(lastBody()).toEqual({
+      templateId: "",
+      recurrence: { kind: "everyNHours", everyNHours: 24 },
+      title: "Weekly dependency bump",
+      description: "",
+      repo: "acme/widgets",
+      base: "",
+      autoMerge: false,
+      reads: [],
+      capabilities: [],
     });
     expect(onRefresh).toHaveBeenCalled();
     expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
