@@ -122,13 +122,28 @@ pkg/capability/gcpkey/  the gcp-key capability: a real MINT
                 Reap, a standalone safety net that deletes anything GCP
                 itself reports as older than 24h regardless of whether a
                 Lease survived to say so
-pkg/secrets/    a model.CredentialResolver backed by its own embedded
-                SQLite database (<dir>/secrets.db), kept deliberately
-                separate from the task/config store's own database file
-                (bwsalmon/agents#366: "put secrets in a separate db,
-                config and tasks in a common db") -- the production
-                implementation CapabilityContext.Credentials had none of
-                until now
+pkg/secrets/    a model.CredentialResolver backed by one encrypted file
+                inside the state repository (staterepo, below), sealed to
+                a public key whose private half lives outside that
+                repository under <data-dir>/secrets and is the operator's
+                to manage. The separation bwsalmon/agents#366 asked for
+                ("put secrets in a separate db, config and tasks in a
+                common db") is stronger this way, not weaker: cloning the
+                repository gets everything grain knows and nothing it can
+                authenticate as. X25519 + HKDF-SHA256 + AES-256-GCM out of
+                the standard library, no dependency added to encrypt one
+                file
+pkg/staterepo/  grain's database as a git repository: every table
+                exported to tables/<name>.json, rows sorted by primary key
+                and columns in declared order, so an unchanged database
+                produces byte-identical files and a settings change is a
+                diff an agent can propose. Import is the other direction
+                and is a wholesale replacement -- that is how a merged
+                pull request, including one that deletes a row, becomes
+                the running configuration. The remote is optional by
+                construction: no Remote is `git init` under the data
+                directory, which is what a local install with no GitHub
+                account gets
 pkg/gitproxy/   a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
@@ -2362,6 +2377,107 @@ history that grows without bound, and handling for a cursor that has
 aged out. That is a real feature; polling is fifteen lines with nothing
 to get wrong, and for one operator watching a handful of tasks on the
 same machine the two are indistinguishable.
+
+## The store is a git repository again
+
+grain's settings -- templates, suites, per-repo configuration, prompt
+extensions, schedules -- are exactly the kind of thing a task is forever
+asking to change, and until now the only way to change one was a human
+editing it through the UI. A row in a SQLite file is not something an
+agent can propose a diff to, so the mechanism grain already has for
+changing anything else (a branch, a pull request, a review, a merge) was
+the one mechanism that could not reach grain's own configuration.
+
+So the database is a git repository now: `pkg/staterepo`, a working tree
+under `<data-dir>/state-repo` holding every table as
+`tables/<name>.json`. The store itself is unchanged -- it is still the
+embedded SQLite database `pkg/model/sqlite` opens, and every query in
+`pkg/model` is untouched. What changed is that the database is a
+materialisation of the repository rather than the thing itself.
+
+Rows are sorted by primary key and columns emitted in the table's own
+declared order, so exporting an unchanged database twice produces
+byte-identical files. That is not tidiness. The daemon exports on a
+timer, and a dump whose row order wandered would commit and push on
+every cycle forever, burying the changes that matter.
+
+### One writer, so no merges
+
+The traffic is one-directional at runtime, and that is what keeps it
+simple. The repository is imported into the database once, at startup,
+and exported back out on a timer after that. grain is the only writer of
+these files while it runs -- the UI and the CLI reach the daemon over
+REST rather than opening the store, which is what makes that claim true
+-- so a sync is a commit and a push and never a resolve, and a pull is
+fast-forward only. Divergence means something this model does not
+describe, and failing loudly beats resolving a conflict in a database
+dump by guesswork.
+
+A change an agent makes arrives the other way: a pull request against
+the state repository, reviewed and merged like any other, which the next
+start pulls and imports. The import is a wholesale replacement of every
+row -- which is exactly what makes a merged deletion delete something --
+and that is why it happens at startup rather than on every tick: it is
+not an operation to run underneath live runs holding ids.
+
+Schema changes are destructive here, deliberately. A dump this build
+cannot read is no more importable than a database it cannot open, so
+`staterepo.Load` refuses an older or newer stamp outright rather than
+guessing at a migration, and `scripts/setup.sh` moves the working tree
+aside alongside the store on a schema bump so the daemon re-seeds it.
+The encrypted secrets file is carried across rather than archived with
+it: it is the one thing in there that cannot be regenerated.
+
+### The remote is optional, by construction
+
+A `Config` with no `Remote` is a plain `git init` in the data directory:
+commits that go nowhere. A local install therefore needs no GitHub
+account, no credential and no answer from the operator at all -- it is
+not a degraded mode, it is the default one -- and `SetRemote` attaches a
+real remote later without reformatting anything, so "I ran it locally
+first" is not a decision anyone has to unmake.
+
+Pushing an https remote authenticates through the same GitHub credential
+ladder everything else here uses, resolved per push rather than cached
+(an installation token lasts an hour). The token goes into a temporary
+askpass script rather than argv or the remote URL: argv is world-readable
+through `ps`, and a URL with a token in it would persist in
+`.git/config`, inside the very repository being pushed.
+
+### Secrets go in it, encrypted
+
+Secrets live in the same repository -- one thing to clone, one thing to
+back up -- as `secrets.enc`, the only file in there that is ciphertext.
+It is sealed to a public key whose private half grain reads from one file
+under `<data-dir>/secrets` and copies nowhere else, so cloning the
+repository gets everything grain knows and nothing it can authenticate
+as. The scheme is X25519 to an ephemeral key pair, HKDF-SHA256 for the
+message key and AES-256-GCM over the plaintext, built out of the standard
+library: adding a dependency to encrypt one file grain alone ever reads
+is a larger commitment than composing three primitives that ship with
+the compiler. Neither values nor secret names appear in the ciphertext.
+
+Agents cannot read it, and nothing about this changed that: a run still
+gets a secret only through the secret input a human asked for.
+
+A fresh install mints its own key, which is what lets a local-only grain
+start with no input from anybody. A key that goes missing while an
+encrypted file remains is reported as the unrecoverable state it is,
+never replaced with a new one -- minting silently there would leave an
+undecryptable file behind and look like it had worked.
+
+### The bootstrap
+
+Three answers, offered in the UI's Settings pane (its State tab) and by
+`grain state` from a terminal: local only, an existing repository whose
+contents replace this installation's database, or an empty repository
+grain seeds from what it has. The last two are one operation, because
+adopting cannot tell them apart up front and does not need to.
+
+Adopting is destructive in one direction on purpose -- the repository is
+the source of truth, and adopting one means taking its answer -- so the
+previous working tree is moved aside with a timestamped name rather than
+deleted, and the pane says as much before you press the button.
 
 ## Deployment configuration lives in the store too
 

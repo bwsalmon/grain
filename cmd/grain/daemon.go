@@ -617,7 +617,17 @@ func run(ctx context.Context, cfg config) error {
 	// repository out from under the timer, so both go through the same
 	// lock rather than holding two handles on one working tree.
 	stateManager := newStateManager(cfg.dataDir, db, stateRepo, openSecrets(cfg.dataDir))
-	go stateSyncLoop(ctx, stateManager.sync)
+	syncStopped := make(chan struct{})
+	go func() {
+		defer close(syncStopped)
+		stateSyncLoop(ctx, stateManager.sync)
+	}()
+	// Waited for here, and deliberately after `defer db.Close()` above so
+	// that it runs *before* it: the loop's last act on the way out is one
+	// final export, and an export against a closed database writes
+	// nothing and reports why in the journal of a process that is already
+	// leaving.
+	defer func() { <-syncStopped }()
 
 	cfg, err = loadConfig(ctx, store, cfg)
 	if err != nil {
