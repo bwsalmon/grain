@@ -427,9 +427,11 @@ func configTOML(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 
 // tomlString renders one Go string as a TOML basic string. A TOML basic
 // string is a JSON string -- same quotes, same backslash escapes, same
-// \uXXXX form for a control character -- so this is encoding/json rather
-// than a quoter of this package's own, which would be one more thing
-// here to get subtly wrong for a path with a quote or a backslash in it.
+// \uXXXX form for anything encoding/json decides to escape (a control
+// character, and also "<", ">" and "&", which it escapes by default and
+// TOML reads back identically) -- so this is encoding/json rather than a
+// quoter of this package's own, which would be one more thing here to
+// get subtly wrong for a path with a quote or a backslash in it.
 func tomlString(s string) (string, error) {
 	data, err := json.Marshal(s)
 	if err != nil {
