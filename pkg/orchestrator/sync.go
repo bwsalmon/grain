@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1264,17 +1263,6 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks
 	}
 }
 
-// fixLogTailLines is how many lines of each failing job's log a fix
-// task's body carries. Enough for a Go test failure's own output and the
-// package lines around it; short enough that four of them stay a thing a
-// person scrolls rather than a file they search.
-const fixLogTailLines = 80
-
-// actionsLogTimestamp is the RFC3339 stamp GitHub prefixes every line of
-// a job log with. It is the same on every line, says nothing about the
-// failure, and costs about a quarter of each line, so it comes off.
-var actionsLogTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z `)
-
 // failingJobLogs is the rest of what a fix task needs and healthReason
 // cannot give it: not just which jobs are red, but what they printed.
 //
@@ -1317,25 +1305,12 @@ func failingJobLogs(client github.Client, ref model.PullRequestRef, headSHA stri
 		// Four backticks, so a log that itself contains a fenced block --
 		// any Go test printing three backticks does -- cannot close this
 		// one early.
-		fmt.Fprintf(&b, "\n````\n%s\n````\n", jobLogExcerpt(l.Log))
+		fmt.Fprintf(&b, "\n````\n%s\n````\n", github.JobLogExcerpt(l.Log))
 		if l.Truncated {
 			b.WriteString("\n(the tail of the log, not all of it)\n")
 		}
 	}
 	return b.String()
-}
-
-// jobLogExcerpt is one job's log as it goes into a task body: its last
-// fixLogTailLines lines, without Actions' own per-line timestamps.
-func jobLogExcerpt(text string) string {
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	if len(lines) > fixLogTailLines {
-		lines = lines[len(lines)-fixLogTailLines:]
-	}
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(actionsLogTimestamp.ReplaceAllString(line, ""), "\r")
-	}
-	return strings.Join(lines, "\n")
 }
 
 // fixTaskTitle names a fix after the task it repairs -- "Resolve: Add

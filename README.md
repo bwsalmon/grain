@@ -1585,6 +1585,39 @@ only as the polling it saves, for the same reason the loop itself is
 spelled out: a run told to "check CI" reaches for the status read and
 then invents a waiting strategy out of turns it could have spent working.
 
+## Putting the failing job's log in the CI answer
+
+Both of those tools used to stop at the name: `FAILING go (failure)`.
+That is enough to know the build is red and not enough to do anything
+about it, so a run's next move was always to guess at what broke and try
+to reproduce it — in a sandbox that is not the runner and may not be able
+to run the failing suite at all. It is the same gap `github.JobLog`'s own
+doc comment describes and `fileFixTask` already closes for the merge
+queue's fix tasks, which carry the tail of each failing job's log in
+their body rather than a job name.
+
+So `pull_request_status` and `wait_for_checks` carry it too: under the
+check list, each failing job's own URL and the end of its log, fenced in
+four backticks so a log containing a fenced block cannot close the quote
+early. Rendered by `github.JobLogExcerpt` and bounded by
+`github.JobLogTailBytes` over the wire and `github.JobLogTailLines` on
+the page — the same excerpt `fileFixTask` builds, shared rather than
+copied so a run reading its own break cannot be shown a
+differently-bounded log than the fix task filed for that same break.
+
+Two things keep it cheap and keep it from taking the answer down with it.
+The logs are read only once something has actually failed — never per
+poll, since `github.FailedJobLogs` is three GitHub reads (a commit's
+runs, a failed run's jobs, each failed job's log) and a fifteen-minute
+wait that went looking every fifteen seconds would spend the whole wait
+reading nothing. And a credential that may not read Actions logs, or CI
+that is not Actions at all and so has no job log to fetch, degrades to
+the answer these tools gave before — the checks, with the failing ones
+named — with one sentence saying why there is nothing under the failure,
+rather than turning a report of a red build into an error about logs.
+`PullRequestReader` grows to six methods for it, still read-only and
+still unable to name a repo the caller has not already pinned.
+
 ## Reaching a sandbox guest without a route into it
 
 A slot's VM guest is reached by exec'ing into that VM's own container:

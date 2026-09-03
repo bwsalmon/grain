@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1097,6 +1098,42 @@ func TestFailedJobLogsKeepsTheTailAtALineBoundary(t *testing.T) {
 	}
 	if !strings.HasSuffix(got.Log, "--- FAIL: TestThing (0.00s)\nFAIL\n") {
 		t.Error("the tail dropped the end of the log, which is the part that failed")
+	}
+}
+
+// What a reader is shown, rather than what crossed the wire. A job log is
+// the whole job, tens of thousands of lines of setup and cache restore
+// included, so what goes into a fix task's body or an mcp CI answer is
+// its last few -- the part where something broke -- with the timestamp
+// Actions repeats on every line taken off.
+func TestJobLogExcerptKeepsTheLastLinesWithoutTheirTimestamps(t *testing.T) {
+	var log strings.Builder
+	for i := 0; i < 500; i++ {
+		log.WriteString("2026-01-02T03:04:05.1234567Z line ")
+		log.WriteString(strconv.Itoa(i))
+		log.WriteString("\n")
+	}
+	got := JobLogExcerpt(log.String())
+
+	lines := strings.Split(got, "\n")
+	if len(lines) != JobLogTailLines {
+		t.Fatalf("kept %d lines, want %d", len(lines), JobLogTailLines)
+	}
+	if lines[0] != "line 420" {
+		t.Errorf("first kept line = %q, want the %dth from the end", lines[0], JobLogTailLines)
+	}
+	if lines[len(lines)-1] != "line 499" {
+		t.Errorf("last kept line = %q, want the end of the log", lines[len(lines)-1])
+	}
+}
+
+// A log shorter than the cap keeps every line it has, and a log that
+// isn't from Actions at all (a third-party CI's, one day) keeps its lines
+// exactly as they came.
+func TestJobLogExcerptLeavesAShortUnstampedLogAlone(t *testing.T) {
+	const log = "--- FAIL: TestThing (0.00s)\n    a_test.go:12: got 3, want 4\nFAIL\n"
+	if got := JobLogExcerpt(log); got != strings.TrimRight(log, "\n") {
+		t.Fatalf("JobLogExcerpt = %q, want it unchanged", got)
 	}
 }
 

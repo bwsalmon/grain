@@ -35,6 +35,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -561,6 +562,42 @@ const JobLogTailBytes = 16 << 10
 // reads logs for. A commit that failed more jobs than this has something
 // wrong that reading a fifth log will not add to.
 const maxFailedJobLogs = 4
+
+// JobLogTailLines is how many lines of a JobLog anything rendering one
+// keeps. Enough for a Go test failure's own output and the package lines
+// around it; short enough that four of them stay a thing a reader
+// scrolls rather than a file they search.
+//
+// A second bound on top of JobLogTailBytes because the two answer
+// different questions: that one is how much log crosses the wire, this
+// one is how much of it a reader is shown. A log of very long lines
+// fits the byte cap and still buries the failure.
+const JobLogTailLines = 80
+
+// actionsLogTimestamp is the RFC3339 stamp GitHub prefixes every line of
+// a job log with. It is the same on every line, says nothing about the
+// failure, and costs about a quarter of each line, so it comes off.
+var actionsLogTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z `)
+
+// JobLogExcerpt is one job's log as a reader is shown it: its last
+// JobLogTailLines lines, without Actions' own per-line timestamps.
+//
+// It lives here, next to JobLog itself, because two callers render the
+// same logs to two different audiences -- orchestrator's fix task body
+// (fileFixTask) and mcp's own CI answers (failingJobLogs) -- and a run
+// reading its build break through one of them should not see a
+// differently-bounded excerpt than the fix task filed for that same
+// break would carry.
+func JobLogExcerpt(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) > JobLogTailLines {
+		lines = lines[len(lines)-JobLogTailLines:]
+	}
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(actionsLogTimestamp.ReplaceAllString(line, ""), "\r")
+	}
+	return strings.Join(lines, "\n")
+}
 
 // failedConclusion reports whether a completed run or job's conclusion is
 // one of the three GitHub uses for "this did not pass" --
