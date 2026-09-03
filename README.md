@@ -2962,6 +2962,79 @@ about `gcp-key` that no configuration pane can see — the tab reads
 **Ready** throughout, because the secret is set and only GCP knows the
 key inside it stopped working.
 
+### Testing a credential, from the pane that calls it Ready
+
+That last sentence is what task-172 is about. Every fix above improves
+what an operator is told *once something has already failed*; none of
+them lets anyone find out before a task does. **Ready** on Settings →
+Capabilities means configured — a project, an agent service account and
+a `gcp-key-minter` secret are all set — and presence is the whole of
+what a configuration pane can see. So a capability row now carries an
+action as well as a badge: `POST /api/capabilities/{id}/check`, which
+authenticates as that capability's standing credential, makes one cheap
+and harmless call with it, and reports what came back.
+
+**The check is each provider's own**, through `model.CredentialChecker`
+— an optional interface shaped exactly like `model.Reaper`, implemented
+by the three capabilities that hold a standing credential and skipped by
+the ones that hold none. `gcp-key` lists the agent account's own keys
+(`Minter.ListKeys`, which `Reap` already calls hourly and which needs no
+permission minting does not); `gemini-key` lists the project's API keys,
+which also answers the pair of 403s `advise` exists to tell apart — a
+minter that may not administer API keys, and a project where
+`apikeys.googleapis.com` was never enabled — on a deployment whose
+minter key is perfectly live; `github-sandbox` asks GitHub which
+installation its App has, the same `FindInstallation` every
+`Materialize` starts with. None of them mints, writes or deletes
+anything, because this is a button somebody is expected to press twice.
+Doing it three ways rather than one is deliberate: only the provider
+knows which call is cheap, which is harmless, and which sentence to
+answer a refusal with — `explainRefusedCredential`'s, naming the dead
+secret and the two places a current key is pasted, rather than Google's
+bare `invalid_grant`.
+
+**On demand, not on a timer.** A background poll would keep the badge
+itself truthful, which is the more appealing design right up until the
+costs are written down: a request to somebody else's API per capability
+per tick, forever, whether or not anyone is looking; and a **Ready**
+that changes with nobody touching Settings, so a badge found red carries
+no answer to "compared to when, and did anything here change?". A button
+costs one round trip a human asked for and gives an answer stamped with
+the moment it was true. The answer is deliberately not stored and not
+folded back into `Ready`: a reload clears it, because a remembered
+"checked ok" is the same unfalsifiable reassurance the badge alone
+already was.
+
+**A refusal reads as this deployment's, not as grain's.** It comes back
+as an ordinary 200 with `ok: false` and the provider's sentence, because
+a configured deployment whose credential the far end refused is a real
+answer to the question asked and has a remedy on this pane — the same
+reasoning that keeps `Grantable` reported beside `Ready` rather than
+folded into it, one naming a gap configuration fixes and the other a gap
+it cannot. The errors that *are* grain's — an unwired UI, an id no build
+knows, a capability with nothing standing behind it — stay errors, 404
+and 400.
+
+`CapabilityStatus.Checkable` is what decides whether a pane offers the
+action at all: grain ships a check for this capability *and* this
+deployment is wired to something that can run one (`ui.Config.
+CapabilityChecks`, the same nil-means-unavailable contract every other
+optional field there has). Two drift tests hold the two halves together
+— every capability with a `Requires` entry owes a checker, and every
+capability without one must not claim to have a check — so a fourth
+capability that grows a standing credential cannot quietly go back to
+being a **Ready** badge and nothing else. `grain settings
+-check-capability <id>` asks the same question from the host, which is
+where whoever is reading a failed task's error is usually already
+standing.
+
+The one standing credential still unchecked is a named GitHub token
+(`github-credential:<name>`): those rows are reported `Ready` by
+construction, since a row exists only because an operator's own file
+does, and a revoked token behind one goes stale exactly the way the
+three above do. That capability holds no API client of its own to check
+through, so it is left for its own change.
+
 ### The same set, per repo
 
 The ask task-14 came from also said "we will also want this to be

@@ -574,10 +574,104 @@ func TestReapFailsIfListingFails(t *testing.T) {
 	}
 }
 
+// --- CheckCredential --------------------------------------------------
+
+// The success case is the one worth being fussy about: a check that
+// reported nothing but "ok" would be as unfalsifiable as the **Ready**
+// badge it exists to go beyond, so the detail has to carry the evidence
+// -- which credential answered, and what it saw.
+func TestCheckCredentialReportsWhatGCPAnswered(t *testing.T) {
+	minter := newFakeMinter()
+	minter.keys["key-a"] = KeyInfo{ID: "key-a", CreatedAt: time.Now()}
+	minter.keys["key-b"] = KeyInfo{ID: "key-b", CreatedAt: time.Now()}
+	p := testProvider(minter)
+	creds := &fakeCredentials{material: map[string]string{DefaultMinterCredential: "minter-key-material"}}
+
+	check, err := p.CheckCredential(context.Background(), creds)
+	if err != nil {
+		t.Fatalf("CheckCredential: %v", err)
+	}
+	if len(check.Credentials) != 1 || check.Credentials[0] != DefaultMinterCredential {
+		t.Errorf("Credentials = %v, want just %q", check.Credentials, DefaultMinterCredential)
+	}
+	if !strings.Contains(check.Detail, "2 user-managed key(s)") {
+		t.Errorf("detail %q does not say what GCP actually listed", check.Detail)
+	}
+	if !strings.Contains(check.Detail, p.Config.ServiceAccountEmail) {
+		t.Errorf("detail %q does not name the account that was checked", check.Detail)
+	}
+	// The check is a listing and nothing else: an operator is expected to
+	// press it repeatedly, and one that minted would leave a key behind
+	// for the reaper every time.
+	if len(minter.keys) != 2 {
+		t.Errorf("the check changed the account's keys: %v", minter.keys)
+	}
+	if minter.minterSeen != "minter-key-material" {
+		t.Errorf("authenticated with %q, want the minter credential's own material", minter.minterSeen)
+	}
+}
+
+// The failure this whole action exists for: the secret is set, the
+// project and account are set, and GCP no longer holds the public half
+// of the key inside it. What comes back has to be the sentence naming
+// the dead secret, not Google's bare invalid_grant.
+func TestCheckCredentialNamesTheSecretWhenGCPRefusesIt(t *testing.T) {
+	minter := newFakeMinter()
+	minter.listErr = refusedCredentialError
+	p := testProvider(minter)
+	creds := &fakeCredentials{material: map[string]string{DefaultMinterCredential: "x"}}
+
+	check, err := p.CheckCredential(context.Background(), creds)
+	if err == nil {
+		t.Fatal("expected a refused credential to fail the check")
+	}
+	if !strings.Contains(err.Error(), DefaultMinterCredential) {
+		t.Errorf("error %q does not name the secret holding the dead credential", err)
+	}
+	if !strings.Contains(err.Error(), "grain secrets set") {
+		t.Errorf("error %q does not name the command that replaces it", err)
+	}
+	if !strings.Contains(err.Error(), "invalid_grant") {
+		t.Errorf("error %q dropped GCP's own message", err)
+	}
+	// Reported even on the failure path: the remedy is "replace what is
+	// in this secret", so the caller has to be able to say which.
+	if len(check.Credentials) != 1 || check.Credentials[0] != DefaultMinterCredential {
+		t.Errorf("Credentials = %v, want the checked credential named even on failure", check.Credentials)
+	}
+}
+
+func TestCheckCredentialFailsWhenUnconfigured(t *testing.T) {
+	p := NewProvider(Config{})
+	creds := &fakeCredentials{material: map[string]string{DefaultMinterCredential: "x"}}
+	_, err := p.CheckCredential(context.Background(), creds)
+	if err == nil {
+		t.Fatal("expected a check against an unconfigured deployment to fail")
+	}
+	if !strings.Contains(err.Error(), "grain settings -gcp-project") {
+		t.Errorf("error %q does not name what is missing or how to set it", err)
+	}
+}
+
+func TestCheckCredentialFailsWhenTheSecretIsUnset(t *testing.T) {
+	p := testProvider(newFakeMinter())
+	_, err := p.CheckCredential(context.Background(), &fakeCredentials{material: map[string]string{}})
+	if err == nil {
+		t.Fatal("expected a check with no minter credential stored to fail")
+	}
+	if !strings.Contains(err.Error(), DefaultMinterCredential) {
+		t.Errorf("error %q does not name the credential that is missing", err)
+	}
+}
+
 // --- Reaper interface ------------------------------------------------
 
 func TestProviderSatisfiesReaper(t *testing.T) {
 	var _ model.Reaper = (*Provider)(nil)
+}
+
+func TestProviderSatisfiesCredentialChecker(t *testing.T) {
+	var _ model.CredentialChecker = (*Provider)(nil)
 }
 
 func TestProviderSatisfiesCapabilityProvider(t *testing.T) {
