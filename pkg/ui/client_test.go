@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -723,6 +724,70 @@ func TestSetCapabilityAttachesAndDetaches(t *testing.T) {
 	// removing an absent label used to do.
 	if err := c.SetCapability(ctx, task.ID, "gemini-key", false); err != nil {
 		t.Fatalf("detaching an absent capability: %v", err)
+	}
+}
+
+// gcp-key and github-sandbox each had a provider cmd/grain/daemon.go
+// registered and no DefaultCapabilities row, so every attempt to attach
+// one -- the only way a model.Grant is ever written -- was rejected as
+// an unknown capability, and no sandbox on any deployment ever got
+// gcpkey.SandboxKeyPath. Both routes a human has are covered here,
+// since both validate against the same listing.
+func TestGCPKeyAndGitHubSandboxCanBeGranted(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "mint me a key", Approved: true,
+		Capabilities: []string{"gcp-key", "github-sandbox"},
+	})
+	if err != nil {
+		t.Fatalf("creating a task granting gcp-key and github-sandbox: %v", err)
+	}
+	for _, want := range []string{"gcp-key", "github-sandbox"} {
+		if !slices.Contains(task.Capabilities, want) {
+			t.Errorf("capabilities = %v, want %s among them", task.Capabilities, want)
+		}
+	}
+
+	plain := create(t, c, ctx)
+	for _, id := range []string{"gcp-key", "github-sandbox"} {
+		if err := c.SetCapability(ctx, plain.ID, id, true); err != nil {
+			t.Errorf("attaching %s: %v", id, err)
+		}
+	}
+}
+
+// A task can be holding a grant this deployment no longer offers -- a
+// renamed capability, "scratch-repo" being the one that was here, which
+// fails the task's every dispatch at model.ResolveGrants. Detaching it
+// has to work, or the only route out is the store itself. Attaching one
+// is still refused: that is the check that keeps an unknown id from
+// becoming a grant in the first place.
+func TestSetCapabilityDetachesAnIDNoLongerOffered(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+	if err := store.UpdateTask(ctx, task.ID, func(tk *model.Task) error {
+		tk.Grants = append(tk.Grants, model.Grant{Capability: "scratch-repo", Via: model.GrantByLabel})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.SetCapability(ctx, task.ID, "scratch-repo", false); err != nil {
+		t.Fatalf("detaching a capability this deployment no longer offers: %v", err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Capabilities) != 0 {
+		t.Fatalf("capabilities after detach = %v, want none", got.Capabilities)
+	}
+
+	err = c.SetCapability(ctx, task.ID, "scratch-repo", true)
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("attaching an unknown capability: error = %v, want a ValidationError", err)
 	}
 }
 

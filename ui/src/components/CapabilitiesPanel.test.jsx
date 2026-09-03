@@ -69,7 +69,7 @@ describe("CapabilitiesPanel", () => {
   });
 
   it("falls back to the id when no display name is given", () => {
-    render(<CapabilitiesPanel capabilities={[{ id: "scratch-repo", description: "", ready: true }]} />);
-    expect(screen.getByText("scratch-repo")).toBeInTheDocument();
+    render(<CapabilitiesPanel capabilities={[{ id: "some-new-capability", description: "", ready: true }]} />);
+    expect(screen.getByText("some-new-capability")).toBeInTheDocument();
   });
 });
