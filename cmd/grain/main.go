@@ -338,8 +338,18 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	}
 	req := ui.CreateTaskRequest{
 		Title: *title, Description: *body, Repo: *repo, NoRepo: *noRepo, Base: *base,
-		AutoMerge: autoMerge, Capabilities: capabilities, Reads: reads, Approved: *approve,
+		AutoMerge: autoMerge, Reads: reads, Approved: *approve,
 		Interactive: *interactive, Attachments: attachments,
+	}
+	// Naming any -capability names the whole set (ui.CreateTaskRequest.
+	// Capabilities); naming none leaves the field unset, so the task is
+	// filed with whatever this deployment attaches by default -- the same
+	// answer the UI's own new-task form starts from. To file one with
+	// nothing at all on a deployment that defaults something, detach it
+	// afterwards (`grain capability <task> <cap> detach`).
+	if len(capabilities) > 0 {
+		ids := []string(capabilities)
+		req.Capabilities = &ids
 	}
 
 	task, err := c.CreateTask(ctx, req)
@@ -579,6 +589,8 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
 	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any")
+	defaultCapabilities := fs.String("default-capabilities", "",
+		"comma-separated capability IDs every new task is filed holding -- empty files each task with only what it asks for")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -616,6 +628,14 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
+		case "default-capabilities":
+			// splitRepoList is a comma-separated list with "" meaning
+			// none, which is exactly what this needs too -- an empty
+			// -default-capabilities is how an operator turns the default
+			// set back off, the same way an empty -target-repos clears
+			// the allowlist.
+			v := splitRepoList(*defaultCapabilities)
+			req.DefaultCapabilities = &v
 		}
 	})
 
@@ -744,6 +764,11 @@ func (p *printer) settings(s ui.Settings) {
 	} else {
 		fmt.Println("target repos:   unrestricted")
 	}
+	if len(s.DefaultCapabilities) > 0 {
+		fmt.Printf("default capabilities: %s\n", strings.Join(s.DefaultCapabilities, ", "))
+	} else {
+		fmt.Println("default capabilities: none")
+	}
 	// Every other setting above is already in effect: the daemon
 	// re-reads this row each reconcile tick (cmd/grain/daemon.go's
 	// liveConfig). These are the ones that are not, so saying so here is
@@ -782,6 +807,13 @@ func capabilityStatusLine(cp ui.CapabilityStatus) string {
 		state = "ready"
 	}
 	var notes []string
+	// First, ahead of the gaps below, for the same reason the pane puts
+	// "not grantable" first: a capability every task is filed holding is
+	// the one whose "not ready" is a deployment-wide problem rather than
+	// a per-task one.
+	if cp.Default {
+		notes = append(notes, "default -- every new task is filed with this")
+	}
 	if !cp.Grantable {
 		notes = append(notes, "NOT GRANTABLE -- grain registers a provider for this, but no task can ask for it")
 	}

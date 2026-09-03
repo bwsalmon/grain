@@ -1758,7 +1758,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 	}
 	uiCfg := ui.Config{
 		Actor:        ui.DefaultActor(actorID(cfg.actor)),
-		Capabilities: ui.DefaultCapabilities(),
+		Capabilities: ui.OfferedCapabilities(),
 		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,

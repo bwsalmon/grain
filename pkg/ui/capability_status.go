@@ -52,12 +52,26 @@ type CapabilityStatus struct {
 	// into it, because the two name opposite kinds of gap and are fixed
 	// in opposite places: an unready capability is this deployment's
 	// configuration (set a project, paste a secret), while an
-	// ungrantable one is grain's own code -- ui.DefaultCapabilities and
+	// ungrantable one is grain's own code -- ui.OfferedCapabilities and
 	// cmd/grain/daemon.go's capabilityProviders having drifted apart --
 	// and no amount of configuring will move it. Showing only Ready is
 	// what let a deployment sit with a fully configured, "Ready" gcp-key
 	// that no task had ever been able to ask for.
 	Grantable bool `json:"grantable"`
+	// Default reports whether this capability is in
+	// model.Config.DefaultCapabilities: whether every task filed on this
+	// deployment starts out holding it, rather than only the ones
+	// somebody ticks it on.
+	//
+	// It is a separate axis from Grantable, not a stronger form of it.
+	// Grantable still means what it always did -- the picker offers a row
+	// -- and a defaulted capability needs that row for two reasons: it is
+	// what UpdateSettings validates the default set against, and it is
+	// what lets a human who does not want it on one task take it off
+	// again. A capability that were defaulted without being grantable
+	// would be one every task holds and none can drop, which is exactly
+	// the deployment-wide, un-detachable grant this deliberately is not.
+	Default bool `json:"default"`
 	// MissingConfig is every deployment setting (this Settings tab's own
 	// General fields) this capability still needs -- e.g. "GCP project"
 	// for gcp-key/gemini-key. Empty for a capability with no such gate
@@ -82,10 +96,10 @@ type CapabilityStatus struct {
 // package sends since (TestConfigEndpointReportsActorAndCapabilities'
 // own "the GitHub label a capability used to carry is gone from the
 // wire shape along with the labels themselves"). gemini-key, self-debug
-// and self-repair repeat the same names DefaultCapabilities already
+// and self-repair repeat the same names OfferedCapabilities already
 // gives the per-task picker's own listing of the very same capabilities
 // -- two different views of one capability, the same duplication
-// DefaultCapabilities and each provider's own Spec().Description
+// OfferedCapabilities and each provider's own Spec().Description
 // already accept for their descriptions.
 var capabilityDisplayNames = map[string]string{
 	"gcp-key":             "GCP key",
@@ -202,6 +216,7 @@ func (c *Client) capabilityStatuses(cfg model.Config) []CapabilityStatus {
 			Name:          capabilityDisplayNames[spec.Name],
 			Description:   spec.Description,
 			Grantable:     grantable,
+			Default:       slices.Contains(cfg.DefaultCapabilities, spec.Name),
 			MissingConfig: missingConfigFor(spec.Name, cfg),
 		}
 		if c.Config.Secrets != nil {

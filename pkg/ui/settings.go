@@ -98,6 +98,26 @@ type Settings struct {
 	// deployment still benefits from seeing that
 	// gcp-key/gemini-key/github-sandbox are not yet.
 	Capabilities []CapabilityStatus `json:"capabilities"`
+	// DefaultCapabilities is model.Config's own field of the same name:
+	// the capability ids every task filed on this deployment starts out
+	// holding, unless whoever files it says otherwise. Reported as
+	// stored, including an id this build no longer offers -- CreateTask
+	// skips such an entry rather than failing (that field's own doc
+	// comment), and an operator can only clear one they can see.
+	//
+	// Each entry is also flagged on the Capabilities list above
+	// (CapabilityStatus.Default), so the pane that says whether a
+	// capability is ready and grantable says in the same view whether
+	// every new task is being filed with it -- "not ready" matters a
+	// great deal more for a capability every task holds than for one
+	// nobody has ticked.
+	//
+	// Deliberately not omitempty, for the same reason PendingRestart is
+	// not: the frontend merges an update response over the settings it
+	// already has, so a set cleared back to nothing has to arrive as
+	// present-and-null rather than as an absent key leaving the old one
+	// on screen.
+	DefaultCapabilities []string `json:"defaultCapabilities"`
 	// ApprovedByDefault and AutoMergeByDefault are model.Config's own
 	// fields of the same name (bwsalmon/agents#612): deployment-wide
 	// defaults for whether a new task's "Queue immediately" and
@@ -270,6 +290,7 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
 		Capabilities:                  c.capabilityStatuses(cfg),
+		DefaultCapabilities:           cfg.DefaultCapabilities,
 		ApprovedByDefault:             cfg.ApprovedByDefault,
 		AutoMergeByDefault:            cfg.AutoMergeByDefault,
 		AgentFramework:                agentFramework,
@@ -371,6 +392,14 @@ type UpdateSettingsRequest struct {
 	ApprovedByDefault      *bool     `json:"approvedByDefault"`
 	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
 	AgentFramework         *string   `json:"agentFramework"`
+	// DefaultCapabilities replaces the whole default set, the same way
+	// TargetRepos above replaces the whole allowlist: a present list is
+	// exactly the ids every new task will be filed with, and an empty one
+	// turns the feature off. Every id must have a row in
+	// OfferedCapabilities -- defaulting a capability no task could be
+	// granted by hand would be a setting that fails silently at every
+	// filing.
+	DefaultCapabilities *[]string `json:"defaultCapabilities"`
 }
 
 // UpdateSettings applies req on top of whatever is currently stored (the
@@ -460,6 +489,26 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 			}
 		}
 		cfg.TargetRepos = *req.TargetRepos
+	}
+	if req.DefaultCapabilities != nil {
+		// Rejected here, not skipped the way CreateTask skips a stored id
+		// with no row: this is somebody choosing the set, and a choice
+		// that cannot take effect should be refused while whoever made it
+		// is still looking at it. Duplicates are dropped rather than
+		// refused -- a picker can produce one, and a set is what this is.
+		seen := map[string]bool{}
+		ids := make([]string, 0, len(*req.DefaultCapabilities))
+		for _, id := range *req.DefaultCapabilities {
+			if _, ok := c.capabilityByID(id); !ok {
+				return Settings{}, validationErrorf("defaultCapabilities: unknown capability %s", id)
+			}
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+		cfg.DefaultCapabilities = ids
 	}
 	if req.NewestFirst != nil {
 		cfg.NewestFirst = *req.NewestFirst

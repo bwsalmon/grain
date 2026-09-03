@@ -160,6 +160,20 @@ const (
 	GrantByDirective GrantSource = "directive" // a trusted author wrote it
 	GrantByFolder    GrantSource = "folder"    // a folder's offers granted it
 	GrantByGrain     GrantSource = "grain"     // grain applied it to itself
+	// GrantByDefault records a grant a task was filed with because the
+	// deployment lists that capability in Config.DefaultCapabilities --
+	// nobody ticked it for this task in particular, it is what filing a
+	// task here starts out with (ui.CreateTask).
+	//
+	// It is provenance only, exactly like the four above: nothing reads
+	// Via to decide what a grant lets a task do, and a default-sourced
+	// grant is in every other way an ordinary one -- it sits on the task,
+	// shows in its capability list, is detached through the same picker,
+	// and fails the same way at ResolveGrants/MaterializeGrants if the
+	// capability behind it is misconfigured. That is deliberate: a
+	// deployment-wide grant applied at dispatch instead would have no
+	// task to be visible on and no way to be taken off one.
+	GrantByDefault GrantSource = "default"
 )
 
 type Provision string

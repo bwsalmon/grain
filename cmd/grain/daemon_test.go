@@ -150,11 +150,11 @@ func TestCapabilityProviders(t *testing.T) {
 }
 
 // Every provider this deployment registers has to have a
-// ui.DefaultCapabilities row, and every row has to have a provider --
+// ui.OfferedCapabilities row, and every row has to have a provider --
 // the two hand-maintained lists whose drift left gcp-key and
 // github-sandbox with providers no task could ever reach, and
 // "scratch-repo" with a row no provider answered to. pkg/ui's own
-// TestDefaultCapabilitiesOffersEveryShippedCapability ties that listing
+// TestOfferedCapabilitiesCoversEveryShippedCapability ties that listing
 // to the catalog of providers grain ships; this ties it to the registry
 // a real daemon actually builds, which is the pair the gap was in.
 //
@@ -169,19 +169,19 @@ func TestEveryRegisteredCapabilityIsGrantable(t *testing.T) {
 		registered = append(registered, p.Spec().Name)
 	}
 	var offered []string
-	for _, c := range ui.DefaultCapabilities() {
+	for _, c := range ui.OfferedCapabilities() {
 		offered = append(offered, c.ID)
 	}
 	for _, name := range registered {
 		if !slices.Contains(offered, name) {
-			t.Errorf("capability %q is registered but ui.DefaultCapabilities does not offer it: "+
+			t.Errorf("capability %q is registered but ui.OfferedCapabilities does not offer it: "+
 				"every attempt to attach it -- from the UI's picker or `grain create -capability` -- is rejected as "+
 				"\"unknown capability\", so no task can be granted it and model.ResolveGrants is never reached", name)
 		}
 	}
 	for _, id := range offered {
 		if !slices.Contains(registered, id) {
-			t.Errorf("ui.DefaultCapabilities offers %q but a fully configured deployment registers no provider for it: "+
+			t.Errorf("ui.OfferedCapabilities offers %q but a fully configured deployment registers no provider for it: "+
 				"a task granted it is refused at dispatch (\"no provider is registered for capability\")", id)
 		}
 	}

@@ -447,6 +447,16 @@ var Tables = []string{
 	// either setting off. Its value is never read by anything -- PutConfig
 	// does not name it, and REPLACE re-defaults it on every settings save,
 	// so the value carries no information to read.
+	//
+	// default_capabilities is Config.DefaultCapabilities' own column --
+	// the capability ids a new task is filed holding -- stored the same
+	// comma-separated way target_repos is (store.go's joinCSV/splitCSV; a
+	// capability id can no more contain a comma than an owner/name repo
+	// can), DEFAULT '' both here and in
+	// Store.ensureConfigDefaultCapabilitiesColumn for an already-created
+	// grain_config. Empty, the default, means a new task starts with only
+	// the capabilities whoever files it asked for -- exactly what every
+	// deployment did before this column existed.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -467,6 +477,7 @@ var Tables = []string{
   ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 1,
   ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
   ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
+  ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
