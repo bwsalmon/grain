@@ -221,6 +221,12 @@ export default function SettingsOverlay({ onClose, showError }) {
       if (maxAgentTurns !== (settings.maxAgentTurns || 0)) payload.maxAgentTurns = maxAgentTurns;
     }
 
+    // Trimmed here and again on the way in (ui.UpdateSettings), so
+    // clearing the box back to blank sends "" -- a deliberate "tell runs
+    // nothing extra" -- rather than reading as unchanged.
+    const promptExtension = form.elements.promptExtension.value.trim();
+    if (promptExtension !== (settings.promptExtension || "")) payload.promptExtension = promptExtension;
+
     return save(payload);
   };
 
@@ -502,6 +508,24 @@ export default function SettingsOverlay({ onClose, showError }) {
             <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="claudeModel" label="Claude model" defaultValue={settings.claudeModel || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = uncapped; runs are bounded by wall-clock runtime instead" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
+
+            {/* The deployment-wide layer of model/prompt_extension.go's
+                three. It lives on this tab rather than General because it
+                is about what the agent is told, next to which agent and
+                which model -- and, like those, it reaches the next run
+                dispatched rather than needing a restart. */}
+            <Typography variant="subtitle2" sx={{ mt: 3 }}>Prompt extension</Typography>
+            <TextField
+              name="promptExtension"
+              label="Standing instructions for every run"
+              helperText="Added to the end of every run's prompt on this deployment -- house style, a test command, a convention grain has no way to know. A repo can add its own on the Repos pane, and a task can replace both (New task -> Advanced options). Leave empty to add nothing."
+              defaultValue={settings.promptExtension || ""}
+              multiline
+              minRows={4}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+            />
 
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
               <Button type="submit" variant="contained">Save</Button>

@@ -497,7 +497,21 @@ type Task struct {
 	// orchestrator.runOne, once per dispatch, when it asks Deps.Framework
 	// for the agent.Framework this run is driven by.
 	AgentFramework string
-	CreatedAt      *time.Time
+	// PromptExtension overrides the deployment's and the target repo's
+	// standing instructions for this task's own dispatch alone
+	// (grain/task-114) -- prompt_extension.go's own doc comment has what
+	// those are and why this layer replaces them rather than adding to
+	// them. Empty, the default, means "no override", the same "zero means
+	// unset" contract AgentFramework and SandboxCPUs above already use,
+	// so a task created before this field existed is told exactly what
+	// the deployment and its repo say.
+	//
+	// Read at dispatch (orchestrator.RunDispatch, through
+	// model.PromptExtensionFor), not at creation, which is what makes an
+	// edit to a queued task's own override reach the run it eventually
+	// gets.
+	PromptExtension string
+	CreatedAt       *time.Time
 
 	// OrderKey is this task's position in the backlog -- Store.Ready
 	// dispatches ascending, so the task with the smallest OrderKey among

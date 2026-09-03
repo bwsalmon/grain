@@ -73,6 +73,23 @@ describe("DetailOverlay", () => {
     expect(screen.queryByText("Agent framework")).not.toBeInTheDocument();
   });
 
+  // grain/task-114: a per-task prompt extension override, shown the same
+  // way and for the same reason -- and shown in full, since what it says
+  // is the whole of what makes this task's runs different.
+  it("shows the prompt extension only when the task overrides it", () => {
+    const { rerender } = render(
+      <DetailOverlay
+        task={{ ...baseTask, promptExtension: "Ignore the house rules." }}
+        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Prompt extension")).toBeInTheDocument();
+    expect(screen.getByText("Ignore the house rules.")).toBeInTheDocument();
+
+    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.queryByText("Prompt extension")).not.toBeInTheDocument();
+  });
+
   // bwsalmon/agents#534: a per-task sandbox shape override.
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(
@@ -890,6 +907,20 @@ describe("DetailOverlay", () => {
       body: JSON.stringify({ body: "sounds good", attachments: [] }),
     });
     expect(textarea).toHaveValue("");
+  });
+
+  // grain/task-91: the title and description above are only part of
+  // what a dispatch hands the agent, so the whole prompt is a click away
+  // from the task itself as well as from its row in the list.
+  it("opens the full prompt the agent was given", async () => {
+    const user = userEvent.setup();
+    api.mockResolvedValueOnce({ prompt: "Fix the login bug\n\nWork in acme/widgets.", attempt: 2 });
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Prompt" }));
+
+    expect(await screen.findByText(/Work in acme\/widgets\./)).toBeInTheDocument();
+    expect(api).toHaveBeenLastCalledWith("/api/tasks/12/prompt");
   });
 
   // bwsalmon/agents#523: "After creating a task the user should be able

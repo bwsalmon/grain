@@ -21,6 +21,17 @@ describe("parsePath", () => {
     expect(parsePath("/tasks/42")).toEqual({ view: "tasks", taskId: "42" });
   });
 
+  it("parses a repo page path, and its releases pane", () => {
+    expect(parsePath("/repos/acme/widgets")).toEqual({ view: "repos", repo: "acme/widgets" });
+    expect(parsePath("/repos/acme/widgets/releases")).toEqual({
+      view: "repos", repo: "acme/widgets", showReleases: true,
+    });
+  });
+
+  it("falls back to the repo list for an owner with no repo name", () => {
+    expect(parsePath("/repos/acme")).toEqual({ view: "repos" });
+  });
+
   it("parses the settings path", () => {
     expect(parsePath("/settings")).toEqual({ view: "tasks", showSettings: true });
   });
@@ -43,6 +54,16 @@ describe("buildPath", () => {
     expect(buildPath({ view: "repos" })).toBe("/repos");
   });
 
+  it("builds a repo's own path, and its releases pane's", () => {
+    expect(buildPath({ view: "repos", repo: "acme/widgets" })).toBe("/repos/acme/widgets");
+    expect(buildPath({ view: "repos", repo: "acme/widgets", showReleases: true }))
+      .toBe("/repos/acme/widgets/releases");
+  });
+
+  it("ignores an open repo outside the repos view", () => {
+    expect(buildPath({ view: "tasks", repo: "acme/widgets" })).toBe("/");
+  });
+
   it("prefers an open task over the underlying view", () => {
     expect(buildPath({ view: "repos", taskId: "42" })).toBe("/tasks/42");
   });
@@ -52,7 +73,11 @@ describe("buildPath", () => {
   });
 
   it("round-trips every path parsePath recognizes", () => {
-    for (const path of ["/", "/repos", "/schedules", "/templates", "/tasks/42", "/settings"]) {
+    const paths = [
+      "/", "/repos", "/schedules", "/templates", "/tasks/42", "/settings",
+      "/repos/acme/widgets", "/repos/acme/widgets/releases",
+    ];
+    for (const path of paths) {
       expect(buildPath(parsePath(path))).toBe(path);
     }
   });

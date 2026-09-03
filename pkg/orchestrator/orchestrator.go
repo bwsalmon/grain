@@ -215,6 +215,21 @@ type Config struct {
 	// Deps.MaxWorkers/MaxMergers, so a change made in Settings reaches the next
 	// run dispatched rather than the next restart.
 	MaxAgentTurns int
+	// PromptExtension is this deployment's own standing instructions for
+	// every run it dispatches -- model.Config.PromptExtension, and
+	// model/prompt_extension.go for what the three layers of it are.
+	// Empty adds nothing to any prompt, which is what a caller that has
+	// never set one gets.
+	//
+	// Only the deployment-wide layer lives here. The repo's own is read
+	// per dispatch, from the task's target (RunDispatch), because it is
+	// keyed by something only a task names; the task's own is on the task
+	// already. Whatever a caller sets here is only the starting value on
+	// a deployment with a store, exactly like MaxAgentTurns above:
+	// RunCycle re-reads it out of grain_config every cycle, so an edit in
+	// Settings reaches the next run dispatched rather than the next
+	// restart.
+	PromptExtension string
 	// GitRemoteBase is the base URL of this deployment's git proxy
 	// (cmd/grain/daemon.go's startGitProxy), which RunDispatch turns into
 	// a task's own clone URL to prepare its sandbox's checkout with --
