@@ -505,8 +505,13 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 
 /* A schedule-filed task is not the write target, so it gets a tinted
    fill rather than the plain default Chip -- its own category of
-   annotation, distinct from an ordinary repo/capability chip. */
-.chip-scheduled {
+   annotation, distinct from an ordinary repo/capability chip. A suite
+   run's own tasks (bwsalmon/agents#642) and an un-nested merge fix
+   (bwsalmon/agents#378) say the same kind of thing -- nobody filed this
+   by hand -- so they share the treatment. */
+.chip-scheduled,
+.chip-suite,
+.chip-stacked {
   background: var(--accent-subtle);
   color: var(--accent);
 }

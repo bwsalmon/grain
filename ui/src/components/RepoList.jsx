@@ -2,9 +2,9 @@ import { useState } from "react";
 import AddIcon from "@mui/icons-material/Add";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
-import { Box, Button, Chip, IconButton, Stack, TextField, Typography } from "@mui/material";
+import { Box, Button, Checkbox, Chip, FormControl, FormHelperText, IconButton, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
+import { STATE_LABELS, STATE_ORDER, capabilityName, repoRows, unionCapabilities } from "../state.js";
 import { TaskRow } from "./TaskList.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
 
@@ -59,6 +59,18 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
   // read from the API at a time (branches holds that one repo's list).
   const [branchRepo, setBranchRepo] = useState(null);
   const [branches, setBranches] = useState([]);
+  // capsRepo/caps/capsSelection are the same one-slot shape branchRepo/
+  // branches above use, for the per-repo default capability set
+  // (grain/task-24): which repo's form is open, what GET
+  // /api/repos/{owner}/{name}/capabilities last said (all three sets --
+  // the repo's own, the deployment's, and the union a task filed here
+  // would actually start with), and the unsaved ticks. caps is null
+  // while that read is in flight, which is what the form renders a
+  // loading line for rather than an empty picker that would look like
+  // "this repo adds nothing".
+  const [capsRepo, setCapsRepo] = useState(null);
+  const [caps, setCaps] = useState(null);
+  const [capsSelection, setCapsSelection] = useState([]);
 
   const q = search.trim().toLowerCase();
   const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
@@ -114,6 +126,54 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
     setBranchRepo(repo);
     setBranches([]);
     loadBranches(repo);
+  };
+
+  const loadCapabilities = async (repo) => {
+    try {
+      const [owner, name] = repo.split("/");
+      const loaded = await api(`/api/repos/${owner}/${name}/capabilities`);
+      setCaps(loaded);
+      setCapsSelection(loaded.defaultCapabilities || []);
+    } catch (err) {
+      // Closed again rather than left on "Loading capabilities…": the
+      // form has nothing to edit if this read failed, and the banner
+      // showError raises is where the reason belongs.
+      setCapsRepo(null);
+      showError(err);
+    }
+  };
+
+  const toggleCapabilitiesForm = (evt, repo) => {
+    evt.stopPropagation();
+    if (capsRepo === repo) {
+      setCapsRepo(null);
+      return;
+    }
+    setCapsRepo(repo);
+    setCaps(null);
+    setCapsSelection([]);
+    loadCapabilities(repo);
+  };
+
+  // saveCapabilities replaces this repo's own set wholesale (PUT's whole
+  // body is the new set, ui.SetRepoCapabilitiesRequest), then refreshes
+  // the config the new-task form seeds its own picker from -- otherwise a
+  // repo whose defaults just changed would keep filing tasks with the old
+  // ones until the page was reloaded.
+  const saveCapabilities = async (evt, repo) => {
+    evt.preventDefault();
+    try {
+      const [owner, name] = repo.split("/");
+      const updated = await api(`/api/repos/${owner}/${name}/capabilities`, {
+        method: "PUT",
+        body: JSON.stringify({ defaultCapabilities: capsSelection }),
+      });
+      setCaps(updated);
+      setCapsSelection(updated.defaultCapabilities || []);
+      await onRefreshConfig();
+    } catch (err) {
+      showError(err);
+    }
   };
 
   // createBranch only ever records the request -- the branches reconciler
@@ -206,6 +266,13 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                 <Button
                   size="small"
                   variant="outlined"
+                  onClick={(evt) => toggleCapabilitiesForm(evt, r.repo)}
+                >
+                  Capabilities
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
                   onClick={(evt) => { evt.stopPropagation(); onOpenReleases(r.repo); }}
                 >
                   Releases
@@ -235,6 +302,76 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                         </li>
                       ))}
                     </ul>
+                  )}
+                </Box>
+              )}
+              {capsRepo === r.repo && (
+                <Box sx={{ px: "1.75rem", py: 1.25, borderTop: "1px solid", borderColor: "divider" }}>
+                  {caps === null ? (
+                    <Typography variant="body2" color="text.secondary">Loading capabilities…</Typography>
+                  ) : (
+                    <Stack component="form" spacing={1} onSubmit={(evt) => saveCapabilities(evt, r.repo)}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel id={`repo-capabilities-label-${r.repo.replace("/", "-")}`}>Default capabilities</InputLabel>
+                        <Select
+                          labelId={`repo-capabilities-label-${r.repo.replace("/", "-")}`}
+                          label="Default capabilities"
+                          multiple
+                          value={capsSelection}
+                          onChange={(e) => setCapsSelection(e.target.value)}
+                          renderValue={(selected) => (
+                            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                              {selected.map((id) => (
+                                <Chip key={id} size="small" label={capabilityName(config, id)} />
+                              ))}
+                            </Box>
+                          )}
+                        >
+                          {/* The same grantable-only listing Settings'
+                              own default-capabilities picker offers, and
+                              for the same reason: a default no task can
+                              be granted by hand would fail at every
+                              filing, and PUT rejects one anyway. A
+                              capability the deployment already defaults
+                              is still offered rather than hidden --
+                              ticking it here is how a repo keeps it if
+                              the deployment-wide entry is later dropped
+                              -- and says so in its own row, so nobody
+                              reads a blank box as "not on here". */}
+                          {(config?.capabilities || []).map((c) => (
+                            <MenuItem key={c.id} value={c.id} title={c.description}>
+                              <Checkbox checked={capsSelection.includes(c.id)} size="small" />
+                              <ListItemText
+                                primary={c.name}
+                                secondary={(caps.deploymentDefaultCapabilities || []).includes(c.id)
+                                  ? "already a deployment default -- on here either way"
+                                  : null}
+                              />
+                            </MenuItem>
+                          ))}
+                        </Select>
+                        <FormHelperText>
+                          Added to this deployment&apos;s own defaults, never subtracted from them -- a repo can
+                          only widen what a task filed against it starts with. Whoever files one can still untick
+                          any of these on the new-task form, and tasks already filed keep what they were filed
+                          with.
+                        </FormHelperText>
+                      </FormControl>
+                      {/* The union, recomputed from the unsaved ticks
+                          rather than read back from the last response,
+                          so this line describes the set that Save is
+                          about to make real. */}
+                      <Typography variant="body2" color="text.secondary">
+                        A task filed against {r.repo} starts with:{" "}
+                        {unionCapabilities(caps.deploymentDefaultCapabilities, capsSelection).length === 0
+                          ? "nothing -- only what whoever files it ticks"
+                          : unionCapabilities(caps.deploymentDefaultCapabilities, capsSelection)
+                            .map((id) => capabilityName(config, id)).join(", ")}
+                      </Typography>
+                      <Stack direction="row" justifyContent="flex-end">
+                        <Button type="submit" variant="contained" size="small">Save capabilities</Button>
+                      </Stack>
+                    </Stack>
                   )}
                 </Box>
               )}

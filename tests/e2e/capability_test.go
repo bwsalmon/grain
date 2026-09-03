@@ -10,7 +10,7 @@
 // the real gcpkey/geminikey providers -- those need real GCP/Gemini
 // credentials this sandbox should not assume it has. It is attached to the
 // task through the real CLI's `capability <id> <cap> attach`, under the one
-// capability ID (self-debug) cmd/grain/main.go's ui.DefaultCapabilities
+// capability ID (self-debug) cmd/grain/main.go's ui.OfferedCapabilities
 // allow-list accepts that needs no such credential, exactly the way an
 // operator would toggle it on -- the orchestrator.Config.Capabilities
 // registry that actually resolves and materializes it, by contrast, is
@@ -145,7 +145,7 @@ func TestCLIAttachedCapabilityIsMaterializedAppliedAndRevokedThroughRunCycle(t *
 	// the real CLI binary -- not a seeded store row and not a hand-built
 	// Grant -- the way an operator actually would. self-debug is the
 	// capability ID because it is on cmd/grain/main.go's own
-	// ui.DefaultCapabilities allow-list and needs no real credential; the
+	// ui.OfferedCapabilities allow-list and needs no real credential; the
 	// registry that actually resolves and materializes it below is this
 	// test's own, never the real one a deployment would wire up for it.
 	storeDir := t.TempDir()

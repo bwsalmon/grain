@@ -42,7 +42,7 @@ func testClient(t *testing.T) (*ui.Client, *model.Store, context.Context) {
 	client := ui.NewClient(ui.Config{
 		Actor:         ui.DefaultActor("alice"),
 		DefaultTarget: &repo,
-		Capabilities:  ui.DefaultCapabilities(),
+		Capabilities:  ui.OfferedCapabilities(),
 	}, store)
 	client.Now = func() time.Time { return baseTime }
 	return client, store, ctx
@@ -213,7 +213,7 @@ func TestCreateTaskConfigurationKeepsACallerSuppliedTitleAndCapabilities(t *test
 		Configuration: true,
 		Title:         "why is the daemon restarting",
 		Description:   "it keeps crash-looping, please debug",
-		Capabilities:  []string{"gemini-key"},
+		Capabilities:  &[]string{"gemini-key"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -312,7 +312,7 @@ func TestCreateTaskCarriesCapabilityGrants(t *testing.T) {
 	c, store, ctx := testClient(t)
 
 	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
-		Title: "needs a key", Approved: true, Capabilities: []string{"gemini-key"},
+		Title: "needs a key", Approved: true, Capabilities: &[]string{"gemini-key"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -326,6 +326,291 @@ func TestCreateTaskCarriesCapabilityGrants(t *testing.T) {
 	}
 	if len(stored.Grants) != 1 || stored.Grants[0].Capability != "gemini-key" {
 		t.Fatalf("grants = %+v, want one gemini-key grant", stored.Grants)
+	}
+}
+
+// putDefaultCapabilities stores ids as this deployment's default
+// capability set, the way an operator saving Settings would -- through a
+// full model.Config, since PutConfig writes the row wholesale.
+func putDefaultCapabilities(t *testing.T, ctx context.Context, store *model.Store, ids ...string) {
+	t.Helper()
+	cfg := model.DefaultConfig()
+	cfg.DefaultCapabilities = ids
+	if err := store.PutConfig(ctx, cfg); err != nil {
+		t.Fatalf("storing default capabilities %v: %v", ids, err)
+	}
+}
+
+// grain/task-14: a deployment can say which capabilities every task
+// filed on it starts out holding. The grant lands on the task itself, as
+// GrantByDefault -- not as a deployment-level set read again at dispatch
+// -- which is what makes it visible on the task and detachable from it.
+func TestCreateTaskSeedsDeploymentDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "needs a sandbox key", Approved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(task.Capabilities, "gcp-key") {
+		t.Fatalf("capabilities = %v, want gcp-key among them: the deployment defaults it", task.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 1 || stored.Grants[0].Via != model.GrantByDefault {
+		t.Fatalf("grants = %+v, want one gcp-key grant recorded as %q", stored.Grants, model.GrantByDefault)
+	}
+	// Detachable like any other grant: a default is a starting point, not
+	// something the task is stuck with.
+	if err := c.SetCapability(ctx, task.ID, "gcp-key", false); err != nil {
+		t.Fatalf("detaching a defaulted capability: %v", err)
+	}
+	detached, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detached.Grants) != 0 {
+		t.Fatalf("grants after detaching = %+v, want none", detached.Grants)
+	}
+}
+
+// A request that names its own capabilities names all of them: the
+// defaults seed a task nobody said anything about, and an empty-but-
+// present list is somebody saying "none". The UI's own form always sends
+// a list -- seeded from the defaults -- so unticking a box on it has to
+// mean the task is filed without that capability.
+func TestCreateTaskCapabilitiesOverrideDeploymentDefaults(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+
+	named, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "only this one", Approved: true, Capabilities: &[]string{"gemini-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(named.Capabilities, []string{"gemini-key"}) {
+		t.Errorf("capabilities = %v, want [gemini-key] alone", named.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, named.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 1 || stored.Grants[0].Via != model.GrantByLabel {
+		t.Errorf("grants = %+v, want one gemini-key grant recorded as %q", stored.Grants, model.GrantByLabel)
+	}
+
+	none, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "none at all", Approved: true, Capabilities: &[]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none.Capabilities) != 0 {
+		t.Errorf("capabilities = %v, want none: an empty list is a choice, not an absent one", none.Capabilities)
+	}
+}
+
+// A configuration-agent task gets its own three grants on top of
+// whatever the deployment defaults, rather than either one replacing the
+// other.
+func TestCreateConfigurationTaskKeepsDeploymentDefaults(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Configuration: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"gcp-key", "self-debug", "self-repair", "bootstrap-playbooks"} {
+		if !slices.Contains(task.Capabilities, want) {
+			t.Errorf("capabilities = %v, want %s among them", task.Capabilities, want)
+		}
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 4 {
+		t.Fatalf("grants = %+v, want four", stored.Grants)
+	}
+}
+
+// A stored default this build no longer offers is skipped, not fatal:
+// UpdateSettings validates the set when it is saved, so an id with no
+// row can only be one grain has retired since, and a settings row left
+// behind by an upgrade must not become a deployment where no task can be
+// filed at all ("scratch-repo" is exactly that -- task-10 renamed it to
+// github-sandbox).
+func TestCreateTaskSkipsRetiredDefaultCapability(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "scratch-repo", "gemini-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "still filable", Approved: true})
+	if err != nil {
+		t.Fatalf("filing a task on a deployment defaulting a retired capability: %v", err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key]: the retired id is skipped, the rest still granted",
+			task.Capabilities)
+	}
+}
+
+// putRepoDefaultCapabilities stores ids as one repo's own default
+// capability set, the way an operator saving the repos pane's own
+// per-repo picker would.
+func putRepoDefaultCapabilities(t *testing.T, ctx context.Context, store *model.Store, repo string, ids ...string) {
+	t.Helper()
+	parsed, err := model.ParseRepo(repo)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", repo, err)
+	}
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{Repo: parsed, DefaultCapabilities: ids}); err != nil {
+		t.Fatalf("storing repo default capabilities %v for %s: %v", ids, repo, err)
+	}
+}
+
+// grain/task-24: a repo can default capabilities of its own, on top of
+// whatever the deployment defaults. Union, deployment-wide first -- a
+// repo adds and never subtracts -- and only for the repo the task
+// actually targets.
+func TestCreateTaskUnionsRepoDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gemini-key")
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	here, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "on the repo that adds one", Approved: true, Repo: "acme/widgets",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compared sorted: a task's capabilities come back in the order
+	// Store.grantsOf reads them (by capability), not in the order they
+	// were seeded.
+	if !reflect.DeepEqual(here.Capabilities, []string{"gcp-key", "gemini-key"}) {
+		t.Errorf("capabilities = %v, want both the deployment's gemini-key and the repo's gcp-key",
+			here.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, here.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range stored.Grants {
+		if g.Via != model.GrantByDefault {
+			t.Errorf("grant %+v: want every seeded grant recorded as %q", g, model.GrantByDefault)
+		}
+	}
+
+	// A different repo gets the deployment's set alone -- the repo layer
+	// is keyed on the target, not applied to everything once stored.
+	elsewhere, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "on another repo", Approved: true, Repo: "acme/gadgets",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(elsewhere.Capabilities, []string{"gemini-key"}) {
+		t.Errorf("capabilities = %v, want [gemini-key] alone on a repo with no defaults of its own",
+			elsewhere.Capabilities)
+	}
+}
+
+// A task filed with no repo named at all is filed against
+// Config.DefaultTarget, and it is that repo's defaults it should get:
+// the layer is keyed on the repo the task ends up targeting, not on
+// whether the request happened to spell it out.
+func TestCreateTaskUsesDefaultTargetRepoDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "no repo named", Approved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gcp-key"}) {
+		t.Fatalf("capabilities = %v, want [gcp-key]: the default target repo's own defaults", task.Capabilities)
+	}
+}
+
+// A repo-less task (NoRepo) has no repo to key the second layer on, so
+// it gets the deployment's set and nothing else -- not the default
+// target's, which it deliberately is not filed against.
+func TestCreateTaskWithNoRepoTakesOnlyDeploymentDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gemini-key")
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "nothing to check out", Approved: true, NoRepo: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key] alone", task.Capabilities)
+	}
+}
+
+// The same skip-rather-than-fail rule the deployment-wide set has, on
+// the repo layer: a repo row naming a capability this build retired must
+// not become a repo no task can be filed against.
+func TestCreateTaskSkipsRetiredRepoDefaultCapability(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "scratch-repo", "gemini-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "still filable", Approved: true})
+	if err != nil {
+		t.Fatalf("filing a task against a repo defaulting a retired capability: %v", err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key]", task.Capabilities)
+	}
+}
+
+// A repo restating something the deployment already defaults grants it
+// once, not twice -- the union is a set, and a duplicate grant would be
+// two rows for one capability on the task.
+func TestCreateTaskDeduplicatesOverlappingDefaultCapabilities(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gcp-key")
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Title: "one key only", Approved: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gcp-key"}) {
+		t.Fatalf("capabilities = %v, want [gcp-key] once", task.Capabilities)
+	}
+	stored, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Grants) != 1 {
+		t.Fatalf("grants = %+v, want exactly one", stored.Grants)
+	}
+}
+
+// A request that names its own set still names all of it: the per-repo
+// layer seeds a task nobody said anything about, exactly like the
+// deployment-wide one, and unticking a box on the new-task form has to
+// mean the task is filed without that capability.
+func TestCreateTaskCapabilitiesOverrideRepoDefaults(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putRepoDefaultCapabilities(t, ctx, store, "acme/widgets", "gcp-key")
+
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "not that one", Approved: true, Capabilities: &[]string{"gemini-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(task.Capabilities, []string{"gemini-key"}) {
+		t.Fatalf("capabilities = %v, want [gemini-key] alone", task.Capabilities)
 	}
 }
 
@@ -416,7 +701,7 @@ func TestCreateTaskValidates(t *testing.T) {
 
 	for name, req := range map[string]ui.CreateTaskRequest{
 		"empty title":              {Title: "  "},
-		"unknown capability":       {Title: "t", Capabilities: []string{"nope"}},
+		"unknown capability":       {Title: "t", Capabilities: &[]string{"nope"}},
 		"unparseable repo":         {Title: "t", Repo: "not-a-repo"},
 		"unknown dependency":       {Title: "t", DependsOn: []string{"404"}},
 		"unparseable read":         {Title: "t", Reads: []string{"not-a-repo"}},
@@ -728,7 +1013,7 @@ func TestSetCapabilityAttachesAndDetaches(t *testing.T) {
 }
 
 // gcp-key and github-sandbox each had a provider cmd/grain/daemon.go
-// registered and no DefaultCapabilities row, so every attempt to attach
+// registered and no OfferedCapabilities row, so every attempt to attach
 // one -- the only way a model.Grant is ever written -- was rejected as
 // an unknown capability, and no sandbox on any deployment ever got
 // gcpkey.SandboxKeyPath. Both routes a human has are covered here,
@@ -738,7 +1023,7 @@ func TestGCPKeyAndGitHubSandboxCanBeGranted(t *testing.T) {
 
 	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
 		Title: "mint me a key", Approved: true,
-		Capabilities: []string{"gcp-key", "github-sandbox"},
+		Capabilities: &[]string{"gcp-key", "github-sandbox"},
 	})
 	if err != nil {
 		t.Fatalf("creating a task granting gcp-key and github-sandbox: %v", err)

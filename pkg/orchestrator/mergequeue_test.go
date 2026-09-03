@@ -264,6 +264,127 @@ func TestSyncPullRequestsEscalatesWhenTheFixTaskFinishesButThePrIsStillBroken(t 
 	}
 }
 
+// The fix that never finishes. Once a fix task is filed, its parent does
+// nothing at all until that task reaches closed -- and nothing else times
+// the wait: the parent reads CONFLICTED (not PENDING) for as long as it
+// is waiting, so the check-stall deadline never looks at it, and the fix
+// task's own pull request is not a queue member, so nothing looks at that
+// either. A fix task that never finishes -- its checks wedged, a dispatch
+// that fails without closing it, an agent run that never comes back --
+// would hold the head of its repo's queue for the life of the deployment,
+// with everything behind it waiting: the same stall the check-stall
+// deadline closes, reached from the other side.
+//
+// orchestrator.FixTaskDeadline is the bound, measured from the moment the
+// fix was filed. Past it the queue says so, names the fix it was waiting
+// for, and gets on with the next task -- while the head it gave up on
+// still merges the moment it reads clean.
+func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseFixTaskNeverFinishes(t *testing.T) {
+	deadline := orchestrator.FixTaskDeadline
+
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	stuck, stuckBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	behind, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
+
+	// The head is conflicted, so the queue files a fix for it. The task
+	// behind it is perfectly mergeable and is held up only by being
+	// second.
+	setMergeable(sim, true)
+	setBranchMergeable(sim, stuckBranch, false)
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests filing the fix: %v", err)
+	}
+	got, err := store.GetTask(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixTaskID, ok := fixTaskLinkOf(got)
+	if !ok {
+		t.Fatal("expected a fix task to have been filed for the conflicted head")
+	}
+	// Nothing ever dispatches that fix task, and nothing ever closes it.
+	// That is the whole of the failure: it simply sits there, while the
+	// head goes on reading conflicted every cycle.
+	//
+	// Well inside the deadline: the queue is still waiting, and has said
+	// nothing beyond the comment announcing the fix. This is the same
+	// cycle a fix that is simply taking a while gets.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline/2)); err != nil {
+		t.Fatalf("SyncPullRequests inside the deadline: %v", err)
+	}
+	if bodies := commentBodies(t, ctx, store, stuck.ID); len(bodies) != 1 {
+		t.Fatalf("expected only the fix-filed comment inside the deadline, got %q", bodies)
+	}
+	obs, err := store.GetObservation(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs != nil && obs.MergeQueueBlockedAt != nil {
+		t.Fatal("gave up on the queue head while its fix was still inside the deadline")
+	}
+
+	// Past it. The queue gives up, names the fix task a person should go
+	// and look at, and files no second fix.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline)); err != nil {
+		t.Fatalf("SyncPullRequests past the deadline: %v", err)
+	}
+	obs, err = store.GetObservation(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs == nil || obs.MergeQueueBlockedAt == nil {
+		t.Fatal("the queue never gave up on a head whose fix task never finished")
+	}
+	bodies := commentBodies(t, ctx, store, stuck.ID)
+	if len(bodies) != 2 {
+		t.Fatalf("expected the fix-filed comment plus one escalation, got %q", bodies)
+	}
+	if !strings.Contains(bodies[1], fixTaskID) {
+		t.Errorf("the escalation does not name the fix task it was waiting on:\n%s", bodies[1])
+	}
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected two queued tasks and exactly one fix task, got %d", len(tasks))
+	}
+
+	// And the queue has moved on: the task behind the stuck one is head
+	// now, and merges.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline+time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests after the queue moved on: %v", err)
+	}
+	st, err := store.State(ctx, behind.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state of the task behind the stuck one = %q, want closed: the queue never moved on", st)
+	}
+
+	// Giving up is not abandoning. A person resolves the conflict by
+	// hand, and the pull request the queue stopped driving merges on its
+	// own -- no second escalation, no further fix task, no human step
+	// beyond the push.
+	setBranchMergeable(sim, stuckBranch, true)
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline+2*time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests once the conflict was resolved: %v", err)
+	}
+	st, err = store.State(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed: a blocked task still merges the moment it reads clean", st)
+	}
+	if bodies := commentBodies(t, ctx, store, stuck.ID); len(bodies) != 2 {
+		t.Fatalf("expected the queue to say this once, got %q", bodies)
+	}
+}
+
 func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
@@ -379,6 +500,17 @@ func queuedTaskWithPullRequest(t *testing.T, ctx context.Context, store *model.S
 func setMergeable(sim *githubsim.Sim, mergeable bool) {
 	for i := range sim.PullRequests {
 		sim.PullRequests[i].Mergeable = &mergeable
+	}
+}
+
+// setBranchMergeable is the same for one branch's pull request alone, so
+// a test can hold a queue head conflicted while everything behind it
+// reads clean.
+func setBranchMergeable(sim *githubsim.Sim, branch string, mergeable bool) {
+	for i := range sim.PullRequests {
+		if sim.PullRequests[i].Head == branch {
+			sim.PullRequests[i].Mergeable = &mergeable
+		}
 	}
 }
 
