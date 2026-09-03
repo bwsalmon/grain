@@ -171,12 +171,13 @@ func TestMCPServerRecreatesARealSandboxOverStdio(t *testing.T) {
 
 	sim := githubsim.New(owner, repoName, filepath.Join(w.upstreamDir, owner, repoName+".git"), "main")
 
-	// HostSandboxes itself, not this package's credentialedSandboxes
-	// wrapper: a rebuild is an optional interface runOne's registration
-	// carries through untouched (orchestrator.SandboxRebuilder), and a
-	// wrapper that does not forward it would leave this test asserting
-	// against a sandbox that cannot rebuild itself. The credentials come
-	// from MintSandboxToken below instead, the way a deployment's do.
+	// Sandboxes is HostSandboxes itself, not this package's
+	// credentialedSandboxes wrapper: a rebuild is an optional interface
+	// (orchestrator.SandboxRebuilder) that runOne's registration carries
+	// through untouched, and a wrapper that does not forward it would
+	// leave this test asserting against a sandbox that cannot rebuild
+	// itself. The git identity and proxy credential come from
+	// MintSandboxToken instead, which is where a deployment's come from.
 	fw := pausedFramework{live: make(chan agent.RunConfig), release: make(chan struct{})}
 	deps := orchestrator.Deps{
 		Store:      w.store,
@@ -212,10 +213,10 @@ func TestMCPServerRecreatesARealSandboxOverStdio(t *testing.T) {
 			t.Error("the dispatch did not finish within 2 minutes of the agent's turn being released")
 		}
 	}
-	// Registered before the run can be waited on deliberately: an
-	// assertion below that fails with t.Fatalf leaves the dispatch
-	// goroutine parked on fw.release, holding a sandbox under a TempDir
-	// this test is about to remove.
+	// Registered as a cleanup as well as called on the happy path below:
+	// an assertion that fails with t.Fatalf would otherwise leave the
+	// dispatch goroutine parked on fw.release forever, holding a sandbox
+	// under a TempDir this test is on its way out of.
 	t.Cleanup(finishRun)
 
 	var cfg agent.RunConfig
