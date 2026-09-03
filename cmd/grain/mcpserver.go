@@ -44,6 +44,13 @@
 // clean one, and carry on in the turns it has left instead of failing
 // every remaining call in a sandbox it cannot repair from inside.
 //
+// -run-deadline is the moment grain will cancel the run this process
+// serves. It adds no tool: it makes every tool result carry how much
+// wall-clock time is left, once there is little enough of it to change
+// what a run should be doing (pkg/mcp's run_deadline.go). The prompt
+// states the same budget up front, and is read once, hours earlier --
+// this is the half that reaches a run at turn 200.
+//
 // The flags name the daemon to ask and the task to ask about. Unlike
 // pull_request_status above, both of these are *writes*, and writes stay
 // grain's: this process asks the daemon over its REST API rather than
@@ -61,6 +68,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/github"
 	"github.com/bwsalmon/grain/pkg/gitproxy"
@@ -177,6 +185,14 @@ func mcpserver(args []string) {
 			"pull request rather than opening one from here")
 	taskID := fs.String("task", "",
 		"id of the task this server's run belongs to (required with -server)")
+
+	runDeadline := fs.String("run-deadline", "",
+		"RFC3339 time at which grain cancels the run this server serves -- the deadline on "+
+			"the context orchestrator.RunDispatch gives framework.Run, passed on by the "+
+			"Framework that forked this process (agent.RunDeadlineArgs). Set, every tool "+
+			"result carries how much of it is left once the run is inside "+
+			"mcp.RunDeadlineNoticeWindow of it; unset, results read exactly as they "+
+			"otherwise would.")
 	fs.Parse(args)
 
 	var tools []mcp.Tool
@@ -198,6 +214,7 @@ func mcpserver(args []string) {
 	}
 
 	registry := mcp.NewRegistry()
+	registry.AnnounceDeadline(parsedRunDeadline(*runDeadline), nil)
 	registry.Register(tools...)
 	// No controller reads a mocked GitHub-shaped tool call back out of this
 	// process today -- there is nothing downstream of it yet (see README.md).
@@ -240,6 +257,32 @@ func mcpserver(args []string) {
 	if err := mcp.Serve(context.Background(), registry, bufio.NewReader(os.Stdin), bufio.NewWriter(os.Stdout)); err != nil && !errors.Is(err, io.EOF) {
 		log.Fatalf("grain mcpserver: %v", err)
 	}
+}
+
+// parsedRunDeadline reads -run-deadline, or the zero time for a server
+// that was given none -- which mcp.Registry.AnnounceDeadline takes as
+// "say nothing about time", the way every caller with no deadline to
+// give (pkg/mcp's own tests, tests/e2e, a `grain mcpserver` run by hand)
+// already works.
+//
+// A value that will not parse is a warning on stderr and no more, for
+// the reason pullRequestTools below refuses to be fatal: every other
+// tool this process serves is how the agent touches its sandbox at all,
+// and exiting over a malformed timestamp would turn a wrong reminder
+// into a run that cannot edit a file. The daemon's own subprocess
+// plumbing carries that line to an operator.
+func parsedRunDeadline(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	at, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"grain mcpserver: -run-deadline %q is not an RFC3339 time (%v); this run's tool "+
+				"results will not say how long it has left\n", value, err)
+		return time.Time{}
+	}
+	return at
 }
 
 // pullRequestTools builds pull_request_status and wait_for_checks for

@@ -325,7 +325,13 @@ func allowedTools() []string {
 // which repo's CI a run may read, and whether it may ask grain to open
 // its pull request, are both independent of which backend its sandbox
 // runs on.
-func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
+//
+// So is agent.RunDeadlineArgs, which is why ctx is here at all: the
+// deadline on the ctx this run was given is what grain will cancel it
+// at, and passing it on is what lets that server's tool results tell the
+// run how long it has left (see that function, and
+// mcp.Registry.AnnounceDeadline).
+func (f *Framework) mcpServerArgs(ctx context.Context, cfg agent.RunConfig) ([]string, error) {
 	var args []string
 	switch {
 	case cfg.SandboxRoot != "":
@@ -350,7 +356,8 @@ func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 		return nil, fmt.Errorf("antigravity: RunConfig.SandboxRoot or .KonturVM is required")
 	}
 	args = append(args, f.pullRequestArgs(cfg)...)
-	return append(args, f.grainServerArgs(cfg)...), nil
+	args = append(args, f.grainServerArgs(cfg)...)
+	return append(args, agent.RunDeadlineArgs(ctx)...), nil
 }
 
 // grainServerArgs is the "-server/-task" pair that turns on the forked
@@ -510,7 +517,7 @@ func userEvent(prompt string) (string, error) {
 // should run agy against a kontur sandbox (cfg.KonturVM), where the
 // controller's filesystem is not reachable from the guest at all.
 func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
-	mcpArgs, err := f.mcpServerArgs(cfg)
+	mcpArgs, err := f.mcpServerArgs(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

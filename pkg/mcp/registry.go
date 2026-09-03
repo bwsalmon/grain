@@ -42,6 +42,12 @@ type Tool struct {
 type Registry struct {
 	tools map[string]Tool
 	order []string
+	// deadline, when AnnounceDeadline has been called, is when grain
+	// cancels the run this registry serves -- read on every tools/call so
+	// that a run approaching it is told so on every answer it gets. nil
+	// (no deadline announced) leaves every result exactly as its handler
+	// wrote it. See run_deadline.go.
+	deadline *runDeadline
 }
 
 func NewRegistry() *Registry {
@@ -137,10 +143,15 @@ func (r *Registry) handleCall(ctx context.Context, id json.RawMessage, params js
 		args = map[string]any{}
 	}
 	result := t.Handler(ctx, args)
+	// The deadline notice goes on every answer, a failed one included:
+	// the run is just as close to being cancelled when its command
+	// exited 1, and that is exactly the turn where it might otherwise
+	// start a long repair it has no time to push.
+	text := withDeadlineNotice(result.Text, r.deadlineNotice())
 	return mustMarshalLine(rpcResponse{
 		JSONRPC: "2.0", ID: id,
 		Result: map[string]any{
-			"content": []map[string]any{{"type": "text", "text": result.Text}},
+			"content": []map[string]any{{"type": "text", "text": text}},
 			"isError": result.IsError,
 		},
 	})

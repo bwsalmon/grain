@@ -148,6 +148,11 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	// here fails the seed, like every other write in this function -- a
 	// demo whose prompt pane silently says "nothing has been dispatched"
 	// is the one thing that pane must not say about a running task.
+	//
+	// The wall-clock budget is DefaultMaxRunRuntime for the same reason:
+	// there is no orchestrator.Config behind a seeded run to read a
+	// deployment's own MaxRunRuntime off, and the default is what a
+	// deployment that has not set one really gives its runs.
 	seeded, err := store.GetTask(ctx, running.ID)
 	if err != nil {
 		return fmt.Errorf("re-reading the running task: %w", err)
@@ -156,7 +161,8 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		return fmt.Errorf("re-reading the running task: %s was not stored", running.ID)
 	}
 	if err := store.SetRunPrompt(ctx, "demo-run-"+running.ID,
-		orchestrator.BuildPrompt(*seeded, orchestrator.CheckoutDir, true)); err != nil {
+		orchestrator.BuildPrompt(*seeded, orchestrator.CheckoutDir, true,
+			orchestrator.DefaultMaxRunRuntime)); err != nil {
 		return fmt.Errorf("seeding a running task's prompt: %w", err)
 	}
 

@@ -1183,7 +1183,7 @@ func fixTaskLink(task model.Task) (string, bool) {
 // Six hours is chosen against what a fix task honestly needs: it has to
 // wait its turn to be dispatched (briefly -- fileFixTask files it at the
 // very head of the backlog, which is the order Store.Ready dispatches
-// in), run an agent (capped at defaultMaxRunRuntime, two hours), open a
+// in), run an agent (capped at DefaultMaxRunRuntime, two hours), open a
 // pull request and get its own CI through. That is comfortably inside
 // six hours even when every stage takes longer than usual, and the cost
 // of erring long is one that is paid once per stuck head rather than per

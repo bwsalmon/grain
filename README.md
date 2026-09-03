@@ -1618,6 +1618,52 @@ rather than turning a report of a red build into an error about logs.
 `PullRequestReader` grows to six methods for it, still read-only and
 still unable to name a repo the caller has not already pinned.
 
+## Telling a run how long it has
+
+`Config.MaxRunRuntime` cancels `framework.Run`'s context outright after
+two hours by default (`RunDispatch`'s own `context.WithTimeoutCause`),
+and until now nothing told the run. Not the prompt, not a tool. A run
+that does not know a deadline exists has no reason to commit early, no
+reason to push a half-finished branch before reaching for one more
+refactor, and no basis for choosing between waiting fifteen minutes on CI
+and finishing — and when the clock does run out, `salvagePushedBranch`
+rescues what was *pushed*, while everything only committed, and
+everything only edited, goes with the sandbox.
+
+It is told twice now, because once is not enough.
+
+**In the prompt**, with the real number: `BuildPrompt` takes
+`cfg.maxRunRuntime()` and states it, together with what to do about it —
+commit and push each piece as it starts working rather than saving one
+push for the end, and, near the end, push what works and leave the rest
+in a `comment_on_issue` note. A task with no repo gets the same deadline
+and the other instruction, since its work product is that note and there
+is no branch for it to push. This is exactly the class of fact
+`BuildPrompt` exists to state: grain's own, unreachable from inside the
+sandbox, and not the agent's to guess.
+
+**On every tool result**, once the run is inside 20 minutes of the wall
+(`mcp.RunDeadlineNoticeWindow`). A prompt is read once, at turn 1, hours
+before the deadline it describes starts to matter, and a tool result is
+the one piece of text a run reads every single turn. So
+`mcp.Registry.AnnounceDeadline` appends a line to each answer —
+`[grain] 14m left before grain cancels this run and destroys its
+sandbox…` — with the same advice, escalating in the last five minutes
+from "finish this piece and push it" to "there is no time for another
+edit-and-test cycle". It rides on failed results too: that is the likelier
+moment for a run to start a long repair it will never get to push.
+
+The deadline reaches that server the way the branch already does. Each
+`Framework.Run` receives the very context `RunDispatch` derived with the
+deadline on it, so `agent.RunDeadlineArgs` reads `ctx.Deadline()` and
+passes it to the forked `mcpserver` as `-run-deadline <RFC3339>` — an
+absolute instant, not a budget, because that process is forked some way
+into the run it serves and a budget measured from its own start would
+hand the run back time it has already spent. There is deliberately no
+second copy of the number on `RunConfig` to drift out of step with the
+context that actually ends the run. A context with no deadline passes no
+flag, and those runs' tool results read exactly as they always have.
+
 ## Reaching a sandbox guest without a route into it
 
 A slot's VM guest is reached by exec'ing into that VM's own container:

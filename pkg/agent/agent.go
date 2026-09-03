@@ -11,6 +11,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/mcp"
 )
@@ -116,6 +117,32 @@ type RunConfig struct {
 	// replaced, which owned its own turn loop and so had a "between
 	// turns" to poll at.
 	Addenda func(ctx context.Context) ([]string, error)
+}
+
+// RunDeadlineArgs is the "-run-deadline <RFC3339>" pair a Framework
+// passes its forked "mcpserver" subprocess so that the tools it serves
+// can tell the run how much wall-clock time it has left
+// (mcp.Registry.AnnounceDeadline, and cmd/grain/mcpserver.go's flag of
+// the same name).
+//
+// It is read off ctx rather than taken from RunConfig on purpose: the
+// ctx a Framework's Run is given *is* the thing that ends the run --
+// orchestrator.RunDispatch derives it with context.WithTimeoutCause at
+// cfg.maxRunRuntime() -- so its deadline is the deadline, and there is
+// no second copy on RunConfig to drift out of step with it. A ctx with
+// no deadline (every in-process caller, every test that does not set
+// one) yields no arguments at all, and the run's tool results read
+// exactly as they always have.
+//
+// UTC and RFC3339 because the receiving process is a fork with its own
+// environment: a zone-free local timestamp is the one way this could be
+// read back as a different moment than it was written as.
+func RunDeadlineArgs(ctx context.Context) []string {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return nil
+	}
+	return []string{"-run-deadline", deadline.UTC().Format(time.RFC3339)}
 }
 
 // ToolCall records one function call an agent made and what it got back,

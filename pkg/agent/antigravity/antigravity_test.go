@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
 )
@@ -256,6 +257,44 @@ func TestRunPassesTheRunsOwnRepoAndBranchToTheMCPServer(t *testing.T) {
 			t.Errorf("mcp args = %v, want no -pr-repo without WithGitHubAccess", args)
 		}
 	})
+}
+
+// The run's own wall-clock deadline reaches the forked mcpserver too,
+// which is what lets its tool results tell the run how long it has left
+// (mcp.Registry.AnnounceDeadline). Asserted here as well as in
+// agent/claude's own test, since each framework builds these arguments
+// separately.
+func TestRunPassesTheRunsDeadlineToTheMCPServer(t *testing.T) {
+	mcpArgs := func(t *testing.T, ctx context.Context) []string {
+		t.Helper()
+		r := &recordingRunner{stdout: okStream()}
+		f := newFramework(r, "/usr/local/bin/grain")
+		if _, err := f.Run(ctx, agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		var settings struct {
+			MCPServers map[string]struct {
+				Args []string `json:"args"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal([]byte(r.homeAtRun), &settings); err != nil {
+			t.Fatalf("settings file was not JSON: %v", err)
+		}
+		return settings.MCPServers[mcpServerName].Args
+	}
+
+	ctx, cancel := context.WithDeadline(context.Background(),
+		time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC))
+	defer cancel()
+	if args := mcpArgs(t, ctx); !argsHave(args, "-run-deadline", "2026-03-04T05:06:07Z") {
+		t.Errorf("mcp args = %v, want -run-deadline carrying the ctx's own deadline", args)
+	}
+
+	// No deadline on the ctx, no flag: a run bounded some other way is
+	// not told a moment nobody set.
+	if args := mcpArgs(t, context.Background()); slices.Contains(args, "-run-deadline") {
+		t.Errorf("mcp args = %v, want no -run-deadline for a ctx that has none", args)
+	}
 }
 
 // TestRunRejectsAKonturVMWithoutSSHConfig keeps the failure at
