@@ -75,6 +75,25 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
   const q = search.trim().toLowerCase();
   const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
 
+  // capsEffective is what a task filed against the repo whose
+  // capabilities form is open would actually start out holding -- the
+  // line the form ends on. The union is recomputed from the unsaved
+  // ticks rather than read back from caps.effectiveDefaultCapabilities,
+  // so it describes the set Save is about to make real rather than the
+  // one the last response described.
+  //
+  // Filtered to what this build still offers, the same filter
+  // ui.(*Client).defaultCapabilities applies before any grant is written
+  // -- and so the same one behind RepoDefaults.
+  // EffectiveDefaultCapabilities, the server's own answer to this
+  // question. Neither of the two sets GET reports is filtered: both come
+  // back exactly as stored, retired ids included, deliberately, so an id
+  // chosen before a build retired it stays visible in the picker above
+  // to be unticked. But a task filed here does not start out holding
+  // one, so this line must not say it does.
+  const capsEffective = unionCapabilities(caps?.deploymentDefaultCapabilities, capsSelection)
+    .filter((id) => (config?.capabilities || []).some((c) => c.id === id));
+
   const toggleExpanded = (repo) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -357,16 +376,11 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                           with.
                         </FormHelperText>
                       </FormControl>
-                      {/* The union, recomputed from the unsaved ticks
-                          rather than read back from the last response,
-                          so this line describes the set that Save is
-                          about to make real. */}
                       <Typography variant="body2" color="text.secondary">
                         A task filed against {r.repo} starts with:{" "}
-                        {unionCapabilities(caps.deploymentDefaultCapabilities, capsSelection).length === 0
+                        {capsEffective.length === 0
                           ? "nothing -- only what whoever files it ticks"
-                          : unionCapabilities(caps.deploymentDefaultCapabilities, capsSelection)
-                            .map((id) => capabilityName(config, id)).join(", ")}
+                          : capsEffective.map((id) => capabilityName(config, id)).join(", ")}
                       </Typography>
                       <Stack direction="row" justifyContent="flex-end">
                         <Button type="submit" variant="contained" size="small">Save capabilities</Button>

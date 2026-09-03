@@ -318,6 +318,50 @@ describe("RepoList", () => {
     expect(onOpenRepo).not.toHaveBeenCalled();
   });
 
+  // Both sets GET reports come back as stored, retired ids included, so
+  // that one chosen before a build retired it can still be seen and
+  // unticked. What a task starts with is the filtered union, though --
+  // (*Client).defaultCapabilities drops a retired id before any grant is
+  // written -- so this line must not list one.
+  it("leaves a retired id out of what a task filed against the repo starts with", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key", "scratch-repo"],
+      deploymentDefaultCapabilities: ["gemini-key", "old-deployment-key"],
+      effectiveDefaultCapabilities: ["gemini-key", "gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
+    const user = userEvent.setup();
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+
+    const line = await screen.findByText(/A task filed against acme\/gadgets starts with:/);
+    expect(line).toHaveTextContent("Gemini key, GCP key");
+    expect(line).not.toHaveTextContent("scratch-repo");
+    expect(line).not.toHaveTextContent("old-deployment-key");
+  });
+
+  it("says a repo whose only defaults are retired ids starts with nothing", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["scratch-repo"],
+      deploymentDefaultCapabilities: ["old-deployment-key"],
+      effectiveDefaultCapabilities: [],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
+    const user = userEvent.setup();
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+
+    expect(await screen.findByText(/A task filed against acme\/gadgets starts with:/)).toHaveTextContent(
+      "nothing -- only what whoever files it ticks",
+    );
+  });
+
   it("saves a repo's default capabilities and refreshes the config the new-task form seeds from", async () => {
     api.mockResolvedValueOnce({
       repo: "acme/gadgets",
