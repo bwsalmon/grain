@@ -61,6 +61,44 @@ describe("RepoList", () => {
     expect(screen.getByText("0 tasks")).toBeInTheDocument();
   });
 
+  // A repo that carries default capabilities of its own is listed even
+  // when nothing else here mentions it: PUT /api/repos/{owner}/{name}/
+  // capabilities never required an allowlist entry, and this page is the
+  // only place that set can be edited.
+  it("also lists a repo that only carries default capabilities of its own", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/orphan",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    const user = userEvent.setup();
+    const config = {
+      targetRepos: [],
+      repoDefaultCapabilities: { "acme/orphan": ["gcp-key"] },
+      capabilities: [{ id: "gcp-key", name: "GCP key" }],
+    };
+    renderList({ config });
+
+    const row = screen.getByText("acme/orphan").closest("li");
+    // Nothing to remove -- it was never on the allowlist -- and the row
+    // says why it is here rather than looking like an empty stray.
+    expect(within(row).queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+    expect(within(row).getByText("Defaults only")).toBeInTheDocument();
+
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/orphan/capabilities");
+    expect(await screen.findByText(/A task filed against acme\/orphan starts with:/)).toHaveTextContent("GCP key");
+  });
+
+  it("does not mark a repo that carries defaults and has tasks of its own as defaults-only", () => {
+    const config = { targetRepos: [], repoDefaultCapabilities: { "acme/gadgets": ["gcp-key"] } };
+    renderList({ config });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    expect(within(row).queryByText("Defaults only")).not.toBeInTheDocument();
+  });
+
   it("filters the list by repo name", async () => {
     const user = userEvent.setup();
     renderList();
