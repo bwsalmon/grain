@@ -169,6 +169,11 @@ GRAIN_DATA_DIR="${GRAIN_DATA_DIR:-/var/lib/grain}"
 # survive a redeploy, so its default lives outside whatever separate,
 # persistent disk an operator mounts at $GRAIN_DATA_DIR (terraform/gcp's
 # own data_disk_gb): nothing under here needs to survive a redeploy.
+#
+# Disposable is not the same as small, though, which is why terraform/gcp
+# gives this path a disk of its own too (its sandbox_disk_gb, bind-mounted
+# here by files/startup.sh, and holding docker's data root beside it):
+# a checkout that fills the boot disk takes the whole host down with it.
 GRAIN_SANDBOX_DIR="${GRAIN_SANDBOX_DIR:-/var/lib/grain-sandbox}"
 GRAIN_USER="${GRAIN_USER:-grain}"
 

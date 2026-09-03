@@ -49,6 +49,16 @@ create_iap_brand = false
 
 grain_ref = "main" # pin a tag or SHA for a reproducible staging build
 
+# -- Storage -----------------------------------------------------------
+#
+# Everything a sandbox writes -- docker's data root, and so the sandbox
+# image and every VM's disk overlay, plus HostSandboxes' own per-run
+# checkouts -- lives on a volume of its own, so a task that fills a disk
+# does not take the OS, the store and the UI down with it. Grow it for a
+# busier deployment; 0 puts all of it back on the boot disk, which then
+# has to be sized for it. See variables.tf's own sandbox_disk_gb.
+# sandbox_disk_gb = 100
+
 # -- Kontur sandboxing --------------------------------------------------
 #
 # enable_kontur_sandboxes defaults to true (variables.tf) and needs

@@ -126,25 +126,23 @@ variable "boot_image" {
 variable "boot_disk_gb" {
   type        = number
   description = <<-EOT
-    Host boot disk: the OS, the grain checkout, the Docker build cache,
-    and nothing that must survive a redeploy -- the SQLite store and
-    secrets live on the separate data disk instead (see data_disk_gb),
-    which is the whole point of splitting them: this disk can be
-    recreated from scratch (a new boot_image, a bigger machine_type) with
-    no state lost.
+    Host boot disk: the OS, the grain checkout, the journal, and nothing
+    that must survive a redeploy -- the SQLite store and secrets live on
+    the separate data disk instead (see data_disk_gb), which is the whole
+    point of splitting them: this disk can be recreated from scratch (a
+    new boot_image, a bigger machine_type) with no state lost.
 
-    Also holds scripts/setup.sh's own $GRAIN_SANDBOX_DIR default
-    (/var/lib/grain-sandbox) -- the per-slot working directories
-    orchestrator.HostSandboxes clones each task's repo into, when
-    enable_kontur_sandboxes is off. Deliberately here rather than on the
-    data disk (bwsalmon/agents#587): unlike the store and secrets, a
-    task's checked-out repo is disposable, and putting it on the disk a
-    redeploy discards is what makes a wipe actually wipe it, rather than
-    leaving one task's leftovers on disk for whatever the next one
-    happens to be. With enable_kontur_sandboxes on (the default), a
-    slot's sandbox is a kontur VM instead, and its own state
-    (kontur_state_dir, /var/lib/kontur, /var/lib/vm-images) already lives
-    here for the same reason.
+    Deliberately modest, and it stays that way, because nothing that
+    grows with the work done on this host is here any more. Sandboxes --
+    the images, the per-VM disk overlays and the per-run checkouts --
+    have a volume of their own (sandbox_disk_gb), so this one holds a
+    Debian install and a few hundred megabytes of grain. What it buys is
+    the thing a shared disk cannot: a task that fills its disk stops
+    tasks, not the OS, the journal, config-sync or the daemon.
+
+    Set sandbox_disk_gb = 0 and all of that comes back here, at which
+    point this needs to be far larger -- a single kontur sandbox image is
+    several gigabytes before any VM has written a byte.
   EOT
   default     = 40
 }
@@ -158,8 +156,10 @@ variable "data_disk_gb" {
     (pkg/model/sqlite) and the secrets database and credential files
     (pkg/secrets) -- state a redeploy must not lose. 20 GB is generous
     for a staging deployment working against a handful of test repos;
-    grow it if the store becomes the bottleneck. Sandbox working
-    directories do not live here -- see boot_disk_gb.
+    grow it if the store becomes the bottleneck. Nothing a sandbox writes
+    lives here -- that is sandbox_disk_gb's disk, and keeping the two
+    apart is what stops a task's runaway checkout from wedging the store
+    the whole deployment reads and writes.
   EOT
   default     = 20
 }
@@ -167,6 +167,52 @@ variable "data_disk_gb" {
 variable "data_disk_type" {
   type        = string
   description = "pd-balanced is the sane default for a staging workload; pd-ssd if I/O becomes the bottleneck."
+  default     = "pd-balanced"
+}
+
+variable "sandbox_disk_gb" {
+  type        = number
+  description = <<-EOT
+    Persistent disk for everything a sandbox writes, mounted by
+    files/startup.sh at /mnt/grain-sandbox and holding two things:
+
+      * docker's data root (/mnt/grain-sandbox/docker), which is where
+        the sandbox image and every kontur VM's writable root actually
+        live -- konturctl gives a VM its own disk as a qcow2 overlay
+        created *inside* that VM's container (bwsalmon/kontur#37), so
+        everything a task's guest writes lands in docker's storage;
+      * /mnt/grain-sandbox/sandboxes, bind-mounted onto scripts/setup.sh's
+        own $GRAIN_SANDBOX_DIR (/var/lib/grain-sandbox), the per-run
+        checkouts orchestrator.HostSandboxes makes when
+        enable_kontur_sandboxes is off.
+
+    This is where the bulk of the host's storage belongs, and the reason
+    it is a volume of its own is isolation rather than size: a task that
+    fills it costs the runs in flight, while the OS, the journal,
+    config-sync, the daemon and the store on their own disks carry on --
+    including the UI that has to be reachable to say what went wrong.
+    Nothing here is state: a wipe costs a re-pulled image and some
+    already-dead runs' leftovers, so unlike the data disk it carries no
+    prevent_destroy.
+
+    0 means no separate disk: all of the above goes back on the boot
+    disk, which then has to be sized for it (see boot_disk_gb). Attaching
+    or detaching one takes effect at the host's next boot, since
+    files/startup.sh is what mounts it -- or immediately, over
+    `sudo google_metadata_script_runner startup`.
+  EOT
+  default     = 100
+}
+
+variable "sandbox_disk_type" {
+  type        = string
+  description = <<-EOT
+    pd-balanced, matching data_disk_type: a sandbox's I/O is a git clone,
+    a package install and a build, and pd-balanced's throughput scales
+    with a disk this size. pd-ssd if a task's build turns out to be
+    seek-bound; pd-standard is a false economy here, since every VM boot
+    reads its image back off this disk.
+  EOT
   default     = "pd-balanced"
 }
 
