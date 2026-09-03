@@ -42,7 +42,7 @@ func demo(args []string) {
 	cfg := ui.Config{
 		Actor:         ui.DefaultActor(actorID(*actor)),
 		DefaultTarget: &repo,
-		Capabilities:  ui.DefaultCapabilities(),
+		Capabilities:  ui.OfferedCapabilities(),
 	}
 
 	dir, err := os.MkdirTemp("", "grain-demo-")
@@ -121,7 +121,7 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		Title:        "Bump the Go toolchain to 1.24",
 		Description:  "go.mod and the CI image both need the version bump.",
 		Approved:     true,
-		Capabilities: []string{"self-debug"},
+		Capabilities: &[]string{"self-debug"},
 	})
 	if err != nil {
 		return err

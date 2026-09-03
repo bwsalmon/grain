@@ -35,7 +35,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
-// CapabilityName is the grant name ui.DefaultCapabilities lists as
+// CapabilityName is the grant name ui.OfferedCapabilities lists as
 // "bootstrap-playbooks".
 const CapabilityName = "bootstrap-playbooks"
 

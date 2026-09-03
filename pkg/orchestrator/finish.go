@@ -418,18 +418,34 @@ func relayComment(ctx context.Context, store *model.Store, task model.Task,
 // schema has no such field, so Grants is always empty here), which makes
 // the check trivially true today; it is written as a real comparison
 // rather than a bare `task.AutoMerge` so it stays correct the day a
-// capability request is added to that schema. This only changes what
-// happens once a human has approved and run the proposal and its PR
-// merges cleanly -- it does not touch Approval, so a proposed task still
-// needs a human to approve it before it ever runs, the same as any other.
+// capability request is added to that schema. An explicit auto_merge
+// argument overrides that inheritance in one direction only: false opts a
+// proposal out (separate work an agent thinks deserves its own review),
+// while true still cannot exceed task's own setting, since a run that
+// could mark its own proposals auto-merge would be granting itself the
+// unreviewed merge a human withheld. This only changes what happens once
+// a human has approved and run the proposal and its PR merges cleanly --
+// it does not touch Approval, so a proposed task still needs a human to
+// approve it before it ever runs, the same as any other.
 //
-// depends_on referring to another call's local `id` in the same run is
-// still not resolved: doing that needs holding every proposal until the
-// whole batch is filed and rewriting cross-references afterward, which is
-// follow-on work. Today each proposal's depends_on stays in the body
-// verbatim for a human to resolve by hand.
+// depends_on becomes real model.LinkDependsOn links (proposedDependency
+// resolves each entry), so a proposal that names work it has to follow is
+// blocked until that work is done rather than dispatchable the moment a
+// human approves it. Resolution is against tasks that already exist --
+// including task itself, the usual case for a piece split out of the run
+// doing the splitting -- and against the local `id` of an earlier
+// propose_task call in the same run. Earlier, not any: a batch resolved
+// in call order cannot contain a cycle, and a cycle in LinkDependsOn is
+// two tasks neither of which is ever dispatchable again.
 func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task,
 	result *agent.Result, now time.Time) error {
+
+	// Local `id` of a propose_task call -> the task id it was filed
+	// under, filled in as each proposal lands so only earlier calls are
+	// in reach. First claim on an id wins: a run that reuses one has
+	// already made the reference ambiguous, and picking the earlier
+	// keeps this pass order-dependent in only one direction.
+	filed := map[string]string{}
 
 	for _, p := range proposedTaskCalls(result) {
 		title, _ := p["title"].(string)
@@ -440,6 +456,15 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 		id, err := store.NewTaskID(ctx)
 		if err != nil {
 			return fmt.Errorf("orchestrator: allocating an id for proposed task %q: %w", title, err)
+		}
+		links := []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}}
+		deps, unresolved, err := proposedDependencies(ctx, store, p, filed)
+		if err != nil {
+			return fmt.Errorf("orchestrator: resolving depends_on for proposed task %q: %w", title, err)
+		}
+		links = append(links, deps...)
+		if len(unresolved) > 0 {
+			body += unresolvedDependencyNote(unresolved)
 		}
 		proposal := model.Task{
 			ID:     id,
@@ -455,15 +480,129 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 			},
 			Target:    task.Target,
 			Binding:   model.BindingDirective,
-			Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
+			Links:     links,
 			CreatedAt: &now,
 		}
-		proposal.AutoMerge = task.AutoMerge && model.GrantsSubsetOf(proposal.Grants, task.Grants)
+		proposal.AutoMerge = proposedAutoMerge(p, task) &&
+			model.GrantsSubsetOf(proposal.Grants, task.Grants)
 		if err := store.PutTask(ctx, proposal); err != nil {
 			return fmt.Errorf("orchestrator: filing proposed task %q: %w", title, err)
 		}
+		if local, _ := p["id"].(string); local != "" {
+			if _, taken := filed[local]; !taken {
+				filed[local] = proposal.ID
+			}
+		}
 	}
 	return nil
+}
+
+// proposedAutoMerge reads one propose_task call's auto_merge argument
+// against task, the job that made it: unset inherits task's own setting,
+// and an explicit answer is honoured only as far down as that -- see
+// relayProposedTasks' own doc comment for why true cannot raise it.
+func proposedAutoMerge(args map[string]any, task model.Task) bool {
+	asked, ok := args["auto_merge"].(bool)
+	if !ok {
+		return task.AutoMerge
+	}
+	return asked && task.AutoMerge
+}
+
+// proposedDependencies turns one propose_task call's depends_on into
+// links, alongside every entry it could not resolve to a task at all.
+//
+// Unresolved entries are returned rather than dropped: an agent naming a
+// task that does not exist (a GitHub issue number, say, from the v1
+// spelling of this tool, or a local `id` it only used later in the run)
+// has said something about the order this work has to happen in, and
+// silently filing the proposal as unblocked would lose it. It goes into
+// the proposal's body instead, where a human approving it can see it --
+// unresolvedDependencyNote.
+func proposedDependencies(ctx context.Context, store *model.Store,
+	args map[string]any, filed map[string]string) (links []model.Link, unresolved []string, err error) {
+
+	seen := map[string]bool{}
+	for _, ref := range argStrings(args["depends_on"]) {
+		target, ok, err := proposedDependency(ctx, store, ref, filed)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ok {
+			unresolved = append(unresolved, ref)
+			continue
+		}
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+		links = append(links, model.Link{Kind: model.LinkDependsOn, Target: target})
+	}
+	return links, unresolved, nil
+}
+
+// proposedDependency resolves one depends_on entry to a real task id.
+//
+// A local `id` from an earlier propose_task call in the same run wins
+// over a task id that happens to read the same, since a run that named
+// one of its own proposals "12" meant that proposal, not task 12.
+// Otherwise the entry has to name a task that already exists: this is the
+// one place a proposal's own claim about ordering is checked against
+// something, and a link to a task id that was never real would block the
+// proposal forever with nothing to unblock it.
+//
+// A leading "#" is tolerated because the tool's v1 spelling asked for
+// issue numbers and agents still write them that way.
+func proposedDependency(ctx context.Context, store *model.Store, ref string,
+	filed map[string]string) (string, bool, error) {
+
+	ref = strings.TrimPrefix(strings.TrimSpace(ref), "#")
+	if ref == "" {
+		return "", false, nil
+	}
+	if id, ok := filed[ref]; ok {
+		return id, true, nil
+	}
+	existing, err := store.GetTask(ctx, ref)
+	if err != nil {
+		return "", false, err
+	}
+	if existing == nil {
+		return "", false, nil
+	}
+	return ref, true, nil
+}
+
+// unresolvedDependencyNote is what a human approving the proposal reads
+// in place of a link grain could not make -- attributed to grain, since
+// the rest of the body is the agent's own words.
+func unresolvedDependencyNote(unresolved []string) string {
+	return fmt.Sprintf("\n\n---\n\ngrain: the run that proposed this said it depends on %s, "+
+		"which named no task that exists and no other proposal from the same run. "+
+		"Nothing blocks this task on them -- resolve them by hand if they matter.",
+		"`"+strings.Join(unresolved, "`, `")+"`")
+}
+
+// argStrings reads a tool argument that should have arrived as an array
+// of strings, skipping anything in it that did not. Tool arguments reach
+// here as map[string]any straight out of the transcript, so this repeats
+// mcp.argStringSlice rather than importing it: agent.ToolCall.Arguments
+// is whatever the framework reported, not something mcp validated.
+func argStrings(v any) []string {
+	if already, ok := v.([]string); ok {
+		return already
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // finishWithPullRequest records that task's run pushed a real branch:
@@ -479,22 +618,14 @@ func finishWithPullRequest(ctx context.Context, store *model.Store, client githu
 		return fmt.Errorf("orchestrator: opening a pull request for %s: %w", task.ID, err)
 	}
 
-	// Through UpdateTask rather than writing back the task this function
-	// was handed: that copy was read at the top of the cycle, and a person
-	// editing it from the UI in between would lose their edit to this
-	// write. Re-checking the link inside the closure is also what makes it
-	// idempotent across a retry.
+	// linkPullRequest (pullrequest.go), not an UpdateTask written out
+	// here: a run that opened its own pull request mid-flight through
+	// open_pull_request has already recorded this very link, and both
+	// paths writing it the same idempotent way is what keeps the second
+	// one a no-op rather than a duplicate.
 	ref := model.PullRequestRef{Repo: *task.Target, Number: pr.Number}
-	if err := store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
-		for _, l := range t.Links {
-			if l.Kind == model.LinkFixes && l.Target == ref.String() {
-				return nil
-			}
-		}
-		t.Links = append(t.Links, model.Link{Kind: model.LinkFixes, Target: ref.String()})
-		return nil
-	}); err != nil {
-		return fmt.Errorf("orchestrator: linking %s to %s: %w", task.ID, ref, err)
+	if err := linkPullRequest(ctx, store, task.ID, ref); err != nil {
+		return err
 	}
 
 	return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.CompletedAt = &now })

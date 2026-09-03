@@ -47,6 +47,54 @@ export function capabilityName(config, id) {
   return c ? c.name : id;
 }
 
+// unionCapabilities composes the two layers of default capabilities the
+// way ui.(*Client).defaultCapabilities does server-side: base (the
+// deployment's own set) with extra (one repo's) appended, deduped,
+// deployment-first.
+//
+// Union is the whole composition rule, and the only one -- a repo adds
+// to what the deployment defaults and can never subtract from it
+// (model.RepoConfig.DefaultCapabilities has why "everything except
+// gcp-key here" is deferred rather than spelled some other way). It is a
+// function of its own so the new-task form (which resolves a repo out of
+// the config it already has) and the repos page (which resolves the same
+// union from unsaved ticks, to say what Save is about to do) cannot
+// drift into two different answers.
+export function unionCapabilities(base, extra) {
+  const ids = [...(base || [])];
+  for (const id of extra || []) {
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+// defaultCapabilitiesFor is the set of capability ids a task filed
+// against repo would start out holding -- the frontend's own reading of
+// what ui.(*Client).defaultCapabilities resolves server-side, from the
+// two layers GET /api/config reports: config.defaultCapabilities (the
+// deployment's, chosen on Settings > Capabilities) and
+// config.repoDefaultCapabilities[repo] (that repo's own, chosen on the
+// repos page).
+//
+// Union, deployment first, deduped: a repo adds to what the deployment
+// defaults and can never subtract from it (model.RepoConfig.
+// DefaultCapabilities has why "everything except gcp-key here" is
+// deferred rather than spelled some other way here). A falsy repo -- no
+// repo picked yet, or a deliberately repo-less task -- has no second
+// layer to add, which is the same answer CreateTask gives a task whose
+// Target is nil.
+//
+// This is only ever a form's starting state. What a task is filed with is
+// what the request names (ui.CreateTaskRequest.Capabilities); computing
+// the same union here is what lets the boxes be ticked, and unticked,
+// before the task exists.
+export function defaultCapabilitiesFor(config, repo) {
+  return unionCapabilities(
+    config?.defaultCapabilities,
+    repo ? config?.repoDefaultCapabilities?.[repo] : null,
+  );
+}
+
 // repoRows unions config.targetRepos with every repo a task's write
 // target names (Task.Repo, never Reads -- a read-only repo grants
 // nothing and is not what a task "belongs to") into one row per repo,

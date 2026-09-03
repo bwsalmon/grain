@@ -317,7 +317,10 @@ func TestMockToolsRecordWithoutAnyNetworkEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := client.CallTool(ctx, "propose_task", map[string]any{
-		"title": "second", "body": "depends on first", "depends_on": []any{"a"},
+		"title":      "second",
+		"body":       "depends on first",
+		"depends_on": []any{"a"},
+		"auto_merge": false,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -327,6 +330,13 @@ func TestMockToolsRecordWithoutAnyNetworkEffect(t *testing.T) {
 	}
 	if tasks[1].DependsOn[0] != "a" {
 		t.Errorf("second task depends_on = %v, want [a]", tasks[1].DependsOn)
+	}
+	// Unset and false are different answers -- see ProposedTask.
+	if tasks[0].AutoMerge != nil {
+		t.Errorf("first task auto_merge = %v, want unset -- it asked for nothing", *tasks[0].AutoMerge)
+	}
+	if tasks[1].AutoMerge == nil || *tasks[1].AutoMerge {
+		t.Errorf("second task auto_merge = %v, want an explicit false", tasks[1].AutoMerge)
 	}
 
 	res, err := client.CallTool(ctx, "add_review_comment", map[string]any{"body": "nit", "path": "x.go"})
