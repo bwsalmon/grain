@@ -222,11 +222,16 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 	// otherwise pay to rediscover -- and both are read before the
 	// mechanics below them. See this function's own doc comment on why
 	// they sit here rather than at the tail.
+	//
+	// Both are lists, so both end in a newline of their own; trimmed on
+	// the way in rather than shaped differently, so that a section
+	// followed by another paragraph is separated from it by the same one
+	// blank line every other pair of paragraphs here is.
 	if attempts := previousAttemptsSection(history, branch); attempts != "" {
-		prompt += "\n\n" + attempts
+		prompt += "\n\n" + strings.TrimRight(attempts, "\n")
 	}
 	if thread := commentThreadSection(history.Comments); thread != "" {
-		prompt += "\n\n" + thread
+		prompt += "\n\n" + strings.TrimRight(thread, "\n")
 	}
 	// Said out loud because neither half is discoverable from the tools
 	// alone. Nothing stops a run pushing repeatedly -- the branch is its
