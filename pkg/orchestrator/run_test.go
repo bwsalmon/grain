@@ -170,6 +170,37 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 	}
 }
 
+// A repo with a setup command gets it reported in the same breath as the
+// checkout it ran in, before anything about pushing or CI -- the failure
+// case being the one that matters, since a run not told is a run
+// debugging the repo's toolchain from a build it has no reason to
+// distrust.
+func TestBuildPromptReportsAFailedSetupBeforeTheMechanics(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false,
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{},
+		&orchestrator.SetupResult{Command: "make deps", ExitCode: 2, Output: "no such package: widgetlib"})
+
+	setup := strings.Index(prompt, "make deps")
+	if setup < 0 || !strings.Contains(prompt, "no such package: widgetlib") {
+		t.Fatalf("prompt says nothing about the setup command that failed: %q", prompt)
+	}
+	// Ahead of the push/check/repair paragraphs: a run that reads it
+	// after those has already spent turns on the failure it explains.
+	if push := strings.Index(prompt, "Push as often as you like"); push >= 0 && setup > push {
+		t.Errorf("the setup report comes after the CI loop paragraphs: %q", prompt)
+	}
+	// And a repo that configures none says nothing at all -- most repos.
+	none := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false,
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
+	if strings.Contains(none, "setup command") {
+		t.Errorf("prompt mentions a setup command for a repo that has none: %q", none)
+	}
+}
+
 // The push/check/repair loop pull_request_status exists for is only
 // usable if the prompt says it is there: nothing about the tool's own
 // description tells a run that it may push more than once, and the
