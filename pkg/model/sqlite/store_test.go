@@ -1434,6 +1434,98 @@ func TestConfigRoundTrips(t *testing.T) {
 	}
 }
 
+// grain/task-24: one repo's own configuration, the per-repo layer of
+// what grain_config says deployment-wide. Round-trips, replaces rather
+// than accumulating, and lists only repos that actually say something.
+func TestRepoConfigRoundTripsAndReplaces(t *testing.T) {
+	store, _, ctx := openStore(t)
+	widgets := model.RepoRef{Owner: "acme", Name: "widgets"}
+	gadgets := model.RepoRef{Owner: "acme", Name: "gadgets"}
+
+	// A repo nobody has configured reads back as nil, with no error --
+	// the same "nothing configured one yet" GetQualificationPlan gives.
+	got, err := store.GetRepoConfig(ctx, widgets)
+	if err != nil {
+		t.Fatalf("get on an unconfigured repo: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("get on an unconfigured repo = %+v, want nil", got)
+	}
+
+	want := model.RepoConfig{Repo: widgets, DefaultCapabilities: []string{"gcp-key", "github-sandbox"}}
+	if err := store.PutRepoConfig(ctx, want); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err = store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+
+	// Replaced wholesale, not merged into.
+	want.DefaultCapabilities = []string{"gemini-key"}
+	if err := store.PutRepoConfig(ctx, want); err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+	got, err = store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo: gadgets, DefaultCapabilities: []string{"gcp-key"},
+	}); err != nil {
+		t.Fatalf("put for a second repo: %v", err)
+	}
+	list, err := store.ListRepoConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	wantList := []model.RepoConfig{
+		{Repo: gadgets, DefaultCapabilities: []string{"gcp-key"}},
+		{Repo: widgets, DefaultCapabilities: []string{"gemini-key"}},
+	}
+	if !reflect.DeepEqual(list, wantList) {
+		t.Fatalf("list = %+v, want %+v, sorted by repo", list, wantList)
+	}
+}
+
+// A config that says nothing leaves no row: "has a row" and "has
+// something of its own to say" are one fact, so a repo whose last
+// default capability is unticked stops being listed at all rather than
+// lingering as an empty entry (model.RepoConfig.Empty).
+func TestPutRepoConfigWithNothingToSayDeletesTheRow(t *testing.T) {
+	store, _, ctx := openStore(t)
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo: repo, DefaultCapabilities: []string{"gcp-key"},
+	}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{Repo: repo}); err != nil {
+		t.Fatalf("put with nothing to say: %v", err)
+	}
+	got, err := store.GetRepoConfig(ctx, repo)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("get = %+v, want nil", got)
+	}
+	list, err := store.ListRepoConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("list = %+v, want no rows left", list)
+	}
+}
+
 // PutConfig replaces the single row wholesale rather than accumulating a
 // second one -- there is exactly one deployment configuration, the same
 // discipline grain_schema holds to.

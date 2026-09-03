@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityName, completionPhase, knownRepos, lastBaseForRepo, repoRows } from "./state.js";
+import { capabilityName, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -155,5 +155,42 @@ describe("repoRows", () => {
 
   it("returns an empty list when nothing is configured or targeted yet", () => {
     expect(repoRows(null, [])).toEqual([]);
+  });
+});
+
+describe("unionCapabilities", () => {
+  it("appends the second layer to the first, deduped and in order", () => {
+    expect(unionCapabilities(["gemini-key"], ["gcp-key", "gemini-key"])).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  it("treats a missing layer as nothing to add", () => {
+    expect(unionCapabilities(undefined, undefined)).toEqual([]);
+    expect(unionCapabilities(["gcp-key"], null)).toEqual(["gcp-key"]);
+  });
+});
+
+describe("defaultCapabilitiesFor", () => {
+  const config = {
+    defaultCapabilities: ["gemini-key"],
+    repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+  };
+
+  it("adds the repo's own defaults to the deployment's", () => {
+    expect(defaultCapabilitiesFor(config, "acme/widgets")).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  it("gives a repo with none of its own the deployment's alone", () => {
+    expect(defaultCapabilitiesFor(config, "acme/gadgets")).toEqual(["gemini-key"]);
+  });
+
+  // No repo picked, or a deliberately repo-less task: there is no second
+  // layer to key on, the same answer CreateTask gives a task whose
+  // Target is nil.
+  it("gives a task with no repo the deployment's alone", () => {
+    expect(defaultCapabilitiesFor(config, "")).toEqual(["gemini-key"]);
+  });
+
+  it("survives a config that has never been loaded", () => {
+    expect(defaultCapabilitiesFor(null, "acme/widgets")).toEqual([]);
   });
 });

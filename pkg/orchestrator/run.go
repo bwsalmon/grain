@@ -558,8 +558,9 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // pkg/orchestrate's own prepare (bwsalmon/agents#254).
 //
 // That rule holds for every grant, including one a task was filed with
-// because the deployment attaches it to everything
-// (model.Config.DefaultCapabilities, model.GrantByDefault). There is no
+// because the deployment attaches it to everything, or because the repo
+// it targets adds it (model.Config.DefaultCapabilities,
+// model.RepoConfig.DefaultCapabilities, model.GrantByDefault). There is no
 // "degrade rather than fail" tier here, and it is not an oversight: v1
 // needed one because it minted a GCP key per dispatch for every sandbox,
 // with no task holding the request and nowhere to record that it had

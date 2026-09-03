@@ -160,10 +160,16 @@ const (
 	GrantByDirective GrantSource = "directive" // a trusted author wrote it
 	GrantByFolder    GrantSource = "folder"    // a folder's offers granted it
 	GrantByGrain     GrantSource = "grain"     // grain applied it to itself
-	// GrantByDefault records a grant a task was filed with because the
-	// deployment lists that capability in Config.DefaultCapabilities --
-	// nobody ticked it for this task in particular, it is what filing a
-	// task here starts out with (ui.CreateTask).
+	// GrantByDefault records a grant a task was filed with because it was
+	// listed as a default -- by the deployment
+	// (Config.DefaultCapabilities) or by the repo the task targets
+	// (RepoConfig.DefaultCapabilities), unioned at creation. Nobody
+	// ticked it for this task in particular; it is what filing a task
+	// here, against that repo, starts out with (ui.CreateTask).
+	//
+	// One source for both layers, deliberately: which of the two attached
+	// it is a question the two panes that own them answer, and nothing
+	// about a task changes with the answer.
 	//
 	// It is provenance only, exactly like the four above: nothing reads
 	// Via to decide what a grant lets a task do, and a default-sourced

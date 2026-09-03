@@ -1767,6 +1767,83 @@ set a new task starts with, which is a different thing from
 docs/data-model.md's folder `offers`, those being floors a task cannot
 drop rather than a seed it can.
 
+### The same set, per repo
+
+The ask task-14 came from also said "we will also want this to be
+possible on individual repos in the future," and this is that: a repo can
+name capabilities of its own that a task filed against it starts holding,
+on top of whatever the deployment already defaults.
+
+**Where it is stored is a new `repo_config` table**, keyed `(owner,
+name)` the same way `qualification_config` already is, holding
+`model.RepoConfig` — one field today, `DefaultCapabilities`, with the
+same comma-separated storage `grain_config.default_capabilities` uses.
+A new table rather than a column somewhere: `base`, `preamble` and
+`max_concurrent` are docs/data-model.md's own next three per-repo
+settings, and this is the row they would join. A repo has a row only
+while it has something of its own to say — `PutRepoConfig` deletes rather
+than writing one that says nothing, so "has a row" and "adds something"
+stay one fact and nothing has to filter empty rows back out.
+
+**It is deliberately not the folder `offers` tree**, which the same
+document describes and which stays available for what it is for. An
+offer is a *floor*: unioned in when a task's grants are resolved, not
+droppable by the task. Everything here is a *seed*: written onto the task
+at creation, visible on it, and untickable on the form that files it.
+Mixing the two silently is the failure worth avoiding in both directions
+— a human unticking a capability and getting it anyway, or an operator
+setting what they think is a floor and watching tasks file without it —
+so they compose at different moments and neither feeds the other.
+
+**The two layers union, deployment-wide first, and a repo can only
+widen.** `(*ui.Client).defaultCapabilities` is still the one place a new
+task's starting set resolves; it now takes the target repo
+`CreateTask` has already parsed, defaults and `NoRepo` included. A
+`NoRepo` task has nothing to key the second layer on and gets the
+deployment's set alone; a task that named no repo is filed against
+`Config.DefaultTarget` and gets *that* repo's defaults, because the layer
+is keyed on the repo the task ends up targeting rather than on whether
+the request spelled it out.
+
+Whether a repo can *subtract* — "everything except `gcp-key` here" — is
+the same "except here" question docs/data-model.md defers for ceilings,
+and it gets the same answer: not yet, and the first person who needs it
+is the signal. Until then the deployment-wide set is for what genuinely
+belongs everywhere, a repo lists what it needs, and whoever files a task
+can untick any of it on the form.
+
+**What Settings reports had to gain a second axis.**
+`CapabilityStatus.Default` used to mean "this deployment defaults this",
+and with two layers a single flag would describe a deployment-wide
+default that only some tasks actually get. So `Default` keeps exactly its
+old meaning — every task, wherever it points — and
+`CapabilityStatus.DefaultRepos` names the repos that default it on their
+own. The Capabilities tab shows both, `grain settings` prints both, and a
+repo that restates something the deployment already gives appears in
+both, since dropping the deployment-wide entry leaves the repo's own
+standing.
+
+Editing lives where the thing being edited does: the deployment-wide set
+on Settings' Capabilities tab, a repo's own on the repos page next to
+that repo (`GET`/`PUT /api/repos/{owner}/{name}/capabilities`). The
+new-task form resolves the union itself, from `GET /api/config`'s
+`repoDefaultCapabilities`, so changing the repo picker re-ticks the boxes
+for the repo now targeted — unless the picker has been touched by hand,
+after which the ticks are the human's and a re-seed that put back
+something they had just unticked would file a task with what they had
+already said no to.
+
+**Schedules, templates and suites still are not seeded**, and this is the
+second time that has been decided rather than merely deferred. Each
+carries a grant set somebody authored once, in a form of its own, and
+those forms edit an existing set as often as they create one. Seeding
+their pickers would write today's defaults into a stored set that then
+never tracks them again: the next save of an unrelated field would
+silently widen a set somebody wrote down, which is the thing task-14
+avoided by seeding at task creation and reading nothing at dispatch. A
+schedule that wants `gcp-key` says so, once, where every task it files
+can be traced back to it.
+
 ## Write-only secrets access when colocated
 
 `pkg/secrets.Store` (above, "no secret store in the model") was

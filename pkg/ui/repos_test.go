@@ -190,3 +190,126 @@ func TestAddRepoRejectsAMalformedRepoWith400(t *testing.T) {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
 	}
 }
+
+// grain/task-24: a repo's own default capability set -- the per-repo
+// layer of what Settings chooses deployment-wide. Stored as given, and
+// reported back alongside the deployment layer it composes with and the
+// union a task filed here would actually start with, since the repo's
+// own list says nothing useful on its own.
+func TestSetRepoDefaultCapabilitiesStoresAndReportsAllThreeSets(t *testing.T) {
+	c, store, ctx := testClient(t)
+	putDefaultCapabilities(t, ctx, store, "gemini-key")
+
+	got, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", []string{"gcp-key"})
+	if err != nil {
+		t.Fatalf("setting a repo's default capabilities: %v", err)
+	}
+	if !reflect.DeepEqual(got.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Errorf("defaultCapabilities = %v, want [gcp-key]", got.DefaultCapabilities)
+	}
+	if !reflect.DeepEqual(got.DeploymentDefaultCapabilities, []string{"gemini-key"}) {
+		t.Errorf("deploymentDefaultCapabilities = %v, want [gemini-key]", got.DeploymentDefaultCapabilities)
+	}
+	if !reflect.DeepEqual(got.EffectiveDefaultCapabilities, []string{"gemini-key", "gcp-key"}) {
+		t.Errorf("effectiveDefaultCapabilities = %v, want [gemini-key gcp-key]: the deployment's, then this repo's",
+			got.EffectiveDefaultCapabilities)
+	}
+
+	read, err := c.RepoDefaults(ctx, "acme/widgets")
+	if err != nil {
+		t.Fatalf("reading them back: %v", err)
+	}
+	if !reflect.DeepEqual(read, got) {
+		t.Fatalf("read back = %+v, want what the write returned %+v", read, got)
+	}
+
+	// A repo nobody has configured is not an error: it adds nothing,
+	// which is exactly what it contributes.
+	none, err := c.RepoDefaults(ctx, "acme/gadgets")
+	if err != nil {
+		t.Fatalf("reading an unconfigured repo: %v", err)
+	}
+	if len(none.DefaultCapabilities) != 0 {
+		t.Errorf("defaultCapabilities = %v, want none", none.DefaultCapabilities)
+	}
+	if !reflect.DeepEqual(none.EffectiveDefaultCapabilities, []string{"gemini-key"}) {
+		t.Errorf("effectiveDefaultCapabilities = %v, want the deployment's [gemini-key]",
+			none.EffectiveDefaultCapabilities)
+	}
+}
+
+// Emptying the set is how a repo stops adding anything -- and it leaves
+// no row behind to be listed or wondered about (model.RepoConfig.Empty).
+func TestSetRepoDefaultCapabilitiesToNoneClearsTheRepo(t *testing.T) {
+	c, store, ctx := testClient(t)
+	if _, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", []string{"gcp-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", nil); err != nil {
+		t.Fatalf("clearing a repo's default capabilities: %v", err)
+	}
+	configs, err := store.ListRepoConfigs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 0 {
+		t.Fatalf("repo configs = %+v, want none left", configs)
+	}
+}
+
+// Rejected on the way in, the same way UpdateSettings rejects an unknown
+// id for the deployment-wide set: this is somebody choosing a set, and a
+// choice that could never take effect should be refused while whoever
+// made it is still looking at it. Duplicates are a picker artifact, not
+// a mistake, so they are folded rather than refused.
+func TestSetRepoDefaultCapabilitiesValidates(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	if _, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", []string{"nope"}); err == nil {
+		t.Fatal("setting an unknown capability: want a validation error, got nil")
+	} else {
+		var ve *ui.ValidationError
+		if !errors.As(err, &ve) {
+			t.Fatalf("error = %v, want a *ui.ValidationError", err)
+		}
+	}
+	if _, err := c.SetRepoDefaultCapabilities(ctx, "not-a-repo", []string{"gcp-key"}); err == nil {
+		t.Fatal("setting defaults on a malformed repo: want a validation error, got nil")
+	}
+
+	got, err := c.SetRepoDefaultCapabilities(ctx, "acme/widgets", []string{"gcp-key", "gcp-key"})
+	if err != nil {
+		t.Fatalf("setting a duplicated id: %v", err)
+	}
+	if !reflect.DeepEqual(got.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("defaultCapabilities = %v, want [gcp-key] once", got.DefaultCapabilities)
+	}
+}
+
+func TestRepoCapabilitiesGetAndPut(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPut, "/api/repos/acme/widgets/capabilities",
+		`{"defaultCapabilities":["gcp-key"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	saved := decode[ui.RepoDefaults](t, rec)
+	if saved.Repo != "acme/widgets" || !reflect.DeepEqual(saved.DefaultCapabilities, []string{"gcp-key"}) {
+		t.Fatalf("put response = %+v, want acme/widgets with [gcp-key]", saved)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/repos/acme/widgets/capabilities", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if got := decode[ui.RepoDefaults](t, rec); !reflect.DeepEqual(got, saved) {
+		t.Fatalf("get = %+v, want %+v", got, saved)
+	}
+
+	rec = do(t, srv, http.MethodPut, "/api/repos/acme/widgets/capabilities",
+		`{"defaultCapabilities":["nope"]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown capability status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
