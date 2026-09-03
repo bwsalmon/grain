@@ -137,6 +137,21 @@ func install() (*deployment, error) {
 	if res := sudo("chmod", "-R", "a+rwX", d.stateRemote); res.exitCode != 0 {
 		return nil, fmt.Errorf("opening the state remote up to the service account: %v", res)
 	}
+	// git refuses to fetch from a repository owned by somebody else
+	// ("detected dubious ownership"), and this one is owned by whoever
+	// runs the tests while everything that reads it runs as $GRAIN_USER.
+	// That is a property of a bare repository sitting on the same host,
+	// not of a state repository: a real one is reached over https, where
+	// no local ownership is involved at all. Exempted through the HOME
+	// both containers are given (docker_run_args, and the CLI wrapper),
+	// which is the one git configuration this fixture can reach.
+	if err := os.MkdirAll(filepath.Join(d.data, "home"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(d.data, "home", ".gitconfig"),
+		[]byte("[safe]\n\tdirectory = "+d.stateRemote+"\n"), 0o644); err != nil {
+		return nil, err
+	}
 
 	// The key a rebuilt host is handed. Generated here rather than
 	// hardcoded so nothing in this repository is a real key's shape with
