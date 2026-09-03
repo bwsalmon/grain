@@ -62,11 +62,15 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 kontur-managed sandbox VM's guest instead, by exec'ing
                 into that VM's own container -- see "Reaching a sandbox
                 guest without a route into it" below.
-                NewPullRequestTools adds pull_request_status: the one
-                tool here that really reads GitHub, from the controller,
-                so a run can see CI's verdict on the commits it pushed
-                and repair a red build inside its own turn budget -- see
-                "Letting a run watch its own CI" below
+                NewPullRequestTools adds pull_request_status and
+                wait_for_checks: the two tools here that really read
+                GitHub, from the controller, so a run can see CI's
+                verdict on the commits it pushed and repair a red build
+                inside its own turn budget. The first answers what CI
+                says now; the second blocks until CI has a verdict at
+                all -- one call instead of a poll loop paid for a turn
+                at a time -- see "Letting a run watch its own CI" and
+                "Waiting for CI instead of polling it" below
 pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
                 run's VM, the container names kontur derives from a VM
                 name, and the one `docker inspect` that tells a VM whose
@@ -1513,6 +1517,64 @@ any check is (`healthFrom`'s `PrConflicted`), so a green branch that
 conflicts still never merges, and the run holding the checkout can fetch
 and merge in a turn — which is cheaper than the fix task the merge queue
 would otherwise file for it minutes later in a cold sandbox.
+
+## Waiting for CI instead of polling it
+
+`pull_request_status` answers "what does CI say right now", which is the
+honest answer to a question no run actually has. A run that has just
+pushed wants to know how CI *ended*, and the only way to get that out of
+a status read is to call it, be told the unfinished checks carry no
+verdict, spend a turn waiting, and call it again. Every one of those
+turns is a model round trip spent on waiting rather than on work, and a
+run that guesses the interval wrong either burns its turn budget or --
+worse -- reads one queued check, decides it has waited long enough and
+finishes on a build it never saw the end of.
+
+`wait_for_checks` (`pkg/mcp/wait_for_checks_tool.go`) moves that loop
+inside grain: one call, and the answer is always a verdict rather than a
+snapshot. It returns the moment the outcome is settled, which is not the
+moment CI is finished — **any check failing ends the wait immediately**,
+without waiting for the rest, since there is nothing left to learn about
+a build that already has to be fixed and the sooner the run is told the
+more of its budget is left to fix it in. Every check completing with
+none failing ends it too, and that is the one green light in there.
+
+Three clocks bound it, none of them an agent's to invent:
+
+- `timeout_seconds`, the only argument, defaulting to 15 minutes and
+  clamped to 30s..60m. A timeout is *reported* — with what each check was
+  doing when it ran out, and the reminder that an unfinished check has
+  not passed — rather than raised as an error.
+- a 3-minute grace on an entirely empty check list. GitHub reports no
+  checks both when CI has not registered them yet and when the repo has
+  no CI at all, and blocking the full timeout to tell those apart would
+  spend fifteen minutes learning nothing. Once any check has appeared,
+  the grace no longer applies: a slow build is waited out to the timeout.
+- a 15-second poll interval, and a tolerance of three *consecutive*
+  failed reads. One 502 in the middle of a long wait is a blip; a
+  credential that cannot see checks at all fails every read, and
+  surfacing that as an error beats reporting a timeout half an hour later
+  and hiding the real cause behind a wrong one.
+
+The scope is fixed at process start exactly as `pull_request_status`'s
+is, and the commit is pinned too: the branch head is read once, up front,
+so an answer can never mix verdicts from two different pushes. A branch
+that was never pushed is answered immediately rather than waited on.
+Cancelling the run reaches into the sleep, since that is the only place
+the call spends any time.
+
+One piece of wiring the tool cannot do for itself: `claude` caps how long
+it will let a single MCP tool call run, well below the hour this one may
+block for, and a cap left where it was would kill the call part-way
+through a wait the agent deliberately asked for and report it as a tool
+failure. `agent/claude`'s `mcpToolTimeout` raises `MCP_TOOL_TIMEOUT` to
+just past `mcp.MaxWaitForChecksTimeout` so the tool's own clock is the
+one that ends the call — and leaves an `MCP_TOOL_TIMEOUT` already in the
+environment alone, since an operator who set one outranks that default.
+`BuildPrompt` names `wait_for_checks` first and `pull_request_status`
+only as the polling it saves, for the same reason the loop itself is
+spelled out: a run told to "check CI" reaches for the status read and
+then invents a waiting strategy out of turns it could have spent working.
 
 ## Reaching a sandbox guest without a route into it
 

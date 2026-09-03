@@ -22,10 +22,12 @@
 // "static-pod" needs a standalone kubelet
 // (deploy/static-kubelet/README.md) and is resolved via crictl instead.
 //
-// -pr-repo/-pr-branch add pkg/mcp's pull_request_status to that roster,
-// so a run can read CI's verdict on the commits it pushes and repair a
-// red build inside its own turn budget instead of leaving it for the
-// merge queue's separate fix task. That read happens *here*, in this
+// -pr-repo/-pr-branch add pkg/mcp's pull_request_status and
+// wait_for_checks to that roster, so a run can read CI's verdict on the
+// commits it pushes -- or block until there is one, rather than spending
+// a turn per poll -- and repair a red build inside its own turn budget
+// instead of leaving it for the merge queue's separate fix task. Those
+// reads happen *here*, in this
 // process, which runs on the controller: the GitHub credential comes off
 // the controller's own -data-dir (the same secrets/github ladder
 // `grain daemon` loads) and never crosses into the sandbox, so
@@ -157,12 +159,12 @@ func mcpserver(args []string) {
 		"grain's own data directory on this controller, holding secrets/github -- the credential "+
 			"pull_request_status reads GitHub with. Required with -pr-repo.")
 	prRepo := fs.String("pr-repo", "",
-		"owner/name of the repository pull_request_status reports on. Unset leaves the tool "+
-			"registered but answering that this run has no repo, which is what a task with no "+
-			"target really does have.")
+		"owner/name of the repository pull_request_status and wait_for_checks report on. Unset "+
+			"leaves both tools registered but answering that this run has no repo, which is what "+
+			"a task with no target really does have.")
 	prBranch := fs.String("pr-branch", "",
-		"branch within -pr-repo pull_request_status reports on -- this run's own branch, and the "+
-			"only one it can ever read (required with -pr-repo)")
+		"branch within -pr-repo pull_request_status and wait_for_checks report on -- this run's "+
+			"own branch, and the only one they can ever read (required with -pr-repo)")
 	githubHost := fs.String("github-host", "github.com",
 		"git host whose REST API pull_request_status reads (github.APIHost maps it to the API host)")
 	githubInsecureHTTP := fs.Bool("github-insecure-http", false,
@@ -240,7 +242,8 @@ func mcpserver(args []string) {
 	}
 }
 
-// pullRequestTools builds pull_request_status for repo/branch, reading
+// pullRequestTools builds pull_request_status and wait_for_checks for
+// repo/branch, reading
 // GitHub with the credential ladder under dataDir -- the very files
 // `grain daemon` loads for its own REST client (its credentialTokenSource
 // call site), opened a second time here because this is a separate
@@ -250,14 +253,15 @@ func mcpserver(args []string) {
 // process serves is how the agent touches its sandbox at all, so exiting
 // because CI happens to be unreadable would turn a missing credential
 // into a run that cannot edit a file. mcp.NewPullRequestTools registers
-// the tool with a nil reader instead, which answers any call with a
+// both tools with a nil reader instead, which answers any call with a
 // sentence saying there is nothing to report -- and the reason goes to
 // stderr, where the daemon's own subprocess plumbing already carries it
 // to an operator.
 func pullRequestTools(dataDir, githubHost string, insecureHTTP bool, repo, branch string) []mcp.Tool {
 	client, scope, err := pullRequestReader(dataDir, githubHost, insecureHTTP, repo, branch)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "grain mcpserver: pull_request_status is unavailable this run: %v\n", err)
+		fmt.Fprintf(os.Stderr,
+			"grain mcpserver: pull_request_status and wait_for_checks are unavailable this run: %v\n", err)
 		return mcp.NewPullRequestTools(nil, mcp.PullRequestScope{})
 	}
 	return mcp.NewPullRequestTools(client, scope)

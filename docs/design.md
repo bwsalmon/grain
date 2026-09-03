@@ -658,17 +658,20 @@ preserved; what moved is that the orchestrator now has a `create_comment`
 operation to call at all, where before it had none.
 
 **A second exception, on the same terms:** `pull_request_status`
-(`pkg/mcp/pullrequest_tools.go`) lets a run see what CI made of the
-commits it pushed, so it can repair a red build itself rather than
-leaving it to a separate fix task dispatched into a cold sandbox. It is
+(`pkg/mcp/pullrequest_tools.go`) and `wait_for_checks`
+(`pkg/mcp/wait_for_checks_tool.go`) let a run see what CI made of the
+commits it pushed -- the first as it stands, the second by blocking
+until there is a verdict at all instead of making the run poll -- so it
+can repair a red build itself rather than leaving it to a separate fix
+task dispatched into a cold sandbox. Both are
 served by the `grain mcpserver` process, which runs on the *controller*
 and reads GitHub with the controller's own credential; the repo and
 branch it may ask about are fixed at process start from grain's own view
 of the task, and no tool argument can move them. So again: the sandbox
 gains no REST or GraphQL of its own, and what crosses into it is a
 rendered answer rather than a credential or a general-purpose API call.
-Unlike `ask_question`, this one reads rather than writes, which is the
-smaller half of the exception — nothing an agent can say through it
+Unlike `ask_question`, these read rather than write, which is the
+smaller half of the exception — nothing an agent can say through them
 changes anything on GitHub.
 
 ### Auth model: a broad credential behind a narrow proxy
