@@ -37,9 +37,9 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
-                propose_task, add_review_comment) -- plus one tool whose
+                propose_task, add_review_comment) -- plus two tools whose
                 effect is real and immediate rather than mocked and
-                deferred, open_pull_request
+                deferred. open_pull_request
                 (NewOpenPullRequestTools): a run
                 that has pushed its branch can have grain open its pull
                 request there and then and read back what the repo's own
@@ -48,7 +48,15 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 is a write, and writes stay grain's: it asks the daemon
                 (pkg/ui's POST /api/tasks/{id}/pull-request) rather than
                 holding a credential of its own -- see "A run can open
-                its own pull request" below. NewSandboxTools runs
+                its own pull request" below. And recreate_sandbox
+                (NewRecreateSandboxTools): a run whose sandbox has become
+                unusable can have grain destroy it and build a clean one,
+                with the checkout, credentials and placements grain put
+                there restored, rather than spending its remaining turns
+                failing in a sandbox no tool it holds can repair -- the
+                same hop, to pkg/ui's
+                POST /api/tasks/{id}/sandbox/recreate, and see "A run can
+                rebuild its own sandbox" below. NewSandboxTools runs
                 those four locally, confined to a directory; NewSSHSandboxTools
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
@@ -2372,6 +2380,85 @@ an error it cannot fix.
 What that leaves worth measuring, rather than assuming, is whether runs
 actually start calling it, and whether a run that sees a failing check
 fixes it instead of opening the pull request and stopping there.
+
+## A run can rebuild its own sandbox
+
+Every tool a run has runs *inside* its sandbox. That is the whole design
+-- the agent is on the controller, the work is in the guest, and
+`run_command`/`read_file`/`edit_file`/`write_file` are the only crossing
+(`pkg/mcp`). It also means a sandbox broken badly enough takes every one
+of those down with it, and leaves the run with no move at all: a guest
+that has stopped answering, a root filesystem an unlucky build filled, an
+interrupted `apt`/`npm`/`docker` that left a state no command can
+untangle, a process that will not die. The agent then spends whatever
+turns it has left failing at things that have nothing to do with its
+task, and the only recovery was for the run to end and the whole task to
+be redispatched -- which throws away everything the agent had worked out
+along with the broken sandbox.
+
+`recreate_sandbox` (`pkg/mcp`'s `NewRecreateSandboxTools`) is the way
+out. It takes no arguments, destroys this run's sandbox, builds an empty
+one under the same name, and puts back what grain itself had set up in
+the old one: the git credentials pointing at the proxy, whatever the
+task's capabilities placed, the task's attachments, and a fresh clone of
+its repo with its branch checked out. Then the run carries on, in the
+same conversation, in a clean sandbox.
+
+The name is what makes this possible without the run's tools going stale.
+A sandbox is addressed by name -- a directory path, or a kontur VM whose
+container name follows from the VM name (`kontur.PodName`) -- never by a
+handle to the particular filesystem or guest behind it. So the tools the
+run already has, and the ones its forked `mcpserver` holds in a separate
+process that nothing here could reach to replace, address the new sandbox
+the moment it exists. `orchestrator.SandboxRebuilder` is the one method
+that adds: `konturSandbox.Rebuild` reuses Acquire's own create-and-wait
+pair (`create` deletes whatever is under the name first, which is exactly
+the destroy half), and `hostSandbox.Rebuild` its `RemoveAll`/`MkdirAll`
+pair.
+
+What the run cannot get back is its own uncommitted work, and the tool
+says so in the one place an agent reads before deciding to call it: the
+description. Commits already *pushed* are safe, because they are on the
+remote rather than in the sandbox, and the re-clone continues the
+existing remote branch rather than branching over it (`prepareCheckout`)
+-- so a rebuild costs a run its unpushed work and nothing more.
+
+The hop is the same one `open_pull_request` makes, for a sharper version
+of the same reason. The `mcpserver` process could not do this even if it
+were allowed to: creating a sandbox needs the shape this run asked for,
+the proxy token to mint for it, the already-minted capability material to
+place in it and the repo to clone into it, none of which exists on that
+side. So `-server`/`-task` point it at
+`POST /api/tasks/{id}/sandbox/recreate`, one call about one task id,
+answered by `orchestrator.SandboxRecreations` -- a registry each
+dispatched run puts itself in (`runOne`) and takes itself out of when it
+ends. A task with no live run there is told so; nothing a tool call
+carries chooses which sandbox is destroyed, because the task id was fixed
+at process start.
+
+Two details are worth knowing:
+
+- **The capability placements are written back, never materialized
+  again.** Re-materializing would mint a second credential and a second
+  lease behind the back of the single revoke `RunDispatch` performs when
+  the run ends. So `RunDispatch` hands the registry the
+  `model.Materialized` it already has (`setMaterialized`) and the rebuild
+  rewrites that same content, which is idempotent.
+- **Only the rebuild itself can fail the call.** Everything after it
+  comes back as a warning, because by then the old sandbox is gone and
+  what the caller most needs is an account of what it is now sitting in
+  front of -- the same reasoning `PullRequestStatus.ChecksError` follows.
+  A run whose credentials did not come back cannot push, and one whose
+  repo did not clone has an empty directory rather than the checkout
+  everything else it was told assumes, so the rendered answer puts those
+  in their own section rather than folding them in with what worked.
+
+Unlike `open_pull_request`, `BuildPrompt` does not name this one. The
+trigger for reaching for it -- a sandbox that has stopped working -- is
+one an agent cannot miss and does not have to be taught to look for, and
+the description is where it reads what the tool costs. Whether that holds
+is worth watching: the failure mode to look for is a run that grinds on
+against a wedged sandbox without ever trying it.
 
 ## Deploying it
 

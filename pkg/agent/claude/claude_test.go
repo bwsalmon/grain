@@ -463,16 +463,16 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	}
 }
 
-// Ten now: the four sandbox tools, the four escape hatches,
-// pull_request_status and open_pull_request. Both of the last two are
-// named here for every run even though only a run whose mcpserver was
-// given the flags for them actually gets them, since --allowedTools
-// filters what the server advertises rather than adding to it
-// (allowedTools' own comment).
+// Eleven now: the four sandbox tools, the four escape hatches,
+// pull_request_status, open_pull_request and recreate_sandbox. The last
+// three are named here for every run even though only a run whose
+// mcpserver was given the flags for them actually gets them, since
+// --allowedTools filters what the server advertises rather than adding
+// to it (allowedTools' own comment).
 func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	names := allowedTools()
-	if len(names) != 10 {
-		t.Fatalf("allowedTools() = %v, want 10 entries", names)
+	if len(names) != 11 {
+		t.Fatalf("allowedTools() = %v, want 11 entries", names)
 	}
 	for _, n := range names {
 		if !strings.HasPrefix(n, "mcp__grain-sandbox__") {
@@ -482,7 +482,7 @@ func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	// --strict-mcp-config refuses any tool this list omits, so a tool the
 	// server may advertise and this list may not name is a run that dies
 	// on its first call to it.
-	for _, tool := range []string{"pull_request_status", "open_pull_request"} {
+	for _, tool := range []string{"pull_request_status", "open_pull_request", "recreate_sandbox"} {
 		if !slices.Contains(names, mcp.QualifiedToolName(tool)) {
 			t.Errorf("allowedTools() = %v, want %s admitted", names, tool)
 		}

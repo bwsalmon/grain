@@ -277,6 +277,25 @@ type Config struct {
 	// the same nil-means-unavailable contract Reboot and Sandboxes above
 	// already give.
 	PullRequests PullRequests
+	// SandboxRecreate, when set, is what
+	// POST /api/tasks/{id}/sandbox/recreate calls to destroy a live run's
+	// sandbox and build an empty one in its place -- cmd/grain/daemon.go's
+	// sandboxRecreateAdapter over the orchestrator.SandboxRecreations its
+	// dispatched runs register themselves in.
+	//
+	// It is how a dispatched run rescues itself from a sandbox it cannot
+	// repair from inside, through the recreate_sandbox tool its own MCP
+	// server exposes: everything else that run has runs *in* the sandbox,
+	// so destroying and rebuilding one is necessarily somebody else's
+	// call to make -- the same hop, and the same reasoning, as
+	// PullRequests above.
+	//
+	// nil means this deployment's UI was not handed one (`grain demo`'s
+	// throwaway UI, or any UI not colocated with the daemon that owns the
+	// runs), and the route answers 404 rather than erroring -- the same
+	// nil-means-unavailable contract PullRequests and Sandboxes above
+	// already give.
+	SandboxRecreate SandboxRecreator
 	// Cycles, when set, is what GET /api/metrics' own "cycles" section
 	// reads to report how long this daemon's RunCycle ticks have been
 	// taking -- cmd/grain/daemon.go's cycleTimesAdapter over the

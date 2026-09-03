@@ -193,6 +193,12 @@ func TestMCPServerOpensAPullRequestOverStdio(t *testing.T) {
 		if !names["open_pull_request"] {
 			t.Errorf("tools/list is missing open_pull_request despite -server/-task; got %v", names)
 		}
+		// recreate_sandbox rides on the same -server/-task pair -- both
+		// are writes the daemon makes on the run's behalf, so a process
+		// given the flags for one has the flags for the other.
+		if !names["recreate_sandbox"] {
+			t.Errorf("tools/list is missing recreate_sandbox despite -server/-task; got %v", names)
+		}
 		// Beside, not instead of: registering the write tool must not
 		// cost the run the tools it touches its sandbox with.
 		for _, want := range []string{"run_command", "read_file", "write_file", "edit_file"} {
