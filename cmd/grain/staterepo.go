@@ -200,6 +200,11 @@ const stateSyncInterval = 30 * time.Second
 func stateSyncLoop(ctx context.Context, sync func(context.Context) (bool, error)) {
 	ticker := time.NewTicker(stateSyncInterval)
 	defer ticker.Stop()
+	// The last thing logged, so a condition that persists -- an expired
+	// credential, or a merged change waiting for a restart, which can
+	// wait days -- is one line in the journal rather than one every
+	// thirty seconds drowning everything else in it.
+	var last string
 	for {
 		select {
 		case <-ctx.Done():
@@ -212,7 +217,12 @@ func stateSyncLoop(ctx context.Context, sync func(context.Context) (bool, error)
 			}
 			return
 		case <-ticker.C:
-			if _, err := sync(ctx); err != nil {
+			_, err := sync(ctx)
+			switch {
+			case err == nil:
+				last = ""
+			case err.Error() != last:
+				last = err.Error()
 				log.Printf("grain: state sync failed: %v", err)
 			}
 		}

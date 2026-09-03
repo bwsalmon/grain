@@ -125,7 +125,28 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 // What changed is in the diff, which is the whole reason the dump is
 // text; a message that tried to summarise it would be a second, worse
 // answer that could disagree with the first.
+// ErrRemoteAhead is returned by Sync when the remote holds commits this
+// deployment has not loaded -- a merged pull request against grain's own
+// settings, which is the mechanism this whole package exists to allow.
+//
+// It is a refusal to export, not a failure to push, and the difference
+// is the whole point: exporting would commit this deployment's dump on
+// top of the merge, and no amount of retrying afterwards could get that
+// commit onto a remote that has moved past it. The database is still the
+// live state and grain goes on running against it; what is waiting is
+// applied at the next start, because importing replaces every row and
+// that is not something to do underneath runs holding ids (Load, above).
+var ErrRemoteAhead = errors.New("the state repository has changes this deployment has not loaded; " +
+	"restart grain to apply them")
+
 func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
+	// Asked before anything is written, so that a merged change is never
+	// committed over -- see ErrRemoteAhead. An unreachable remote answers
+	// "not ahead" and the push below reports the network in its own
+	// words.
+	if ahead, err := r.RemoteAhead(ctx); err == nil && ahead {
+		return false, ErrRemoteAhead
+	}
 	// Rewritten on every sync, not only at Seed: a repository an operator
 	// adopted, or one whose README a merge dropped, still has to explain
 	// itself to whoever opens it next, and this is the cheapest place to

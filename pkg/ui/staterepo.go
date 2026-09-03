@@ -75,6 +75,14 @@ type StateRepoStatus struct {
 	// or a credential -- and because a store that cannot be read is not a
 	// sync that failed.
 	SecretsError string `json:"secretsError,omitempty"`
+	// RemoteAhead reports that the remote holds changes this deployment
+	// has not loaded -- a merged pull request against grain's settings,
+	// which is what the repository is for. It is its own field rather
+	// than another Error because it is not a failure and the operator's
+	// move is different: grain applies what is waiting at its next start,
+	// so the answer is a restart, and until then grain stops exporting
+	// rather than committing over the merge.
+	RemoteAhead bool `json:"remoteAhead,omitempty"`
 	// Error is a last-sync failure worth showing (an expired credential,
 	// an unreachable remote), rather than one this pane's own request
 	// caused. Empty when the last sync was fine.

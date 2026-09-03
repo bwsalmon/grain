@@ -2493,6 +2493,20 @@ encrypted file remains is reported as the unrecoverable state it is,
 never replaced with a new one -- minting silently there would leave an
 undecryptable file behind and look like it had worked.
 
+The key travels by hand or not at all, and that is the point of it: a
+repository cloned onto a new host arrives with every secret grain has in
+a form nothing on that host can open. So the key is something an
+operator can put back -- `grain state key import`, `grain state adopt
+-secrets-key-file`, or the field in the pane, each reading it from a file
+or a form and never from a command line anyone with `ps` can read. A key
+that cannot open the file is refused rather than installed, naming both
+public halves so an operator holding several knows which one this
+repository wants; a key it replaces is kept beside it with a timestamped
+name, because key material is the one thing here that cannot be
+regenerated. Whether this host can read its own secrets is reported at
+startup, by `grain state status` and in the pane -- not left to surface
+later as a run that could not resolve a credential.
+
 ### The bootstrap
 
 Three answers, offered in the UI's Settings pane (its State tab) and by
@@ -2505,6 +2519,36 @@ Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
 previous working tree is moved aside with a timestamped name rather than
 deleted, and the pane says as much before you press the button.
+
+One file crosses from that archived tree into the new one: `secrets.enc`,
+and only when the repository being adopted has none of its own.
+Everything else in there is a materialisation of a database that is still
+right here, and that file is not -- so seeding an empty repository used
+to leave every secret the deployment held behind in a directory nothing
+reads again, and to do it silently, since a store with no file reports no
+secrets rather than reporting anything wrong. A repository that does
+carry its own secrets keeps them: they are the adopted installation's
+source of truth exactly as its tables are, and the key to read them is
+what the import above is for.
+
+### A merged change is not something to commit over
+
+The export runs on a timer, so the daemon is writing to the repository
+while a pull request against it is open. If one is merged, the remote has
+a commit this deployment does not -- and grain committing its own dump on
+top of that used to strand the installation: the push rejected as a
+non-fast-forward on that tick and on every tick afterwards, and a next
+start that finds the two diverged and refuses to load at all. A grain
+that will not come up because somebody merged the change it asked for is
+a bad answer to the mechanism this whole repository exists to allow.
+
+So each sync asks the remote first, which costs one `ls-remote`, and
+declines to export at all while something is waiting. The database is
+still the live state and grain goes on running against it, unaffected;
+what is waiting is applied at the next start, for the reason the import
+happens there and not on a tick. The pane says so in those terms -- a
+merge to load and a restart to load it with -- rather than showing a git
+error, and the journal says it once rather than every thirty seconds.
 
 ## Deployment configuration lives in the store too
 

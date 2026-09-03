@@ -123,6 +123,13 @@ describe("StateRepoPanel", () => {
     expect(screen.queryByRole("button", { name: "Stop using the remote" })).not.toBeInTheDocument();
   });
 
+  it("says a merged change is waiting, and what to do about it", async () => {
+    api.mockResolvedValueOnce({ ...local, mode: "remote", remote: "https://example.invalid/x.git", remoteAhead: true });
+    render(<StateRepoPanel showError={() => {}} />);
+
+    expect(await screen.findByText(/restart it to load this one/i)).toBeInTheDocument();
+  });
+
   it("warns when the repository was written by a different schema", async () => {
     api.mockResolvedValueOnce({ ...local, schemaVersion: 15, buildSchemaVersion: 16 });
     render(<StateRepoPanel showError={() => {}} />);

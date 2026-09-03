@@ -101,6 +101,13 @@ export default function StateRepoPanel({ showError }) {
         working tree: {status.dir}
       </Typography>
 
+      {status.remoteAhead && (
+        <Alert severity="info" sx={{ mt: 2 }}>
+          Somebody merged a change into this repository. grain applies what is waiting when it starts &mdash;
+          restart it to load this one. Until then it stops exporting rather than committing over the merge, so
+          the database keeps running as it is and nothing here is lost.
+        </Alert>
+      )}
       {status.error && <Alert severity="warning" sx={{ mt: 2 }}>{status.error}</Alert>}
       {schemaMismatch && (
         <Alert severity="error" sx={{ mt: 2 }}>

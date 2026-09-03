@@ -332,6 +332,48 @@ func (r *Repo) Pull(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(before) != strings.TrimSpace(after), nil
 }
 
+// RemoteAhead reports whether origin holds commits this working tree
+// does not -- which, for this repository, means exactly one thing: a
+// pull request against grain's own state was merged.
+//
+// It is asked before every export (see Sync) because of what would
+// otherwise happen. The daemon would commit its own dump on top of a
+// history the remote has moved past, the push would be rejected as a
+// non-fast-forward on that tick and on every tick after it, and the next
+// start would find the two diverged and refuse to load at all -- a grain
+// that will not come up because somebody merged the change it asked
+// them to. Noticing first costs one ls-remote and turns all of that into
+// a sentence an operator can act on.
+//
+// A remote that cannot be reached is not "ahead": nothing is known, so
+// the caller carries on exactly as it did before this check existed and
+// the push reports the network for itself.
+func (r *Repo) RemoteAhead(ctx context.Context) (bool, error) {
+	if r.cfg.Remote == "" {
+		return false, nil
+	}
+	out, err := r.gitAuthed(ctx, "ls-remote", "--heads", "origin", r.branch)
+	if err != nil {
+		return false, err
+	}
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) == 0 {
+		// No such branch on the remote yet: an empty repository, which is
+		// behind rather than ahead.
+		return false, nil
+	}
+	head := fields[0]
+	// A commit this clone has never fetched cannot be one of ours.
+	if _, err := r.git(ctx, "cat-file", "-e", head+"^{commit}"); err != nil {
+		return true, nil
+	}
+	// We have it: ahead only if it is not already in our history.
+	if _, err := r.git(ctx, "merge-base", "--is-ancestor", head, "HEAD"); err != nil {
+		return true, nil
+	}
+	return false, nil
+}
+
 func (r *Repo) remoteBranchMissing(ctx context.Context) bool {
 	out, err := r.gitAuthed(ctx, "ls-remote", "--heads", "origin", r.branch)
 	if err != nil {

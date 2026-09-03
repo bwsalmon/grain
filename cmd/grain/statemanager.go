@@ -98,7 +98,14 @@ func (m *stateManager) status(ctx context.Context) ui.StateRepoStatus {
 		}
 	}
 	if m.lastErr != nil {
-		out.Error = m.lastErr.Error()
+		// A merge waiting to be loaded is a state, not a failure, and the
+		// pane says a different thing about it -- so it is reported as
+		// itself rather than as the last error to have come out of git.
+		if errors.Is(m.lastErr, staterepo.ErrRemoteAhead) {
+			out.RemoteAhead = true
+		} else {
+			out.Error = m.lastErr.Error()
+		}
 	}
 	return out
 }
@@ -227,7 +234,11 @@ func (m *stateManager) Sync(ctx context.Context) (ui.StateRepoStatus, error) {
 	defer m.mu.Unlock()
 	_, err := staterepo.Sync(ctx, m.repo, m.db, model.SchemaVersion)
 	m.lastErr = err
-	if err != nil {
+	// "Somebody merged a change and grain has not loaded it" is an answer
+	// to "sync now", not a failure of it: the pane gets a status saying so
+	// rather than an error banner, since what it asks for next is a
+	// restart and not another sync.
+	if err != nil && !errors.Is(err, staterepo.ErrRemoteAhead) {
 		return ui.StateRepoStatus{}, err
 	}
 	return m.status(ctx), nil
