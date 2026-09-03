@@ -301,7 +301,7 @@ func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 		for _, want := range []string{
 			"run_command", "read_file", "write_file", "edit_file",
 			"ask_question", "comment_on_issue", "propose_task", "add_review_comment",
-			"pull_request_status",
+			"pull_request_status", "wait_for_checks",
 		} {
 			if !names[want] {
 				t.Errorf("tools/list is missing %q; got %v", want, names)
@@ -362,6 +362,41 @@ func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 				t.Errorf("Authorization = %q, want the token from -data-dir's secrets/github ladder", auth)
 			}
 		}
+	})
+
+	t.Run("wait_for_checks answers over the same chain, without waiting", func(t *testing.T) {
+		// The sim's roster already has a failing check on the branch's
+		// tip, and a failure is what ends a wait immediately -- so this
+		// exercises the whole argv -> flags -> credential -> transport
+		// -> tool chain for the blocking tool without the test ever
+		// sitting through a poll interval. A wait that came back with
+		// anything other than the failure would mean it had not read the
+		// sim at all.
+		p := startMCPServer(t, bin, serverArgs(t, dataDir, true)...)
+		res, err := p.CallTool(context.Background(), "wait_for_checks", map[string]any{
+			"timeout_seconds": 30,
+		})
+		if err != nil {
+			t.Fatalf("tools/call wait_for_checks: %v\nstderr:\n%s", err, p.stderr.String())
+		}
+		if res.IsError {
+			t.Fatalf("wait_for_checks answered with an error: %q\nstderr:\n%s", res.Text(), p.stderr.String())
+		}
+		got := res.Text()
+		for _, want := range []string{
+			sha[:7],
+			"FAILING  unit-tests (failure)",
+			"CI has failed",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("wait_for_checks answer is missing %q; full answer:\n%s", want, got)
+			}
+		}
+		// wire accumulates until something takes them, and the
+		// uncredentialed subtest below asserts on *everything* it finds
+		// there -- so these credentialed reads are cleared here rather
+		// than left to be read as that subtest's own.
+		wire.takeAuthorizations()
 	})
 
 	t.Run("without -github-insecure-http it reaches nothing at all", func(t *testing.T) {

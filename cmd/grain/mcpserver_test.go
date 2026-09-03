@@ -2,16 +2,18 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/mcp"
 )
 
-// pull_request_status has to be registered whatever the flags said, so
-// that a run whose task has no repo gets the tool's own explanation
-// rather than "unknown tool pull_request_status" -- which reads like
-// grain is broken rather than like a task with nothing to look at.
+// pull_request_status and wait_for_checks have to be registered whatever
+// the flags said, so that a run whose task has no repo gets each tool's
+// own explanation rather than "unknown tool pull_request_status" -- which
+// reads like grain is broken rather than like a task with nothing to
+// look at.
 func TestPullRequestToolsAlwaysRegisterTheTool(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -26,13 +28,17 @@ func TestPullRequestToolsAlwaysRegisterTheTool(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tools := pullRequestTools(tc.dataDir, "github.com", false, tc.repo, tc.branch)
-			if len(tools) != 1 || tools[0].Name != "pull_request_status" {
-				t.Fatalf("pullRequestTools = %+v, want exactly pull_request_status", tools)
+			var names []string
+			for _, tool := range tools {
+				names = append(names, tool.Name)
+				res := tool.Handler(context.Background(), map[string]any{})
+				if !res.IsError || !strings.Contains(res.Text, "no GitHub repository configured") {
+					t.Errorf("%s answered %q (isError=%v), want the "+
+						"nothing-configured explanation", tool.Name, res.Text, res.IsError)
+				}
 			}
-			res := tools[0].Handler(context.Background(), map[string]any{})
-			if !res.IsError || !strings.Contains(res.Text, "no GitHub repository configured") {
-				t.Errorf("handler answered %q (isError=%v), want the "+
-					"nothing-configured explanation", res.Text, res.IsError)
+			if want := []string{"pull_request_status", "wait_for_checks"}; !slices.Equal(names, want) {
+				t.Fatalf("pullRequestTools registered %v, want %v", names, want)
 			}
 		})
 	}

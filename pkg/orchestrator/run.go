@@ -181,19 +181,28 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 	// alone. Nothing stops a run pushing repeatedly -- the branch is its
 	// own and the proxy authorizes every push to it (gitproxy/authorize.go)
 	// -- but the sentences above read as one final act, and a run that
-	// treats them that way has no reason to ever call pull_request_status,
-	// whose whole value is being called again after the next push. Leaving
-	// that loop implicit is what left a red build to the merge queue's
-	// separate fix task (sync.go's fileFixTask) even when the run that
-	// caused it was still running.
+	// treats them that way has no reason to ever look at CI at all.
+	// Leaving that loop implicit is what left a red build to the merge
+	// queue's separate fix task (sync.go's fileFixTask) even when the run
+	// that caused it was still running.
+	//
+	// wait_for_checks is named first, and pull_request_status only as the
+	// thing it saves: a run told to "check CI" reaches for the status read
+	// and then has to invent a waiting strategy out of turns it could have
+	// spent working -- which is the loop that tool was added to end
+	// (mcp/wait_for_checks_tool.go). The status read is still worth
+	// naming, since it is the one that answers questions about the pull
+	// request itself rather than about the build.
 	if task.Target != nil {
 		prompt += fmt.Sprintf(
 			"\n\nPush as often as you like: %q is your branch, and each push reruns CI "+
-				"against the new commit. After a push, call `pull_request_status` to "+
-				"see what GitHub's checks made of it -- that is how you find out "+
-				"whether tests you cannot run in the sandbox actually pass. If any "+
-				"check fails, fix it, push again and check again, rather than "+
-				"finishing on a red build.",
+				"against the new commit. After a push, call `wait_for_checks`: it "+
+				"blocks until GitHub's checks on that commit have an actual verdict "+
+				"and then reports it, so one turn gets you the answer that polling "+
+				"`pull_request_status` on a timer would cost you several. That is how "+
+				"you find out whether tests you cannot run in the sandbox actually "+
+				"pass. If any check fails, fix it, push again and wait again, rather "+
+				"than finishing on a red build.",
 			branch,
 		)
 		// The second half of the same loop, for a run that really has the
@@ -230,8 +239,8 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 		prompt += fmt.Sprintf(
 			"\n\nYour job is not done at the moment you push: it is done when those "+
 				"checks have finished and passed and your branch still merges cleanly "+
-				"into %s. A check that has not finished carries no verdict, so wait and "+
-				"look again rather than reading it as a pass. If your branch conflicts "+
+				"into %s. A check that has not finished carries no verdict, so wait for "+
+				"it rather than reading it as a pass. If your branch conflicts "+
 				"with %s, resolving that is part of this task too -- `git fetch origin`, "+
 				"merge that branch into %q, resolve the conflicts, commit and push "+
 				"again.",

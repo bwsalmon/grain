@@ -1,0 +1,433 @@
+package mcp
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bwsalmon/grain/pkg/github"
+)
+
+// scriptedChecks is a PullRequestReader whose CI answer changes with
+// every read, which is the whole thing wait_for_checks is about: a real
+// build is queued, then running, then done, and a tool that only ever
+// saw one answer could not tell those apart.
+type scriptedChecks struct {
+	head    *github.BranchHead
+	headErr error
+
+	// rounds[i] is the answer to the i'th read of CI; the last entry
+	// answers every read after it, so a script does not have to guess
+	// how many polls a wait will make.
+	rounds [][]github.CheckRun
+	errs   []error
+
+	reads int
+	repos []string
+}
+
+func (s *scriptedChecks) GetBranchHead(owner, repo, branch string) (*github.BranchHead, error) {
+	s.repos = append(s.repos, owner+"/"+repo)
+	return s.head, s.headErr
+}
+
+func (s *scriptedChecks) FindOpenPullRequestForBranch(string, string, string) (*github.PullRequest, error) {
+	return nil, errors.New("wait_for_checks must not look for a pull request")
+}
+
+func (s *scriptedChecks) GetPullRequest(string, string, int) (github.PullRequestDetail, error) {
+	return github.PullRequestDetail{}, errors.New("wait_for_checks must not read a pull request")
+}
+
+func (s *scriptedChecks) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error) {
+	s.repos = append(s.repos, owner+"/"+repo)
+	i := s.reads
+	s.reads++
+	if i < len(s.errs) && s.errs[i] != nil {
+		return nil, s.errs[i]
+	}
+	if len(s.rounds) == 0 {
+		return nil, nil
+	}
+	if i >= len(s.rounds) {
+		i = len(s.rounds) - 1
+	}
+	return s.rounds[i], nil
+}
+
+func (s *scriptedChecks) ListWorkflowRuns(owner, repo, headSHA string) ([]github.CheckRun, error) {
+	return nil, &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible"}`)}
+}
+
+// fakeClock is a clock that only ever moves when the waiter sleeps, so a
+// test can run a full-length wait in no time and know exactly how much
+// waiting the loop believed it did.
+type fakeClock struct {
+	t      time.Time
+	slept  []time.Duration
+	cancel error
+}
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+func (c *fakeClock) sleep(ctx context.Context, d time.Duration) error {
+	if c.cancel != nil {
+		return c.cancel
+	}
+	c.slept = append(c.slept, d)
+	c.t = c.t.Add(d)
+	return nil
+}
+
+func waiterFor(client PullRequestReader, clock *fakeClock) checkWaiter {
+	clock.t = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	return checkWaiter{
+		client: client,
+		scope:  testScope,
+		poll:   15 * time.Second,
+		grace:  3 * time.Minute,
+		now:    clock.now,
+		sleep:  clock.sleep,
+	}
+}
+
+func pushed() *github.BranchHead {
+	return &github.BranchHead{SHA: "abcdef0123456789", Message: "the change"}
+}
+
+func running(name string) github.CheckRun {
+	return github.CheckRun{Name: name, Status: "in_progress"}
+}
+
+func done(name, verdict string) github.CheckRun {
+	return github.CheckRun{Name: name, Status: "completed", Conclusion: conclusion(verdict)}
+}
+
+// The point of the tool: it keeps reading while checks are unfinished
+// and answers once -- with a verdict, not a snapshot -- rather than
+// handing the polling back to the agent a turn at a time.
+func TestWaitForChecksBlocksUntilEveryCheckFinishes(t *testing.T) {
+	client := &scriptedChecks{
+		head: pushed(),
+		rounds: [][]github.CheckRun{
+			{running("tests"), running("build")},
+			{done("tests", "success"), running("build")},
+			{done("tests", "success"), done("build", "success")},
+		},
+	}
+	clock := &fakeClock{}
+
+	text, err := waiterFor(client, clock).wait(context.Background(), DefaultWaitForChecksTimeout)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if client.reads != 3 {
+		t.Errorf("read CI %d times, want 3 -- one per scripted round", client.reads)
+	}
+	if len(clock.slept) != 2 {
+		t.Errorf("slept %v, want one nap between each pair of reads", clock.slept)
+	}
+	for _, want := range []string{"Waited 30s", "0 failing", "2 otherwise done", "none of them failed"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("answer does not contain %q:\n%s", want, text)
+		}
+	}
+}
+
+// A failure ends the wait on the spot: everything the agent needs to
+// start fixing is already known, and the turns left are better spent
+// fixing than watching.
+func TestWaitForChecksReturnsAsSoonAsACheckFails(t *testing.T) {
+	client := &scriptedChecks{
+		head: pushed(),
+		rounds: [][]github.CheckRun{
+			{running("tests"), running("build")},
+			{done("tests", "failure"), running("build")},
+			{done("tests", "failure"), done("build", "success")},
+		},
+	}
+	clock := &fakeClock{}
+
+	text, err := waiterFor(client, clock).wait(context.Background(), DefaultWaitForChecksTimeout)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if client.reads != 2 {
+		t.Errorf("read CI %d times, want 2 -- the wait should end at the first failure", client.reads)
+	}
+	for _, want := range []string{"FAILING  tests (failure)", "1 failing", "CI has failed", "still running"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("answer does not contain %q:\n%s", want, text)
+		}
+	}
+}
+
+// The three conclusions checkFailed treats as broken end the wait, not
+// just the plain "failure" one.
+func TestWaitForChecksStopsForEveryFailingConclusion(t *testing.T) {
+	for _, verdict := range []string{"failure", "timed_out", "startup_failure"} {
+		t.Run(verdict, func(t *testing.T) {
+			client := &scriptedChecks{
+				head:   pushed(),
+				rounds: [][]github.CheckRun{{done("tests", verdict)}},
+			}
+			text, err := waiterFor(client, &fakeClock{}).wait(context.Background(), DefaultWaitForChecksTimeout)
+			if err != nil {
+				t.Fatalf("wait: %v", err)
+			}
+			if !strings.Contains(text, "CI has failed") {
+				t.Errorf("a %q check did not end the wait as a failure:\n%s", verdict, text)
+			}
+		})
+	}
+}
+
+// A wait that runs out of time reports what was still running and says
+// plainly that it is not a verdict -- the one reading of a timeout that
+// must never be "it was fine".
+func TestWaitForChecksReportsATimeoutAsUnfinishedNotAsPassing(t *testing.T) {
+	client := &scriptedChecks{
+		head:   pushed(),
+		rounds: [][]github.CheckRun{{done("build", "success"), running("tests")}},
+	}
+	clock := &fakeClock{}
+
+	text, err := waiterFor(client, clock).wait(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if !strings.Contains(text, "Waited 1m0s") {
+		t.Errorf("answer does not say it waited the whole timeout:\n%s", text)
+	}
+	for _, want := range []string{"running  tests", "timed out", "has not passed"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("answer does not contain %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "none of them failed") {
+		t.Errorf("a timeout reads as a pass:\n%s", text)
+	}
+}
+
+// A timeout does not overshoot: the last nap is trimmed to what is left
+// of the clock rather than a whole poll interval past it.
+func TestWaitForChecksDoesNotWaitPastItsDeadline(t *testing.T) {
+	client := &scriptedChecks{head: pushed(), rounds: [][]github.CheckRun{{running("tests")}}}
+	clock := &fakeClock{}
+
+	if _, err := waiterFor(client, clock).wait(context.Background(), 40*time.Second); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	var total time.Duration
+	for _, d := range clock.slept {
+		total += d
+	}
+	if total != 40*time.Second {
+		t.Errorf("slept %v (%v in total), want exactly the 40s timeout", clock.slept, total)
+	}
+}
+
+// An empty check list is CI that has not registered yet *or* a repo with
+// no CI, and blocking the full timeout to find out would waste the run's
+// clock -- so the empty answer gets the grace period and is then
+// reported for what it most likely is, without ever reading as a pass.
+func TestWaitForChecksGivesUpOnAnEmptyCheckListAfterTheGracePeriod(t *testing.T) {
+	client := &scriptedChecks{head: pushed()}
+	clock := &fakeClock{}
+
+	text, err := waiterFor(client, clock).wait(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if !strings.Contains(text, "Waited 3m0s") {
+		t.Errorf("answer did not stop at the grace period:\n%s", text)
+	}
+	for _, want := range []string{"no checks at all", "nobody looked"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("answer does not contain %q:\n%s", want, text)
+		}
+	}
+}
+
+// The grace period bounds an *entirely* empty CI, not a slow one: a
+// build that registers immediately and then runs for half an hour is
+// waited out to the timeout, not abandoned three minutes in.
+func TestWaitForChecksOnlyAppliesTheGracePeriodToAnEmptyCI(t *testing.T) {
+	slow := make([][]github.CheckRun, 40)
+	for i := range slow {
+		slow[i] = []github.CheckRun{running("tests")}
+	}
+	client := &scriptedChecks{
+		head:   pushed(),
+		rounds: append(slow, []github.CheckRun{done("tests", "success")}),
+	}
+	clock := &fakeClock{}
+
+	text, err := waiterFor(client, clock).wait(context.Background(), time.Hour)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if !strings.Contains(text, "Waited 10m0s") {
+		t.Errorf("answer did not wait the slow build out:\n%s", text)
+	}
+	if strings.Contains(text, "no checks at all") {
+		t.Errorf("a slow build was reported as a repo with no CI:\n%s", text)
+	}
+	if !strings.Contains(text, "none of them failed") {
+		t.Errorf("answer is not the green verdict it waited for:\n%s", text)
+	}
+}
+
+// A branch nobody pushed is answered at once. Blocking fifteen minutes
+// before saying "you have not pushed" would be a particularly slow way
+// to say something knowable immediately.
+func TestWaitForChecksDoesNotWaitOnABranchThatWasNeverPushed(t *testing.T) {
+	client := &scriptedChecks{}
+	clock := &fakeClock{}
+
+	text, err := waiterFor(client, clock).wait(context.Background(), DefaultWaitForChecksTimeout)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if len(clock.slept) != 0 {
+		t.Errorf("slept %v, want no waiting at all", clock.slept)
+	}
+	if !strings.Contains(text, "does not exist") || !strings.Contains(text, "git push origin grain/task-9") {
+		t.Errorf("answer does not say the branch was never pushed:\n%s", text)
+	}
+}
+
+// One failed read of CI in the middle of a long wait is a blip and is
+// retried; a credential that cannot read CI at all fails every read, and
+// that has to surface as an error rather than as a timeout half an hour
+// later.
+func TestWaitForChecksToleratesABlipButNotAPermanentFailure(t *testing.T) {
+	blip := &scriptedChecks{
+		head:   pushed(),
+		errs:   []error{errors.New("502 Bad Gateway")},
+		rounds: [][]github.CheckRun{nil, {done("tests", "success")}},
+	}
+	text, err := waiterFor(blip, &fakeClock{}).wait(context.Background(), DefaultWaitForChecksTimeout)
+	if err != nil {
+		t.Fatalf("a single failed read ended the wait: %v", err)
+	}
+	if !strings.Contains(text, "none of them failed") {
+		t.Errorf("answer is not the verdict the retry found:\n%s", text)
+	}
+
+	broken := &scriptedChecks{
+		head: pushed(),
+		errs: []error{errors.New("502"), errors.New("502"), errors.New("502"), errors.New("502")},
+	}
+	if _, err := waiterFor(broken, &fakeClock{}).wait(context.Background(), time.Hour); err == nil {
+		t.Fatal("a CI that could never be read did not end the wait")
+	} else if !strings.Contains(err.Error(), "consecutive failed reads") {
+		t.Errorf("error does not say why it gave up: %v", err)
+	}
+	if broken.reads != checkReadAttempts {
+		t.Errorf("read CI %d times, want %d before giving up", broken.reads, checkReadAttempts)
+	}
+}
+
+// Cancelling the run has to reach into the sleep: this is the only place
+// a wait spends time, so a wait that ignored ctx would keep a torn-down
+// run alive for the rest of its timeout.
+func TestWaitForChecksStopsWhenTheRunIsCancelled(t *testing.T) {
+	client := &scriptedChecks{head: pushed(), rounds: [][]github.CheckRun{{running("tests")}}}
+	clock := &fakeClock{cancel: context.Canceled}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := waiterFor(client, clock).wait(ctx, DefaultWaitForChecksTimeout)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait returned %v, want it to carry the cancellation", err)
+	}
+}
+
+// The scope is fixed at construction, exactly as pull_request_status's
+// is: no argument moves the wait onto another repo.
+func TestWaitForChecksOnlyEverReadsItsOwnScope(t *testing.T) {
+	client := &scriptedChecks{head: pushed(), rounds: [][]github.CheckRun{{done("tests", "success")}}}
+	tool := namedTool(t, NewPullRequestTools(client, testScope), "wait_for_checks")
+
+	res := tool.Handler(context.Background(), map[string]any{
+		"owner": "attacker", "repo": "secrets", "branch": "main", "timeout_seconds": 30,
+	})
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	for _, repo := range client.repos {
+		if repo != "acme/widgets" {
+			t.Errorf("read %q, want only acme/widgets", repo)
+		}
+	}
+	if len(client.repos) == 0 {
+		t.Error("the tool read nothing at all, so this proves nothing")
+	}
+}
+
+// An unconfigured run gets the same explanation pull_request_status
+// gives, rather than a tool that is simply missing.
+func TestWaitForChecksWithoutAScopeSaysSo(t *testing.T) {
+	for name, tc := range map[string]struct {
+		client PullRequestReader
+		scope  PullRequestScope
+	}{
+		"no client": {nil, testScope},
+		"no scope":  {&scriptedChecks{}, PullRequestScope{}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tool := namedTool(t, NewWaitForChecksTools(tc.client, tc.scope), "wait_for_checks")
+			res := tool.Handler(context.Background(), map[string]any{})
+			if !res.IsError {
+				t.Errorf("IsError = false, want an error result: %s", res.Text)
+			}
+			if !strings.Contains(res.Text, "no GitHub repository configured") {
+				t.Errorf("answer does not explain why there is nothing to wait for:\n%s", res.Text)
+			}
+		})
+	}
+}
+
+// timeout_seconds is clamped rather than refused, and the clamp is said
+// out loud so a wait that came back early is never mistaken for CI that
+// finished early.
+func TestWaitForChecksClampsTheTimeoutAndSaysSo(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args map[string]any
+		want time.Duration
+		note string
+	}{
+		"unset":     {map[string]any{}, DefaultWaitForChecksTimeout, ""},
+		"in range":  {map[string]any{"timeout_seconds": 120.0}, 2 * time.Minute, ""},
+		"too long":  {map[string]any{"timeout_seconds": 7200.0}, MaxWaitForChecksTimeout, "longest wait allowed"},
+		"too short": {map[string]any{"timeout_seconds": 1.0}, minWaitForChecksTimeout, "shortest wait allowed"},
+		"not a number": {map[string]any{"timeout_seconds": "ten minutes"},
+			DefaultWaitForChecksTimeout, "was not a number"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, note := waitForChecksTimeout(tc.args)
+			if got != tc.want {
+				t.Errorf("waitForChecksTimeout = %v, want %v", got, tc.want)
+			}
+			if tc.note == "" && note != "" {
+				t.Errorf("note = %q, want none", note)
+			}
+			if tc.note != "" && !strings.Contains(note, tc.note) {
+				t.Errorf("note = %q, want it to mention %q", note, tc.note)
+			}
+		})
+	}
+}
+
+// The description has to name the failure mode that makes the tool
+// useless if an agent gets it wrong: it reports on the commit already
+// pushed, so calling it before pushing waits for the wrong build.
+func TestWaitForChecksDescriptionSaysToPushFirst(t *testing.T) {
+	tool := namedTool(t, NewWaitForChecksTools(nil, PullRequestScope{}), "wait_for_checks")
+	if !strings.Contains(tool.Description, "Push first") {
+		t.Errorf("description does not tell the agent to push first:\n%s", tool.Description)
+	}
+}
