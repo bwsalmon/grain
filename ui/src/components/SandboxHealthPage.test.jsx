@@ -32,7 +32,7 @@ describe("SandboxHealthPage", () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
-  it("shows the host's load average, memory and disk", async () => {
+  it("shows the host's load average, memory and every disk it reports", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
       sandboxes: [],
@@ -42,8 +42,10 @@ describe("SandboxHealthPage", () => {
         loadAverage15: 0.3,
         memoryUsedMB: 512,
         memoryTotalMB: 1024,
-        diskUsedMB: 4096,
-        diskTotalMB: 20480,
+        disks: [
+          { holds: ["store"], path: "/var/lib/grain", usedMB: 4096, totalMB: 20480 },
+          { holds: ["sandboxes", "docker"], path: "/var/lib/grain-sandbox", usedMB: 61440, totalMB: 102400 },
+        ],
       },
     });
     render(<SandboxHealthPage showError={() => {}} />);
@@ -53,7 +55,40 @@ describe("SandboxHealthPage", () => {
     // Shown in GB rather than in the MB it arrives as: a data disk is
     // counted in tens of gigabytes, and "4096 / 20480 MB" answers "how
     // full is it" worse than "4.0 / 20.0 GB" does.
-    expect(screen.getByText(/4\.0 \/ 20\.0 GB/)).toBeInTheDocument();
+    expect(screen.getByText("4.0 / 20.0 GB")).toBeInTheDocument();
+    // The sandbox volume, which the pane showed no figure for at all
+    // while it had one "disk" number taken from the store's filesystem
+    // (grain/task-148) -- and which is the one that actually fills.
+    expect(screen.getByText("60.0 / 100.0 GB")).toBeInTheDocument();
+    expect(screen.getByText("/var/lib/grain-sandbox")).toBeInTheDocument();
+    // One row, not two, for a sandbox root and a docker data root the
+    // daemon found to be the same filesystem -- named for both.
+    expect(screen.getByRole("cell", { name: "sandboxes, docker" })).toBeInTheDocument();
+  });
+
+  it("says why a disk it cannot read has no figure", async () => {
+    api.mockResolvedValueOnce({
+      enabled: true,
+      sandboxes: [],
+      host: {
+        loadAverage1: 0.5,
+        loadAverage5: 0.4,
+        loadAverage15: 0.3,
+        memoryUsedMB: 512,
+        memoryTotalMB: 1024,
+        disks: [
+          { holds: ["store"], path: "/var/lib/grain", usedMB: 4096, totalMB: 20480 },
+          { holds: ["sandboxes"], path: "/var/lib/grain-sandbox", error: "sysstat: statfs /var/lib/grain-sandbox: no such file or directory" },
+        ],
+      },
+    });
+    render(<SandboxHealthPage showError={() => {}} />);
+
+    // A volume that has stopped answering is exactly what an operator
+    // opens this pane for, so the row says so rather than going quiet --
+    // and the disks either side of it keep their figures.
+    expect(await screen.findByText(/statfs \/var\/lib\/grain-sandbox/)).toBeInTheDocument();
+    expect(screen.getByText("4.0 / 20.0 GB")).toBeInTheDocument();
   });
 
   it("lists every sandbox with its status", async () => {
@@ -123,7 +158,10 @@ describe("SandboxHealthPage", () => {
 
     expect(await screen.findByText("CPU (1 min load average)")).toBeInTheDocument();
     expect(screen.getByText("Memory (MB)")).toBeInTheDocument();
-    expect(screen.getByText("Disk (MB)")).toBeInTheDocument();
+    // The host's disk trends live in the disk table's own Trend column
+    // now, one per filesystem, rather than in a third chart beside these
+    // two (grain/task-148).
+    expect(screen.getByText("No disk figures available.")).toBeInTheDocument();
     expect(screen.getByText("CPU trend")).toBeInTheDocument();
     expect(screen.getByText("Memory trend")).toBeInTheDocument();
     expect(screen.getByText("Disk trend")).toBeInTheDocument();
@@ -137,11 +175,10 @@ describe("SandboxHealthPage", () => {
     render(<SandboxHealthPage showError={() => {}} />);
 
     await screen.findByText("CPU (1 min load average)");
-    // Three host charts now: CPU, memory and disk (grain/task-41). This
-    // poll's host section reports no disk figure at all, so that third
-    // one stays empty for the whole test rather than only until the
-    // second poll.
-    expect(screen.getAllByLabelText("Not enough data yet")).toHaveLength(3);
+    // Two host charts beside each other -- CPU and memory. The disk
+    // trends moved into the disk table (grain/task-148), and this poll's
+    // host section reports no disk at all, so there is no third one.
+    expect(screen.getAllByLabelText("Not enough data yet")).toHaveLength(2);
 
     await user.click(screen.getByRole("button", { name: "Refresh" }));
 
@@ -150,7 +187,7 @@ describe("SandboxHealthPage", () => {
 });
 
 describe("appendHistory", () => {
-  const empty = { host: { cpu: [], mem: [], disk: [] }, sandboxes: {} };
+  const empty = { host: { cpu: [], mem: [], disks: {} }, sandboxes: {} };
 
   // Keyed by the sandbox's own name, which is the run's id -- not by a
   // slot number, and not by array position. Two sandboxes in one poll
@@ -172,23 +209,54 @@ describe("appendHistory", () => {
     expect(appendHistory(empty, { enabled: true, sandboxes: [] })).toEqual(empty);
   });
 
-  it("appends host CPU, memory and disk samples", () => {
+  it("appends host CPU, memory and one disk series per filesystem", () => {
     const result = appendHistory(empty, {
-      host: { loadAverage1: 1.5, memoryUsedMB: 300, diskUsedMB: 4000, diskTotalMB: 20000 },
+      host: {
+        loadAverage1: 1.5,
+        memoryUsedMB: 300,
+        disks: [
+          { holds: ["store"], path: "/var/lib/grain", usedMB: 4000, totalMB: 20000 },
+          { holds: ["sandboxes", "docker"], path: "/var/lib/grain-sandbox", usedMB: 61000, totalMB: 100000 },
+        ],
+      },
       sandboxes: [],
     });
-    expect(result.host).toEqual({ cpu: [1.5], mem: [300], disk: [4000] });
+    expect(result.host).toEqual({
+      cpu: [1.5],
+      mem: [300],
+      // Keyed by path, so a chart follows the same filesystem across
+      // polls however the list around it changes.
+      disks: { "/var/lib/grain": [4000], "/var/lib/grain-sandbox": [61000] },
+    });
   });
 
-  // 0/0 is how a host with no disk reading at all reports one (a
-  // non-Linux daemon, an unreadable data directory) -- plotting the 0
-  // would draw an empty disk rather than a missing sample.
-  it("skips a host disk sample when there is no reading", () => {
+  // 0/0 is how one disk with no reading reports itself (a volume that
+  // has stopped answering statfs) -- plotting the 0 would draw an empty
+  // disk rather than a missing sample.
+  it("skips a disk sample when that filesystem has no reading", () => {
     const result = appendHistory(empty, {
-      host: { loadAverage1: 1.5, memoryUsedMB: 300, diskUsedMB: 0, diskTotalMB: 0 },
+      host: {
+        loadAverage1: 1.5,
+        memoryUsedMB: 300,
+        disks: [{ holds: ["sandboxes"], path: "/var/lib/grain-sandbox", usedMB: 0, totalMB: 0, error: "no such file or directory" }],
+      },
       sandboxes: [],
     });
-    expect(result.host).toEqual({ cpu: [1.5], mem: [300], disk: [] });
+    expect(result.host).toEqual({ cpu: [1.5], mem: [300], disks: { "/var/lib/grain-sandbox": [] } });
+  });
+
+  // A filesystem the host has stopped reporting takes its series with it
+  // rather than accumulating forever behind a chart nothing draws.
+  it("drops the series of a filesystem no longer reported", () => {
+    const first = appendHistory(empty, {
+      host: { loadAverage1: 1.5, memoryUsedMB: 300, disks: [{ holds: ["docker"], path: "/docker", usedMB: 10, totalMB: 100 }] },
+      sandboxes: [],
+    });
+    const second = appendHistory(first, {
+      host: { loadAverage1: 1.5, memoryUsedMB: 300, disks: [{ holds: ["store"], path: "/store", usedMB: 20, totalMB: 100 }] },
+      sandboxes: [],
+    });
+    expect(second.host.disks).toEqual({ "/store": [20] });
   });
 
   it("skips a sandbox that is not ready", () => {
