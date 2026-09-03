@@ -187,6 +187,13 @@ func printSettingsDiff(before, after ui.Settings) {
 		{"sandbox cpus", fmt.Sprint(before.SandboxCPUs), fmt.Sprint(after.SandboxCPUs)},
 		{"sandbox memory mb", fmt.Sprint(before.SandboxMemoryMB), fmt.Sprint(after.SandboxMemoryMB)},
 		{"sandbox disk gb", fmt.Sprint(before.SandboxDiskGB), fmt.Sprint(after.SandboxDiskGB)},
+		// Listed for the same reason the sandbox shape is, and printed
+		// the same %q way despite being the one field here that can be
+		// several lines long: a diff is where the change is worth seeing
+		// whole, and %q keeps a multi-line value on one line of output
+		// rather than breaking the two-column shape of every line
+		// around it.
+		{"prompt extension", before.PromptExtension, after.PromptExtension},
 	}
 	changed := false
 	for _, f := range fields {

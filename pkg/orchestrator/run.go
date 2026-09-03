@@ -253,6 +253,56 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 	return prompt
 }
 
+// resolvePromptExtension is the three layers of standing instructions
+// this run is given, resolved into the one block of text that reaches
+// its prompt: the deployment's (deployment, which RunCycle refreshes out
+// of grain_config every cycle), this task's target repo's, and the
+// task's own override -- see model.PromptExtensionFor for how they
+// compose, and model/prompt_extension.go for why.
+//
+// The repo layer is read here rather than carried on Config beside the
+// deployment's, for the reason a task's grants are resolved here too:
+// it is keyed by something only the task in hand names, so there is no
+// one value a cycle could have refreshed ahead of time. A task with no
+// target reads no row at all and gets the deployment's own text, which
+// is the only layer that could apply to it.
+//
+// A store read that fails fails the dispatch, the same as the run's
+// conversation and attachments (RunDispatch reads both the same way, a
+// few lines above this one is called): these are all one broken store,
+// and running an agent with instructions the operator wrote but grain
+// could not read is worse than not running it -- silently, since nothing
+// in the prompt would say a layer was missing.
+func resolvePromptExtension(ctx context.Context, store *model.Store, deployment string, task model.Task) (string, error) {
+	var repo string
+	if task.Target != nil && store != nil {
+		rc, err := store.GetRepoConfig(ctx, *task.Target)
+		if err != nil {
+			return "", fmt.Errorf("orchestrator: reading %s's prompt extension: %w", task.Target, err)
+		}
+		if rc != nil {
+			repo = rc.PromptExtension
+		}
+	}
+	return model.PromptExtensionFor(deployment, repo, task.PromptExtension), nil
+}
+
+// promptExtensionSection is how that text is handed to the agent: named
+// as the operator's, so a run can tell an instruction somebody chose for
+// this deployment apart from the task it was filed under and from the
+// facts grain states about the branch and the repo. "" for no extension
+// at all, which is every deployment that has not written one and so the
+// overwhelmingly common case -- an empty heading with nothing under it
+// would be a paragraph of prompt saying there is nothing to say.
+func promptExtensionSection(text string) string {
+	if text == "" {
+		return ""
+	}
+	return "Standing instructions from whoever operates this deployment. They are not " +
+		"part of the task above, and they do not replace anything grain has told you " +
+		"about the branch, the repo or the checks -- follow them alongside all of it:\n\n" + text
+}
+
 // baseDescription names the branch a run's own branch has to keep
 // merging into, for the sentence above -- task.Base when the task fixes
 // one (directives.go's `/base`, and every merge queue fix task, which
@@ -464,6 +514,10 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: reading %s's attachments: %w", task.ID, err)
 	}
+	promptExtension, err := resolvePromptExtension(ctx, store, cfg.PromptExtension, task)
+	if err != nil {
+		return nil, err
+	}
 
 	// Before capabilities, and before the agent's first turn: a run whose
 	// sandbox never got its repo has nothing to do, and there is no point
@@ -489,7 +543,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prepErr error
 	if checkoutErr == nil {
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
-			attachments, checkoutDir, frameworkOpensPullRequests(framework))
+			attachments, checkoutDir, frameworkOpensPullRequests(framework), promptExtension)
 	}
 	// Told to the recreate path, which is registered one level up in
 	// runOne and so never sees this: what a rebuilt sandbox needs is
@@ -879,11 +933,22 @@ func erroredCallSuffix(result *agent.Result) string {
 // checkoutDir and canOpenPullRequest are passed straight through to
 // BuildPrompt, which is where both are explained: nothing here reads
 // either, this being the one path that assembles a dispatch's prompt.
+//
+// promptExtension is the operator's own standing instructions for this
+// run, already resolved across the three layers that can carry them
+// (resolvePromptExtension). It goes last, after the capability sections
+// and everything else: it is the one part of this prompt a human wrote
+// for runs in general rather than for this run in particular, and
+// wedging it between the conversation and a capability's own "your key
+// is at /path" is where it would read as an aside. Last, it reads as the
+// standing rule it is. "" -- no deployment, repo or task has written one
+// -- leaves the prompt exactly as it was before any of this existed.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
 	attachments []model.Attachment, checkoutDir string,
-	canOpenPullRequest bool) (materialized []model.Materialized, prompt string, err error) {
+	canOpenPullRequest bool, promptExtension string) (materialized []model.Materialized, prompt string, err error) {
 
+	extension := promptExtensionSection(promptExtension)
 	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest)
 	if thread := commentThreadSection(comments); thread != "" {
 		prompt += "\n\n" + thread
@@ -894,7 +959,7 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	}
 	prompt += attachmentsSection
 	if reg == nil || len(cc.Task.Grants) == 0 {
-		return nil, prompt, nil
+		return nil, appendSection(prompt, extension), nil
 	}
 
 	resolved, err := model.ResolveGrants(ctx, reg, cc)
@@ -921,7 +986,19 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	for _, s := range sections {
 		prompt += "\n\n" + s
 	}
-	return materialized, prompt, nil
+	return materialized, appendSection(prompt, extension), nil
+}
+
+// appendSection joins one more section onto a prompt, blank-line
+// separated the way every other section here is joined, and leaves the
+// prompt untouched when there is no section to add -- so "no prompt
+// extension" is a prompt with nothing appended rather than one ending in
+// two blank lines.
+func appendSection(prompt, section string) string {
+	if section == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + section
 }
 
 // applyPlacements delivers every SideSandbox placement Materialize

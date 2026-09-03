@@ -75,8 +75,15 @@ type Task struct {
 	// Omitted, like the three above, for the common "no override" case, so
 	// a frontend reading it back gets the same empty-means-default it
 	// sent.
-	AgentFramework string   `json:"agentFramework,omitempty"`
-	Capabilities   []string `json:"capabilities"`
+	AgentFramework string `json:"agentFramework,omitempty"`
+	// PromptExtension is this task's own override of the standing
+	// instructions its deployment and its repo would otherwise give its
+	// run -- model.Task's own field of the same name (grain/task-114).
+	// Omitted, like the fields above, for the common "no override" case,
+	// so a frontend reading it back gets the same empty-means-default it
+	// sent.
+	PromptExtension string   `json:"promptExtension,omitempty"`
+	Capabilities    []string `json:"capabilities"`
 	PullRequest    string   `json:"pullRequest,omitempty"`
 	GeneratedFrom  string   `json:"generatedFrom,omitempty"`
 	// Stacked is true for a task the merge queue filed automatically to
@@ -259,6 +266,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		SandboxMemoryMB:     t.SandboxMemoryMB,
 		SandboxDiskGB:       t.SandboxDiskGB,
 		AgentFramework:      t.AgentFramework,
+		PromptExtension:     t.PromptExtension,
 		Capabilities:        []string{},
 		Stacked:             t.Origin.Reason == model.ReasonFix,
 		Scheduled:           t.Origin.Reason == model.ReasonSchedule,
@@ -437,6 +445,26 @@ type configResponse struct {
 	// Filtered to what this build offers, the same as DefaultCapabilities
 	// above and for the same reason.
 	RepoDefaultCapabilities map[string][]string `json:"repoDefaultCapabilities,omitempty"`
+	// PromptExtension mirrors model.Config.PromptExtension -- this
+	// deployment's own standing instructions for every run -- read from
+	// the store the same way AgentFramework above is.
+	// NewTaskOverlay.jsx shows it beside its own per-task override box,
+	// since that box *replaces* this text rather than adding to it
+	// (model.Task.PromptExtension) and nobody can make that choice
+	// sensibly without seeing what they would be replacing.
+	//
+	// Deployment-wide only, unlike RepoDefaultCapabilities above: the
+	// per-repo layer is a paragraph of prose per repo rather than a short
+	// list of ids, and this response is fetched on every poll by every
+	// open tab. The repos pane reads a repo's own through GET
+	// /api/repos/{owner}/{name}/prompt-extension, one repo at a time,
+	// which is where the editing of it happens anyway.
+	//
+	// omitempty: absent and empty both mean a deployment that adds
+	// nothing, and App.jsx replaces this response wholesale on every
+	// poll, so there is nothing here for a cleared value to have to
+	// overwrite.
+	PromptExtension string `json:"promptExtension,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -464,6 +492,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
 		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
+		resp.PromptExtension = cfg.PromptExtension
 		// Filtered to what this build actually offers, the same way
 		// (*Client).defaultCapabilities filters before granting -- the
 		// form should tick what a task would really be filed with, and

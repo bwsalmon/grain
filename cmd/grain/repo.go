@@ -54,6 +54,8 @@ const repoUsage = `usage: grain repo <subcommand> [args]
 
   list                                  one line per repo this deployment knows about
   capabilities [-set a,b] <owner/name>  show, or replace, a repo's own default capability set
+  prompt-extension [-set text] <owner/name>
+                                        show, or replace, a repo's own standing instructions for a run
   add <owner/name>                      add a repo to the allowlist a task's repo may name
   remove <owner/name>                   remove a repo from that allowlist
 `
@@ -69,6 +71,8 @@ func cmdRepo(ctx context.Context, c *ui.HTTPClient, out *printer, args []string)
 		return cmdRepoList(ctx, c, out, subArgs)
 	case "capabilities":
 		return cmdRepoCapabilities(ctx, c, out, subArgs)
+	case "prompt-extension":
+		return cmdRepoPromptExtension(ctx, c, out, subArgs)
 	case "add":
 		return cmdRepoAdd(ctx, c, out, subArgs)
 	case "remove":
@@ -146,6 +150,55 @@ func parseRepoCapabilities(args []string) (repo string, set *[]string, err error
 			if v == nil {
 				v = []string{}
 			}
+			set = &v
+		}
+	})
+	return fs.Arg(0), set, nil
+}
+
+// cmdRepoPromptExtension shows a repo's own standing instructions with
+// no -set given, and replaces them with any -- including an empty one,
+// which is how a repo goes back to adding nothing of its own
+// (grain/task-114). The deployment-wide layer these are appended to is
+// `grain settings -prompt-extension`; a repo can only add to it.
+func cmdRepoPromptExtension(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
+	repo, set, err := parseRepoPromptExtension(args)
+	if err != nil {
+		return err
+	}
+	if set != nil {
+		defaults, err := c.SetRepoPromptExtension(ctx, repo, *set)
+		if err != nil {
+			return err
+		}
+		out.repoPromptExtension(defaults)
+		return nil
+	}
+	defaults, err := c.RepoDefaults(ctx, repo)
+	if err != nil {
+		return err
+	}
+	out.repoPromptExtension(defaults)
+	return nil
+}
+
+// parseRepoPromptExtension is parseRepoCapabilities' counterpart for the
+// text, and makes the same distinction for the same reason: a nil set
+// means -set was not given and this is a read, where a non-nil empty one
+// was given empty and is the only way to clear what a repo says.
+func parseRepoPromptExtension(args []string) (repo string, set *string, err error) {
+	fs := flag.NewFlagSet("grain repo prompt-extension", flag.ContinueOnError)
+	text := fs.String("set", "",
+		"standing instructions appended to the deployment's for a run against this repo -- empty clears the repo's own")
+	if err := fs.Parse(args); err != nil {
+		return "", nil, err
+	}
+	if fs.NArg() == 0 {
+		return "", nil, errors.New("usage: grain repo prompt-extension [-set text] <owner/name>")
+	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "set" {
+			v := *text
 			set = &v
 		}
 	})
@@ -273,6 +326,24 @@ func (p *printer) repoDefaults(d ui.RepoDefaults) {
 	fmt.Printf("deployment defaults: %s\n", capabilityList(d.DeploymentDefaultCapabilities))
 	fmt.Printf("what a task gets:    %s\n", capabilityList(d.EffectiveDefaultCapabilities))
 	fmt.Println("\n-set replaces own defaults only; the deployment-wide set is \"grain settings -default-capabilities\", and a repo can only add to it")
+}
+
+// repoPromptExtension prints the prompt-extension half of the same
+// RepoDefaults document repoDefaults above prints the capability half
+// of -- all three layers, for the same reason it prints all three sets:
+// a repo's own text says nothing useful without what it is appended to,
+// and what a run here is actually told is the composition rather than
+// either one.
+func (p *printer) repoPromptExtension(d ui.RepoDefaults) {
+	if p.json {
+		p.encode(d)
+		return
+	}
+	fmt.Println(d.Repo)
+	fmt.Print(promptExtensionBlock("own", d.PromptExtension))
+	fmt.Print(promptExtensionBlock("deployment", d.DeploymentPromptExtension))
+	fmt.Print(promptExtensionBlock("what a run here is told", d.EffectivePromptExtension))
+	fmt.Println("\n-set replaces this repo's own text only; the deployment-wide one is \"grain settings -prompt-extension\", and a repo can only add to it. A task can override both (New task -> Advanced options)")
 }
 
 func capabilityList(ids []string) string {

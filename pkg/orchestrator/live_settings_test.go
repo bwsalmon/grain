@@ -9,6 +9,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +69,63 @@ func TestACycleAdoptsAMaxAgentTurnsChangeFromTheStoreWithoutRestart(t *testing.T
 		if got != 40 {
 			t.Fatalf("the agent was given a %d-turn budget, want the stored 40 rather than the 10 this "+
 				"process started with", got)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no agent ran")
+	}
+}
+
+// promptFramework is turnsFramework's counterpart for the prompt: it
+// reports the prompt each dispatch was built with, which is where the
+// deployment-wide prompt extension ends up (grain/task-114).
+type promptFramework struct{ prompts chan string }
+
+func (f *promptFramework) Run(_ context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+	f.prompts <- cfg.Prompt
+	return toolResult(agent.ToolCall{
+		Name:      "comment_on_issue",
+		Arguments: map[string]any{"comment": "done"},
+	}), nil
+}
+
+// The same "no restart" property for the deployment-wide prompt
+// extension: an operator who changes what every run is told in Settings
+// is changing the next run, not the next process. It is worth its own
+// test rather than trusting the field's neighbour above, because this
+// one is only live if RunCycle actually refreshes it -- a Config field
+// read straight from whatever the daemon started with would pass every
+// other test this package has.
+func TestACycleAdoptsAPromptExtensionChangeFromTheStoreWithoutRestart(t *testing.T) {
+	store, ctx := openStore(t)
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	filedTask(t, ctx, store, "t1", repo)
+	_, client := newSim(t, "acme", "widgets", "main")
+
+	fw := &promptFramework{prompts: make(chan string, 4)}
+	deps := orchestrator.Deps{
+		Store:     store,
+		Client:    client,
+		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework: orchestrator.StaticFramework(fw),
+		// What this process started with -- in practice nothing at all,
+		// since no daemon flag seeds this one.
+		Config:     orchestrator.Config{},
+		MaxWorkers: 1,
+	}
+
+	const text = "Run `make lint` before you push."
+	if err := store.PutConfig(ctx, model.Config{MaxWorkers: 1, PromptExtension: text}); err != nil {
+		t.Fatalf("PutConfig: %v", err)
+	}
+
+	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+
+	select {
+	case got := <-fw.prompts:
+		if !strings.Contains(got, text) {
+			t.Fatalf("the agent's prompt does not carry the stored standing instructions: %q", got)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("no agent ran")

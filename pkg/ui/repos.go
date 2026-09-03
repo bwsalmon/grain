@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/bwsalmon/grain/pkg/model"
 )
@@ -73,10 +74,17 @@ func (c *Client) RemoveTargetRepo(ctx context.Context, repo string) (Settings, e
 	return c.UpdateSettings(ctx, UpdateSettingsRequest{TargetRepos: &updated})
 }
 
-// RepoDefaults is one repo's own task defaults -- GET and PUT
-// /api/repos/{owner}/{name}/capabilities' shared JSON shape, and the
-// per-repo half of what the Settings pane's Capabilities tab chooses
-// deployment-wide (grain/task-24).
+// RepoDefaults is one repo's own task defaults -- what GET
+// /api/repos/{owner}/{name}/capabilities and GET
+// /api/repos/{owner}/{name}/prompt-extension both answer with, and what
+// each of their PUTs returns -- the per-repo half of what the Settings
+// pane chooses deployment-wide (grain/task-24, grain/task-114).
+//
+// One document, two routes onto it: a repo's defaults are one row
+// (model.RepoConfig) and reporting one field of it without the rest
+// would leave a caller unable to say what it is about to overwrite, so
+// both routes report all of it and each PUT writes only the field its
+// path names.
 //
 // It reports all three sets rather than only the one that is editable
 // here, because the editable one is meaningless on its own: a repo row
@@ -104,6 +112,26 @@ type RepoDefaults struct {
 	// (*Client).defaultCapabilities' own answer, for this repo, rather
 	// than a second computation of it that could drift.
 	EffectiveDefaultCapabilities []string `json:"effectiveDefaultCapabilities"`
+	// PromptExtension is this repo's own standing instructions for a run
+	// working in it -- model.RepoConfig.PromptExtension, exactly as
+	// stored, and the only one of the three fields below that a PUT to
+	// this repo's prompt-extension route writes.
+	PromptExtension string `json:"promptExtension"`
+	// DeploymentPromptExtension is model.Config.PromptExtension, the
+	// deployment-wide layer, reported read-only for the same reason
+	// DeploymentDefaultCapabilities is: it is chosen in Settings, a repo
+	// adds to it and can never replace it, and a pane editing this repo's
+	// own text has to be able to show what it is being appended to.
+	DeploymentPromptExtension string `json:"deploymentPromptExtension"`
+	// EffectivePromptExtension is what a run against this repo would
+	// actually be told, absent a task that overrides it: the two above
+	// composed by model.PromptExtensionFor, rather than a second
+	// composition here that could drift from the one dispatch uses.
+	//
+	// A task with a PromptExtension of its own replaces all of it (that
+	// field's own doc comment), which is why this is "absent a task that
+	// overrides it" rather than the last word.
+	EffectivePromptExtension string `json:"effectivePromptExtension"`
 }
 
 // SetRepoCapabilitiesRequest is PUT /api/repos/{owner}/{name}/
@@ -118,6 +146,20 @@ type RepoDefaults struct {
 // purpose is to say what the set now is.
 type SetRepoCapabilitiesRequest struct {
 	DefaultCapabilities []string `json:"defaultCapabilities"`
+}
+
+// SetRepoPromptExtensionRequest is PUT /api/repos/{owner}/{name}/
+// prompt-extension's body: the whole of this repo's own standing
+// instructions, replaced rather than added to.
+//
+// A plain string rather than a pointer, for the reason
+// SetRepoCapabilitiesRequest's list is plain: there is one field here
+// and replacing it is the entire request, so an omitted value and an
+// empty one mean the same thing -- this repo adds nothing of its own --
+// and there is no "leave this alone" for a request that exists only to
+// say what the text now is.
+type SetRepoPromptExtensionRequest struct {
+	PromptExtension string `json:"promptExtension"`
 }
 
 // RepoDefaults reads repo's own defaults, alongside the deployment-wide
@@ -140,6 +182,7 @@ func (c *Client) repoDefaults(ctx context.Context, repo model.RepoRef) (RepoDefa
 	}
 	if stored != nil {
 		out.DefaultCapabilities = stored.DefaultCapabilities
+		out.PromptExtension = stored.PromptExtension
 	}
 	cfg, err := c.Store.GetConfig(ctx)
 	if err != nil {
@@ -147,7 +190,13 @@ func (c *Client) repoDefaults(ctx context.Context, repo model.RepoRef) (RepoDefa
 	}
 	if cfg != nil {
 		out.DeploymentDefaultCapabilities = cfg.DefaultCapabilities
+		out.DeploymentPromptExtension = cfg.PromptExtension
 	}
+	// The same composition dispatch itself applies, with no task layer:
+	// what a run here is told when nothing overrides it
+	// (model.PromptExtensionFor).
+	out.EffectivePromptExtension = model.PromptExtensionFor(
+		out.DeploymentPromptExtension, out.PromptExtension, "")
 	effective, err := c.defaultCapabilities(ctx, &repo)
 	if err != nil {
 		return RepoDefaults{}, err
@@ -199,10 +248,57 @@ func (c *Client) SetRepoDefaultCapabilities(ctx context.Context, repo string, id
 		seen[id] = true
 		clean = append(clean, id)
 	}
-	if err := c.Store.PutRepoConfig(ctx, model.RepoConfig{Repo: parsed, DefaultCapabilities: clean}); err != nil {
+	return c.putRepoConfig(ctx, parsed, func(rc *model.RepoConfig) { rc.DefaultCapabilities = clean })
+}
+
+// SetRepoPromptExtension replaces repo's own standing instructions --
+// the repos pane's per-repo counterpart to the Settings pane's
+// deployment-wide box, and the middle of model/prompt_extension.go's
+// three layers (grain/task-114).
+//
+// Trimmed the same way ui.UpdateSettings trims the deployment-wide one,
+// and empty is how a repo goes back to adding nothing of its own -- at
+// which point it may stop having a row here at all, since a repo config
+// that says nothing is deleted rather than stored (model.RepoConfig.Empty).
+//
+// It does not check repo against Config.TargetRepos, for the reason
+// SetRepoDefaultCapabilities does not: a repo may be configured before
+// it is allow-listed, nothing here is granted by the row alone, and a
+// task targeting a repo off the allowlist parks before it can ever be
+// dispatched with any of this.
+func (c *Client) SetRepoPromptExtension(ctx context.Context, repo, text string) (RepoDefaults, error) {
+	parsed, err := model.ParseRepo(repo)
+	if err != nil {
+		return RepoDefaults{}, validationErrorf("repo: %v", err)
+	}
+	trimmed := strings.TrimSpace(text)
+	return c.putRepoConfig(ctx, parsed, func(rc *model.RepoConfig) { rc.PromptExtension = trimmed })
+}
+
+// putRepoConfig applies one edit to repo's stored configuration and
+// writes the whole row back, read-modify-write.
+//
+// Read first, rather than each setter writing a model.RepoConfig built
+// from its own field alone: Store.PutRepoConfig replaces the row
+// wholesale (one row per repo, replaced rather than diffed), so a setter
+// that named only its own field would silently clear every other one --
+// saving a repo's capabilities would wipe the prompt extension somebody
+// wrote on the pane beside it. A repo with no row yet starts from an
+// empty config, which is exactly what it means.
+func (c *Client) putRepoConfig(ctx context.Context, repo model.RepoRef, edit func(*model.RepoConfig)) (RepoDefaults, error) {
+	stored, err := c.Store.GetRepoConfig(ctx, repo)
+	if err != nil {
 		return RepoDefaults{}, err
 	}
-	return c.repoDefaults(ctx, parsed)
+	cfg := model.RepoConfig{Repo: repo}
+	if stored != nil {
+		cfg = *stored
+	}
+	edit(&cfg)
+	if err := c.Store.PutRepoConfig(ctx, cfg); err != nil {
+		return RepoDefaults{}, err
+	}
+	return c.repoDefaults(ctx, repo)
 }
 
 // RepoSummary is one repo as `grain repo list` reports it (grain/
@@ -329,6 +425,29 @@ func (s *Server) handleSetRepoCapabilities(w http.ResponseWriter, r *http.Reques
 	}
 	defaults, err := s.tasks.SetRepoDefaultCapabilities(r.Context(),
 		r.PathValue("owner")+"/"+r.PathValue("name"), req.DefaultCapabilities)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, defaults)
+}
+
+// handleGetRepoPromptExtension answers with the same whole-defaults
+// document handleGetRepoCapabilities does (RepoDefaults' own doc comment
+// on why there is one document behind both routes) -- so a pane that
+// only edits the prompt extension still reads one response and gets the
+// deployment-wide text it is appended to along with it.
+func (s *Server) handleGetRepoPromptExtension(w http.ResponseWriter, r *http.Request) {
+	s.handleGetRepoCapabilities(w, r)
+}
+
+func (s *Server) handleSetRepoPromptExtension(w http.ResponseWriter, r *http.Request) {
+	var req SetRepoPromptExtensionRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	defaults, err := s.tasks.SetRepoPromptExtension(r.Context(),
+		r.PathValue("owner")+"/"+r.PathValue("name"), req.PromptExtension)
 	if err != nil {
 		writeClientError(w, err)
 		return

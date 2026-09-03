@@ -293,6 +293,26 @@ type Config struct {
 	// retired a capability, and a stale settings row must not become a
 	// deployment that can file no tasks at all.
 	DefaultCapabilities []string
+	// PromptExtension is the standing instruction text every run
+	// dispatched on this deployment is given on top of the prompt grain
+	// builds for it (grain/task-114) -- prompt_extension.go's own doc
+	// comment has what it is for and how the three layers of it compose.
+	// Empty, the default, adds nothing at all, which is what every
+	// deployment did before this field existed.
+	//
+	// Unlike DefaultCapabilities above, this is *not* seeded onto a task
+	// at creation: it is read at dispatch (orchestrator.RunCycle
+	// refreshes orchestrator.Config.PromptExtension from this row every
+	// tick, the same as MaxAgentTurns), so editing it changes what the
+	// next run is told rather than only what the next task is filed
+	// with. That is the right direction for text an operator tunes by
+	// watching runs go wrong: a seed would leave every task already
+	// queued carrying the wording that was wrong.
+	//
+	// Free text, unvalidated beyond being trimmed -- it is prose handed
+	// to an agent, exactly like a task's own Body, and grain has no more
+	// business bounding one than the other.
+	PromptExtension string
 }
 
 // DefaultConfig is the configuration a deployment that has never chosen
