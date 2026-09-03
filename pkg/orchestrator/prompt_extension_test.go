@@ -64,7 +64,7 @@ func TestRunDispatchAppendsTheDeploymentsPromptExtension(t *testing.T) {
 	if bare := promptFor(t, ctx, store, orchestrator.Config{}, "t1", "r2"); bare != orchestrator.BuildPrompt(
 		model.Task{ID: "t1", Title: "Do the thing", Body: "details",
 			Target: &model.RepoRef{Owner: "acme", Name: "widgets"}}, "", false,
-		orchestrator.DefaultMaxRunRuntime) {
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}) {
 		t.Errorf("with no extension configured, prompt = %q, want exactly BuildPrompt's own", bare)
 	}
 }
