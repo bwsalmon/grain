@@ -817,6 +817,18 @@ but the entity is deliberately general: `base`, `preamble`, and
 `max_concurrent` are the obvious next three, and each of them is
 currently either a global or a per-task directive with no middle ground.
 
+`preamble` has since grown one, without the folder tree
+(`model.Config.PromptExtension`, `model.RepoConfig.PromptExtension`,
+`model.Task.PromptExtension` — see `pkg/model/prompt_extension.go`): a
+deployment-wide block of standing instructions, a per-repo one appended
+to it, and a per-task one that replaces both. That composition rule is
+the shape a folder-level `preamble` would join rather than replace, and
+it is *not* the same rule capabilities compose by — text appends where a
+capability set unions, and a task overrides where a task can never drop
+an offer. Nothing about the repo layer presumes the tree: a repo is
+where the middle ground was actually needed first, and a folder that
+carries one later composes at the same point in the same function.
+
 ### Attaching capabilities to repos and folders
 
 Yes. **v1 is floors only** — a node says what every task under it gets

@@ -39,6 +39,7 @@ describe("NewTaskOverlay", () => {
         sandboxMemoryMb: 0,
         sandboxDiskGb: 0,
         agentFramework: "",
+        promptExtension: "",
         capabilities: [],
         dependsOn: [],
         reads: [],
@@ -542,6 +543,32 @@ describe("NewTaskOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(JSON.parse(api.mock.calls[0][1].body).agentFramework).toBe("");
+  });
+
+  // grain/task-114: a task can replace the standing instructions its
+  // deployment and repo would otherwise give its runs -- the last of the
+  // per-task overrides behind "Advanced options", and the only one that
+  // replaces rather than adds, which is why the deployment's own text is
+  // shown beside it.
+  it("files a task with its own prompt extension when one is written", async () => {
+    api.mockResolvedValueOnce({ id: "42" });
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay
+        config={{ promptExtension: "Run `make lint` before you push." }}
+        onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}}
+      />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Regenerate the client");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    expect(screen.getByText(/Deployment-wide, used when the box above is empty/))
+      .toHaveTextContent("Run `make lint` before you push.");
+    await user.type(screen.getByLabelText(/Prompt extension override/), "Ignore the house rules.");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).promptExtension).toBe("Ignore the house rules.");
   });
 
   it("reports the error and leaves the overlay open when the request fails", async () => {

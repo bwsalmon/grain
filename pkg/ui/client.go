@@ -611,6 +611,15 @@ type CreateTaskRequest struct {
 	// validated the same way UpdateSettings validates the
 	// deployment-wide setting.
 	AgentFramework string `json:"agentFramework"`
+	// PromptExtension sets model.Task's own field of the same name
+	// (grain/task-114) -- this task's own standing instructions, used
+	// *instead of* the deployment's and its repo's for this task's runs.
+	// "" (the default) means no override, so the task gets whatever those
+	// two say when it dispatches. Trimmed on the way in, the same as the
+	// deployment-wide and per-repo layers, so a box someone typed a
+	// newline into files as no override rather than as an override that
+	// silences both.
+	PromptExtension string `json:"promptExtension"`
 	// Capabilities is the exact set of capability ids this task is filed
 	// holding -- but only when the caller names one. nil (the field left
 	// out, or JSON null) means the caller expressed no opinion, and the
@@ -906,6 +915,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		SandboxMemoryMB: req.SandboxMemoryMB,
 		SandboxDiskGB:   req.SandboxDiskGB,
 		AgentFramework:  req.AgentFramework,
+		PromptExtension: strings.TrimSpace(req.PromptExtension),
 		Grants:          grants,
 		Links:           links,
 		Reads:           reads,
@@ -1178,6 +1188,15 @@ type UpdateTaskRequest struct {
 	// already dispatched keeps whichever framework its live run started
 	// with -- Deps.Framework is asked once, when the run begins.
 	AgentFramework *string `json:"agentFramework,omitempty"`
+	// PromptExtension edits the same per-task override
+	// CreateTaskRequest.PromptExtension sets, with an empty string
+	// meaningful for the same reason it is on AgentFramework above: it
+	// clears the override, so the task's next run is told whatever its
+	// deployment and its repo say. Read at dispatch rather than at
+	// creation (model.Task.PromptExtension), so an edit here reaches any
+	// run this task has not started yet -- but not one already live,
+	// whose prompt was built when it began.
+	PromptExtension *string `json:"promptExtension,omitempty"`
 	// Reads, given, replaces the whole set of read-only repos rather than
 	// adding to it -- there is no per-entry attach/detach endpoint for
 	// Reads the way SetCapability and SetDependency give Grants and
@@ -1273,6 +1292,9 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		}
 		if req.AgentFramework != nil {
 			task.AgentFramework = *req.AgentFramework
+		}
+		if req.PromptExtension != nil {
+			task.PromptExtension = strings.TrimSpace(*req.PromptExtension)
 		}
 		if req.Reads != nil {
 			task.Reads = reads

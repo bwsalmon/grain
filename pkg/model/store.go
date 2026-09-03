@@ -175,6 +175,15 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskObservationRefreshedColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_observation: %w", err)
 	}
+	if err := s.ensureConfigPromptExtensionColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
+	if err := s.ensureRepoConfigPromptExtensionColumn(ctx); err != nil {
+		return fmt.Errorf("migrating repo_config: %w", err)
+	}
+	if err := s.ensureTaskPromptExtensionColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -729,6 +738,56 @@ func (s *Store) ensureTaskAgentFrameworkColumn(ctx context.Context) error {
 	return err
 }
 
+// ensureTaskPromptExtensionColumn adds task.prompt_extension
+// (Task.PromptExtension's own doc comment, and prompt_extension.go's,
+// have the reasoning -- grain/task-114) to a database created before this
+// column existed, the same probe-then-ALTER approach every other
+// ensure*Column migration here uses. It defaults to the empty string,
+// Task.PromptExtension's own "no override, use what the deployment and
+// the repo say" zero value, so every task already in such a database is
+// dispatched with exactly the instructions it would have had before a
+// task could carry an override at all.
+func (s *Store) ensureTaskPromptExtensionColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `prompt_extension` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `prompt_extension` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureConfigPromptExtensionColumn adds grain_config.prompt_extension
+// (model.Config.PromptExtension's own doc comment has the reasoning) to a
+// database created before grain/task-114, the same probe-then-ALTER
+// approach ensureConfigEnvironmentNameColumn already uses. It defaults to
+// the empty string, which adds nothing to any prompt -- exactly what an
+// upgraded deployment was doing until somebody writes one.
+func (s *Store) ensureConfigPromptExtensionColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `prompt_extension` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `prompt_extension` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureRepoConfigPromptExtensionColumn is the same migration for
+// repo_config, whose own table predates this column (schema.go's DDL
+// comment on it): a deployment that has already given a repo default
+// capabilities has the table without the column, and CREATE TABLE IF NOT
+// EXISTS will not add one to a table that is already there.
+func (s *Store) ensureRepoConfigPromptExtensionColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `prompt_extension` FROM `repo_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `repo_config` ADD COLUMN `prompt_extension` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
 // ensureTaskInteractiveColumn adds task.interactive (schema.go's own DDL
 // comment on the table has the reasoning -- bwsalmon/agents#539) to a
 // database created before this column existed, the same probe-then-ALTER
@@ -1082,14 +1141,14 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `configuration`, `agent_framework`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `configuration`, `agent_framework`, `prompt_extension`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
 		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.SandboxDiskGB, t.Interactive, t.Configuration,
-		t.AgentFramework,
+		t.AgentFramework, t.PromptExtension,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -1365,7 +1424,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
 	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`interactive`,`configuration`," +
-	"`agent_framework`"
+	"`agent_framework`,`prompt_extension`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -1382,7 +1441,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
 		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.SandboxDiskGB, &t.Interactive, &t.Configuration,
-		&t.AgentFramework); err != nil {
+		&t.AgentFramework, &t.PromptExtension); err != nil {
 		return Task{}, err
 	}
 
@@ -2837,7 +2896,8 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 const configColumns = "`poll_interval_ms`,`max_workers`,`max_mergers`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
-	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`,`environment_name`"
+	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`,`environment_name`," +
+	"`prompt_extension`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -2848,7 +2908,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
 		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
-		&defaultCapabilities, &c.EnvironmentName); err != nil {
+		&defaultCapabilities, &c.EnvironmentName, &c.PromptExtension); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -2869,12 +2929,12 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxWorkers, c.MaxMergers, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
 			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,
-			joinCSV(c.DefaultCapabilities), c.EnvironmentName)
+			joinCSV(c.DefaultCapabilities), c.EnvironmentName, c.PromptExtension)
 		return err
 	})
 }

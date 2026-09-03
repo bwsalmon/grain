@@ -44,13 +44,26 @@ type RepoConfig struct {
 	// keeps it if the deployment-wide entry is later dropped. The union
 	// is what a task is filed with either way.
 	DefaultCapabilities []string
+	// PromptExtension is this repo's own standing instructions for a run
+	// working in it, appended *after* Config.PromptExtension for a task
+	// that targets this repo -- prompt_extension.go's own doc comment has
+	// the composition rule and why it is an append rather than a
+	// replacement.
+	//
+	// Read at dispatch rather than seeded onto the task, unlike
+	// DefaultCapabilities above (Config.PromptExtension has why): a task
+	// filed today against a repo whose conventions are written down
+	// tomorrow is told about them when it runs.
+	PromptExtension string
 }
 
 // Empty reports whether this config says nothing at all -- the state a
 // repo with no row is in. PutRepoConfig deletes rather than writes such a
 // row, so "has a row" and "has something of its own to say" stay the same
 // fact and ListRepoConfigs never returns a repo that adds nothing. A
-// second field here (base, preamble and max_concurrent are
-// docs/data-model.md's own next three) gains a term in this method and
-// nothing else has to change.
-func (c RepoConfig) Empty() bool { return len(c.DefaultCapabilities) == 0 }
+// further field here (base and max_concurrent are docs/data-model.md's
+// own remaining two) gains a term in this method and nothing else has to
+// change -- PromptExtension, the second, is exactly that.
+func (c RepoConfig) Empty() bool {
+	return len(c.DefaultCapabilities) == 0 && c.PromptExtension == ""
+}

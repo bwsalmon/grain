@@ -88,6 +88,7 @@ var Tables = []string{
   ` + "`interactive`" + `           INTEGER  NOT NULL DEFAULT 0,
   ` + "`configuration`" + `         INTEGER  NOT NULL DEFAULT 0,
   ` + "`agent_framework`" + `       TEXT     NOT NULL DEFAULT '',
+  ` + "`prompt_extension`" + `      TEXT     NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -523,6 +524,14 @@ var Tables = []string{
 	// Store.ensureConfigEnvironmentNameColumn for an already-created
 	// grain_config. Empty is an unnamed deployment, which is what every
 	// deployment was before this column existed.
+	//
+	// prompt_extension is Config.PromptExtension's own column -- the
+	// standing instructions every dispatch's prompt ends with
+	// (prompt_extension.go) -- DEFAULT '' both here and in
+	// Store.ensureConfigPromptExtensionColumn for an already-created
+	// grain_config. Empty adds nothing to a prompt, which is what every
+	// deployment did before this column existed. TEXT with no length of
+	// its own: it is prose for an agent, the same as task.body beside it.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -547,6 +556,7 @@ var Tables = []string{
   ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
   ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
   ` + "`environment_name`" + `             TEXT    NOT NULL DEFAULT '',
+  ` + "`prompt_extension`" + `             TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -651,15 +661,23 @@ var Tables = []string{
 	// grain_config.default_capabilities and target_repos already are
 	// (store.go's joinCSV/splitCSV), for the same reason -- a capability
 	// id is a bare word with no room for a comma in it. No DEFAULT and no
-	// migration: this table is new rather than a column added to one that
-	// already exists, so Init's own CREATE TABLE IF NOT EXISTS creates it
-	// on an existing database the same as on a fresh one, and a
-	// deployment that upgrades across it starts with no repo saying
-	// anything -- exactly what every deployment did before it existed.
+	// migration: that column is as old as this table, so Init's own
+	// CREATE TABLE IF NOT EXISTS creates the pair together on an existing
+	// database the same as on a fresh one, and a deployment that upgrades
+	// across it starts with no repo saying anything -- exactly what every
+	// deployment did before it existed.
+	//
+	// prompt_extension is RepoConfig.PromptExtension's own column -- this
+	// repo's standing instructions, appended to the deployment's for a
+	// task that targets it (prompt_extension.go). Unlike
+	// default_capabilities it *is* newer than the table, so it carries a
+	// DEFAULT '' and Store.ensureRepoConfigPromptExtensionColumn adds it
+	// to a repo_config that already exists.
 	`CREATE TABLE IF NOT EXISTS ` + "`repo_config`" + ` (
   ` + "`owner`" + `                TEXT NOT NULL,
   ` + "`name`" + `                 TEXT NOT NULL,
   ` + "`default_capabilities`" + ` TEXT NOT NULL,
+  ` + "`prompt_extension`" + `     TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
 )`,
 

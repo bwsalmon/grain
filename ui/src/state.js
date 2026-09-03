@@ -186,8 +186,10 @@ export function defaultCapabilitiesFor(config, repo) {
 // repoRows unions the three things that can make this deployment know a
 // repo at all -- config.targetRepos, every repo a task's write target
 // names (Task.Repo, never Reads: a read-only repo grants nothing and is
-// not what a task "belongs to"), and every repo carrying defaults of its
-// own in config.repoDefaultCapabilities -- into one row per repo, sorted
+// not what a task "belongs to"), and every repo carrying configuration
+// of its own, which today is a default capability set
+// (config.repoDefaultCapabilities), standing instructions
+// (config.reposWithPromptExtension), or both -- into one row per repo, sorted
 // alphabetically, for the repo page and its per-state counts. Tasks with
 // no target (a proposal nobody has pointed at a repo yet) are omitted
 // rather than grouped under a blank name.
@@ -202,20 +204,21 @@ export function defaultCapabilitiesFor(config, repo) {
 // empty, so every row it has is `configured: false`.
 //
 // The third source is there for the same reason, one step further out.
-// ui.(*Client).SetRepoDefaultCapabilities does not require a repo to be
-// allow-listed (its own doc comment: a repo can be configured before it
-// is allowed, and keeps its configuration after it is removed), so a
-// repo can hold a stored default set while matching neither of the other
-// two -- and this page is the only place that set can be edited, so
-// dropping the row would leave it real, really seeded onto every task
-// filed there, and unreachable. `grain repo list` (grain/task-36) reads
-// the same three sources for the same reason; the page and the CLI are
-// meant to agree on which repos this deployment knows about.
+// Neither ui.(*Client).SetRepoDefaultCapabilities nor
+// SetRepoPromptExtension requires a repo to be allow-listed (their own
+// doc comments: a repo can be configured before it is allowed, and keeps
+// its configuration after it is removed), so a repo can hold stored
+// configuration while matching neither of the other two -- and this page
+// is the only place that configuration can be edited, so dropping the
+// row would leave it real, really applied to every task filed there, and
+// unreachable. `grain repo list` (grain/task-36) reads the same sources
+// for the same reason; the page and the CLI are meant to agree on which
+// repos this deployment knows about.
 //
-// `defaults` is whether the repo carries a set of its own, which on a
-// row that is neither configured nor targeted is the only reason it is
-// here at all -- the repos pane says so rather than leaving an empty row
-// with nothing to explain it.
+// `defaults` is whether the repo carries configuration of its own, which
+// on a row that is neither configured nor targeted is the only reason it
+// is here at all -- the repos pane says so rather than leaving an empty
+// row with nothing to explain it.
 export function repoRows(config, tasks) {
   const byRepo = new Map();
   const row = (repo) => {
@@ -226,7 +229,8 @@ export function repoRows(config, tasks) {
         counts: {},
         blocked: 0,
         configured: false,
-        defaults: (config?.repoDefaultCapabilities?.[repo] || []).length > 0,
+        defaults: (config?.repoDefaultCapabilities?.[repo] || []).length > 0
+          || (config?.reposWithPromptExtension || []).includes(repo),
       });
     }
     return byRepo.get(repo);
@@ -239,6 +243,13 @@ export function repoRows(config, tasks) {
   // do, so an empty one is not a repo to put a row up for.
   for (const [repo, ids] of Object.entries(config?.repoDefaultCapabilities || {})) {
     if ((ids || []).length > 0) row(repo);
+  }
+  // The other half of that same third source: a repo whose only
+  // configuration is standing instructions of its own
+  // (ui.configResponse.ReposWithPromptExtension, which lists exactly the
+  // repos that have some).
+  for (const repo of config?.reposWithPromptExtension || []) {
+    row(repo);
   }
   for (const t of tasks) {
     if (!t.repo) continue;
