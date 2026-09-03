@@ -132,6 +132,28 @@ func stateStatus(ctx context.Context, dataDir string) error {
 	fmt.Printf("schema:     %d in the repository, %d in this build\n", version, model.SchemaVersion)
 	fmt.Printf("secrets:    %s (key: %s)\n",
 		secretsConfig(dataDir).File, secretsConfig(dataDir).KeyFile)
+	// Whether a task can be dispatched at this repository, which is not
+	// something an operator can tell by looking: it turns on whether
+	// grain's encrypted secrets file appears anywhere in the history, and
+	// a repository that has one looks exactly like one that has not until
+	// the first push through the proxy is refused.
+	held, err := repo.HasSecrets(ctx)
+	switch {
+	case err != nil:
+		fmt.Printf("dispatch:   unknown -- could not read this repository's history (%v), "+
+			"so the git proxy refuses it to every sandbox\n", err)
+	case settings.Remote == "":
+		fmt.Printf("dispatch:   not applicable -- a local-only repository is not reachable " +
+			"through the git proxy at all\n")
+	case held:
+		fmt.Printf("dispatch:   refused -- %s appears in this repository, so the git proxy "+
+			"refuses it to every sandbox. Removing it does not undo that: a clone reads "+
+			"history. Adopt a repository that has never held one to file settings tasks "+
+			"against it\n", staterepo.SecretsFile)
+	default:
+		fmt.Printf("dispatch:   allowed -- a task may be filed against this repository " +
+			"(`grain create -repo <owner>/<name> ...`)\n")
+	}
 	return nil
 }
 
