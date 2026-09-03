@@ -614,14 +614,16 @@ func runFailure(stdout string, maxTurns int, runErr error) error {
 		// Named in plain words rather than passed through as a subtype:
 		// this is not a fault of claude or of the model but a configured
 		// --max-turns budget running out, and the operator reading the
-		// failed run needs to be told which number to raise. Phrased to
-		// match agent/antigravity's own turn-cap error.
-		return fmt.Errorf("claude: exceeded max turns (%d) without a final answer", maxTurns)
+		// failed run needs to be told which number to raise. Worded by
+		// agent.MaxTurnsExceeded, which every Framework shares: what
+		// reads that sentence afterwards is model.EndingOf, not only a
+		// human.
+		return agent.MaxTurnsExceeded("claude", maxTurns)
 	case p.resultSubtype == maxTurnsSubtype:
 		// No cap was configured, so claude hit one of its own -- naming
 		// a number grain never set would send an operator looking for a
 		// setting that is already unlimited.
-		return fmt.Errorf("claude: the CLI stopped the run at its own turn limit without a final answer")
+		return agent.MaxTurnsExceededByCLI("claude")
 	case limit != nil:
 		// Before p.resultErr below, which would otherwise render this as
 		// a generic "run ended in error (subtype=...)" and lose the one

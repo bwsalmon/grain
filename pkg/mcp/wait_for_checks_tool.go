@@ -329,14 +329,33 @@ const (
 	waitVerdictNoChecks
 )
 
+// The phrases a report is built from, and the phrases ReadCheckWait
+// matches it by. They are constants rather than literals inside the
+// format strings below for one reason: what reads this report afterwards
+// is not only an agent -- orchestrator records which verdict each wait
+// ended in (model.RunCheckWait), and a reworded report that left a reader
+// matching the old words would quietly measure a deployment's whole CI
+// loop as never having happened. Sharing the phrase is what makes that
+// impossible; telemetry.go's own tests walk every verdict through both
+// halves.
+const (
+	waitHeaderPrefix   = "Waited "
+	waitHeaderSuffix   = " for CI on"
+	waitFailedMarker   = "CI has failed, so I stopped waiting"
+	waitPassedMarker   = "finished and none of them failed"
+	waitTimedOutMarker = "The wait timed out with"
+	waitNoChecksMarker = "still reports no checks at all against"
+)
+
 // report renders one whole answer: how long it waited, what every check
 // was doing when it stopped waiting, and what that means.
 func (w checkWaiter) report(sha string, waited time.Duration, tally checkTally, verdict waitVerdict) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Waited %s for CI on %s at %s.\n\n", roundDuration(waited), w.scope.Branch, sha)
+	fmt.Fprintf(&b, "%s%s%s %s at %s.\n\n",
+		waitHeaderPrefix, roundDuration(waited), waitHeaderSuffix, w.scope.Branch, sha)
 
 	if verdict == waitVerdictNoChecks {
-		fmt.Fprintf(&b, "GitHub still reports no checks at all against %s after %s. Either this "+
+		fmt.Fprintf(&b, "GitHub "+waitNoChecksMarker+" %s after %s. Either this "+
 			"repo has no CI configured, or its checks are registered by something slower "+
 			"than a push -- a workflow that only runs on pull requests, for instance, has "+
 			"nothing to report until one is open. Nothing here says your change is good; "+
@@ -349,7 +368,7 @@ func (w checkWaiter) report(sha string, waited time.Duration, tally checkTally, 
 
 	switch verdict {
 	case waitVerdictFailed:
-		fmt.Fprintf(&b, "CI has failed, so I stopped waiting")
+		fmt.Fprint(&b, waitFailedMarker)
 		if tally.pending > 0 {
 			fmt.Fprintf(&b, " -- the %d unfinished check(s) above are still running and may "+
 				"fail too", tally.pending)
@@ -358,11 +377,11 @@ func (w checkWaiter) report(sha string, waited time.Duration, tally checkTally, 
 			"`git push origin %s` -- each push reruns CI against the new commit, and "+
 			"calling this again afterwards waits for the verdict on the fix.", w.scope.Branch)
 	case waitVerdictPassed:
-		fmt.Fprintf(&b, "Every check against %s finished and none of them failed. Note that a "+
+		fmt.Fprintf(&b, "Every check against %s "+waitPassedMarker+". Note that a "+
 			"green build is not the same as a mergeable branch: call pull_request_status "+
 			"if you also need to know whether the branch still merges into its base.", sha)
 	case waitVerdictTimedOut:
-		fmt.Fprintf(&b, "The wait timed out with %d check(s) still running, so none of this is a "+
+		fmt.Fprintf(&b, waitTimedOutMarker+" %d check(s) still running, so none of this is a "+
 			"verdict yet -- an unfinished check has not passed. Call this again to keep "+
 			"waiting (with a larger timeout_seconds if this CI is simply slow), rather "+
 			"than finishing on a build you have not seen the end of.", tally.pending)
