@@ -1,5 +1,72 @@
-import { Alert, Box, Chip, Stack, Typography } from "@mui/material";
+import { useState } from "react";
+import { Alert, AlertTitle, Box, Button, Chip, Stack, Typography } from "@mui/material";
 import { SecretFields } from "./SecretField.jsx";
+import api from "../api.js";
+
+// grain/task-172: the one control on this pane that asks a question of
+// somebody else's API rather than reading grain's own configuration.
+//
+// "Ready" above means *configured* -- a project, an account and a secret
+// are all set -- and that is the whole of what any configuration pane
+// can see. The key inside a set secret can have been deleted or rotated
+// away at the far end months ago and every one of those facts stays
+// true, which is how a deployment sat **Ready** while every mint failed
+// with `invalid_grant` (README.md's "Debugging `gcp-key` again"). This
+// button authenticates as that standing credential and makes one cheap,
+// harmless call with it -- a listing, never a mint -- and shows what
+// came back.
+//
+// The answer is shown beside the badge, never folded into it. It is true
+// at the moment it was given and says so; nothing here is stored, and a
+// reload clears it, because a stale "checked ok" would be the same
+// unfalsifiable reassurance the badge alone already gives.
+function CredentialCheck({ capability, showError }) {
+  const [check, setCheck] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      setCheck(await api(`/api/capabilities/${encodeURIComponent(capability.id)}/check`, { method: "POST" }));
+    } catch (err) {
+      // A request that never got an answer is grain's own problem (an
+      // unwired deployment, an id this build does not know), so it goes
+      // to the error banner rather than being drawn as a verdict about
+      // the credential.
+      if (showError) showError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Box sx={{ mt: 1 }}>
+      <Button type="button" size="small" variant="outlined" disabled={busy} onClick={run}>
+        {busy ? "Testing…" : "Test credential"}
+      </Button>
+      <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
+        Makes one harmless call as this capability&apos;s standing credential -- a listing, never a
+        mint -- and reports what the service said. &quot;Ready&quot; above only means this deployment
+        is configured for it.
+      </Typography>
+      {check && (
+        <Alert severity={check.ok ? "success" : "warning"} sx={{ mt: 1 }}>
+          {/* Named as the deployment's own credential being refused,
+              not as grain failing: the remedy is pasting a current
+              value into the field below, and the sentence under this
+              says which secret and where. */}
+          <AlertTitle>{check.ok ? "Credential works" : "Credential refused"}</AlertTitle>
+          {check.detail}
+          <Typography variant="caption" component="div" sx={{ mt: 0.5 }}>
+            {(check.credentials || []).length > 0 && <>checked as {check.credentials.join(", ")} · </>}
+            {check.checkedAt ? new Date(check.checkedAt).toLocaleString() : "just now"} -- a
+            point-in-time answer, not a badge
+          </Typography>
+        </Alert>
+      )}
+    </Box>
+  );
+}
 
 // bwsalmon/agents#611: a mostly read-only view of GET /api/settings' own
 // "capabilities" field -- every capability grain ships a provider for,
@@ -46,7 +113,9 @@ export default function CapabilitiesPanel({ capabilities, showError, onSecretsCh
         A capability marked "not grantable" is one no task can ask for at all, however this
         deployment is configured; one marked "default" is attached to every new task as it is
         filed, and one marked "default in" only to tasks filed against the repos named (set on
-        the repos page, per repo).
+        the repos page, per repo). Whether a capability is configured is all this page can tell
+        on its own -- for the ones holding a standing credential, "Test credential" asks the
+        service that issued it whether the value stored here still works.
       </Typography>
       {list.length === 0 && <Alert severity="info">No capabilities known.</Alert>}
       <Stack spacing={1.5}>
@@ -124,6 +193,11 @@ export default function CapabilitiesPanel({ capabilities, showError, onSecretsCh
                 credential can be rotated or cleared from the same
                 place it was set. */}
             <SecretFields secrets={cap.secrets} showError={showError} onChanged={onSecretsChanged} />
+            {/* Under the fields, because a refused check is answered by
+                typing into one of them -- and offered only where this
+                deployment can actually make the call (cap.checkable),
+                so no pane ever shows a button that could not work. */}
+            {cap.checkable && <CredentialCheck capability={cap} showError={showError} />}
           </Box>
         ))}
       </Stack>

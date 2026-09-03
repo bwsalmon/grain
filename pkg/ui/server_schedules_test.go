@@ -86,7 +86,7 @@ func TestSchedulesDeleteOnAnUnknownIDIs404(t *testing.T) {
 // suite goes through the very same four routes, with suiteId in place of
 // the title and content fields (ui.CreateScheduleRequest's own doc
 // comment on why they are mutually exclusive).
-func TestSchedulesCreateFromATaskSuite(t *testing.T) {
+func TestSchedulesCreateFromASuite(t *testing.T) {
 	srv, _ := testServer(t)
 
 	rec := do(t, srv, http.MethodPost, "/api/templates",

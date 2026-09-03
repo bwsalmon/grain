@@ -16,7 +16,7 @@ function describeMode(run) {
   return run.mode === "count" ? `run ${run.count}×` : `run until clean (max ${run.maxPasses})`;
 }
 
-// SuitesList is the task suites page's main pane (bwsalmon/agents#642):
+// SuitesList is the suites page's main pane (bwsalmon/agents#642):
 // the suite templates a human has saved, each runnable against any repo
 // and branch, and -- what the issue itself asks for -- the status of
 // every run, outstanding or finished, so a run started five minutes ago
@@ -41,7 +41,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
   return (
     <main>
       <ListHeader
-        title="Task suites"
+        title="Suites"
         count={suites.length}
         action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New suite</Button>}
       />
@@ -62,7 +62,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
           </li>
         ))}
       </ul>
-      {suites.length === 0 && <ListEmpty>No task suites yet -- combine one or more task templates into a suite to qualify a branch before merging it, sweep for bugs, and the like.</ListEmpty>}
+      {suites.length === 0 && <ListEmpty>No suites yet -- combine one or more templates into a suite to qualify a branch before merging it, sweep for bugs, and the like.</ListEmpty>}
 
       <ListHeader title="Runs" count={suiteRuns.length} style={{ marginTop: "1.5rem" }} />
       <ul className="template-list">
@@ -78,7 +78,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
           </li>
         ))}
       </ul>
-      {suiteRuns.length === 0 && <ListEmpty>No task suite runs yet.</ListEmpty>}
+      {suiteRuns.length === 0 && <ListEmpty>No suite runs yet.</ListEmpty>}
 
       {showNew && (
         <SuiteOverlay

@@ -69,6 +69,7 @@ package githubsandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -428,6 +429,49 @@ func (p *Provider) Revoke(ctx context.Context, cc model.CapabilityContext, lease
 		return fmt.Errorf("githubsandbox: deleting repo %s: %w", lease.Resource, err)
 	}
 	return nil
+}
+
+// CheckCredential implements model.CredentialChecker: it signs a JWT
+// with the App's stored private key and asks GitHub which installation
+// it has, which is the cheapest call this package makes and the first
+// one every Materialize makes anyway.
+//
+// The App's private key is a standing credential like gcp-key's minter,
+// and goes stale the same silent way: a key regenerated in the App's own
+// settings, an installation revoked, an App deleted -- none of which
+// changes anything in this deployment's secrets, so a configuration pane
+// goes on reporting the same two secrets set and **Ready**. Only GitHub
+// knows, and only when something authenticates.
+//
+// FindInstallation reads; it mints no token and creates no repo. It is
+// also the call that answers the one question beyond "is the key live"
+// worth asking here -- that the App is installed on exactly one account,
+// which is what this capability's whole "no config names an account"
+// design rests on, and which FindInstallation itself errors on when it
+// is not true.
+func (p *Provider) CheckCredential(ctx context.Context, creds model.CredentialResolver) (model.CredentialCheck, error) {
+	check := model.CredentialCheck{Credentials: []string{p.appIDCredential(), p.privateKeyCredential()}}
+	if reason, ok := p.unconfigured(ctx, creds); ok {
+		return check, errors.New("githubsandbox: " + reason)
+	}
+	client, err := p.client(ctx, creds)
+	if err != nil {
+		return check, err
+	}
+	installation, err := client.FindInstallation(ctx)
+	if err != nil {
+		return check, fmt.Errorf(
+			"githubsandbox: %s would not answer for the App this deployment's `%s`/`%s` "+
+				"secrets hold: the App's private key has been regenerated or the App "+
+				"deleted, or its installation was revoked. Generate a fresh private key in "+
+				"the App's settings and paste it into Settings -> Capabilities (or re-run "+
+				"`grain controller bootstrap-github-app` on the host): %w",
+			p.host(), p.appIDCredential(), p.privateKeyCredential(), err)
+	}
+	check.Detail = fmt.Sprintf(
+		"%s accepted this deployment's GitHub App and reports it installed on %s (installation %d).",
+		p.host(), installation.Account, installation.ID)
+	return check, nil
 }
 
 // Reap implements model.Reaper: it lists every repo in the App's

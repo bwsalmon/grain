@@ -233,6 +233,22 @@ type Config struct {
 	// apart is a confusing 500 "no credential configured" from the git
 	// proxy on the next push (bwsalmon/agents#427).
 	Credentials *gitproxy.CredentialSet
+	// CapabilityChecks, when set, is what POST /api/capabilities/{id}/
+	// check calls to test one capability's standing credential -- cmd/
+	// grain/daemon.go's own adapter over the same providers a dispatch
+	// resolves through. It is what turns Settings' **Ready** badge from
+	// "this deployment is configured for that" into something a human
+	// can hold against the far end, which is the only thing that knows
+	// whether the key inside a set secret still works (see
+	// Client.CheckCapability).
+	//
+	// nil means this UI was not handed one (`grain demo`'s throwaway UI,
+	// or any UI not colocated with a daemon holding the credentials),
+	// and the route answers 404 while CapabilityStatus.Checkable reports
+	// false so no pane offers a button that could not work -- the same
+	// nil-means-unavailable contract Secrets, Reboot and Credentials
+	// above already give.
+	CapabilityChecks CapabilityChecker
 	// StateRepo is set only when this UI runs inside the daemon that owns
 	// the state repository its store is exported to (pkg/staterepo) --
 	// nil means it does not, and the bootstrap pane and its API routes

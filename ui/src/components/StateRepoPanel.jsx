@@ -7,8 +7,10 @@ import api from "../api.js";
 // grain's database is a git repository now (pkg/staterepo): every table
 // exported as JSON, so a template, a suite or a repo's configuration can
 // be changed through a pull request like anything else, with grain
-// pulling the merged result back in. This pane is the bootstrap for
-// that, and it is deliberately only the bootstrap -- there are three
+// pulling the merged result back in on its own timer -- "Sync now" below
+// is that same cycle, both directions, for an operator who does not want
+// to wait for the tick. This pane is the bootstrap for that, and it is
+// deliberately only the bootstrap -- there are three
 // answers to "where does the repository live" and nothing here edits
 // what is *in* it, because the repository is the place to do that.
 //
@@ -72,6 +74,12 @@ export default function StateRepoPanel({ showError }) {
         grain exports its whole database to a git repository &mdash; one JSON file per table &mdash; so settings,
         tasks and metrics can be read and changed through pull requests. Secrets go there too, in one file encrypted
         to the key below; nothing else in the repository is encrypted, and no agent ever reads that file.
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        A merged change to the settings tables &mdash; templates, suites, schedules, repo and deployment
+        configuration &mdash; is pulled in and live within half a minute, with no restart. Tasks, runs and metrics
+        are grain&apos;s own record of what it did and are only replaced when grain starts, so nothing here rewrites
+        rows a run in flight is holding.
       </Typography>
 
       <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }} flexWrap="wrap">

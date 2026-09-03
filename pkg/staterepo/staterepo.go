@@ -18,10 +18,12 @@
 //
 // Concurrency is deliberately not modelled. The daemon is the only writer
 // (see cmd/grain's daemon.go: the UI and the CLI reach it over REST), so
-// a sync cycle is "write what the database says, commit it, push it" with
-// no merge to resolve. An agent's change arrives the other way, as a
-// merged pull request, and Pull brings it back down; ImportInto is what
-// makes it live.
+// a sync cycle is "pull, write what the database says, commit it, push
+// it" with no merge to resolve. An agent's change arrives the other way,
+// as a merged pull request, and Pull brings it back down: Load imports
+// the whole of it at startup, and Apply imports the settings tables of
+// it into a daemon that is already running, which is as much of a
+// wholesale replacement as is safe to do underneath live runs.
 //
 // The remote is optional, and that is not a fallback but a supported
 // deployment: Config.Remote left empty gives a repository with no origin

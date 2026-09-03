@@ -604,7 +604,10 @@ func run(ctx context.Context, cfg config) error {
 	// merged pull request changed since the last start, and loadConfig
 	// immediately below is the first thing that would read a stale
 	// answer. See staterepo.go for the direction of travel and why the
-	// import only happens here rather than on every tick.
+	// *whole* import only happens here rather than on every tick -- the
+	// timer below pulls too, and imports the settings tables of whatever
+	// it finds, but nothing else replaces task and run rows once there
+	// are runs live to hold them.
 	stateRepo, err := openStateRepo(ctx, cfg.dataDir)
 	if err != nil {
 		return fmt.Errorf("opening the state repository: %w", err)
@@ -2365,6 +2368,11 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		return nil, fmt.Errorf("loading GitHub credential ladder for the UI: %w", err)
 	}
 	disks := hostDisks(cfg)
+	// One open of this deployment's secrets, used twice below: the
+	// secrets fields on the Capabilities tab write into it, and the
+	// "test this credential" action on that same tab resolves the
+	// standing credential it is about to authenticate as out of it.
+	uiSecrets := openSecrets(cfg.dataDir)
 	uiCfg := ui.Config{
 		Actor: ui.DefaultActor(actorID(cfg.actor)),
 		// The fixed set grain ships providers for, plus one row per named
@@ -2373,7 +2381,17 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// the matching providers from, so every id the picker offers is
 		// one a dispatch can actually resolve.
 		Capabilities: append(ui.OfferedCapabilities(), ui.GitHubTokenCapabilities(live.gitHubTokens())...),
-		Secrets:      openSecrets(cfg.dataDir),
+		Secrets:      uiSecrets,
+		// The "test this credential" action on that same tab
+		// (ui.Config.CapabilityChecks): the pane that says **Ready**
+		// because a secret is set, given a way to ask the far end
+		// whether the key inside it still works. Wired here rather than
+		// behind a gate like PullRequests below, because it needs
+		// nothing the reconcile loop builds -- the providers come from
+		// the live configuration and the credentials from this same
+		// secrets directory, both available before (and regardless of
+		// whether) that loop ever starts.
+		CapabilityChecks: capabilityCheckAdapter{live: live, creds: uiSecrets},
 		// The bootstrap pane: this process owns the state repository its
 		// store is exported to, so the UI it serves is the one place that
 		// can offer the choice of where state lives (pkg/ui/staterepo.go).
@@ -2680,6 +2698,59 @@ func (a cycleTimesAdapter) CycleTimes() metrics.CycleHistory {
 		out.Samples = append(out.Samples, sample)
 	}
 	return out
+}
+
+// capabilityCheckAdapter is ui.Config.CapabilityChecks over this
+// deployment's own capability providers: it authenticates as one
+// capability's standing credential and makes the one cheap, harmless
+// call that capability's provider offers as proof the credential still
+// works (model.CredentialChecker).
+//
+// It rebuilds the providers per call, out of capabilityProviders and the
+// live configuration, rather than holding a registry of its own. Two
+// reasons, both about answering for what this deployment is doing right
+// now: capabilityProviders is the one place a provider's deployment
+// configuration is assembled, so a check made through it cannot drift
+// from the mint a dispatch would make; and the answer follows a settings
+// change immediately, where a registry captured at startup would go on
+// checking the project an operator has since replaced. Construction
+// touches no network -- every provider here builds its client at call
+// time -- so the cost is a handful of structs per button press.
+//
+// The credential resolver is the daemon's own secrets store, the same
+// one orchestrator.Config.Credentials resolves a real Materialize
+// through. Nothing here reads a value back out to the caller: material
+// goes into a provider, and what comes back is a sentence about what the
+// far end said.
+type capabilityCheckAdapter struct {
+	live  *liveConfig
+	creds model.CredentialResolver
+}
+
+func (a capabilityCheckAdapter) CheckCapability(ctx context.Context, id string) (ui.CapabilityCheckResult, error) {
+	registry := model.NewCapabilityRegistry(capabilityProviders(a.live.current(), a.live.gitHubTokens())...)
+	provider, ok := registry.Lookup(id)
+	if !ok {
+		// An answer about this deployment rather than a fault:
+		// capabilityProviders registers gcp-key and gemini-key only once
+		// a GCP project (and, for gcp-key, an agent service account) is
+		// set, so the honest reply is that there is nothing configured
+		// here to check -- which is what the pane's own "Needs:" line
+		// beside this already says.
+		return ui.CapabilityCheckResult{}, fmt.Errorf(
+			"this deployment registers no provider for %q, so there is nothing to test: "+
+				"it is not configured (Settings -> Capabilities) in this build", id)
+	}
+	checker, ok := provider.(model.CredentialChecker)
+	if !ok {
+		return ui.CapabilityCheckResult{}, fmt.Errorf("capability %q has no credential to test", id)
+	}
+	check, err := checker.CheckCredential(ctx, a.creds)
+	// The result is carried out even alongside an error: Credentials is
+	// filled in from the provider's own Requires before the call is
+	// made, and a refusal's whole remedy is "replace what is in that
+	// secret" -- see ui.CapabilityCheck.Credentials.
+	return ui.CapabilityCheckResult{Credentials: check.Credentials, Detail: check.Detail}, err
 }
 
 // hostDisk is one filesystem hostStats reports a figure for: a path to

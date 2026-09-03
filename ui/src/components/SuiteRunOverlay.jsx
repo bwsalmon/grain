@@ -4,7 +4,7 @@ import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
 
-// SuiteRunOverlay starts a task suite running against a repo and branch
+// SuiteRunOverlay starts a suite running against a repo and branch
 // (bwsalmon/agents#642's own "run the template against a repo and
 // branch") -- opened from a suite row's own "Run" action, with that
 // suite preselected but still changeable, since a suite is meant to be
@@ -31,7 +31,7 @@ export default function SuiteRunOverlay({ suites, suiteId, repoOptions, onClose,
 
   return (
     <Overlay onClose={onClose}>
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Run a task suite</Typography>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Run a suite</Typography>
       <form onSubmit={submit}>
         <FormControl fullWidth margin="normal" size="small">
           <InputLabel id="suite-run-suite-label">Suite</InputLabel>

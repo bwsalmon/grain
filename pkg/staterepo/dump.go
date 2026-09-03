@@ -218,6 +218,50 @@ func Import(ctx context.Context, db *sql.DB, dir string) error {
 	if err != nil {
 		return err
 	}
+	return importInto(ctx, db, dir, tables)
+}
+
+// ImportTables is Import over a named subset: the rows of those tables
+// are replaced by what dir holds and every other table is left exactly
+// as it is.
+//
+// This is what makes a merged change applicable to a daemon that is
+// already running (Apply, in bind.go). A whole-database Import cannot
+// be: it clears task and task_run too, underneath a reconcile loop
+// holding the very ids it is deleting. A subset that names only tables
+// the daemon does not write for itself can be, and is replacement
+// within that subset for exactly the reason Import is replacement
+// overall -- a merge that deleted a template has to delete it here.
+//
+// A name no table in db has is skipped rather than refused, the same
+// way importTable treats a file the dump does not have: the set of
+// settings tables is a constant in this package, and a build whose
+// schema does not have one of them yet must not fail to import the
+// rest.
+func ImportTables(ctx context.Context, db *sql.DB, dir string, tables []string) error {
+	present, err := tableNames(ctx, db)
+	if err != nil {
+		return err
+	}
+	has := map[string]bool{}
+	for _, t := range present {
+		has[t] = true
+	}
+	var wanted []string
+	for _, t := range tables {
+		if has[t] {
+			wanted = append(wanted, t)
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	return importInto(ctx, db, dir, wanted)
+}
+
+// importInto is Import's and ImportTables' shared body: clear the named
+// tables and refill them from the dump, all in one transaction.
+func importInto(ctx context.Context, db *sql.DB, dir string, tables []string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

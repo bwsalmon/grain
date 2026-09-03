@@ -241,16 +241,16 @@ day-of-month field added for monthly).
 Still open, unchanged from before: no CLI, and no per-schedule approval
 gate.
 
-## Update: task templates (bwsalmon/agents#516)
+## Update: templates (bwsalmon/agents#516)
 
 A schedule's own content -- title, description, target repo, base
 branch, auto-merge, read-only repos, and capabilities -- used to exist
 only inline on the schedule itself, one copy per schedule with no way to
-share it. `TaskTemplate` (`pkg/model/template.go`) is that content pulled
-out into its own store row, `task_template` plus its own `task_template_
-read`/`task_template_grant` child tables (`SchemaVersion` 11 → 12), so
-more than one schedule can point at the same declaration -- and, per this
-issue's own framing ("we will add more places to use them in the
+share it. `Template` (`pkg/model/template.go`) is that content pulled
+out into its own store row, `template` plus its own
+`template_read`/`template_grant` child tables (`SchemaVersion` 11 → 12),
+so more than one schedule can point at the same declaration -- and, per
+this issue's own framing ("we will add more places to use them in the
 future"), so a later caller beyond schedules has somewhere to point too,
 without this type or its store surface changing shape for that caller.
 
@@ -275,7 +275,7 @@ rather than blanking it out.
 
 **Resolved fresh at firing time, not copied in once.**
 `orchestrator.fireTaskSchedule` re-reads a template-backed schedule's
-`TaskTemplate` from the store on every firing rather than trusting
+`Template` from the store on every firing rather than trusting
 `Schedule`'s own inline columns, so editing a template changes what
 every schedule pointing at it files *next*, with no separate "push the
 edit out" step -- the entire reason a template is worth having over
@@ -285,8 +285,8 @@ firing writes the template's current content back onto them, so
 and the rest with no join, and a template deleted or otherwise
 unresolvable out from under a schedule fails that one firing with a
 plain error (`reconcileSchedule`'s own "one schedule failing does not
-stop the others" tolerance already covers this) rather than filing a task
-with no content.
+stop the others" tolerance already covers this) rather than filing a
+task with no content.
 
 **Deleting a template in use is refused, not silently orphaning.**
 `Store.SchedulesUsingTemplate` is what `ui.Client.DeleteTemplate` checks
@@ -404,27 +404,27 @@ button.
 
 ## Update: templates carry no target repo or branch (bwsalmon/agents#516 revisited)
 
-`TaskTemplate` (`pkg/model/template.go`) originally carried Target and
-Base alongside Title/Body/AutoMerge/Reads/Grants -- the earlier "Update:
-task templates" section above documents `ui.CreateScheduleRequest`/
+`Template` (`pkg/model/template.go`) originally carried Target and Base
+alongside Title/Body/AutoMerge/Reads/Grants -- the earlier "Update:
+templates" section above documents `ui.CreateScheduleRequest`/
 `UpdateScheduleRequest` treating a `templateId` as taking over Repo/Base
 along with everything else. That was wrong for the same reason a
-qualification plan and a task suite were already built the other way:
-`QualificationPlan.Repo` and `TaskSuiteRun.Target`/`Base` decide what
-those two mechanisms target, never a template's own fields -- a template
-is reusable content, and which repo and branch a firing targets is a
+qualification plan and a suite were already built the other way:
+`QualificationPlan.Repo` and `SuiteRun.Target`/`Base` decide what those
+two mechanisms target, never a template's own fields -- a template is
+reusable content, and which repo and branch a firing targets is a
 property of *how* it is used, not of the reusable content itself.
 Schedules were the one caller that had a template override it anyway,
 and it never generalized: `CreateQualificationRun` always targeted
 `candidate.Repo`/`candidate.Branch`, whatever `tmpl.Target` said, and
 only failed a run outright if the two happened to disagree.
 
-`task_template` drops `target_owner`/`target_name`/`base`
-(`ensureTaskTemplateNoTargetColumns`, the same probe-then-`ALTER TABLE`
+`template` drops `target_owner`/`target_name`/`base`
+(`ensureTemplateNoTargetColumns`, the same probe-then-`ALTER TABLE`
 approach every other migration in `store.go` uses, in the direction
 `ensureConfigMaxConcurrentColumn`'s own `slots` removal already goes:
 probe for the old columns' presence, then drop them, since they are
-`NOT NULL` and `PutTaskTemplate` stops supplying them). `ui.Template`/
+`NOT NULL` and `PutTemplate` stops supplying them). `ui.Template`/
 `CreateTemplateRequest`/`UpdateTemplateRequest` drop `Repo`/`Base` to
 match.
 
@@ -440,25 +440,23 @@ targets, template-backed or not. `ui.PutQualificationPlan` and
 same repo" check along with it -- there is no longer a template-side
 Target to check against.
 
-No change to suites: `TaskSuite`/`TaskSuiteRun`/`fireSuitePass` never
-read a template's Target or Base to begin with (`model.TaskSuiteItem`'s
-own doc comment already says a suite resolves each item's template
-content only), so `SuiteOverlay.jsx`/`SuiteRunOverlay.jsx` needed no
-behavioural change -- only the template picker's secondary text
-(`t.repo`) and `RepoReleases.jsx`'s "templates already declared for this
-repo" filter, both of which assumed a field that no longer exists, come
-out.
+No change to suites: `Suite`/`SuiteRun`/`fireSuitePass` never read a
+template's Target or Base to begin with (`model.SuiteItem`'s own doc
+comment already says a suite resolves each item's template content
+only), so `SuiteOverlay.jsx`/`SuiteRunOverlay.jsx` needed no behavioural
+change -- only the template picker's secondary text (`t.repo`) and
+`RepoReleases.jsx`'s "templates already declared for this repo" filter,
+both of which assumed a field that no longer exists, come out.
 
 
-## Update: a schedule can run a task suite, not only file a task
+## Update: a schedule can run a suite, not only file a task
 
-A task suite (`docs/design.md`, `pkg/model/suite.go` --
-bwsalmon/agents#642) was runnable only by hand: a human picks a suite, a
-repo and a branch, and `ui.Client.CreateSuiteRun` starts one run. The
-recurring-chore case this whole document is about wanted the other half
--- "sweep this branch for bugs every night", not "sweep it when I
-remember to click Run" -- so a schedule now fires either of the two
-things grain knows how to start.
+A suite (`docs/design.md`, `pkg/model/suite.go` -- bwsalmon/agents#642)
+was runnable only by hand: a human picks a suite, a repo and a branch,
+and `ui.Client.CreateSuiteRun` starts one run. The recurring-chore case
+this whole document is about wanted the other half -- "sweep this branch
+for bugs every night", not "sweep it when I remember to click Run" -- so
+a schedule now fires either of the two things grain knows how to start.
 
 **One schedule type, not a second parallel mechanism.**
 `Schedule.SuiteID` (`pkg/model/schedule.go`) sits beside the
@@ -478,26 +476,27 @@ copy. `orchestrator.fireSchedule` is the whole of the fork --
 for the timing half both need.
 
 **Idempotency is an active run, not an open task.** A schedule filing a
-task checks `Store.HasOpenTaskWithTag` for its own firing tag; a schedule
-running a suite checks `Store.HasActiveRunForSchedule`, since a firing
-there is a whole run over as many passes as the suite's mode asks for,
-not one task. `task_suite_run.schedule_id` is what that reads (NULL for a
-run a human started, which is also how a database created before this
-migrates -- `ensureTaskSuiteRunScheduleColumn`, the same
+task checks `Store.HasOpenTaskWithTag` for its own firing tag; a
+schedule running a suite checks `Store.HasActiveRunForSchedule`, since a
+firing there is a whole run over as many passes as the suite's mode asks
+for, not one task. `suite_run.schedule_id` is what that reads (NULL for
+a run a human started, which is also how a database created before this
+migrates -- `ensureSuiteRunScheduleColumn`, the same
 probe-then-`ALTER TABLE` approach as every other migration in
-`store.go`). Both checks have the same consequence: a suppressed firing
-leaves `NextRunAt` where it was, so it is delayed rather than skipped.
+`store.go`). Both checks
+have the same consequence: a suppressed firing leaves `NextRunAt` where
+it was, so it is delayed rather than skipped.
 
 **Resolved fresh at firing time.** `fireSuiteSchedule` re-reads the
-`TaskSuite` on every firing, exactly as `fireTaskSchedule` re-reads a
-`TaskTemplate`, so editing a suite changes what every schedule pointing
-at it runs *next*, with no push step; the schedule's own `Title` is kept
-in sync with the suite's name as a display cache the same way. A suite
+`Suite` on every firing, exactly as `fireTaskSchedule` re-reads a
+`Template`, so editing a suite changes what every schedule pointing at
+it runs *next*, with no push step; the schedule's own `Title` is kept in
+sync with the suite's name as a display cache the same way. A suite
 deleted out from under a schedule fails that one firing with a plain
-error rather than starting a run of nothing --
-`ui.Client.DeleteSuite` refuses the delete in the first place
-(`Store.SchedulesUsingSuite`), `DeleteTemplate`'s own guard applied to
-the other thing a schedule can point at.
+error rather than starting a run of nothing -- `ui.Client.DeleteSuite`
+refuses the delete in the first place (`Store.SchedulesUsingSuite`),
+`DeleteTemplate`'s own guard applied to the other thing a schedule can
+point at.
 
 **What a schedule fires is fixed when it is created.**
 `ui.UpdateScheduleRequest.SuiteID` repoints a suite-backed schedule at a
@@ -579,7 +578,7 @@ store and the schema still said *scheduled task* —
 `model.ScheduledTask`, `Store.PutScheduledTask`, the `scheduled_task`
 table — and so did the two labels a human actually reads, the sidebar
 entry and the list heading. The older name is also actively wrong now: a
-schedule has fired a whole task suite rather than a single task since the
+schedule has fired a whole suite rather than a single task since the
 update above, so "scheduled task" names one of the two things it does.
 
 So: one name, the shorter one. `model.Schedule`, `Store.PutSchedule`/
@@ -623,3 +622,84 @@ filed automatically by a schedule.
 Tests: `pkg/model/sqlite/schedule_store_test.go` gains a database built
 under the old four table names, checking `Init` carries the row, its
 reads and grants, and the sequence position onto the new ones.
+
+## Update: "task templates" and "task suites" are just templates and suites
+
+The same double naming the section above unpicked for schedules was
+still there twice over, on the two mechanisms that section leans on.
+Most of both already said *template* and *suite*: `/api/templates` and
+`/api/suites`, `pkg/ui/templates.go` and `pkg/ui/suites.go` with their
+own `Template` and `Suite`, `TemplatesList.jsx`/`SuitesList.jsx`, the
+`template-` and `suite-` id prefixes, this document's own prose. The
+model, the store and the schema still said *task template* and *task
+suite* -- `model.TaskTemplate`, `model.TaskSuite`,
+`Store.PutTaskTemplate`, `Store.CreateTaskSuiteRun`, the `task_template`
+and `task_suite` tables -- and so did the two sidebar entries and the
+list headings a human actually reads.
+
+The longer names were also saying something untrue. A template is not a
+template *of a task*: it is reusable content that a schedule fires as a
+task, a qualification plan runs against a candidate, and a suite runs as
+one of its items -- `model.Template`'s own doc comment has said "more
+callers are expected to arrive later" since it was written. A suite is
+not a suite *of tasks* either; it is a suite of templates, which is what
+a run turns into tasks a pass at a time.
+
+So: one name each, the shorter one. `model.Template` and `model.Suite`,
+with `SuiteItem`/`SuiteMode`/`SuiteRun`/`SuiteRunStatus`/
+`SuiteTaskStatus` and the `SuiteCount`/`SuiteUntilClean`/`SuiteRun*`
+constants following; `Store.NewTemplateID`/`PutTemplate`/`GetTemplate`/
+`ListTemplates`/`UpdateTemplate`/`DeleteTemplate`, and
+`Store.NewSuiteID`/`PutSuite`/`GetSuite`/`ListSuites`/`UpdateSuite`/
+`DeleteSuite`/`SuitesUsingTemplate`/`CreateSuiteRun`/`GetSuiteRun`/
+`ListSuiteRuns`/`ActiveSuiteRuns`/`CompleteSuiteRun`;
+`orchestrator.SyncTaskSuites` becomes `SyncSuites`. The sidebar's "Task
+templates" and "Task suites" entries and the two list headings become
+"Templates" and "Suites".
+
+The tables move with it: `task_template`, `task_template_sequence`,
+`task_template_read` and `task_template_grant` become `template`,
+`template_sequence`, `template_read` and `template_grant` (with the
+child tables' `task_template_id` column becoming `template_id`), and
+`task_suite`, `task_suite_sequence`, `task_suite_item`, `task_suite_run`,
+`task_suite_run_item` and `task_suite_run_task` become `suite`,
+`suite_sequence`, `suite_item`, `suite_run`, `suite_run_item` and
+`suite_run_task`. A database written before this migrates in place --
+`Store.renameTemplateAndSuiteTables`, `renameScheduleTables`' own shape
+right down to running before `Init` applies the DDL, being guarded step
+by step on the old name being present and the new one absent, and
+bumping no `SchemaVersion`.
+
+One thing that rename did not have to deal with: SQLite carries an index
+across `ALTER TABLE ... RENAME` under its *own* old name, which no
+`CREATE INDEX IF NOT EXISTS` in `Statements()` would ever match. The
+five suite indexes are therefore dropped rather than renamed, and the
+DDL immediately after creates them again under the names `schema.go`
+declares -- including the unique one on `suite_run_task.task_id`, which
+is load-bearing rather than cosmetic.
+
+`model.SuitePrincipal`, the automation actor a run attributes the tasks
+it files to, was `task-suite` and is now `suite` --
+`QualificationPrincipal`'s own `qualification` is the shape it matches.
+That one is a value in rows rather than a name in the schema, so
+`Store.renameSuitePrincipal` carries existing tasks across with a plain
+`UPDATE` of the two columns a run ever writes that actor to (a task's
+origin, and the approval a run stamps on the tasks it files itself),
+narrowed to rows whose kind is automation and whose id is exactly the
+old string.
+
+Nothing about behaviour changes, and neither does the wire format: the
+REST surface was already `/api/templates` and `/api/suites` with
+`pkg/ui`'s own JSON field names, and both id prefixes were already
+`template-` and `suite-`, so no client sees this at all. What stays
+"task" is what genuinely describes a task: `model.ReasonSuite`, the task
+list's `suite` chip, and `ui.Task.SuiteRun` all still name a task filed
+automatically by a suite run.
+
+Tests: `pkg/model/sqlite/template_store_test.go` and
+`suite_store_test.go` each gain a database built under the old table
+names, checking `Init` carries every row, child row and sequence
+position onto the new ones -- and, for suites, that the run's own tasks
+and the unique index over them come across too. A third test seeds a
+task carrying the old `task-suite` actor and checks `Init` brings it
+onto `suite`.

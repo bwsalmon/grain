@@ -386,6 +386,51 @@ func (c *Capability) Reap(ctx context.Context, creds model.CredentialResolver, n
 	return deleteExpired(ctx, m, now, maxLease, c.Credential.Name)
 }
 
+// CheckCredential implements model.CredentialChecker: it authenticates
+// as the standing minter credential and lists the project's API keys,
+// the same call Reap already makes, and reports what came back.
+//
+// This capability shares gcp-key's minter credential
+// (cmd/grain/daemon.go hands New the same gcpkey.DefaultMinterCredential),
+// so it goes stale in exactly the same way and at exactly the same
+// moment -- which is why it is checkable here rather than left as a
+// gcp-key special case. What it adds over checking gcp-key alone is the
+// second thing only this API can answer: whether apikeys.googleapis.com
+// is enabled and the minter may administer keys in it, the pair of 403s
+// advise exists to tell apart. A deployment can hold a perfectly live
+// minter key and still fail every Gemini mint on that.
+//
+// The listing is project-wide, since an API key hangs off no account to
+// scope it to (see Reap); nothing is created and nothing is deleted.
+func (c *Capability) CheckCredential(ctx context.Context, creds model.CredentialResolver) (model.CredentialCheck, error) {
+	check := model.CredentialCheck{Credentials: []string{c.Credential.Name}}
+	if c.ProjectID == "" || c.Credential.Name == "" {
+		return check, fmt.Errorf(
+			"geminikey: this deployment has no GCP project and minter credential set, so " +
+				"there is nothing to check (Settings -> Capabilities, or `grain settings " +
+				"-gcp-project <project>`)")
+	}
+	m, err := c.minterFor(ctx, creds)
+	if err != nil {
+		return check, err
+	}
+	keys, err := m.ListKeys(ctx)
+	if err != nil {
+		return check, fmt.Errorf("geminikey: listing keys: %w",
+			advise(c.ProjectID, explainRefusedCredential(err, c.Credential.Name)))
+	}
+	var mine int
+	for _, k := range keys {
+		if strings.HasPrefix(k.DisplayName, displayNamePrefix) {
+			mine++
+		}
+	}
+	check.Detail = fmt.Sprintf(
+		"GCP accepted the key held in `%s` and listed %d API key(s) in project %s, %d of them grain's.",
+		c.Credential.Name, len(keys), c.ProjectID, mine)
+	return check, nil
+}
+
 // MintOperatingKey mints the daemon's own long-lived Gemini API key --
 // the credential pkg/agent/antigravity runs as, distinct from the per-task
 // keys Materialize mints -- authenticating with the credential named
