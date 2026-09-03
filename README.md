@@ -2154,6 +2154,63 @@ set, where a failed materialize reads as `materializing capabilities:
 geminikey: resolving credential ...` — grain describing its own
 internals.
 
+### Debugging `gcp-key`: a diagnosis that was confidently wrong
+
+"Attempting to add a gcp key fails tasks." Same shape as `gemini-key`
+above, and the picker half of that fix already covers this capability —
+`GET /api/config` carries `ready` and `needs` for every row, and
+`gcp-key` needs one thing more than `gemini-key` does, an agent service
+account for keys to be minted *for*, which `capabilityProviders` also
+gates on. What was left was everything this capability says once it has
+been ticked, and each of those sentences was wrong in a different way.
+
+`Resolve`'s refusal — the text posted to the task verbatim, which is the
+whole reason a refusal carries prose rather than a code — told an
+operator to run `grain controller configure
+--gcp-agent-service-account-email <email> --gcp-project-id <project>`.
+No build of grain has ever had that command or those flags; the real
+ones are `grain settings -gcp-project -gcp-agent-service-account`, and
+the same pair of fields sits on Settings → Capabilities. It opened by
+telling them their *issue* carries a label, from a version of grain with
+neither issues nor labels left in it. And it never fired for the missing
+`gcp-key-minter` secret at all: that arrived a moment later as
+`materializing capabilities: gcpkey: resolving minter credential ...`,
+grain describing its own internals in the place a task's own comment
+should have named the secret to paste and the pane to paste it into.
+`Resolve` now refuses for that too, the way `geminikey.Resolve` already
+did.
+
+The one no configuration pane can see is in GCP, and here grain was not
+merely unhelpful but confidently wrong. Creating a service-account key
+can fail as a `FAILED_PRECONDITION`, and `explainCreateFailure` answered
+*every* one of those with the key-quota explanation
+(bwsalmon/agents#140, where a per-retry leak really did fill a project's
+10-key cap in minutes). The far more likely cause on a project set up
+since is the organization policy
+`constraints/iam.disableServiceAccountKeyCreation`, which forbids
+user-managed service-account keys outright and is enforced by default in
+organizations created since 2024. An operator whose org forbids keys was
+being told — with a count of **0** in the same sentence — that keys were
+being created faster than grain releases them, and sent looking for a
+leak that does not exist, in the one case where nothing about grain can
+help. The key count decides it now: the quota explanation is given only
+when the account is actually at the cap, and otherwise the constraint is
+named. The three other ways a half-set-up project refuses a mint get
+their own sentence too — `iam.googleapis.com` never enabled, a minter
+holding no `roles/iam.serviceAccountKeyAdmin` on the agent account, and
+a service account email that names nothing in this project — each with
+the command or the pane that fixes that one, and each wrapping GCP's own
+message rather than replacing it.
+
+`iamMinter`, like `apiKeysMinter` before it, is the code that runs the
+moment somebody attaches this capability and was covered by nothing at
+all; it has tests now, against a fake IAM API. They found the same
+looks-like-success failure the Gemini side had: a key created with no
+private key material was base64-decoded to nothing, placed at
+`SandboxKeyPath`, and described to the agent as a working key. It is a
+failed mint now, and the useless key is deleted rather than left to
+count against the very cap above.
+
 ### The same set, per repo
 
 The ask task-14 came from also said "we will also want this to be
