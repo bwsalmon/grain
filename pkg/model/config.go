@@ -212,6 +212,29 @@ type Config struct {
 	// ApprovedByDefault -- CreateTaskRequest.AutoMerge, not this, is what
 	// a filed task actually gets.
 	AutoMergeByDefault bool
+	// EnvironmentName is what this deployment is called, for whoever is
+	// looking at it: "staging", "dev", a hostname, anything. Empty, the
+	// default, means an unnamed deployment and the UI shows nothing at
+	// all -- the shape grain has always had, and the right one for an
+	// operator running a single deployment who has nothing to tell it
+	// apart from.
+	//
+	// It names nothing the daemon itself does: no dispatch, no sandbox,
+	// no credential is chosen by it, and nothing outside the UI reads it.
+	// It exists for the one failure a single-operator cluster invites --
+	// approving, merging or rebooting on the deployment you thought was
+	// the other one -- which is a question of what the screen says, not
+	// of what the daemon enforces. A deployment that should refuse to
+	// touch a repo wants TargetRepos above; this is a label.
+	//
+	// Free text, deliberately, rather than an enum of "staging"/"prod":
+	// what environments a deployment sits among is the operator's own
+	// vocabulary, and grain has no list of them to validate against.
+	// ui.UpdateSettings bounds its length so it can be rendered somewhere
+	// prominent without a paragraph pasted in taking the pane over, and
+	// trims it so a stray space is not the difference between named and
+	// unnamed.
+	EnvironmentName string
 	// DefaultCapabilities is the set of capability ids a new task is
 	// filed holding, by id -- the deployment-wide answer to "what should
 	// every task here start out able to do", and the reason gcp-key need

@@ -1766,8 +1766,8 @@ The rest were already read per cycle or per dispatch, or gained it here:
 `dispatchConfig` re-reads `agent-framework`, `gemini-model` and
 `claude-model` when a run's framework is built (which is per dispatch,
 for the same reason the credential is); and `target-repos`,
-`newest-first` and the three "by default" toggles are read out of the
-store by `pkg/ui` on the request that needs them. What a change costs is
+`newest-first`, `environment-name` and the three "by default" toggles are
+read out of the store by `pkg/ui` on the request that needs them. What a change costs is
 therefore at most one poll interval, and nothing already in flight is
 disturbed: `Deps` is copied per cycle and per dispatch, so a run keeps
 the registry and the caps it started under.
@@ -1791,6 +1791,40 @@ saved but not yet running; `grain settings` prints the same thing as a
 closing line. `restartOnlySettings` in `pkg/ui/settings.go` is the one
 list both ends read, so a setting cannot be applied live *and* annotated,
 nor left needing a restart in silence.
+
+### Telling one deployment from another
+
+`model.Config.EnvironmentName` (grain/task-69) is a name an operator
+gives a deployment — "staging", "dev", a hostname — and it is the only
+setting here that changes nothing the daemon does. Nothing dispatches,
+sandboxes, or authenticates differently because of it; `pkg/ui` is the
+only thing that reads it at all.
+
+It exists for the one mistake a single-operator cluster invites. Two
+deployments of grain are pixel-identical: the same sidebar, the same task
+list, the same Merge and Approve and reboot buttons, and nothing on
+screen saying which store is behind them. Approving on the wrong tab is
+therefore a mis-click rather than a mistake anyone could have caught, and
+no amount of `target-repos` fixes it — that setting refuses a repo, while
+this one answers "which deployment am I looking at" *before* the click.
+
+So it is a label, and rendered like one: a warning-coloured badge beside
+the grain mark in the sidebar (`Sidebar.jsx`, on screen in every view),
+and the same name in front of the browser tab's own title (`App.jsx` —
+first, not last, because a narrow tab truncates its title from the end
+and `grain — sta…` would say nothing this is for). Empty, the default and
+what every deployment upgrading across this reads back, draws neither:
+an operator running one deployment has nothing to be told apart from, and
+grain's own shape is the one it has always had.
+
+It rides on `GET /api/config` as well as `GET /api/settings`, unlike most
+of what the Settings pane edits: the frontend needs it on first paint, on
+every view, and `/api/config` is the one call `App.jsx` makes before it
+renders anything. Free text, since what environments a deployment sits
+among is the operator's own vocabulary and grain has no list to validate
+against — `ui.UpdateSettings` only trims it (so a stray space is not the
+difference between named and unnamed) and bounds it to 32 runes with no
+line breaks, which is what it takes for a badge to stay a badge.
 
 ### A capability can be ready and still ungrantable
 

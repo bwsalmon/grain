@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/model"
@@ -98,6 +99,20 @@ type Settings struct {
 	// has it to seed that toggle with before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// EnvironmentName is model.Config's own field of the same name: what
+	// this deployment is called on screen ("staging", "dev", whatever an
+	// operator running more than one of these needs to tell them apart).
+	// Empty is an unnamed deployment, and the UI shows nothing for it.
+	// Also mirrored onto GET /api/config (configResponse, tasks.go) the
+	// same way ShowClosedByDefault is, since the frontend needs it on
+	// first paint rather than only once Settings has been opened.
+	//
+	// Deliberately not omitempty, like DefaultCapabilities and
+	// PendingRestart above: the frontend merges an update response over
+	// the settings it already has, so a name cleared back to nothing has
+	// to arrive as present-and-empty rather than as an absent key leaving
+	// the old one on screen.
+	EnvironmentName string `json:"environmentName"`
 	// Capabilities is every capability grain ships a provider for, with
 	// this deployment's own readiness computed against it -- capability_
 	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
@@ -206,6 +221,13 @@ type Settings struct {
 	PendingRestart []string `json:"pendingRestart"`
 }
 
+// maxEnvironmentNameLen bounds Settings.EnvironmentName, in runes. The
+// name is rendered as a badge in the sidebar and appended to the
+// browser tab's title, neither of which has room for prose: this is
+// generously above every real answer ("staging", "dev", "bwsalmon-prod")
+// and far below a paste that would take the chrome over.
+const maxEnvironmentNameLen = 32
+
 // restartOnlySetting is one setting a running daemon cannot pick up on
 // its own, and how to tell whether a stored value for it differs from
 // the one actually in effect.
@@ -311,6 +333,7 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		SandboxCPUsDefault:            kontur.DefaultCPUs,
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
+		EnvironmentName:               cfg.EnvironmentName,
 		Capabilities:                  c.capabilityStatuses(cfg, repoConfigs),
 		DefaultCapabilities:           cfg.DefaultCapabilities,
 		ApprovedByDefault:             cfg.ApprovedByDefault,
@@ -421,6 +444,7 @@ type UpdateSettingsRequest struct {
 	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
 	SandboxDiskGB          *int      `json:"sandboxDiskGb"`
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
+	EnvironmentName        *string   `json:"environmentName"`
 	ApprovedByDefault      *bool     `json:"approvedByDefault"`
 	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
 	AgentFramework         *string   `json:"agentFramework"`
@@ -445,10 +469,11 @@ type UpdateSettingsRequest struct {
 // already tells a caller that much on the way in, so writing a config
 // that could not be told apart from one somebody actually chose is worse
 // than asking for the field up front. MaxAgentTurns, GitHubInsecureHTTP,
-// GCPProject, GCPServiceAccountEmail and TargetRepos have real,
-// meaningful zero values (the framework's own default, HTTPS, "no GCP
-// capability configured", and "unrestricted" respectively -- daemon.go's
-// own flag defaults), so nothing here demands them.
+// GCPProject, GCPServiceAccountEmail, TargetRepos and EnvironmentName
+// have real, meaningful zero values (the framework's own default, HTTPS,
+// "no GCP capability configured", "unrestricted", and "this deployment
+// has no name" respectively -- daemon.go's own flag defaults), so
+// nothing here demands them.
 func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) (Settings, error) {
 	current, err := c.Store.GetConfig(ctx)
 	if err != nil {
@@ -576,6 +601,23 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	}
 	if req.ShowClosedByDefault != nil {
 		cfg.ShowClosedByDefault = *req.ShowClosedByDefault
+	}
+	if req.EnvironmentName != nil {
+		// Trimmed, so "  " and "" both store as the unnamed deployment
+		// they mean rather than as a name made of spaces that the UI
+		// would render as an empty badge.
+		name := strings.TrimSpace(*req.EnvironmentName)
+		if utf8.RuneCountInString(name) > maxEnvironmentNameLen {
+			return Settings{}, validationErrorf("environmentName cannot be longer than %d characters", maxEnvironmentNameLen)
+		}
+		// A control character here would be pasted straight into the
+		// badge the frontend renders; a newline in particular turns one
+		// line of chrome into two. There is no environment anyone names
+		// with one, so this is a refusal rather than a silent strip.
+		if strings.ContainsFunc(name, func(r rune) bool { return r == '\n' || r == '\r' || r == '\t' }) {
+			return Settings{}, validationErrorf("environmentName cannot contain line breaks or tabs")
+		}
+		cfg.EnvironmentName = name
 	}
 	if req.ApprovedByDefault != nil {
 		cfg.ApprovedByDefault = *req.ApprovedByDefault

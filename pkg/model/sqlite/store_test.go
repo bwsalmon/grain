@@ -1417,6 +1417,7 @@ func testConfig() model.Config {
 		SandboxMemoryMB:     8192,
 		SandboxDiskGB:       40,
 		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
+		EnvironmentName:     "staging",
 	}
 }
 
@@ -2398,6 +2399,72 @@ func TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities(t *testing.T) 
 	}
 	if !reflect.DeepEqual(got.DefaultCapabilities, want.DefaultCapabilities) {
 		t.Fatalf("DefaultCapabilities = %v, want %v", got.DefaultCapabilities, want.DefaultCapabilities)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingEnvironmentName is the same
+// pattern, applied to grain_config.environment_name (grain/task-69): a
+// database from before a deployment could be named gets the column added
+// by ensureConfigEnvironmentNameColumn, defaulted to '' -- an unnamed
+// deployment, whose UI looks exactly as it did before the upgrade until
+// an operator names it.
+func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-69 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-task-69 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.environment_name: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.EnvironmentName != "" {
+		t.Fatalf("EnvironmentName after migrating = %q, want empty", got.EnvironmentName)
+	}
+
+	// And writable afterwards, the same as every other added column:
+	// PutConfig binds this one, so naming the deployment after the
+	// upgrade is durable rather than failing every save.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.EnvironmentName != want.EnvironmentName {
+		t.Fatalf("EnvironmentName = %q, want %q", got.EnvironmentName, want.EnvironmentName)
 	}
 }
 

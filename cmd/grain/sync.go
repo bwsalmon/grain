@@ -168,6 +168,7 @@ func printSettingsDiff(before, after ui.Settings) {
 		afterValue  string
 	}
 	fields := []field{
+		{"environment name", before.EnvironmentName, after.EnvironmentName},
 		{"poll interval", before.PollInterval, after.PollInterval},
 		{"max concurrent", fmt.Sprint(before.MaxConcurrent), fmt.Sprint(after.MaxConcurrent)},
 		{"gemini model", before.GeminiModel, after.GeminiModel},

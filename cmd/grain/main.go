@@ -629,6 +629,15 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		"comma-separated owner/name list a task's repo may name -- empty allows any; replaces the whole list, where \"grain repo add\"/\"remove\" change one entry")
 	defaultCapabilities := fs.String("default-capabilities", "",
 		"comma-separated capability IDs every new task is filed holding -- empty files each task with only what it asks for")
+	// Settable from a shell, not only from the Settings pane, because
+	// naming a deployment is something scripts/setup.sh-style
+	// provisioning wants to do as it brings one up -- "grain settings
+	// -environment-name=staging" beside the rest of the deployment's
+	// configuration, rather than a browser trip afterwards. Empty clears
+	// it back to an unnamed deployment, the same way an empty
+	// -target-repos clears the allowlist.
+	environmentName := fs.String("environment-name", "",
+		"what this deployment is called in the UI, e.g. staging -- empty leaves it unnamed and shows nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -672,6 +681,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "sandbox-disk-gb":
 			v := *sandboxDiskGB
 			req.SandboxDiskGB = &v
+		case "environment-name":
+			v := *environmentName
+			req.EnvironmentName = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -792,6 +804,15 @@ func (p *printer) settings(s ui.Settings) {
 	if !s.Configured {
 		fmt.Println("not configured yet -- nothing here until a daemon starts, or a value is set")
 		return
+	}
+	// First line, and printed even when unset: "which deployment am I
+	// talking to" is the question every line under it is an answer for,
+	// and a CLI pointed at the wrong -server has no sidebar badge to
+	// give it away.
+	if s.EnvironmentName != "" {
+		fmt.Printf("environment:    %s\n", s.EnvironmentName)
+	} else {
+		fmt.Println("environment:    unnamed")
 	}
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
 	fmt.Printf("max concurrent: %d\n", s.MaxConcurrent)

@@ -86,6 +86,20 @@ describe("Sidebar", () => {
     expect(onSetView).toHaveBeenCalledWith("schedules");
   });
 
+  // grain/task-69: the deployment's own name, beside the wordmark, so a
+  // staging tab and a production tab are not pixel-identical. Nothing at
+  // all when the deployment is unnamed, which is grain's own shape for
+  // an operator running one of these.
+  it("shows the environment name beside the wordmark when one is configured", () => {
+    render(<Sidebar {...baseProps} config={{ environmentName: "staging" }} tasks={[]} />);
+    expect(screen.getByText("staging")).toBeInTheDocument();
+  });
+
+  it("shows no environment badge when the deployment is unnamed", () => {
+    render(<Sidebar {...baseProps} config={{ environmentName: "" }} tasks={[]} />);
+    expect(screen.queryByTitle(/^Environment:/)).not.toBeInTheDocument();
+  });
+
   // bwsalmon/agents#640: Logs and Sandbox health share the "Debugging"
   // nav entry rather than having one each of their own.
   it("does not show Logs or Sandbox health as their own nav entries", () => {
