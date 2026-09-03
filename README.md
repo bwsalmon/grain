@@ -41,7 +41,12 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
                 into that VM's own container -- see "Reaching a sandbox
-                guest without a route into it" below
+                guest without a route into it" below.
+                NewPullRequestTools adds pull_request_status: the one
+                tool here that really reads GitHub, from the controller,
+                so a run can see CI's verdict on the commits it pushed
+                and repair a red build inside its own turn budget -- see
+                "Letting a run watch its own CI" below
 pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
                 run's VM, the container names kontur derives from a VM
                 name, and the one `docker inspect` that tells a VM whose
@@ -1344,6 +1349,44 @@ upgrading across this change needs `agy` installed on the controller and
 otherwise keeps its existing `-gemini-api-key-file`, which `agy`
 authenticates with as `GEMINI_API_KEY` in the subprocess environment
 (never in argv).
+
+## Letting a run watch its own CI
+
+A run could always push more than once — the git proxy authorizes every
+push to the task's own target (`gitproxy/authorize.go`), and
+`ConfigureGitCredentials` leaves a working identity and credential helper
+behind — but it had no way to find out what CI made of a push. The
+checks were read minutes later by a different process
+(`SyncPullRequests`), and a red build became a whole separate fix task
+(`fileFixTask`), dispatched into a cold sandbox, to repair something the
+run that broke it was still sitting there able to repair.
+
+`pkg/mcp`'s `pull_request_status` closes that loop. It reports the branch
+tip, the pull request open for it if there is one, and every check run
+against the pushed commit with the failing ones named — enough for a run
+to push, look, fix and push again inside one dispatch.
+
+It does not reopen docs/design.md's split surface ("Sandboxes: git
+transport only. No REST, no GraphQL"). The tool is served by the
+`grain mcpserver` process, which runs on the *controller*, and reads
+GitHub with the controller's own `secrets/github` ladder — exactly the
+shape the `ask_question` escape hatch already had, and acceptable for the
+same reason: what crosses into the sandbox is a rendered answer, never a
+credential and never a general-purpose API call. The scope is fixed at
+process start from flags `cmd/grain/mcpserver.go` receives
+(`-pr-repo`/`-pr-branch`, written by each framework's `mcpServerArgs`
+from `agent.RunConfig`), and no tool argument can move it: a run reads CI
+for its own branch or nothing. The tool is registered whatever those
+flags said, so a task with no repo attached gets its own explanation
+rather than an "unknown tool" that reads like a broken grain.
+
+Two things had to be said out loud rather than left implicit. `BuildPrompt`
+now names the push/check/repair loop, because nothing about a tool
+description tells a run that it may push a second time and the sentences
+around it read like one final act. And an unfinished check is reported as
+carrying no verdict, never as passing — the same call `healthFrom` makes
+at the merge gate, made again here so a run that pushes and sees three
+queued jobs does not declare itself done.
 
 ## Reaching a sandbox guest without a route into it
 
