@@ -487,11 +487,12 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		return fmt.Errorf("orchestrator: recording run %s's sandbox: %w", d.RunID, err)
 	}
 
-	// A task's own SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534) is a
-	// create-time argument now rather than something applied to an
-	// already-built sandbox: this one is built for this run, so its size
-	// is decided once, here, and goes away with it.
-	shape := Shape{CPUs: task.SandboxCPUs, MemoryMB: task.SandboxMemoryMB}
+	// A task's own SandboxCPUs/SandboxMemoryMB/SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) is a create-time argument now
+	// rather than something applied to an already-built sandbox: this one
+	// is built for this run, so its size is decided once, here, and goes
+	// away with it.
+	shape := Shape{CPUs: task.SandboxCPUs, MemoryMB: task.SandboxMemoryMB, DiskGB: task.SandboxDiskGB}
 	sandbox, err := deps.Sandboxes.Acquire(ctx, sandboxName, shape)
 	if err != nil {
 		return fmt.Errorf("orchestrator: acquiring a sandbox for run %s: %w", d.RunID, err)

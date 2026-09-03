@@ -584,6 +584,184 @@ func (c *deletedBranchClient) ListCheckRuns(owner, repo, ref string) ([]github.C
 	return nil, &github.Error{Status: 404, Body: []byte("Not Found")}
 }
 
+// A push landing between the pull-request read and the check read is a
+// single instant between two sequential HTTP calls, and it used to be
+// enough to merge a commit nothing had run tests against: the checks came
+// back for the branch (so, for the new commit, which CI had not
+// registered for yet -- an empty list), while the window that decides
+// whether an empty list means "no CI here" was keyed on the *old* commit,
+// whose window had long since elapsed. Empty plus settled reads clean,
+// and clean at the head of a queue merges.
+//
+// Scoping the check read to the commit whose health is being decided
+// closes it: the checks, the verdict and the sighting all describe one
+// commit, and the commit that has just landed gets judged on its own CI
+// next cycle.
+func TestSyncEntryDoesNotMergeOnChecksReadForADifferentCommit(t *testing.T) {
+	restoreWindow := SetCheckRegistrationWindow(2 * time.Minute)
+	defer restoreWindow()
+
+	store, ctx, entry, heads := autoMergeQueueHead(t)
+	completedAt := *entry.obs.CompletedAt
+	client := &racingPushClient{tip: "aaaaaaa", checks: map[string][]github.CheckRun{}}
+
+	// A first cycle, with nothing reported against aaaaaaa yet: that
+	// starts its registration window, which is the sighting the bug then
+	// went on to read as an answer about another commit entirely.
+	if err := syncEntry(ctx, store, client, entry, heads, completedAt); err != nil {
+		t.Fatalf("syncEntry: %v", err)
+	}
+	if len(client.merges) != 0 {
+		t.Fatalf("merged before any CI had reported: %v", client.merges)
+	}
+
+	// CI registers for aaaaaaa and is still running. Meanwhile a push
+	// lands the instant the next cycle has read the pull request -- so
+	// this cycle's detail still names aaaaaaa, and the head branch
+	// already points at bbbbbbb, which no CI has reported for.
+	client.checks["aaaaaaa"] = []github.CheckRun{{Name: "ci", Status: "in_progress"}}
+	client.pushOnRead = "bbbbbbb"
+
+	if err := syncEntry(ctx, store, client, entry, heads, completedAt.Add(3*time.Minute)); err != nil {
+		t.Fatalf("syncEntry: %v", err)
+	}
+	if len(client.merges) != 0 {
+		t.Fatalf("merged %v with aaaaaaa's checks still running", client.merges)
+	}
+	if client.merged {
+		t.Fatal("merged a commit whose checks this cycle never read")
+	}
+
+	// The task is left exactly where it was -- still its repo's queue
+	// head, still open, waiting to be judged again next cycle.
+	st, err := store.State(ctx, entry.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateCompleted {
+		t.Fatalf("state = %q, want still completed", st)
+	}
+}
+
+// The registration window times an *empty* check list, so a cycle that
+// reads a full one has nothing left to time and drops the sighting --
+// exactly what forgetPendingChecks does for the other clock. Without
+// that, a commit's window could go on elapsing underneath check runs
+// that had long since registered, and be spent on some later emptiness
+// it was never started for.
+func TestSyncEntryForgetsTheEmptyChecksSightingOnceChecksRegister(t *testing.T) {
+	restoreWindow := SetCheckRegistrationWindow(2 * time.Minute)
+	defer restoreWindow()
+
+	store, ctx, entry, heads := autoMergeQueueHead(t)
+	completedAt := *entry.obs.CompletedAt
+	client := &racingPushClient{tip: "aaaaaaa", checks: map[string][]github.CheckRun{}}
+
+	// Nothing has reported yet: aaaaaaa's window starts here.
+	if err := syncEntry(ctx, store, client, entry, heads, completedAt); err != nil {
+		t.Fatalf("syncEntry: %v", err)
+	}
+	// CI registers, so there is no longer an empty list to be timing.
+	client.checks["aaaaaaa"] = []github.CheckRun{{Name: "ci", Status: "in_progress"}}
+	if err := syncEntry(ctx, store, client, entry, heads, completedAt.Add(time.Minute)); err != nil {
+		t.Fatalf("syncEntry: %v", err)
+	}
+	// And the list goes empty again on the same commit -- a check run
+	// deleted, a provider withdrawing one. That is a fresh emptiness,
+	// timed from now, not one two minutes old.
+	delete(client.checks, "aaaaaaa")
+	if err := syncEntry(ctx, store, client, entry, heads, completedAt.Add(3*time.Minute)); err != nil {
+		t.Fatalf("syncEntry: %v", err)
+	}
+	if len(client.merges) != 0 {
+		t.Fatalf("merged %v on a window that had been running under registered checks", client.merges)
+	}
+}
+
+// autoMergeQueueHead is the store, task and queue entry a syncEntry test
+// needs to be exercising the merge arm at all: one completed task with
+// /auto-merge on, at the head of its repo's queue, its pull request open.
+func autoMergeQueueHead(t *testing.T) (*model.Store, context.Context, queueEntry, map[string]string) {
+	t.Helper()
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	store := model.New(db)
+	ctx := context.Background()
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("applying schema: %v", err)
+	}
+
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	human := model.Principal{Kind: model.PrincipalHuman, ID: "alice"}
+	completedAt := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	task := model.Task{
+		ID: "t1", Intent: model.IntentImplement, Title: "fix the thing", Body: "please",
+		Origin:    model.Origin{Attribution: model.Attribution{Actor: human}, Reason: model.ReasonDirect},
+		Approval:  &model.Attribution{Actor: human},
+		Target:    &repo,
+		Binding:   model.BindingDirective,
+		AutoMerge: true,
+	}
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatalf("filing task: %v", err)
+	}
+	obs := model.Observation{TaskID: task.ID, CompletedAt: &completedAt}
+	if err := store.Observe(ctx, obs); err != nil {
+		t.Fatalf("recording completion: %v", err)
+	}
+
+	entry := queueEntry{task: task, obs: &obs, ref: model.PullRequestRef{Repo: repo, Number: 7}}
+	return store, ctx, entry, map[string]string{repo.String(): task.ID}
+}
+
+// racingPushClient is GitHub with a push landing mid-cycle: the tip moves
+// the instant the pull request has been read, which is the gap between
+// syncEntry's own GetPullRequest and everything it does next.
+//
+// Its check runs are keyed by commit, as GitHub's own are -- the point of
+// the test being that reading them for the wrong commit is what merged
+// untested code -- and its merge honours the head sha the caller pins,
+// answering 409 for a branch that has moved.
+type racingPushClient struct {
+	github.Client
+	tip        string
+	pushOnRead string
+	checks     map[string][]github.CheckRun
+	merges     []string
+	merged     bool
+}
+
+func (c *racingPushClient) GetPullRequest(owner, repo string, number int) (github.PullRequestDetail, error) {
+	mergeable := true
+	detail := github.PullRequestDetail{
+		State: "open", HeadRef: "grain/t1", BaseRef: "main",
+		HeadSHA: c.tip, Mergeable: &mergeable,
+	}
+	if c.merged {
+		detail.State, detail.Merged = "closed", true
+	}
+	if c.pushOnRead != "" {
+		c.tip, c.pushOnRead = c.pushOnRead, ""
+	}
+	return detail, nil
+}
+
+func (c *racingPushClient) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error) {
+	return c.checks[ref], nil
+}
+
+func (c *racingPushClient) MergePullRequest(owner, repo string, number int, headSHA string) error {
+	c.merges = append(c.merges, headSHA)
+	if headSHA != "" && headSHA != c.tip {
+		return &github.Error{Status: 409, Body: []byte("Head branch was modified")}
+	}
+	c.merged = true
+	return nil
+}
+
 // --- checks the credential cannot read ----------------------------------
 
 // The dangerous reading of an unreadable Checks API is "no checks came
@@ -778,6 +956,37 @@ func TestCheckRunsForDoesNotReachForTheFallbackWhenChecksWork(t *testing.T) {
 	}
 }
 
+// The Checks read is scoped to the commit for the same reason the
+// Actions fallback already is. The Checks API takes a branch name
+// happily, and answers for whatever that branch points at now -- so a
+// push landing between the caller's GetPullRequest and this read would
+// hand back one commit's checks to a caller deciding another commit's
+// health.
+func TestCheckRunsForAsksForTheHeadSHANotTheBranch(t *testing.T) {
+	client := &checkRunsClient{checks: []github.CheckRun{{Name: "build", Status: "completed"}}}
+	if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	if client.checksRefSaw != "deadbeef" {
+		t.Errorf("the Checks read asked for %q, want the head sha deadbeef", client.checksRefSaw)
+	}
+}
+
+// The one case with no commit to name: GitHub fills the head sha in
+// asynchronously, so a PR read can arrive without one. A branch-scoped
+// read beats no CI signal at all there, and nothing downstream can
+// conclude much from it anyway -- emptyChecksSettled refuses to settle an
+// empty list with no head sha.
+func TestCheckRunsForFallsBackToTheBranchWithNoHeadSHA(t *testing.T) {
+	client := &checkRunsClient{checks: []github.CheckRun{{Name: "build", Status: "completed"}}}
+	if _, _, err := checkRunsFor(client, testPullRequestRef(), "head-branch", ""); err != nil {
+		t.Fatal(err)
+	}
+	if client.checksRefSaw != "head-branch" {
+		t.Errorf("the Checks read asked for %q, want the branch head-branch", client.checksRefSaw)
+	}
+}
+
 func TestCheckRunsForPassesASuccessfulReadThrough(t *testing.T) {
 	client := &checkRunsClient{checks: []github.CheckRun{{Name: "build", Status: "completed"}}}
 	checks, known, err := checkRunsFor(client, testPullRequestRef(), "head-branch", "deadbeef")
@@ -808,8 +1017,9 @@ func testPullRequestRef() model.PullRequestRef {
 // The tests that mean "no CI signal at all" set both.
 type checkRunsClient struct {
 	github.Client
-	checks []github.CheckRun
-	err    error
+	checks       []github.CheckRun
+	err          error
+	checksRefSaw string
 
 	workflowRuns   []github.CheckRun
 	workflowErr    error
@@ -817,6 +1027,7 @@ type checkRunsClient struct {
 }
 
 func (c *checkRunsClient) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error) {
+	c.checksRefSaw = ref
 	if c.err != nil {
 		return nil, c.err
 	}

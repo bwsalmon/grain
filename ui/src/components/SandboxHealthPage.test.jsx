@@ -32,23 +32,35 @@ describe("SandboxHealthPage", () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
-  it("shows the host's load average and memory", async () => {
+  it("shows the host's load average, memory and disk", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
       sandboxes: [],
-      host: { loadAverage1: 0.5, loadAverage5: 0.4, loadAverage15: 0.3, memoryUsedMB: 512, memoryTotalMB: 1024 },
+      host: {
+        loadAverage1: 0.5,
+        loadAverage5: 0.4,
+        loadAverage15: 0.3,
+        memoryUsedMB: 512,
+        memoryTotalMB: 1024,
+        diskUsedMB: 4096,
+        diskTotalMB: 20480,
+      },
     });
     render(<SandboxHealthPage showError={() => {}} />);
 
     expect(await screen.findByText(/0\.50 \/ 0\.40 \/ 0\.30/)).toBeInTheDocument();
     expect(screen.getByText(/512 \/ 1024 MB/)).toBeInTheDocument();
+    // Shown in GB rather than in the MB it arrives as: a data disk is
+    // counted in tens of gigabytes, and "4096 / 20480 MB" answers "how
+    // full is it" worse than "4.0 / 20.0 GB" does.
+    expect(screen.getByText(/4\.0 \/ 20\.0 GB/)).toBeInTheDocument();
   });
 
   it("lists every sandbox with its status", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
       sandboxes: [
-        { sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 },
+        { sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200, diskUsedMB: 3072, diskTotalMB: 20480 },
         { sandbox: "t2-r1", backend: "kontur", name: "g-t2-r1", ready: false, error: "connection refused" },
       ],
       host: null,
@@ -60,6 +72,11 @@ describe("SandboxHealthPage", () => {
     expect(screen.getByText("connection refused")).toBeInTheDocument();
     expect(screen.getByText("0.1 0.2 0.3")).toBeInTheDocument();
     expect(screen.getByText("100 / 200 MB")).toBeInTheDocument();
+    expect(screen.getByText("3.0 / 20.0 GB")).toBeInTheDocument();
+    // The unreachable sandbox has no disk figure of its own, and gets the
+    // same dash the memory column already gives it rather than a 0 that
+    // would read as an empty disk.
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
 
     // Every row belongs to a run, and says which -- the substance of what
     // changed here, not just a renamed field. The table used to lead with
@@ -106,8 +123,10 @@ describe("SandboxHealthPage", () => {
 
     expect(await screen.findByText("CPU (1 min load average)")).toBeInTheDocument();
     expect(screen.getByText("Memory (MB)")).toBeInTheDocument();
+    expect(screen.getByText("Disk (MB)")).toBeInTheDocument();
     expect(screen.getByText("CPU trend")).toBeInTheDocument();
     expect(screen.getByText("Memory trend")).toBeInTheDocument();
+    expect(screen.getByText("Disk trend")).toBeInTheDocument();
   });
 
   it("accumulates trend history across polls", async () => {
@@ -118,7 +137,11 @@ describe("SandboxHealthPage", () => {
     render(<SandboxHealthPage showError={() => {}} />);
 
     await screen.findByText("CPU (1 min load average)");
-    expect(screen.getAllByLabelText("Not enough data yet")).toHaveLength(2);
+    // Three host charts now: CPU, memory and disk (grain/task-41). This
+    // poll's host section reports no disk figure at all, so that third
+    // one stays empty for the whole test rather than only until the
+    // second poll.
+    expect(screen.getAllByLabelText("Not enough data yet")).toHaveLength(3);
 
     await user.click(screen.getByRole("button", { name: "Refresh" }));
 
@@ -127,7 +150,7 @@ describe("SandboxHealthPage", () => {
 });
 
 describe("appendHistory", () => {
-  const empty = { host: { cpu: [], mem: [] }, sandboxes: {} };
+  const empty = { host: { cpu: [], mem: [], disk: [] }, sandboxes: {} };
 
   // Keyed by the sandbox's own name, which is the run's id -- not by a
   // slot number, and not by array position. Two sandboxes in one poll
@@ -141,29 +164,51 @@ describe("appendHistory", () => {
       ],
     });
     expect(Object.keys(result.sandboxes).sort()).toEqual(["t1-r1", "t2-r1"]);
-    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40] });
-    expect(result.sandboxes["t2-r1"]).toEqual({ cpu: [1.5], mem: [90] });
+    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40], disk: [] });
+    expect(result.sandboxes["t2-r1"]).toEqual({ cpu: [1.5], mem: [90], disk: [] });
   });
 
   it("skips a poll with no host stats", () => {
     expect(appendHistory(empty, { enabled: true, sandboxes: [] })).toEqual(empty);
   });
 
-  it("appends host CPU and memory samples", () => {
-    const result = appendHistory(empty, { host: { loadAverage1: 1.5, memoryUsedMB: 300 }, sandboxes: [] });
-    expect(result.host).toEqual({ cpu: [1.5], mem: [300] });
+  it("appends host CPU, memory and disk samples", () => {
+    const result = appendHistory(empty, {
+      host: { loadAverage1: 1.5, memoryUsedMB: 300, diskUsedMB: 4000, diskTotalMB: 20000 },
+      sandboxes: [],
+    });
+    expect(result.host).toEqual({ cpu: [1.5], mem: [300], disk: [4000] });
+  });
+
+  // 0/0 is how a host with no disk reading at all reports one (a
+  // non-Linux daemon, an unreadable data directory) -- plotting the 0
+  // would draw an empty disk rather than a missing sample.
+  it("skips a host disk sample when there is no reading", () => {
+    const result = appendHistory(empty, {
+      host: { loadAverage1: 1.5, memoryUsedMB: 300, diskUsedMB: 0, diskTotalMB: 0 },
+      sandboxes: [],
+    });
+    expect(result.host).toEqual({ cpu: [1.5], mem: [300], disk: [] });
   });
 
   it("skips a sandbox that is not ready", () => {
     const result = appendHistory(empty, { sandboxes: [{ sandbox: "t1-r1", ready: false, error: "boom" }] });
-    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [], mem: [] });
+    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [], mem: [], disk: [] });
   });
 
-  it("appends a ready sandbox's load average and memory", () => {
+  it("appends a ready sandbox's load average, memory and disk", () => {
     const result = appendHistory(empty, {
-      sandboxes: [{ sandbox: "t1-r1", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40, memoryTotalMB: 100 }],
+      sandboxes: [{
+        sandbox: "t1-r1",
+        ready: true,
+        loadAverage: "0.25 0.5 0.75",
+        memoryUsedMB: 40,
+        memoryTotalMB: 100,
+        diskUsedMB: 3072,
+        diskTotalMB: 20480,
+      }],
     });
-    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40] });
+    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40], disk: [3072] });
   });
 
   it("caps each series at 60 samples", () => {

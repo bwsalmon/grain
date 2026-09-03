@@ -37,6 +37,7 @@ describe("NewTaskOverlay", () => {
         autoMerge: false,
         sandboxCpus: 0,
         sandboxMemoryMb: 0,
+        sandboxDiskGb: 0,
         agentFramework: "",
         capabilities: [],
         dependsOn: [],
@@ -99,10 +100,11 @@ describe("NewTaskOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Advanced options" }));
     await user.type(screen.getByLabelText(/vCPUs/), "4");
     await user.type(screen.getByLabelText(/Memory \(MiB\)/), "8192");
+    await user.type(screen.getByLabelText(/Disk \(GiB\)/), "40");
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(api).toHaveBeenCalledWith("/api/tasks", expect.objectContaining({
-      body: expect.stringContaining('"sandboxCpus":4,"sandboxMemoryMb":8192'),
+      body: expect.stringContaining('"sandboxCpus":4,"sandboxMemoryMb":8192,"sandboxDiskGb":40'),
     }));
   });
 

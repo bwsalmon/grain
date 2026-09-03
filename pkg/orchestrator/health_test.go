@@ -66,7 +66,7 @@ func TestHostSandboxesHealthReportsEveryLiveSandboxAsReady(t *testing.T) {
 	}
 }
 
-func TestKonturSandboxesHealthReportsLoadAndMemoryOverSSH(t *testing.T) {
+func TestKonturSandboxesHealthReportsLoadMemoryAndDiskOverSSH(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30082)
 	home := t.TempDir()
@@ -109,6 +109,15 @@ func TestKonturSandboxesHealthReportsLoadAndMemoryOverSSH(t *testing.T) {
 	}
 	if h.MemoryTotalMB == 0 {
 		t.Error("MemoryTotalMB = 0, want a real /proc/meminfo reading")
+	}
+	// Same again for the disk reading (grain/task-41): really this
+	// process's own `df -Pk /`, run in the same one command as the two
+	// /proc files above.
+	if h.DiskTotalMB == 0 {
+		t.Error("DiskTotalMB = 0, want a real df reading")
+	}
+	if h.DiskUsedMB > h.DiskTotalMB {
+		t.Errorf("DiskUsedMB = %d, want no more than DiskTotalMB (%d)", h.DiskUsedMB, h.DiskTotalMB)
 	}
 }
 

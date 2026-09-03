@@ -508,7 +508,17 @@ knows where it wants them (`scripts/setup.sh`'s own
 `ensure_kontur_images`) skips parsing this script's output to find them.
 It needs docker and nothing else; in particular not root, and not
 `debootstrap` or `mke2fs` on the build host, both of which now only ever
-run inside the build. If `KONTUR_IMAGE_BUCKET`
+run inside the build.
+
+That "rootfs plus 20% headroom" is also the whole of a sandbox's disk
+unless something says otherwise, since `konturctl` gives each VM a qcow2
+overlay at exactly its backing image's size. `sandbox-disk-gb` (Settings
+-> Sandbox, or a per-task override) is what says otherwise, reaching
+`konturctl vm create` as `-disk-size-gb`; the guest's own half of it is
+the `grain-growfs` unit `guest-setup.sh` installs, which grows the root
+filesystem onto the larger device on each boot. Nothing about the image
+build changes for it -- a bigger disk is a create-time argument, not a
+different image. If `KONTUR_IMAGE_BUCKET`
 is set, `gsutil cp`s all three to both
 `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/<same name>/` (a permanent,
 versioned copy) and `gs://$KONTUR_IMAGE_BUCKET/kontur-guest/latest/` (a
