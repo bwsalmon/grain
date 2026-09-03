@@ -29,6 +29,17 @@ export default function StateRepoPanel({ showError }) {
   const [remote, setRemote] = useState("");
   const [branch, setBranch] = useState("main");
   const [token, setToken] = useState("");
+  // The private key of the installation being adopted. It is the third
+  // input "point grain at an existing repository" needs and the one the
+  // repository deliberately cannot carry: the clone brings the sealed
+  // secrets file, and nothing here can open it until its key arrives by
+  // some other route than the repository itself.
+  const [secretsKey, setSecretsKey] = useState("");
+  // The same key, arriving later: a repository can be adopted before
+  // whoever runs it has fetched their key out of wherever they keep it,
+  // so importing one is its own action and its own field rather than
+  // something only an adopt can carry.
+  const [importKey, setImportKey] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -43,9 +54,12 @@ export default function StateRepoPanel({ showError }) {
     setBusy(true);
     try {
       setStatus(await api(path, { method: "POST", body: JSON.stringify(body || {}) }));
-      // The token has reached the daemon and is written to a file only it
-      // reads; keeping it in a form field afterwards serves nobody.
+      // Both credentials have reached the daemon and are written to files
+      // only it reads; keeping either in a form field afterwards serves
+      // nobody.
       setToken("");
+      setSecretsKey("");
+      setImportKey("");
     } catch (e) {
       showError(e.message);
     } finally {
@@ -120,8 +134,14 @@ export default function StateRepoPanel({ showError }) {
       <TextField label="Push token (optional)" value={token} onChange={(e) => setToken(e.target.value)}
         helperText="Leave empty to push with this deployment's own GitHub credential. Stored on the host, never shown again."
         type="password" autoComplete="off" fullWidth margin="normal" size="small" />
+      <TextField label="Secrets key (optional)" value={secretsKey} onChange={(e) => setSecretsKey(e.target.value)}
+        helperText={"The private key that repository's secrets are encrypted to. Needed only when adopting an " +
+          "installation this host has not run before; an empty repository keeps the key below."}
+        type="password" autoComplete="off" fullWidth margin="normal" size="small" />
       <Button type="button" variant="contained" size="small" disabled={busy || !remote.trim()}
-        onClick={() => act("/api/state-repo", { mode: "remote", remote: remote.trim(), branch: branch.trim(), token })}>
+        onClick={() => act("/api/state-repo", {
+          mode: "remote", remote: remote.trim(), branch: branch.trim(), token, secretsKey,
+        })}>
         Adopt repository
       </Button>
 
@@ -134,6 +154,26 @@ export default function StateRepoPanel({ showError }) {
       <Typography variant="caption" component="pre" sx={{ mt: 1, overflowX: "auto" }}>
         {status.secretsPublicKey || "(no key yet)"}
       </Typography>
+
+      {status.secretsError && (
+        <Alert severity="error" sx={{ mt: 2 }}>
+          grain cannot read the secrets in this repository: {status.secretsError}
+          {status.secretsFileRecipient && (
+            <>
+              {" "}They are encrypted to <code>{status.secretsFileRecipient}</code>; paste that key&apos;s private
+              half below to install it.
+            </>
+          )}
+        </Alert>
+      )}
+      <TextField label="Import a private key" value={importKey} onChange={(e) => setImportKey(e.target.value)}
+        helperText={"Installs a key you already hold, so a repository sealed to another installation becomes " +
+          "readable here. A key that cannot open the file is refused, and the key it replaces is kept on disk."}
+        type="password" autoComplete="off" fullWidth margin="normal" size="small" />
+      <Button type="button" size="small" variant="outlined" disabled={busy || !importKey.trim()}
+        onClick={() => act("/api/state-repo/secrets-key", { key: importKey.trim() })}>
+        Import key
+      </Button>
     </Box>
   );
 }

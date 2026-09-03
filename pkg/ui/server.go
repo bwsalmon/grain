@@ -125,6 +125,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/state-repo", s.handleGetStateRepo)
 	s.mux.HandleFunc("POST /api/state-repo", s.handleSetStateRepo)
 	s.mux.HandleFunc("POST /api/state-repo/sync", s.handleSyncStateRepo)
+	s.mux.HandleFunc("POST /api/state-repo/secrets-key", s.handleImportSecretsKey)
 
 	s.mux.HandleFunc("POST /api/host/reboot", s.handleRebootHost)
 	s.mux.HandleFunc("GET /api/host/top", s.handleGetHostTop)

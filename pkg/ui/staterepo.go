@@ -57,15 +57,50 @@ type StateRepoStatus struct {
 	// a single "compatible" boolean that hides which way round it is.
 	SchemaVersion      int `json:"schemaVersion"`
 	BuildSchemaVersion int `json:"buildSchemaVersion"`
-	// SecretsPublicKey is the public half of the key the secrets file is
-	// encrypted to, and SecretsKeyFile where its private half is read
-	// from on this host -- the file an operator has to back up.
+	// SecretsPublicKey is the public half of the key this host holds, and
+	// SecretsKeyFile where its private half is read from -- the file an
+	// operator has to back up.
 	SecretsPublicKey string `json:"secretsPublicKey,omitempty"`
 	SecretsKeyFile   string `json:"secretsKeyFile,omitempty"`
+	// SecretsFileRecipient is the public key the repository's secrets
+	// file is actually sealed to, which is not always the key above: a
+	// repository adopted from another installation arrives encrypted to
+	// that installation's key. Both are shown because the difference is
+	// the diagnosis, and a public key reveals nothing -- it can seal a
+	// secret, not open one.
+	SecretsFileRecipient string `json:"secretsFileRecipient,omitempty"`
+	// SecretsError says why this host cannot read its own secrets file,
+	// and is empty when it can. Separate from Error below because the two
+	// have different fixes -- one is a key to import, the other a remote
+	// or a credential -- and because a store that cannot be read is not a
+	// sync that failed.
+	SecretsError string `json:"secretsError,omitempty"`
 	// Error is a last-sync failure worth showing (an expired credential,
 	// an unreachable remote), rather than one this pane's own request
 	// caused. Empty when the last sync was fine.
 	Error string `json:"error,omitempty"`
+}
+
+// AdoptRequest is everything "point this installation at a repository"
+// takes: where it is, and the two credentials that are nobody else's to
+// supply -- one to push it, one to read the secrets in it. A struct
+// rather than four positional strings because three of them are optional
+// and two of them are secret, and a call site that got the order wrong
+// would put a private key where a push token goes.
+type AdoptRequest struct {
+	// Remote is the git URL, and the only required field.
+	Remote string
+	// Branch is the branch state lives on; the package default if empty.
+	Branch string
+	// Token is the credential to push with, for a repository this
+	// deployment's own GitHub credential ladder does not cover. Empty
+	// leaves that ladder to answer.
+	Token string
+	// SecretsKey is the private key the repository's secrets file is
+	// sealed to, in the form pkg/secrets renders. Empty keeps this host's
+	// own key, which is right when adopting an empty repository and wrong
+	// when adopting an installation somebody else's grain wrote.
+	SecretsKey string
 }
 
 // StateRepoManager is the daemon's side of the bootstrap. cmd/grain
@@ -76,12 +111,15 @@ type StateRepoManager interface {
 	Status(ctx context.Context) (StateRepoStatus, error)
 	// UseLocal drops the remote, keeping every commit already made.
 	UseLocal(ctx context.Context) (StateRepoStatus, error)
-	// Adopt points the installation at remote. A repository that already
-	// holds a dump replaces this installation's database with it; an empty
-	// one is seeded from the database instead. token, when given, is the
-	// credential to push with, for a repository this deployment's own
-	// GitHub credential ladder does not cover.
-	Adopt(ctx context.Context, remote, branch, token string) (StateRepoStatus, error)
+	// Adopt points the installation at req.Remote. A repository that
+	// already holds a dump replaces this installation's database with it;
+	// an empty one is seeded from the database instead.
+	Adopt(ctx context.Context, req AdoptRequest) (StateRepoStatus, error)
+	// ImportSecretsKey installs a private key the operator holds, so a
+	// repository sealed to another installation's key becomes readable on
+	// this host. It refuses a key that cannot open the file rather than
+	// installing it and failing later.
+	ImportSecretsKey(ctx context.Context, key string) (StateRepoStatus, error)
 	// Sync exports, commits and pushes now, rather than at the next tick.
 	Sync(ctx context.Context) (StateRepoStatus, error)
 }
@@ -109,6 +147,10 @@ type stateRepoRequest struct {
 	Remote string `json:"remote"`
 	Branch string `json:"branch"`
 	Token  string `json:"token"`
+	// SecretsKey is the private key of the installation being adopted,
+	// for the case where its secrets file was sealed to a key this host
+	// does not hold. Write-only in the same sense Token is.
+	SecretsKey string `json:"secretsKey"`
 }
 
 // handleSetStateRepo is the bootstrap's one write.
@@ -140,12 +182,56 @@ func (s *Server) handleSetStateRepo(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, errors.New("a remote is required to adopt a repository"))
 			return
 		}
-		status, err = s.tasks.Config.StateRepo.Adopt(r.Context(),
-			strings.TrimSpace(req.Remote), strings.TrimSpace(req.Branch), strings.TrimSpace(req.Token))
+		status, err = s.tasks.Config.StateRepo.Adopt(r.Context(), AdoptRequest{
+			Remote:     strings.TrimSpace(req.Remote),
+			Branch:     strings.TrimSpace(req.Branch),
+			Token:      strings.TrimSpace(req.Token),
+			SecretsKey: strings.TrimSpace(req.SecretsKey),
+		})
 	default:
 		writeError(w, http.StatusBadRequest, errors.New(`mode must be "local" or "remote"`))
 		return
 	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	status.Available = true
+	writeJSON(w, http.StatusOK, status)
+}
+
+// secretsKeyRequest is POST /api/state-repo/secrets-key's body: the
+// private key itself, which goes to the daemon and is never read back
+// out through here -- no route in this package returns one, and Status
+// carries only public halves.
+type secretsKeyRequest struct {
+	Key string `json:"key"`
+}
+
+// handleImportSecretsKey installs the operator's own secrets key.
+//
+// This is the third input the bootstrap's "point grain at an existing
+// repository" needs, and the one the repository deliberately cannot
+// carry: the clone brings secrets.enc, and nothing on this host can open
+// it until the key that sealed it arrives by another route. It is a
+// route of its own as well as a field on adopt, because the two happen
+// at different times -- a repository can be adopted before its operator
+// has gone and fetched the key out of wherever they keep it.
+func (s *Server) handleImportSecretsKey(w http.ResponseWriter, r *http.Request) {
+	if s.tasks.Config.StateRepo == nil {
+		writeError(w, http.StatusNotImplemented, errors.New("this deployment's UI does not manage a state repository"))
+		return
+	}
+	var req secretsKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid JSON body"))
+		return
+	}
+	if strings.TrimSpace(req.Key) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("a key is required"))
+		return
+	}
+	status, err := s.tasks.Config.StateRepo.ImportSecretsKey(r.Context(), strings.TrimSpace(req.Key))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

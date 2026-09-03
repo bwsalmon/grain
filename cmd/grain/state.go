@@ -23,7 +23,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/model"
@@ -41,13 +43,15 @@ database.
 Commands:
   status                    where this installation's state lives, and whether it is committed
   local                     use a local-only repository: no remote, no credential, no input
-  adopt -remote URL [-branch B] [-token-file F]
+  adopt -remote URL [-branch B] [-token-file F] [-secrets-key-file F]
                             point this installation at a repository. An existing
                             one's contents replace the database; an empty one is
                             seeded from it
   sync                      export the database, commit and push, now
   key show                  print this installation's secrets public key
   key path                  print where the private key is read from
+  key import [-key-file F]  install a secrets private key this operator holds,
+                            reading it from -key-file or stdin
 `
 
 func stateCmd(args []string) {
@@ -119,6 +123,18 @@ func stateStatus(ctx context.Context, dataDir string) error {
 	fmt.Printf("schema:     %d in the repository, %d in this build\n", version, model.SchemaVersion)
 	fmt.Printf("secrets:    %s (key: %s)\n",
 		secretsConfig(dataDir).File, secretsConfig(dataDir).KeyFile)
+	// Whether this host can actually open that file, which is a separate
+	// question from whether it is there: a repository adopted from
+	// another installation arrives sealed to that installation's key, and
+	// an operator should learn that here rather than from the first run
+	// that cannot resolve a credential.
+	store := secrets.Open(secretsConfig(dataDir))
+	if err := store.Check(); err != nil {
+		fmt.Printf("            unreadable: %v\n", err)
+		if want, err := store.FileRecipient(); err == nil && want != "" {
+			fmt.Printf("            encrypted to %s -- install that key with `grain state key import`\n", want)
+		}
+	}
 	return nil
 }
 
@@ -163,6 +179,8 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 	branch := fs.String("branch", staterepo.DefaultBranch, "branch state lives on")
 	tokenFile := fs.String("token-file", "", "file holding the credential to push with; "+
 		"defaults to the GitHub credential ladder under <data-dir>/secrets/github")
+	keyFile := fs.String("secrets-key-file", "", "file holding the secrets private key this repository's "+
+		"secrets.enc is encrypted to; required to read the secrets of an installation this host has not run before")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -170,13 +188,27 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 		fs.Usage()
 		return errors.New("-remote is required")
 	}
+	// Read before anything is moved: a key that does not parse should
+	// fail here, with the installation still exactly as it was, rather
+	// than halfway through adopting.
+	var secretsKey secrets.Key
+	if *keyFile != "" {
+		var err error
+		if secretsKey, err = secrets.ReadKeyFile(*keyFile); err != nil {
+			return err
+		}
+	}
 	// The working tree is a clone of whatever was there before, and a
 	// clone of one repository cannot become a clone of another by
 	// changing a URL: its history is the wrong history. Moving it aside
 	// rather than deleting it means an operator who adopts the wrong
 	// repository has not lost anything.
-	if err := archiveStateRepo(dataDir); err != nil {
+	archived, err := archiveStateRepo(dataDir)
+	if err != nil {
 		return err
+	}
+	if archived != "" {
+		fmt.Printf("moved the previous state repository to %s\n", archived)
 	}
 	if err := staterepo.SaveSettings(dataDir, staterepo.Settings{
 		Remote: *remote, Branch: *branch, TokenFile: *tokenFile,
@@ -186,6 +218,19 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 	repo, err := openStateRepo(ctx, dataDir)
 	if err != nil {
 		return err
+	}
+	carried, err := carrySecretsFile(archived, repo.Dir())
+	if err != nil {
+		return err
+	}
+	if carried {
+		fmt.Printf("carried this installation's secrets across into %s\n", repo.Dir())
+	}
+	if *keyFile != "" {
+		if err := secrets.Open(secretsConfig(dataDir)).ImportKey(secretsKey); err != nil {
+			return err
+		}
+		fmt.Printf("installed the secrets key from %s\n", *keyFile)
 	}
 	_, db, err := openStore(dataDir)
 	if err != nil {
@@ -201,21 +246,64 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 }
 
 // archiveStateRepo moves an existing working tree aside, if there is
-// one, keeping a dated copy rather than removing it.
-func archiveStateRepo(dataDir string) error {
+// one, keeping a dated copy rather than removing it. It returns where it
+// went, or "" when there was nothing there -- both because the caller
+// says so in its own voice (a terminal or the daemon's journal) and
+// because carrySecretsFile has to go looking in it.
+func archiveStateRepo(dataDir string) (string, error) {
 	dir := stateRepoDir(dataDir)
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return "", nil
 		}
-		return err
+		return "", err
 	}
 	moved := dir + ".replaced-" + timestampSuffix()
 	if err := os.Rename(dir, moved); err != nil {
-		return fmt.Errorf("moving the existing state repository aside: %w", err)
+		return "", fmt.Errorf("moving the existing state repository aside: %w", err)
 	}
-	fmt.Printf("moved the previous state repository to %s\n", moved)
-	return nil
+	return moved, nil
+}
+
+// carrySecretsFile brings the encrypted secrets file across from the
+// working tree an adopt moved aside.
+//
+// Everything else in the old tree is regenerable -- it is a dump of a
+// database that is still right here -- and the secrets file is not: it
+// is the one thing in the repository that is not a materialisation of
+// something else. Adopting an empty repository, which is the bootstrap's
+// "start from scratch", would otherwise leave every secret this
+// deployment holds behind in a directory nothing looks at again, and
+// silently: the store would come back up reporting no secrets set rather
+// than reporting anything wrong.
+//
+// A repository that already carries its own secrets file keeps it. That
+// file is the adopted installation's, sealed to the adopted
+// installation's key, and it is the source of truth for the same reason
+// its tables are; the key to read it is what ImportKey is for.
+func carrySecretsFile(fromDir, toDir string) (bool, error) {
+	if fromDir == "" {
+		return false, nil
+	}
+	src := filepath.Join(fromDir, secrets.DefaultFileName)
+	data, err := os.ReadFile(src)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", src, err)
+	}
+	dst := filepath.Join(toDir, secrets.DefaultFileName)
+	switch _, err := os.Stat(dst); {
+	case err == nil:
+		return false, nil
+	case !os.IsNotExist(err):
+		return false, fmt.Errorf("inspecting %s: %w", dst, err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return false, fmt.Errorf("writing %s: %w", dst, err)
+	}
+	return true, nil
 }
 
 // timestampSuffix names an archived directory by when it was archived,
@@ -253,7 +341,7 @@ func stateSync(ctx context.Context, dataDir string) error {
 func stateKey(dataDir string, args []string) error {
 	store := secrets.Open(secretsConfig(dataDir))
 	if len(args) == 0 {
-		return errors.New("usage: grain state key show|path")
+		return errors.New("usage: grain state key show|path|import")
 	}
 	switch args[0] {
 	case "show":
@@ -266,7 +354,44 @@ func stateKey(dataDir string, args []string) error {
 	case "path":
 		fmt.Println(store.KeyFile())
 		return nil
+	case "import":
+		return stateKeyImport(store, args[1:])
 	default:
 		return fmt.Errorf("unknown key command %q", args[0])
 	}
+}
+
+// stateKeyImport installs a key the operator already holds, which is
+// what makes "clone the repository onto a new machine" a restore rather
+// than a fresh install with an unreadable file in it.
+//
+// The key is read from a file or from stdin and never from a flag: a
+// private key on a command line is readable by anyone else on the host
+// through `ps` and lands in the shell's history besides. That is the same
+// reason `grain secrets set` takes no value on its own command line.
+func stateKeyImport(store *secrets.Store, args []string) error {
+	fs := flag.NewFlagSet("grain state key import", flag.ContinueOnError)
+	keyFile := fs.String("key-file", "", "file holding the private key; defaults to reading stdin")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var data []byte
+	var err error
+	if *keyFile != "" {
+		data, err = os.ReadFile(*keyFile)
+	} else {
+		data, err = io.ReadAll(os.Stdin)
+	}
+	if err != nil {
+		return err
+	}
+	key, err := secrets.ParseKey(string(data))
+	if err != nil {
+		return err
+	}
+	if err := store.ImportKey(key); err != nil {
+		return err
+	}
+	fmt.Printf("installed %s at %s\n", key.Public(), store.KeyFile())
+	return nil
 }

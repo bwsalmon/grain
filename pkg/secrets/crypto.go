@@ -186,6 +186,22 @@ func Encrypt(k Key, plaintext []byte) ([]byte, error) {
 	return armour(recipient.Bytes(), eph.PublicKey().Bytes(), sealed), nil
 }
 
+// Recipient reports which public key a sealed file was encrypted to, in
+// the same form Key.Public renders.
+//
+// The armour header carries it in clear, which is the point: an operator
+// who has cloned a state repository onto a new host and holds several
+// keys needs to be told *which* one this file wants, and answering that
+// must not require already being able to read the file. It reveals
+// nothing -- a public key encrypts secrets, it does not read them.
+func Recipient(data []byte) (string, error) {
+	recipient, _, _, err := unarmour(data)
+	if err != nil {
+		return "", err
+	}
+	return pubPrefix + base64.StdEncoding.EncodeToString(recipient), nil
+}
+
 // Decrypt opens a file Encrypt wrote.
 func Decrypt(k Key, data []byte) ([]byte, error) {
 	if k.priv == nil {

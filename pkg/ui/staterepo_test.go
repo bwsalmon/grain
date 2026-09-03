@@ -18,11 +18,13 @@ import (
 // fakeStateRepo records what the handler asked for, so a test can assert
 // on the call rather than on a real clone.
 type fakeStateRepo struct {
-	status     ui.StateRepoStatus
-	adopted    []string // remote, branch, token of the last Adopt
-	usedLocal  bool
-	synced     bool
-	adoptError error
+	status      ui.StateRepoStatus
+	adopted     *ui.AdoptRequest // the last Adopt, nil if there was none
+	importedKey string
+	usedLocal   bool
+	synced      bool
+	adoptError  error
+	keyError    error
 }
 
 func (f *fakeStateRepo) Status(context.Context) (ui.StateRepoStatus, error) { return f.status, nil }
@@ -33,12 +35,21 @@ func (f *fakeStateRepo) UseLocal(context.Context) (ui.StateRepoStatus, error) {
 	return f.status, nil
 }
 
-func (f *fakeStateRepo) Adopt(_ context.Context, remote, branch, token string) (ui.StateRepoStatus, error) {
+func (f *fakeStateRepo) Adopt(_ context.Context, req ui.AdoptRequest) (ui.StateRepoStatus, error) {
 	if f.adoptError != nil {
 		return ui.StateRepoStatus{}, f.adoptError
 	}
-	f.adopted = []string{remote, branch, token}
-	f.status.Mode, f.status.Remote, f.status.Branch = "remote", remote, branch
+	f.adopted = &req
+	f.status.Mode, f.status.Remote, f.status.Branch = "remote", req.Remote, req.Branch
+	return f.status, nil
+}
+
+func (f *fakeStateRepo) ImportSecretsKey(_ context.Context, key string) (ui.StateRepoStatus, error) {
+	if f.keyError != nil {
+		return ui.StateRepoStatus{}, f.keyError
+	}
+	f.importedKey = key
+	f.status.SecretsError = ""
 	return f.status, nil
 }
 
@@ -109,20 +120,74 @@ func TestBootstrapChoosesLocalOnly(t *testing.T) {
 func TestBootstrapAdoptsARepository(t *testing.T) {
 	fake := &fakeStateRepo{}
 	rec := do(t, stateRepoServer(t, fake), http.MethodPost, "/api/state-repo",
-		`{"mode":"remote","remote":"https://github.com/owner/grain-state.git","branch":"main","token":"ghp_x"}`)
+		`{"mode":"remote","remote":"https://github.com/owner/grain-state.git","branch":"main",`+
+			`"token":"ghp_x","secretsKey":"grain-secret-key-v1:AAAA"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	want := []string{"https://github.com/owner/grain-state.git", "main", "ghp_x"}
-	for i, v := range want {
-		if len(fake.adopted) != 3 || fake.adopted[i] != v {
-			t.Fatalf("adopted %v, want %v", fake.adopted, want)
+	want := ui.AdoptRequest{
+		Remote: "https://github.com/owner/grain-state.git", Branch: "main",
+		Token: "ghp_x", SecretsKey: "grain-secret-key-v1:AAAA",
+	}
+	if fake.adopted == nil || *fake.adopted != want {
+		t.Fatalf("adopted %+v, want %+v", fake.adopted, want)
+	}
+	// Both pasted credentials are write-only, like every other credential
+	// this package handles: they go to the manager and never come back in
+	// a response.
+	for _, secret := range []string{"ghp_x", "grain-secret-key-v1:AAAA"} {
+		if body := rec.Body.String(); strings.Contains(body, secret) {
+			t.Fatalf("a pasted credential came back in the response: %s", body)
 		}
 	}
-	// The token is write-only, like every other credential this package
-	// handles: it goes to the manager and never comes back in a response.
-	if body := rec.Body.String(); strings.Contains(body, "ghp_x") {
-		t.Fatalf("the pasted token came back in the response: %s", body)
+}
+
+// The other half of adopting somebody else's repository: the clone
+// brings the sealed file, and this brings the key that opens it.
+func TestBootstrapImportsASecretsKey(t *testing.T) {
+	fake := &fakeStateRepo{status: ui.StateRepoStatus{
+		Mode: "remote", SecretsError: "secrets: this file is encrypted to a different key",
+	}}
+	rec := do(t, stateRepoServer(t, fake), http.MethodPost, "/api/state-repo/secrets-key",
+		`{"key":"grain-secret-key-v1:AAAA"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if fake.importedKey != "grain-secret-key-v1:AAAA" {
+		t.Fatalf("the key did not reach the manager: %q", fake.importedKey)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "grain-secret-key-v1:AAAA") {
+		t.Fatalf("the private key came back in the response: %s", body)
+	}
+	if got := decode[ui.StateRepoStatus](t, rec); got.SecretsError != "" {
+		t.Fatalf("the store still reports itself unreadable: %+v", got)
+	}
+}
+
+func TestAnEmptySecretsKeyIsRefused(t *testing.T) {
+	fake := &fakeStateRepo{}
+	rec := do(t, stateRepoServer(t, fake), http.MethodPost, "/api/state-repo/secrets-key", `{"key":"  "}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if fake.importedKey != "" {
+		t.Fatal("an empty key reached the manager")
+	}
+}
+
+// A key that cannot open the file is refused by the manager, and the
+// operator has to be told which one it wanted -- not left with a store
+// that fails the next time a run asks it for a credential.
+func TestARefusedSecretsKeySaysWhy(t *testing.T) {
+	fake := &fakeStateRepo{keyError: errors.New(
+		"secrets: this file is encrypted to a different key: secrets.enc is encrypted to grain-secret-pub-v1:BBBB")}
+	rec := do(t, stateRepoServer(t, fake), http.MethodPost, "/api/state-repo/secrets-key",
+		`{"key":"grain-secret-key-v1:AAAA"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "grain-secret-pub-v1:BBBB") {
+		t.Fatalf("the failure does not say which key the file wants: %s", rec.Body)
 	}
 }
 

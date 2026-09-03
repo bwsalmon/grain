@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -84,8 +85,16 @@ func (m *stateManager) status(ctx context.Context) ui.StateRepoStatus {
 		out.SecretsKeyFile = m.secrets.KeyFile()
 		if pub, err := m.secrets.PublicKey(); err == nil {
 			out.SecretsPublicKey = pub
-		} else {
-			out.Error = err.Error()
+		}
+		if recipient, err := m.secrets.FileRecipient(); err == nil {
+			out.SecretsFileRecipient = recipient
+		}
+		// Reported whether or not the key is merely absent: "this host
+		// cannot read the secrets in the repository it is running" is one
+		// condition with one fix, and splitting it into a missing-key case
+		// and a wrong-key case would only make the pane say it twice.
+		if err := m.secrets.Check(); err != nil {
+			out.SecretsError = err.Error()
 		}
 	}
 	if m.lastErr != nil {
@@ -127,15 +136,26 @@ func (m *stateManager) UseLocal(ctx context.Context) (ui.StateRepoStatus, error)
 // runs a live reconcile loop is holding ids from. Nothing here tries to
 // make that safe -- the pane says as much, and bwsalmon/grain#174 accepts
 // it outright.
-func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) (ui.StateRepoStatus, error) {
+func (m *stateManager) Adopt(ctx context.Context, req ui.AdoptRequest) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if strings.TrimSpace(remote) == "" {
+	remote := strings.TrimSpace(req.Remote)
+	if remote == "" {
 		return ui.StateRepoStatus{}, errors.New("a remote is required")
 	}
-	settings := staterepo.Settings{Remote: strings.TrimSpace(remote), Branch: strings.TrimSpace(branch)}
-	if token != "" {
-		path, err := writeStateRepoToken(m.dataDir, token)
+	// Parsed before anything moves. A key that is not a key should be
+	// rejected with the installation untouched, rather than partway
+	// through adopting a repository it then cannot read.
+	var secretsKey secrets.Key
+	if req.SecretsKey != "" {
+		var err error
+		if secretsKey, err = secrets.ParseKey(req.SecretsKey); err != nil {
+			return ui.StateRepoStatus{}, err
+		}
+	}
+	settings := staterepo.Settings{Remote: remote, Branch: strings.TrimSpace(req.Branch)}
+	if req.Token != "" {
+		path, err := writeStateRepoToken(m.dataDir, req.Token)
 		if err != nil {
 			return ui.StateRepoStatus{}, err
 		}
@@ -145,8 +165,12 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 	// no change of URL makes it a clone of this one. Moved aside rather
 	// than deleted: an operator who adopts the wrong repository has lost
 	// nothing, and the secrets file inside it is not regenerable.
-	if err := archiveStateRepo(m.dataDir); err != nil {
+	archived, err := archiveStateRepo(m.dataDir)
+	if err != nil {
 		return ui.StateRepoStatus{}, err
+	}
+	if archived != "" {
+		log.Printf("grain: moved the previous state repository to %s", archived)
 	}
 	if err := staterepo.SaveSettings(m.dataDir, settings); err != nil {
 		return ui.StateRepoStatus{}, err
@@ -156,10 +180,45 @@ func (m *stateManager) Adopt(ctx context.Context, remote, branch, token string) 
 		return ui.StateRepoStatus{}, fmt.Errorf("opening %s: %w", remote, err)
 	}
 	m.repo = repo
+	// The one thing in the archived tree that the database cannot
+	// regenerate. Without this, adopting an empty repository -- the
+	// bootstrap's "start from scratch" -- would leave every secret this
+	// deployment holds behind in a directory nothing reads again.
+	if carried, err := carrySecretsFile(archived, repo.Dir()); err != nil {
+		return ui.StateRepoStatus{}, err
+	} else if carried {
+		log.Printf("grain: carried this installation's secrets into %s", repo.Dir())
+	}
+	if req.SecretsKey != "" && m.secrets != nil {
+		if err := m.secrets.ImportKey(secretsKey); err != nil {
+			return ui.StateRepoStatus{}, err
+		}
+	}
 	if err := staterepo.Load(ctx, repo, m.db, model.SchemaVersion); err != nil {
 		return ui.StateRepoStatus{}, fmt.Errorf("loading %s: %w", remote, err)
 	}
 	m.lastErr = nil
+	return m.status(ctx), nil
+}
+
+// ImportSecretsKey installs the operator's own key, on its own rather
+// than as part of an adopt: a repository can be adopted before whoever
+// runs it has gone and fetched the key out of wherever they keep it, and
+// until it arrives the secrets in that repository are ciphertext this
+// host cannot open.
+func (m *stateManager) ImportSecretsKey(ctx context.Context, key string) (ui.StateRepoStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.secrets == nil {
+		return ui.StateRepoStatus{}, errors.New("this deployment has no secret store to import a key into")
+	}
+	parsed, err := secrets.ParseKey(key)
+	if err != nil {
+		return ui.StateRepoStatus{}, err
+	}
+	if err := m.secrets.ImportKey(parsed); err != nil {
+		return ui.StateRepoStatus{}, err
+	}
 	return m.status(ctx), nil
 }
 

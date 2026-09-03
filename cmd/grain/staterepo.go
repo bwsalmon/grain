@@ -66,6 +66,18 @@ func openSecrets(dataDir string) *secrets.Store {
 			"without it, %s cannot be decrypted by anyone, grain included",
 			store.KeyFile(), store.File())
 	}
+	// A repository adopted from another installation arrives sealed to
+	// that installation's key, and every secret in it is unreadable here
+	// until the operator imports theirs. Said once at startup, where it
+	// is a line about the deployment, rather than only later as a run
+	// that could not resolve a credential.
+	if err := store.Check(); err != nil {
+		log.Printf("grain: this host cannot read %s: %v", store.File(), err)
+		if recipient, rerr := store.FileRecipient(); rerr == nil && recipient != "" {
+			log.Printf("grain: it is encrypted to %s -- install that key with "+
+				"`grain state key import` or the Settings pane's State tab", recipient)
+		}
+	}
 	return store
 }
 
