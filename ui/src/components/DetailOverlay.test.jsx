@@ -662,6 +662,41 @@ describe("DetailOverlay", () => {
     expect(onOpenTask).toHaveBeenCalledWith("10");
   });
 
+  it("labels a dependency chip with the depended-on task's title, and the whole task on hover", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, dependsOn: ["9"], blockedBy: ["9"] }}
+        tasks={[{ id: "9", title: "Add dark mode", state: "running" }]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const chip = screen.getByText("9 Add dark mode (open)");
+    await user.hover(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("9 Add dark mode — Running (blocking this task)");
+  });
+
+  it("falls back to the id for a dependency the task list does not carry", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, dependsOn: ["9"] }}
+        tasks={[{ id: "20", title: "Add dark mode", state: "queued" }]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    await user.hover(screen.getByText("9"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("9");
+  });
+
   it("adds a dependency picked from the task picker", async () => {
     const act = vi.fn();
     const tasks = [{ id: "20", title: "Add dark mode" }];

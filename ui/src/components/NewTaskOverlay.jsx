@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
@@ -226,17 +226,22 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
         <fieldset>
           <legend>Depends on <span className="hint">optional</span></legend>
           {dependsOn.length > 0 && (
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.6, mb: 1 }}>
+            // One full-width chip per line, the shape DetailOverlay's
+            // dependency list uses: a picked task then reads as a row,
+            // rather than a bubble sized by however long its title
+            // happens to be, wrapped in beside the others.
+            <Stack spacing={0.6} sx={{ mb: 1 }}>
               {dependsOn.map((t) => (
-                <Chip
-                  key={t.id}
-                  size="small"
-                  label={`${t.id} ${t.title}`}
-                  onDelete={() => removeDependency(t.id)}
-                  deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
-                />
+                <Tooltip key={t.id} title={`${t.id} ${t.title}`} placement="left">
+                  <Chip
+                    label={`${t.id} ${t.title}`}
+                    onDelete={() => removeDependency(t.id)}
+                    deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
+                    sx={{ width: "100%", justifyContent: "space-between", "& .MuiChip-label": { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } }}
+                  />
+                </Tooltip>
               ))}
-            </Box>
+            </Stack>
           )}
           <TaskPicker
             tasks={tasks || []}
