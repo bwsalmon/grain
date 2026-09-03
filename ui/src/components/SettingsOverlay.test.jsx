@@ -91,8 +91,10 @@ describe("SettingsOverlay", () => {
 
     expect(screen.getByLabelText("Gemini API key")).toBeInTheDocument();
     expect(screen.getByLabelText("Claude Code OAuth token")).toBeInTheDocument();
+    expect(screen.getByLabelText("OpenAI API key")).toBeInTheDocument();
     expect(screen.getByText("set")).toBeInTheDocument();
-    expect(screen.getByText("not set")).toBeInTheDocument();
+    // One chip per framework with no key stored: two of the three here.
+    expect(screen.getAllByText("not set")).toHaveLength(2);
     expect(api).toHaveBeenCalledTimes(1);
   });
 

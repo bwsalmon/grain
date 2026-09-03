@@ -606,10 +606,9 @@ type CreateTaskRequest struct {
 	// (Settings' own "Agent framework"). "" (the default) means no
 	// override: the task is driven by whichever framework the deployment
 	// is set to when it dispatches. Anything but "" must be one of
-	// model.AgentFrameworkAntigravity/AgentFrameworkClaude (the legacy
-	// "gemini" spelling is accepted and normalized to the former),
-	// validated the same way UpdateSettings validates the
-	// deployment-wide setting.
+	// model.AgentFrameworks() (the legacy "gemini" spelling is accepted
+	// and normalized to "antigravity"), validated the same way
+	// UpdateSettings validates the deployment-wide setting.
 	AgentFramework string `json:"agentFramework"`
 	// Capabilities is the exact set of capability ids this task is filed
 	// holding -- but only when the caller names one. nil (the field left
@@ -940,16 +939,15 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 // deployment-wide setting, which has no such reading, empty is accepted
 // here rather than rejected as unset.
 func validateAgentFramework(framework string) error {
-	// NormalizeAgentFrameworkName, not NormalizeAgentFramework: "" must
-	// stay "" here, since for a task it means "no override" rather than
-	// naming a framework (model.Task.AgentFramework's own doc comment).
-	switch model.NormalizeAgentFrameworkName(framework) {
-	case "", model.AgentFrameworkAntigravity, model.AgentFrameworkClaude:
+	// "" is checked here rather than left to ValidAgentFramework, which
+	// deliberately rejects it: for a task, empty means "no override"
+	// rather than naming a framework (model.Task.AgentFramework's own
+	// doc comment), and only this caller reads it that way.
+	if framework == "" || model.ValidAgentFramework(framework) {
 		return nil
-	default:
-		return validationErrorf("agentFramework must be %q, %q, or empty for this deployment's default",
-			model.AgentFrameworkAntigravity, model.AgentFrameworkClaude)
 	}
+	return validationErrorf("agentFramework must be %s, or empty for this deployment's default",
+		model.AgentFrameworkNames())
 }
 
 // validateSandboxShape checks a task's own SandboxCPUs/SandboxMemoryMB/

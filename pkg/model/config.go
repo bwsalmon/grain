@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // Config is a deployment's tunable, non-secret configuration -- the
 // knobs bwsalmon/agents#320 asked to move off the daemon's own flags and
@@ -63,9 +67,10 @@ type Config struct {
 	MaxMergers int
 	// AgentFramework selects which agent.Framework a run is meant to be
 	// driven by -- AgentFrameworkAntigravity (agent/antigravity, the
-	// Antigravity CLI's `agy` binary as a subprocess) or
+	// Antigravity CLI's `agy` binary as a subprocess),
 	// AgentFrameworkClaude (agent/claude, the real `claude` CLI as a
-	// subprocess). Empty reads back as AgentFrameworkAntigravity
+	// subprocess) or AgentFrameworkCodex (agent/codex, OpenAI's `codex`
+	// CLI as a subprocess). Empty reads back as AgentFrameworkAntigravity
 	// (ui.UpdateSettings' own default).
 	//
 	// It is the deployment-wide default, not the last word: a task
@@ -102,8 +107,17 @@ type Config struct {
 	// (cmd/grain/daemon.go's agentFrameworks/dispatchConfig); a
 	// deployment that never runs agent/claude simply leaves this unread.
 	ClaudeModel string
+	// CodexModel is agent/codex's own counterpart to the two above: the
+	// model OpenAI's `codex` CLI is asked for. Unlike them it is not
+	// required on a first save (ui.UpdateSettings): this column was added
+	// after that check was written, so every deployment upgrading across
+	// it would read back an empty CodexModel that no save had ever been
+	// asked for -- cmd/grain/daemon.go's own -codex-model flag default is
+	// what fills that gap instead, exactly as it seeds the rest of this
+	// row.
+	CodexModel string
 	// MaxAgentTurns caps model/tool round trips per run; 0 leaves the
-	// agent framework's own default in place, which for both frameworks
+	// agent framework's own default in place, which for every framework
 	// is no cap at all (agent/claude's defaultMaxTurns has why). A run's
 	// real ceiling is orchestrator.Config.MaxRunRuntime. Re-read by
 	// orchestrator.RunCycle every cycle, the same as MaxWorkers, so a
@@ -326,14 +340,15 @@ func DefaultConfig() Config {
 // backfills a database predating the column with).
 const DefaultMaxMergers = 1
 
-// AgentFramework's own vocabulary -- the two agent.Framework
+// AgentFramework's own vocabulary -- the three agent.Framework
 // implementations pkg/agent has today (pkg/agent/antigravity,
-// pkg/agent/claude). Named here, not in either of those packages, so
-// this file can reference them without pkg/model depending on pkg/agent
-// or either of its implementations.
+// pkg/agent/claude, pkg/agent/codex). Named here, not in any of those
+// packages, so this file can reference them without pkg/model depending
+// on pkg/agent or any of its implementations.
 const (
 	AgentFrameworkAntigravity = "antigravity"
 	AgentFrameworkClaude      = "claude"
+	AgentFrameworkCodex       = "codex"
 
 	// LegacyAgentFrameworkGemini is what AgentFrameworkAntigravity used
 	// to be called, back when it named a home-grown in-process Gemini
@@ -374,4 +389,50 @@ func NormalizeAgentFramework(v string) string {
 		return AgentFrameworkAntigravity
 	}
 	return NormalizeAgentFrameworkName(v)
+}
+
+// AgentFrameworks is the vocabulary above as a list, in the order a
+// human should be offered it: the deployment default first.
+//
+// It exists because "which names are there" was written out by hand at
+// every place that validates one -- ui.UpdateSettings, ui's own per-task
+// check, cmd/grain/daemon.go's flag guard and its dispatch switch -- each
+// as a pair of constants and a two-slot error message. That was already
+// four copies to keep in step while there were two frameworks; adding a
+// third is exactly the change that would have left one of them quietly
+// rejecting a framework the others accept.
+func AgentFrameworks() []string {
+	return []string{AgentFrameworkAntigravity, AgentFrameworkClaude, AgentFrameworkCodex}
+}
+
+// ValidAgentFramework reports whether v names a framework grain can
+// actually dispatch onto, after NormalizeAgentFrameworkName has folded
+// in the legacy spelling. "" is not one: a caller that means "no
+// override, use the deployment's own" has to say so itself, since the
+// two readings differ by caller (Config.AgentFramework's zero value is a
+// framework, Task.AgentFramework's is not).
+func ValidAgentFramework(v string) bool {
+	v = NormalizeAgentFrameworkName(v)
+	for _, name := range AgentFrameworks() {
+		if v == name {
+			return true
+		}
+	}
+	return false
+}
+
+// AgentFrameworkNames renders the vocabulary for an error message a
+// human reads -- `"antigravity", "claude" or "codex"` -- so the sentence
+// that rejects a bad value cannot name a shorter list than the check
+// that rejected it.
+func AgentFrameworkNames() string {
+	names := AgentFrameworks()
+	quoted := make([]string, len(names))
+	for i, n := range names {
+		quoted[i] = strconv.Quote(n)
+	}
+	if len(quoted) == 1 {
+		return quoted[0]
+	}
+	return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
 }

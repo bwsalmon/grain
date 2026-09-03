@@ -336,12 +336,16 @@ export function lastBaseForRepo(tasks, repo) {
 }
 
 // frameworkLabel names an agent framework the way the UI talks about it
-// -- model.AgentFrameworkAntigravity/AgentFrameworkClaude are wire
-// values, not display text, and two panes (the per-task picker on New
-// task, the "Agent framework" row on a task's detail) would otherwise
-// each spell them out and drift. "gemini" is the former wire value for
-// Antigravity and still arrives from a store written before the rename,
-// so it falls through to the same label rather than being special-cased.
+// -- model.AgentFrameworks() are wire values, not display text, and two
+// panes (the per-task picker on New task, the "Agent framework" row on a
+// task's detail) would otherwise each spell them out and drift. "gemini"
+// is the former wire value for Antigravity and still arrives from a
+// store written before the rename, so it falls through to the same
+// default label rather than being special-cased -- as does anything else
+// unrecognized, since a label is not the place to discover that a
+// deployment is running a framework this build has never heard of.
+const FRAMEWORK_LABELS = { claude: "Claude", codex: "Codex" };
+
 export function frameworkLabel(framework) {
-  return framework === "claude" ? "Claude" : "Antigravity";
+  return FRAMEWORK_LABELS[framework] || "Antigravity";
 }

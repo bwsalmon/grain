@@ -12,8 +12,8 @@ import (
 // The agent credentials this pane manages: one per agent.Framework grain
 // can drive a run with, each stored in this deployment's own secrets
 // database under the well-known name cmd/grain's daemon resolves it by
-// (secrets.GeminiAPIKeySecret/ClaudeOAuthTokenSecret) before every
-// dispatch.
+// (secrets.GeminiAPIKeySecret/ClaudeOAuthTokenSecret/OpenAIAPIKeySecret)
+// before every dispatch.
 //
 // They are ordinary secrets, so the Secrets pane this predates could
 // already set them by hand -- but only by knowing both the exact secret
@@ -21,7 +21,7 @@ import (
 // those are or whether the framework an operator just switched to has a
 // credential at all. These handlers are that knowledge, moved into the
 // one pane where the framework itself is chosen: set a key, clear a key,
-// and report which of the two are set, never what they hold (the same
+// and report which of them are set, never what they hold (the same
 // write-only contract secrets.Store.List gives everything else here).
 //
 // grain/task-110 took the same argument the rest of the way: every
@@ -43,6 +43,8 @@ func agentKeySecret(framework string) (string, bool) {
 		return secrets.GeminiAPIKeySecret, true
 	case model.AgentFrameworkClaude:
 		return secrets.ClaudeOAuthTokenSecret, true
+	case model.AgentFrameworkCodex:
+		return secrets.OpenAIAPIKeySecret, true
 	default:
 		return "", false
 	}
@@ -51,38 +53,41 @@ func agentKeySecret(framework string) (string, bool) {
 // agentKeysResponse is GET /api/agent-keys' body, and what setting or
 // clearing one returns afterward -- the same respond-with-the-current-
 // shape convention the secrets pane's own handlers follow. Enabled is
-// false, with both flags false, when this UI has no local secrets
+// false, with every flag false, when this UI has no local secrets
 // directory to write to (Config.Secrets nil), so the pane can say so
 // rather than offer a control that could only ever 404.
 type agentKeysResponse struct {
 	Enabled bool `json:"enabled"`
-	// GeminiAPIKeySet and ClaudeOAuthTokenSet report presence exactly as
-	// the daemon will find it: set means the secret exists and resolves
-	// (secrets.Store.Resolve's sole-key form), not merely that something
-	// of that name is in the database.
+	// These report presence exactly as the daemon will find it: set
+	// means the secret exists and resolves (secrets.Store.Resolve's
+	// sole-key form), not merely that something of that name is in the
+	// database.
 	GeminiAPIKeySet     bool `json:"geminiApiKeySet"`
 	ClaudeOAuthTokenSet bool `json:"claudeOAuthTokenSet"`
+	OpenAIAPIKeySet     bool `json:"openaiApiKeySet"`
 }
 
 // agentKeysSet reports which agent credentials this deployment has,
-// leaving both false when there is no secrets store to ask (`grain
+// leaving every flag false when there is no secrets store to ask (`grain
 // demo`'s throwaway UI) or when listing it fails -- best-effort, the
 // same reading capabilityStatuses gives the same listing, since a
 // Settings response has never failed on this and an operator is better
 // served by a pane that loads and says "not set" than by one that does
 // not load.
-func (c *Client) agentKeysSet() (gemini, claude bool) {
+func (c *Client) agentKeysSet() (gemini, claude, openai bool) {
 	if c.Config.Secrets == nil {
-		return false, false
+		return false, false, false
 	}
 	list, err := c.Config.Secrets.List()
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	resolvable := func(secret string) bool {
 		return len(missingSecretsFor([]string{secret}, list)) == 0
 	}
-	return resolvable(secrets.GeminiAPIKeySecret), resolvable(secrets.ClaudeOAuthTokenSecret)
+	return resolvable(secrets.GeminiAPIKeySecret),
+		resolvable(secrets.ClaudeOAuthTokenSecret),
+		resolvable(secrets.OpenAIAPIKeySecret)
 }
 
 func (s *Server) handleListAgentKeys(w http.ResponseWriter, r *http.Request) {
@@ -155,10 +160,11 @@ func (s *Server) handleDeleteAgentKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) respondWithAgentKeys(w http.ResponseWriter) {
-	gemini, claude := s.tasks.agentKeysSet()
+	gemini, claude, openai := s.tasks.agentKeysSet()
 	writeJSON(w, http.StatusOK, agentKeysResponse{
 		Enabled:             s.tasks.Config.Secrets != nil,
 		GeminiAPIKeySet:     gemini,
 		ClaudeOAuthTokenSet: claude,
+		OpenAIAPIKeySet:     openai,
 	})
 }

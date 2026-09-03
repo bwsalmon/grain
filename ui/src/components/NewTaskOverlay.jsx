@@ -330,6 +330,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               </MenuItem>
               <MenuItem value="antigravity">Antigravity</MenuItem>
               <MenuItem value="claude">Claude</MenuItem>
+              <MenuItem value="codex">Codex</MenuItem>
             </TextField>
             <fieldset>
               <legend>Sandbox shape override <span className="hint">optional, kontur-managed deployments only</span></legend>

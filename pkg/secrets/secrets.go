@@ -34,7 +34,7 @@ import (
 )
 
 // The well-known names an agent framework's own credential is stored
-// under -- the two secrets cmd/grain's daemon resolves before every
+// under -- one per framework, resolved by cmd/grain's daemon before every
 // dispatch and pkg/ui's Settings pane writes (its "Agent frameworks"
 // section) and reports the presence of. Named here, in the one package
 // both sides already depend on, so neither has to repeat a string the
@@ -52,8 +52,14 @@ const (
 	// ClaudeOAuthTokenSecret holds the Claude Code OAuth token
 	// agent/claude passes its subprocess as CLAUDE_CODE_OAUTH_TOKEN.
 	ClaudeOAuthTokenSecret = "claude-oauth-token"
-	// AgentCredentialKey is the one key each of the two secrets above
-	// holds. "value" rather than a per-secret name ("api-key", "token")
+	// OpenAIAPIKeySecret holds the OpenAI API key agent/codex passes its
+	// subprocess as OPENAI_API_KEY. Named for the credential rather than
+	// for the framework, the way the other two are: it is an OpenAI
+	// account's key, and a second framework built on one would want this
+	// same secret rather than a copy of it under another name.
+	OpenAIAPIKeySecret = "openai-api-key"
+	// AgentCredentialKey is the one key each of the secrets above holds.
+	// "value" rather than a per-secret name ("api-key", "token")
 	// so nothing has to remember which is which: the secret's own name
 	// already says what the value is.
 	AgentCredentialKey = "value"

@@ -207,6 +207,9 @@ export default function SettingsOverlay({ onClose, showError }) {
     const claudeModel = form.elements.claudeModel.value.trim();
     if (claudeModel !== (settings.claudeModel || "")) payload.claudeModel = claudeModel;
 
+    const codexModel = form.elements.codexModel.value.trim();
+    if (codexModel !== (settings.codexModel || "")) payload.codexModel = codexModel;
+
     const maxAgentTurnsRaw = form.elements.maxAgentTurns.value.trim();
     if (maxAgentTurnsRaw !== "") {
       const maxAgentTurns = parseInt(maxAgentTurnsRaw, 10);
@@ -471,15 +474,17 @@ export default function SettingsOverlay({ onClose, showError }) {
           <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "antigravity"} sx={{ mb: 1 }}>
             <FormControlLabel value="antigravity" control={<Radio />} label="Antigravity" />
             <FormControlLabel value="claude" control={<Radio />} label="Claude" />
+            <FormControlLabel value="codex" control={<Radio />} label="Codex" />
           </RadioGroup>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Which agent drives a run by default &mdash; the Antigravity CLI (agy) or the Claude CLI, each run as a
-            subprocess on the controller. A task can override it for its own dispatch (New task &rarr;
-            Advanced options), so both frameworks want a credential below.
+            Which agent drives a run by default &mdash; the Antigravity CLI (agy), the Claude CLI or the Codex CLI,
+            each run as a subprocess on the controller. A task can override it for its own dispatch (New task &rarr;
+            Advanced options), so every framework wants a credential below.
           </Typography>
           <AgentKeysSection settings={settings} showError={showError} />
           <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
           <TextField name="claudeModel" label="Claude model" defaultValue={settings.claudeModel || ""} autoComplete="off" fullWidth margin="normal" />
+          <TextField name="codexModel" label="Codex model" helperText="blank leaves the daemon's own -codex-model default in place" defaultValue={settings.codexModel || ""} autoComplete="off" fullWidth margin="normal" />
           <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = uncapped; runs are bounded by wall-clock runtime instead" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
 
           <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
