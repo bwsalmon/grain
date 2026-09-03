@@ -14,7 +14,7 @@ func TestSyncPullRequestsClosesOutAMergedPullRequest(t *testing.T) {
 	task := filedTask(t, ctx, store, "t1", repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestSyncPullRequestsRecordsAPullRequestClosedWithoutMerging(t *testing.T) {
 	task := filedTask(t, ctx, store, "t1", repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestSyncPullRequestsLeavesAnOpenCleanPullRequestAlone(t *testing.T) {
 	task := filedTask(t, ctx, store, "t1", repo)
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestSyncPullRequestsAutoMergesACleanPullRequest(t *testing.T) {
 	}
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}

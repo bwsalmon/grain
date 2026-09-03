@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -298,5 +298,36 @@ describe("defaultCapabilitiesFor", () => {
 
   it("survives a config that has never been loaded", () => {
     expect(defaultCapabilitiesFor(null, "acme/widgets")).toEqual([]);
+  });
+});
+
+describe("orphanedPullRequest", () => {
+  it("names the pull request a closed task has left open", () => {
+    expect(orphanedPullRequest({ state: "closed", pullRequest: "acme/widgets#1" })).toBe("acme/widgets#1");
+  });
+
+  // The ordinary ending, not an orphan: a merged pull request closes its
+  // own task (orchestrator.recordPullRequestEvents sets ClosedAt
+  // alongside PrMergedAt), so the state and the link alone cannot tell
+  // the two apart.
+  it("says nothing about a task closed because its pull request merged", () => {
+    expect(orphanedPullRequest({
+      state: "closed",
+      pullRequest: "acme/widgets#1",
+      pullRequestEvents: [{ kind: "opened" }, { kind: "merged" }],
+    })).toBeNull();
+  });
+
+  it("says nothing about a pull request that closed without merging", () => {
+    expect(orphanedPullRequest({
+      state: "closed",
+      pullRequest: "acme/widgets#1",
+      pullRequestEvents: [{ kind: "closed" }],
+    })).toBeNull();
+  });
+
+  it("says nothing about a task that is not closed, or has no pull request", () => {
+    expect(orphanedPullRequest({ state: "completed", pullRequest: "acme/widgets#1" })).toBeNull();
+    expect(orphanedPullRequest({ state: "closed" })).toBeNull();
   });
 });

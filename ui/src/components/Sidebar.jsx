@@ -24,7 +24,13 @@ import GrainMark from "./GrainMark.jsx";
 // than a tab buried inside Settings' configuration form. The throughput
 // and latency report (GET /api/metrics) is a fourth tab in there, for
 // the same reason the other three are.
-export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenDebug, onOpenNewTask }) {
+//
+// Both footer entries open a full pane beside this rail rather than a
+// dialog over the middle of the screen (grain/task-115), which is why
+// they are nav entries carrying a selected state now rather than plain
+// buttons: the rail stays visible under the pane, so it has to say
+// which of the two is covering everything else.
+export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, showSettings = false, showDebug = false, onOpenSettings, onOpenDebug, onOpenNewTask }) {
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -144,11 +150,17 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
         </ListItemButton>
       </List>
 
-      <Box sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}>
+      {/* No dot beside either, unlike every nav entry above: those count
+          something, and these two are one destination each. */}
+      <List component="nav" disablePadding sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}>
         <Divider sx={{ mb: 0.9 }} />
-        <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenSettings}>Settings</Button>
-        <Button color="inherit" sx={{ justifyContent: "flex-start", px: 0.9, py: 0.6, fontSize: "0.85rem", fontWeight: 500, color: "text.secondary" }} onClick={onOpenDebug}>Debugging</Button>
-      </Box>
+        <ListItemButton selected={showSettings} onClick={onOpenSettings} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <ListItemText primary="Settings" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showSettings ? "text.primary" : "text.secondary" }} />
+        </ListItemButton>
+        <ListItemButton selected={showDebug} onClick={onOpenDebug} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <ListItemText primary="Debugging" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showDebug ? "text.primary" : "text.secondary" }} />
+        </ListItemButton>
+      </List>
     </Box>
   );
 }

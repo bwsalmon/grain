@@ -390,6 +390,25 @@ func TestSimCreatePullRequestRecordsThePR(t *testing.T) {
 	}
 }
 
+// Real GitHub refuses a pull request whose base is not a branch, every
+// time, and that refusal is worth having here: a task whose base merged
+// and was deleted between being filed and being dispatched could never be
+// finished, because this one call was declined on every attempt -- and a
+// sim that accepted any base at all is why nothing ever caught it.
+// orchestrator.pullRequestBase is what answers it now.
+func TestSimRefusesAPullRequestAgainstABaseThatIsNotABranch(t *testing.T) {
+	_, client := newSim(t, "main")
+
+	_, err := client.CreatePullRequest("acme", "widgets", "grain/issue-1", "gone", "grain: fix #1", "")
+	var ghErr *github.Error
+	if !errors.As(err, &ghErr) || ghErr.Status != 422 {
+		t.Fatalf("got %v, want a 422 for a base branch that does not exist", err)
+	}
+	if !strings.Contains(string(ghErr.Body), "base") {
+		t.Errorf("body = %q, want GitHub's own complaint about the base", ghErr.Body)
+	}
+}
+
 func TestSimPanicsOnAnUnhandledRequest(t *testing.T) {
 	sim, _ := newSim(t, "main")
 	sim.Issues[1] = &Issue{Title: "t", Body: "b", Labels: map[string]struct{}{}}

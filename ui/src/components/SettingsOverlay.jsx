@@ -14,6 +14,14 @@ import { capabilityRows } from "../state.js";
 // deployment settings, since all of it is the same kind of operator-only,
 // deployment-wide configuration.
 //
+// grain/task-115: and it is a full-height pane beside the sidebar now
+// (Overlay's own `pane`), not a centered dialog. Six tabs of
+// configuration is a destination an operator navigates around, not a
+// single form to fill in and dismiss, so it gets the same shape opening
+// a task or a schedule does -- with the title and the tab strip as the
+// pane's fixed header, so switching tabs never means scrolling back up
+// to find them.
+//
 // Logs, Sandbox health and the reboot control used to join them here as
 // a single Debug tab (bwsalmon/agents#623), but moved back out to their
 // own sidebar entry/overlay, DebugOverlay.jsx (bwsalmon/agents#640): live
@@ -357,303 +365,317 @@ export default function SettingsOverlay({ onClose, showError }) {
   // tab is open rather than only from the one the field lives on.
   const pending = (settings.pendingRestart || []).map(settingLabel);
 
-  return (
-    <Overlay onClose={onClose}>
+  // The pane's fixed chrome: the title and the tab strip stay put while
+  // whichever tab is open scrolls under them (grain/task-115). The strip
+  // scrolls sideways rather than wrapping, so a narrow window shortens
+  // it instead of pushing the tallest tab's fields further down.
+  const header = (
+    <>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Settings</Typography>
-      {pending.length > 0 && (
-        <Alert severity="warning" sx={{ mb: 2 }}>
-          Saved, but not applied yet: {pending.join(", ")}. Everything else here takes effect within a poll
-          interval; these only take effect when the daemon restarts.
-        </Alert>
-      )}
-      {!settings.configured && (
-        <Alert severity="info" sx={{ mb: 2 }}>
-          Not configured yet -- nothing has been saved for this deployment. Poll interval and max concurrent
-          (General), Gemini model and Claude model (Agents) and GitHub host (GitHub) are required the first time.
-        </Alert>
-      )}
-      <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
+      <Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" scrollButtons="auto">
         {TABS.map((t) => (
           <Tab key={t.id} value={t.id} label={t.label} />
         ))}
       </Tabs>
-      {tab === "general" && (
-        <>
-          <Typography variant="subtitle2">Appearance</Typography>
-          <RadioGroup
-            row
-            aria-label="Appearance"
-            value={themeMode}
-            onChange={(evt) => setThemeMode(evt.target.value)}
-            sx={{ mb: 2 }}
-          >
-            <FormControlLabel value="auto" control={<Radio />} label="Auto" />
-            <FormControlLabel value="light" control={<Radio />} label="Light" />
-            <FormControlLabel value="dark" control={<Radio />} label="Dark" />
-          </RadioGroup>
-          <form onSubmit={submitGeneral}>
-            <Typography variant="subtitle2" sx={{ mt: 1 }}>Deployment</Typography>
+    </>
+  );
+
+  return (
+    <Overlay onClose={onClose} pane header={header}>
+      {/* Capped like any other pane's form: these are single-column
+          fields, and a "Poll interval" box the width of a widescreen
+          reads no better here than it does anywhere else. */}
+      <div className="pane-form">
+        {pending.length > 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Saved, but not applied yet: {pending.join(", ")}. Everything else here takes effect within a poll
+            interval; these only take effect when the daemon restarts.
+          </Alert>
+        )}
+        {!settings.configured && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Not configured yet -- nothing has been saved for this deployment. Poll interval and max concurrent
+            (General), Gemini model and Claude model (Agents) and GitHub host (GitHub) are required the first time.
+          </Alert>
+        )}
+        {tab === "general" && (
+          <>
+            <Typography variant="subtitle2">Appearance</Typography>
+            <RadioGroup
+              row
+              aria-label="Appearance"
+              value={themeMode}
+              onChange={(evt) => setThemeMode(evt.target.value)}
+              sx={{ mb: 2 }}
+            >
+              <FormControlLabel value="auto" control={<Radio />} label="Auto" />
+              <FormControlLabel value="light" control={<Radio />} label="Light" />
+              <FormControlLabel value="dark" control={<Radio />} label="Dark" />
+            </RadioGroup>
+            <form onSubmit={submitGeneral}>
+              <Typography variant="subtitle2" sx={{ mt: 1 }}>Deployment</Typography>
+              <TextField
+                name="environmentName"
+                label="Environment name"
+                helperText="Shown beside the grain mark and in the browser tab, e.g. staging. Leave empty for an unnamed deployment."
+                defaultValue={settings.environmentName || ""}
+                inputProps={{ maxLength: 32 }}
+                autoComplete="off"
+                fullWidth
+                margin="normal"
+              />
+              <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
+              <TextField name="maxWorkers" label="Max worker agents" helperText="maximum number of ordinary tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxWorkers || "")} fullWidth margin="normal" />
+              <TextField name="maxMergers" label="Max merge agents" helperText="extra agents only the merge queue may dispatch, to repair a pull request that will not land -- on top of the workers above, and free to use a spare worker slot too. 0 makes them wait for one like anything else" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxMergers ?? "")} fullWidth margin="normal" />
+              <Typography variant="subtitle2" sx={{ mt: 2 }}>Backlog &amp; task defaults</Typography>
+              <FormControlLabel
+                control={<Checkbox name="newestFirst" defaultChecked={!!settings.newestFirst} />}
+                label={(
+                  <>
+                    Work through the backlog newest-first
+                    <span className="hint">
+                      off (default): a new task is added to the top of the list but dispatched last, behind
+                      everything already queued. on: it is dispatched next instead, ahead of everything queued.
+                    </span>
+                  </>
+                )}
+                sx={{ display: "flex", mt: 1 }}
+              />
+              <FormControlLabel
+                control={<Checkbox name="showClosedByDefault" defaultChecked={!!settings.showClosedByDefault} />}
+                label={(
+                  <>
+                    Show closed tasks by default
+                    <span className="hint">
+                      off (default): a task list's own "Show closed tasks" checkbox starts unchecked, hiding closed
+                      tasks until turned on. on: it starts checked instead, showing them from the start.
+                    </span>
+                  </>
+                )}
+                sx={{ display: "flex", mt: 1 }}
+              />
+              <FormControlLabel
+                control={<Checkbox name="approvedByDefault" defaultChecked={!!settings.approvedByDefault} />}
+                label={(
+                  <>
+                    Queue new tasks immediately by default
+                    <span className="hint">
+                      on (default): a new task's own "Queue immediately" checkbox starts checked, filing a task ready
+                      to dispatch at once. off: it starts unchecked instead, filing it as a proposal needing
+                      approval.
+                    </span>
+                  </>
+                )}
+                sx={{ display: "flex", mt: 1 }}
+              />
+              <FormControlLabel
+                control={<Checkbox name="autoMergeByDefault" defaultChecked={!!settings.autoMergeByDefault} />}
+                label={(
+                  <>
+                    Auto-merge new tasks by default
+                    <span className="hint">
+                      on (default): a new task's own "Auto-merge once checks pass" checkbox starts checked. off: it
+                      starts unchecked instead.
+                    </span>
+                  </>
+                )}
+                sx={{ display: "flex", mt: 1 }}
+              />
+
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+                Target repos are managed from the Repos pane now, not here.
+              </Typography>
+
+              <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+                <Button type="submit" variant="contained">Save</Button>
+              </Stack>
+            </form>
+          </>
+        )}
+        {tab === "agents" && (
+          <form onSubmit={submitAgents}>
+            <Typography variant="subtitle2">Agent frameworks</Typography>
+            <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "antigravity"} sx={{ mb: 1 }}>
+              <FormControlLabel value="antigravity" control={<Radio />} label="Antigravity" />
+              <FormControlLabel value="claude" control={<Radio />} label="Claude" />
+            </RadioGroup>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              Which agent drives a run by default &mdash; the Antigravity CLI (agy) or the Claude CLI, each run as a
+              subprocess on the controller. A task can override it for its own dispatch (New task &rarr;
+              Advanced options), so both frameworks want a credential below.
+            </Typography>
+            <AgentKeysSection settings={settings} showError={showError} />
+            <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="claudeModel" label="Claude model" defaultValue={settings.claudeModel || ""} autoComplete="off" fullWidth margin="normal" />
+            <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = uncapped; runs are bounded by wall-clock runtime instead" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
+
+            {/* The deployment-wide layer of model/prompt_extension.go's
+                three. It lives on this tab rather than General because it
+                is about what the agent is told, next to which agent and
+                which model -- and, like those, it reaches the next run
+                dispatched rather than needing a restart. */}
+            <Typography variant="subtitle2" sx={{ mt: 3 }}>Prompt extension</Typography>
             <TextField
-              name="environmentName"
-              label="Environment name"
-              helperText="Shown beside the grain mark and in the browser tab, e.g. staging. Leave empty for an unnamed deployment."
-              defaultValue={settings.environmentName || ""}
-              inputProps={{ maxLength: 32 }}
+              name="promptExtension"
+              label="Standing instructions for every run"
+              helperText="Added to the end of every run's prompt on this deployment -- house style, a test command, a convention grain has no way to know. A repo can add its own on the Repos pane, and a task can replace both (New task -> Advanced options). Leave empty to add nothing."
+              defaultValue={settings.promptExtension || ""}
+              multiline
+              minRows={4}
               autoComplete="off"
               fullWidth
               margin="normal"
             />
-            <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
-            <TextField name="maxWorkers" label="Max worker agents" helperText="maximum number of ordinary tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxWorkers || "")} fullWidth margin="normal" />
-            <TextField name="maxMergers" label="Max merge agents" helperText="extra agents only the merge queue may dispatch, to repair a pull request that will not land -- on top of the workers above, and free to use a spare worker slot too. 0 makes them wait for one like anything else" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxMergers ?? "")} fullWidth margin="normal" />
-            <Typography variant="subtitle2" sx={{ mt: 2 }}>Backlog &amp; task defaults</Typography>
-            <FormControlLabel
-              control={<Checkbox name="newestFirst" defaultChecked={!!settings.newestFirst} />}
-              label={(
-                <>
-                  Work through the backlog newest-first
-                  <span className="hint">
-                    off (default): a new task is added to the top of the list but dispatched last, behind
-                    everything already queued. on: it is dispatched next instead, ahead of everything queued.
-                  </span>
-                </>
-              )}
-              sx={{ display: "flex", mt: 1 }}
-            />
-            <FormControlLabel
-              control={<Checkbox name="showClosedByDefault" defaultChecked={!!settings.showClosedByDefault} />}
-              label={(
-                <>
-                  Show closed tasks by default
-                  <span className="hint">
-                    off (default): a task list's own "Show closed tasks" checkbox starts unchecked, hiding closed
-                    tasks until turned on. on: it starts checked instead, showing them from the start.
-                  </span>
-                </>
-              )}
-              sx={{ display: "flex", mt: 1 }}
-            />
-            <FormControlLabel
-              control={<Checkbox name="approvedByDefault" defaultChecked={!!settings.approvedByDefault} />}
-              label={(
-                <>
-                  Queue new tasks immediately by default
-                  <span className="hint">
-                    on (default): a new task's own "Queue immediately" checkbox starts checked, filing a task ready
-                    to dispatch at once. off: it starts unchecked instead, filing it as a proposal needing
-                    approval.
-                  </span>
-                </>
-              )}
-              sx={{ display: "flex", mt: 1 }}
-            />
-            <FormControlLabel
-              control={<Checkbox name="autoMergeByDefault" defaultChecked={!!settings.autoMergeByDefault} />}
-              label={(
-                <>
-                  Auto-merge new tasks by default
-                  <span className="hint">
-                    on (default): a new task's own "Auto-merge once checks pass" checkbox starts checked. off: it
-                    starts unchecked instead.
-                  </span>
-                </>
-              )}
-              sx={{ display: "flex", mt: 1 }}
-            />
-
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-              Target repos are managed from the Repos pane now, not here.
-            </Typography>
 
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
               <Button type="submit" variant="contained">Save</Button>
             </Stack>
           </form>
-        </>
-      )}
-      {tab === "agents" && (
-        <form onSubmit={submitAgents}>
-          <Typography variant="subtitle2">Agent frameworks</Typography>
-          <RadioGroup row aria-label="Agent framework" name="agentFramework" defaultValue={settings.agentFramework || "antigravity"} sx={{ mb: 1 }}>
-            <FormControlLabel value="antigravity" control={<Radio />} label="Antigravity" />
-            <FormControlLabel value="claude" control={<Radio />} label="Claude" />
-          </RadioGroup>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Which agent drives a run by default &mdash; the Antigravity CLI (agy) or the Claude CLI, each run as a
-            subprocess on the controller. A task can override it for its own dispatch (New task &rarr;
-            Advanced options), so both frameworks want a credential below.
-          </Typography>
-          <AgentKeysSection settings={settings} showError={showError} />
-          <TextField name="geminiModel" label="Gemini model" defaultValue={settings.geminiModel || ""} autoComplete="off" fullWidth margin="normal" />
-          <TextField name="claudeModel" label="Claude model" defaultValue={settings.claudeModel || ""} autoComplete="off" fullWidth margin="normal" />
-          <TextField name="maxAgentTurns" label="Max agent turns" helperText="0 = uncapped; runs are bounded by wall-clock runtime instead" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxAgentTurns || 0)} fullWidth margin="normal" />
+        )}
+        {tab === "github" && (
+          <form onSubmit={submitGithub}>
+            <TextField
+              name="githubHost"
+              label="GitHub host"
+              helperText={restartHint("githubHost", "")}
+              defaultValue={settings.githubHost || ""}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+              InputProps={{ endAdornment: restartChip("githubHost") }}
+            />
+            <FormControlLabel
+              control={<Checkbox name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />}
+              label={(
+                <>
+                  Speak plain HTTP to GitHub host <span className="hint">mock servers only</span>
+                  {restartChip("githubInsecureHttp")}
+                  {restartRequired.has("githubInsecureHttp") && (
+                    <span className="hint">{restartHint("githubInsecureHttp", "")}</span>
+                  )}
+                </>
+              )}
+              sx={{ display: "flex", mt: 1 }}
+            />
 
-          {/* The deployment-wide layer of model/prompt_extension.go's
-              three. It lives on this tab rather than General because it
-              is about what the agent is told, next to which agent and
-              which model -- and, like those, it reaches the next run
-              dispatched rather than needing a restart. */}
-          <Typography variant="subtitle2" sx={{ mt: 3 }}>Prompt extension</Typography>
-          <TextField
-            name="promptExtension"
-            label="Standing instructions for every run"
-            helperText="Added to the end of every run's prompt on this deployment -- house style, a test command, a convention grain has no way to know. A repo can add its own on the Repos pane, and a task can replace both (New task -> Advanced options). Leave empty to add nothing."
-            defaultValue={settings.promptExtension || ""}
-            multiline
-            minRows={4}
-            autoComplete="off"
-            fullWidth
-            margin="normal"
-          />
-
-          <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-            <Button type="submit" variant="contained">Save</Button>
-          </Stack>
-        </form>
-      )}
-      {tab === "github" && (
-        <form onSubmit={submitGithub}>
-          <TextField
-            name="githubHost"
-            label="GitHub host"
-            helperText={restartHint("githubHost", "")}
-            defaultValue={settings.githubHost || ""}
-            autoComplete="off"
-            fullWidth
-            margin="normal"
-            InputProps={{ endAdornment: restartChip("githubHost") }}
-          />
-          <FormControlLabel
-            control={<Checkbox name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />}
-            label={(
-              <>
-                Speak plain HTTP to GitHub host <span className="hint">mock servers only</span>
-                {restartChip("githubInsecureHttp")}
-                {restartRequired.has("githubInsecureHttp") && (
-                  <span className="hint">{restartHint("githubInsecureHttp", "")}</span>
-                )}
-              </>
-            )}
-            sx={{ display: "flex", mt: 1 }}
-          />
-
-          <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-            <Button type="submit" variant="contained">Save</Button>
-          </Stack>
-        </form>
-      )}
-      {tab === "sandbox" && (
-        <form onSubmit={submitSandbox}>
-          <TextField
-            name="sandboxCpus"
-            label="Sandbox vCPUs"
-            helperText="default vCPU count for a kontur-managed sandbox VM. Overridable per task."
-            type="number"
-            inputProps={{ min: 0, step: 1 }}
-            defaultValue={settings.sandboxCpus ? String(settings.sandboxCpus) : ""}
-            placeholder={settings.sandboxCpusDefault ? String(settings.sandboxCpusDefault) : undefined}
-            fullWidth
-            margin="normal"
-          />
-          <TextField
-            name="sandboxMemoryMb"
-            label="Sandbox memory (MiB)"
-            helperText="default guest memory, in MiB, for a kontur-managed sandbox VM. Overridable per task."
-            type="number"
-            inputProps={{ min: 0, step: 1 }}
-            defaultValue={settings.sandboxMemoryMb ? String(settings.sandboxMemoryMb) : ""}
-            placeholder={settings.sandboxMemoryMbDefault ? String(settings.sandboxMemoryMbDefault) : undefined}
-            fullWidth
-            margin="normal"
-          />
-          {/*
-            Disk shows a faint placeholder default like the two above now.
-            It used to have none, because an empty box meant "as large as
-            the guest image behind the VM" -- a property of the image this
-            deployment built rather than a number the API could report.
-            grain names all three sizes itself and passes all three on
-            every create, so sandboxDiskGbDefault is a real number here.
-          */}
-          <TextField
-            name="sandboxDiskGb"
-            label="Sandbox disk (GiB)"
-            helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Overridable per task."
-            type="number"
-            inputProps={{ min: 0, step: 1 }}
-            defaultValue={settings.sandboxDiskGb ? String(settings.sandboxDiskGb) : ""}
-            placeholder={settings.sandboxDiskGbDefault ? String(settings.sandboxDiskGbDefault) : undefined}
-            fullWidth
-            margin="normal"
-          />
-
-          <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-            <Button type="submit" variant="contained">Save</Button>
-          </Stack>
-        </form>
-      )}
-      {tab === "capabilities" && (
-        <>
-          <form onSubmit={submitCapabilities}>
-            <Typography variant="subtitle2">GCP</Typography>
-            <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
-            {/* The credential those two capabilities mint *through* is
-                not a setting and is not here: it is a secret, set on the
-                gcp-key row further down this tab (grain/task-110). */}
-            <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional -- the minter's own key is set with the gcp-key capability below" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
-
-            <Typography variant="subtitle2" sx={{ mt: 2 }}>New tasks</Typography>
-            {/* Only grantable capabilities are offered: the set is
-                validated against the same picker listing a task's own
-                capabilities are, and one no task could be granted by hand
-                would be a default that failed at every filing. A stored
-                id this build has retired gets a row anyway, purely so it
-                can be unticked -- capabilityRows (state.js) has why a
-                pane without one cannot be saved at all. */}
-            <FormControl fullWidth margin="normal" size="small">
-              <InputLabel id="settings-default-capabilities-label">Default capabilities</InputLabel>
-              <Select
-                labelId="settings-default-capabilities-label"
-                label="Default capabilities"
-                multiple
-                value={defaultCapabilities}
-                onChange={(e) => setDefaultCapabilities(e.target.value)}
-                renderValue={(selected) => (
-                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                    {selected.map((id) => {
-                      const cap = capabilityChoices.find((c) => c.id === id);
-                      return <Chip key={id} size="small" label={cap ? cap.name || cap.id : id} />;
-                    })}
-                  </Box>
-                )}
-              >
-                {capabilityChoices.map((c) => (
-                  <MenuItem key={c.id} value={c.id} title={c.description}>
-                    <Checkbox checked={defaultCapabilities.includes(c.id)} size="small" />
-                    <ListItemText primary={c.name || c.id} secondary={c.retired ? c.description : null} />
-                  </MenuItem>
-                ))}
-              </Select>
-              <FormHelperText>
-                attached to every new task as it is filed, whichever repo it targets -- whoever files one can
-                untick any of these on the new-task form, and any of them can be detached from a task
-                afterwards. Tasks already filed keep what they were filed with. An individual repo can add
-                more of its own, on the repos page.
-              </FormHelperText>
-            </FormControl>
-
-            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2, mb: 2 }}>
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
               <Button type="submit" variant="contained">Save</Button>
             </Stack>
           </form>
-          <CapabilitiesPanel
-            capabilities={settings.capabilities}
-            showError={showError}
-            onSecretsChanged={reloadSettings}
-          />
-          <SecretsPanel showError={showError} claimed={claimedSecrets} />
-        </>
-      )}
-      {tab === "upgrade" && <UpgradePanel showError={showError} />}
+        )}
+        {tab === "sandbox" && (
+          <form onSubmit={submitSandbox}>
+            <TextField
+              name="sandboxCpus"
+              label="Sandbox vCPUs"
+              helperText="default vCPU count for a kontur-managed sandbox VM. Overridable per task."
+              type="number"
+              inputProps={{ min: 0, step: 1 }}
+              defaultValue={settings.sandboxCpus ? String(settings.sandboxCpus) : ""}
+              placeholder={settings.sandboxCpusDefault ? String(settings.sandboxCpusDefault) : undefined}
+              fullWidth
+              margin="normal"
+            />
+            <TextField
+              name="sandboxMemoryMb"
+              label="Sandbox memory (MiB)"
+              helperText="default guest memory, in MiB, for a kontur-managed sandbox VM. Overridable per task."
+              type="number"
+              inputProps={{ min: 0, step: 1 }}
+              defaultValue={settings.sandboxMemoryMb ? String(settings.sandboxMemoryMb) : ""}
+              placeholder={settings.sandboxMemoryMbDefault ? String(settings.sandboxMemoryMbDefault) : undefined}
+              fullWidth
+              margin="normal"
+            />
+            {/*
+              Disk shows a faint placeholder default like the two above now.
+              It used to have none, because an empty box meant "as large as
+              the guest image behind the VM" -- a property of the image this
+              deployment built rather than a number the API could report.
+              grain names all three sizes itself and passes all three on
+              every create, so sandboxDiskGbDefault is a real number here.
+            */}
+            <TextField
+              name="sandboxDiskGb"
+              label="Sandbox disk (GiB)"
+              helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Overridable per task."
+              type="number"
+              inputProps={{ min: 0, step: 1 }}
+              defaultValue={settings.sandboxDiskGb ? String(settings.sandboxDiskGb) : ""}
+              placeholder={settings.sandboxDiskGbDefault ? String(settings.sandboxDiskGbDefault) : undefined}
+              fullWidth
+              margin="normal"
+            />
+
+            <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
+              <Button type="submit" variant="contained">Save</Button>
+            </Stack>
+          </form>
+        )}
+        {tab === "capabilities" && (
+          <>
+            <form onSubmit={submitCapabilities}>
+              <Typography variant="subtitle2">GCP</Typography>
+              <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
+              {/* The credential those two capabilities mint *through* is
+                  not a setting and is not here: it is a secret, set on the
+                  gcp-key row further down this tab (grain/task-110). */}
+              <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional -- the minter's own key is set with the gcp-key capability below" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
+
+              <Typography variant="subtitle2" sx={{ mt: 2 }}>New tasks</Typography>
+              {/* Only grantable capabilities are offered: the set is
+                  validated against the same picker listing a task's own
+                  capabilities are, and one no task could be granted by hand
+                  would be a default that failed at every filing. A stored
+                  id this build has retired gets a row anyway, purely so it
+                  can be unticked -- capabilityRows (state.js) has why a
+                  pane without one cannot be saved at all. */}
+              <FormControl fullWidth margin="normal" size="small">
+                <InputLabel id="settings-default-capabilities-label">Default capabilities</InputLabel>
+                <Select
+                  labelId="settings-default-capabilities-label"
+                  label="Default capabilities"
+                  multiple
+                  value={defaultCapabilities}
+                  onChange={(e) => setDefaultCapabilities(e.target.value)}
+                  renderValue={(selected) => (
+                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                      {selected.map((id) => {
+                        const cap = capabilityChoices.find((c) => c.id === id);
+                        return <Chip key={id} size="small" label={cap ? cap.name || cap.id : id} />;
+                      })}
+                    </Box>
+                  )}
+                >
+                  {capabilityChoices.map((c) => (
+                    <MenuItem key={c.id} value={c.id} title={c.description}>
+                      <Checkbox checked={defaultCapabilities.includes(c.id)} size="small" />
+                      <ListItemText primary={c.name || c.id} secondary={c.retired ? c.description : null} />
+                    </MenuItem>
+                  ))}
+                </Select>
+                <FormHelperText>
+                  attached to every new task as it is filed, whichever repo it targets -- whoever files one can
+                  untick any of these on the new-task form, and any of them can be detached from a task
+                  afterwards. Tasks already filed keep what they were filed with. An individual repo can add
+                  more of its own, on the repos page.
+                </FormHelperText>
+              </FormControl>
+
+              <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2, mb: 2 }}>
+                <Button type="submit" variant="contained">Save</Button>
+              </Stack>
+            </form>
+            <CapabilitiesPanel
+              capabilities={settings.capabilities}
+              showError={showError}
+              onSecretsChanged={reloadSettings}
+            />
+            <SecretsPanel showError={showError} claimed={claimedSecrets} />
+          </>
+        )}
+        {tab === "upgrade" && <UpgradePanel showError={showError} />}
+      </div>
     </Overlay>
   );
 }

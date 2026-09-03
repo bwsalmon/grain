@@ -305,6 +305,48 @@ describe("DetailOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/tasks/12/reopen", { method: "POST" });
   });
 
+  // A pull request nobody is going to merge, said where the person who
+  // closed the task is looking. grain leaves the same note on the task
+  // and on the pull request itself (model.OrphanedPullRequestNote); this
+  // is the copy that needs no reading of the conversation to find.
+  it("warns that a closed task has left its pull request open and unwatched", () => {
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "closed", pullRequest: "acme/widgets#42" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(/acme\/widgets#42 is still open, and grain has stopped watching it\./)).toBeInTheDocument();
+  });
+
+  // The ordinary ending closes the task too: a pull request that merged
+  // sets ClosedAt alongside PrMergedAt (orchestrator.
+  // recordPullRequestEvents), and there is nothing orphaned about it.
+  it("says nothing about a closed task whose pull request merged", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "closed",
+          pullRequest: "acme/widgets#42",
+          pullRequestEvents: [{ kind: "merged", at: "2026-08-28T12:00:00Z" }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByText(/grain has stopped watching it/)).not.toBeInTheDocument();
+  });
+
   it("shows Cancel for a running task, only closing after confirmation", async () => {
     const act = vi.fn();
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));

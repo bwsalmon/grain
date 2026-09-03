@@ -207,9 +207,17 @@ func refreshDescription(client github.Client, task model.Task, number int) {
 	if !grainAuthored(detail.Body, task.ID) {
 		return
 	}
+	// The pull request's own base, not the task's: those differ on a task
+	// whose base branch had vanished by the time it was opened, and
+	// pullRequestBase retargeted it (finish.go). The commits worth
+	// describing are the ones this pull request actually proposes.
 	base := detail.BaseRef
 	if base == "" {
-		base = task.Base
+		base, _, err = pullRequestBase(client, task)
+		if err != nil {
+			log.Printf("orchestrator: resolving %s's base to describe its pull request: %v", task.ID, err)
+			return
+		}
 	}
 	description := describeBranch(client, repo, base, model.BranchName(task.ID))
 	if description == "" {
