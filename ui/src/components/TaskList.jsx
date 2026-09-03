@@ -258,17 +258,19 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       <span className="task-title">{t.title}</span>
       <span className="chips">
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
+        {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a task suite run" label="suite" />}
         {/* A stacked task no longer hangs under the task it repairs, so
             the chip is what carries that provenance into the list: it
             says the merge queue filed this row, and which task's pull
-            request it is fixing. */}
+            request it is fixing. Every stacked row gets it now -- there
+            is no nested position left that would explain itself. */}
         {t.stacked && (
           <Chip
             size="small"
             className="chip-stacked"
             title={t.generatedFrom
-              ? `filed automatically by the merge queue, to fix ${t.generatedFrom}'s pull request`
-              : "filed automatically by the merge queue"}
+              ? `the merge queue's own automatic fix for ${t.generatedFrom}`
+              : "the merge queue's own automatic fix for another task's pull request"}
             label="merge fix"
           />
         )}

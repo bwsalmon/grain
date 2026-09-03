@@ -29,7 +29,7 @@ func TestSeedDemoCoversEveryState(t *testing.T) {
 	cfg := ui.Config{
 		Actor:         ui.DefaultActor("demo-operator"),
 		DefaultTarget: &repo,
-		Capabilities:  ui.DefaultCapabilities(),
+		Capabilities:  ui.OfferedCapabilities(),
 	}
 	if err := seedDemo(ctx, store, cfg); err != nil {
 		t.Fatalf("seedDemo: %v", err)

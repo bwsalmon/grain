@@ -114,6 +114,13 @@ func (r *scriptRunner) Run(ctx context.Context, args []string, stdin string, _ [
 	registry := mcp.NewRegistry()
 	registry.Register(mcp.NewSandboxTools(root)...)
 	registry.Register(mcp.NewMockTools(&mcp.MockSink{})...)
+	// Registered with no reader, keeping this scripted roster the same
+	// shape as the real forked mcpserver's: a script that calls
+	// pull_request_status gets the tool's own "this run has no
+	// repository configured" answer, which is the truth here, rather
+	// than an "unknown tool" that would look like a missing tool
+	// instead of a missing configuration.
+	registry.Register(mcp.NewPullRequestTools(nil, mcp.PullRequestScope{})...)
 	client := mcp.NewInProcess(ctx, registry)
 	defer client.Close()
 

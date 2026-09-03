@@ -298,7 +298,7 @@ describe("TaskList", () => {
       it("says in the list who filed it and which task it fixes", () => {
         renderList({ tasks: stacked });
 
-        expect(screen.getByTitle("filed automatically by the merge queue, to fix 1's pull request"))
+        expect(screen.getByTitle("the merge queue's own automatic fix for 1"))
           .toHaveTextContent("merge fix");
       });
     });
@@ -322,6 +322,56 @@ describe("TaskList", () => {
     });
     expect(screen.getByTitle("filed automatically by a schedule")).toHaveTextContent("scheduled");
     expect(screen.queryAllByTitle("filed automatically by a schedule")).toHaveLength(1);
+  });
+
+  // bwsalmon/agents#642: a suite run files its pass of tasks with nobody
+  // typing them in, so they get scheduled's own badge treatment.
+  it("badges a task a suite run filed, and leaves an ordinary one unbadged", () => {
+    renderList({
+      tasks: [
+        { ...tasks[0], suiteRun: true },
+        tasks[1],
+      ],
+    });
+    expect(screen.getByTitle("filed automatically by a task suite run")).toHaveTextContent("suite");
+    expect(screen.queryAllByTitle("filed automatically by a task suite run")).toHaveLength(1);
+    // The suite chip is its own thing, not the schedule one relabelled.
+    expect(screen.queryByTitle("filed automatically by a schedule")).not.toBeInTheDocument();
+  });
+
+  // bwsalmon/agents#378: a stacked task no longer sits nested under the
+  // task it repairs -- it is a row of its own, pinned to the head of the
+  // list -- so the chip is what says who filed it and what it is for,
+  // on every one of those rows.
+  describe("the merge-fix chip on a stacked task", () => {
+    const parent = { id: 1, title: "Fix the thing", state: "queued", capabilities: [], blocked: false };
+    const fix = {
+      id: 2, title: "Repair the pull request", state: "queued", capabilities: [], blocked: false,
+      stacked: true, generatedFrom: 1,
+    };
+
+    it("chips a fix listed alongside the task it repairs, rather than nesting it under it", () => {
+      renderList({ tasks: [parent, fix] });
+      expect(document.querySelector(".task-sublist")).not.toBeInTheDocument();
+      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+    });
+
+    it("chips a fix whose parent is filtered out of the view", () => {
+      renderList({ tasks: [{ ...parent, state: "completed" }, fix], stateFilter: "queued" });
+      expect(document.querySelector(".task-sublist")).not.toBeInTheDocument();
+      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+    });
+
+    it("chips a fix whose parent is gone entirely", () => {
+      renderList({ tasks: [fix] });
+      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+    });
+
+    it("chips a fix with no generatedFrom at all, without naming a parent", () => {
+      renderList({ tasks: [{ ...fix, generatedFrom: undefined }] });
+      expect(screen.getByTitle("the merge queue's own automatic fix for another task's pull request"))
+        .toHaveTextContent("merge fix");
+    });
   });
 
   // bwsalmon/agents#539

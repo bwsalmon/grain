@@ -42,7 +42,7 @@ func demo(args []string) {
 	cfg := ui.Config{
 		Actor:         ui.DefaultActor(actorID(*actor)),
 		DefaultTarget: &repo,
-		Capabilities:  ui.DefaultCapabilities(),
+		Capabilities:  ui.OfferedCapabilities(),
 	}
 
 	dir, err := os.MkdirTemp("", "grain-demo-")
@@ -121,7 +121,7 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		Title:        "Bump the Go toolchain to 1.24",
 		Description:  "go.mod and the CI image both need the version bump.",
 		Approved:     true,
-		Capabilities: []string{"self-debug"},
+		Capabilities: &[]string{"self-debug"},
 	})
 	if err != nil {
 		return err
@@ -230,7 +230,7 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	fixTask := model.Task{
 		ID:     fixID,
 		Intent: model.IntentImplement,
-		Title:  "\U0001F916 grain: fix acme/widgets#104",
+		Title:  "Resolve: Add pagination to the tasks API",
 		Body:   "Task " + stacked.ID + " opened acme/widgets#104, but it has conflicts with `main`.",
 		Origin: model.Origin{
 			Attribution: model.Attribution{Actor: queue},

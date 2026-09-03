@@ -178,6 +178,22 @@ func (c *HTTPClient) Retry(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/retry", nil, nil)
 }
 
+// OpenPullRequest is Client.OpenPullRequest over the wire: open (or find)
+// the pull request for id's own branch and read its current checks.
+//
+// Its caller is not the CLI but `grain mcpserver` (cmd/grain/mcpserver.go),
+// which serves a dispatched run's own tools and holds no GitHub
+// credential -- this is the hop that lets a run open its pull request
+// while it is still running without a credential ever reaching the
+// process the agent drives.
+func (c *HTTPClient) OpenPullRequest(ctx context.Context, id string) (PullRequestStatus, error) {
+	var status PullRequestStatus
+	if err := c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/pull-request", nil, &status); err != nil {
+		return PullRequestStatus{}, err
+	}
+	return status, nil
+}
+
 // Config reads the deployment's fixed configuration -- who the daemon
 // attributes every task and comment written through this API to, its
 // default target repo, and the capabilities it offers. Unlike the

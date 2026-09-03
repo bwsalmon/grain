@@ -26,6 +26,14 @@ func (f agentFunc) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result,
 	return f(ctx, cfg)
 }
 
+// openingFramework is an agentFunc that also implements
+// agent.PullRequestFramework, standing in for a real Framework built
+// WithGrainServer -- the only kind whose runs are offered
+// open_pull_request at all.
+type openingFramework struct{ agentFunc }
+
+func (openingFramework) CanOpenPullRequest() bool { return true }
+
 func pushed() *agent.Result {
 	return &agent.Result{
 		FinalText: "pushed the change",
@@ -123,7 +131,7 @@ func TestBuildPromptMentionsReadOnlyRepos(t *testing.T) {
 			{Owner: "acme", Name: "schema"},
 		},
 	}
-	prompt := orchestrator.BuildPrompt(task, "")
+	prompt := orchestrator.BuildPrompt(task, "", false)
 	if !strings.Contains(prompt, "acme/shared-lib") || !strings.Contains(prompt, "acme/schema") {
 		t.Fatalf("prompt does not mention both read-only repos: %q", prompt)
 	}
@@ -142,14 +150,109 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir)
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false)
 	for _, want := range []string{"./" + orchestrator.CheckoutDir, model.BranchName("t1"), "rather than cloning"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt does not mention %q: %q", want, prompt)
 		}
 	}
-	if bare := orchestrator.BuildPrompt(task, ""); strings.Contains(bare, orchestrator.CheckoutDir) {
-		t.Fatalf("prompt mentions a checkout that was never prepared: %q", bare)
+	// Against the checkout sentence's own phrasing rather than against
+	// CheckoutDir alone: that constant is "work", an ordinary English word
+	// the rest of the prompt is entitled to use (proposalSection does), so
+	// a bare substring search for it fails on prose that mentions no
+	// checkout at all. "./work" and "rather than cloning" are what only
+	// that sentence says, which is what this is checking is absent.
+	bare := orchestrator.BuildPrompt(task, "", false)
+	for _, unwanted := range []string{"./" + orchestrator.CheckoutDir, "rather than cloning"} {
+		if strings.Contains(bare, unwanted) {
+			t.Fatalf("prompt mentions %q, a checkout that was never prepared: %q", unwanted, bare)
+		}
+	}
+}
+
+// The push/check/repair loop pull_request_status exists for is only
+// usable if the prompt says it is there: nothing about the tool's own
+// description tells a run that it may push more than once, and the
+// sentences before it read like one final act.
+func TestBuildPromptDescribesThePushAndCheckCILoop(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false)
+	for _, want := range []string{"pull_request_status", "Push as often as you like", "check fails"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+
+	// A task with no repo has no branch to push and no CI to watch, so
+	// the paragraph must not appear at all -- the same reason the
+	// pushing/branching sentences do not.
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false)
+	if strings.Contains(bare, "pull_request_status") {
+		t.Errorf("prompt offers a CI tool to a task with no repo: %q", bare)
+	}
+}
+
+// open_pull_request is only on a run's roster when the Framework driving
+// it was given a daemon to ask (agent.PullRequestFramework), so the
+// prompt names it on exactly that condition: a run that has it and is
+// never told finishes without ever seeing its own CI, which is the whole
+// thing the tool exists to fix, and a run told to call one it does not
+// have burns turns on an error it cannot do anything about.
+func TestBuildPromptOffersOpenPullRequestOnlyToARunThatHasIt(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, true)
+	for _, want := range []string{"open_pull_request", "push again", "never opens a second one"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+
+	without := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false)
+	if strings.Contains(without, "open_pull_request") {
+		t.Errorf("prompt names a tool this run's mcpserver never registered: %q", without)
+	}
+
+	// A task with no repo has no branch, no pull request and no CI, so
+	// the sentence has nothing to attach itself to even where the tool is
+	// registered -- registration turns on -server/-task, neither of which
+	// knows whether the task has a target.
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", true)
+	if strings.Contains(bare, "open_pull_request") {
+		t.Errorf("prompt offers to open a pull request for a task with no repo: %q", bare)
+	}
+}
+
+// The prompt's half of the fact only the Framework holds: RunDispatch
+// asks the one it is about to run, so a deployment whose daemon serves a
+// UI/API tells its runs about open_pull_request and one without says
+// nothing. openingFramework is the "yes" answer; a bare agentFunc, which
+// implements no such method, is every other test here saying "no".
+func TestRunDispatchTellsARunItCanOpenItsOwnPullRequest(t *testing.T) {
+	store, ctx := openStore(t)
+	dispatchTask(t, ctx, store, "t1")
+	d := dispatch.Dispatch{TaskID: "t1", RunID: "r1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	task, err := store.GetTask(ctx, "t1")
+	if err != nil || task == nil {
+		t.Fatalf("reading task: %v", err)
+	}
+
+	var gotPrompt string
+	fw := openingFramework{agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		gotPrompt = cfg.Prompt
+		return pushed(), nil
+	})}
+	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", nil, baseTime); err != nil {
+		t.Fatalf("RunDispatch: %v", err)
+	}
+	if !strings.Contains(gotPrompt, "open_pull_request") {
+		t.Errorf("prompt = %q, want it to name open_pull_request -- this framework's runs have it", gotPrompt)
 	}
 }
 
@@ -160,7 +263,7 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 // like a clone that silently failed.
 func TestBuildPromptExplainsThereIsNoRepo(t *testing.T) {
 	task := model.Task{ID: "t1", Title: "Do the thing", Body: "details"}
-	prompt := orchestrator.BuildPrompt(task, "")
+	prompt := orchestrator.BuildPrompt(task, "", false)
 	if !strings.Contains(prompt, "no repo") {
 		t.Fatalf("prompt does not say there is no repo: %q", prompt)
 	}
@@ -169,13 +272,46 @@ func TestBuildPromptExplainsThereIsNoRepo(t *testing.T) {
 	}
 }
 
+// An agent can only follow propose_task's own etiquette if it knows two
+// things about itself grain never otherwise tells it: which task it is
+// (what a proposal's depends_on names) and whether that task auto-merges
+// (what caps a proposal's auto_merge -- orchestrator.proposedAutoMerge).
+func TestBuildPromptTellsAnAgentWhatItsProposalsCanSay(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, "", false)
+	for _, want := range []string{"task t1", "depends_on"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+	// Nothing to say about auto_merge to a task that cannot pass it on.
+	if strings.Contains(prompt, "auto_merge") {
+		t.Errorf("prompt offers auto_merge to a task that is not an auto-merge job: %q", prompt)
+	}
+
+	task.AutoMerge = true
+	prompt = orchestrator.BuildPrompt(task, "", false)
+	if !strings.Contains(prompt, "auto_merge") {
+		t.Errorf("prompt does not tell an auto-merge job it can pass that on: %q", prompt)
+	}
+}
+
+// Matched against the Reads section's own opening words rather than the
+// bare substring "read", which this used to look for: every other
+// sentence BuildPrompt writes is free to use the word for something
+// else, and the first one that did (the pull_request_status paragraph:
+// "see what GitHub's checks made of it") would have failed this test
+// while the Reads section was correctly absent.
 func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
 	task := model.Task{
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, "")
-	if strings.Contains(prompt, "read") {
+	prompt := orchestrator.BuildPrompt(task, "", false)
+	if strings.Contains(prompt, "You may also read") {
 		t.Fatalf("prompt mentions reading a repo with no Reads set: %q", prompt)
 	}
 }
@@ -496,7 +632,7 @@ func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
 	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", nil, baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
-	if gotPrompt != orchestrator.BuildPrompt(*task, "") {
+	if gotPrompt != orchestrator.BuildPrompt(*task, "", false) {
 		t.Errorf("prompt = %q, want exactly BuildPrompt's own prompt with no conversation yet", gotPrompt)
 	}
 }

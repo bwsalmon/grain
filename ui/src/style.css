@@ -512,8 +512,13 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 
 /* A schedule-filed task is not the write target, so it gets a tinted
    fill rather than the plain default Chip -- its own category of
-   annotation, distinct from an ordinary repo/capability chip. */
-.chip-scheduled {
+   annotation, distinct from an ordinary repo/capability chip. A suite
+   run's own tasks (bwsalmon/agents#642) and a merge fix, pinned at the
+   head of the list (bwsalmon/agents#378), say the same kind of thing --
+   nobody filed this by hand -- so they share the treatment. */
+.chip-scheduled,
+.chip-suite,
+.chip-stacked {
   background: var(--accent-subtle);
   color: var(--accent);
 }
@@ -523,14 +528,6 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
    about how a task came to be or how it runs, not a repo/capability
    chip describing what it targets. */
 .chip-interactive {
-  background: var(--accent-subtle);
-  color: var(--accent);
-}
-
-/* A merge-queue fix (bwsalmon/agents#378) gets the same treatment again:
-   it is grain saying who filed this task and why it is sitting at the
-   head of the list, not a chip describing what it targets. */
-.chip-stacked {
   background: var(--accent-subtle);
   color: var(--accent);
 }
