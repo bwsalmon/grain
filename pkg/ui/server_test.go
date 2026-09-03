@@ -22,6 +22,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/ui"
 	"github.com/bwsalmon/grain/pkg/upgrade"
+	"github.com/bwsalmon/grain/pkg/version"
 )
 
 func testServer(t *testing.T) (*ui.Server, *ui.Client) {
@@ -699,6 +700,35 @@ func TestSettingsRejectionsAre400(t *testing.T) {
 	rec := do(t, srv, http.MethodPut, "/api/settings", `{"pollInterval":"not-a-duration"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
+// The build stamp rides on /api/config (version.go) so the sidebar can
+// print which grain is answering. Which of the two branches below runs
+// is a property of how this test binary was built, not of the server:
+// `go test` stamps no VCS information, so the unstamped contract -- the
+// key absent entirely rather than an object of empty strings -- is what
+// this asserts in practice, and version_test.go covers the shape of a
+// stamped one directly.
+func TestConfigReportsTheBuildVersion(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[map[string]any](t, rec)
+
+	info := version.Get()
+	if info.Revision == "" {
+		if v, ok := got["version"]; ok {
+			t.Fatalf("version = %v out of a binary carrying no VCS stamp, want the key absent", v)
+		}
+		return
+	}
+	v, ok := got["version"].(map[string]any)
+	if !ok {
+		t.Fatalf("version = %v, want an object naming commit %s", got["version"], info.Revision)
+	}
+	if v["commit"] != info.Revision {
+		t.Fatalf("version.commit = %v, want %q", v["commit"], info.Revision)
 	}
 }
 
