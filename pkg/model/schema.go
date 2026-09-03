@@ -494,7 +494,8 @@ var Tables = []string{
 	// claude_model is Config.ClaudeModel's own column -- agent/claude's
 	// counterpart to gemini_model, added the same way (DEFAULT '' both
 	// here and in Store.ensureConfigClaudeModelColumn for an
-	// already-created grain_config).
+	// already-created grain_config). codex_model is agent/codex's, added
+	// the same way again (Store.ensureConfigCodexModelColumn).
 	//
 	// approved_by_default and auto_merge_by_default (Config.ApprovedByDefault/
 	// AutoMergeByDefault) are DEFAULT 1, not 0: both settings are on for a
@@ -553,6 +554,7 @@ var Tables = []string{
   ` + "`approved_by_default`" + `          INTEGER NOT NULL DEFAULT 1,
   ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 1,
   ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
+  ` + "`codex_model`" + `                  TEXT    NOT NULL DEFAULT '',
   ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
   ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
   ` + "`environment_name`" + `             TEXT    NOT NULL DEFAULT '',

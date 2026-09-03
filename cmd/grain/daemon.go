@@ -35,7 +35,7 @@
 // README.md for what that merge kept and dropped.
 //
 // Most of this file's own flags (-max-workers, -max-mergers, -poll-interval, -agent-framework,
-// -gemini-model, -claude-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
+// -gemini-model, -claude-model, -codex-model, -max-agent-turns, -github-host, -github-insecure-http, -gcp-project,
 // -gcp-agent-service-account, -target-repos) are store-backed now
 // (bwsalmon/agents#320):
 // loadConfig writes them into model.Store's grain_config row the first
@@ -50,11 +50,11 @@
 // UI as needing a restart. What stays flags-only either has to
 // be known before there is a store to read it from (-data-dir) or names
 // secret material rather than being configuration itself
-// (-gemini-api-key-file, -kontur-ssh-key, -claude-oauth-token-file) --
-// bwsalmon/agents#320's own "but not the secrets." -claude-path joins
-// them not because it is secret but because, like -kontur-ssh-key, it
-// names something about *this host's* filesystem rather than the
-// deployment's own behaviour.
+// (-gemini-api-key-file, -kontur-ssh-key, -claude-oauth-token-file,
+// -openai-api-key-file) -- bwsalmon/agents#320's own "but not the
+// secrets." -claude-path and -codex-path join them not because they are
+// secret but because, like -kontur-ssh-key, they name something about
+// *this host's* filesystem rather than the deployment's own behaviour.
 package main
 
 import (
@@ -84,6 +84,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/agent"
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/agent/claude"
+	"github.com/bwsalmon/grain/pkg/agent/codex"
 	"github.com/bwsalmon/grain/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/pkg/capability/geminikey"
@@ -161,9 +162,11 @@ func daemon(args []string) {
 
 	agentFramework := fs.String("agent-framework", model.AgentFrameworkAntigravity,
 		"which agent.Framework a run is driven by by default: \""+model.AgentFrameworkAntigravity+
-			"\" (agent/antigravity, the Antigravity CLI's agy binary as a subprocess -- see -agy-path) or \""+
+			"\" (agent/antigravity, the Antigravity CLI's agy binary as a subprocess -- see -agy-path), \""+
 			model.AgentFrameworkClaude+"\" (agent/claude, the real claude CLI as a subprocess -- see "+
-			"-claude-path/-claude-oauth-token-file). \""+model.LegacyAgentFrameworkGemini+"\" is accepted as the "+
+			"-claude-path/-claude-oauth-token-file) or \""+model.AgentFrameworkCodex+
+			"\" (agent/codex, OpenAI's codex CLI as a subprocess -- see -codex-path/-openai-api-key-file). \""+
+			model.LegacyAgentFrameworkGemini+"\" is accepted as the "+
 			"former spelling of "+model.AgentFrameworkAntigravity+". Seeds the store-backed setting the UI edits, "+
 			"and a task can override it for its own dispatch"+seedOnly)
 	geminiAPIKeyFile := fs.String("gemini-api-key-file", "", "file holding the Gemini API key the agent runs as. "+
@@ -173,6 +176,7 @@ func daemon(args []string) {
 		"setup-failed saying so, rather than the daemon refusing to start")
 	geminiModel := fs.String("gemini-model", antigravity.DefaultModel, "model the antigravity agent framework calls"+seedOnly)
 	claudeModel := fs.String("claude-model", claude.DefaultModel, "model the claude agent framework calls"+seedOnly)
+	codexModel := fs.String("codex-model", codex.DefaultModel, "model the codex agent framework calls"+seedOnly)
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)"+seedOnly)
 
 	// claudePath and claudeOAuthTokenFile are only consulted when a run
@@ -195,6 +199,13 @@ func daemon(args []string) {
 		"agent authenticates as, passed to the claude subprocess as CLAUDE_CODE_OAUTH_TOKEN. Optional, and the "+
 		"exact counterpart of -gemini-api-key-file above: the UI stores one as the "+
 		"\""+secrets.ClaudeOAuthTokenSecret+"\" secret and that wins over this file")
+	codexPath := fs.String("codex-path", "", "path to the codex CLI binary agent/codex runs as a subprocess; "+
+		"empty resolves \"codex\" against $PATH instead. Only used when the agent-framework setting is \""+
+		model.AgentFrameworkCodex+"\"")
+	openAIAPIKeyFile := fs.String("openai-api-key-file", "", "file holding the OpenAI API key the agent "+
+		"authenticates as, passed to the codex subprocess as OPENAI_API_KEY. Optional, and the exact "+
+		"counterpart of the two files above: the UI stores one as the "+
+		"\""+secrets.OpenAIAPIKeySecret+"\" secret and that wins over this file")
 
 	githubHost := fs.String("github-host", "github.com", "GitHub git host -- what the proxy forwards to and, via github.APIHost, where REST calls go; override to point at a mock for local testing"+seedOnly)
 	githubInsecureHTTP := fs.Bool("github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (mock servers only)"+seedOnly)
@@ -394,9 +405,8 @@ func daemon(args []string) {
 	// deployment's own unit file may still pass keeps working across the
 	// upgrade that replaced that framework with agent/antigravity.
 	*agentFramework = model.NormalizeAgentFramework(*agentFramework)
-	if *agentFramework != model.AgentFrameworkAntigravity && *agentFramework != model.AgentFrameworkClaude {
-		fmt.Fprintf(os.Stderr, "grain daemon: -agent-framework must be %q or %q\n",
-			model.AgentFrameworkAntigravity, model.AgentFrameworkClaude)
+	if !model.ValidAgentFramework(*agentFramework) {
+		fmt.Fprintf(os.Stderr, "grain daemon: -agent-framework must be %s\n", model.AgentFrameworkNames())
 		os.Exit(2)
 	}
 	var targetReposList []string
@@ -416,6 +426,7 @@ func daemon(args []string) {
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
 		agyPath:    *agyPath,
 		claudePath: *claudePath, claudeOAuthTokenFile: *claudeOAuthTokenFile, claudeModel: *claudeModel,
+		codexPath: *codexPath, openAIAPIKeyFile: *openAIAPIKeyFile, codexModel: *codexModel,
 		githubHost: *githubHost, githubInsecureHTTP: *githubInsecureHTTP,
 		gcpProject: *gcpProject, gcpServiceAccountEmail: *gcpServiceAccountEmail,
 		upgradeSrcDir: *upgradeSrcDir, upgradeInstallPath: *upgradeInstallPath, upgradeRestartCmd: upgradeRestartCmd,
@@ -469,7 +480,7 @@ type config struct {
 	maxAgentTurns    int
 
 	// agentFramework is this deployment's default agent.Framework --
-	// model.AgentFrameworkAntigravity or model.AgentFrameworkClaude -- and is
+	// one of model.AgentFrameworks() -- and is
 	// store-backed (model.Config.AgentFramework) the same way geminiModel
 	// is: -agent-framework only seeds it the first time a deployment's
 	// store has none; `grain settings` (or the Settings UI) is what
@@ -491,6 +502,13 @@ type config struct {
 	// counterpart of geminiModel above: -claude-model only seeds it the
 	// first time a deployment's store has none.
 	claudeModel string
+	// codexPath and openAIAPIKeyFile are agent/codex's own half of the
+	// two lines above -- flags-only for the same two reasons, a path on
+	// this host and secret material -- and codexModel is store-backed
+	// like the two models beside it.
+	codexPath        string
+	openAIAPIKeyFile string
+	codexModel       string
 
 	githubHost         string
 	githubInsecureHTTP bool
@@ -921,14 +939,15 @@ func drainInFlight(runs *orchestrator.InFlight) {
 // deployment-wide default, so which one a run needs is not known until
 // that run comes up; and both frameworks' credentials are settable from
 // the UI now (pkg/ui's "Agent frameworks" section, writing the
-// secrets.GeminiAPIKeySecret/ClaudeOAuthTokenSecret entries this reads),
+// secrets.GeminiAPIKeySecret/ClaudeOAuthTokenSecret/OpenAIAPIKeySecret
+// entries this reads),
 // so the key a run authenticates with is whatever is in the secrets
 // database at the moment it is dispatched -- not whatever a file held
 // when this process started.
 //
 // The cost is one client construction per dispatch instead of one per
-// process, which is nothing next to the run itself: both constructors
-// resolve a binary and a credential and build a struct.
+// process, which is nothing next to the run itself: every constructor
+// resolves a binary and a credential and builds a struct.
 func agentFrameworks(cfg config, store *model.Store, secretStore *secrets.Store) func(context.Context, string) (agent.Framework, error) {
 	return func(ctx context.Context, framework string) (agent.Framework, error) {
 		// Re-read here, not closed over from startup: which framework a
@@ -946,15 +965,17 @@ func agentFrameworks(cfg config, store *model.Store, secretStore *secrets.Store)
 		switch model.NormalizeAgentFrameworkName(framework) {
 		case model.AgentFrameworkClaude:
 			return buildClaudeFramework(ctx, live, secretStore)
+		case model.AgentFrameworkCodex:
+			return buildCodexFramework(ctx, live, secretStore)
 		case model.AgentFrameworkAntigravity:
 			return buildAntigravityFramework(ctx, live, secretStore)
 		default:
 			// Unreachable through the UI (ui.UpdateSettings and
-			// ui.CreateTask both validate against the same two names),
+			// ui.CreateTask both validate against the same vocabulary),
 			// so this is a store written by hand or by a newer build --
 			// worth naming rather than silently running the default.
-			return nil, fmt.Errorf("unknown agent framework %q: expected %q or %q",
-				framework, model.AgentFrameworkAntigravity, model.AgentFrameworkClaude)
+			return nil, fmt.Errorf("unknown agent framework %q: expected %s",
+				framework, model.AgentFrameworkNames())
 		}
 	}
 }
@@ -1123,6 +1144,69 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 		opts = append(opts, claude.WithGrainServer(url))
 	}
 	return claude.New(claudePath, grainBinaryPath, opts...), nil
+}
+
+// buildCodexFramework builds the framework a run driven by agent/codex
+// uses: OpenAI's codex CLI as a subprocess, authenticating with an
+// OpenAI API key. Same shape as the two above -- resolve the CLI,
+// resolve the credential, fail with something an operator can act on if
+// either is missing -- because a deployment hits exactly the same two
+// ways of not being set up.
+func buildCodexFramework(ctx context.Context, cfg config, secretStore *secrets.Store) (agent.Framework, error) {
+	codexPath := cfg.codexPath
+	if codexPath == "" {
+		resolved, err := exec.LookPath("codex")
+		if err != nil {
+			// Named as an install, not as a lookup failure -- see
+			// buildClaudeFramework's own comment on why a bare
+			// "executable file not found in $PATH" reads as grain being
+			// broken to the operator who has just switched frameworks in
+			// Settings.
+			return nil, fmt.Errorf("the codex CLI is not installed: %w -- "+
+				"the deployment image carries one (Dockerfile), so this is either an image "+
+				"built without it or a grain running outside one; deploy an image that has it, "+
+				"or point -codex-path at an existing copy", err)
+		}
+		codexPath = resolved
+	}
+	// Checked here, so a task dispatched with no key ends as a
+	// setup-failed run naming what is missing (orchestrator.runOne's own
+	// guard) rather than as a codex subprocess failing to authenticate
+	// later with a message that says nothing about where grain reads
+	// credentials from.
+	apiKey, err := agentCredential(ctx, secretStore, secrets.OpenAIAPIKeySecret, cfg.openAIAPIKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading the OpenAI API key: %w", err)
+	}
+	if apiKey == "" {
+		return nil, errors.New("no OpenAI API key is configured: set one in the UI " +
+			"(Settings -> Agent frameworks), or point -openai-api-key-file at a file holding one")
+	}
+	grainBinaryPath, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolving this binary's own path, for codex's MCP config: %w", err)
+	}
+	// Resolved again inside the Run rather than closing over the key
+	// just read, exactly as the two frameworks above do: a key replaced
+	// in Settings between this construction and the subprocess actually
+	// starting is the one that should be used, and re-reading it is one
+	// SQLite row.
+	opts := []codex.Option{
+		codex.WithAPIKeyFunc(func(ctx context.Context) (string, error) {
+			return agentCredential(ctx, secretStore, secrets.OpenAIAPIKeySecret, cfg.openAIAPIKeyFile)
+		}),
+		codex.WithModel(cfg.codexModel),
+		// The controller's own GitHub credential ladder -- see the
+		// identical line in buildAntigravityFramework.
+		codex.WithGitHubAccess(cfg.dataDir, cfg.githubHost, cfg.githubInsecureHTTP),
+	}
+	if cfg.konturSandboxes {
+		opts = append(opts, codex.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
+	}
+	if url := daemonServerURL(cfg.uiAddr); url != "" {
+		opts = append(opts, codex.WithGrainServer(url))
+	}
+	return codex.New(codexPath, grainBinaryPath, opts...), nil
 }
 
 // daemonServerURL is the base URL this same process's own UI/API server
@@ -1660,6 +1744,7 @@ func (c config) changesFrom(prev config) []string {
 	note("agent-framework", prev.agentFramework, c.agentFramework)
 	note("gemini-model", prev.geminiModel, c.geminiModel)
 	note("claude-model", prev.claudeModel, c.claudeModel)
+	note("codex-model", prev.codexModel, c.codexModel)
 	note("max-agent-turns", prev.maxAgentTurns, c.maxAgentTurns)
 	note("gcp-project", prev.gcpProject, c.gcpProject)
 	note("gcp-agent-service-account", prev.gcpServiceAccountEmail, c.gcpServiceAccountEmail)
@@ -1730,6 +1815,7 @@ func (c config) logStoreOverrides(mc model.Config) {
 	warn("agent-framework", c.agentFramework, mc.AgentFramework)
 	warn("gemini-model", c.geminiModel, mc.GeminiModel)
 	warn("claude-model", c.claudeModel, mc.ClaudeModel)
+	warn("codex-model", c.codexModel, mc.CodexModel)
 	warn("max-agent-turns", c.maxAgentTurns, mc.MaxAgentTurns)
 	warn("github-host", c.githubHost, mc.GitHubHost)
 	warn("github-insecure-http", c.githubInsecureHTTP, mc.GitHubInsecureHTTP)
@@ -1755,7 +1841,8 @@ func (c config) toModelConfig() model.Config {
 	mc := model.DefaultConfig()
 	mc.PollInterval, mc.MaxWorkers, mc.MaxMergers = c.pollInterval, c.maxWorkers, c.maxMergers
 	mc.AgentFramework = c.agentFramework
-	mc.GeminiModel, mc.ClaudeModel, mc.MaxAgentTurns = c.geminiModel, c.claudeModel, c.maxAgentTurns
+	mc.GeminiModel, mc.ClaudeModel, mc.CodexModel = c.geminiModel, c.claudeModel, c.codexModel
+	mc.MaxAgentTurns = c.maxAgentTurns
 	mc.GitHubHost, mc.GitHubInsecureHTTP = c.githubHost, c.githubInsecureHTTP
 	mc.GCPProject, mc.GCPServiceAccountEmail = c.gcpProject, c.gcpServiceAccountEmail
 	mc.TargetRepos = c.targetRepos
@@ -1797,6 +1884,14 @@ func (c config) withLiveModelConfig(mc model.Config) config {
 	if strings.TrimSpace(mc.ClaudeModel) == "" {
 		live.claudeModel = c.claudeModel
 	}
+	// Every deployment upgrading across the column that holds this one
+	// reads it back empty (model.Config.CodexModel), so unlike the two
+	// above this branch is the ordinary case rather than the guard
+	// against a hand-written row: -codex-model's own default is what a
+	// codex run uses until an operator names a model in Settings.
+	if strings.TrimSpace(mc.CodexModel) == "" {
+		live.codexModel = c.codexModel
+	}
 	return live
 }
 
@@ -1810,6 +1905,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.agentFramework = mc.AgentFramework
 	c.geminiModel = mc.GeminiModel
 	c.claudeModel = mc.ClaudeModel
+	c.codexModel = mc.CodexModel
 	c.maxAgentTurns = mc.MaxAgentTurns
 	c.githubHost = mc.GitHubHost
 	c.githubInsecureHTTP = mc.GitHubInsecureHTTP
@@ -1984,6 +2080,7 @@ func liveTranscriptDir(transcriptDir string) ui.LiveTranscript {
 		dir:         transcriptDir,
 		claude:      claude.LiveTranscriptDir{Dir: transcriptDir},
 		antigravity: antigravity.LiveTranscriptDir{Dir: transcriptDir},
+		codex:       codex.LiveTranscriptDir{Dir: transcriptDir},
 	}
 }
 
@@ -1993,22 +2090,22 @@ type liveTranscripts struct {
 	dir         string
 	claude      claude.LiveTranscriptDir
 	antigravity antigravity.LiveTranscriptDir
+	codex       codex.LiveTranscriptDir
 }
 
 // Tail sniffs the file rather than being told which framework wrote it,
 // the daemon having no per-run record of the framework to consult.
 //
-// Both formats are now NDJSON -- agent/claude mirrors claude's own
-// --output-format stream-json, agent/antigravity mirrors agy's -- so "does
-// it start with a brace", which was enough while the other framework tee'd
-// a human-readable narrative, no longer separates them. The discriminator
-// is the event key each vocabulary tags its lines with: claude's carry
-// "type", agy's carry "event". Sniffing the first line that parses (not
-// simply the first line) is what keeps a file caught mid-write readable.
+// All three formats are NDJSON -- each framework mirrors its own CLI's
+// event stream -- so "does it start with a brace", which was enough
+// while one framework tee'd a human-readable narrative, separates
+// nothing. transcriptFramework is the discriminator, on the key and the
+// event names each vocabulary uses.
 //
-// A file that is neither, or has no complete line yet, reads as the
-// antigravity form -- whose PartialTranscript renders an empty string for
-// it, the same "nothing to show yet" a caller already handles.
+// A file none of them claims, or one with no complete line yet, reads as
+// the antigravity form -- whose PartialTranscript renders an empty
+// string for it, the same "nothing to show yet" a caller already
+// handles.
 func (l liveTranscripts) Tail(runID string) (string, bool, error) {
 	data, err := os.ReadFile(filepath.Join(l.dir, runID))
 	if os.IsNotExist(err) {
@@ -2017,38 +2114,55 @@ func (l liveTranscripts) Tail(runID string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if transcriptIsClaude(string(data)) {
+	switch transcriptFramework(string(data)) {
+	case model.AgentFrameworkClaude:
 		return l.claude.Tail(runID)
+	case model.AgentFrameworkCodex:
+		return l.codex.Tail(runID)
+	default:
+		return l.antigravity.Tail(runID)
 	}
-	return l.antigravity.Tail(runID)
 }
 
-// transcriptIsClaude reports whether a stream-json capture is
-// agent/claude's rather than agent/antigravity's, by the key its events
-// are tagged with. Unparseable lines are skipped rather than decided on:
-// reading a file the framework is still appending to routinely catches a
-// half-written one.
-func transcriptIsClaude(data string) bool {
+// transcriptFramework names which framework wrote a capture, by the
+// shape of the first line of it that parses -- not simply the first
+// line, which is what keeps a file caught mid-write readable.
+//
+// The three vocabularies are told apart by two facts. agy tags its
+// events with "event" where the other two use "type"; and codex's
+// "type" is a dotted name from its own thread/item vocabulary
+// ("item.completed", "turn.failed") or, on an older codex, a line whose
+// payload is nested under "msg" -- where claude's is a bare word
+// ("assistant", "result"). A line that is none of these leaves the
+// question open and the next line is tried, since a framework whose
+// stream this code does not recognize is better rendered as nothing than
+// as somebody else's events.
+func transcriptFramework(data string) string {
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		var tagged struct {
-			Type  string `json:"type"`
-			Event string `json:"event"`
+			Type  string          `json:"type"`
+			Event string          `json:"event"`
+			Msg   json.RawMessage `json:"msg"`
 		}
 		if err := json.Unmarshal([]byte(line), &tagged); err != nil {
 			continue
 		}
-		if tagged.Event != "" {
-			return false
-		}
-		if tagged.Type != "" {
-			return true
+		switch {
+		case tagged.Event != "":
+			return model.AgentFrameworkAntigravity
+		case len(tagged.Msg) > 0:
+			return model.AgentFrameworkCodex
+		case strings.Contains(tagged.Type, "."):
+			return model.AgentFrameworkCodex
+		case tagged.Type != "":
+			return model.AgentFrameworkClaude
 		}
 	}
-	return false
+	return ""
 }
 
 // startGitProxy serves gitproxy.NewHandler on a random port, and returns

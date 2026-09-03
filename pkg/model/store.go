@@ -157,6 +157,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigClaudeModelColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigCodexModelColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureTaskTemplateNoTargetColumns(ctx); err != nil {
 		return fmt.Errorf("migrating task_template: %w", err)
 	}
@@ -947,6 +950,24 @@ func (s *Store) ensureConfigClaudeModelColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `claude_model` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureConfigCodexModelColumn adds grain_config.codex_model
+// (model.Config.CodexModel's own doc comment has the reasoning) to a
+// database created before this column existed, the same probe-then-ALTER
+// approach ensureConfigClaudeModelColumn above uses. It defaults to the
+// empty string, which cmd/grain/daemon.go reads as "this row predates
+// the setting" and fills from -codex-model's own default rather than
+// dispatching a codex run with no model named at all -- see its
+// withLiveModelConfig.
+func (s *Store) ensureConfigCodexModelColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `codex_model` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `codex_model` TEXT NOT NULL DEFAULT ''")
 	return err
 }
 
@@ -2896,8 +2917,8 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 const configColumns = "`poll_interval_ms`,`max_workers`,`max_mergers`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
-	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`,`environment_name`," +
-	"`prompt_extension`"
+	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`codex_model`,`default_capabilities`," +
+	"`environment_name`,`prompt_extension`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -2907,7 +2928,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	if err := scan(&pollMS, &c.MaxWorkers, &c.MaxMergers, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
-		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
+		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel, &c.CodexModel,
 		&defaultCapabilities, &c.EnvironmentName, &c.PromptExtension); err != nil {
 		return Config{}, err
 	}
@@ -2929,11 +2950,11 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxWorkers, c.MaxMergers, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
-			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,
+			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel, c.CodexModel,
 			joinCSV(c.DefaultCapabilities), c.EnvironmentName, c.PromptExtension)
 		return err
 	})

@@ -6,7 +6,12 @@ import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-const enabled = { agentKeysEnabled: true, geminiApiKeySet: false, claudeOAuthTokenSet: false };
+const enabled = {
+  agentKeysEnabled: true,
+  geminiApiKeySet: false,
+  claudeOAuthTokenSet: false,
+  openaiApiKeySet: false,
+};
 
 describe("AgentKeysSection", () => {
   afterEach(() => {
@@ -27,8 +32,10 @@ describe("AgentKeysSection", () => {
 
     expect(screen.getByText("Gemini API key")).toBeInTheDocument();
     expect(screen.getByText("Claude Code OAuth token")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI API key")).toBeInTheDocument();
     expect(screen.getByText("set")).toBeInTheDocument();
-    expect(screen.getByText("not set")).toBeInTheDocument();
+    // One chip per framework whose key is missing: two of the three here.
+    expect(screen.getAllByText("not set")).toHaveLength(2);
     expect(screen.getByLabelText("Claude Code OAuth token")).toHaveValue("");
   });
 
@@ -59,7 +66,23 @@ describe("AgentKeysSection", () => {
     await user.click(screen.getAllByRole("button", { name: "Clear" })[0]);
 
     expect(api).toHaveBeenCalledWith("/api/agent-keys/antigravity", { method: "DELETE" });
-    expect(await screen.findAllByText("not set")).toHaveLength(2);
+    expect(await screen.findAllByText("not set")).toHaveLength(3);
+  });
+
+  it("stores an OpenAI key under the codex framework's own endpoint", async () => {
+    api.mockResolvedValueOnce({ ...enabled, openaiApiKeySet: true });
+    const user = userEvent.setup();
+    render(<AgentKeysSection settings={enabled} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText("OpenAI API key"), "sk-openai-fake");
+    await user.click(screen.getAllByRole("button", { name: "Set" })[2]);
+
+    expect(api).toHaveBeenCalledWith("/api/agent-keys/codex", {
+      method: "PUT",
+      body: JSON.stringify({ value: "sk-openai-fake" }),
+    });
+    expect(await screen.findByText("set")).toBeInTheDocument();
+    expect(screen.getByLabelText("OpenAI API key")).toHaveValue("");
   });
 
   it("cannot set an empty value, or clear a key that is not set", () => {

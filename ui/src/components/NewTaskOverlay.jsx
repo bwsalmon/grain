@@ -334,6 +334,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               </MenuItem>
               <MenuItem value="antigravity">Antigravity</MenuItem>
               <MenuItem value="claude">Claude</MenuItem>
+              <MenuItem value="codex">Codex</MenuItem>
             </TextField>
             {/* The task layer of model/prompt_extension.go's three, and
                 the only one that replaces rather than adds: what the

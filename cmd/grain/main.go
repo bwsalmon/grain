@@ -622,6 +622,7 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	maxMergers := fs.Int("max-mergers", 0, "capacity on top of -max-workers only the merge queue's own fix tasks may use (0 lets them contend for it like anything else)")
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
+	codexModel := fs.String("codex-model", "", "model the codex agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)")
 	githubHost := fs.String("github-host", "", "GitHub API host (the one setting here that needs a daemon restart to take effect)")
 	var githubInsecureHTTP bool
@@ -691,6 +692,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "claude-model":
 			v := *claudeModel
 			req.ClaudeModel = &v
+		case "codex-model":
+			v := *codexModel
+			req.CodexModel = &v
 		case "max-agent-turns":
 			v := *maxAgentTurns
 			req.MaxAgentTurns = &v
@@ -856,6 +860,7 @@ func (p *printer) settings(s ui.Settings) {
 	fmt.Printf("max mergers:    %d\n", s.MaxMergers)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
 	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
+	fmt.Printf("codex model:    %s\n", s.CodexModel)
 	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)
 	fmt.Printf("github host:    %s\n", s.GitHubHost)
 	fmt.Printf("github insecure http: %t\n", s.GitHubInsecureHTTP)

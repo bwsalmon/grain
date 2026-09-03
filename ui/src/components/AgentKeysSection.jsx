@@ -28,6 +28,13 @@ const FRAMEWORKS = [
     setFlag: "claudeOAuthTokenSet",
     help: "passed to the claude CLI as CLAUDE_CODE_OAUTH_TOKEN -- stored as the \"claude-oauth-token\" secret",
   },
+  {
+    id: "codex",
+    label: "OpenAI API key",
+    secret: "openai-api-key",
+    setFlag: "openaiApiKeySet",
+    help: "passed to the codex CLI as OPENAI_API_KEY -- stored as the \"openai-api-key\" secret",
+  },
 ];
 
 // AGENT_KEY_SECRETS is which secrets this section owns, for
@@ -42,7 +49,7 @@ export const AGENT_KEY_SECRETS = FRAMEWORKS.map((f) => f.secret);
 // do with them.
 //
 // It is seeded from the Settings response the pane already fetched
-// (agentKeysEnabled/geminiApiKeySet/claudeOAuthTokenSet) rather than
+// (agentKeysEnabled plus one presence flag per framework) rather than
 // fetching presence itself -- one request for one pane -- and every
 // mutation below answers with that same shape, which is what keeps the
 // chips current without a reload.
@@ -51,10 +58,11 @@ export default function AgentKeysSection({ settings, showError }) {
     enabled: !!settings.agentKeysEnabled,
     geminiApiKeySet: !!settings.geminiApiKeySet,
     claudeOAuthTokenSet: !!settings.claudeOAuthTokenSet,
+    openaiApiKeySet: !!settings.openaiApiKeySet,
   });
   const [values, setValues] = useState({});
 
-  // Only the two presence flags are taken from a mutation's reply: it
+  // Only the presence flags are taken from a mutation's reply: it
   // answers with the agent-keys shape, whose own "enabled" says the same
   // thing settings.agentKeysEnabled already did (a mutation that reached
   // the store at all proves it), so keeping the seeded value means one
@@ -63,6 +71,7 @@ export default function AgentKeysSection({ settings, showError }) {
     ...prev,
     geminiApiKeySet: !!resp.geminiApiKeySet,
     claudeOAuthTokenSet: !!resp.claudeOAuthTokenSet,
+    openaiApiKeySet: !!resp.openaiApiKeySet,
   }));
 
   const setKey = async (id) => {
@@ -86,7 +95,7 @@ export default function AgentKeysSection({ settings, showError }) {
     return (
       <Alert severity="info" sx={{ mb: 2 }}>
         Agent credentials cannot be set from here: this UI has no local secrets directory to write to. A deployment
-        seeds them with -gemini-api-key-file / -claude-oauth-token-file instead.
+        seeds them with -gemini-api-key-file / -claude-oauth-token-file / -openai-api-key-file instead.
       </Alert>
     );
   }

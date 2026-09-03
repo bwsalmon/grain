@@ -568,6 +568,17 @@ variable "agy_path" {
   default     = ""
 }
 
+variable "codex_path" {
+  type        = string
+  description = <<-EOT
+    Path to the codex CLI the "codex" agent framework runs as a
+    subprocess -- agy_path's counterpart for the third framework. Empty
+    resolves "codex" inside the deployment image, which carries one
+    (Dockerfile), and is what an ordinary deployment wants.
+  EOT
+  default     = ""
+}
+
 variable "gemini_model" {
   type        = string
   description = "Model override. Empty uses the daemon's own default (pkg/agent/antigravity.DefaultModel)."
@@ -577,6 +588,12 @@ variable "gemini_model" {
 variable "claude_model" {
   type        = string
   description = "Model override for the claude agent framework. Empty uses the daemon's own default (pkg/agent/claude.DefaultModel)."
+  default     = ""
+}
+
+variable "codex_model" {
+  type        = string
+  description = "Model override for the codex agent framework. Empty uses the daemon's own default (pkg/agent/codex.DefaultModel)."
   default     = ""
 }
 

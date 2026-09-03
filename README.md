@@ -99,6 +99,15 @@ pkg/agent/claude/  Framework via the real `claude` CLI, run as a
                 `python3 -m grain.automation.mcp_server`, and parses the
                 resulting --output-format stream-json transcript back into
                 an agent.Result
+pkg/agent/codex/  Framework via OpenAI's `codex` CLI, run as a subprocess
+                on the controller. Shaped by the same two gaps agy has --
+                no --mcp-config (so each run gets a private CODEX_HOME
+                holding just the config.toml naming its own "mcpserver"
+                server) and no --max-turns (so the cap is counted here,
+                off the live stream) -- plus a third: no --allowedTools to
+                empty its native roster with, so the per-run config denies
+                that roster anything worth having instead
+                (sandbox_mode read-only, approvals never, code mode off)
 pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
                 and revokes a Gemini API key, direct against the API Keys
                 API
@@ -1336,10 +1345,10 @@ in the same OS process as the store the reply lands on.
 **Nothing satisfies that any more.** It held while the default framework
 was the home-grown in-process Gemini runtime, which registered a run's
 tools in-process and so already held that `*model.Store` connection.
-Both frameworks that remain (`agent/antigravity`, `agent/claude`) fork a
-CLI that manages its own MCP connection and ignore `RunConfig.Tools`
-entirely, because there is no in-process registry to hand a forked
-process. `Config.GrantTools` still assembles these tools and
+Every framework that remains (`agent/antigravity`, `agent/claude`,
+`agent/codex`) forks a CLI that manages its own MCP connection and
+ignores `RunConfig.Tools` entirely, because there is no in-process
+registry to hand a forked process. `Config.GrantTools` still assembles these tools and
 `RunDispatch` still passes them, but no `Framework` consumes them, so
 `selfrepair`/`selfdebug`'s host tools reach no running agent today.
 Closing that gap means giving the `mcpserver` subcommand a route back to
@@ -1387,9 +1396,9 @@ API that moves.
 `agy` binary that replaced Gemini CLI. The loop is agy's now. What is
 left here is the shape `pkg/agent/claude` already settled on for driving
 a real CLI: build the arguments, hand it a prompt, parse the transcript
-it streams back. Both frameworks a deployment can pick between are now
-subprocess drivers, and `agent.Framework` is the seam that makes them
-interchangeable.
+it streams back -- the shape `pkg/agent/codex` follows too. Every
+framework a deployment can pick between is a subprocess driver now, and
+`agent.Framework` is the seam that makes them interchangeable.
 
 Three things about agy shaped the port, none of them cosmetic.
 
@@ -2616,8 +2625,8 @@ the `{secret, key}` a write would address it by, and the Capabilities tab
 renders a write-only field per entry on the capability's own row: the
 pane that says what is missing is the pane that fills it in. The agent
 credentials were already this shape, on the Agents tab beside the choice
-of framework (below, "Two agent frameworks"), which is where the argument
-came from.
+of framework (below, "Three agent frameworks"), which is where the
+argument came from.
 
 Two details are worth naming. `Requires` comes in the two forms
 `Store.Resolve` accepts, and the bare `<secret>` one names no key at all
@@ -2639,7 +2648,7 @@ secrets" at the foot of the Capabilities tab, filtered to exactly what
 nothing above claims. It is deliberately not a tab: it is the leftovers,
 and nothing grain itself resolves should ever appear in it.
 
-## Two agent frameworks, either per task
+## Three agent frameworks, any of them per task
 
 `agent/antigravity` and `agent/claude` both existed for a while before
 either was actually a choice: `model.Config.AgentFramework` (bwsalmon/agents#609)
@@ -2665,10 +2674,10 @@ already are, for the same reason: a task filed with no choice must
 follow the deployment wherever it is set later, rather than pin itself
 to whatever was configured the moment it was filed.
 
-The credential each framework runs as moved with it. Both are stored in
-this deployment's own secrets database now, under the two well-known
-names `pkg/secrets` exports (`GeminiAPIKeySecret`,
-`ClaudeOAuthTokenSecret`), and the Settings pane writes them: a
+The credential each framework runs as moved with it. Each is stored in
+this deployment's own secrets database now, under the well-known names
+`pkg/secrets` exports (`GeminiAPIKeySecret`, `ClaudeOAuthTokenSecret`,
+`OpenAIAPIKeySecret`), and the Settings pane writes them: a
 write-only field per framework, a set/not-set chip, and a Clear button,
 backed by `GET`/`PUT`/`DELETE /api/agent-keys/{framework}`. Nothing
 reads a value back out through the API, the same rule the secrets pane
@@ -2694,7 +2703,7 @@ before `RunDispatch` takes over finishing the run), and
 Gemini key exists: a UI that is not running is a credential that can
 never be pasted in.
 
-Both frameworks need a binary on the host, and that requirement
+Every framework needs a binary on the host, and that requirement
 outlived the wiring above. It was once claude's alone: `agent/claude`
 execs `claude` per dispatch, resolving a bare `"claude"` against the
 daemon's own `$PATH` when `-claude-path` is unset -- and nothing in the
@@ -2722,16 +2731,20 @@ requirement: `agy` is a binary too, and for a while it was the one
 nothing installed anywhere -- an operator's own manual step on every
 host, for the *default* framework, which made "this deployment cannot
 dispatch anything" a state it could sit in indefinitely. `Dockerfile`
-installs both agent CLIs now (bwsalmon/agents#645), from their own
-installers, in CI: an image carrying one of them is an image that fails
-every run choosing the other, and which one a run chooses is a live
-per-task decision. `scripts/setup.sh` checks the image for both
-(`verify_agent_cli`) and reports each in its readiness summary;
-`GRAIN_AGY_PATH`/`GRAIN_CLAUDE_PATH` still override either with a copy on
-the host, bind-mounted in at the path they name.
-`buildAntigravityFramework` fails the same way `buildClaudeFramework`
-does when one is missing: naming the install, not the `$PATH` lookup, so
-an operator reads a missing binary rather than a broken grain.
+installs every agent CLI now (bwsalmon/agents#645), in CI: an image
+carrying some of them is an image that fails every run choosing another,
+and which one a run chooses is a live per-task decision. claude and agy
+come from their own installers; codex comes from its published release
+archive, at a version pinned in the `Dockerfile` itself -- an image built
+twice a week apart would otherwise carry two different agents with no
+record of which, and the whole point of baking the CLIs in is that what
+an image runs is settled at build time. `scripts/setup.sh` checks the
+image for all three (`verify_agent_cli`) and reports each in its
+readiness summary; `GRAIN_AGY_PATH`/`GRAIN_CLAUDE_PATH`/`GRAIN_CODEX_PATH`
+still override any of them with a copy on the host, bind-mounted in at
+the path they name. Each `build*Framework` fails the same way when its
+binary is missing: naming the install, not the `$PATH` lookup, so an
+operator reads a missing binary rather than a broken grain.
 
 `grain-daemon.service` also exports a `HOME` that exists now
 (`$GRAIN_DATA_DIR/home`). `$GRAIN_USER` is created `--no-create-home`,
@@ -2742,23 +2755,79 @@ would. `agy` needs nothing from it: `agent/antigravity` hands every run
 a private `HOME` of its own, for the per-run MCP isolation described
 above.
 
-One consequence worth naming: two frameworks writing into one
-`TranscriptDir` means two transcript formats in it at once, so
+One consequence worth naming: several frameworks writing into one
+`TranscriptDir` means several transcript formats in it at once, so
 `ui.Config.LiveTranscripts` can no longer be whichever reader matched
 the deployment's framework at startup. `cmd/grain`'s
 `liveTranscripts.Tail` picks per file instead.
 
 *How* it picks changed with the runtime replacement. While one framework
 tee'd an already-readable narrative, "does the file open with a JSON
-object" separated them. Both mirror their subprocess's own NDJSON now --
-claude's `--output-format stream-json`, agy's -- so the discriminator is
-the key each vocabulary tags its events with instead: claude's carry
-`type`, agy's carry `event` (`transcriptIsClaude`). It sniffs the first
-line that *parses* rather than the first line, since reading a file the
-framework is still appending to routinely catches a half-written one. A
-run's finished transcript needs none of this, since
+object" separated them. Each mirrors its subprocess's own NDJSON now --
+claude's `--output-format stream-json`, agy's, codex's `--json` -- so
+the discriminator is the shape each vocabulary tags its events with
+instead: agy's carry `event`, codex's carry either a dotted `type`
+(`item.completed`, `turn.failed`) or a nested `msg`, and claude's carry
+a bare `type` (`transcriptFramework`). It sniffs the first line that
+*parses* rather than the first line, since reading a file the framework
+is still appending to routinely catches a half-written one. A run's
+finished transcript needs none of this, since
 `agent.Result.Transcript` is already rendered text by the time the store
 sees it.
+
+### The third one: `agent/codex`
+
+`agent/codex` runs OpenAI's `codex` CLI, and adding it was mostly a
+matter of the seam already being the right shape: `agent.Framework`,
+the per-dispatch factory above, one secret name, one model setting, one
+more radio button. Where it needed thought is the three things the CLI
+does not have.
+
+It has no `--mcp-config`. Its MCP servers live in a `config.toml` inside
+its config directory, which is `~/.codex` unless `CODEX_HOME` names
+another -- a per-user registration, which is exactly the wrong shape for
+a deployment running two sandboxes at once (`agent/antigravity`'s own
+doc comment makes this argument about `agy mcp add`). So every run gets
+a private `CODEX_HOME` holding nothing but the config this run needs,
+and it goes when the run does.
+
+It has no `--max-turns`, so `RunConfig.MaxTurns` is enforced here, off
+the live stream, exactly as `agent/antigravity` enforces it: `turnCap`
+counts completed assistant messages as they stream past and cancels the
+run's context, which `procgroup.Prepare` turns into a kill of codex and
+its MCP child both.
+
+And it has no `--allowedTools` to empty its native roster with. What the
+per-run config does instead is deny that roster anything worth having:
+`sandbox_mode = "read-only"` and `approval_policy = "never"`, so codex's
+own shell and patch tools cannot write to the controller and cannot stop
+an unattended run to ask a human for permission to. There is a third
+line, `features.code_mode_host = false`, which is about the *record*
+rather than about permissions: codex's code mode has the model reach its
+MCP tools from code it writes and runs, rather than as tool calls of its
+own -- and `mcp_tool_call` events are exactly what `Result.ToolCalls` is
+built from, which is what `orchestrator.ProcessResult` reads to find
+that a run asked a question or left a closing comment. The deployment
+image carries only the `codex` binary, so that mode is already off;
+saying so in the config makes it a decision rather than a property of
+how the image was built.
+
+Two smaller things the CLI's actual behaviour settled. A bare
+`{"type":"error"}` event is *not* terminal -- codex emits one per
+attempt while it retries a dropped connection, and a run that reconnects
+goes on to finish normally, so reading the first as the end of the run
+would report a working run as a failure; what ends a run is
+`turn.failed`, which repeats the last of them as its own message. And an
+error *item* is codex reporting something about itself (the optional
+code-mode host it was told not to use, on every run) rather than the run
+failing: it belongs in the narrative and nowhere else.
+
+The credential is an `OPENAI_API_KEY`, passed through the subprocess's
+environment like the other two and never in argv. An API key rather than
+a ChatGPT sign-in, because the private `CODEX_HOME` is also why a
+`codex login` on the host is not visible to a run -- and because a key
+is something a deployment can replace from the UI between one run and
+the next, which a login file is not.
 
 ## The UI and the CLI talk to the daemon over REST
 
@@ -2871,8 +2940,9 @@ It is named only for a run that really has it. Registration turns on
 such tool -- and a prompt that promised it there would send an agent
 after something that is not on its roster. The one thing that knows is
 the `Framework` itself, which is why it answers for its own runs
-(`agent.PullRequestFramework`, implemented by `pkg/agent/claude` and
-`pkg/agent/antigravity` as "was I built `WithGrainServer`?");
+(`agent.PullRequestFramework`, implemented by `pkg/agent/claude`,
+`pkg/agent/antigravity` and `pkg/agent/codex` as "was I built
+`WithGrainServer`?");
 `RunDispatch` asks, and passes the answer to `BuildPrompt`. A `Framework`
 that does not implement it at all answers no, which is the safe
 direction: a run never told about a tool it happens to have loses one
@@ -3948,9 +4018,10 @@ strength of an outage none of them caused.
 
 So a limit is now its own kind of failure, end to end.
 
-`agent.UsageLimitError` is the type. Both frameworks recognise their own
-provider's refusal and return one instead of a plain error
-(`pkg/agent/claude/usagelimit.go`, `pkg/agent/antigravity/usagelimit.go`),
+`agent.UsageLimitError` is the type. Every framework recognises its own
+provider's refusal and returns one instead of a plain error
+(`pkg/agent/claude/usagelimit.go`, `pkg/agent/antigravity/usagelimit.go`,
+`pkg/agent/codex/usagelimit.go`),
 carrying what the provider said and, where it named one, when it will
 serve again — an absolute instant (Claude's epoch) or a delay (Gemini's
 `retryDelay`). What each package matches on is deliberately narrow, and

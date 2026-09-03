@@ -279,13 +279,14 @@ func TestTheDockerfileCarriesEveryBinaryGrainShellsOutTo(t *testing.T) {
 		}
 	}
 	contains(t, text, "konturctl")
-	// Both agent CLIs, not just one: the framework a run uses is a live
-	// per-task choice, so an image with only one of them fails every run
-	// that chooses the other. agy was the one nothing installed anywhere
+	// Every agent CLI, not just one: the framework a run uses is a live
+	// per-task choice, so an image with only some of them fails every run
+	// that chooses another. agy was the one nothing installed anywhere
 	// until bwsalmon/agents#645 -- an operator's manual step on every
 	// host, for the *default* framework.
 	contains(t, text, "claude.ai/install.sh")
 	contains(t, text, "antigravity.google/cli/install.sh")
+	contains(t, text, "openai/codex/releases/download")
 	// CAP_NET_BIND_SERVICE reaches a non-root process in a container only
 	// through a file capability -- --cap-add alone grants it nothing, so
 	// the default -ui-addr (port 80) would fail to bind without this.

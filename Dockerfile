@@ -38,22 +38,24 @@
 #                     those VMs. Built here from third_party/kontur, the
 #                     same vendored copy the sandbox image is built from,
 #                     so the two cannot drift apart in a deployment
-#   claude, agy       the two agent CLIs a dispatch actually runs:
-#                     agent/claude execs the Claude Code CLI,
-#                     agent/antigravity execs Google's Antigravity CLI.
-#                     Both frameworks are a live, per-task choice
-#                     (README.md, "Two agent frameworks, either per
-#                     task"), so an image carrying one of them is an
-#                     image that fails every run choosing the other --
+#   claude, agy,      the three agent CLIs a dispatch actually runs:
+#   codex             agent/claude execs the Claude Code CLI,
+#                     agent/antigravity execs Google's Antigravity CLI,
+#                     agent/codex execs OpenAI's Codex CLI. Which one
+#                     drives a run is a live, per-task choice
+#                     (README.md, "Three agent frameworks, any of them
+#                     per task"), so an image carrying some of them is
+#                     an image that fails every run choosing another --
 #                     they belong here together or not at all.
 #
 #                     Installed here rather than by setup.sh's own
 #                     install_claude_cli, which this replaces: a CLI
 #                     baked into the image has its presence settled at
 #                     build time, in CI, instead of depending on every
-#                     deployed host being able to reach claude.ai and
-#                     antigravity.google at deploy time -- and on
-#                     depending on it again on every re-deploy, forever.
+#                     deployed host being able to reach claude.ai,
+#                     antigravity.google and github.com at deploy time --
+#                     and on depending on it again on every re-deploy,
+#                     forever.
 #
 # Build it from the *repository root*:
 #
@@ -273,6 +275,55 @@ RUN if [ "$INSTALL_AGY_CLI" = "1" ]; then \
 		ln -sf "$agy" /usr/local/bin/agy; \
 		chmod -R a+rX /opt/antigravity; \
 		agy --version >/dev/null; \
+	fi
+
+# The Codex CLI, from its own published release archive rather than from
+# an installer script: OpenAI ships codex as a static binary per
+# platform on GitHub Releases (and as an npm package, which would put a
+# whole node runtime in this image to run a binary that needs none).
+#
+# The archive is fetched to a file and unpacked, never piped, for the
+# reason the two blocks above give; the binary inside it is *found*
+# rather than assumed, the way agy's is, since its name carries the
+# target triple and a release that renames it should move the symlink
+# instead of failing a build for a binary that is actually there. `codex
+# --version` at the end is what makes "found something" mean "installed
+# something that runs".
+#
+# CODEX_CLI_VERSION pins which release is fetched. "latest" is
+# deliberately not the default: an image built twice a week apart would
+# otherwise carry two different agents with no record of which, and the
+# whole point of baking the CLIs in is that what an image runs is
+# settled at build time. Bump it here, in one place, and the deployment
+# that pulls the next image gets it.
+#
+# INSTALL_CODEX_CLI=0 opts out for a build on a network that cannot
+# reach GitHub's release CDN; the resulting image runs everything except
+# the codex framework, which fails at dispatch naming the missing
+# binary. GRAIN_CODEX_PATH overrides this with a copy on the host, the
+# same escape hatch GRAIN_AGY_PATH/GRAIN_CLAUDE_PATH are.
+ARG INSTALL_CODEX_CLI=1
+ARG CODEX_CLI_VERSION=rust-v0.153.0
+RUN if [ "$INSTALL_CODEX_CLI" = "1" ]; then \
+		set -eu; \
+		mkdir -p /opt/codex; \
+		arch="$(uname -m)"; \
+		case "$arch" in \
+			x86_64) target=x86_64-unknown-linux-musl ;; \
+			aarch64|arm64) target=aarch64-unknown-linux-musl ;; \
+			*) echo "unsupported architecture for the codex CLI: $arch" >&2; exit 1 ;; \
+		esac; \
+		curl -fsSL --max-time 180 \
+			"https://github.com/openai/codex/releases/download/${CODEX_CLI_VERSION}/codex-${target}.tar.gz" \
+			-o /tmp/codex.tar.gz; \
+		test -s /tmp/codex.tar.gz; \
+		tar -xzf /tmp/codex.tar.gz -C /opt/codex; \
+		rm -f /tmp/codex.tar.gz; \
+		codex="$(find /opt/codex -type f -name 'codex*' -perm -u+x | head -n1)"; \
+		test -n "$codex"; \
+		ln -sf "$codex" /usr/local/bin/codex; \
+		chmod -R a+rX /opt/codex; \
+		codex --version >/dev/null; \
 	fi
 
 # No USER of its own. The unit scripts/setup.sh writes always passes

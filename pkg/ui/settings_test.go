@@ -571,10 +571,34 @@ func TestUpdateSettingsRoundTripsAgentFramework(t *testing.T) {
 	}
 }
 
+// Every framework there is round-trips, from the one list of them, so a
+// name accepted by cmd/grain's dispatch switch and rejected here -- the
+// drift model.AgentFrameworks exists to prevent -- fails this rather
+// than a deployment's first run under a newly added framework.
+func TestUpdateSettingsRoundTripsEveryAgentFramework(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	for _, framework := range model.AgentFrameworks() {
+		name := framework
+		if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{AgentFramework: &name}); err != nil {
+			t.Fatalf("UpdateSettings(agentFramework=%q): %v", name, err)
+		}
+		read, err := c.GetSettings(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if read.AgentFramework != name {
+			t.Errorf("AgentFramework = %q after setting %q", read.AgentFramework, name)
+		}
+	}
+}
+
 // TestUpdateSettingsRejectsUnknownAgentFramework is UpdateSettings' own
-// allow-list check: anything other than model.AgentFrameworkAntigravity/
-// AgentFrameworkClaude (or the legacy "gemini" spelling, normalized to
-// the former) is a validation error, not a value silently
+// allow-list check: anything outside model.AgentFrameworks() (or the
+// legacy "gemini" spelling, normalized to "antigravity") is a
+// validation error, not a value silently
 // stored, the same way an unparseable pollInterval or an empty
 // geminiModel already are.
 func TestUpdateSettingsRejectsUnknownAgentFramework(t *testing.T) {
@@ -586,6 +610,37 @@ func TestUpdateSettingsRejectsUnknownAgentFramework(t *testing.T) {
 	bogus := "chatgpt"
 	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{AgentFramework: &bogus}); err == nil {
 		t.Fatal("UpdateSettings with an unknown agentFramework: want an error, got nil")
+	}
+}
+
+// codexModel is the one model setting a first save does not demand
+// (model.Config.CodexModel): the column arrived after that check, so
+// every deployment upgrading across it would fail its next save for a
+// field it was never asked for. Empty is meaningful rather than unset
+// -- the daemon's own -codex-model default fills it -- but an empty
+// string sent *explicitly* is still rejected, exactly as the other two
+// models are.
+func TestUpdateSettingsTreatsCodexModelAsOptionalButNotBlank(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatalf("a first save naming no codexModel must succeed: %v", err)
+	}
+
+	blank := "   "
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{CodexModel: &blank}); err == nil {
+		t.Fatal("UpdateSettings with a blank codexModel: want an error, got nil")
+	}
+
+	named := "gpt-5.1-codex"
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{CodexModel: &named}); err != nil {
+		t.Fatal(err)
+	}
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.CodexModel != named {
+		t.Errorf("CodexModel = %q, want %q", read.CodexModel, named)
 	}
 }
 

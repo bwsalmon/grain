@@ -144,9 +144,11 @@ SLOTS="$(cfg slots)"
 POLL_INTERVAL="$(cfg poll_interval)"
 GEMINI_MODEL="$(cfg gemini_model)"
 CLAUDE_MODEL="$(cfg claude_model)"
+CODEX_MODEL="$(cfg codex_model)"
 # Where the Antigravity CLI lives, if not on $PATH -- see setup.sh's own
 # GRAIN_AGY_PATH and verify_agent_cli.
 AGY_PATH="$(cfg agy_path)"
+CODEX_PATH="$(cfg codex_path)"
 MAX_AGENT_TURNS="$(cfg max_agent_turns)"
 GCP_PROJECT="$(cfg gcp_project)"
 GCP_AGENT_SERVICE_ACCOUNT="$(cfg gcp_agent_service_account)"
@@ -207,6 +209,7 @@ GITHUB_APP_INSTALLATION_ID="$(md_optional instance/attributes/grain-github-app-i
 GITHUB_APP_PRIVATE_KEY="$(md_optional instance/attributes/grain-github-app-private-key)"
 GEMINI_API_KEY="$(md_optional instance/attributes/grain-gemini-api-key)"
 CLAUDE_OAUTH_TOKEN="$(md_optional instance/attributes/grain-claude-oauth-token)"
+OPENAI_API_KEY="$(md_optional instance/attributes/grain-openai-api-key)"
 # Only needed for a private image package; ghcr.io/bwsalmon/grain's is
 # public and pulls anonymously (variables.tf's own
 # grain_image_pull_user).
@@ -225,8 +228,8 @@ if [ -z "$GITHUB_TOKEN" ] && [ -z "$GITHUB_APP_ID" ]; then
 fi
 if [ -z "$GEMINI_API_KEY" ] && [ -n "$MINTER_KEY_FILE" ]; then
   log "no grain-gemini-api-key in instance metadata -- setup.sh will mint the daemon's own key with the minter credential (terraform/gcp README, \"The daemon's own Gemini key\")"
-elif [ -z "$GEMINI_API_KEY" ] && [ -z "$CLAUDE_OAUTH_TOKEN" ]; then
-  log "no grain-gemini-api-key or grain-claude-oauth-token in instance metadata and no minter key either -- grain-daemon.service will run and serve the UI, but no run can dispatch until an agent credential is set there (Settings -> Agent frameworks) or pushed with push-secrets.sh"
+elif [ -z "$GEMINI_API_KEY" ] && [ -z "$CLAUDE_OAUTH_TOKEN" ] && [ -z "$OPENAI_API_KEY" ]; then
+  log "no agent credential in instance metadata (grain-gemini-api-key, grain-claude-oauth-token, grain-openai-api-key) and no minter key either -- grain-daemon.service will run and serve the UI, but no run can dispatch until an agent credential is set there (Settings -> Agent frameworks) or pushed with push-secrets.sh"
 fi
 
 # What this deploy is about to hand setup.sh, before handing it over.
@@ -248,6 +251,7 @@ log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo absent)" \
     "| github app: $([ -n "$GITHUB_APP_ID" ] && echo present || echo absent)" \
     "| gemini key: $([ -n "$GEMINI_API_KEY" ] && echo present || echo 'absent, will mint')" \
     "| claude token: $([ -n "$CLAUDE_OAUTH_TOKEN" ] && echo present || echo absent)" \
+    "| openai key: $([ -n "$OPENAI_API_KEY" ] && echo present || echo absent)" \
     "| minter key: $([ -n "$MINTER_KEY_FILE" ] && echo present || echo MISSING)"
 log "  enable_kontur_sandboxes=$ENABLE_KONTUR_SANDBOXES kontur_oci_image=${KONTUR_OCI_IMAGE:-<empty>}"
 
@@ -285,8 +289,11 @@ env \
   GRAIN_GEMINI_API_KEY="$GEMINI_API_KEY" \
   GRAIN_AGY_PATH="$AGY_PATH" \
   GRAIN_CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_OAUTH_TOKEN" \
+  GRAIN_OPENAI_API_KEY="$OPENAI_API_KEY" \
+  GRAIN_CODEX_PATH="$CODEX_PATH" \
   GRAIN_GEMINI_MODEL="$GEMINI_MODEL" \
   GRAIN_CLAUDE_MODEL="$CLAUDE_MODEL" \
+  GRAIN_CODEX_MODEL="$CODEX_MODEL" \
   GRAIN_MAX_AGENT_TURNS="$MAX_AGENT_TURNS" \
   GRAIN_GCP_PROJECT="$GCP_PROJECT" \
   GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="$GCP_AGENT_SERVICE_ACCOUNT" \

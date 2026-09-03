@@ -175,6 +175,7 @@ func printSettingsDiff(before, after ui.Settings) {
 		{"max mergers", fmt.Sprint(before.MaxMergers), fmt.Sprint(after.MaxMergers)},
 		{"gemini model", before.GeminiModel, after.GeminiModel},
 		{"claude model", before.ClaudeModel, after.ClaudeModel},
+		{"codex model", before.CodexModel, after.CodexModel},
 		{"max agent turns", fmt.Sprint(before.MaxAgentTurns), fmt.Sprint(after.MaxAgentTurns)},
 		{"github host", before.GitHubHost, after.GitHubHost},
 		{"github insecure http", fmt.Sprint(before.GitHubInsecureHTTP), fmt.Sprint(after.GitHubInsecureHTTP)},

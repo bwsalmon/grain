@@ -36,12 +36,12 @@ func TestTheImageRunsTheCLIAndReportsASchemaVersion(t *testing.T) {
 // pane, which is exactly the class of failure putting them in an image
 // was meant to end.
 //
-// Both agent CLIs are in that list on purpose: which framework a run uses
-// is a live per-task choice, so an image carrying one of them is an image
-// that fails every run choosing the other.
+// Every agent CLI is in that list on purpose: which framework a run uses
+// is a live per-task choice, so an image carrying some of them is an
+// image that fails every run choosing another.
 func TestTheImageCarriesEveryBinaryTheDaemonShellsOutTo(t *testing.T) {
 	requireImage(t)
-	script := `for b in git bash konturctl docker claude agy journalctl top ssh curl; do ` +
+	script := `for b in git bash konturctl docker claude agy codex journalctl top ssh curl; do ` +
 		`command -v "$b" >/dev/null || { echo "MISSING $b"; exit 1; }; ` +
 		`done; echo all-present`
 
