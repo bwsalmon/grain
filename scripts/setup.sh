@@ -469,7 +469,12 @@ Recognized variables:
                                       Seeded once
   GRAIN_GCP_SERVICE_ACCOUNT_EMAIL    the narrow agent service account they mint
                                       for. Seeded once
-  GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE a minter key to seed under secrets/gcp-key-minter/
+  GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE a minter key to seed under the gcp-key-minter
+                                      secret. Written on *every* run, unlike the
+                                      seeded-once values above: the deploy that
+                                      supplies this key also rotates it in GCP, so a
+                                      host that kept its first copy ends up
+                                      authenticating with a key GCP has deleted
 
   GRAIN_TARGET_REPO         owner/name: the UI's default target for a task with
                              no repo of its own, and the repo this script pushes
@@ -1400,21 +1405,45 @@ setup_data_dir() {
   fi
 }
 
-# seed_gcp_minter_key writes the GCP minter's key into gcp-key-minter/key.json
-# in the (SQLite-backed, pkg/secrets's own doc comment) secrets database
-# -- through the just-installed `grain secrets` CLI rather than a raw file
-# write, since that database is no longer a directory tree this script can
-# lay files into directly. `grain secrets list` is checked first so a
-# re-run never overwrites a key an earlier run (or an operator's own
-# `grain secrets set`) already placed, the same never-overwrite rule
-# seed_secret gives every plain-file secret above; chown afterward because
-# the CLI, run here as root, otherwise leaves the database it creates
-# owned by root, unreadable by grain-daemon.service's own $GRAIN_USER.
+# seed_gcp_minter_key writes the GCP minter's key into the gcp-key-minter
+# secret in the (SQLite-backed, pkg/secrets's own doc comment) secrets
+# database -- through the just-installed `grain secrets` CLI rather than a
+# raw file write, since that database is no longer a directory tree this
+# script can lay files into directly; chown afterward because the CLI, run
+# here as root, otherwise leaves the database it creates owned by root,
+# unreadable by grain-daemon.service's own $GRAIN_USER.
+#
+# **It converges rather than seeding once, unlike every plain-file secret
+# seed_secret places above, and that difference is the whole point.** This
+# used to return early whenever `grain secrets list` already showed a
+# gcp-key-minter entry, on the same "never overwrite what is already
+# there" rule as the rest -- and for a credential nobody rotates, that
+# rule costs nothing. This one is rotated, by the deployment's own
+# machinery: terraform/gcp/deploy/push-secrets.sh mints a *fresh* minter
+# key on every run, pushes it into instance metadata, and then deletes
+# every key on the minter account beyond the newest two. The host, having
+# seeded its copy on the first deploy and refused every later one, went on
+# authenticating with the key from that first run -- so the third
+# push-secrets.sh run deleted the credential the daemon was actually
+# using, out from under a deployment that had no idea it had been handed
+# a replacement twice.
+#
+# Nothing failed visibly when that happened. `gcp-key`'s own Settings row
+# still read Ready (the secret is set; only GCP knows the key inside it is
+# dead), and the failure surfaced a task at a time, as GCP's own
+# `invalid_grant` / "Invalid JWT Signature" out of a mint -- see
+# pkg/capability/gcpkey's explainRefusedCredential, which now names this
+# secret when it happens. The documented remedy was to delete the entry by
+# hand over IAP and bump deploy_generation, which is a manual step to
+# repair a state the deployment itself created.
+#
+# So: a key given to this script is the key the daemon ends up holding,
+# every run. An operator's own `grain secrets set` still wins for as long
+# as no deploy carries a key of its own (the early return below), which is
+# the case a hand-installed deployment is actually in -- what it no longer
+# does is win against the rotation that is about to invalidate it.
 seed_gcp_minter_key() {
   if [ -z "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" ]; then
-    return
-  fi
-  if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null | grep -q '^gcp-key-minter:'; then
     return
   fi
   # Staged under $GRAIN_DATA_DIR before being handed to the CLI, and
@@ -1441,10 +1470,37 @@ seed_gcp_minter_key() {
   local staged="$GRAIN_DATA_DIR/secrets/.minter-key.staged.json"
   install -m0600 -o "$GRAIN_USER" -g "$GRAIN_USER" \
     "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" "$staged"
+  local key
+  key="$(minter_secret_key)"
   /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" set \
-    -value-file "$staged" gcp-key-minter key.json
+    -value-file "$staged" gcp-key-minter "$key"
   rm -f "$staged"
   chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
+}
+
+# minter_secret_key names the key *inside* the gcp-key-minter secret that
+# this deployment's minter credential is written to: whichever single key
+# the secret already holds, and key.json for a secret that does not exist
+# yet.
+#
+# Writing in place matters because gcpkey.Config.MinterCredential names
+# the bare secret, and pkg/secrets.Store.Resolve only answers a bare name
+# when the secret holds exactly one key -- so a secret carrying both a
+# `value` written from Settings and a `key.json` written here resolves to
+# an error rather than to either of them, and the capability breaks in a
+# second way while this function is busy fixing the first. (pkg/ui writes
+# to the key already there for exactly the same reason; this is that rule
+# from the other side.) A secret that has somehow ended up with several
+# keys is already in that state and gets key.json, which is at least the
+# name the rest of this deployment's documentation uses.
+minter_secret_key() {
+  local keys
+  keys="$(/usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null |
+    sed -n 's/^gcp-key-minter: //p' || true)"
+  case "$keys" in
+    "" | *,*) echo "key.json" ;;
+    *) echo "$keys" ;;
+  esac
 }
 
 # mint_gemini_operating_key mints the daemon's own Gemini API key, using

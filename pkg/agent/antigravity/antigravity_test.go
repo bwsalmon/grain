@@ -25,11 +25,15 @@ type recordingRunner struct {
 	env    []string
 	dir    string
 	stdout string
-	// homeAtRun is a copy of the settings file found in the HOME this
-	// run was given, read while the run is notionally in flight -- Run
-	// deletes that directory as it returns, so a test cannot look
-	// afterwards.
-	homeAtRun string
+	// homeAtRun is a copy of the MCP config found in the HOME this run
+	// was given, and settingsAtRun a copy of agy's own settings file
+	// beside it -- both read while the run is notionally in flight, since
+	// Run deletes that directory as it returns and a test cannot look
+	// afterwards. settingsAtRun is "" when no settings file was written
+	// at all, which is a distinct case from an empty one.
+	homeAtRun     string
+	settingsAtRun string
+	sawSettings   bool
 }
 
 func (r *recordingRunner) Run(_ context.Context, args []string, stdin string, env []string, dir string, tee io.Writer) (string, error) {
@@ -38,6 +42,9 @@ func (r *recordingRunner) Run(_ context.Context, args []string, stdin string, en
 		if home, ok := strings.CutPrefix(e, "HOME="); ok {
 			if data, err := os.ReadFile(filepath.Join(home, mcpConfigRelPath)); err == nil {
 				r.homeAtRun = string(data)
+			}
+			if data, err := os.ReadFile(filepath.Join(home, cliSettingsRelPath)); err == nil {
+				r.settingsAtRun, r.sawSettings = string(data), true
 			}
 		}
 	}
@@ -149,19 +156,6 @@ func TestRunWritesThisRunsOwnMCPSettingsIntoAPrivateHome(t *testing.T) {
 	// outlive a run holding a pointer at that run's sandbox.
 	if _, err := os.Stat(home); !os.IsNotExist(err) {
 		t.Errorf("private HOME %s still exists after Run returned (stat err = %v)", home, err)
-	}
-}
-
-// TestRunWritesTheMCPConfigWhereAgyActuallyLooksForIt pins the one
-// filename in this package that is agy's on-disk layout rather than
-// grain's: agy reads its MCP servers from ~/.gemini/config/mcp_config.json
-// (what `agy mcp add` writes and `agy mcp list` reads), not from the CLI's
-// own settings file. A run whose config landed anywhere else would start
-// with no grain tools at all -- and, having no --strict-mcp-config to
-// refuse on, would say nothing about it.
-func TestRunWritesTheMCPConfigWhereAgyActuallyLooksForIt(t *testing.T) {
-	if got, want := mcpConfigRelPath, filepath.Join(".gemini", "config", "mcp_config.json"); got != want {
-		t.Errorf("mcpConfigRelPath = %q, want %q", got, want)
 	}
 }
 
@@ -393,6 +387,112 @@ func TestRunPassesTheAPIKeyByEnvironmentNotArgv(t *testing.T) {
 	}
 	if !saw {
 		t.Errorf("env = %v, want GEMINI_API_KEY passed to the subprocess", r.env)
+	}
+}
+
+// TestRunAsksAgyToUseTheAPIKeyItIsGiven is the failure this pair of
+// files was written for: agy reads GEMINI_API_KEY only for a session
+// whose settings name the gemini model provider, and a run without that
+// setting ignores the key, falls through to its interactive browser
+// login and dies with "authentication required. Run 'agy' to log in,
+// then retry" -- with a prompt on stdin there is no terminal to log in
+// at. Passing the key is therefore only half of authenticating with it.
+func TestRunAsksAgyToUseTheAPIKeyItIsGiven(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithAPIKey("AIza-not-a-real-key"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !r.sawSettings {
+		t.Fatalf("no %s written into the private HOME; agy would ignore GEMINI_API_KEY and ask for a browser login", cliSettingsRelPath)
+	}
+	var settings struct {
+		ModelProvider string `json:"modelProvider"`
+	}
+	if err := json.Unmarshal([]byte(r.settingsAtRun), &settings); err != nil {
+		t.Fatalf("agy settings were not JSON: %v (%q)", err, r.settingsAtRun)
+	}
+	if settings.ModelProvider != apiKeyModelProvider {
+		t.Errorf("modelProvider = %q, want %q -- the one value that makes agy authenticate from GEMINI_API_KEY",
+			settings.ModelProvider, apiKeyModelProvider)
+	}
+}
+
+// The other side of it: a deployment that configured no key at all means
+// agy to authenticate however its own environment says, and pinning the
+// provider for it would break that rather than fix anything.
+func TestRunLeavesAgysProviderAloneWithoutAKey(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if r.sawSettings {
+		t.Errorf("%s = %q for a run with no API key, want no settings file at all",
+			cliSettingsRelPath, r.settingsAtRun)
+	}
+}
+
+// TestRunClearsAnAmbientGoogleAPIKey: the subprocess inherits the
+// controller's environment, and agy prefers GOOGLE_API_KEY over the
+// GEMINI_API_KEY grain passes when both are set. An unrelated key
+// exported on the controller would otherwise become the credential every
+// run bills against.
+func TestRunClearsAnAmbientGoogleAPIKey(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithAPIKey("AIza-not-a-real-key"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !slices.Contains(r.env, "GOOGLE_API_KEY=") {
+		t.Errorf("env = %v, want GOOGLE_API_KEY cleared so grain's own key is the one agy uses", r.env)
+	}
+}
+
+// TestAgyConfigPathsAreTheOnesAgyReads pins the two paths in agy's HOME
+// this package depends on. They are asserted as literals rather than
+// against the vars themselves because that is the whole content of the
+// dependency: written anywhere else -- ~/.gemini/settings.json, where
+// Gemini CLI kept both -- neither file is an error, it is silently
+// ignored, and a run gets no grain tools and no working credential. With
+// no --strict-mcp-config to refuse on, agy would say nothing about it
+// either.
+func TestAgyConfigPathsAreTheOnesAgyReads(t *testing.T) {
+	if want := filepath.Join(".gemini", "config", "mcp_config.json"); mcpConfigRelPath != want {
+		t.Errorf("mcpConfigRelPath = %q, want %q (what `agy mcp list` reads)", mcpConfigRelPath, want)
+	}
+	if want := filepath.Join(".gemini", "antigravity-cli", "settings.json"); cliSettingsRelPath != want {
+		t.Errorf("cliSettingsRelPath = %q, want %q (agy's own settings file)", cliSettingsRelPath, want)
+	}
+}
+
+// TestDefaultModelNamesItsEffort: agy's model catalog spells the
+// reasoning effort into the name, and refuses a bare family name before
+// the run starts ("--model gemini-3.1-pro requires --effort"). Passing
+// --effort alongside a suffixed name is refused too, so the suffix is
+// the only form that works and this is what asserts we ship one.
+func TestDefaultModelNamesItsEffort(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !argsHave(r.args, "--model", DefaultModel) {
+		t.Errorf("args = %v, want --model %s", r.args, DefaultModel)
+	}
+	if slices.Contains(r.args, "--effort") {
+		t.Errorf("args = %v, want no --effort: agy rejects it alongside a model whose name carries one", r.args)
+	}
+	var suffixed bool
+	for _, effort := range []string{"-low", "-medium", "-high"} {
+		suffixed = suffixed || strings.HasSuffix(DefaultModel, effort)
+	}
+	if !suffixed {
+		t.Errorf("DefaultModel = %q, want a name carrying its own effort (agy refuses a bare family name)", DefaultModel)
 	}
 }
 

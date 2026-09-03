@@ -7,6 +7,7 @@ package sysstat_test
 // elsewhere.
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -65,5 +66,49 @@ func TestDiskUsageReportsAMissingPathAsAnError(t *testing.T) {
 
 	if _, _, err := sysstat.DiskUsage(filepath.Join(t.TempDir(), "no-such-dir")); err == nil {
 		t.Error("DiskUsage of a missing path returned no error")
+	}
+}
+
+// The property cmd/grain's own hostStats relies on: two paths that are
+// the same filesystem answer the same, and the answer survives the paths
+// looking nothing alike. A subdirectory is the only two-paths-one-disk
+// case a test can create without root (a bind mount needs CAP_SYS_ADMIN),
+// but it is the same st_dev comparison the bind-mounted sandbox volume
+// this exists for is decided by.
+func TestFilesystemIDIsTheSameForOneFilesystemOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sysstat.FilesystemID only ever works on Linux")
+	}
+
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "a", "b")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	root, err := sysstat.FilesystemID(dir)
+	if err != nil {
+		t.Fatalf("FilesystemID(%s): %v", dir, err)
+	}
+	nested, err := sysstat.FilesystemID(sub)
+	if err != nil {
+		t.Fatalf("FilesystemID(%s): %v", sub, err)
+	}
+	if root != nested {
+		t.Errorf("FilesystemID = %d for %s and %d for %s, want one filesystem to answer once", root, dir, nested, sub)
+	}
+}
+
+// Missing paths are errors here for the same reason they are for
+// DiskUsage above: the caller decides what an unavailable reading costs,
+// and folding two disk figures together on a 0 it was never given would
+// hide one of them.
+func TestFilesystemIDReportsAMissingPathAsAnError(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("sysstat.FilesystemID only ever works on Linux")
+	}
+
+	if _, err := sysstat.FilesystemID(filepath.Join(t.TempDir(), "no-such-dir")); err == nil {
+		t.Error("FilesystemID of a missing path returned no error")
 	}
 }

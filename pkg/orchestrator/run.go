@@ -495,7 +495,7 @@ func proposalSection(task model.Task) string {
 // dispatched for it is told: the attempts before this one, the commits
 // those attempts left on the branch this one continues, and the
 // conversation. RunDispatch assembles it (from store.Runs,
-// branchCommits and store.Comments) and BuildPrompt renders it.
+// checkoutCommits and store.Comments) and BuildPrompt renders it.
 //
 // The zero value is a first attempt at a task nobody has commented on,
 // which is what every one of this package's own prompt tests passes and
@@ -514,7 +514,7 @@ type History struct {
 	Attempts []model.Run
 	// Commits is what those attempts left on the branch: `git log
 	// <base>..HEAD` in the checkout prepareCheckout just made, newest
-	// first, one "<abbrev> <subject>" per entry (branchCommits). Empty
+	// first, one "<abbrev> <subject>" per entry (checkoutCommits). Empty
 	// when nothing was ever pushed, when there is no checkout to read, or
 	// when the read failed -- none of which is worth failing a dispatch
 	// over.
@@ -630,7 +630,7 @@ func previousAttemptsSection(h History, branch string) string {
 			fmt.Fprintf(&b, "- %s\n", c)
 		}
 		// No count on the overflow line, because there is no honest one
-		// to give: RunDispatch asks branchCommits for one commit more
+		// to give: RunDispatch asks checkoutCommits for one commit more
 		// than this list holds, precisely so that "there is more" can be
 		// said without a second, unbounded read whose only use would be
 		// to make this sentence a number.
@@ -868,12 +868,12 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 
 	// The commits those earlier attempts pushed, read out of the checkout
 	// they are in -- the one place they can be read at all
-	// (branchCommits). Only for a redispatch, and only where there is a
+	// (checkoutCommits). Only for a redispatch, and only where there is a
 	// checkout: a first attempt's branch has nothing on it that is not
 	// the base's, so this would be a tool call spent proving that.
 	history := History{Attempt: d.Attempt, Attempts: previous, Comments: comments}
 	if len(previous) > 0 && checkoutErr == nil && checkoutDir != "" {
-		history.Commits = branchCommits(ctx, tools, task, maxBranchCommits+1)
+		history.Commits = checkoutCommits(ctx, tools, task, maxBranchCommits+1)
 	}
 
 	var materialized []model.Materialized

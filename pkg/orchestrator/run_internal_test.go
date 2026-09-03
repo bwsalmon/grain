@@ -191,7 +191,7 @@ func TestPreviousAttemptsSectionTrimsAnUnboundedDetail(t *testing.T) {
 }
 
 // The commit list is bounded too, and says so: RunDispatch asks
-// branchCommits for one more than the list holds precisely so "there is
+// checkoutCommits for one more than the list holds precisely so "there is
 // more" can be said without a second, unbounded read.
 func TestPreviousAttemptsSectionSaysWhenThereAreMoreCommits(t *testing.T) {
 	var commits []string

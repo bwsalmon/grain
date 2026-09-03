@@ -181,6 +181,16 @@ pkg/metrics/    what the deployment actually delivers: tasks completed per
                 the daemon's own RunCycle tick, which leaves no row to
                 derive anything from -- see "Measuring the daemon's own
                 tick" below. See "Measuring throughput and latency" below
+pkg/version/    which build of grain this is, read back out of the
+                binary's own `go build -buildvcs` stamp: the commit, its
+                timestamp, and whether the tree was dirty. Nothing to
+                bump by hand and nothing for a deployment to be told --
+                the same reasoning cmd/grain/sandboximage.go gives for
+                stamping its sandbox tag in at build time. pkg/ui puts it
+                on GET /api/config and the sidebar's footer prints it, so
+                "is this deployment running the change I just merged?"
+                is answered by the page in front of you rather than by an
+                image tag that describes what was deployed
 tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
@@ -1445,8 +1455,8 @@ binding: two runs dispatched concurrently against two different sandboxes
 would share one registration, and whichever wrote it last would decide
 where both runs' tools landed. So `Framework.Run` gives each run its own
 private `HOME` -- a temp directory holding nothing but the config file
-naming that run's own `mcpserver` server -- and deletes it as the run
-returns. That has the same effect `claude`'s `--strict-mcp-config` has
+naming that run's own `mcpserver` server, and the settings file
+authentication needs (below) -- and deletes it as the run returns. That has the same effect `claude`'s `--strict-mcp-config` has
 there: the only MCP server a run can see is its own, because there is no
 other config file in the `HOME` it was given to find one in.
 
@@ -1529,6 +1539,26 @@ upgrading across this change needs `agy` installed on the controller and
 otherwise keeps its existing `-gemini-api-key-file`, which `agy`
 authenticates with as `GEMINI_API_KEY` in the subprocess environment
 (never in argv).
+
+Authenticating that way is two things, not one, and grain does both. agy
+reads `GEMINI_API_KEY` only for a session whose settings ask it to --
+`"modelProvider": "gemini"` in `.gemini/antigravity-cli/settings.json` --
+so `Framework.Run` writes that file into the private `HOME` beside the
+MCP config whenever it has a key to pass. Without it agy ignores the
+variable, falls through to the interactive browser login its OAuth
+sessions come from, and, with a prompt on stdin rather than a terminal,
+exits 1 with `authentication required. Run 'agy' to log in, then retry`.
+The credential a run uses is grain's own either way: `GOOGLE_API_KEY` is
+cleared in the same environment, because agy prefers it when both are
+set and the subprocess inherits the controller's.
+
+The model name carries its reasoning effort: agy's catalog is
+`gemini-3.1-pro-high`, `gemini-3.1-pro-low`, `gemini-3.8-flash-medium`
+and so on (`agy models` lists them), and it refuses both a bare family
+name (`--model gemini-3.1-pro requires --effort`) and a suffixed name
+passed alongside `--effort`. `antigravity.DefaultModel` is one of the
+catalog names, and a deployment overriding it in Settings or with
+`-gemini-model` should name one too.
 
 ## Letting a run watch its own CI
 
@@ -1713,6 +1743,96 @@ second copy of the number on `RunConfig` to drift out of step with the
 context that actually ends the run. A context with no deadline passes no
 flag, and those runs' tool results read exactly as they always have.
 
+## What `run_command` says when it, not the command, ended it
+
+Every `run_command` is bounded. `mcp.defaultRunCommandTimeout` is five
+minutes and applies even when the call passed no `timeout` at all, which
+is the whole point of it — and until now neither transport said so when
+that bound was what ended the command. Locally the answer was `exit=-1`,
+which is also exactly what "the command could not be started" looks like
+(a process killed by a signal has no exit status of its own). Remotely it
+was a bare `exit=124` out of the guest's own `timeout` coreutil. Neither
+named the number, and when the number is the default it is one the run
+never chose and cannot see, so the move that follows is re-running the
+same long command verbatim, twice, before concluding the sandbox is
+broken.
+
+Both now append a line: `Killed after 300s by run_command's default
+bound, which this call did not choose — it passed no timeout … Pass a
+larger timeout (milliseconds, up to 600000) or narrow the command.` A
+caller that did choose the bound is told that instead, because sending
+that run to look for a grain default that had nothing to do with it is
+its own wasted turn. Locally the trigger is `ctx.Err()` being
+`DeadlineExceeded` *and* the bound having actually elapsed, so a run
+whose two-hour wall clock fired first is not told the wrong number;
+remotely it is `timeout`'s own reserved 124.
+
+The remote bound is also a bound now, which it was not. Measured on a
+real grain guest: plain `timeout N` against a command that traps SIGTERM
+waits for that command to finish of its own accord — sixty seconds, for a
+sixty-second sleep — and only then reports 124, so a `run_command` whose
+command ignores SIGTERM held its tool call open for as long as it liked,
+and a run only advances a turn when its current call returns. It gets
+`--kill-after=5s`, and the `exit=137` that escalation produces gets its
+own explanation, hedged, since 128+SIGKILL is also what the kernel's OOM
+killer leaves behind. It deliberately does *not* get `--foreground`:
+plain `timeout` runs the command in its own process group and signals the
+whole group, which is `procgroup.Prepare`'s guarantee for the local
+transport arriving by another route — confirmed on a real guest, where a
+backgrounded grandchild does not survive the bound — and `--foreground`
+means, in its own documentation's words, that "children of COMMAND will
+not be timed out".
+
+What the remote path genuinely lacked is a bound on the *call* rather
+than on the command: nothing on this side can make a guest answer. So it
+now also carries a local deadline of the bound plus 30s
+(`sshRunCommandGrace`), whose notice says the guest never answered, that
+what the command did is therefore unknown, and that `recreate_sandbox` is
+the escape hatch if it repeats. The hang that was suspected to need it —
+a command backgrounding something that inherits the channel's stdout,
+which is enough to wedge an OpenSSH client waiting for EOF — does not
+happen here: `./bgtest.sh &` returns in about two milliseconds on a real
+guest, because the Go SSH client `kontur exec` uses returns on the
+exit-status message rather than waiting for the streams to close.
+
+## No single answer may eat the run's context
+
+`run_command` returned the whole of stdout and stderr; `read_file` with
+no `limit` returned the whole file, line-numbered. One `go test ./...` on
+a failing suite, one `git log -p`, one `grep -r` that matched more than
+expected, one 250 KB README — each was a large fraction of a run's
+context spent in one turn, and the run cannot get it back.
+
+Past that point the behaviour was whichever CLI happens to be driving the
+run: `claude` caps an MCP tool's output itself and rejects a result that
+exceeds the cap, so an oversized answer costs the run the wall clock the
+command took and buys it nothing at all; antigravity is a different CLI
+with its own answer. grain already reaches into exactly this set of knobs
+where it needs a guarantee — `mcpToolTimeout` sets `MCP_TOOL_TIMEOUT` so
+a `wait_for_checks` call is not killed before it can report — and set
+nothing for size. So the point at which a tool result stopped working was
+a per-framework default grain had not chosen, did not know, and could not
+explain to the agent when it was hit.
+
+`mcp.maxToolResultBytes` is that choice: 64 KB, applied where the answer
+is formatted, so it holds for every framework at once. Both `run_command`
+streams share the one budget rather than getting one each — a build that
+fails prints kilobytes of stderr and megabytes of stdout, or the reverse,
+and a stream that fits keeps all of it and lends the rest to the other.
+The head and the tail are kept, never just the head: a command's verdict
+is in its last lines and its invocation in the first, and the middle is
+what nobody needed. What goes between them is the part only the server
+can write — how much was dropped, that grain dropped it rather than the
+command, and the next call that gets it back: narrow the command or
+redirect it to a file, and for `read_file` the `cat -n` numbering either
+side of the cut is exactly the `offset` and `limit` to ask for. The cut
+snaps to line boundaries so that numbering stays whole.
+
+64 KB is a starting guess — about 16k tokens, enough for a failing suite's
+summary and far short of an unbounded `git log -p`. The result-size
+telemetry in `docs/agent-ergonomics.md`'s finding 11 is what should
+eventually set it from what runs actually ask for, rather than taste.
+
 ## Telling attempt N what attempt N−1 did
 
 A redispatch got the task, the conversation, its attachments and a
@@ -1733,7 +1853,7 @@ first comes from `store.Runs` with this run's own row filtered out —
 `dispatch.Cycle` writes that row before `RunDispatch` ever sees the
 dispatch, so a prompt that listed it would be telling a run about itself,
 with an empty outcome because it has not happened yet. The second comes
-from `branchCommits`, a `git log <base>..HEAD` run through the same
+from `checkoutCommits`, a `git log <base>..HEAD` run through the same
 sandbox `run_command` tool `prepareCheckout` clones with — the only place
 in a dispatch that has a repository rather than a string — with each line
 marked so it can be picked back out of the tool's own `exit=`/`stdout:`
@@ -1743,7 +1863,7 @@ It reads as a list: per attempt its number, outcome and `detail`, then
 the branch's commits newest first. Bounded on purpose — three attempts,
 240 bytes of one-line detail each, ten commits, and a pointer at `git
 log` for the rest, which `RunDispatch` can say without a second read
-because it asks `branchCommits` for one commit more than the list holds.
+because it asks `checkoutCommits` for one commit more than the list holds.
 This is orientation, not a transcript store: the transcript stays in
 `task_run.transcript` and the UI's pane over it, being prose,
 per-framework and unbounded.
@@ -2513,6 +2633,73 @@ private key material was base64-decoded to nothing, placed at
 `SandboxKeyPath`, and described to the agent as a working key. It is a
 failed mint now, and the useless key is deleted rather than left to
 count against the very cap above.
+
+### Debugging `gcp-key` again: the deploy rotated the key out from under the host
+
+"Attempting to add a gcp key to a task fails to provision the task."
+The same sentence as last time, a different failure underneath it, and
+this one was never grain's classification of a GCP error — it was the
+deployment invalidating its own credential on a schedule.
+
+```
+materializing capabilities: model: materializing capability "gcp-key":
+gcpkey: minting a key for projects/…/serviceAccounts/grain-main-agent@…:
+gcpkey: minting a key for projects/…/serviceAccounts/grain-main-agent@…:
+Post "https://iam.googleapis.com/…/keys?alt=json": auth: cannot fetch
+token: 400 Response: {"error":"invalid_grant","error_description":"Invalid
+JWT Signature."}
+```
+
+`invalid_grant` is Google's token endpoint refusing to exchange the JWT
+`gcp-key-minter`'s stored key signed, which means Google no longer holds
+the public half of that key. Nothing in the message says so: it names the
+*agent* account being minted for, never the minter credential doing the
+minting, and it arrives before any request reaches `iam.googleapis.com`
+— so it carries no `googleapi.Error`, no status code, and none of
+`explainCreateFailure`'s four explanations fire. It is also, as printed,
+the same forty characters of resource name twice, because `iamMinter`
+re-labelled every failure with the context `Materialize` had already
+wrapped it in.
+
+**Where the key went is `terraform/gcp/deploy/push-secrets.sh`.** It
+mints a *fresh* minter key on every run, pushes it into instance
+metadata, and then deletes every key on the minter account beyond the
+newest two — a deliberate rotate-and-prune, ported from v1. The other
+half never held up its end: `scripts/setup.sh`'s `seed_gcp_minter_key`
+returned early whenever `grain secrets list` already showed a
+`gcp-key-minter` entry, on the same never-overwrite rule every plain-file
+secret beside it follows. So the host seeded its copy on the first deploy
+and refused every replacement afterward, and the third `push-secrets.sh`
+run deleted, in GCP, the key the daemon was still authenticating with.
+The rotation was not a safety measure that happened to be inconvenient;
+it was a countdown. The documented remedy was to delete the entry by hand
+over IAP and bump `deploy_generation` — a manual step to repair a state
+the deployment created for itself.
+
+The seed converges now: a key handed to `setup.sh` is the key the daemon
+ends up holding, every run, so a rotation lands on the next deploy the
+way every other pushed secret does. The one early return left is for a
+deploy carrying no key at all, which still leaves an operator's own
+`grain secrets set` alone. It writes to whichever key the secret already
+holds rather than always to `key.json`, for the reason "Secrets sit with
+what uses them" below gives from the other side: `Resolve` answers the
+bare `gcp-key-minter` name only while the secret holds exactly one key,
+so a fixed name would break a secret first written from Settings (as
+`value`) in a second way while fixing the first.
+
+**And grain says which secret is dead when it happens**, since a key
+deleted in GCP by anything at all lands here, not just this deployment's
+own rotation. `isCredentialRefused` matches the token endpoint's body,
+and `explainRefusedCredential` — on `Provider`, the only thing that knows
+which secret the material came out of, and that `Revoke` authenticates as
+whatever the *lease* names rather than what `Config` says today — names
+that secret, the ways a stored key stops being one GCP will accept, and
+the two places a current one is pasted. `Materialize`, `Revoke` and
+`Reap` all go through it: a dead minter credential breaks releasing and
+reaping a key exactly as it breaks minting one. This is the third thing
+about `gcp-key` that no configuration pane can see — the tab reads
+**Ready** throughout, because the secret is set and only GCP knows the
+key inside it stopped working.
 
 ### The same set, per repo
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/version"
 )
 
 // Task is a task's JSON shape -- everything the frontend needs to list
@@ -386,6 +387,17 @@ type configResponse struct {
 	// unlike ui.Settings there is nothing here to merge a cleared value
 	// over -- App.jsx replaces this response wholesale on every poll.
 	EnvironmentName string `json:"environmentName,omitempty"`
+	// Version is which build of grain is answering -- the commit this
+	// binary was stamped with and when it was made (version.go, over
+	// pkg/version). It rides here for the same reason EnvironmentName
+	// above does: the sidebar shows it in every view, and this is the
+	// call the frontend already makes before its first paint.
+	//
+	// Unlike every other field on this response it comes from the
+	// process rather than from the store or from Config, and nil -- a
+	// binary built with no VCS stamp at all -- means the sidebar simply
+	// has nothing to print.
+	Version *versionResponse `json:"version,omitempty"`
 	// ApprovedByDefault and AutoMergeByDefault mirror model.Config's own
 	// fields of the same name (bwsalmon/agents#612), the same
 	// read-straight-from-the-store-not-cached way ShowClosedByDefault
@@ -506,6 +518,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		Capabilities:  s.tasks.capabilitiesWithReadiness(cfg, repoConfigs),
 		RebootEnabled: s.tasks.Config.Reboot != nil,
 		TargetRepos:   s.tasks.targetRepos(),
+		Version:       versionResponseFrom(version.Get()),
 	}
 	resp.AgentFramework = model.AgentFrameworkAntigravity
 	// Same reading of "no row yet" the AgentFramework line above takes:

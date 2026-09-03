@@ -321,7 +321,7 @@ func TestPrepareCheckoutSaysNothingAboutABaseThatIsStillThere(t *testing.T) {
 // built. Read here, through the same sandbox tool prepareCheckout clones
 // with, because this is the only place in a dispatch that has a
 // repository rather than a string.
-func TestBranchCommitsListsWhatEarlierAttemptsPushed(t *testing.T) {
+func TestCheckoutCommitsListsWhatEarlierAttemptsPushed(t *testing.T) {
 	remoteBase := t.TempDir()
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	seed := seedRemote(t, remoteBase, repo)
@@ -344,7 +344,7 @@ func TestBranchCommitsListsWhatEarlierAttemptsPushed(t *testing.T) {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 
-	commits := branchCommits(context.Background(), tools, task, maxBranchCommits+1)
+	commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1)
 	if len(commits) != 2 {
 		t.Fatalf("commits = %v, want the two the earlier attempt pushed", commits)
 	}
@@ -370,7 +370,7 @@ func TestBranchCommitsListsWhatEarlierAttemptsPushed(t *testing.T) {
 // A first attempt's branch has nothing on it that its base does not, and
 // says so with no commits rather than with the base's whole history --
 // which is what a `git log` with no range would have given it.
-func TestBranchCommitsIsEmptyOnAFreshBranch(t *testing.T) {
+func TestCheckoutCommitsIsEmptyOnAFreshBranch(t *testing.T) {
 	remoteBase := t.TempDir()
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	seedRemote(t, remoteBase, repo)
@@ -381,7 +381,7 @@ func TestBranchCommitsIsEmptyOnAFreshBranch(t *testing.T) {
 	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
-	if commits := branchCommits(context.Background(), tools, task, maxBranchCommits+1); len(commits) != 0 {
+	if commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1); len(commits) != 0 {
 		t.Errorf("commits on a branch nobody has pushed to = %v, want none", commits)
 	}
 }
@@ -390,7 +390,7 @@ func TestBranchCommitsIsEmptyOnAFreshBranch(t *testing.T) {
 // case baseCheck carries on through -- and the attempt's commits are
 // still worth describing, so the range falls back to origin/HEAD rather
 // than the read failing with the base.
-func TestBranchCommitsFallsBackWhenTheBaseIsGone(t *testing.T) {
+func TestCheckoutCommitsFallsBackWhenTheBaseIsGone(t *testing.T) {
 	remoteBase := t.TempDir()
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	seed := seedRemote(t, remoteBase, repo)
@@ -413,7 +413,7 @@ func TestBranchCommitsFallsBackWhenTheBaseIsGone(t *testing.T) {
 	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
-	commits := branchCommits(context.Background(), tools, task, maxBranchCommits+1)
+	commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1)
 	if len(commits) != 1 || !strings.Contains(commits[0], "first attempt") {
 		t.Errorf("commits = %v, want the one commit the earlier attempt pushed", commits)
 	}
@@ -425,7 +425,7 @@ func TestBranchCommitsFallsBackWhenTheBaseIsGone(t *testing.T) {
 // package runs. A refused base is not an error here -- orientation that
 // could fail a dispatch would be a worse trade than the re-diagnosis it
 // saves -- it just falls back to the base every clone has.
-func TestBranchCommitsRefusesAnUnusableBase(t *testing.T) {
+func TestCheckoutCommitsRefusesAnUnusableBase(t *testing.T) {
 	remoteBase := t.TempDir()
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	seedRemote(t, remoteBase, repo)
@@ -437,7 +437,7 @@ func TestBranchCommitsRefusesAnUnusableBase(t *testing.T) {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	task.Base = "x';touch pwned;'"
-	if commits := branchCommits(context.Background(), tools, task, maxBranchCommits+1); len(commits) != 0 {
+	if commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1); len(commits) != 0 {
 		t.Errorf("commits = %v, want none", commits)
 	}
 	for _, dir := range []string{root, filepath.Join(root, CheckoutDir)} {
@@ -451,10 +451,10 @@ func TestBranchCommitsRefusesAnUnusableBase(t *testing.T) {
 // deployment running no proxy -- is silence, not a failure: the whole
 // section this feeds is orientation, and there is nothing to orient
 // against.
-func TestBranchCommitsSaysNothingWithoutACheckout(t *testing.T) {
+func TestCheckoutCommitsSaysNothingWithoutACheckout(t *testing.T) {
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "widgets"}}
-	if commits := branchCommits(context.Background(), mcp.NewSandboxTools(root), task, maxBranchCommits+1); len(commits) != 0 {
+	if commits := checkoutCommits(context.Background(), mcp.NewSandboxTools(root), task, maxBranchCommits+1); len(commits) != 0 {
 		t.Errorf("commits with no checkout = %v, want none", commits)
 	}
 }

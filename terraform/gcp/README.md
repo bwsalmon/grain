@@ -704,14 +704,21 @@ other too.
   neither this module nor Google controls, resolving purely by encoding
   the reserved IP in the hostname. Set `dns_managed_zone` to use a domain
   you actually control instead.
-- **Rotating the minter key needs a manual step on the host.**
-  `push-secrets.sh` mints a fresh minter key and prunes old ones on every
-  run, but `scripts/setup.sh`'s own `seed_gcp_minter_key` only ever
-  seeds the host's local secrets database once -- it never overwrites an
-  existing `gcp-key-minter` entry. Delete that entry by hand
-  (`grain secrets delete gcp-key-minter key.json`, over
-  `gcloud compute ssh --tunnel-through-iap`) and bump `deploy_generation`
-  if a rotated key genuinely needs to take effect.
+- **The minter key rotates with the deploy, and the host follows it.**
+  `push-secrets.sh` mints a fresh minter key on every run, pushes it into
+  instance metadata and deletes every key on the minter account beyond
+  the newest two; `scripts/setup.sh`'s `seed_gcp_minter_key` writes
+  whatever it is handed into the host's own secrets database on every
+  run, so the daemon ends each deploy holding the key that was pushed for
+  it. That second half is new. It used to seed once and never overwrite,
+  which meant a host went on authenticating with the key from its first
+  deploy until the third `push-secrets.sh` run deleted it in GCP --
+  after which every `gcp-key` mint failed with Google's `invalid_grant`
+  ("Invalid JWT Signature") while the Capabilities tab still read
+  **Ready**, since the secret is set and only GCP knows the key inside it
+  is dead. What has not changed is *when* it takes effect: the host picks
+  up a pushed key on its next deploy, so bump `deploy_generation` if you
+  need a rotation to land right now.
 - **The host's journal reaches Cloud Logging.** `files/deploy.sh`
   installs `google-cloud-ops-agent` early, before anything that can
   fail, which is what the host account's `roles/logging.logWriter`
@@ -771,6 +778,18 @@ other too.
   `docker.service` drop-in carries `RequiresMountsFor=/mnt/grain-sandbox`,
   so `dockerd` waits for the volume rather than racing it and quietly
   filling the boot disk under a mount point.
+
+  The UI's own host status (Debugging → Sandbox health) reports this
+  volume as well as the data disk, one row per filesystem: the daemon
+  reads `-data-dir`, `-sandbox-dir` and docker's data root and folds
+  together whichever turn out to be the same disk, which here means the
+  sandbox row covers both of the things listed above. It showed only the
+  data disk's figure until then, so the 20 GB volume read as healthy
+  however full the 100 GB one beside it got. Docker's data root
+  (`/mnt/grain-sandbox/docker`) is not itself mounted into the daemon's
+  container, so the daemon logs one line about it at startup and reports
+  the volume through `$GRAIN_SANDBOX_DIR`'s bind mount instead -- the
+  same filesystem, and the same number.
 
   On an existing deployment the volume arrives at the host's next boot,
   since the startup script is what mounts it (or run it by hand:

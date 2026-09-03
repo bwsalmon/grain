@@ -138,6 +138,20 @@ rather than by itself, append one line: *"the command was killed after
 is `timeout`'s own reserved status. `runCommandTimeout` already computes
 the number, and both handlers already share it.
 
+**Done** (grain/task-150). `runCommandBound`
+(`pkg/mcp/run_command_result.go`) carries the resolved bound *and* where
+it came from, and both handlers append its notice when the bound is what
+ended the command: "Killed after 300s by run_command's default bound,
+which this call did not choose — it passed no `timeout` … Pass a larger
+`timeout` (milliseconds, up to 600000) or narrow the command", or the
+same line naming the call's own `timeout` when it had one. Locally the
+trigger is `ctx.Err()` being `DeadlineExceeded` *and* the bound having
+actually elapsed, so a run-deadline cancellation that fired first is not
+reported as this bound and cannot name the wrong number; remotely it is
+exit 124, joined by the exit 137 that finding 5's SIGKILL escalation
+produces. See README.md's "What `run_command` says when it, not the
+command, ended it".
+
 ## 4. No tool result has an upper bound on its size
 
 `run_command` returns the whole of stdout and stderr
@@ -176,6 +190,21 @@ already shared by both `read_file`s, so this is two call sites and a
 helper. Size the cap from the data in finding 11 rather than from taste;
 64 KB is a defensible starting guess.
 
+**Done** (grain/task-150), at 64 KB (`mcp.maxToolResultBytes`,
+`pkg/mcp/result_size.go`) and at those two call sites. `run_command`'s
+two streams share the one budget rather than getting one each, with a
+stream that fits lending its remainder to the other; head and tail are
+kept, never just the head, since the verdict is in the last lines and the
+invocation in the first. The notice between them says how much went, that
+grain cut it rather than the command, and the call that gets it back —
+narrow the command or redirect it to a file, and for `read_file` the
+`cat -n` numbering either side of the cut is the `offset` and `limit` to
+ask for, which is why the cut snaps to line boundaries. The number is
+still a guess and is deliberately a `var`: finding 11's telemetry is what
+should set it. Nothing else was capped here, because the other big
+answers already bound themselves (`github.JobLogExcerpt` for a failing
+job's log). See README.md's "No single answer may eat the run's context".
+
 ## 5. The remote `run_command` has no process-group discipline
 
 `procgroup` exists because killing a command has to kill everything it
@@ -196,6 +225,43 @@ a real sandbox VM (the shape `procgroup`'s own test already has). If
 confirmed, `timeout --foreground --kill-after=5s` plus a sentence in the
 tool description about redirecting a backgrounded process's output is the
 whole fix.
+
+**Done** (grain/task-150) — confirmed, and it turned out otherwise, which
+is why it was worth measuring on a real guest first. Three results, all
+from a real grain sandbox running the exact `timeout N bash -c 'cd … && …'`
+this path builds:
+
+- **The premise is wrong.** Plain `timeout` puts the command in a process
+  group it leads and signals that whole group, so it already reaches
+  everything the command forked: `timeout 2 bash -c './gc.sh & sleep 10'`
+  leaves no surviving `gc.sh`. `--foreground` is what would have broken
+  that — its own documentation says "children of COMMAND will not be
+  timed out" — so it is deliberately *not* used. The remote path has the
+  discipline `procgroup` gives the local one; it just gets it from
+  `timeout` rather than from grain.
+- **The suspected hang does not happen.** A backgrounded process
+  inheriting the channel's stdout returns in about two milliseconds, not
+  in five minutes, because the Go SSH client `kontur exec` uses returns
+  on the exit-status message rather than waiting for the streams to
+  close — unlike an OpenSSH client, which is where that folklore comes
+  from. No `exit=124` for a command that succeeded, and so no sentence in
+  the tool description either: it would have described a hazard this
+  transport does not have.
+- **A real hole, found on the way.** Plain `timeout N` against a command
+  that traps SIGTERM does not bound anything: it waits for that command
+  to finish of its own accord — a full minute for a minute-long sleep —
+  and only then reports 124. `--kill-after=5s` (`runCommandKillGrace`) is
+  the fix, and the `exit=137` it produces gets finding 3's treatment.
+  Reporting that 137 at all needs a trailing `exit $?` in the wrapper:
+  bash otherwise replaces itself with `timeout`, which the group SIGKILL
+  then kills, and death by signal is not something an exit-status message
+  can carry.
+
+Separately, the remote path had no bound on the *call* as opposed to the
+command — nothing this side can make a guest answer — so it now carries a
+local deadline of the bound plus 30s (`sshRunCommandGrace`) with a notice
+of its own. See README.md's "What `run_command` says when it, not the
+command, ended it".
 
 ## 6. The git proxy denies a push and a fetch with the same sentence
 
@@ -276,7 +342,7 @@ per-framework and unbounded, and none of that belongs in a prompt.
 `orchestrator.History` — the attempts before this one (`previousAttempts`,
 `store.Runs` with this run's own row filtered out, since `dispatch.Cycle`
 writes that row before `RunDispatch` ever sees the dispatch), the commits
-they left on the branch (`branchCommits`, run through the same sandbox
+they left on the branch (`checkoutCommits`, run through the same sandbox
 tool `prepareCheckout` clones with), and the conversation — and renders
 it as `previousAttemptsSection`: per attempt its number, outcome and
 `detail`, then the branch's own commits newest first. Bounded by
@@ -395,7 +461,7 @@ Filed as separate proposals, each depending on this document:
 1. Truthful escape-hatch tool descriptions and confirmations (findings 1
    and 2) — **done**, grain/task-149.
 2. `run_command`: say when a command timed out, and bound result size
-   (findings 3, 4, and the check in 5).
+   (findings 3, 4, and the check in 5) — **done**, grain/task-150.
 3. Tell a run its wall-clock budget (finding 7) — **done**,
    grain/task-151.
 4. Tell a redispatched run what its previous attempts did (finding 8) —

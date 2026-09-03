@@ -131,7 +131,7 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 	return CheckoutDir, nil
 }
 
-// commitMarker prefixes each commit line branchCommits has git print, so
+// commitMarker prefixes each commit line checkoutCommits has git print, so
 // those lines can be picked back out of a run_command result that also
 // carries the tool's own `exit=`/`stdout:`/`stderr:` framing and whatever
 // git said on the way -- the same trick baseGoneMarker plays for
@@ -139,7 +139,7 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 // that framing.
 const commitMarker = "grain-commit:"
 
-// branchCommits lists the commits already on task's own branch and not on
+// checkoutCommits lists the commits already on task's own branch and not on
 // its base -- `git log <base>..HEAD` in the checkout prepareCheckout has
 // just made, newest first, one "<abbrev> <subject>" per entry.
 //
@@ -149,6 +149,14 @@ const commitMarker = "grain-commit:"
 // actually left behind. It is read here because here is the only place
 // that has the checkout at all -- by the time BuildPrompt runs there is a
 // string, not a repository.
+//
+// Not description.go's branchCommits, which asks GitHub for the same
+// range over its API. That one runs at the end of a run, to describe a
+// pull request and to decide whether there is anything to open one for,
+// and needs an answer it can tell apart from a failed read. This one
+// runs before the agent's first turn, in the sandbox, against a
+// checkout that exists precisely because the run is about to work in
+// it -- and treats every failure as nothing to say.
 //
 // Best effort, and never fatal: a missing base, a branch with nothing on
 // it, a git that refuses for a reason nobody predicted, and a sandbox
@@ -162,7 +170,7 @@ const commitMarker = "grain-commit:"
 // clone left at origin/HEAD (prepareCheckout), and a task whose base has
 // since been merged and deleted still has a branch worth describing --
 // the same survivable case baseCheck carries on through.
-func branchCommits(ctx context.Context, tools []mcp.Tool, task model.Task, limit int) []string {
+func checkoutCommits(ctx context.Context, tools []mcp.Tool, task model.Task, limit int) []string {
 	branch := model.BranchName(task.ID)
 	if !gitSafe.MatchString(branch) {
 		return nil

@@ -790,8 +790,16 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		// with no_action.
 		var salvageErr error
 		if result != nil {
+			// An empty branch is excepted: salvagePushedBranch has
+			// already explained it on the task and parked it
+			// (noteEmptyBranch), and this run's row keeps runErr's own
+			// diagnosis, which is the more informative of the two -- a
+			// run that broke before it had committed anything failed
+			// first and pushed nothing second.
 			if _, err := salvagePushedBranch(ctx, deps.Store, deps.Client, *task, now); err != nil {
-				salvageErr = err
+				if _, empty := emptyBranch(err); !empty {
+					salvageErr = err
+				}
 			}
 		}
 		if salvageErr != nil {
