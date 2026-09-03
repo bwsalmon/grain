@@ -153,8 +153,27 @@ func pullRequestStatus(client PullRequestReader, scope PullRequestScope) (string
 		if err != nil {
 			return "", fmt.Errorf("reading pull request #%d: %w", pr.Number, err)
 		}
+		// The link comes off `pr`, the same lookup the number does.
+		// Taking one field from each read split a single reference
+		// across two responses, and wherever the detail read came back
+		// without html_url this line rendered "Pull request #42 () is
+		// open" -- an empty pair of parentheses where the link belongs.
+		// Both reads carry html_url, so the copy already in hand was
+		// always enough.
+		//
+		// The converse is deliberately left alone: a caller whose `pr`
+		// is the one missing html_url gets those same empty parentheses
+		// rather than a fallback to detail.HTMLURL. A fallback would put
+		// the line back on two reads to cover a shape no live GitHub
+		// response produces, and the empty parentheses are what made the
+		// original blank visible enough to fix -- quietly printing the
+		// number alone would not have been. Only the source is pinned
+		// (pullrequest_tools_test.go's
+		// TestPullRequestStatusTakesTheLinkOffTheLookupThatNamedTheNumber);
+		// nothing pins the blank rendering, so a caller that really does
+		// arrive holding only the detail's copy can add the fallback.
 		fmt.Fprintf(&b, "Pull request #%d (%s) is %s%s.\n",
-			pr.Number, detail.HTMLURL, detail.State, mergeableClause(detail))
+			pr.Number, pr.HTMLURL, detail.State, mergeableClause(detail))
 	}
 
 	checks, err := checkRunsForCommit(client, scope, head.SHA)

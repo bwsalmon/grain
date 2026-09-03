@@ -229,7 +229,7 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 	// merge over the bare repo, not just flipping a status flag, since
 	// pass 2 below needs the fix to genuinely be there when it clones.
 	t.Log("merging pass 1's pull request into main")
-	if err := client.MergePullRequest(repoRef.Owner, repoRef.Name, prNumber); err != nil {
+	if err := client.MergePullRequest(repoRef.Owner, repoRef.Name, prNumber, ""); err != nil {
 		t.Fatalf("merging pass 1's pull request: %v", err)
 	}
 	merged, err := os.ReadFile(bareFileAt(t, bare, "main", "calc.py"))

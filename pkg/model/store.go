@@ -123,6 +123,12 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskSandboxShapeColumns(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureConfigSandboxDiskColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
+	if err := s.ensureTaskSandboxDiskColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	if err := s.ensureTaskInteractiveColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
@@ -462,6 +468,44 @@ func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task` ADD COLUMN `sandbox_memory_mb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureConfigSandboxDiskColumn adds grain_config.sandbox_disk_gb, the
+// third dimension of the same VM shape (model.Config.SandboxDiskGB,
+// grain/task-41), to a database created before it existed.
+//
+// Its own migration rather than a third column in
+// ensureConfigSandboxShapeColumns above: that one's probe finds
+// sandbox_cpus/sandbox_memory_mb already present on every database
+// migrated by an earlier build and returns without adding anything, so a
+// column appended to it would only ever reach a database that had none
+// of the three. Defaults to 0, SandboxDiskGB's own "unset, take whatever
+// size the guest image gives it" zero value.
+func (s *Store) ensureConfigSandboxDiskColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `sandbox_disk_gb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureTaskSandboxDiskColumn is ensureConfigSandboxDiskColumn's
+// per-task counterpart -- task.sandbox_disk_gb, Task.SandboxDiskGB's own
+// column -- added separately from ensureTaskSandboxShapeColumns for the
+// reason that function's doc comment gives. Defaults to 0, the "use the
+// deployment default" zero value, so every task already stored reads
+// back deferring to the deployment exactly as it did before a task could
+// ask for a disk size at all.
+func (s *Store) ensureTaskSandboxDiskColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `sandbox_disk_gb` INTEGER NOT NULL DEFAULT 0")
 	return err
 }
 
@@ -819,13 +863,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`, `agent_framework`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `configuration`, `agent_framework`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.Interactive, t.Configuration,
+		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.SandboxDiskGB, t.Interactive, t.Configuration,
 		t.AgentFramework,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
@@ -1101,7 +1145,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`," +
+	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`interactive`,`configuration`," +
 	"`agent_framework`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
@@ -1118,7 +1162,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration,
+		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.SandboxDiskGB, &t.Interactive, &t.Configuration,
 		&t.AgentFramework); err != nil {
 		return Task{}, err
 	}
@@ -1746,24 +1790,30 @@ func (s *Store) State(ctx context.Context, taskID string) (State, error) {
 // Ready is every task dispatchable right now: approved, not running, with
 // no open blocker -- in dispatch order, which is the backlog's own order
 // (bwsalmon/agents#476): ascending OrderKey, the same order ListTasks
-// hands a UI or CLI before any newest-first display flip. A fix task
-// (Origin.Reason == ReasonFix) sorts before everything else: it exists
-// only because orchestrator.queueHeads found its repo's merge queue head
-// broken, and queueHeads already guarantees at most one such task per
-// repo at a time, so there is never more than a handful competing for
-// this and nothing else to weigh them against. Leaving one to wait behind
-// unrelated new work is what bwsalmon/agents#389 asks to avoid: the
-// longer a queue head's repair sits queued, the more likely something
-// else lands on the branch it targets first and the fix has to be
-// refiled rather than simply merged. Ties within each group still break
-// on task ID, the same stable tiebreak as before.
+// hands a UI or CLI before any newest-first display flip, ties broken on
+// task ID.
+//
+// That is the whole rule, with no carve-out for any kind of task. A fix
+// task the merge queue filed (Origin.Reason == ReasonFix) used to sort
+// ahead of everything else here regardless of where the backlog put it --
+// bwsalmon/agents#389's "a queue head's repair must not wait behind
+// unrelated new work", since the longer it waits the more likely
+// something else lands on the branch it targets and the fix has to be
+// refiled rather than simply merged. That priority is a position now
+// rather than a sort: orchestrator.fileFixTask files the task at the very
+// head of the backlog (OrderKeyForNewTask, atFront), where a human can
+// see it sitting first, see why the queue behind it is waiting, and drag
+// it elsewhere if they disagree. A rule that lived only in this ORDER BY
+// could do none of that -- the list said one thing and the dispatcher did
+// another -- and two orderings that have to agree but are computed in
+// different places are the kind that quietly stop agreeing.
 func (s *Store) Ready(ctx context.Context) ([]string, error) {
 	var out []string
 	err := each(ctx, s.db,
 		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
-			"ORDER BY (`t`.`origin_reason` = ?) DESC, `t`.`order_key`, `r`.`task_id`",
-		[]any{string(ReasonFix)},
+			"ORDER BY `t`.`order_key`, `r`.`task_id`",
+		nil,
 		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
@@ -1778,8 +1828,9 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 // ReadyConfiguration is Ready narrowed to the configuration agent
 // (Task.Configuration, bwsalmon/agents#621): every such task
 // dispatchable right now, in the same backlog order Ready itself uses
-// (ascending OrderKey, task ID the tiebreak) -- there is no fix-task
-// carve-out to make here, since a configuration task is never one.
+// (ascending OrderKey, task ID the tiebreak), and with no carve-out of
+// its own for the same reason Ready has none: position in the backlog is
+// the whole of the order, here as there.
 //
 // dispatch.Cycle calls this before it ever looks at MaxConcurrent, and
 // starts every task it returns unconditionally: the configuration agent
@@ -1879,7 +1930,7 @@ func (s *Store) Reorder(ctx context.Context, ids []string, afterID, beforeID *st
 		return nil
 	}
 	return s.write(ctx, "reorder tasks", func(tx *sql.Tx) error {
-		ordered, err := sortByOrderKey(ctx, tx, ids)
+		ordered, _, err := sortByOrderKey(ctx, tx, ids)
 		if err != nil {
 			return err
 		}
@@ -1905,21 +1956,159 @@ func (s *Store) Reorder(ctx context.Context, ids []string, afterID, beforeID *st
 	})
 }
 
+// MoveToFrontOfBacklog places ids at the front of the backlog: ahead of
+// every other task, and behind nothing but the merge tasks
+// (Origin.Reason == ReasonFix) already scheduled at the very head of it.
+// They keep their existing relative order among themselves, the same
+// guarantee a multi-select drag gets from Reorder and against the same
+// OrderKey column, so this is a move a human could have made by hand
+// rather than a second ordering rule layered on top of theirs.
+//
+// It is the merge queue making its own order visible
+// (orchestrator.SyncPullRequests): a pull request waiting to land is the
+// work closest to done, and which of them lands next used to be a
+// comparison the queue made inside one cycle and never wrote down.
+// Putting them at the front, in the order they will land, lets a list
+// answer "what is grain about to finish" without anyone opening a task --
+// and, because the queue reads its own head back off this same order
+// (orchestrator.queueHeads), dragging one of those tasks above another
+// really does change which merges first. An order a human can see and an
+// order a human can set are the same fact here, deliberately.
+//
+// Nothing is written when ids already sit there in that order, which is
+// what lets a reconciler call this every cycle. A task dragged out of the
+// block altogether does come back to it next cycle -- while it is in the
+// queue its position belongs to the queue -- but it comes back where the
+// drag left it relative to the others, so "merge this one last" still
+// lands.
+//
+// An id naming no task is an error, the same as Reorder's own and for the
+// same reason: every key here is read inside this call's transaction, so
+// missing one means the caller's view was already stale.
+func (s *Store) MoveToFrontOfBacklog(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return s.write(ctx, "move tasks to the front of the backlog", func(tx *sql.Tx) error {
+		ordered, keys, err := sortByOrderKey(ctx, tx, ids)
+		if err != nil {
+			return err
+		}
+		lower, upper, err := frontOfBacklogBounds(ctx, tx, ordered)
+		if err != nil {
+			return err
+		}
+		if alreadyAtFrontOfBacklog(ordered, keys, lower, upper) {
+			return nil
+		}
+		if !orderKeysFitBetween(lower, upper, len(ordered)) {
+			if err := rebalanceOrderKeys(ctx, tx); err != nil {
+				return err
+			}
+			if lower, upper, err = frontOfBacklogBounds(ctx, tx, ordered); err != nil {
+				return err
+			}
+		}
+		for i, key := range splitOrderKeys(lower, upper, len(ordered)) {
+			if _, err := tx.ExecContext(ctx,
+				"UPDATE `task` SET `order_key` = ? WHERE `id` = ?", key, ordered[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// frontOfBacklogBounds is the interval MoveToFrontOfBacklog moves ids
+// into: below the first task of the ordinary backlog, above whatever
+// merge tasks are already scheduled at the very head of it. Either side
+// is nil when there is nothing on it -- a deployment whose whole backlog
+// is the merge queue, or one with no fix task filed -- which
+// splitOrderKeys reads as "step away from the other side" the same way
+// Reorder's own unbounded drops do.
+//
+// The head is decided by position, not by state: only a fix task that
+// actually sits ahead of the whole ordinary backlog bounds the block from
+// below. One dragged down into the middle of the backlog since, or filed
+// before fix tasks had a place of their own and left at OrderKey's zero
+// value, is just another task there -- pinning the merge queue behind it
+// would put the block somewhere nobody is looking, which is the opposite
+// of what moving it to the front is for.
+func frontOfBacklogBounds(ctx context.Context, tx *sql.Tx, ids []string) (lower, upper *float64, err error) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, string(ReasonFix))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	var ordinary sql.NullFloat64
+	if err := tx.QueryRowContext(ctx,
+		"SELECT MIN(`order_key`) FROM `task` "+
+			"WHERE `origin_reason` <> ? AND `id` NOT IN ("+placeholders+")",
+		args...).Scan(&ordinary); err != nil {
+		return nil, nil, fmt.Errorf("reading the first task of the backlog: %w", err)
+	}
+
+	q := "SELECT MAX(`order_key`) FROM `task` " +
+		"WHERE `origin_reason` = ? AND `id` NOT IN (" + placeholders + ")"
+	if ordinary.Valid {
+		q += " AND `order_key` < ?"
+		args = append(args, ordinary.Float64)
+	}
+	var head sql.NullFloat64
+	if err := tx.QueryRowContext(ctx, q, args...).Scan(&head); err != nil {
+		return nil, nil, fmt.Errorf("reading the merge tasks at the head of the backlog: %w", err)
+	}
+
+	if head.Valid {
+		lower = &head.Float64
+	}
+	if ordinary.Valid {
+		upper = &ordinary.Float64
+	}
+	return lower, upper, nil
+}
+
+// alreadyAtFrontOfBacklog reports whether ordered already holds distinct,
+// ascending OrderKey values strictly inside (lower, upper) -- exactly what
+// MoveToFrontOfBacklog would otherwise write, so writing it would move
+// nothing. It is asked before every one of those writes because the
+// reconciler calling it has nothing to do on almost every cycle, and a
+// write that changes no order still narrows the gaps the next one has to
+// split.
+func alreadyAtFrontOfBacklog(ordered []string, keys map[string]float64, lower, upper *float64) bool {
+	first, last := keys[ordered[0]], keys[ordered[len(ordered)-1]]
+	if lower != nil && first <= *lower {
+		return false
+	}
+	if upper != nil && last >= *upper {
+		return false
+	}
+	for i := 1; i < len(ordered); i++ {
+		if keys[ordered[i]] <= keys[ordered[i-1]] {
+			return false
+		}
+	}
+	return true
+}
+
 // sortByOrderKey returns ids sorted ascending by each task's current
-// OrderKey -- Reorder's own "the block keeps its existing relative order"
-// guarantee.
-func sortByOrderKey(ctx context.Context, tx *sql.Tx, ids []string) ([]string, error) {
+// OrderKey, alongside the keys it read to do it -- Reorder's own "the
+// block keeps its existing relative order" guarantee, and the same order
+// MoveToFrontOfBacklog carries to the front of the backlog.
+func sortByOrderKey(ctx context.Context, tx *sql.Tx, ids []string) ([]string, map[string]float64, error) {
 	keys := make(map[string]float64, len(ids))
 	for _, id := range ids {
 		k, err := orderKeyOf(ctx, tx, id)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		keys[id] = k
 	}
 	ordered := append([]string(nil), ids...)
 	sort.SliceStable(ordered, func(i, j int) bool { return keys[ordered[i]] < keys[ordered[j]] })
-	return ordered, nil
+	return ordered, keys, nil
 }
 
 // orderKeyBounds resolves Reorder's afterID/beforeID to the OrderKey
@@ -2247,7 +2436,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
-	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`,`agent_framework`," +
+	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
 	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
@@ -2257,7 +2446,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var defaultCapabilities string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault,
+		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
 		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
 		&defaultCapabilities); err != nil {
 		return Config{}, err
@@ -2280,10 +2469,10 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault,
+			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
 			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,
 			joinCSV(c.DefaultCapabilities))
 		return err

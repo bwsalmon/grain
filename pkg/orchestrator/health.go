@@ -54,6 +54,19 @@ type SandboxHealth struct {
 	// the same way ui.HostPressure's are for the daemon's host -- 0/0
 	// when unavailable.
 	MemoryUsedMB, MemoryTotalMB int
+	// DiskUsedMB and DiskTotalMB are the sandbox's own root filesystem,
+	// in MiB, from `df` inside the guest -- 0/0 when unavailable, the
+	// same as the memory pair above.
+	//
+	// Reported in MiB rather than in the GiB
+	// model.Config.SandboxDiskGB is expressed in, so that this stays a
+	// plain integer at the sizes a sandbox actually reaches: the useful
+	// reading is "3 GiB of 20 used", and a GiB-granular integer would
+	// round the interesting half of that to zero. It is the figure the
+	// disk-size setting is there to move -- a run that fails part way
+	// through a build is often a guest that has simply filled its root
+	// filesystem, which nothing in this pane could previously show.
+	DiskUsedMB, DiskTotalMB int
 }
 
 // Health implements the same shape KonturSandboxes.Health does: one entry
@@ -93,8 +106,8 @@ const healthTimeout = 5 * time.Second
 
 // Health implements the same shape HostSandboxes.Health does: one entry
 // per VM currently held by a live run, each with a best-effort live
-// /proc/loadavg and /proc/meminfo reading pulled out of the guest over
-// the same transport that run's own tools use. Unlike Acquire, this never
+// /proc/loadavg, /proc/meminfo and `df` reading pulled out of the guest
+// over the same transport that run's own tools use. Unlike Acquire, this never
 // waits out a VM's multi-minute boot -- a sandbox not reachable within
 // healthTimeout gets Error set instead, which is exactly the condition
 // this pane exists to surface (bwsalmon/agents#536), not one this method
@@ -158,7 +171,27 @@ func (k *KonturSandboxes) sandboxHealth(ctx context.Context, sandbox, name strin
 		return health
 	}
 
-	stdout, stderr, exitCode := runner.Run(ctx, []string{"cat", "/proc/loadavg", "/proc/meminfo"}, "")
+	// One command rather than a `cat` and a `df`: this whole check runs
+	// inside healthTimeout, and a second round trip over the same
+	// transport would spend a second guest login's worth of it for one
+	// more line of output. "kontur exec" hands its argv to the guest's
+	// own shell (mcp.DockerExecRunner.Run), so the two run in one shell
+	// here rather than as separate calls. `df -Pk` is the POSIX
+	// single-line-per-filesystem form, which is what keeps
+	// parseDiskStats' own "the line whose last field is /" reliable
+	// against a long device name that plain `df` would wrap.
+	//
+	// The `&&` and the `|| true` are what keep the exit status meaning
+	// what it did before this line grew a second command: the two /proc
+	// files are what says the guest is answering at all, so their status
+	// is the one reported, while a `df` that fails (a busybox build
+	// without -P, say) leaves the disk figure at 0/0 -- "unavailable",
+	// which the pane already has a shape for -- rather than turning a
+	// perfectly reachable sandbox into an errored row. The order matters
+	// too: parseProcStats reads /proc/loadavg off the first line, so the
+	// `cat` has to come first regardless.
+	stdout, stderr, exitCode := runner.Run(ctx,
+		[]string{"sh", "-c", "cat /proc/loadavg /proc/meminfo && { df -Pk / || true; }"}, "")
 	if exitCode != 0 {
 		if stderr == "" {
 			stderr = fmt.Sprintf("exited %d with no output", exitCode)
@@ -169,6 +202,7 @@ func (k *KonturSandboxes) sandboxHealth(ctx context.Context, sandbox, name strin
 
 	health.Ready = true
 	health.LoadAverage, health.MemoryUsedMB, health.MemoryTotalMB = parseProcStats(stdout)
+	health.DiskUsedMB, health.DiskTotalMB = parseDiskStats(stdout)
 	return health
 }
 
@@ -208,4 +242,39 @@ func parseProcStats(output string) (loadAverage string, usedMB, totalMB int) {
 		usedMB = (totalKB - availKB) / 1024
 	}
 	return loadAverage, usedMB, totalMB
+}
+
+// parseDiskStats picks the root filesystem's size and usage out of the
+// same combined output parseProcStats reads -- the "df -Pk /" half of it
+// (see sandboxHealth, which asks for both in one command).
+//
+// The row is found by shape rather than by position: the line whose last
+// field is "/" and which has df's own six POSIX columns
+// (filesystem, 1024-blocks, used, available, capacity, mounted-on). That
+// survives the header line, a shell warning printed ahead of the output,
+// and the /proc lines the same stream carries, none of which look like
+// that. Used, not "total minus available", so the reading matches what
+// `df` itself reports: the two differ by the reserved blocks only root
+// may use, and it is `df`'s answer an operator will compare this pane
+// against.
+//
+// 0/0 when no such line is there at all -- a guest whose `df` does not
+// take -P, or a busybox build that words its output differently -- which
+// SandboxHealth.DiskUsedMB documents as "unavailable" and the pane shows
+// as a dash, rather than an error that would take a perfectly healthy
+// sandbox's whole row down with it.
+func parseDiskStats(output string) (usedMB, totalMB int) {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 6 || fields[5] != "/" {
+			continue
+		}
+		totalKB, err1 := strconv.Atoi(fields[1])
+		usedKB, err2 := strconv.Atoi(fields[2])
+		if err1 != nil || err2 != nil || totalKB <= 0 {
+			continue
+		}
+		return usedKB / 1024, totalKB / 1024
+	}
+	return 0, 0
 }

@@ -41,19 +41,46 @@ shquote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+# The Go the guest carries, read out of go.mod with the same expression
+# the Makefile uses for Dockerfile.build's own GO_VERSION -- one version,
+# written down once, in the file that already has to be right. A guest
+# whose Go disagreed with the module's would fail a dispatched task's
+# `go build` for a reason that has nothing to do with that task.
+go_version="$(sed -n 's/^go[[:space:]]\{1,\}//p' ../../go.mod)"
+if [ -z "$go_version" ]; then
+  echo "build-guest.sh: no 'go' line in ../../go.mod, so there is no toolchain version to install" >&2
+  exit 1
+fi
+
+# What the guest's module and npm caches get warmed from. A sandbox has
+# no route to proxy.golang.org or registry.npmjs.org (only the git
+# proxy), so a toolchain arriving with a cold cache cannot build
+# anything -- see guest-setup.sh's "The Go and Node toolchains".
+#
+# Compressed and base64'd rather than spliced in as-is because the whole
+# script becomes one argument of one `RUN /bin/sh -c` inside kontur's
+# build, and Linux caps a single argument at 128KB (MAX_ARG_STRLEN).
+# ui/package-lock.json alone is ~125KB of that; gzipped and base64'd all
+# four manifests together are ~48KB, which leaves the spliced script at
+# ~77KB. Worth knowing if that lock file ever doubles: the failure would
+# be an E2BIG from the build, not from anything here.
+manifests="$(tar -C ../.. -czf - go.mod go.sum ui/package.json ui/package-lock.json | base64 -w0)"
+
 # kontur's hook writes GUEST_SETUP_SCRIPT to a file and execs it with only
 # its own build stage's environment (third_party/kontur's Dockerfile,
-# guest-customized stage), so the one variable guest-setup.sh reads has
-# to travel inside the script text itself. It is inserted immediately
+# guest-customized stage), so every variable guest-setup.sh reads has
+# to travel inside the script text itself. They are inserted immediately
 # after the shebang, which has to stay on line 1 for the exec to work.
 #
-# There used to be a second, OPERATOR_SSH_PUBLIC_KEY, and it was the
+# There used to be another, OPERATOR_SSH_PUBLIC_KEY, and it was the
 # reason the image this produces was deployment-specific. kontur now
 # generates a keypair per boot and passes the public half to the guest on
 # the kernel command line, so what comes out of here is generic -- see
 # guest-setup.sh's "No SSH key is baked in".
 setup_script="$(
   head -n 1 guest-setup.sh
+  printf 'GO_VERSION=%s\n' "$(shquote "$go_version")"
+  printf 'GRAIN_DEP_MANIFESTS=%s\n' "$(shquote "$manifests")"
   printf 'SANDBOX_SETUP_SCRIPT=%s\n' "$(shquote "${SANDBOX_SETUP_SCRIPT:-}")"
   tail -n +2 guest-setup.sh
 )"
