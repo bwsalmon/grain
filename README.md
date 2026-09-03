@@ -1374,7 +1374,9 @@ no Runner" stays true of the package itself even though a deployment can
 now wire one in from outside it. `selfdebug.SourceTools` is read-only --
 `read_grain_source`/`list_grain_source`, confined to whatever directory
 a deployment's `-upgrade-src-dir` already names, needing no confirmation
-of any kind, since nothing it exposes can change anything.
+of any kind, since nothing it exposes can change anything -- and the same
+grant now also carries `pkg/mcp`'s four task tools, for reading grain's
+*other* tasks (see below).
 `selfrepair.HostCommandTools`' `run_host_command` is the opposite: it
 runs a shell command directly against the same host `grain daemon`
 itself runs on -- no sandbox, no adapter, the real machine -- so every
@@ -1394,7 +1396,32 @@ Every framework that remains (`agent/antigravity`, `agent/claude`,
 ignores `RunConfig.Tools` entirely, because there is no in-process
 registry to hand a forked process. `Config.GrantTools` still assembles these tools and
 `RunDispatch` still passes them, but no `Framework` consumes them, so
-`selfrepair`/`selfdebug`'s host tools reach no running agent today.
+`selfrepair`'s host tool reaches no running agent today.
+
+`self-debug` is the half that no longer depends on any of that, because
+everything it offers is read-only and so needs no route back into a live
+run's own conversation. `grain mcpserver` takes `-self-debug` (and
+`-grain-src-dir`), and a `Framework` passes both to the subprocess it
+forks exactly when `agent.RunConfig.SelfDebug` says this task holds the
+grant — `RunDispatch` reads that off the task's own `Grants`, and
+`agent.SelfDebugArgs` is the one translation from "what this run may do"
+to "what that process is told", shared by all three frameworks the way
+`RunDeadlineArgs` already is. What the flag turns on is two halves of one
+question. `selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`
+answer what grain is *built* to do. `mcp.NewTaskTools`'
+`list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
+`read_grain_task_transcript` answer what this deployment actually *did*:
+another task's record, every attempt it has had with the error each one
+recorded, the prompt its agent was really handed, and its session
+transcript — a still-running attempt's included, since the daemon serves
+one from `Config.LiveTranscripts`. Those reads take the same hop
+`open_pull_request` takes for its write: `cmd/grain/mcpserver.go`'s
+`daemonTasks` asks the daemon over its REST API, so that process still
+holds no store handle and `docs/design.md`'s split surface is untouched.
+Both halves refuse politely rather than disappearing when a deployment
+has no source checkout, or an `mcpserver` no daemon to ask, so a run's
+tool roster is a property of the vocabulary rather than of one
+deployment's configuration.
 Closing that gap means giving the `mcpserver` subcommand a route back to
 the store, which is a design question rather than a missing flag: the
 isolation that makes the subprocess frameworks safe is exactly that it

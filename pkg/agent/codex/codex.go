@@ -298,7 +298,10 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 // pullRequestArgs and grainServerArgs are appended to either, since
 // which repo's CI a run may read, and whether it may ask grain to open
 // its pull request, are both independent of which backend its sandbox
-// runs on.
+// runs on. So is agent.SelfDebugArgs, which passes on whether this
+// task holds the self-debug grant -- and so whether that server serves
+// the read-only tools for grain's own source and grain's own task
+// records.
 //
 // So is agent.RunDeadlineArgs, which is why ctx is here at all: the
 // deadline on the ctx this run was given is what grain will cancel it
@@ -331,6 +334,7 @@ func (f *Framework) mcpServerArgs(ctx context.Context, cfg agent.RunConfig) ([]s
 	}
 	args = append(args, f.pullRequestArgs(cfg)...)
 	args = append(args, f.grainServerArgs(cfg)...)
+	args = append(args, agent.SelfDebugArgs(cfg)...)
 	return append(args, agent.RunDeadlineArgs(ctx)...), nil
 }
 
