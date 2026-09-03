@@ -604,7 +604,10 @@ func run(ctx context.Context, cfg config) error {
 	// merged pull request changed since the last start, and loadConfig
 	// immediately below is the first thing that would read a stale
 	// answer. See staterepo.go for the direction of travel and why the
-	// import only happens here rather than on every tick.
+	// *whole* import only happens here rather than on every tick -- the
+	// timer below pulls too, and imports the settings tables of whatever
+	// it finds, but nothing else replaces task and run rows once there
+	// are runs live to hold them.
 	stateRepo, err := openStateRepo(ctx, cfg.dataDir)
 	if err != nil {
 		return fmt.Errorf("opening the state repository: %w", err)

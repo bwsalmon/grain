@@ -140,7 +140,12 @@ pkg/staterepo/  grain's database as a git repository: every table
                 diff an agent can propose. Import is the other direction
                 and is a wholesale replacement -- that is how a merged
                 pull request, including one that deletes a row, becomes
-                the running configuration. The remote is optional by
+                the running configuration. Load imports the whole of it
+                at startup; Apply imports the settings tables of it into
+                a daemon that is already running, so a merged change
+                takes effect on the next tick rather than on the next
+                restart, without replacing the task and run rows a live
+                run holds ids from. The remote is optional by
                 construction: no Remote is `git init` under the data
                 directory, which is what a local install with no GitHub
                 account gets
@@ -2430,22 +2435,37 @@ every cycle forever, burying the changes that matter.
 
 ### One writer, so no merges
 
-The traffic is one-directional at runtime, and that is what keeps it
-simple. The repository is imported into the database once, at startup,
-and exported back out on a timer after that. grain is the only writer of
-these files while it runs -- the UI and the CLI reach the daemon over
-REST rather than opening the store, which is what makes that claim true
--- so a sync is a commit and a push and never a resolve, and a pull is
-fast-forward only. Divergence means something this model does not
-describe, and failing loudly beats resolving a conflict in a database
-dump by guesswork.
+grain is the only writer of these files while it runs -- the UI and the
+CLI reach the daemon over REST rather than opening the store, which is
+what makes that claim true -- so a sync is a commit and a push and never
+a resolve, and a pull is fast-forward only. Divergence means something
+this model does not describe, and failing loudly beats resolving a
+conflict in a database dump by guesswork.
 
 A change an agent makes arrives the other way: a pull request against
-the state repository, reviewed and merged like any other, which the next
-start pulls and imports. The import is a wholesale replacement of every
-row -- which is exactly what makes a merged deletion delete something --
-and that is why it happens at startup rather than on every tick: it is
-not an operation to run underneath live runs holding ids.
+the state repository, reviewed and merged like any other, which the
+daemon pulls on the same thirty-second timer it exports on. What it does
+with what arrives is asymmetric, and deliberately so. The whole-database
+import is a wholesale replacement of every row -- which is exactly what
+makes a merged deletion delete something -- and it happens only at
+startup, because clearing `task` and `task_run` underneath live runs
+holding those very ids is not something to do to a daemon that is
+working. On a tick, only the settings tables are imported
+(`staterepo.SettingsTables`: the deployment's config row, repo
+configuration, templates, suites, schedules, qualification plans), and
+they are imported the same wholesale way, so a merged deletion of a
+template still deletes it. Those are the tables an agent proposes
+changes to and the tables grain does not write for itself, which is what
+makes them safe to replace live. A merged change to a task or a run is
+not applied, and the next export writes the database's own version of it
+back out: the database is authoritative for what grain itself did.
+
+If a pull arrives that cannot be applied -- a dump stamped with a schema
+this build does not know, or rows that will not insert -- the daemon
+stops exporting until it can. Writing the database over those files
+would commit a revert of somebody's merged pull request and push it,
+which is a worse answer than sitting still with the failure named in the
+bootstrap pane.
 
 Schema changes are destructive here, deliberately. A dump this build
 cannot read is no more importable than a database it cannot open, so
