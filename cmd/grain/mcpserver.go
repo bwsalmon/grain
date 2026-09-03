@@ -1,7 +1,9 @@
 // mcpserver.go implements `grain mcpserver`, formerly its own
 // cmd/mcpserver binary before bwsalmon/agents#313 combined every mode
-// into one: it serves the sandbox tools and the mocked GitHub-shaped
-// escape hatches over its own stdin/stdout, so anything that can spawn a
+// into one: it serves the sandbox tools and the escape hatches
+// (ask_question, comment_on_issue, propose_task, add_review_comment --
+// recorded here, relayed by orchestrator.ProcessResult once the run
+// finishes) over its own stdin/stdout, so anything that can spawn a
 // subprocess and speak MCP -- not just an in-process
 // client -- can drive it. Real MCP clients (an actual `claude` or
 // `gemini` CLI's --mcp-config, for instance) can point at this same
@@ -216,13 +218,17 @@ func mcpserver(args []string) {
 	registry := mcp.NewRegistry()
 	registry.AnnounceDeadline(parsedRunDeadline(*runDeadline), nil)
 	registry.Register(tools...)
-	// No controller reads a mocked GitHub-shaped tool call back out of this
-	// process today -- there is nothing downstream of it yet (see README.md).
-	// The sink exists so calls fail loudly (a real Result, not a silent
-	// no-op) rather than because there's anywhere for it to report to.
+	// The sink is a throwaway because nothing reads an escape-hatch call
+	// back out of *this* process: orchestrator.ProcessResult recovers
+	// ask_question, comment_on_issue and propose_task from
+	// agent.Result.ToolCalls once the run finishes, and relays each one
+	// for real. The sink is here so a call answers with a real Result
+	// rather than being a silent no-op, and the tools' own text describes
+	// the relay rather than this sink -- see mcp.NewMockTools.
 	registry.Register(mcp.NewMockTools(&mcp.MockSink{})...)
-	// Unlike those, this one is not mocked: it really does read GitHub,
-	// from this process, on the controller. See the file's doc comment.
+	// Unlike those, this one acts within the run rather than after it: it
+	// really does read GitHub, from this process, on the controller. See
+	// the file's doc comment.
 	registry.Register(pullRequestTools(*dataDir, *githubHost, *githubInsecureHTTP, *prRepo, *prBranch)...)
 
 	// open_pull_request and recreate_sandbox are the two tools here whose

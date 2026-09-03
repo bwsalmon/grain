@@ -556,3 +556,99 @@ func TestMintOperatingKeyPropagatesAFailure(t *testing.T) {
 		t.Fatal("expected the underlying create error to propagate")
 	}
 }
+
+// --- Reap ----------------------------------------------------------------
+
+// Reap is the same sweep deleteExpired performs, reached with no task and
+// no CapabilityContext in hand -- the shape cmd/grain's hourly
+// reapCapabilities can call, and the reason a key minted for a run whose
+// controller died before the lease was written is deleted at all.
+func TestReapDeletesOnlyKeysOlderThanTheMaxLease(t *testing.T) {
+	fm := newFakeMinter()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	fm.keys = map[string]mintedKey{
+		"leaked":    {Name: "leaked", DisplayName: "grain-run-1", CreateTime: now.Add(-maxLease - time.Hour)},
+		"live":      {Name: "live", DisplayName: "grain-run-2", CreateTime: now.Add(-time.Hour)},
+		"operating": {Name: "operating", DisplayName: OperatingKeyDisplayName, CreateTime: now.Add(-90 * 24 * time.Hour)},
+		"theirs":    {Name: "theirs", DisplayName: "someone-elses-key", CreateTime: now.Add(-90 * 24 * time.Hour)},
+	}
+	c := testCapability(fm)
+
+	deleted, err := c.Reap(context.Background(), fakeResolver{"test-gcp-credential": "the-minter-key-material"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 1 || deleted[0] != "leaked" {
+		t.Fatalf("deleted = %v, want exactly [leaked]", deleted)
+	}
+	for _, name := range []string{"live", "operating", "theirs"} {
+		if _, stillThere := fm.keys[name]; !stillThere {
+			t.Errorf("%s should have been left alone", name)
+		}
+	}
+}
+
+// A half-wired deployment has no project to list and nothing minted to
+// reap -- the same configuration Resolve refuses a task for. Reaping it
+// must be a no-op rather than an hourly error in the daemon log, and
+// must not reach the API Keys API at all.
+func TestReapDoesNothingWhenUnconfigured(t *testing.T) {
+	fm := newFakeMinter()
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	fm.listErr = errors.New("ListKeys should never have been called")
+	factory := func(ctx context.Context, credentialJSON, projectID string) (minter, error) {
+		return fm, nil
+	}
+	creds := fakeResolver{"test-gcp-credential": "the-minter-key-material"}
+
+	for _, tc := range []struct {
+		name string
+		c    *Capability
+	}{
+		{"no project", &Capability{Credential: model.CredentialRef{Name: "test-gcp-credential"}, factory: factory}},
+		{"no credential", &Capability{ProjectID: "test-project", factory: factory}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deleted, err := tc.c.Reap(context.Background(), creds, now)
+			if err != nil || deleted != nil {
+				t.Fatalf("Reap = %v, %v, want nil, nil", deleted, err)
+			}
+		})
+	}
+}
+
+// A resolver that cannot produce the minter credential is an error the
+// sweep's caller logs, not a silent "nothing to reap": the keys are
+// still there, and reporting none deleted would say they were checked.
+func TestReapReportsAnUnresolvableCredential(t *testing.T) {
+	c := testCapability(newFakeMinter())
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+
+	if _, err := c.Reap(context.Background(), fakeResolver{}, now); err == nil {
+		t.Fatal("expected an error when the minter credential cannot be resolved")
+	}
+	// And a caller with no resolver at all is the same kind of failure,
+	// rather than a nil-map panic inside the sweep.
+	if _, err := c.Reap(context.Background(), nil, now); err == nil {
+		t.Fatal("expected an error when there is no credential resolver")
+	}
+}
+
+func TestReapReportsAFailedListing(t *testing.T) {
+	fm := newFakeMinter()
+	fm.listErr = errors.New("network error")
+	c := testCapability(fm)
+
+	_, err := c.Reap(context.Background(), fakeResolver{"test-gcp-credential": "the-minter-key-material"}, time.Now())
+	if err == nil {
+		t.Fatal("expected the underlying listing error to propagate")
+	}
+}
+
+// The interface is the whole point of this method existing: cmd/grain's
+// reapCapabilities finds a provider to sweep by type-asserting it, so a
+// signature that drifts from model.Reaper's would leave gemini-key
+// silently unswept again rather than failing to compile.
+func TestCapabilitySatisfiesReaper(t *testing.T) {
+	var _ model.Reaper = (*Capability)(nil)
+}

@@ -85,6 +85,9 @@ func (g *loadGitHub) CreatePullRequest(owner, repo, head, base, title, body stri
 func (g *loadGitHub) UpdatePullRequestBody(owner, repo string, number int, body string) error {
 	return g.unsupported("UpdatePullRequestBody")
 }
+func (g *loadGitHub) ClosePullRequest(owner, repo string, number int) error {
+	return g.unsupported("ClosePullRequest")
+}
 func (g *loadGitHub) FindOpenPullRequestForBranch(owner, repo, branch string) (*github.PullRequest, error) {
 	return nil, g.unsupported("FindOpenPullRequestForBranch")
 }

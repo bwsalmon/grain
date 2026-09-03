@@ -85,12 +85,14 @@ pkg/agent/antigravity/  Framework via the Antigravity CLI -- Google's
                 against its own pkg/mcp/ registry; agy owns that loop now.
                 Two things agy lacks shape this package: there is no
                 --mcp-config, so each run gets a private HOME holding just
-                the settings file naming its own "mcpserver" server (a
+                the mcp_config.json naming its own "mcpserver" server (a
                 per-user `agy mcp add` registration cannot express a
                 per-run sandbox binding); and there is no --max-turns, so
                 RunConfig.MaxTurns is enforced here, by counting completed
                 agent_response steps on the live stream and cancelling the
-                subprocess
+                subprocess. agy's own three-minute cap on a single MCP
+                tool call is raised past wait_for_checks' longest wait in
+                that same file, since it has no MCP_TOOL_TIMEOUT to raise
 pkg/agent/claude/  Framework via the real `claude` CLI, run as a
                 subprocess on the controller (bwsalmon/agents#255) --
                 this points --mcp-config at this same grain binary's own
@@ -110,7 +112,9 @@ pkg/agent/codex/  Framework via OpenAI's `codex` CLI, run as a subprocess
                 (sandbox_mode read-only, approvals never, code mode off)
 pkg/capability/geminikey/  a MINT model.CapabilityProvider: mints, places
                 and revokes a Gemini API key, direct against the API Keys
-                API
+                API, plus Reap, the hourly project-wide sweep that deletes
+                grain-prefixed keys older than 24h whether or not a Lease
+                survived to name them
 pkg/capability/gcpkey/  the gcp-key capability: a real MINT
                 model.CapabilityProvider that mints/revokes a per-task GCP
                 service-account key against the IAM API directly
@@ -932,14 +936,24 @@ gap this paragraph used to describe.
 
 The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
 `propose_task`, `add_review_comment`) a run's own MCP server wires
-internally are still discarded rather than posted anywhere real while a
-run is live — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
+internally are still discarded rather than acted on *while a run is
+live* — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
 after a run finishes, and relays `ask_question`/`comment_on_issue`/
 `propose_task` for real at that point (see the package tree entry
 above); giving `Framework.Run` (or its caller) a way to inject a live
 sink instead is still open, and `add_review_comment` calls are still
 just recorded and nothing more, since nothing yet dispatches with review
-intent for one to attach to. Neither sandbox stand-in carries any real
+intent for one to attach to. What the *agent* is told about all four is
+that relay rather than that sink: the tools' descriptions and
+confirmations used to answer every production run with "mocked — no
+GitHub comment was posted", and describe v1's issue, trigger label and
+issue-per-proposal, none of which has been true since tasks became rows
+(docs/agent-ergonomics.md, findings 1 and 2). They now say where the
+words really land — the task's own conversation, when the run
+finishes — and `add_review_comment` says the one true thing about
+itself, that nothing relays it anywhere and `comment_on_issue` is the
+call to make for feedback a human needs to read.
+`pkg/mcp/mock_tools_test.go` is what holds them to it. Neither sandbox stand-in carries any real
 isolation: a real deployment still needs the actual host adapter
 (creating a real VM/container per task and running commands in it over
 something better than "this process's own filesystem," or an SSH hop to
@@ -1203,9 +1217,9 @@ Generative Language API, places it at `/home/debian/.gemini-api-key`,
 and revokes it, calling the API Keys API directly through its Go client
 library rather than shelling out to `gcloud` the way the Python version
 has to — one of the two things `google.golang.org/api` was expected to
-correct, per "Two things the port corrected" above. `DeleteExpired` is
-the "clean up after 24 hours if leaked" safety net, mirroring
-`delete_expired_keys`.
+correct, per "Two things the port corrected" above. `Reap` (and
+`DeleteExpired` beneath it) is the "clean up after 24 hours if leaked"
+safety net, mirroring `delete_expired_keys`.
 
 `gcpkey.Provider` (`pkg/capability/gcpkey/`) is now a real `MINT` provider too —
 `gcp-key`, ported from `grain/automation/gcp_keys.py` but talking to the
@@ -1217,11 +1231,26 @@ resource can outlive the `Lease` that recorded it, matching
 `docs/data-model.md`'s description of `gcp_keys.py`'s own
 `delete_expired_keys` as a backstop independent of any task record —
 `gcpkey.Provider.Reap` implements it by asking GCP's own key listing for
-the answer, not grain's store. `geminikey.DeleteExpired` plays the same
-backstop role for Gemini keys but stays a free function rather than a
-`model.Reaper` implementation, since an API key carries no service
-account of its own for a `ListKeys` call to scope to the way
-`gcpkey.Provider.Reap`'s does.
+the answer, not grain's store. `geminikey.Capability.Reap` plays the same
+backstop role for Gemini keys, and is a `model.Reaper` too as of
+grain/task-140 — it was a free function (`DeleteExpired`, still there for
+a caller-chosen cutoff) that no binary called until then, which meant a
+Gemini key minted for a run whose controller died between the mint and
+the store write was never deleted by anything: `revokeAll` covers only
+the leases grain still has a record of, and a lost record is precisely
+what the backstop exists for.
+
+Its one asymmetry with `gcpkey.Provider.Reap` is worth an operator
+knowing: an API key carries no service account of its own for a
+`ListKeys` call to scope to, so the sweep is **project-wide** and the
+`grain-` display-name prefix is all that separates grain's keys from
+anyone else's. Two grain deployments minting into one GCP project reap
+each other's *leaked* keys — never each other's live ones (nothing under
+24 hours old is touched) and never either daemon's own operating key
+(`geminikey.OperatingKeyDisplayName`, exempted by exact name). Give each
+deployment its own GCP project if that matters, the same way deployments
+that must not reap each other's VMs get separate `-kontur-state-dir`
+values.
 
 Both providers can now point at the same standing credential —
 `geminikey.Capability.Credential` and `gcpkey.Provider.Config.
@@ -1234,10 +1263,13 @@ now driving `pkg/orchestrator.RunDispatch` rather than the original
 `pkg/orchestrate` package it shipped against, per bwsalmon/agents#263):
 it constructs a real `CapabilityContext` per dispatch, applies every
 `SideSandbox` `Placement` under the dispatch's sandbox root, and calls
-`Revoke` once the run finishes. `Reap` is still uncalled from any binary
-here — a standalone sweep independent of any one dispatch, matching
-`gcp_keys.py`'s own `delete_expired_keys` cron job rather than something
-a reconcile cycle runs itself, and is still open.
+`Revoke` once the run finishes. `Reap` is called too, now: `cmd/grain`'s
+`reapCapabilities` sweeps every registered provider implementing
+`model.Reaper` once an hour from the same reconcile loop, which is what
+makes "clean up after 24 hours if leaked" hold within roughly that bound
+rather than "eventually" — a standalone sweep independent of any one
+dispatch, matching `gcp_keys.py`'s own `delete_expired_keys` cron job,
+just on grain's own timer rather than cron's.
 
 `CapabilityContext.Credentials` (`model.CredentialResolver`) had no
 production implementation until `pkg/secrets/`: a `Store` reading a
@@ -1298,11 +1330,13 @@ every call `pkg/orchestrator` makes (issue listing/labelling, branch and
 pull-request state, check runs, comments) — but not the agent's own
 `ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
 calls: a run's own MCP server still wires those to a `mcp.MockSink` it
-builds and discards internally on every call, so they still just record
-what they were asked to do rather than posting it anywhere real.
-`ProcessResult` only sees them after the fact, through the `agent.Result`
-`Run` returns, not while the run is live. Giving `Framework.Run` (or its
-caller) a way to inject a real sink is still open.
+builds and discards internally on every call, so nothing happens at the
+moment the agent makes one. `ProcessResult` only sees them after the
+fact, through the `agent.Result` `Run` returns, not while the run is
+live — and then relays a question, a closing comment and a proposal into
+the store for real (`add_review_comment` alone goes nowhere). Giving
+`Framework.Run` (or its caller) a way to inject a real sink, so the
+effect could happen while the run is still going, is still open.
 
 `tests/e2e/` is that whole chain driven by hand, in a test, rather than
 by `dispatch.Cycle` itself: it calls `dispatch.Cycle` to decide what runs,
@@ -1400,22 +1434,35 @@ it streams back -- the shape `pkg/agent/codex` follows too. Every
 framework a deployment can pick between is a subprocess driver now, and
 `agent.Framework` is the seam that makes them interchangeable.
 
-Three things about agy shaped the port, none of them cosmetic.
+Four things about agy shaped the port, none of them cosmetic.
 
 **It has no `--mcp-config`.** agy registers MCP servers per *user* --
-`agy mcp add` writes them into `~/.gemini`, and caches each server's tool
-manifests under `~/.gemini/antigravity-cli/mcp/<server>/`. A per-user
+`agy mcp add` writes them into `~/.gemini/config/mcp_config.json`, and
+caches each server's tool manifests under
+`~/.gemini/antigravity-cli/mcp/<server>/`. A per-user
 registration cannot express what grain needs, which is a per-*run*
 binding: two runs dispatched concurrently against two different sandboxes
 would share one registration, and whichever wrote it last would decide
 where both runs' tools landed. So `Framework.Run` gives each run its own
 private `HOME` -- a temp directory holding nothing but the config file
-naming that run's own `mcpserver` server, at the
-`.gemini/config/mcp_config.json` agy actually reads it from -- and
-deletes it as the run returns. That has the same effect `claude`'s
-`--strict-mcp-config` has there: the only MCP server a run can see is its
-own, because there is no other config file in the `HOME` it was given to
-find one in.
+naming that run's own `mcpserver` server, and the settings file
+authentication needs (below) -- and deletes it as the run returns. That has the same effect `claude`'s `--strict-mcp-config` has
+there: the only MCP server a run can see is its own, because there is no
+other config file in the `HOME` it was given to find one in.
+
+**It caps a single MCP tool call, and has no `MCP_TOOL_TIMEOUT`.** agy
+abandons a tool call after three minutes when nothing says otherwise;
+the knob is a `timeoutSeconds` key on the server's own entry in that
+same config file, where a positive value is seconds and a negative one
+means no cap at all. Three minutes is far short of `wait_for_checks`,
+which blocks for as long as CI takes, up to
+`mcp.MaxWaitForChecksTimeout` (an hour) -- so a run that deliberately
+asked to wait out a slow build would have the call killed under it and
+be told the tool failed, which is neither true nor useful. `Run` writes
+the key out past that maximum for the reason `agent/claude` raises
+`MCP_TOOL_TIMEOUT`: the deadline that ends the wait should be grain's,
+whose expiry produces a report, not the CLI's, whose expiry produces a
+tool failure.
 
 **It has no `--max-turns`.** `RunConfig.MaxTurns` is therefore enforced
 here rather than by the binary, and enforced on the live stream rather

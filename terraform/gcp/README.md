@@ -772,6 +772,18 @@ other too.
   so `dockerd` waits for the volume rather than racing it and quietly
   filling the boot disk under a mount point.
 
+  The UI's own host status (Debugging → Sandbox health) reports this
+  volume as well as the data disk, one row per filesystem: the daemon
+  reads `-data-dir`, `-sandbox-dir` and docker's data root and folds
+  together whichever turn out to be the same disk, which here means the
+  sandbox row covers both of the things listed above. It showed only the
+  data disk's figure until then, so the 20 GB volume read as healthy
+  however full the 100 GB one beside it got. Docker's data root
+  (`/mnt/grain-sandbox/docker`) is not itself mounted into the daemon's
+  container, so the daemon logs one line about it at startup and reports
+  the volume through `$GRAIN_SANDBOX_DIR`'s bind mount instead -- the
+  same filesystem, and the same number.
+
   On an existing deployment the volume arrives at the host's next boot,
   since the startup script is what mounts it (or run it by hand:
   `sudo google_metadata_script_runner startup`). That boot moves docker's

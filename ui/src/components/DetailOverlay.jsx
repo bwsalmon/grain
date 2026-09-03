@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, completionPhase, frameworkLabel, orphanedPullRequest } from "../state.js";
+import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, frameworkLabel, orphanedPullRequest } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -211,7 +211,28 @@ function Declared({ t }) {
   );
 }
 
+// closePullRequest is deliberately local state that dies with the
+// overlay, and starts false every time it is mounted: it is a choice
+// about this close, made in the moment (ui.CloseOptions' own doc
+// comment), and the one thing it must never become is a preference that
+// outlives the task it was ticked on. Closing the panel and reopening it
+// unticks it, which is exactly right.
 function Actions({ t, config, act }) {
+  const closable = closablePullRequest(t);
+  const [closePullRequest, setClosePullRequest] = useState(false);
+  // The flag is sent on every close, true or false, so that what was
+  // asked for is on the wire either way -- and false whenever there is
+  // no open pull request to act on, whatever the box was left at before
+  // one merged underneath it.
+  const close = () =>
+    act(
+      () =>
+        api(`/api/tasks/${t.id}/close`, {
+          method: "POST",
+          body: JSON.stringify({ close_pull_request: Boolean(closable) && closePullRequest }),
+        }),
+      t.id
+    );
   return (
     <Stack className="actions" spacing={1}>
       {t.state === "proposed" && (
@@ -254,6 +275,23 @@ function Actions({ t, config, act }) {
           Retry
         </Button>
       )}
+      {/* The choice grain makes nowhere else: closing this task's pull
+          request along with it. Offered only where there is an open one
+          to close (state.js's closablePullRequest), unticked every time,
+          and read at the moment Close is clicked -- never stored, never
+          a default. Closing a pull request on GitHub keeps the branch
+          and every commit on it, and reopening the pull request brings
+          it back whole, which is what makes it an offer worth making at
+          all rather than a way to lose an agent's work. */}
+      {t.state !== "closed" && closable && (
+        <FormControlLabel
+          control={<Checkbox size="small" checked={closePullRequest} onChange={(e) => setClosePullRequest(e.target.checked)} />}
+          label={`Close ${closable} too`}
+          title={`Closes ${closable} on GitHub without merging it. The branch and its commits are left untouched, and reopening the pull request restores it.`}
+          sx={{ display: "flex", m: 0 }}
+          slotProps={{ typography: { fontSize: "0.8rem" } }}
+        />
+      )}
       {t.state === "closed" ? (
         <Button variant="outlined" onClick={() => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id)}>
           Reopen
@@ -267,19 +305,30 @@ function Actions({ t, config, act }) {
           variant="outlined"
           color="error"
           onClick={() => {
-            if (!confirm("Cancel this job? Its run will be abandoned: no pull request will be opened for it.")) return;
-            act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id);
+            if (!confirm(cancelPrompt(closable && closePullRequest ? closable : null))) return;
+            close();
           }}
         >
           Cancel
         </Button>
       ) : (
-        <Button variant="outlined" color="error" onClick={() => act(() => api(`/api/tasks/${t.id}/close`, { method: "POST" }), t.id)}>
+        <Button variant="outlined" color="error" onClick={close}>
           Close
         </Button>
       )}
     </Stack>
   );
+}
+
+// cancelPrompt is the running task's confirmation, which has to name the
+// pull request when the box beside it is ticked: cancelling a run is
+// already destructive enough to confirm, and this is the one path where
+// confirming it also shuts a pull request. A cancel that leaves the pull
+// request alone reads exactly as it always did.
+function cancelPrompt(ref) {
+  const base = "Cancel this job? Its run will be abandoned: no pull request will be opened for it.";
+  if (!ref) return base;
+  return `Cancel this job, and close ${ref} on GitHub? Its run will be abandoned. The branch and its commits are kept, and reopening ${ref} restores it.`;
 }
 
 // OUTCOME_LABELS and OUTCOME_BADGES cover model.Run's own outcome

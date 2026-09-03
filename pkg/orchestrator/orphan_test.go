@@ -63,6 +63,14 @@ func TestAPullRequestOrphanedByACloseMidRunIsAnnouncedOnBothSides(t *testing.T) 
 	if len(posted) != 1 || !strings.Contains(posted[0].Body, "grain has stopped watching "+ref) {
 		t.Fatalf("comments on the pull request = %+v, want grain's own note", posted)
 	}
+	// Told, and nothing more. The one path that closes a pull request
+	// needs a human to have asked for it as they closed the task
+	// (ui.CloseOptions.ClosePullRequest); this path only ever finds a
+	// close that already happened, and must not act on somebody's
+	// earlier choice as though it had been made here.
+	if got := prByHead(t, sim, model.BranchName(task.ID)); got.State != "open" || got.Merged {
+		t.Fatalf("pull request = %+v, want it left open and unmerged", got)
+	}
 }
 
 // closingClient is a github.Client that closes a task from underneath the

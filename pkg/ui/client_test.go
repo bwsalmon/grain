@@ -650,7 +650,7 @@ func TestCreateTaskCarriesDependsOnAndBlockedSignal(t *testing.T) {
 		}
 	}
 
-	if err := c.Close(ctx, blocker.ID); err != nil {
+	if err := c.Close(ctx, blocker.ID, ui.CloseOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := c.Task(ctx, task.ID)
@@ -1807,7 +1807,7 @@ func TestCloseAndReopen(t *testing.T) {
 	c, _, ctx := testClient(t)
 	task := create(t, c, ctx)
 
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := c.Task(ctx, task.ID); got.State != model.StateClosed {

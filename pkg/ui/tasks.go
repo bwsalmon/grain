@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -798,9 +799,29 @@ func (s *Server) handleGetAttachment(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(a.Content)
 }
 
+// closeRequest is the body of POST /api/tasks/{id}/close: the choice
+// made at the moment of closing, and nothing else. See CloseOptions,
+// whose one field this is.
+type closeRequest struct {
+	ClosePullRequest bool `json:"close_pull_request"`
+}
+
+// handleClose closes a task, and closes its pull request too if -- and
+// only if -- the request said to.
+//
+// The flag is read out of the request body rather than a query
+// parameter, and defaults to false on a body that does not mention it,
+// which is what keeps every caller that predates it (the CLI without its
+// flag, `curl -X POST`, the batch Close button) closing tasks and
+// nothing else. An empty body is one of those: this is a POST that has
+// never needed one.
 func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.tasks.Close(r.Context(), id); err != nil {
+	var req closeRequest
+	if !readOptionalJSON(w, r, &req) {
+		return
+	}
+	if err := s.tasks.Close(r.Context(), id, CloseOptions{ClosePullRequest: req.ClosePullRequest}); err != nil {
 		writeClientError(w, err)
 		return
 	}
@@ -914,6 +935,26 @@ func writeClientError(w http.ResponseWriter, err error) {
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	defer r.Body.Close()
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return false
+	}
+	return true
+}
+
+// readOptionalJSON is readJSON for a route whose body is optional: no
+// body at all leaves v at its zero value and succeeds, while a body that
+// is there and malformed is still the caller's mistake and still a 400.
+//
+// It exists for POSTs that acquired a field after callers already
+// existed without one -- see handleClose. io.EOF is precisely "there was
+// nothing to decode", and is the only error swallowed here.
+func readOptionalJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	defer r.Body.Close()
+	err := json.NewDecoder(r.Body).Decode(v)
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return false
 	}

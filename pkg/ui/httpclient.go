@@ -171,8 +171,15 @@ func (c *HTTPClient) AddComment(ctx context.Context, id, body string, attachment
 		addCommentRequest{Body: body, Attachments: attachments}, nil)
 }
 
-func (c *HTTPClient) Close(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/close", nil, nil)
+// Close is Client.Close over the wire, opts and all: the flag travels as
+// the request body's own close_pull_request, which the server reads back
+// into the same CloseOptions. Sent on every call rather than only when
+// it is true, so that what a caller asked for is on the wire either way
+// -- there is no shorter spelling of "and leave the pull request alone"
+// than saying so.
+func (c *HTTPClient) Close(ctx context.Context, id string, opts CloseOptions) error {
+	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/close",
+		closeRequest{ClosePullRequest: opts.ClosePullRequest}, nil)
 }
 
 func (c *HTTPClient) Reopen(ctx context.Context, id string) error {

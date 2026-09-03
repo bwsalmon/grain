@@ -136,6 +136,12 @@ func daemon(args []string) {
 		"flag from -data-dir rather than a subdirectory of it (bwsalmon/agents#587): a task's checked-out repo and whatever it wrote into its "+
 		"sandbox are disposable, unlike the store and secrets under -data-dir, so this belongs on storage that a VM wipe or redeploy is free to "+
 		"discard along with the rest of the host")
+	dockerRootDir := fs.String("docker-root-dir", "", "path to the local docker engine's own data root, for the UI's host disk figures only "+
+		"(grain/task-148): the sandbox image and every kontur VM's disk overlay are written there rather than under -sandbox-dir, so on a "+
+		"deployment that gives sandboxes a volume of their own it is a disk worth a figure. Empty asks `docker info` for it once at startup, "+
+		"which is right whenever the daemon can reach the docker socket and sees that path where dockerd does; name it here when it cannot, "+
+		"or when this process sees the same directory at a path of its own. A path this process cannot stat is logged once and left out, not "+
+		"reported as a broken figure -- a containerised daemon is usually shown docker's socket and not the tree behind it")
 	maxWorkers := fs.Int("max-workers", 1, "maximum number of ordinary tasks dispatched at once -- the worker half of the concurrency "+
 		"dispatch.Cycle fills (model.Limits)"+seedOnly)
 	maxMergers := fs.Int("max-mergers", model.DefaultMaxMergers, "capacity on top of -max-workers that only the merge queue's own "+
@@ -418,7 +424,8 @@ func daemon(args []string) {
 	defer stop()
 
 	if err := run(ctx, config{
-		dataDir: *dataDir, sandboxDir: *sandboxDir, maxWorkers: *maxWorkers, maxMergers: *maxMergers,
+		dataDir: *dataDir, sandboxDir: *sandboxDir, dockerRootDir: *dockerRootDir,
+		maxWorkers: *maxWorkers, maxMergers: *maxMergers,
 		pollInterval: *pollInterval,
 		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		targetRepos:      targetReposList,
@@ -460,6 +467,12 @@ type config struct {
 	// as every other non-kontur-only field would be if HostSandboxes had
 	// more than this one.
 	sandboxDir string
+	// dockerRootDir is where the local docker engine keeps its data, if
+	// this deployment would rather say than have hostDisks ask `docker
+	// info` -- see -docker-root-dir's own flag doc comment. Nothing but
+	// the UI's host disk figures reads it: grain never writes there
+	// itself, dockerd does, on grain's behalf.
+	dockerRootDir string
 
 	// uiAddr, uiOpen, actor and defaultTargetRepo configure the in-process
 	// pkg/ui.Server this daemon serves alongside RunCycle (bwsalmon/agents#363);
@@ -1439,6 +1452,23 @@ func (o *pullRequestOpener) Comment(ctx context.Context, ref, body string) error
 	return err
 }
 
+// Close is ui.Config.PullRequestCloser over the same client, and the one
+// place in this daemon where a pull request is closed rather than merged
+// -- reached only when whoever closed the task asked for it in the same
+// request (ui.CloseOptions.ClosePullRequest). It parses ref back the way
+// Comment above does, for the same reason.
+//
+// It closes the pull request and touches nothing else: the branch and
+// every commit on it stay where they are, and reopening the pull request
+// on GitHub restores it whole.
+func (o *pullRequestOpener) Close(ctx context.Context, ref string) error {
+	pr, err := model.ParsePullRequestRef(ref)
+	if err != nil {
+		return err
+	}
+	return o.client.ClosePullRequest(pr.Repo.Owner, pr.Repo.Name, pr.Number)
+}
+
 // pullRequestGate is the ui.Config.PullRequests the UI/API server is
 // given: whatever livePullRequests holds by the time a request actually
 // arrives, or a plain refusal until runDaemon has put one there.
@@ -1468,13 +1498,29 @@ func (pullRequestGate) Comment(ctx context.Context, ref, body string) error {
 	return opener.Comment(ctx, ref, body)
 }
 
+// Close is the same gate for ui.Config.PullRequestCloser. Refusing is the
+// right answer rather than a shame here: a daemon with no GitHub client
+// cannot close a pull request, and the alternative to saying so is a
+// close that silently left one open. The refusal ends up quoted in the
+// note on the task, where whoever ticked the box will read it.
+func (pullRequestGate) Close(ctx context.Context, ref string) error {
+	opener := livePullRequests.Load()
+	if opener == nil {
+		return errors.New(
+			"this daemon has no GitHub client yet: " +
+				"its reconcile loop has not started (or has failed -- check the daemon log)")
+	}
+	return opener.Close(ctx, ref)
+}
+
 // reapInterval is how often reconcile calls reapCapabilities -- not
 // configurable, since nothing about it needs to race a deployment's own
 // -poll-interval: it only has to run comfortably more often than the
-// shortest ReapAfter/DeleteExpired cutoff any registered
-// model.Reaper carries (24 hours, for both gcpkey.Reap and
-// githubsandbox.Provider.Reap) for "clean up after N hours if leaked" to
-// actually hold within roughly that bound, not "eventually".
+// shortest ReapAfter/maxLease cutoff any registered
+// model.Reaper carries (24 hours, for all three of gcpkey.Reap,
+// githubsandbox.Provider.Reap and geminikey.Capability.Reap) for "clean
+// up after N hours if leaked" to actually hold within roughly that
+// bound, not "eventually".
 const reapInterval = time.Hour
 
 // reapCapabilities calls Reap on every registered capability provider
@@ -1486,10 +1532,20 @@ const reapInterval = time.Hour
 // exists on gcpkey.Provider and githubsandbox.Provider today, but until
 // something calls it periodically it is dead code, reachable only from a
 // test -- this closes that gap for both, not just the capability
-// bwsalmon/agents#354 asked for it on. geminikey's own DeleteExpired
-// plays the same role but is a package-level function, not a
-// model.Reaper, so it is not reached here; wiring it in is a separate,
-// smaller follow-up (bwsalmon/agents#354's PR notes this explicitly).
+// bwsalmon/agents#354 asked for it on.
+//
+// geminikey.Capability is the third, and joined the sweep later
+// (grain/task-140): its backstop was a package-level DeleteExpired no
+// binary called, so a Gemini key minted for a run whose controller died
+// between the mint and the store write was never deleted by anything --
+// revokeAll covers only the leases grain still has a record of, which is
+// exactly what that case has lost. Its Reap is project-wide rather than
+// scoped to one resource's owner the way the other two are, because an
+// API key hangs off no service account for a listing to scope to: two
+// deployments minting into one GCP project reap each other's leaked keys
+// (never each other's live ones, and never the daemon's own operating
+// key). See geminikey.Capability.Reap for why that is the accepted
+// trade and what avoids it.
 func reapCapabilities(ctx context.Context, registry *model.CapabilityRegistry, creds model.CredentialResolver, now time.Time) {
 	if registry == nil {
 		return
@@ -2249,6 +2305,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 	if err != nil {
 		return nil, fmt.Errorf("loading GitHub credential ladder for the UI: %w", err)
 	}
+	disks := hostDisks(cfg)
 	uiCfg := ui.Config{
 		Actor: ui.DefaultActor(actorID(cfg.actor)),
 		// The fixed set grain ships providers for, plus one row per named
@@ -2304,10 +2361,13 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		Sandboxes: sandboxHealthAdapter{sandboxes},
 		// hostStats reads this same process's own machine, not any one
 		// sandbox -- see pkg/sysstat's own doc comment on why that's a
-		// separate reading from Sandboxes above. It takes the data
-		// directory because the disk figure has to name a filesystem
-		// (hostStats' own doc comment on why that one).
-		HostStats: func() (ui.HostPressure, error) { return hostStats(cfg.dataDir) },
+		// separate reading from Sandboxes above. It takes a list of
+		// paths because a disk figure has to name a filesystem, and this
+		// deployment has more than one worth naming (hostDisks' own doc
+		// comment on which). Resolved once, out here, rather than per
+		// poll: which filesystems they are is fixed for the life of the
+		// process, and finding docker's own asks its engine.
+		HostStats: func() (ui.HostPressure, error) { return hostStats(disks) },
 		// hostTop is the per-process half of that same reading -- which
 		// processes are spending the machine HostStats above says is
 		// busy (pkg/hosttop's own doc comment). Same machine, and in a
@@ -2342,6 +2402,15 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// request, this one turns it into a line in the note left on the
 		// task saying the pull request itself was not told.
 		PullRequestComments: pullRequestGate{},
+		// PullRequestCloser is the other half of that same close, and the
+		// only route in a grain deployment by which a pull request is
+		// ever closed rather than merged: a human who ticked the box
+		// beside Close asking for this task's pull request to be closed
+		// with it (ui.CloseOptions.ClosePullRequest). Behind the same
+		// gate as the two above. A deployment that wanted its UI able to
+		// say things on GitHub but never to shut anything would leave
+		// exactly this field nil, which is why it is a field of its own.
+		PullRequestCloser: pullRequestGate{},
 		// SandboxRecreate is how a dispatched run gets out of a sandbox
 		// it has broken beyond what it can fix from inside one
 		// (ui.Config.SandboxRecreate's own doc comment): its mcpserver
@@ -2540,39 +2609,161 @@ func (a cycleTimesAdapter) CycleTimes() metrics.CycleHistory {
 	return out
 }
 
+// hostDisk is one filesystem hostStats reports a figure for: a path to
+// take the reading through, and the word the UI shows for what of the
+// daemon's own state lives on it (ui.DiskUsage.Holds).
+type hostDisk struct {
+	holds string
+	path  string
+}
+
+// hostDisks lists those filesystems, in the order the pane shows them.
+//
+// None of these is "/": the daemon runs in a container whose root
+// filesystem is an image layer nobody's runs fill up. What fills is
+// whichever volume the state below sits on --
+//
+//	store       -data-dir, the store and the secrets. Small, and on
+//	            terraform/gcp a 20 GB disk of its own.
+//	sandboxes   -sandbox-dir, orchestrator.HostSandboxes' per-run
+//	            checkouts. Empty (and so absent here) under
+//	            -kontur-sandboxes, which keeps no checkout on this host.
+//	docker      docker's data root, which is where the sandbox image and
+//	            every kontur VM's qcow2 overlay actually land -- konturctl
+//	            creates a VM's writable root inside its own container
+//	            (bwsalmon/kontur#37), so nothing grain writes itself ever
+//	            passes through a path grain names.
+//
+// -- and only the last two of those grow with what a run does. Reporting
+// -data-dir alone, as this did while all three shared one volume, showed
+// a near-empty disk reading as healthy at exactly the moment a runaway
+// build was filling the 100 GB one beside it (grain/task-148, after
+// grain/task-134 gave sandboxes that volume).
+//
+// Two of these are usually one filesystem: terraform/gcp bind-mounts the
+// sandbox volume's own sandboxes/ onto -sandbox-dir and points dockerd's
+// data root at its docker/, so those two entries answer identically.
+// hostStats folds them together rather than drawing the same bar twice.
+func hostDisks(cfg config) []hostDisk {
+	disks := []hostDisk{{holds: "store", path: cfg.dataDir}}
+	if cfg.sandboxDir != "" {
+		disks = append(disks, hostDisk{holds: "sandboxes", path: cfg.sandboxDir})
+	}
+	if root := dockerRootDir(cfg.dockerRootDir); root != "" {
+		// Read once, here, rather than left to show as a permanently
+		// broken row on every poll. A containerised daemon is normally
+		// not shown docker's data root at all -- scripts/setup.sh mounts
+		// the socket, not the tree behind it -- and on terraform/gcp that
+		// root is on the very volume the sandbox entry above already
+		// reports, reached through the bind mount onto -sandbox-dir. So a
+		// path dockerd names but this process cannot stat is the ordinary
+		// case rather than a fault, and it costs no figure the pane does
+		// not already have.
+		if _, _, err := sysstat.DiskUsage(root); err != nil {
+			log.Printf("grain daemon: docker's data root %s is not readable from here (%v); the host status pane reports no docker disk of its own", root, err)
+		} else {
+			disks = append(disks, hostDisk{holds: "docker", path: root})
+		}
+	}
+	return disks
+}
+
+// dockerRootTimeout bounds the one `docker info` dockerRootDir runs. It
+// is asked once per process, at startup, so this only ever costs a
+// deployment whose docker socket is mounted but whose engine is wedged --
+// and then it costs it once, not once per poll.
+const dockerRootTimeout = 10 * time.Second
+
+// dockerRootDir resolves docker's data root for hostDisks above:
+// whatever -docker-root-dir said, or else what the local engine says
+// about itself. Empty means "no docker disk figure", which is what a
+// deployment with no docker socket mounted (scripts/setup.sh only mounts
+// it for kontur and the Upgrade button) or no engine running gets.
+//
+// Asked once and logged once rather than polled: dockerd's data root is
+// fixed for the life of the daemon it belongs to, and a deployment that
+// moves it restarts both.
+func dockerRootDir(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dockerRootTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "info", "-f", "{{.DockerRootDir}}").Output()
+	if err != nil {
+		log.Printf("grain daemon: asking docker where its data root is: %v (the host status pane reports no docker disk; pass -docker-root-dir to say)", err)
+		return ""
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		log.Printf("grain daemon: `docker info` named no data root; the host status pane reports no docker disk")
+		return ""
+	}
+	log.Printf("grain daemon: docker's data root is %s; reporting its disk in the host status pane", root)
+	return root
+}
+
 // hostStats is startUIServer's ui.Config.HostStats: this machine's own
-// CPU-load/memory pressure, read straight out of /proc by pkg/sysstat --
-// see that package's own doc comment for why this, not any one sandbox,
-// is what it reports.
+// CPU-load/memory pressure, read straight out of /proc by pkg/sysstat,
+// plus one usage figure per filesystem in disks -- see that package's own
+// doc comment for why this, not any one sandbox, is what it reports, and
+// hostDisks above for which filesystems those are.
 //
-// dataDir names the filesystem the disk reading describes. Not "/": the
-// daemon runs in a container whose root filesystem is an image layer
-// nobody's runs fill up, while -data-dir is on the host volume that
-// holds the store *and* (in scripts/setup.sh's own layout) every
-// sandbox VM's disk overlay -- the one that actually runs out
-// (grain/task-41).
-//
-// A failing disk reading is left as 0/0 rather than failing the whole
-// call: load and memory came from a different file and are still good,
-// and the pane already reads 0/0 as "no figure to show" for a sandbox.
-// It is also the reading most likely to be unavailable for an
-// uninteresting reason -- a non-Linux developer machine -- which should
-// not cost the two readings beside it.
-func hostStats(dataDir string) (ui.HostPressure, error) {
+// A failing disk reading is carried on the disk it belongs to rather
+// than failing the whole call: load and memory came from a different
+// file and are still good, and the other disks' readings are unaffected
+// by one path that has stopped answering. hostDisks has already dropped
+// the paths that were never readable to begin with, so a failure here
+// means a filesystem that answered at startup and does not now -- a
+// volume that went away, which is worth saying rather than worth
+// suppressing.
+func hostStats(disks []hostDisk) (ui.HostPressure, error) {
 	snap, err := sysstat.Read()
 	if err != nil {
 		return ui.HostPressure{}, err
 	}
-	diskTotalMB, diskUsedMB, _ := sysstat.DiskUsage(dataDir)
 	return ui.HostPressure{
 		LoadAverage1:  snap.LoadAverage1,
 		LoadAverage5:  snap.LoadAverage5,
 		LoadAverage15: snap.LoadAverage15,
 		MemoryUsedMB:  snap.MemUsedMB,
 		MemoryTotalMB: snap.MemTotalMB,
-		DiskUsedMB:    diskUsedMB,
-		DiskTotalMB:   diskTotalMB,
+		Disks:         diskUsage(disks),
 	}, nil
+}
+
+// diskUsage reads each of disks' own filesystem, folding entries that
+// turn out to be the same filesystem into one -- st_dev, not the path,
+// decides that (sysstat.FilesystemID's own doc comment on why a path
+// comparison cannot: the sandbox volume reaches -sandbox-dir through a
+// bind mount that shares no prefix with docker's root beside it).
+//
+// The first path onto a given filesystem keeps the entry and every later
+// one only adds its word to Holds, so the order hostDisks chose is the
+// order the pane reads in: the store, then the disk a run fills.
+//
+// A filesystem whose identity cannot be read but whose usage can is left
+// unfolded rather than dropped: two identical rows say too much, and no
+// row at all says too little.
+func diskUsage(disks []hostDisk) []ui.DiskUsage {
+	var out []ui.DiskUsage
+	byFilesystem := map[uint64]int{}
+	for _, d := range disks {
+		totalMB, usedMB, err := sysstat.DiskUsage(d.path)
+		if err != nil {
+			out = append(out, ui.DiskUsage{Holds: []string{d.holds}, Path: d.path, Error: err.Error()})
+			continue
+		}
+		if id, idErr := sysstat.FilesystemID(d.path); idErr == nil {
+			if i, ok := byFilesystem[id]; ok {
+				out[i].Holds = append(out[i].Holds, d.holds)
+				continue
+			}
+			byFilesystem[id] = len(out)
+		}
+		out = append(out, ui.DiskUsage{Holds: []string{d.holds}, Path: d.path, UsedMB: usedMB, TotalMB: totalMB})
+	}
+	return out
 }
 
 // hostTopTimeout bounds one `top` run. Its own sampling interval is a

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, repoRows, unionCapabilities } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -329,5 +329,35 @@ describe("orphanedPullRequest", () => {
   it("says nothing about a task that is not closed, or has no pull request", () => {
     expect(orphanedPullRequest({ state: "completed", pullRequest: "acme/widgets#1" })).toBeNull();
     expect(orphanedPullRequest({ state: "closed" })).toBeNull();
+  });
+});
+
+// The same pull request a moment earlier, while closing the task is still
+// a choice: this is what decides whether the Close button is offered the
+// checkbox that closes it too.
+describe("closablePullRequest", () => {
+  it("names the pull request closing this task would orphan", () => {
+    expect(closablePullRequest({ state: "completed", pullRequest: "acme/widgets#1" })).toBe("acme/widgets#1");
+    expect(closablePullRequest({ state: "running", pullRequest: "acme/widgets#1" })).toBe("acme/widgets#1");
+  });
+
+  it("names nothing when there is no open pull request to close", () => {
+    expect(closablePullRequest({ state: "completed" })).toBeNull();
+    expect(closablePullRequest({
+      state: "completed",
+      pullRequest: "acme/widgets#1",
+      pullRequestEvents: [{ kind: "merged" }],
+    })).toBeNull();
+    expect(closablePullRequest({
+      state: "completed",
+      pullRequest: "acme/widgets#1",
+      pullRequestEvents: [{ kind: "closed" }],
+    })).toBeNull();
+  });
+
+  // A task already closed has no close to make the choice at: the warning
+  // orphanedPullRequest drives is what that task gets instead.
+  it("names nothing on a task that is already closed", () => {
+    expect(closablePullRequest({ state: "closed", pullRequest: "acme/widgets#1" })).toBeNull();
   });
 });

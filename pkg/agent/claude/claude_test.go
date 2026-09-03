@@ -759,10 +759,11 @@ func TestRunWithNoTranscriptPathWritesNoFile(t *testing.T) {
 }
 
 // TestMockToolCallsNeverReachAnyNetwork mirrors agent/antigravity's own test of
-// the same name: proving the escape-hatch tools this transcript parser
-// reports on are only ever mocked ones as far as this package is
-// concerned -- it never talks to GitHub itself, only parses what
-// cmd/mcpserver's own MockSink already recorded.
+// the same name: proving this package never acts on an escape-hatch call
+// itself -- it talks to no network at all, and only parses the
+// confirmation `grain mcpserver` already answered with. What that call
+// eventually turns into is orchestrator.ProcessResult's business, off
+// the ToolCalls this parser produces.
 func TestMockToolCallsNeverReachAnyNetwork(t *testing.T) {
 	fake := &fakeRunner{stdout: strings.Join([]string{
 		streamJSONLine(t, map[string]any{
@@ -779,7 +780,8 @@ func TestMockToolCallsNeverReachAnyNetwork(t *testing.T) {
 			"message": map[string]any{
 				"content": []map[string]any{{
 					"type": "tool_result", "tool_use_id": "call-1",
-					"content": "Recorded (mocked -- no GitHub comment was posted).",
+					"content": "Recorded. When this run finishes, grain relays this comment " +
+						"into the task's conversation.",
 				}},
 			},
 		}),

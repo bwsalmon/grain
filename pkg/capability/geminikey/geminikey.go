@@ -50,6 +50,10 @@ const DefaultAPITargetService = "generativelanguage.googleapis.com"
 // are -- ListKeys returns every key in the project -- so this prefix is
 // the only thing separating grain's keys from anyone else's, and
 // DeleteExpired must never delete a key without it.
+//
+// It is a *deployment*-blind mark, though: two grain deployments minting
+// into one GCP project both write it, and neither's reap can tell the
+// other's leaked key from its own. See Reap.
 const displayNamePrefix = "grain-"
 
 // OperatingKeyDisplayName names the daemon's own long-lived operating
@@ -72,11 +76,12 @@ const OperatingKeyDisplayName = displayNamePrefix + "daemon-operating-key"
 // maxLease is the unconditional backstop past which a lease is revoked
 // regardless of whether its task ever released cleanly -- "clean up
 // after 24 hours if leaked" (bwsalmon/agents#239). A GCP API key has no
-// native TTL, so this is enforced by DeleteExpired, not by the key
-// itself; see that function's doc comment.
+// native TTL, so this is enforced by Reap (and DeleteExpired, the same
+// sweep with a caller-chosen cutoff), not by the key itself; see those
+// functions' doc comments.
 const maxLease = 24 * time.Hour
 
-// minter is the narrow surface Materialize, Revoke and DeleteExpired
+// minter is the narrow surface Materialize, Revoke and Reap
 // need against the API Keys API -- narrow enough that Capability's own
 // tests fake it and need no network, the same "test needs no sandbox and
 // no cloud" bar docs/data-model.md sets for a MINT provider.
@@ -256,7 +261,18 @@ func (c *Capability) Revoke(ctx context.Context, cc model.CapabilityContext, lea
 }
 
 func (c *Capability) minter(ctx context.Context, cc model.CapabilityContext) (minter, error) {
-	material, err := cc.Credentials.Resolve(ctx, c.Credential.Name)
+	return c.minterFor(ctx, cc.Credentials)
+}
+
+// minterFor is the seam Materialize, Revoke and Reap share: everything
+// minting needs is a resolver and this Capability's own two fields, and
+// a reap has no CapabilityContext to carry the resolver in -- it is not
+// scoped to a task (model.Reaper's own doc comment).
+func (c *Capability) minterFor(ctx context.Context, credentials model.CredentialResolver) (minter, error) {
+	if credentials == nil {
+		return nil, fmt.Errorf("geminikey: no credential resolver to resolve %q with", c.Credential.Name)
+	}
+	material, err := credentials.Resolve(ctx, c.Credential.Name)
 	if err != nil {
 		return nil, fmt.Errorf("geminikey: resolving credential %q: %w", c.Credential.Name, err)
 	}
@@ -265,6 +281,46 @@ func (c *Capability) minter(ctx context.Context, cc model.CapabilityContext) (mi
 		build = newAPIKeysMinter
 	}
 	return build(ctx, material, c.ProjectID)
+}
+
+// Reap implements model.Reaper: it deletes every grain-minted key in
+// ProjectID older than maxLease, independent of any Lease grain may or
+// may not still have a record of -- the "clean up after 24 hours if
+// leaked" backstop for the case Revoke cannot cover, a key minted for a
+// run whose controller died between the mint and the store write. Same
+// sweep DeleteExpired performs, reachable by an hourly caller holding
+// nothing but the registry and a resolver (cmd/grain's
+// reapCapabilities), which is what makes that bound hold rather than
+// merely be documented.
+//
+// Best-effort per key, and it returns the resource names it deleted, for
+// a caller to log -- see deleteExpired.
+//
+// The sweep is project-wide, which is the one way this differs from
+// gcpkey.Provider.Reap: a service-account key listing is scoped to the
+// account it hangs off, while an API key hangs off nothing, so ListKeys
+// returns every key in the project and displayNamePrefix is the only
+// thing separating grain's from anyone else's. Two grain deployments
+// sharing one GCP project therefore reap each other's leaked keys -- not
+// each other's *live* ones, since nothing under a day old is touched,
+// and never the daemon's own operating key, which deleteExpired exempts
+// by exact name. Give each deployment its own project (or accept that a
+// key stranded by one is collected by the other a day later, which is
+// the outcome either deployment wanted for it anyway).
+//
+// Returns nothing at all, and calls no API, when this Capability was
+// never configured with a project and a credential -- the same
+// half-wired deployment Resolve refuses for, where there is no project
+// to list and nothing minted to reap.
+func (c *Capability) Reap(ctx context.Context, creds model.CredentialResolver, now time.Time) ([]string, error) {
+	if c.ProjectID == "" || c.Credential.Name == "" {
+		return nil, nil
+	}
+	m, err := c.minterFor(ctx, creds)
+	if err != nil {
+		return nil, err
+	}
+	return deleteExpired(ctx, m, now, maxLease)
 }
 
 // MintOperatingKey mints the daemon's own long-lived Gemini API key --
@@ -315,12 +371,16 @@ func mintOperatingKey(ctx context.Context, m minter) (name, keyString string, er
 // Best-effort per key, and a key whose createTime is unparseable is left
 // alone rather than guessed at -- "absent data loses, doesn't crash",
 // the same stance the ported function takes.
+//
+// The daemon reaches this sweep through Reap, not through here: what
+// this form adds is a caller-chosen maxAge and a credential named
+// directly, with no Capability in hand -- an operator-driven or
+// live-cloud sweep against a project this build was never configured
+// for. Reap is the same call with maxLease and a Capability's own
+// configuration.
 func DeleteExpired(ctx context.Context, credentials model.CredentialResolver, credentialName, projectID string, now time.Time, maxAge time.Duration) ([]string, error) {
-	material, err := credentials.Resolve(ctx, credentialName)
-	if err != nil {
-		return nil, fmt.Errorf("geminikey: resolving credential %q: %w", credentialName, err)
-	}
-	m, err := newAPIKeysMinter(ctx, material, projectID)
+	c := New(projectID, model.CredentialRef{Name: credentialName})
+	m, err := c.minterFor(ctx, credentials)
 	if err != nil {
 		return nil, err
 	}

@@ -65,23 +65,46 @@ export function completionPhase(t) {
 // behind it, or null when there is none to name.
 //
 // grain only ever merges a *completed* task's pull request (model.Store.
-// OpenPullRequestLinks), and nothing in grain closes one -- so a task
-// closed while its pull request was still open leaves that pull request
-// on GitHub with nobody watching it. It is a deliberate outcome, and the
-// point of surfacing it here is that it is otherwise invisible: the task
-// is closed, so nobody looks at it, and the pull request has merely gone
-// quiet. grain also says so on the task and on the pull request itself
-// (model.OrphanedPullRequestNote); this is the same fact where the person
-// who just clicked Close is actually looking.
+// OpenPullRequestLinks), and it closes one only when whoever closed the
+// task asked for that in the same breath (ui.CloseOptions.
+// ClosePullRequest, the checkbox closablePullRequest below is for) -- so
+// a task closed without that ask, while its pull request was still open,
+// leaves that pull request on GitHub with nobody watching it. It is a
+// deliberate outcome, and the point of surfacing it here is that it is
+// otherwise invisible: the task is closed, so nobody looks at it, and the
+// pull request has merely gone quiet. grain also says so on the task and
+// on the pull request itself (model.OrphanedPullRequestNote); this is the
+// same fact where the person who just clicked Close is actually looking.
 //
 // The events check is what keeps it from crying wolf on the ordinary
 // ending: a task whose pull request *merged* is closed too (orchestrator.
 // recordPullRequestEvents sets ClosedAt alongside PrMergedAt), and its
-// link is the most normal thing in the world.
+// link is the most normal thing in the world. It is also what takes this
+// warning away once a pull request grain closed on the way out has been
+// synced back as closed.
 export function orphanedPullRequest(t) {
   if (t.state !== "closed" || !t.pullRequest) return null;
-  const finished = (t.pullRequestEvents || []).some((e) => e.kind === "merged" || e.kind === "closed");
-  return finished ? null : t.pullRequest;
+  return pullRequestFinished(t) ? null : t.pullRequest;
+}
+
+// closablePullRequest names the pull request that closing this task right
+// now would orphan -- the same pull request orphanedPullRequest names, a
+// moment earlier, while there is still a choice about it.
+//
+// It is what decides whether the Close button is offered the checkbox
+// that closes the pull request too. Offered only when there is really one
+// open to close: a task with no pull request, or one that already merged
+// or closed, has nothing for that choice to act on, and an option with
+// nothing behind it invites a tick that means nothing.
+export function closablePullRequest(t) {
+  if (t.state === "closed" || !t.pullRequest) return null;
+  return pullRequestFinished(t) ? null : t.pullRequest;
+}
+
+// pullRequestFinished is the shared half of the two above: a pull request
+// that merged or closed on GitHub is done with, whichever way it went.
+function pullRequestFinished(t) {
+  return (t.pullRequestEvents || []).some((e) => e.kind === "merged" || e.kind === "closed");
 }
 
 export function capabilityName(config, id) {

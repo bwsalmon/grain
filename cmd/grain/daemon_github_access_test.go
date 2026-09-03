@@ -100,9 +100,9 @@ func TestAgentFrameworksTellTheForkedMCPServerAboutGitHub(t *testing.T) {
 	if [ "$1" = "--mcp-config" ]; then cp "$2" "$GRAIN_TEST_MCP_CONFIG"; fi
 	shift
 done`
-	// agy has no --mcp-config: it reads its MCP servers out of a config
-	// file in its HOME, and agent/antigravity gives each run a private
-	// HOME that it deletes as Run returns.
+	// agy has no --mcp-config: it reads an mcp_config.json out of its
+	// HOME, and agent/antigravity gives each run a private one that it
+	// deletes as Run returns.
 	const agyCapture = `cp "$HOME/` + agyMCPConfigRelPath + `" "$GRAIN_TEST_MCP_CONFIG"`
 
 	const claudeTranscript = `{"type":"result","result":"ok"}`

@@ -361,7 +361,7 @@ type Config struct {
 	// already give.
 	PullRequests PullRequests
 	// PullRequestComments, when set, is what Close uses to say on a pull
-	// request itself that grain has stopped watching it -- see
+	// request itself what closing its task has done to it -- see
 	// Client.noteOrphanedPullRequests, and model.OrphanedPullRequestNote
 	// for what is said and why it is said in two places at once.
 	//
@@ -370,6 +370,19 @@ type Config struct {
 	// on the task, and says in so many words that the pull request itself
 	// was not told. A close never fails over this.
 	PullRequestComments PullRequestComments
+	// PullRequestCloser, when set, is what a close asking for its pull
+	// request to be closed too (CloseOptions.ClosePullRequest) uses to
+	// close it on GitHub. Nothing else in this package ever reaches it:
+	// grain closes a pull request only on that explicit, per-close ask.
+	//
+	// Its own field rather than a second method on PullRequestComments
+	// above, because it is a strictly larger power than commenting and a
+	// deployment ought to be able to grant one without the other -- see
+	// PullRequestCloser's own doc comment. nil is that choice as much as
+	// it is an unwired UI: the task still closes, the pull request is
+	// left open, and the note left in both places says grain was asked to
+	// close it and could not.
+	PullRequestCloser PullRequestCloser
 	// SandboxRecreate, when set, is what
 	// POST /api/tasks/{id}/sandbox/recreate calls to destroy a live run's
 	// sandbox and build an empty one in its place -- cmd/grain/daemon.go's
