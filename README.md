@@ -85,12 +85,14 @@ pkg/agent/antigravity/  Framework via the Antigravity CLI -- Google's
                 against its own pkg/mcp/ registry; agy owns that loop now.
                 Two things agy lacks shape this package: there is no
                 --mcp-config, so each run gets a private HOME holding just
-                the settings file naming its own "mcpserver" server (a
+                the mcp_config.json naming its own "mcpserver" server (a
                 per-user `agy mcp add` registration cannot express a
                 per-run sandbox binding); and there is no --max-turns, so
                 RunConfig.MaxTurns is enforced here, by counting completed
                 agent_response steps on the live stream and cancelling the
-                subprocess
+                subprocess. agy's own three-minute cap on a single MCP
+                tool call is raised past wait_for_checks' longest wait in
+                that same file, since it has no MCP_TOOL_TIMEOUT to raise
 pkg/agent/claude/  Framework via the real `claude` CLI, run as a
                 subprocess on the controller (bwsalmon/agents#255) --
                 this points --mcp-config at this same grain binary's own
@@ -1400,20 +1402,35 @@ it streams back -- the shape `pkg/agent/codex` follows too. Every
 framework a deployment can pick between is a subprocess driver now, and
 `agent.Framework` is the seam that makes them interchangeable.
 
-Three things about agy shaped the port, none of them cosmetic.
+Four things about agy shaped the port, none of them cosmetic.
 
 **It has no `--mcp-config`.** agy registers MCP servers per *user* --
-`agy mcp add` writes them into `~/.gemini`, and caches each server's tool
-manifests under `~/.gemini/antigravity-cli/mcp/<server>/`. A per-user
+`agy mcp add` writes them into `~/.gemini/config/mcp_config.json`, and
+caches each server's tool manifests under
+`~/.gemini/antigravity-cli/mcp/<server>/`. A per-user
 registration cannot express what grain needs, which is a per-*run*
 binding: two runs dispatched concurrently against two different sandboxes
 would share one registration, and whichever wrote it last would decide
 where both runs' tools landed. So `Framework.Run` gives each run its own
-private `HOME` -- a temp directory holding nothing but the settings file
+private `HOME` -- a temp directory holding nothing but the config file
 naming that run's own `mcpserver` server -- and deletes it as the run
 returns. That has the same effect `claude`'s `--strict-mcp-config` has
 there: the only MCP server a run can see is its own, because there is no
-other settings file in the `HOME` it was given to find one in.
+other config file in the `HOME` it was given to find one in.
+
+**It caps a single MCP tool call, and has no `MCP_TOOL_TIMEOUT`.** agy
+abandons a tool call after three minutes when nothing says otherwise;
+the knob is a `timeoutSeconds` key on the server's own entry in that
+same config file, where a positive value is seconds and a negative one
+means no cap at all. Three minutes is far short of `wait_for_checks`,
+which blocks for as long as CI takes, up to
+`mcp.MaxWaitForChecksTimeout` (an hour) -- so a run that deliberately
+asked to wait out a slow build would have the call killed under it and
+be told the tool failed, which is neither true nor useful. `Run` writes
+the key out past that maximum for the reason `agent/claude` raises
+`MCP_TOOL_TIMEOUT`: the deadline that ends the wait should be grain's,
+whose expiry produces a report, not the CLI's, whose expiry produces a
+tool failure.
 
 **It has no `--max-turns`.** `RunConfig.MaxTurns` is therefore enforced
 here rather than by the binary, and enforced on the live stream rather

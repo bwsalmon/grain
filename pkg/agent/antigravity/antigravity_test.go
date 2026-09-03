@@ -9,8 +9,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/mcp"
 )
 
 // recordingRunner captures everything Framework.Run hands the subprocess,
@@ -34,7 +36,7 @@ func (r *recordingRunner) Run(_ context.Context, args []string, stdin string, en
 	r.args, r.stdin, r.env, r.dir = args, stdin, env, dir
 	for _, e := range env {
 		if home, ok := strings.CutPrefix(e, "HOME="); ok {
-			if data, err := os.ReadFile(filepath.Join(home, settingsRelPath)); err == nil {
+			if data, err := os.ReadFile(filepath.Join(home, mcpConfigRelPath)); err == nil {
 				r.homeAtRun = string(data)
 			}
 		}
@@ -120,7 +122,7 @@ func TestRunWritesThisRunsOwnMCPSettingsIntoAPrivateHome(t *testing.T) {
 		t.Fatal("HOME was the controller's own; a run must get a private one")
 	}
 	if r.homeAtRun == "" {
-		t.Fatalf("no %s written into the private HOME", settingsRelPath)
+		t.Fatalf("no %s written into the private HOME", mcpConfigRelPath)
 	}
 
 	var settings struct {
@@ -147,6 +149,55 @@ func TestRunWritesThisRunsOwnMCPSettingsIntoAPrivateHome(t *testing.T) {
 	// outlive a run holding a pointer at that run's sandbox.
 	if _, err := os.Stat(home); !os.IsNotExist(err) {
 		t.Errorf("private HOME %s still exists after Run returned (stat err = %v)", home, err)
+	}
+}
+
+// TestRunWritesTheMCPConfigWhereAgyActuallyLooksForIt pins the one
+// filename in this package that is agy's on-disk layout rather than
+// grain's: agy reads its MCP servers from ~/.gemini/config/mcp_config.json
+// (what `agy mcp add` writes and `agy mcp list` reads), not from the CLI's
+// own settings file. A run whose config landed anywhere else would start
+// with no grain tools at all -- and, having no --strict-mcp-config to
+// refuse on, would say nothing about it.
+func TestRunWritesTheMCPConfigWhereAgyActuallyLooksForIt(t *testing.T) {
+	if got, want := mcpConfigRelPath, filepath.Join(".gemini", "config", "mcp_config.json"); got != want {
+		t.Errorf("mcpConfigRelPath = %q, want %q", got, want)
+	}
+}
+
+// wait_for_checks blocks for as long as CI takes, so agy's own cap on a
+// single MCP tool call has to be moved out past the longest wait that
+// tool will ever do -- otherwise a run that asked to wait out a slow
+// build has the call killed under it and is told the tool failed. agy
+// takes that cap as a per-server key rather than an environment variable,
+// which is the only way this differs from agent/claude's MCP_TOOL_TIMEOUT.
+func TestRunRaisesAgysMCPToolTimeoutPastTheLongestWait(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var settings struct {
+		MCPServers map[string]struct {
+			TimeoutSeconds *int `json:"timeoutSeconds"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(r.homeAtRun), &settings); err != nil {
+		t.Fatalf("mcp config was not JSON: %v (%q)", err, r.homeAtRun)
+	}
+	got := settings.MCPServers[mcpServerName].TimeoutSeconds
+	if got == nil {
+		t.Fatalf("mcp config = %q, want a timeoutSeconds on this run's server", r.homeAtRun)
+	}
+	if limit := time.Duration(*got) * time.Second; limit <= mcp.MaxWaitForChecksTimeout {
+		t.Errorf("timeoutSeconds = %v, want more than wait_for_checks' own %v maximum",
+			limit, mcp.MaxWaitForChecksTimeout)
+	}
+	// Positive, not the negative agy reads as "no cap at all": a wedged
+	// MCP server should still end the call eventually.
+	if *got <= 0 {
+		t.Errorf("timeoutSeconds = %d, want a finite cap rather than agy's no-timeout value", *got)
 	}
 }
 
