@@ -126,7 +126,7 @@ func TestRunCycleCompletesEndToEnd(t *testing.T) {
 	branch := model.BranchName(task.ID)
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(sim.BareRepo, branch, task.ID)),
 	}
 	// One cycle, straight from the store write: no poll, and no tick spent
@@ -183,7 +183,7 @@ func TestRunCycleParksOnAQuestionThenResumesAfterAReply(t *testing.T) {
 
 	clock := baseTime
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: credentialingSandboxes{inner: sandboxes, t: t}, MaxWorkers: 1,
 		Framework: scriptedFramework(askScript("which file should this go in?")),
 	}
 	if err := orchestrator.RunCycle(ctx, deps, clock); err != nil {

@@ -193,7 +193,7 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-1",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	assertState(model.StateRunning)
@@ -293,7 +293,7 @@ func TestLeasesAreQueryableByMintingCredential(t *testing.T) {
 			MintedBy: model.CredentialRef{Name: "gcp-host-service-account"},
 			IssuedAt: now, ExpiresAt: &expires,
 		}},
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -338,7 +338,7 @@ func TestAttemptsCountsRuns(t *testing.T) {
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: "a1b2", Sandbox: "s1",
 			Attempt: i + 1, StartedAt: now,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, now.Add(time.Hour), "requeued", ""); err != nil {
@@ -365,7 +365,7 @@ func TestRunsReturnsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r-second-by-id", TaskID: "a1b2", Sandbox: "s1",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r-second-by-id", now.Add(30*time.Minute), "failed", "build error"); err != nil {
@@ -374,7 +374,7 @@ func TestRunsReturnsEveryAttemptOldestFirst(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r-first-by-id", TaskID: "a1b2", Sandbox: "s2",
 		Attempt: 2, StartedAt: now.Add(time.Hour),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	// Attempt 2 is left unfinished, to prove a still-running attempt comes
@@ -410,7 +410,7 @@ func TestRunTranscriptRoundTrips(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "s1",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -451,7 +451,7 @@ func TestGitScopeFollowsTheLiveRunOnASandbox(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -486,7 +486,7 @@ func TestGitScopeStopsFollowingASandboxOnceItsRunFinishes(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, "r1", now.Add(time.Hour), "succeeded", ""); err != nil {
@@ -512,7 +512,7 @@ func TestGitCredentialOverrideFollowsTheLiveRunOnASandbox(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -535,7 +535,7 @@ func TestGitCredentialOverrideIsAbsentWithoutAGitCredentialGrant(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: "r1", TaskID: "a1b2", Sandbox: "sandbox-0",
 		Attempt: 1, StartedAt: now,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1025,7 +1025,7 @@ func TestReadsSeeConsistentStateWhileWritersAreActive(t *testing.T) {
 			writeErrs[i] = store.StartRun(ctx, model.Run{
 				ID: "r-" + id, TaskID: id,
 				Sandbox: fmt.Sprintf("sandbox-%d", i), Attempt: 1, StartedAt: now,
-			}, 0)
+			}, model.Limits{})
 		}(i)
 	}
 	for i := 0; i < readers; i++ {
@@ -1199,7 +1199,7 @@ func TestFailureStreakCountsConsecutiveFailuresAndStopsAtASuccess(t *testing.T) 
 		id := fmt.Sprintf("r%d", i+1)
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: "a1b2", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, at.Add(time.Minute), outcomes[i], "boom"); err != nil {
@@ -1237,7 +1237,7 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 		at := now.Add(time.Duration(i) * time.Hour)
 		if err := store.StartRun(ctx, model.Run{
 			ID: id, TaskID: "a1b2", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.FinishRun(ctx, id, at.Add(time.Minute), "failed", "boom"); err != nil {
@@ -1281,7 +1281,7 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 	if err := store.StartRun(ctx, model.Run{
 		ID: freshID, TaskID: "a1b2", Sandbox: "s1",
 		Attempt: model.MaxConsecutiveFailures + 1, StartedAt: freshAt,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.FinishRun(ctx, freshID, freshAt.Add(time.Minute), "failed", "boom again"); err != nil {
@@ -1310,12 +1310,12 @@ func TestStartRunRejectsASecondLiveRunOnTheSameTask(t *testing.T) {
 	}
 
 	first := model.Run{ID: "a1b2-1", TaskID: "a1b2", Sandbox: "a1b2-1", Attempt: 1, StartedAt: now}
-	if err := store.StartRun(ctx, first, 0); err != nil {
+	if err := store.StartRun(ctx, first, model.Limits{}); err != nil {
 		t.Fatalf("first StartRun for an idle task: %v", err)
 	}
 
 	second := model.Run{ID: "a1b2-2", TaskID: "a1b2", Sandbox: "a1b2-2", Attempt: 2, StartedAt: now}
-	if err := store.StartRun(ctx, second, 0); err == nil {
+	if err := store.StartRun(ctx, second, model.Limits{}); err == nil {
 		t.Fatal("a second live run on a task that already has one should have failed, not landed")
 	}
 
@@ -1339,7 +1339,7 @@ func TestStartRunRejectsASecondLiveRunOnTheSameTask(t *testing.T) {
 	if err := store.FinishRun(ctx, "a1b2-1", now.Add(time.Hour), "failed", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StartRun(ctx, second, 0); err != nil {
+	if err := store.StartRun(ctx, second, model.Limits{}); err != nil {
 		t.Fatalf("StartRun for a second attempt after the first finished: %v", err)
 	}
 }
@@ -1361,13 +1361,13 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 
 	for _, id := range []string{"a1b2", "c3d4"} {
 		run := model.Run{ID: id + "-1", TaskID: id, Sandbox: id + "-1", Attempt: 1, StartedAt: now}
-		if err := store.StartRun(ctx, run, 2); err != nil {
+		if err := store.StartRun(ctx, run, model.Limits{Workers: 2}); err != nil {
 			t.Fatalf("StartRun for %s within the limit: %v", id, err)
 		}
 	}
 
 	third := model.Run{ID: "e5f6-1", TaskID: "e5f6", Sandbox: "e5f6-1", Attempt: 1, StartedAt: now}
-	err := store.StartRun(ctx, third, 2)
+	err := store.StartRun(ctx, third, model.Limits{Workers: 2})
 	if !errors.Is(err, model.ErrAtCapacity) {
 		t.Fatalf("StartRun past the limit = %v, want ErrAtCapacity", err)
 	}
@@ -1379,15 +1379,163 @@ func TestStartRunRefusesToExceedTheConcurrencyLimit(t *testing.T) {
 	if err := store.FinishRun(ctx, "a1b2-1", now.Add(time.Hour), "succeeded", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.StartRun(ctx, third, 2); err != nil {
+	if err := store.StartRun(ctx, third, model.Limits{Workers: 2}); err != nil {
 		t.Fatalf("StartRun into freed capacity: %v", err)
 	}
 
 	// A limit of zero or less means "no limit of mine to enforce" -- what
 	// a caller with its own reason to record a run passes.
 	fourth := model.Run{ID: "a1b2-2", TaskID: "a1b2", Sandbox: "a1b2-2", Attempt: 2, StartedAt: now.Add(2 * time.Hour)}
-	if err := store.StartRun(ctx, fourth, 0); err != nil {
+	if err := store.StartRun(ctx, fourth, model.Limits{}); err != nil {
 		t.Fatalf("StartRun with no limit: %v", err)
+	}
+}
+
+// fixTask is a task the merge queue filed to repair a stuck queue head
+// (Origin.Reason == ReasonFix) -- the one kind whose runs count against
+// model.Limits.Mergers rather than against the worker ceiling.
+func fixTask(id string) model.Task {
+	t := task(id, true)
+	t.Origin.Reason = model.ReasonFix
+	return t
+}
+
+// TestStartRunCountsMergersAgainstTheirOwnHalfOfTheLimit is
+// grain/task-63 at the only place the limit is really enforced: inside
+// the transaction that records the run. Ordinary work stops at
+// Limits.Workers even with merger capacity free; a merge-queue fix task
+// takes that free capacity *and* a spare worker slot; and nothing of
+// either kind gets past the sum of the two.
+func TestStartRunCountsMergersAgainstTheirOwnHalfOfTheLimit(t *testing.T) {
+	store, _, ctx := openStore(t)
+	for _, id := range []string{"w1", "w2", "f1", "f2"} {
+		tk := task(id, true)
+		if id[0] == 'f' {
+			tk = fixTask(id)
+		}
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limits := model.Limits{Workers: 1, Mergers: 2}
+	start := func(id string) error {
+		return store.StartRun(ctx, model.Run{
+			ID: id + "-1", TaskID: id, Sandbox: id + "-1", Attempt: 1, StartedAt: now,
+		}, limits)
+	}
+
+	if err := start("w1"); err != nil {
+		t.Fatalf("StartRun for the one worker slot: %v", err)
+	}
+	if err := start("w2"); !errors.Is(err, model.ErrAtCapacity) {
+		t.Fatalf("StartRun for a second worker = %v, want ErrAtCapacity -- merger capacity is not a general pool", err)
+	}
+	// Both fix tasks fit: one in a merger slot, one in the other.
+	if err := start("f1"); err != nil {
+		t.Fatalf("StartRun for the first fix task: %v", err)
+	}
+	if err := start("f2"); err != nil {
+		t.Fatalf("StartRun for the second fix task: %v", err)
+	}
+
+	counts, err := store.LiveRunCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Workers != 1 || counts.Mergers != 2 {
+		t.Fatalf("LiveRunCounts = %+v, want one worker and two mergers", counts)
+	}
+	if live, err := store.LiveRunCount(ctx); err != nil || live != counts.Total() {
+		t.Fatalf("LiveRunCount = %d (%v), want the same %d LiveRunCounts totals", live, err, counts.Total())
+	}
+
+	// Everything together is capped at the sum, so with three live there
+	// is nothing left for a fix task either.
+	if err := store.PutTask(ctx, fixTask("f3")); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("f3"); !errors.Is(err, model.ErrAtCapacity) {
+		t.Fatalf("StartRun past the sum of both limits = %v, want ErrAtCapacity", err)
+	}
+
+	// Freeing the worker slot frees it for a merger too -- that is the
+	// direction the asymmetry runs.
+	if err := store.FinishRun(ctx, "w1-1", now.Add(time.Hour), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := start("f3"); err != nil {
+		t.Fatalf("StartRun for a fix task into a freed worker slot: %v", err)
+	}
+	if counts, err := store.LiveRunCounts(ctx); err != nil || counts.Mergers != 3 || counts.Workers != 0 {
+		t.Fatalf("LiveRunCounts = %+v (%v), want three mergers and no worker", counts, err)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseMissingWorkerMergerColumns is
+// grain/task-63's own migration: a database whose grain_config still has
+// the single max_concurrent count keeps that count as its worker limit
+// (renamed to max_workers, the old column dropped) and gains
+// model.DefaultMaxMergers of merge capacity it never had a way to
+// express.
+func TestInitMigratesAnExistingDatabaseMissingWorkerMergerColumns(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-split grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`) "+
+			"VALUES (1,30000,3,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','')"); err != nil {
+		t.Fatalf("seeding a pre-split config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing max_workers/max_mergers: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.MaxWorkers != 3 {
+		t.Fatalf("MaxWorkers after migrating = %d, want the 3 the old max_concurrent held", got.MaxWorkers)
+	}
+	if got.MaxMergers != model.DefaultMaxMergers {
+		t.Fatalf("MaxMergers after migrating = %d, want DefaultMaxMergers (%d)", got.MaxMergers, model.DefaultMaxMergers)
+	}
+
+	// The old column is gone, not merely ignored -- PutConfig stops
+	// supplying it, so a NOT NULL column left behind would fail every
+	// later write.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	after, err := store.GetConfig(ctx)
+	if err != nil || after == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", after, err)
+	}
+	if !reflect.DeepEqual(*after, want) {
+		t.Fatalf("got %+v, want %+v", *after, want)
 	}
 }
 
@@ -1401,7 +1549,7 @@ func TestGetConfigReturnsNilOnAFreshDatabase(t *testing.T) {
 
 func testConfig() model.Config {
 	return model.Config{
-		PollInterval: 30 * time.Second, MaxConcurrent: 2,
+		PollInterval: 30 * time.Second, MaxWorkers: 2,
 		// AgentFramework is named explicitly rather than left zero
 		// because it is the one Config field that never reads back
 		// exactly as written: GetConfig runs it through
@@ -1537,7 +1685,7 @@ func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
 	}
 	updated := testConfig()
 	updated.PollInterval = time.Minute
-	updated.MaxConcurrent = 1
+	updated.MaxWorkers = 1
 	if err := store.PutConfig(ctx, updated); err != nil {
 		t.Fatalf("second put: %v", err)
 	}
@@ -1596,8 +1744,8 @@ func TestInitMigratesAnExistingDatabaseMissingTargetRepos(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.GeminiModel != "gemini-2.5-pro" || len(got.TargetRepos) != 0 || got.MaxConcurrent != 2 {
-		t.Fatalf("got %+v, want the pre-existing row intact, targetRepos empty, and maxConcurrent migrated from the old two-name slots column", got)
+	if got.GeminiModel != "gemini-2.5-pro" || len(got.TargetRepos) != 0 || got.MaxWorkers != 2 {
+		t.Fatalf("got %+v, want the pre-existing row intact, targetRepos empty, and maxWorkers migrated from the old two-name slots column", got)
 	}
 
 	// And it's not just readable -- PutConfig can now actually make
@@ -1711,8 +1859,8 @@ func TestInitMigratesAnExistingDatabaseWithNamedSlots(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.GeminiModel != "gemini-2.5-pro" || got.MaxConcurrent != 3 {
-		t.Fatalf("got %+v, want the pre-existing row intact and maxConcurrent migrated from the old three-name slots column", got)
+	if got.GeminiModel != "gemini-2.5-pro" || got.MaxWorkers != 3 {
+		t.Fatalf("got %+v, want the pre-existing row intact and maxWorkers migrated from the old three-name slots column", got)
 	}
 
 	// The old column is gone, not merely ignored -- PutConfig stops

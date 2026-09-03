@@ -140,7 +140,7 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 	branch := model.BranchName(task.ID)
 
 	deps := orchestrator.Deps{
-		Store: store, Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Store: store, Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(sim.BareRepo, branch, task.ID)),
 	}
 

@@ -172,12 +172,12 @@ fi
 // cycle.go's reconcileDispatch doc comment to its word: two dispatches
 // never touch the same sandbox, "so nothing here needs to hold a lock of
 // its own" -- which is
-// exactly what makes -max-concurrent/GRAIN_MAX_CONCURRENT a real
+// exactly what makes -max-workers/GRAIN_MAX_WORKERS a real
 // concurrency knob rather than just a scheduling one (that same comment,
 // bwsalmon/agents#435). If KonturSandboxes held one lock across the whole
 // map rather than none at all here, two dispatches acquiring distinct
 // sandboxes at the same time would still create their VMs one at a time
-// -- indistinguishable from -max-concurrent=1 for exactly the case that
+// -- indistinguishable from -max-workers=1 for exactly the case that
 // matters now, since every run builds a VM from scratch rather than
 // reusing a slot's. This drives Acquire for several distinct sandboxes at
 // once, each behind a fake konturctl that sleeps for delay inside "vm

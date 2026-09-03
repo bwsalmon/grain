@@ -277,7 +277,7 @@ func TestCLICreatesTaskAgentOpensPRAndUserMergeClosesIt(t *testing.T) {
 	branch := model.BranchName(task.ID)
 	client := github.NewClient(sim, nil)
 	deps := orchestrator.Deps{
-		Client: client, Sandboxes: sandboxes, MaxConcurrent: 1,
+		Client: client, Sandboxes: sandboxes, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(remote, branch, task.ID)),
 	}
 

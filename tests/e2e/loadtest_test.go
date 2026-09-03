@@ -182,7 +182,7 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 			return antigravity.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics)), nil
 		},
 		Config:        orchestrator.Config{Capabilities: registry},
-		MaxConcurrent: cfg.slots,
+		MaxWorkers: cfg.slots,
 	}
 
 	// Seed a backlog before the sustained phase starts, so every slot has

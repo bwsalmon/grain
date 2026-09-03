@@ -61,7 +61,7 @@ func TestCmdSyncGCPSectionRequiresProject(t *testing.T) {
 
 func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 	pollInterval := "45s"
-	maxConcurrent := 2
+	maxWorkers := 2
 	geminiModel := "gemini-test"
 	claudeModel := "claude-test"
 	githubHost := "github.example"
@@ -81,7 +81,7 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 	srv := httptest.NewServer(ui.NewServer(ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.OfferedCapabilities()}, store))
 	defer srv.Close()
 
-	path := writeSyncConfig(t, dir, syncConfig{Settings: settingsRequest(pollInterval, maxConcurrent, geminiModel, claudeModel, githubHost)})
+	path := writeSyncConfig(t, dir, syncConfig{Settings: settingsRequest(pollInterval, maxWorkers, geminiModel, claudeModel, githubHost)})
 
 	if err := cmdSync(context.Background(), []string{"-config", path, "-server", srv.URL}); err != nil {
 		t.Fatalf("cmdSync: %v", err)
@@ -103,18 +103,18 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 		t.Fatalf("settings = %+v, want poll interval %q, gemini model %q, claude model %q, github host %q",
 			settings, pollInterval, geminiModel, claudeModel, githubHost)
 	}
-	if settings.MaxConcurrent != 2 {
-		t.Fatalf("settings.MaxConcurrent = %v, want 2", settings.MaxConcurrent)
+	if settings.MaxWorkers != 2 {
+		t.Fatalf("settings.MaxWorkers = %v, want 2", settings.MaxWorkers)
 	}
 }
 
 // settingsRequest builds a syncConfig's own settings section with every
 // field the first-ever UpdateSettings call requires
 // (ui.Client.UpdateSettings's own doc comment) filled in.
-func settingsRequest(pollInterval string, maxConcurrent int, geminiModel, claudeModel, githubHost string) *ui.UpdateSettingsRequest {
+func settingsRequest(pollInterval string, maxWorkers int, geminiModel, claudeModel, githubHost string) *ui.UpdateSettingsRequest {
 	return &ui.UpdateSettingsRequest{
 		PollInterval:  &pollInterval,
-		MaxConcurrent: &maxConcurrent,
+		MaxWorkers:    &maxWorkers,
 		GeminiModel:   &geminiModel,
 		ClaudeModel:   &claudeModel,
 		GitHubHost:    &githubHost,

@@ -407,7 +407,7 @@ type Task struct {
 	//
 	// It also changes how dispatch.Cycle schedules the task: unlike an
 	// ordinary Interactive task, which still waits its turn for
-	// Config.MaxConcurrent headroom the same as anything else, a
+	// Config.MaxWorkers headroom the same as anything else, a
 	// Configuration task is dispatched unconditionally, on top of
 	// whatever the deployment's concurrency limit already has in flight.
 	// A person reaching for this because something is already wrong --

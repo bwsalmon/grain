@@ -274,7 +274,7 @@ func TestRetryRouteClearsAFailedTasksStreak(t *testing.T) {
 		started := baseTime.Add(time.Duration(i) * time.Hour)
 		if err := client.Store.StartRun(context.Background(), model.Run{
 			ID: runID, TaskID: id, Sandbox: "s1", Attempt: i + 1, StartedAt: started,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := client.Store.FinishRun(context.Background(), runID, started.Add(time.Minute), "failed", "boom"); err != nil {
@@ -589,7 +589,7 @@ func TestSettingsRoutesReadAndWrite(t *testing.T) {
 	}
 
 	rec = do(t, srv, http.MethodPut, "/api/settings",
-		`{"pollInterval":"1m","maxConcurrent":2,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
+		`{"pollInterval":"1m","maxWorkers":2,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put status = %d, want 200: %s", rec.Code, rec.Body)
 	}

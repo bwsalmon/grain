@@ -10,7 +10,8 @@ vi.mock("../api.js", () => ({ default: vi.fn() }));
 const settings = {
   configured: true,
   pollInterval: "30s",
-  maxConcurrent: 2,
+  maxWorkers: 2,
+  maxMergers: 1,
   geminiModel: "gemini-2.5-pro",
   claudeModel: "claude-sonnet-5",
   maxAgentTurns: 40,
@@ -33,7 +34,8 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
 
     expect(await screen.findByDisplayValue("30s")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("2")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Max worker agents/)).toHaveValue(2);
+    expect(screen.getByLabelText(/Max merge agents/)).toHaveValue(1);
   });
 
   it("populates the Agents tab with them", async () => {

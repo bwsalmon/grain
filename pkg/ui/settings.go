@@ -33,8 +33,16 @@ type Settings struct {
 	Configured bool `json:"configured"`
 	// PollInterval is a Go duration string ("30s"), the same syntax
 	// -poll-interval itself parses.
-	PollInterval           string `json:"pollInterval"`
-	MaxConcurrent          int    `json:"maxConcurrent"`
+	PollInterval string `json:"pollInterval"`
+	// MaxWorkers and MaxMergers are model.Config's own fields of the same
+	// name (grain/task-63): how many runs of ordinary work may be in
+	// flight at once, and how much further capacity only the merge
+	// queue's own fix tasks may reach. MaxWorkers was called
+	// maxConcurrent, and was the whole limit, until the two were split --
+	// see model.Limits for the rule they make together, in particular why
+	// a merger may take a worker's free slot and never the reverse.
+	MaxWorkers             int    `json:"maxWorkers"`
+	MaxMergers             int    `json:"maxMergers"`
 	GeminiModel            string `json:"geminiModel"`
 	ClaudeModel            string `json:"claudeModel"`
 	MaxAgentTurns          int    `json:"maxAgentTurns"`
@@ -294,7 +302,8 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 	return Settings{
 		Configured:                    true,
 		PollInterval:                  cfg.PollInterval.String(),
-		MaxConcurrent:                 cfg.MaxConcurrent,
+		MaxWorkers:                    cfg.MaxWorkers,
+		MaxMergers:                    cfg.MaxMergers,
 		GeminiModel:                   cfg.GeminiModel,
 		ClaudeModel:                   cfg.ClaudeModel,
 		MaxAgentTurns:                 cfg.MaxAgentTurns,
@@ -407,7 +416,8 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 // than that yet.
 type UpdateSettingsRequest struct {
 	PollInterval           *string   `json:"pollInterval"`
-	MaxConcurrent          *int      `json:"maxConcurrent"`
+	MaxWorkers             *int      `json:"maxWorkers"`
+	MaxMergers             *int      `json:"maxMergers"`
 	GeminiModel            *string   `json:"geminiModel"`
 	ClaudeModel            *string   `json:"claudeModel"`
 	MaxAgentTurns          *int      `json:"maxAgentTurns"`
@@ -438,17 +448,21 @@ type UpdateSettingsRequest struct {
 // zero model.Config if nothing is yet) and writes the result back
 // wholesale.
 //
-// The first time settings are ever saved, PollInterval, MaxConcurrent,
+// The first time settings are ever saved, PollInterval, MaxWorkers,
 // GeminiModel, ClaudeModel and GitHubHost are required: leaving one of
 // them out would otherwise write a zero value that reads back later as a
 // deliberate setting rather than as "never configured" -- Configured
 // already tells a caller that much on the way in, so writing a config
 // that could not be told apart from one somebody actually chose is worse
-// than asking for the field up front. MaxAgentTurns, GitHubInsecureHTTP,
+// than asking for the field up front. MaxMergers, MaxAgentTurns,
+// GitHubInsecureHTTP,
 // GCPProject, GCPServiceAccountEmail and TargetRepos have real,
-// meaningful zero values (the framework's own default, HTTPS, "no GCP
-// capability configured", and "unrestricted" respectively -- daemon.go's
-// own flag defaults), so nothing here demands them.
+// meaningful zero values ("mergers take worker capacity", the
+// framework's own default, HTTPS, "no GCP capability configured", and
+// "unrestricted" respectively -- daemon.go's own flag defaults), so
+// nothing here demands them. A first save that never mentions MaxMergers
+// stores model.DefaultConfig's own value for it rather than that zero,
+// the same as every other field whose default is not its zero value.
 func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) (Settings, error) {
 	current, err := c.Store.GetConfig(ctx)
 	if err != nil {
@@ -475,11 +489,22 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		}
 		cfg.PollInterval = d
 	}
-	if req.MaxConcurrent != nil {
-		if *req.MaxConcurrent < 1 {
-			return Settings{}, validationErrorf("maxConcurrent must be at least 1")
+	if req.MaxWorkers != nil {
+		if *req.MaxWorkers < 1 {
+			return Settings{}, validationErrorf("maxWorkers must be at least 1")
 		}
-		cfg.MaxConcurrent = *req.MaxConcurrent
+		cfg.MaxWorkers = *req.MaxWorkers
+	}
+	if req.MaxMergers != nil {
+		// 0 is allowed where maxWorkers' own 0 is not, and means
+		// something rather than nothing: mergers then contend for worker
+		// capacity alongside every other task, which is what a deployment
+		// filed before this setting existed was doing
+		// (model.Config.MaxMergers).
+		if *req.MaxMergers < 0 {
+			return Settings{}, validationErrorf("maxMergers cannot be negative")
+		}
+		cfg.MaxMergers = *req.MaxMergers
 	}
 	if req.GeminiModel != nil {
 		if strings.TrimSpace(*req.GeminiModel) == "" {
@@ -607,8 +632,8 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		if cfg.PollInterval <= 0 {
 			return Settings{}, validationErrorf("pollInterval is required the first time settings are saved")
 		}
-		if cfg.MaxConcurrent < 1 {
-			return Settings{}, validationErrorf("maxConcurrent is required the first time settings are saved")
+		if cfg.MaxWorkers < 1 {
+			return Settings{}, validationErrorf("maxWorkers is required the first time settings are saved")
 		}
 		if strings.TrimSpace(cfg.GeminiModel) == "" {
 			return Settings{}, validationErrorf("geminiModel is required the first time settings are saved")

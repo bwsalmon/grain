@@ -114,7 +114,7 @@ func startRun(t *testing.T, ctx context.Context, store *model.Store, d dispatch.
 	t.Helper()
 	if err := store.StartRun(ctx, model.Run{
 		ID: d.RunID, TaskID: d.TaskID, Sandbox: d.RunID, Attempt: d.Attempt, StartedAt: at,
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		t.Fatalf("starting run %s: %v", d.RunID, err)
 	}
 }
