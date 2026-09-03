@@ -166,3 +166,27 @@ type Framework interface {
 	Run(ctx context.Context, cfg RunConfig) (*Result, error)
 }
 
+// PullRequestFramework is the optional half of Framework that answers one
+// question about the runs it drives: do they actually get the
+// open_pull_request tool?
+//
+// It exists because that tool is registered on a fact only the Framework
+// holds. A run gets it when its forked mcpserver was passed both -server
+// and -task (cmd/grain/mcpserver.go), which happens when the Framework
+// was built WithGrainServer -- a deployment whose daemon serves a UI/API
+// at all -- and RunConfig.TaskID is set. Nothing downstream of Run can
+// see the first half, and orchestrator.BuildPrompt needs it: a prompt
+// that told every run to call open_pull_request would, on a deployment
+// serving no UI/API, name a tool that is not on the roster.
+//
+// A Framework that does not implement this drives runs with no such tool
+// -- the reading orchestrator.RunDispatch takes -- which is what every
+// test fake and every in-process caller is.
+type PullRequestFramework interface {
+	Framework
+	// CanOpenPullRequest reports whether this Framework gives a run it
+	// drives with a task id the open_pull_request tool. It is a property
+	// of the Framework, not of one run: RunDispatch always passes a task
+	// id, so the per-run half is never the one in doubt.
+	CanOpenPullRequest() bool
+}

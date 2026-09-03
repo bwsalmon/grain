@@ -244,6 +244,23 @@ func WithGrainServer(url string) Option {
 	return func(f *Framework) { f.grainServerURL = url }
 }
 
+// Asserted here rather than left to the one call site that type-asserts
+// for it (orchestrator.frameworkOpensPullRequests): a Framework that
+// stopped implementing this would otherwise not fail to compile, it
+// would quietly stop telling its runs about a tool they still have.
+var _ agent.PullRequestFramework = (*Framework)(nil)
+
+// CanOpenPullRequest implements agent.PullRequestFramework: a run driven
+// by this Framework is offered open_pull_request exactly when
+// WithGrainServer named a daemon for its forked mcpserver to ask (see
+// mcpServerArgs, which passes -server/-task together or not at all).
+//
+// It is what lets orchestrator.BuildPrompt tell a run about the tool
+// only when the run really has it -- a tool description alone reaches
+// nobody who never reads the roster, and a prompt that promised it
+// unconditionally would be wrong on every deployment serving no UI/API.
+func (f *Framework) CanOpenPullRequest() bool { return f.grainServerURL != "" }
+
 // New builds a Framework that runs the real claude binary at claudePath
 // (typically just "claude", resolved against $PATH) and points every
 // run's --mcp-config at grainBinaryPath -- the same grain binary this

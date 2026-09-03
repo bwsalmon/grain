@@ -2184,6 +2184,32 @@ one: a REST client, one endpoint, no store handle and no credential --
 not the in-process `*model.Store` `selfrepair.Confirm`'s blocking
 confirmation would still need.
 
+### Telling the run it has it
+
+A tool nobody reads about is a tool nobody calls. `BuildPrompt` names
+`open_pull_request` in the same paragraph as the push/check/repair loop,
+so a run learns it can open its pull request and read CI without having
+studied the roster -- which is the whole failure the tool exists to fix,
+one level up: an agent that finishes and exits never sees its own checks.
+
+It is named only for a run that really has it. Registration turns on
+`-server`/`-task`, and the `-server` half comes from `-ui-addr`
+(`daemonServerURL`), so a deployment serving no UI/API gives its runs no
+such tool -- and a prompt that promised it there would send an agent
+after something that is not on its roster. The one thing that knows is
+the `Framework` itself, which is why it answers for its own runs
+(`agent.PullRequestFramework`, implemented by `pkg/agent/claude` and
+`pkg/agent/antigravity` as "was I built `WithGrainServer`?");
+`RunDispatch` asks, and passes the answer to `BuildPrompt`. A `Framework`
+that does not implement it at all answers no, which is the safe
+direction: a run never told about a tool it happens to have loses one
+convenience, where a run told to call one it does not have burns turns on
+an error it cannot fix.
+
+What that leaves worth measuring, rather than assuming, is whether runs
+actually start calling it, and whether a run that sees a failing check
+fixes it instead of opening the pull request and stopping there.
+
 ## Deploying it
 
 `scripts/setup.sh` (bwsalmon/agents#355) is the first real answer to "how
