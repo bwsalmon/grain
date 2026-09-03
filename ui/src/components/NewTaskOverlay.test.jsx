@@ -155,6 +155,18 @@ describe("NewTaskOverlay", () => {
     expect(payload.capabilities).toEqual(["web-search"]);
   });
 
+  it("shows a picked dependency's whole task on hover", async () => {
+    const tasks = [{ id: "12", title: "Fix the login bug" }];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByPlaceholderText("Search tasks to depend on…"), "12");
+    await user.click(await screen.findByText("Fix the login bug"));
+
+    await user.hover(screen.getByText("12 Fix the login bug"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("12 Fix the login bug");
+  });
+
   it("offers a repo dropdown built from targetRepos and existing tasks' repos, instead of a bare text field", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [{ id: "1", title: "Old task", repo: "acme/other" }];
