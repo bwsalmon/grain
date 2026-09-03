@@ -21,22 +21,29 @@
 // # Where this differs from agent/claude, and why it matters
 //
 // agy has no --mcp-config flag. Its MCP servers live in a per-user config
-// file that `agy mcp add` edits, and its tool manifests are cached under
+// file that `agy mcp add` edits (~/.gemini/config/mcp_config.json), and
+// its tool manifests are cached under
 // ~/.gemini/antigravity-cli/mcp/<server>/. A per-user registration is
 // exactly the wrong shape here: two runs dispatched concurrently against
 // two different sandboxes would share one registration, and whichever
 // wrote it last would decide where both runs' tools landed. So Run gives
-// each run its own private HOME (a temp directory holding just the
-// settings file agy reads) instead of registering anything globally --
-// see writeMCPSettings. That keeps the per-run sandbox binding the
-// dispatch model depends on, and leaves the controller's real ~/.gemini
-// untouched.
+// each run its own private HOME (a temp directory holding just the config
+// file agy reads) instead of registering anything globally -- see
+// writeMCPSettings. That keeps the per-run sandbox binding the dispatch
+// model depends on, and leaves the controller's real ~/.gemini untouched.
 //
 // agy also has no --max-turns. The cap RunConfig.MaxTurns asks for is
 // therefore enforced here rather than by the binary: Run counts completed
 // agent_response steps as they stream past and cancels the subprocess
 // once the cap is reached (turnCap). procgroup.Prepare is what makes that
 // cancellation reach agy's own MCP child too, rather than orphaning it.
+//
+// agy does cap a single MCP tool call, and there is no environment
+// variable for it the way MCP_TOOL_TIMEOUT is for claude: the cap is a
+// per-server "timeoutSeconds" key in the same config file, which is why
+// mcpToolTimeoutSeconds writes one rather than Run adding to the
+// subprocess environment. See that function for the measured default and
+// why wait_for_checks makes leaving it alone the wrong answer.
 package antigravity
 
 import (
@@ -49,6 +56,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
 	"github.com/bwsalmon/grain/pkg/mcp"
@@ -394,42 +402,80 @@ func (f *Framework) pullRequestArgs(cfg agent.RunConfig) []string {
 	return args
 }
 
-// mcpSettingsJSON is the content of the settings file agy reads its MCP
+// mcpToolTimeoutSlack is how far past the longest wait wait_for_checks
+// can do the per-server cap below is set. Enough for the round trips
+// either side of the wait itself, and no more: the point is that the
+// tool's own clock runs out first, not that agy stops capping tool calls.
+const mcpToolTimeoutSlack = 2 * time.Minute
+
+// mcpToolTimeoutSeconds is the "timeoutSeconds" this run's MCP server
+// entry carries, and it is agent/claude's mcpToolTimeout in the one shape
+// agy offers: a key in the config file rather than an environment
+// variable, since agy reads no MCP_TOOL_TIMEOUT of its own.
+//
+// agy caps a single MCP tool call at three minutes when the key is
+// absent, takes a positive value as that many seconds, and treats a
+// negative one as no cap at all (measured against agy 1.1.25's own
+// mcpcore.(*McpClientSessionInstance).callToolTimeout, which is also
+// where "MCP tool call to server %q timed out after %s" comes from).
+// Three minutes is far short of wait_for_checks, which blocks for as long
+// as CI takes, up to an hour (mcp.MaxWaitForChecksTimeout). Leaving the
+// default in place would kill the call part-way through a wait the agent
+// deliberately asked for and report it as a tool failure -- the one
+// answer that is neither true nor useful, since the build it was waiting
+// on is still running and the run now has no idea how it ended. Raising
+// it to just past the tool's own maximum puts the deadline back where it
+// belongs: on grain's side, where running out of time produces a report
+// saying so.
+//
+// A finite value rather than the negative "never time out" agy also
+// accepts, for the reason the slack above gives: an MCP server that has
+// genuinely wedged should still end the call eventually.
+func mcpToolTimeoutSeconds() int {
+	return int((mcp.MaxWaitForChecksTimeout + mcpToolTimeoutSlack).Seconds())
+}
+
+// mcpSettingsJSON is the content of the config file agy reads its MCP
 // servers from: grainBinaryPath spawned with mcpArgs (built by
 // mcpServerArgs above) -- the "mcpserver" argument selects the same
 // subcommand mcpserver.go implements, so agy forking this exact command
 // is what actually starts an MCP server, rather than needing a separately
 // built binary on disk. The schema is Gemini CLI's own mcpServers map,
-// which agy inherited along with the ~/.gemini config directory.
+// which agy inherited along with the ~/.gemini config directory, plus the
+// per-server timeoutSeconds agy added to it.
 func mcpSettingsJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"mcpServers": map[string]any{
 			mcpServerName: map[string]any{
-				"command": grainBinaryPath,
-				"args":    mcpArgs,
+				"command":        grainBinaryPath,
+				"args":           mcpArgs,
+				"timeoutSeconds": mcpToolTimeoutSeconds(),
 			},
 		},
 	})
 }
 
-// settingsRelPath is where, inside the private HOME writeMCPSettings
-// builds, agy looks for the settings file above. Named once, here,
+// mcpConfigRelPath is where, inside the private HOME writeMCPSettings
+// builds, agy looks for the config file above -- the same
+// ~/.gemini/config/mcp_config.json `agy mcp add` writes and `agy mcp
+// list` reads, not the CLI's own ~/.gemini/antigravity-cli/settings.json,
+// which agy does not read MCP servers from at all. Named once, here,
 // because it is the single piece of this package that depends on agy's
 // own on-disk layout rather than on its command line or its output: if a
 // future agy moves the file, this constant is the whole change.
-var settingsRelPath = filepath.Join(".gemini", "settings.json")
+var mcpConfigRelPath = filepath.Join(".gemini", "config", "mcp_config.json")
 
 // writeMCPSettings builds the private HOME one run gets: a fresh
-// directory containing nothing but the settings file naming this run's
-// own MCP server. It returns that directory and a cleanup func the caller
+// directory containing nothing but the config file naming this run's own
+// MCP server. It returns that directory and a cleanup func the caller
 // defers.
 //
 // A private HOME rather than `agy mcp add` is the whole point -- see this
 // package's own doc comment on why a per-user registration cannot express
 // a per-run sandbox binding. It has the same effect claude's
 // --strict-mcp-config has there: the only MCP server this run can see is
-// the one written here, because there is no other settings file in the
-// HOME it was given to find one in.
+// the one written here, because there is no other config file in the HOME
+// it was given to find one in.
 func writeMCPSettings(grainBinaryPath string, mcpArgs []string) (home string, cleanup func(), err error) {
 	settings, err := mcpSettingsJSON(grainBinaryPath, mcpArgs)
 	if err != nil {
@@ -440,7 +486,7 @@ func writeMCPSettings(grainBinaryPath string, mcpArgs []string) (home string, cl
 		return "", nil, fmt.Errorf("antigravity: creating agy home: %w", err)
 	}
 	cleanup = func() { os.RemoveAll(home) }
-	path := filepath.Join(home, settingsRelPath)
+	path := filepath.Join(home, mcpConfigRelPath)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("antigravity: creating agy config dir: %w", err)

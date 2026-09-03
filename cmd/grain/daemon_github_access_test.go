@@ -29,13 +29,13 @@ import (
 	"github.com/bwsalmon/grain/pkg/secrets"
 )
 
-// agySettingsRelPath is where agent/antigravity writes the MCP settings
+// agyMCPConfigRelPath is where agent/antigravity writes the MCP config
 // file inside the private HOME it hands one run (that package's own
-// settingsRelPath, which is unexported). Duplicated rather than shared
+// mcpConfigRelPath, which is unexported). Duplicated rather than shared
 // because it is agy's on-disk layout, not grain's API: if a future agy
 // moves the file, the stub below stops finding it and this test fails
 // loudly rather than quietly asserting nothing.
-const agySettingsRelPath = ".gemini/settings.json"
+const agyMCPConfigRelPath = ".gemini/config/mcp_config.json"
 
 // stubAgentCLI writes an executable shell script at path that saves the
 // MCP configuration its invocation was handed into the file named by
@@ -100,10 +100,10 @@ func TestAgentFrameworksTellTheForkedMCPServerAboutGitHub(t *testing.T) {
 	if [ "$1" = "--mcp-config" ]; then cp "$2" "$GRAIN_TEST_MCP_CONFIG"; fi
 	shift
 done`
-	// agy has no --mcp-config: it reads a settings file out of its HOME,
-	// and agent/antigravity gives each run a private one that it deletes
-	// as Run returns.
-	const agyCapture = `cp "$HOME/` + agySettingsRelPath + `" "$GRAIN_TEST_MCP_CONFIG"`
+	// agy has no --mcp-config: it reads an mcp_config.json out of its
+	// HOME, and agent/antigravity gives each run a private one that it
+	// deletes as Run returns.
+	const agyCapture = `cp "$HOME/` + agyMCPConfigRelPath + `" "$GRAIN_TEST_MCP_CONFIG"`
 
 	const claudeTranscript = `{"type":"result","result":"ok"}`
 	const agyTranscript = `{"event":"init","init":{"cwd":"/w","tools":[],"permission_mode":"bypass"}}` + "\n" +
