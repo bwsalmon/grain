@@ -1705,7 +1705,8 @@ func testConfig() model.Config {
 		// both come back as AgentFrameworkAntigravity (see
 		// TestGetConfigNormalizesTheLegacyAgentFrameworkName below).
 		AgentFramework: model.AgentFrameworkAntigravity,
-		GeminiModel:    "gemini-2.5-pro", ClaudeModel: "claude-sonnet-5", MaxAgentTurns: 40,
+		GeminiModel:    "gemini-2.5-pro", ClaudeModel: "claude-sonnet-5", CodexModel: "gpt-5.1-codex",
+		MaxAgentTurns: 40,
 		GitHubHost: "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
 		TargetRepos:         []string{"acme/widgets", "acme/gadgets"},

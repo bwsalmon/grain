@@ -15,6 +15,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/agent/claude"
+	"github.com/bwsalmon/grain/pkg/agent/codex"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/secrets"
@@ -91,16 +92,22 @@ func TestAgentFrameworksSaysWhereToSetAMissingCredential(t *testing.T) {
 	// below comes back; absent -- every CI runner -- and the framework
 	// fails one step earlier, on the missing binary, which is a correct
 	// error about a different missing thing.
-	// -agy-path is stubbed for the same reason, both frameworks needing
-	// a binary now that agent/antigravity runs the Antigravity CLI where
-	// the in-process Gemini runtime needed nothing on the host.
+	// -agy-path and -codex-path are stubbed for the same reason, every
+	// framework needing a binary now that agent/antigravity runs the
+	// Antigravity CLI where the in-process Gemini runtime needed nothing
+	// on the host.
 	cfg := config{
 		agyPath:    filepath.Join(t.TempDir(), "agy"),
 		claudePath: filepath.Join(t.TempDir(), "claude"),
+		codexPath:  filepath.Join(t.TempDir(), "codex"),
 	}
 	build := agentFrameworks(cfg, testStore(t), testSecrets(t))
 
-	for _, framework := range []string{model.AgentFrameworkAntigravity, model.AgentFrameworkClaude} {
+	// Every framework there is, from the one list of them
+	// (model.AgentFrameworks), so a fourth added later is covered here
+	// the moment it is added rather than the moment somebody remembers
+	// this test.
+	for _, framework := range model.AgentFrameworks() {
 		_, err := build(ctx, framework)
 		if err == nil {
 			t.Fatalf("building the %s framework with no credential succeeded", framework)
@@ -168,6 +175,46 @@ func TestAgentFrameworksBuildsClaudeFromAUISetToken(t *testing.T) {
 	}
 	if _, ok := framework.(*claude.Framework); !ok {
 		t.Fatalf("framework = %T, want *claude.Framework", framework)
+	}
+}
+
+// The codex half of the two tests above: it builds from a key set in
+// the UI, and says where to install its CLI when the image has none.
+func TestAgentFrameworksBuildsCodexFromAUISetKey(t *testing.T) {
+	ctx := context.Background()
+	secretStore := testSecrets(t)
+	if err := secretStore.Set(secrets.OpenAIAPIKeySecret, secrets.AgentCredentialKey, []byte("sk-openai-fake")); err != nil {
+		t.Fatal(err)
+	}
+	// -codex-path, so this needs no codex binary on $PATH to prove the
+	// credential half.
+	cfg := config{codexPath: filepath.Join(t.TempDir(), "codex")}
+
+	framework, err := agentFrameworks(cfg, testStore(t), secretStore)(ctx, model.AgentFrameworkCodex)
+	if err != nil {
+		t.Fatalf("building the codex framework: %v", err)
+	}
+	if _, ok := framework.(*codex.Framework); !ok {
+		t.Fatalf("framework = %T, want *codex.Framework", framework)
+	}
+}
+
+func TestAgentFrameworksSaysHowToInstallAMissingCodexCLI(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	secretStore := testSecrets(t)
+	if err := secretStore.Set(secrets.OpenAIAPIKeySecret, secrets.AgentCredentialKey, []byte("sk-openai-fake")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := agentFrameworks(config{}, testStore(t), secretStore)(context.Background(), model.AgentFrameworkCodex)
+	if err == nil {
+		t.Fatal("building the codex framework with no codex binary succeeded")
+	}
+	if !strings.Contains(err.Error(), "not installed") {
+		t.Errorf("error = %v; want it to name the CLI as not installed", err)
+	}
+	if !strings.Contains(err.Error(), "Dockerfile") {
+		t.Errorf("error = %v; want it to name where the CLI comes from", err)
 	}
 }
 
@@ -271,6 +318,15 @@ func TestLiveTranscriptsPicksTheFormatPerFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "run-agy"), []byte(agyLine+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// ...and agent/codex mirrors codex's own --json, which tags its
+	// events with "type" the way claude's does -- so that key alone no
+	// longer separates those two either. codex's are dotted names from
+	// its own thread/item vocabulary, which is what tells them apart.
+	codexLine := `{"type":"item.completed","item":{"id":"item_0","type":"agent_message",` +
+		`"text":"parsing what the run produced"}}`
+	if err := os.WriteFile(filepath.Join(dir, "run-codex"), []byte(codexLine+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	text, ok, err := transcripts.Tail("run-claude")
 	if err != nil || !ok {
@@ -289,6 +345,14 @@ func TestLiveTranscriptsPicksTheFormatPerFile(t *testing.T) {
 	}
 	if strings.Contains(text, `"event"`) {
 		t.Fatalf("Tail(run-agy) = %q, want it parsed rather than handed back raw", text)
+	}
+
+	text, ok, err = transcripts.Tail("run-codex")
+	if err != nil || !ok || text != "parsing what the run produced" {
+		t.Fatalf("Tail(run-codex) = %q, %v, %v; want codex's own event stream decoded", text, ok, err)
+	}
+	if strings.Contains(text, "item.completed") {
+		t.Fatalf("Tail(run-codex) = %q, want it parsed rather than handed back raw", text)
 	}
 
 	if text, ok, err := transcripts.Tail("run-that-never-started"); err != nil || ok || text != "" {

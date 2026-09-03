@@ -106,6 +106,36 @@ func TestSetAgentKeyRejectsBlanksAndUnknownFrameworks(t *testing.T) {
 	}
 }
 
+// The codex framework's own credential, through the same endpoints: an
+// OpenAI API key, under the name cmd/grain's agentCredential resolves
+// for a codex dispatch.
+func TestSetOpenAIAPIKeyStoresItWhereTheDaemonReadsIt(t *testing.T) {
+	srv, store := testServerWithSecrets(t)
+
+	rec := do(t, srv, http.MethodPut, "/api/agent-keys/codex", `{"value":"  sk-openai-fake\n"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "sk-openai-fake") {
+		t.Fatalf("response leaked the key: %s", rec.Body)
+	}
+	got := decode[map[string]any](t, rec)
+	if got["openaiApiKeySet"] != true {
+		t.Fatalf("openaiApiKeySet = %v, want true", got["openaiApiKeySet"])
+	}
+	if got["claudeOAuthTokenSet"] != false || got["geminiApiKeySet"] != false {
+		t.Fatalf("response = %v, want only the openai key set", got)
+	}
+
+	value, err := store.Resolve(context.Background(), secrets.OpenAIAPIKeySecret)
+	if err != nil {
+		t.Fatalf("Resolve(%q) = %v", secrets.OpenAIAPIKeySecret, err)
+	}
+	if value != "sk-openai-fake" {
+		t.Fatalf("stored key = %q, want it trimmed", value)
+	}
+}
+
 func TestSettingsReportsWhichAgentKeysAreSet(t *testing.T) {
 	srv, _ := testServerWithSecrets(t)
 
@@ -116,7 +146,7 @@ func TestSettingsReportsWhichAgentKeysAreSet(t *testing.T) {
 	if !settings.AgentKeysEnabled {
 		t.Fatal("agentKeysEnabled = false on a server with a secrets store")
 	}
-	if settings.GeminiAPIKeySet || settings.ClaudeOAuthTokenSet {
+	if settings.GeminiAPIKeySet || settings.ClaudeOAuthTokenSet || settings.OpenAIAPIKeySet {
 		t.Fatalf("keys report as set before anything was stored: %+v", settings)
 	}
 
@@ -124,7 +154,7 @@ func TestSettingsReportsWhichAgentKeysAreSet(t *testing.T) {
 		t.Fatalf("setting the claude token: %d %s", rec.Code, rec.Body)
 	}
 	settings = decode[ui.Settings](t, do(t, srv, http.MethodGet, "/api/settings", ""))
-	if !settings.ClaudeOAuthTokenSet || settings.GeminiAPIKeySet {
+	if !settings.ClaudeOAuthTokenSet || settings.GeminiAPIKeySet || settings.OpenAIAPIKeySet {
 		t.Fatalf("settings = %+v, want only the claude token set", settings)
 	}
 }
