@@ -128,6 +128,9 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/metrics", s.handleGetMetrics)
 
+	s.mux.HandleFunc("GET /api/pause", s.handleGetAgentPause)
+	s.mux.HandleFunc("DELETE /api/pause", s.handleLiftAgentPause)
+
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		// staticFS is embedded at build time from a directory this package

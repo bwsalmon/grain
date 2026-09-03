@@ -4384,6 +4384,51 @@ limit, and pauses again: one wasted attempt, against a durable row that
 would have to be reconciled with a credential that may by then have been
 changed by the very operator doing the restarting.
 
+### Saying so, and lifting it by hand
+
+None of that was visible from the UI. An operator opening grain in the
+middle of a five-hour window saw a queue of ready tasks and nothing
+running, and the only places that said why were the daemon's journal and
+the detail of the attempts the pause had ended — which you have to know
+to open, on a task you have to know to pick.
+
+So the gate is wired to the UI as `ui.Config.AgentPause`, the way
+`Config.Cycles` is wired to the metrics report: an interface named in
+`pkg/ui`, satisfied by `*orchestrator.Pause` itself, handed over by
+`cmd/grain/daemon.go` — which now allocates the one `Pause` at process
+start, package-level beside `cycleTimes`, so the UI/API server and the
+reconcile loop that comes up after it are talking about the same gate.
+`GET /api/config` carries it as `agentPause` and a standing banner says
+what the provider said, when dispatch resumes, and how long that is from
+now; `GET /api/pause` is the same reading on its own for anything else
+polling.
+
+Every read goes through `Pause.Until`, never `Pause.Blocked`: `Blocked`
+is what *clears* an expired pause, as the reconcile loop's own read, and
+a browser poll must not be able to open the gate out from under the loop
+that owns it. A window whose instant has passed simply reads as not
+paused.
+
+It is deliberately not a section of `GET /api/metrics`. That report is
+computed over rows for a window that has ended; a pause is a gauge of
+what this process is doing right now, with nothing in any table behind
+it. The `cycles` section is in that report because it is an *input* to
+the same `metrics.Compute` call the rest of it comes from — a pause is
+not, and filing it there would mean learning to look for "why is nothing
+dispatching?" in a latency report.
+
+`DELETE /api/pause` — the banner's own "Resume now" — lifts a pause
+early. An operator who has just topped a plan up, or moved the deployment
+onto another agent framework, is holding information this process cannot
+have: the credential behind the refusal is not the credential the next
+run would spend, and there is no reason to sit out the rest of a window
+that no longer applies. A lift opens the gate and nothing more — the runs
+the pause cancelled are over, recorded as `model.PausedOutcome`, which no
+streak counts — so what it buys is the next tick dispatching rather than
+skipping. If the limit is in fact still in force, that run meets it and
+pauses again, which is the same self-correcting shape as a window that
+expires without having really reset.
+
 ## Every sandbox is built at a size grain chose
 
 All three dimensions of a sandbox VM were opt-in: `sandbox-cpus`,
