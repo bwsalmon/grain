@@ -74,7 +74,7 @@ func TestScheduleRoundTrips(t *testing.T) {
 	}
 }
 
-// A schedule that runs a task suite instead of filing a task: SuiteID is
+// A schedule that runs a suite instead of filing a task: SuiteID is
 // what says so, and SchedulesUsingSuite is what reads it back for
 // ui.Client.DeleteSuite's own "not out from under a schedule still
 // running it" guard.

@@ -661,7 +661,8 @@ const maxBranchCommits = 10
 // diagnosis attempt 1 already paid for; the dearest is re-attempting
 // precisely the thing that hit the wall clock -- an ending a branch
 // cannot reveal and the detail says outright ("the run exceeded its 2h0m0s
-// wall-clock limit", recorded on RunDispatch's errRunTimedOut arm).
+// wall-clock limit" -- model.RuntimeCapDetail, recorded on RunDispatch's
+// errRunTimedOut arm, and read back by model.EndingOf).
 //
 // Bounded on purpose, by maxPreviousAttempts, maxAttemptDetail and
 // maxBranchCommits: this is orientation, not a transcript store. The
@@ -1144,11 +1145,15 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errUsageLimit)
 		case runErr != nil && errors.Is(context.Cause(agentCtx), errTaskClosed):
 			outcome = "cancelled"
-			detail = "the task was closed while this run was still live"
+			// Both cancellations record "cancelled", and the sentence
+			// beside it is the only thing that says which -- so both
+			// sentences are model's (RunEnding), which is what reads
+			// them back.
+			detail = model.TaskClosedDetail
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errTaskClosed)
 		case runErr != nil && errors.Is(context.Cause(agentCtx), errRunTimedOut):
 			outcome = "cancelled"
-			detail = fmt.Sprintf("the run exceeded its %s wall-clock limit", cfg.maxRunRuntime()) + partialWorkSuffix(result)
+			detail = model.RuntimeCapDetail(cfg.maxRunRuntime()) + partialWorkSuffix(result)
 			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errRunTimedOut)
 		case runErr != nil:
 			// runErr's own text, not the wrapped form below: that form
@@ -1188,6 +1193,17 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		// whose own outcome failed to record is not worth a second write
 		// attempt on top of it.
 		finishErr = store.SetRunTranscript(ctx, d.RunID, result.Transcript)
+	}
+	// The run's own census, from the one place it exists: agent.Result,
+	// which is about to be discarded (census.go). A separate write again,
+	// after the outcome this run is judged on, and logged rather than
+	// surfaced on failure -- a measurement that cannot be taken is not a
+	// reason to fail the run being measured, the same rule
+	// Store.SetRunAgentStarted's own doc comment states.
+	if telemetry := runTelemetry(result); !telemetry.Empty() {
+		if err := store.RecordRunTelemetry(ctx, d.RunID, telemetry); err != nil {
+			log.Printf("orchestrator: run %s: recording what it did with its tools: %v", d.RunID, err)
+		}
 	}
 	// Only now, with the store already carrying whatever final story this
 	// run has to tell (FinishRun and SetRunTranscript, just above), does

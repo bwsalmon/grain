@@ -13,24 +13,24 @@ import (
 var QualificationPrincipal = Principal{Kind: PrincipalAutomation, ID: "qualification"}
 
 // QualificationItem is one entry in a repo's qualification plan: a
-// TaskTemplate (bwsalmon/agents#516) this plan schedules, how many times
-// it fires, and which other items in the same plan must finish first.
-// TemplateID is what DependsOn names -- there is no separate key, since a
-// template may appear at most once per plan (QualificationPlan.Validate
-// rejects a duplicate), so its own id already identifies this item
-// uniquely within the plan.
+// Template (bwsalmon/agents#516) this plan schedules, how many times it
+// fires, and which other items in the same plan must finish first.
+// TemplateID is what DependsOn names -- there is no separate key, since
+// a template may appear at most once per plan
+// (QualificationPlan.Validate rejects a duplicate), so its own id
+// already identifies this item uniquely within the plan.
 //
-// There is no per-item content here -- no Title, nothing a TaskTemplate
-// itself already carries -- because CreateQualificationRun resolves each
-// item's template fresh from the store at the moment a candidate is
-// qualified, the same "not a stale copy" discipline fireTaskSchedule
+// There is no per-item content here -- no Title, nothing a Template
+// itself already carries -- because CreateQualificationRun resolves
+// each item's template fresh from the store at the moment a candidate
+// is qualified, the same "not a stale copy" discipline fireTaskSchedule
 // already holds TemplateID to. Base is never among that content either
-// way (TaskTemplate's own doc comment on why): CreateQualificationRun
+// way (Template's own doc comment on why): CreateQualificationRun
 // always targets the candidate's own branch.
 type QualificationItem struct {
 	TemplateID string
 	// Repeat is how many instances of this item's template one run
-	// fires -- the issue's own "specify that a task template is to be
+	// fires -- the issue's own "specify that a template is to be
 	// executed multiple times." Always >= 1.
 	Repeat int
 	// DependsOn is every other item's TemplateID in the same plan that

@@ -126,11 +126,11 @@ func putQualificationPlan(ctx context.Context, tx *sql.Tx, plan QualificationPla
 	return nil
 }
 
-// QualificationPlansUsingTemplate returns every repo whose qualification
-// plan has an item referencing templateID -- what ui.Client.DeleteTemplate
-// checks before deleting one out from under a plan that still schedules
-// from it, SchedulesUsingTemplate's own reasoning applied to this second
-// caller of TaskTemplate.
+// QualificationPlansUsingTemplate returns every repo whose
+// qualification plan has an item referencing templateID -- what
+// ui.Client.DeleteTemplate checks before deleting one out from under a
+// plan that still schedules from it, SchedulesUsingTemplate's own
+// reasoning applied to this second caller of Template.
 func (s *Store) QualificationPlansUsingTemplate(ctx context.Context, templateID string) ([]RepoRef, error) {
 	var out []RepoRef
 	err := each(ctx, s.db,
@@ -234,22 +234,23 @@ func (s *Store) QualifiableActiveCandidates(ctx context.Context) ([]Candidate, e
 
 // CreateQualificationRun instantiates plan's items against candidate as
 // real tasks -- the issue's own "schedule these tasks and run them
-// through against the rc". Every item's TaskTemplate is resolved fresh
-// from the store here, not from whatever content a UI had in hand when
-// the plan was last saved (fireTaskSchedule's own "not a stale copy"
+// through against the rc". Every item's Template is resolved fresh from
+// the store here, not from whatever content a UI had in hand when the
+// plan was last saved (fireTaskSchedule's own "not a stale copy"
 // discipline for bwsalmon/agents#516, applied again): a template edited
 // since is what actually gets filed, and a template deleted out from
 // under a plan (ui.Client.DeleteTemplate tries to prevent this, but
-// nothing stops a row from disappearing some other way) fails this whole
-// run's creation with a plain error, retried next cycle exactly like any
-// other store error reconcileQualifications already tolerates.
+// nothing stops a row from disappearing some other way) fails this
+// whole run's creation with a plain error, retried next cycle exactly
+// like any other store error reconcileQualifications already tolerates.
 //
-// Every instance's Target is candidate.Repo and Base is candidate.Branch
-// -- a template carries no target of its own (model.TaskTemplate's own
-// doc comment on why), so there is nothing to reconcile it against: the
-// entire point of a qualification task is running against a branch that
-// did not exist until this candidate was cut, which only the plan's own
-// repo and this candidate's own branch can ever say.
+// Every instance's Target is candidate.Repo and Base is
+// candidate.Branch -- a template carries no target of its own
+// (model.Template's own doc comment on why), so there is nothing to
+// reconcile it against: the entire point of a qualification task is
+// running against a branch that did not exist until this candidate was
+// cut, which only the plan's own repo and this candidate's own branch
+// can ever say.
 //
 // A dependency between two items becomes a depends-on link from every
 // instance of the dependent to every instance of the dependency, so the
@@ -277,9 +278,9 @@ func (s *Store) CreateQualificationRun(ctx context.Context, candidate Candidate,
 		return QualificationRun{}, fmt.Errorf("qualification plan for %s: %w", candidate.Repo, err)
 	}
 
-	templates := make(map[string]TaskTemplate, len(ordered))
+	templates := make(map[string]Template, len(ordered))
 	for _, it := range ordered {
-		tmpl, err := s.GetTaskTemplate(ctx, it.TemplateID)
+		tmpl, err := s.GetTemplate(ctx, it.TemplateID)
 		if err != nil {
 			return QualificationRun{}, fmt.Errorf("resolving template %s: %w", it.TemplateID, err)
 		}

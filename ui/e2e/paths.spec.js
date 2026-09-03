@@ -20,10 +20,10 @@ test("loads directly into each sidebar sub-page from its URL", async ({ page }) 
   await expect(page.getByRole("heading", { name: "Schedules" })).toBeVisible();
 
   await page.goto("/templates");
-  await expect(page.getByRole("heading", { name: "Task templates" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Templates" })).toBeVisible();
 
   await page.goto("/suites");
-  await expect(page.getByRole("heading", { name: "Task suites" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Suites" })).toBeVisible();
 
   // /logs and /sandboxes were sidebar destinations of their own until
   // both moved into Settings' Debug tab (bwsalmon/agents#623), then out
@@ -104,7 +104,7 @@ test("deep-links to a schedule, a template and a suite from their own URLs", asy
   await expect(page.getByLabel("Name")).toHaveValue(`E2E deep-link template ${stamp}`);
 
   await page.goto(`/suites/${suite.id}`);
-  await expect(page.getByRole("heading", { name: "Edit task suite" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Edit suite" })).toBeVisible();
   await expect(page.getByLabel("Name")).toHaveValue(`E2E deep-link suite ${stamp}`);
 
   await page.goto(`/schedules/${schedule.id}`);

@@ -80,7 +80,7 @@ const (
 	ReasonReview        OriginReason = "review"        // review threads asked for it
 	ReasonProposal      OriginReason = "proposal"      // an agent or parent proposed it
 	ReasonQualification OriginReason = "qualification" // a release candidate's qualification plan fired it
-	ReasonSuite         OriginReason = "suite"         // a task suite run fired it (bwsalmon/agents#642)
+	ReasonSuite         OriginReason = "suite"         // a suite run fired it (bwsalmon/agents#642)
 )
 
 func (r OriginReason) Valid() bool {

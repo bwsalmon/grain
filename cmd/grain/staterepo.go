@@ -2,17 +2,19 @@
 // repository lives under -data-dir, how it is opened, what authenticates
 // its pushes, and the loop that keeps it up to date with the database.
 //
-// The shape is deliberately one-directional at runtime. The repository
-// is loaded into the database once, at startup (loadStateRepo), and
-// exported back out on a timer after that (stateSyncLoop). grain is the
-// only writer of these files while it is running -- the UI and the CLI
-// reach it over REST rather than opening the store, which is this
-// file's whole reason for being able to say "no merges" -- so a sync is
-// a commit and a push, never a resolve. A change an agent makes arrives
-// the other way, as a merged pull request against the repository, and
-// takes effect the next time the daemon starts: the import is a
-// wholesale replacement of every row, which is not something to do
-// underneath runs that are live.
+// Traffic runs both ways on the timer (stateSyncLoop), but not
+// symmetrically. grain is the only writer of these files while it is
+// running -- the UI and the CLI reach it over REST rather than opening
+// the store, which is this file's whole reason for being able to say "no
+// merges" -- so the outward half is a commit and a push, never a
+// resolve. The inward half is a fast-forward pull, and what it may do
+// with what arrives depends on which rows changed: the whole database is
+// replaced only at startup (staterepo.Load), because that replacement is
+// what makes a merged deletion delete something and is not an operation
+// to run underneath runs holding task and run ids. On a tick, only the
+// settings tables an agent actually proposes changes to are imported
+// (staterepo.Apply and its SettingsTables), which is enough for a merged
+// settings change to take effect without a restart.
 package main
 
 import (
@@ -166,25 +168,29 @@ func hostnameOrLocalhost() string {
 	return "localhost"
 }
 
-// stateSyncInterval is how often the daemon writes its database back out
-// to the repository.
+// stateSyncInterval is how often the daemon reconciles its database with
+// the repository, in both directions.
 //
 // A timer rather than a hook on every write: the export is a full dump,
 // which is cheap at grain's scale but not free, and batching a burst of
 // writes into one commit produces a history a human can actually read --
 // one commit per reconcile cycle's worth of change rather than one per
-// row. Nothing is lost by the delay, because the database, not the
-// repository, is what the daemon reads from while it runs.
+// row. Nothing is lost outbound by the delay, because the database, not
+// the repository, is what the daemon reads from while it runs; inbound
+// it is the upper bound on how long a merged settings change takes to
+// become live, which at half a minute is a good deal less than the
+// restart it used to take.
 const stateSyncInterval = 30 * time.Second
 
-// stateSyncLoop exports, commits and pushes until ctx is cancelled, then
-// does it once more on the way out so a clean shutdown leaves nothing
-// unwritten.
+// stateSyncLoop pulls, applies, exports, commits and pushes until ctx is
+// cancelled, then does it once more on the way out so a clean shutdown
+// leaves nothing unwritten.
 //
 // A failure is logged and the loop continues. A remote that is
 // unreachable, or a credential that has expired, must not stop grain
 // from running: the database is still the live state, and the next tick
-// will push everything that accumulated in the meantime.
+// will push everything that accumulated in the meantime -- and will try
+// the pull again.
 func stateSyncLoop(ctx context.Context, sync func(context.Context) (bool, error)) {
 	ticker := time.NewTicker(stateSyncInterval)
 	defer ticker.Stop()

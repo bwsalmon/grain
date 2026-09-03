@@ -58,6 +58,29 @@ type CapabilityStatus struct {
 	// what let a deployment sit with a fully configured, "Ready" gcp-key
 	// that no task had ever been able to ask for.
 	Grantable bool `json:"grantable"`
+	// Checkable reports whether this deployment can actually *test* this
+	// capability's standing credential -- whether grain ships a check for
+	// it (model.CredentialChecker, capabilityCheckable) and this UI is
+	// wired to something that can run one (Config.CapabilityChecks). It
+	// is what decides whether the pane offers the action at all; the
+	// answer a check gives is POST /api/capabilities/{id}/check's own
+	// (CapabilityCheck), never stored here.
+	//
+	// A third axis again, beside Ready and Grantable, and for the reason
+	// this whole field exists: Ready means *configured* -- a project, an
+	// account and a secret are all set -- and no configuration pane can
+	// see whether the key inside that secret is one the far end still
+	// accepts. A checkable capability is one where that question has an
+	// answer somebody can go and get; it says nothing about what the
+	// answer is.
+	//
+	// False for a capability holding no standing credential at all
+	// (self-debug, self-repair, bootstrap-playbooks: nothing to go stale
+	// behind grain's back), and false on a UI not colocated with a
+	// daemon that could make the call -- the same
+	// nil-means-unavailable contract MissingSecrets already follows for
+	// a nil Config.Secrets.
+	Checkable bool `json:"checkable,omitempty"`
 	// Default reports whether this capability is in
 	// model.Config.DefaultCapabilities: whether every task filed on this
 	// deployment starts out holding it, rather than only the ones
@@ -195,14 +218,59 @@ var capabilityDisplayNames = map[string]string{
 // whether GCPProject is set, since that constant, not the project, is
 // what Requires needs to name.
 func capabilityCatalog() []model.CapabilitySpec {
-	return []model.CapabilitySpec{
-		gcpkey.NewProvider(gcpkey.Config{}).Spec(),
-		geminikey.New("", model.CredentialRef{Name: gcpkey.DefaultMinterCredential}).Spec(),
-		githubsandbox.NewProvider(githubsandbox.Config{}).Spec(),
-		selfdebug.New().Spec(),
-		selfrepair.New().Spec(),
-		bootstrap.New().Spec(),
+	providers := capabilityProviderCatalog()
+	out := make([]model.CapabilitySpec, 0, len(providers))
+	for _, p := range providers {
+		out = append(out, p.Spec())
 	}
+	return out
+}
+
+// capabilityProviderCatalog is the providers capabilityCatalog above
+// reads its specs out of, kept as providers rather than specs alone for
+// the one question a spec cannot answer: whether this capability's
+// standing credential can be *checked* (model.CredentialChecker), which
+// is a property of the provider's own code and not of any deployment's
+// configuration -- so it is answered here, from grain's own build, the
+// same way the rest of the catalog is.
+func capabilityProviderCatalog() []model.CapabilityProvider {
+	return []model.CapabilityProvider{
+		gcpkey.NewProvider(gcpkey.Config{}),
+		geminikey.New("", model.CredentialRef{Name: gcpkey.DefaultMinterCredential}),
+		githubsandbox.NewProvider(githubsandbox.Config{}),
+		selfdebug.New(),
+		selfrepair.New(),
+		bootstrap.New(),
+	}
+}
+
+// capabilityCheckable reports whether grain ships a live credential
+// check for this capability -- whether its provider implements
+// model.CredentialChecker. Read off capabilityProviderCatalog above and
+// not off the deployment: a capability either has a check written for it
+// in this build or it does not, and whether *this* deployment can run
+// one is the separate question Config.CapabilityChecks answers.
+// capabilityShipped reports whether name is a capability this build
+// ships a provider for at all -- the catalog above, regardless of
+// whether this deployment configures it or the picker offers it.
+func capabilityShipped(name string) bool {
+	for _, spec := range capabilityCatalog() {
+		if spec.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func capabilityCheckable(name string) bool {
+	for _, p := range capabilityProviderCatalog() {
+		if p.Spec().Name != name {
+			continue
+		}
+		_, ok := p.(model.CredentialChecker)
+		return ok
+	}
+	return false
 }
 
 // missingConfigFor is capabilityProviders' own gates
@@ -377,6 +445,7 @@ func (c *Client) capabilityStatuses(cfg model.Config, repoConfigs []model.RepoCo
 			Name:          capabilityDisplayNames[spec.Name],
 			Description:   spec.Description,
 			Grantable:     grantable,
+			Checkable:     c.Config.CapabilityChecks != nil && capabilityCheckable(spec.Name),
 			Default:       slices.Contains(cfg.DefaultCapabilities, spec.Name),
 			DefaultRepos:  reposByCapability[spec.Name],
 			MissingConfig: missingConfigFor(spec.Name, cfg),

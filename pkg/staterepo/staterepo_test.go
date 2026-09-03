@@ -9,6 +9,7 @@ package staterepo_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -472,6 +473,178 @@ func TestARepositoryFromANewerBuildIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "newer build") {
 		t.Fatalf("the error does not say what is wrong: %v", err)
+	}
+}
+
+// Apply is the same merge arriving at a daemon that is already running:
+// the settings in it become live without a restart, and the tables the
+// daemon writes for itself -- the tasks and runs a live reconcile loop is
+// holding ids from -- are not replaced underneath it.
+func TestApplyMakesAMergedSettingsChangeLiveWithoutARestart(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", Body: "as configured", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// An agent's pull request against the template, merged.
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	path := filepath.Join(work, staterepo.TablesDir, "task_template.json")
+	edited := strings.Replace(read(t, path), "Run the nightly sweep", "Run the nightly sweep, twice", 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatalf("editing the dump: %v", err)
+	}
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "Retitle the template")
+	git(t, work, "push", "--quiet", "origin", "main")
+
+	// Meanwhile grain keeps running, and files a task the repository has
+	// never heard of -- exactly the row a whole-database import would
+	// take away.
+	if err := store.PutTask(ctx, task("filed-while-the-pr-was-open")); err != nil {
+		t.Fatalf("putting a task: %v", err)
+	}
+
+	applied, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion)
+	if err != nil {
+		t.Fatalf("applying: %v", err)
+	}
+	if !applied {
+		t.Fatal("a merged commit arrived and nothing was applied")
+	}
+	tmpl, err := store.GetTaskTemplate(ctx, "tpl-1")
+	if err != nil || tmpl == nil {
+		t.Fatalf("reading the template: %v %v", tmpl, err)
+	}
+	if tmpl.Title != "Run the nightly sweep, twice" {
+		t.Fatalf("the merged change is not live: %q", tmpl.Title)
+	}
+	if got, err := store.GetTask(ctx, "filed-while-the-pr-was-open"); err != nil || got == nil {
+		t.Fatalf("applying a settings change took a task with it: %v %v", got, err)
+	}
+	// A second Apply with nothing new on the remote is a no-op, or the
+	// daemon would re-import on every tick.
+	if applied, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil || applied {
+		t.Fatalf("a second apply with nothing to pull: applied=%v err=%v", applied, err)
+	}
+	// And the commit counts as loaded, so a restart does not import the
+	// whole of it back over the task filed since.
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading after applying: %v", err)
+	}
+	if got, err := store.GetTask(ctx, "filed-while-the-pr-was-open"); err != nil || got == nil {
+		t.Fatalf("a restart after an apply lost the task: %v %v", got, err)
+	}
+}
+
+// Within the settings tables the import is still a replacement, which is
+// what makes a merged deletion delete something.
+func TestApplyDeletesASettingAMergeRemoved(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+		ID: "tpl-1", Name: "retired", Title: "Something nobody wants any more", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	path := filepath.Join(work, staterepo.TablesDir, "task_template.json")
+	if err := os.WriteFile(path, []byte("[]\n"), 0o644); err != nil {
+		t.Fatalf("emptying the dump: %v", err)
+	}
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "Delete the template")
+	git(t, work, "push", "--quiet", "origin", "main")
+
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying: %v", err)
+	}
+	got, err := store.GetTaskTemplate(ctx, "tpl-1")
+	if err != nil {
+		t.Fatalf("reading the template: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("a merged deletion did not delete: %+v", got)
+	}
+}
+
+// A dump this build cannot read has to be reported as arrived-but-not-
+// applied, because the daemon's own cycle keys on that: exporting over a
+// working tree in that state would commit a revert of what was merged
+// and push it.
+func TestApplyRefusesADumpFromANewerBuild(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// A host running a later build pushed its own dump.
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	tmplPath := filepath.Join(work, staterepo.TablesDir, "task_template.json")
+	edited := strings.Replace(read(t, tmplPath), "Run the nightly sweep", "Written by a newer build", 1)
+	if err := os.WriteFile(tmplPath, []byte(edited), 0o644); err != nil {
+		t.Fatalf("editing the dump: %v", err)
+	}
+	if err := staterepo.WriteSchemaVersion(work, model.SchemaVersion+1); err != nil {
+		t.Fatalf("stamping: %v", err)
+	}
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "From a newer build")
+	git(t, work, "push", "--quiet", "origin", "main")
+
+	_, err = staterepo.Apply(ctx, repo, db, model.SchemaVersion)
+	if !errors.Is(err, staterepo.ErrNotApplied) {
+		t.Fatalf("a dump from a newer build: got %v, want an ErrNotApplied", err)
+	}
+	if !errors.Is(err, staterepo.ErrSchemaTooNew) {
+		t.Fatalf("the error does not say what is wrong: %v", err)
+	}
+	tmpl, err := store.GetTaskTemplate(ctx, "tpl-1")
+	if err != nil || tmpl == nil {
+		t.Fatalf("reading the template: %v %v", tmpl, err)
+	}
+	if tmpl.Title != "Run the nightly sweep" {
+		t.Fatalf("a dump this build cannot read was imported anyway: %q", tmpl.Title)
+	}
+	// And it keeps saying so. The commit is already fetched, so a second
+	// Apply pulls nothing new -- if that were what it keyed on it would
+	// report all clear, and the caller would export the database over a
+	// working tree holding a merge nothing has taken up.
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); !errors.Is(err, staterepo.ErrNotApplied) {
+		t.Fatalf("applying again with nothing left to fetch: got %v, want an ErrNotApplied", err)
 	}
 }
 
