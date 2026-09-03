@@ -309,6 +309,11 @@ func daemon(args []string) {
 		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM, passed as `konturctl vm "+
 			"create`'s own -memory-mb (only used with -kontur-sandboxes); 0 leaves bwsalmon/kontur's own "+
 			"default in place. Overridable per task from the UI/API (model.Task.SandboxMemoryMB)"+seedOnly)
+	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
+		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM, passed as `konturctl "+
+			"vm create`'s own -disk-size-gb (only used with -kontur-sandboxes); 0 leaves the VM's disk as large "+
+			"as the guest image behind it, which is what every sandbox got before this flag existed. "+
+			"Overridable per task from the UI/API (model.Task.SandboxDiskGB)"+seedOnly)
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -386,7 +391,7 @@ func daemon(args []string) {
 		konturCreateArgs: konturCreateArgs, konturNet: *konturNet,
 		konturBaseIP: *konturBaseIP, konturBasePort: *konturBasePort,
 		konturGitProxyHost: *konturGitProxyHost,
-		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB,
+		sandboxCPUs:        *sandboxCPUs, sandboxMemoryMB: *sandboxMemoryMB, sandboxDiskGB: *sandboxDiskGB,
 	}); err != nil {
 		log.Fatalf("grain daemon: %v", err)
 	}
@@ -489,13 +494,15 @@ type config struct {
 	// why a kontur VM cannot reach that default (bwsalmon/agents#567).
 	// Required whenever konturSandboxes is set; unused otherwise.
 	konturGitProxyHost string
-	// sandboxCPUs and sandboxMemoryMB are store-backed
-	// (model.Config.SandboxCPUs/SandboxMemoryMB, bwsalmon/agents#534),
+	// sandboxCPUs, sandboxMemoryMB and sandboxDiskGB are store-backed
+	// (model.Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB,
+	// bwsalmon/agents#534 and grain/task-41),
 	// like poll-interval and the rest of the seedOnly flags above --
 	// only consulted with -kontur-sandboxes, the same as every
 	// other kontur* field here.
 	sandboxCPUs     int
 	sandboxMemoryMB int
+	sandboxDiskGB   int
 }
 
 // run wires every piece pkg/orchestrator needs from real, on-disk material
@@ -546,6 +553,7 @@ func run(ctx context.Context, cfg config) error {
 			Port:            cfg.konturBasePort,
 			DefaultCPUs:     cfg.sandboxCPUs,
 			DefaultMemoryMB: cfg.sandboxMemoryMB,
+			DefaultDiskGB:   cfg.sandboxDiskGB,
 		})
 		sandboxes = konturSandboxes
 	} else {
@@ -1309,9 +1317,9 @@ func (l *liveConfig) refresh(ctx context.Context, deps *orchestrator.Deps) (poll
 		// dispatch) rather than seeing one change underneath it.
 		deps.Config.Capabilities = model.NewCapabilityRegistry(capabilityProviders(now)...)
 	}
-	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB {
+	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB || now.sandboxDiskGB != was.sandboxDiskGB {
 		if shaper, ok := l.sandboxes.(defaultShaper); ok {
-			shaper.SetDefaultShape(orchestrator.Shape{CPUs: now.sandboxCPUs, MemoryMB: now.sandboxMemoryMB})
+			shaper.SetDefaultShape(orchestrator.Shape{CPUs: now.sandboxCPUs, MemoryMB: now.sandboxMemoryMB, DiskGB: now.sandboxDiskGB})
 		}
 	}
 	return now.pollInterval != was.pollInterval
@@ -1342,6 +1350,7 @@ func (c config) changesFrom(prev config) []string {
 	note("target-repos", prev.targetRepos, c.targetRepos)
 	note("sandbox-cpus", prev.sandboxCPUs, c.sandboxCPUs)
 	note("sandbox-memory-mb", prev.sandboxMemoryMB, c.sandboxMemoryMB)
+	note("sandbox-disk-gb", prev.sandboxDiskGB, c.sandboxDiskGB)
 	return changes
 }
 
@@ -1412,6 +1421,7 @@ func (c config) logStoreOverrides(mc model.Config) {
 	warn("target-repos", c.targetRepos, mc.TargetRepos)
 	warn("sandbox-cpus", c.sandboxCPUs, mc.SandboxCPUs)
 	warn("sandbox-memory-mb", c.sandboxMemoryMB, mc.SandboxMemoryMB)
+	warn("sandbox-disk-gb", c.sandboxDiskGB, mc.SandboxDiskGB)
 }
 
 // toModelConfig is the flag-parsed subset of config that mirrors
@@ -1432,7 +1442,7 @@ func (c config) toModelConfig() model.Config {
 	mc.GitHubHost, mc.GitHubInsecureHTTP = c.githubHost, c.githubInsecureHTTP
 	mc.GCPProject, mc.GCPServiceAccountEmail = c.gcpProject, c.gcpServiceAccountEmail
 	mc.TargetRepos = c.targetRepos
-	mc.SandboxCPUs, mc.SandboxMemoryMB = c.sandboxCPUs, c.sandboxMemoryMB
+	mc.SandboxCPUs, mc.SandboxMemoryMB, mc.SandboxDiskGB = c.sandboxCPUs, c.sandboxMemoryMB, c.sandboxDiskGB
 	return mc
 }
 
@@ -1487,6 +1497,7 @@ func (c config) withModelConfig(mc model.Config) config {
 	c.targetRepos = mc.TargetRepos
 	c.sandboxCPUs = mc.SandboxCPUs
 	c.sandboxMemoryMB = mc.SandboxMemoryMB
+	c.sandboxDiskGB = mc.SandboxDiskGB
 	return c
 }
 
@@ -1814,8 +1825,10 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		Sandboxes: sandboxHealthAdapter{sandboxes},
 		// hostStats reads this same process's own machine, not any one
 		// sandbox -- see pkg/sysstat's own doc comment on why that's a
-		// separate reading from Sandboxes above.
-		HostStats: hostStats,
+		// separate reading from Sandboxes above. It takes the data
+		// directory because the disk figure has to name a filesystem
+		// (hostStats' own doc comment on why that one).
+		HostStats: func() (ui.HostPressure, error) { return hostStats(cfg.dataDir) },
 		// ReconcilerDown mirrors this same process's own package-level
 		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
 		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
@@ -1964,6 +1977,8 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 			LoadAverage:   s.LoadAverage,
 			MemoryUsedMB:  s.MemoryUsedMB,
 			MemoryTotalMB: s.MemoryTotalMB,
+			DiskUsedMB:    s.DiskUsedMB,
+			DiskTotalMB:   s.DiskTotalMB,
 		}
 	}
 	return out
@@ -1973,17 +1988,34 @@ func (a sandboxHealthAdapter) Health(ctx context.Context) []ui.SandboxSnapshot {
 // CPU-load/memory pressure, read straight out of /proc by pkg/sysstat --
 // see that package's own doc comment for why this, not any one sandbox,
 // is what it reports.
-func hostStats() (ui.HostPressure, error) {
+//
+// dataDir names the filesystem the disk reading describes. Not "/": the
+// daemon runs in a container whose root filesystem is an image layer
+// nobody's runs fill up, while -data-dir is on the host volume that
+// holds the store *and* (in scripts/setup.sh's own layout) every
+// sandbox VM's disk overlay -- the one that actually runs out
+// (grain/task-41).
+//
+// A failing disk reading is left as 0/0 rather than failing the whole
+// call: load and memory came from a different file and are still good,
+// and the pane already reads 0/0 as "no figure to show" for a sandbox.
+// It is also the reading most likely to be unavailable for an
+// uninteresting reason -- a non-Linux developer machine -- which should
+// not cost the two readings beside it.
+func hostStats(dataDir string) (ui.HostPressure, error) {
 	snap, err := sysstat.Read()
 	if err != nil {
 		return ui.HostPressure{}, err
 	}
+	diskTotalMB, diskUsedMB, _ := sysstat.DiskUsage(dataDir)
 	return ui.HostPressure{
 		LoadAverage1:  snap.LoadAverage1,
 		LoadAverage5:  snap.LoadAverage5,
 		LoadAverage15: snap.LoadAverage15,
 		MemoryUsedMB:  snap.MemUsedMB,
 		MemoryTotalMB: snap.MemTotalMB,
+		DiskUsedMB:    diskUsedMB,
+		DiskTotalMB:   diskTotalMB,
 	}, nil
 }
 

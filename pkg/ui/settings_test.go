@@ -471,7 +471,7 @@ func TestSettingsReportsWhichSettingsNeedARestart(t *testing.T) {
 	// deliberately absent: this list is what the UI annotates, so
 	// anything named here is a promise that it cannot be applied live.
 	for _, live := range []string{"pollInterval", "maxConcurrent", "geminiModel", "claudeModel",
-		"maxAgentTurns", "agentFramework", "gcpProject", "sandboxCpus", "sandboxMemoryMb"} {
+		"maxAgentTurns", "agentFramework", "gcpProject", "sandboxCpus", "sandboxMemoryMb", "sandboxDiskGb"} {
 		if contains(fresh.RestartRequired, live) {
 			t.Errorf("restartRequired names %q, which the daemon applies without a restart", live)
 		}

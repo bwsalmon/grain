@@ -116,6 +116,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       autoMerge: form.elements.autoMerge.checked,
       sandboxCpus: parseInt(data.get("sandboxCpus"), 10) || 0,
       sandboxMemoryMb: parseInt(data.get("sandboxMemoryMb"), 10) || 0,
+      sandboxDiskGb: parseInt(data.get("sandboxDiskGb"), 10) || 0,
       // "" is the deployment default, not a framework: the server reads
       // an empty agentFramework as "whichever one this deployment is set
       // to when the task dispatches" (model.Task.AgentFramework).
@@ -339,6 +340,17 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               <TextField
                 name="sandboxMemoryMb"
                 label="Memory (MiB)"
+                helperText="blank/0 uses the deployment default"
+                type="number"
+                inputProps={{ min: 0, step: 1 }}
+                autoComplete="off"
+                fullWidth
+                margin="normal"
+                size="small"
+              />
+              <TextField
+                name="sandboxDiskGb"
+                label="Disk (GiB)"
                 helperText="blank/0 uses the deployment default"
                 type="number"
                 inputProps={{ min: 0, step: 1 }}

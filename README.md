@@ -1675,7 +1675,8 @@ is noticed: once per tick, before the cycle, `liveConfig.refresh`
 re-reads `grain_config` and hands each change to whatever it configures
 — its own ticker for `poll-interval`, a rebuilt `model.CapabilityRegistry`
 for `gcp-project`/`gcp-agent-service-account`, and
-`KonturSandboxes.SetDefaultShape` for `sandbox-cpus`/`sandbox-memory-mb`.
+`KonturSandboxes.SetDefaultShape` for
+`sandbox-cpus`/`sandbox-memory-mb`/`sandbox-disk-gb`.
 The rest were already read per cycle or per dispatch, or gained it here:
 `RunCycle` re-reads `max-concurrent` *and* `max-agent-turns`;
 `dispatchConfig` re-reads `agent-framework`, `gemini-model` and
@@ -1975,7 +1976,8 @@ startup: switching the default in Settings takes effect on the next run,
 not the next restart. A task that names one instead
 (`agentFramework` on `POST /api/tasks`, or the picker under New task ->
 Advanced options) overrides it for that task alone -- the same
-"zero means unset" per-task override `SandboxCPUs`/`SandboxMemoryMB`
+"zero means unset" per-task override
+`SandboxCPUs`/`SandboxMemoryMB`/`SandboxDiskGB`
 already are, for the same reason: a task filed with no choice must
 follow the deployment wherever it is set later, rather than pin itself
 to whatever was configured the moment it was filed.
@@ -2635,3 +2637,77 @@ smaller idea than a pool of assignments, and does not bring slots back.
 The sandbox-health pane changed meaning with everything else: it reports
 live sandboxes, so an idle deployment shows nothing rather than a table
 of idle slots.
+
+## Disk is the third dimension of a sandbox's shape
+
+A sandbox VM's size had two knobs — `sandbox-cpus` and
+`sandbox-memory-mb`, deployment-wide in Settings and overridable per task
+— and no third. Its disk was whatever the guest image happened to be:
+`konturctl` gives each VM a copy-on-write qcow2 overlay backed by that
+image, and an overlay is created at exactly the image's own virtual size,
+which `scripts/kontur/build-guest.sh` packs to the rootfs plus 20%
+headroom. That is a few hundred megabytes of slack for every run, and a
+build-heavy checkout spends it: the run fails part way through with a
+disk-full error, on a VM that had CPUs and memory to spare.
+
+`sandbox-disk-gb` is that knob, everywhere the other two already are:
+`model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
+tab in Settings and the shape override under New task -> Advanced
+options, `orchestrator.Shape.DiskGB` resolved per dimension against the
+deployment default, and `konturctl vm create -disk-size-gb` at the one
+moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
+is left off the create entirely, so a deployment that never sets one
+passes exactly the arguments it passed before.
+
+Two things about it are genuinely unlike CPUs and memory, and both are
+visible in the code:
+
+- **There is no default to show.** `ui.Settings` reports
+  `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
+  what is really in effect rather than a misleading literal 0. Disk has
+  no such constant: an unset disk is however large *this deployment's*
+  guest image is, which is a property of an image somebody built, not a
+  number this build can name. The field has no placeholder, and says so
+  in words instead.
+- **A bigger disk is not by itself more space.** The image's filesystem
+  ends where it ended; the extra is unallocated until something grows it.
+  `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
+  runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
+  disk was not enlarged and a one-line grow on one whose was.
+
+**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
+snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
+disk-size field, and `writeQcow2Overlay` — which already takes the
+virtual size as an argument — is called with the source image's size
+unconditionally. Passing the flag against a `konturctl` without it fails
+the create, which is why zero omits it rather than sending an explicit
+size: a deployment that has not set one is unaffected either way, and a
+deployment that sets one has said out loud that it expects the flag to
+work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
+the other half of this, and belongs there rather than as a local patch
+here — see `third_party/kontur/VENDORED.md`.
+
+### Monitoring it
+
+Setting a size is half the ask; the other half is seeing whether it was
+the right one. The sandbox-health pane now reports disk alongside load
+average and memory, from both ends:
+
+- **Per sandbox.** `KonturSandboxes.sandboxHealth` already pulled
+  `/proc/loadavg` and `/proc/meminfo` out of the guest in one command
+  over the same transport a run's own tools use; it now asks for
+  `df -Pk /` in that same command rather than paying a second guest login
+  out of the five-second health budget. `-P` is what makes the parse
+  reliable — one line per filesystem, six columns — and the row is found
+  by shape ("the line whose last field is `/`") rather than by position,
+  so the `/proc` lines sharing the stream cannot be mistaken for it.
+- **For the host.** `pkg/sysstat` gains `DiskUsage`, one `statfs` call,
+  which `hostStats` asks about the daemon's own `-data-dir` rather than
+  about `/`: the daemon runs in a container whose root filesystem is an
+  image layer nobody's runs fill, while the data directory is on the host
+  volume that holds the store *and* every VM's disk overlay. That is the
+  disk a deployment actually runs out of.
+
+Both report 0/0 when there is no reading to be had, which the pane shows
+as a dash and the trend charts skip rather than plotting as an empty
+disk — the same "unavailable is not zero" treatment memory already got.

@@ -182,9 +182,11 @@ export default function SettingsOverlay({ onClose, showError }) {
     const payload = {};
 
     // An empty box is a deliberate "go back to the default" (bwsalmon/agents#610),
-    // not "leave it alone" -- unlike every other field on this pane, these two
-    // pre-fill that default in faintly, so an operator who never touched them
-    // and one who cleared them back to blank on purpose type the same thing here.
+    // not "leave it alone": unlike every other field on this pane, an unset one
+    // of these reads as blank rather than as its stored value, so an operator
+    // who never touched it and one who cleared it back to blank on purpose type
+    // the same thing here. (vCPUs and memory show the real default faintly, as a
+    // placeholder; disk has no such number to show -- see its own field below.)
     const sandboxCpusRaw = form.elements.sandboxCpus.value.trim();
     const sandboxCpus = sandboxCpusRaw === "" ? 0 : parseInt(sandboxCpusRaw, 10);
     if (sandboxCpus !== (settings.sandboxCpus || 0)) payload.sandboxCpus = sandboxCpus;
@@ -192,6 +194,10 @@ export default function SettingsOverlay({ onClose, showError }) {
     const sandboxMemoryMbRaw = form.elements.sandboxMemoryMb.value.trim();
     const sandboxMemoryMb = sandboxMemoryMbRaw === "" ? 0 : parseInt(sandboxMemoryMbRaw, 10);
     if (sandboxMemoryMb !== (settings.sandboxMemoryMb || 0)) payload.sandboxMemoryMb = sandboxMemoryMb;
+
+    const sandboxDiskGbRaw = form.elements.sandboxDiskGb.value.trim();
+    const sandboxDiskGb = sandboxDiskGbRaw === "" ? 0 : parseInt(sandboxDiskGbRaw, 10);
+    if (sandboxDiskGb !== (settings.sandboxDiskGb || 0)) payload.sandboxDiskGb = sandboxDiskGb;
 
     return save(payload);
   };
@@ -446,6 +452,23 @@ export default function SettingsOverlay({ onClose, showError }) {
             inputProps={{ min: 0, step: 1 }}
             defaultValue={settings.sandboxMemoryMb ? String(settings.sandboxMemoryMb) : ""}
             placeholder={settings.sandboxMemoryMbDefault ? String(settings.sandboxMemoryMbDefault) : undefined}
+            fullWidth
+            margin="normal"
+          />
+          {/*
+            No faint placeholder default here, unlike the two above: a VM's
+            disk is as large as the guest image behind it when nothing is set,
+            which is a property of the image this deployment built rather than
+            a number the API could report (ui.Settings' own comment on why
+            there is no sandboxDiskGbDefault). The helper text says so instead.
+          */}
+          <TextField
+            name="sandboxDiskGb"
+            label="Sandbox disk (GiB)"
+            helperText="default root disk size, in GiB, for a kontur-managed sandbox VM. Empty leaves it as large as the guest image. Overridable per task."
+            type="number"
+            inputProps={{ min: 0, step: 1 }}
+            defaultValue={settings.sandboxDiskGb ? String(settings.sandboxDiskGb) : ""}
             fullWidth
             margin="normal"
           />
