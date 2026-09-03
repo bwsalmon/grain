@@ -8,8 +8,9 @@ import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, capabilityUn
 // Everything that is a property of one repo lives here: its task counts,
 // the branches grain has been asked to create in it, the default
 // capabilities every task filed against it starts with, the standing
-// instructions every run against it is given, the way into its releases,
-// and removing it from the deployment's allowlist.
+// instructions every run against it is given, the setup command grain
+// runs in every checkout it makes here, the way into its releases, and
+// removing it from the deployment's allowlist.
 //
 // That is the whole point of it. Each of those used to be a button on
 // the repo *list* row (bwsalmon/agents#459, #473, #474, #638), which
@@ -45,6 +46,13 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   // nothing", which is a real and different state.
   const [prompt, setPrompt] = useState(null);
   const [promptText, setPromptText] = useState("");
+  // And once more for this repo's setup command (grain/task-154): what
+  // GET /api/repos/{owner}/{name}/setup-command last said, and the
+  // unsaved edit. null while in flight, for the same reason -- an empty
+  // box would read as "grain runs nothing in this repo's checkouts",
+  // which is a real and different answer.
+  const [setup, setSetup] = useState(null);
+  const [setupText, setSetupText] = useState("");
 
   // The row this repo would have on the list page: its per-state counts,
   // whether it is on the allowlist (which is what makes Remove worth
@@ -85,13 +93,24 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
     }
   }, [owner, name, showError]);
 
-  // All three reads happen on landing rather than behind a toggle the
+  const loadSetupCommand = useCallback(async () => {
+    try {
+      const loaded = await api(`/api/repos/${owner}/${name}/setup-command`);
+      setSetup(loaded);
+      setSetupText(loaded.setupCommand || "");
+    } catch (err) {
+      showError(err);
+    }
+  }, [owner, name, showError]);
+
+  // All four reads happen on landing rather than behind a toggle the
   // way the list page's own fold-out forms did: this page is *about*
   // this repo, so there is nothing else the GETs could be competing
   // with.
   useEffect(() => { loadBranches(); }, [loadBranches]);
   useEffect(() => { loadCapabilities(); }, [loadCapabilities]);
   useEffect(() => { loadPromptExtension(); }, [loadPromptExtension]);
+  useEffect(() => { loadSetupCommand(); }, [loadSetupCommand]);
 
   // capsEffective is what a task filed against this repo would actually
   // start out holding -- the line the capabilities form ends on. The
@@ -193,6 +212,28 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
     }
   };
 
+  // saveSetupCommand replaces this repo's setup command wholesale (PUT's
+  // whole body is the new command, ui.SetRepoSetupCommandRequest), and
+  // refreshes the config for the reason savePromptExtension does:
+  // config.reposWithSetupCommand is one of the sources that put a repo on
+  // the list page at all (repoRows, state.js), so writing the first setup
+  // command for a repo with no tasks and no allowlist entry is what makes
+  // it reachable, and clearing the last one is what takes it away.
+  const saveSetupCommand = async (evt) => {
+    evt.preventDefault();
+    try {
+      const updated = await api(`/api/repos/${owner}/${name}/setup-command`, {
+        method: "PUT",
+        body: JSON.stringify({ setupCommand: setupText.trim() }),
+      });
+      setSetup(updated);
+      setSetupText(updated.setupCommand || "");
+      await onRefreshConfig();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
   return (
     <div className="main-column">
       <div className="repo-page-header">
@@ -230,8 +271,8 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
         {row.defaults && !row.configured && row.total === 0 && (
           <Alert severity="info">
             No tasks, and not on this deployment&apos;s target repos -- {repo} is known here only because it
-            carries configuration of its own -- default capabilities, standing instructions, or both --
-            below.
+            carries configuration of its own -- default capabilities, standing instructions, a setup
+            command, or any of them -- below.
           </Alert>
         )}
 
@@ -371,6 +412,32 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
               </Typography>
               <Stack direction="row" justifyContent="flex-end">
                 <Button type="submit" variant="contained" size="small">Save prompt extension</Button>
+              </Stack>
+            </Stack>
+          )}
+        </Box>
+
+        <Box>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Setup command</Typography>
+          {setup === null ? (
+            <Typography variant="body2" color="text.secondary">Loading setup command…</Typography>
+          ) : (
+            <Stack component="form" spacing={1} onSubmit={saveSetupCommand}>
+              <TextField
+                name="repoSetupCommand"
+                label={`Setup command for ${repo}`}
+                placeholder="make deps"
+                helperText="Shell run in the fresh checkout after the clone and before the agent's first turn -- and again whenever a run rebuilds its sandbox. Its exit status and the tail of its output go into the run's prompt; a run whose setup failed is told, not stopped. Leave empty for a repo that needs no setup."
+                value={setupText}
+                onChange={(e) => setSetupText(e.target.value)}
+                multiline
+                minRows={2}
+                autoComplete="off"
+                fullWidth
+                size="small"
+              />
+              <Stack direction="row" justifyContent="flex-end">
+                <Button type="submit" variant="contained" size="small">Save setup command</Button>
               </Stack>
             </Stack>
           )}

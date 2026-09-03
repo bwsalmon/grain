@@ -101,7 +101,7 @@ func TestRecreateDestroysTheSandboxAndClonesTheRepoAgain(t *testing.T) {
 	}
 
 	task := model.Task{ID: "12", Title: "Do the thing", Target: &repo}
-	if _, err := prepareCheckout(ctx, tools, remoteBase, task); err != nil {
+	if _, err := prepareCheckout(ctx, tools, remoteBase, task, ""); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	// What the agent broke: a file of its own beside the checkout, and
@@ -331,5 +331,107 @@ func TestRecreateWritesAlreadyMintedPlacementsBack(t *testing.T) {
 	}
 	if string(content) != "{}" {
 		t.Errorf("%s = %q, want the already-minted content", placed, content)
+	}
+}
+
+// A rebuild takes the whole sandbox with it -- the node_modules, the
+// virtualenv, whatever `make deps` installed -- so the repo's setup
+// command has to run again in the fresh checkout. Handing a run back a
+// directory in exactly the state model.RepoConfig.SetupCommand exists to
+// prevent is worse than never having run it: the run was told at turn 1
+// that setup was done for it.
+func TestRecreateRunsTheReposSetupCommandAgain(t *testing.T) {
+	store, ctx := recreateStore(t)
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo: repo, SetupCommand: "echo installed > DEPS",
+	}); err != nil {
+		t.Fatalf("PutRepoConfig: %v", err)
+	}
+
+	sandboxes := NewHostSandboxes(t.TempDir())
+	sandbox, err := sandboxes.Acquire(ctx, "12-1", Shape{})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	root, err := sandbox.(*hostSandbox).Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := sandbox.Tools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := model.Task{ID: "12", Title: "Do the thing", Target: &repo}
+	rec := &sandboxRecreation{
+		store: store, cfg: Config{GitRemoteBase: remoteBase}, task: task,
+		sandbox: sandbox, tools: tools, sandboxRoot: root,
+	}
+	out, err := rec.recreate(ctx)
+	if err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	if len(out.Warnings) != 0 {
+		t.Errorf("warnings = %v, want none", out.Warnings)
+	}
+	if _, err := os.Stat(filepath.Join(root, CheckoutDir, "DEPS")); err != nil {
+		t.Fatalf("the setup command did not run in the rebuilt sandbox's checkout: %v", err)
+	}
+	var said bool
+	for _, r := range out.Restored {
+		said = said || strings.Contains(r, "setup command")
+	}
+	if !said {
+		t.Errorf("Restored = %v, want the setup command named -- a run that is not told cannot know", out.Restored)
+	}
+}
+
+// And a setup command that fails in the rebuilt sandbox is a warning,
+// not a silence: the whole point of the answer this tool returns is an
+// account of what the run is now sitting in front of.
+func TestRecreateWarnsWhenTheSetupCommandFailsAgain(t *testing.T) {
+	store, ctx := recreateStore(t)
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo: repo, SetupCommand: "echo no such package >&2; exit 4",
+	}); err != nil {
+		t.Fatalf("PutRepoConfig: %v", err)
+	}
+
+	sandboxes := NewHostSandboxes(t.TempDir())
+	sandbox, err := sandboxes.Acquire(ctx, "13-1", Shape{})
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	root, err := sandbox.(*hostSandbox).Root()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := sandbox.Tools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	task := model.Task{ID: "13", Title: "Do the thing", Target: &repo}
+	rec := &sandboxRecreation{
+		store: store, cfg: Config{GitRemoteBase: remoteBase}, task: task,
+		sandbox: sandbox, tools: tools, sandboxRoot: root,
+	}
+	out, err := rec.recreate(ctx)
+	if err != nil {
+		t.Fatalf("recreate: %v", err)
+	}
+	// The clone is still restored -- a failed setup is not a failed
+	// re-clone, and the run has a checkout to work in either way.
+	if out.CheckoutDir != CheckoutDir {
+		t.Errorf("CheckoutDir = %q, want the checkout the run still has", out.CheckoutDir)
+	}
+	if len(out.Warnings) != 1 || !strings.Contains(out.Warnings[0], "no such package") {
+		t.Errorf("Warnings = %v, want one naming what the setup command printed", out.Warnings)
 	}
 }

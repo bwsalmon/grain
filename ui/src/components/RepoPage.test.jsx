@@ -27,15 +27,21 @@ const noPrompt = {
   effectivePromptExtension: "",
 };
 
-// routeApi answers the three GETs the page issues on mount -- its branch
-// list, its capability sets and its prompt extension -- and leaves
-// anything else to the per-test mockResolvedValueOnce queue, so a test
-// only has to say what it is actually about.
-function routeApi({ branches = [], caps = noCaps, prompt = noPrompt } = {}) {
+const noSetup = {
+  repo: "acme/widgets",
+  setupCommand: "",
+};
+
+// routeApi answers the four GETs the page issues on mount -- its branch
+// list, its capability sets, its prompt extension and its setup command
+// -- and leaves anything else to the per-test mockResolvedValueOnce
+// queue, so a test only has to say what it is actually about.
+function routeApi({ branches = [], caps = noCaps, prompt = noPrompt, setup = noSetup } = {}) {
   api.mockImplementation((path, opts) => {
     if (!opts && /\/branches$/.test(path)) return Promise.resolve(branches);
     if (!opts && /\/capabilities$/.test(path)) return Promise.resolve(caps);
     if (!opts && /\/prompt-extension$/.test(path)) return Promise.resolve(prompt);
+    if (!opts && /\/setup-command$/.test(path)) return Promise.resolve(setup);
     return Promise.resolve({});
   });
 }
@@ -400,6 +406,53 @@ describe("RepoPage", () => {
 
     api.mockImplementationOnce(() => Promise.reject(new Error("store is down")));
     await user.click(screen.getByRole("button", { name: "Save prompt extension" }));
+
+    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "store is down" }));
+  });
+
+  // The setup command is a property of the repo's toolchain rather than
+  // of any one task, so it belongs on this page for the reason the two
+  // forms above it do -- and it is the only one whose effect a run sees
+  // before its first turn (grain/task-154).
+  it("loads this repo's setup command", async () => {
+    routeApi({ setup: { repo: "acme/widgets", setupCommand: "make deps" } });
+    renderPage();
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/setup-command");
+    expect(await screen.findByLabelText(/Setup command for acme\/widgets/)).toHaveValue("make deps");
+  });
+
+  // Refreshing the config matters here for the same reason it does for
+  // the prompt extension: config.reposWithSetupCommand is one of the
+  // sources repoRows lists a repo from, so a repo whose setup command is
+  // the only thing this deployment knows it by is missing from the list
+  // page until the config is re-read.
+  it("saves the repo's setup command and refreshes the config the repo list is built from", async () => {
+    routeApi();
+    const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderPage({ onRefreshConfig });
+
+    await user.type(await screen.findByLabelText(/Setup command for acme\/widgets/), "make deps");
+
+    api.mockImplementationOnce(() => Promise.resolve({ repo: "acme/widgets", setupCommand: "make deps" }));
+    await user.click(screen.getByRole("button", { name: "Save setup command" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/setup-command", {
+      method: "PUT", body: JSON.stringify({ setupCommand: "make deps" }),
+    });
+    expect(onRefreshConfig).toHaveBeenCalled();
+  });
+
+  it("reports the error when saving the repo's setup command fails", async () => {
+    routeApi();
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    renderPage({ showError });
+    await screen.findByLabelText(/Setup command for acme\/widgets/);
+
+    api.mockImplementationOnce(() => Promise.reject(new Error("store is down")));
+    await user.click(screen.getByRole("button", { name: "Save setup command" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "store is down" }));
   });

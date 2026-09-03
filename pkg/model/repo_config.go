@@ -55,6 +55,29 @@ type RepoConfig struct {
 	// filed today against a repo whose conventions are written down
 	// tomorrow is told about them when it runs.
 	PromptExtension string
+	// SetupCommand is the shell this repo needs run once, in the fresh
+	// checkout, before a run's first turn: `make deps`, an `npm ci`, a
+	// virtualenv, whatever generates the file the tests will not build
+	// without. orchestrator.prepareCheckout runs it after the clone and
+	// puts its exit status and a tail of its output into the prompt.
+	//
+	// A repo without one is the normal case and says nothing here. Prose
+	// in PromptExtension above is what a repo had to use instead, and it
+	// is a poor substitute: an instruction is something each run has to
+	// spend a turn obeying, and one that is not obeyed first is a run
+	// that has already read the wrong failure out of a tree that does
+	// not build.
+	//
+	// Read at dispatch, like PromptExtension and for the same reason --
+	// a repo whose toolchain changes tomorrow changes it for every task
+	// already filed against it, not only for the ones filed after.
+	//
+	// It is arbitrary shell, run in the sandbox with the same
+	// run_command tool the agent's own commands go through. That grants
+	// nothing new: the agent runs arbitrary shell in that sandbox
+	// anyway, and this is somebody with access to grain's settings
+	// choosing what runs there first.
+	SetupCommand string
 }
 
 // Empty reports whether this config says nothing at all -- the state a
@@ -63,7 +86,8 @@ type RepoConfig struct {
 // fact and ListRepoConfigs never returns a repo that adds nothing. A
 // further field here (base and max_concurrent are docs/data-model.md's
 // own remaining two) gains a term in this method and nothing else has to
-// change -- PromptExtension, the second, is exactly that.
+// change -- PromptExtension, the second, and SetupCommand, the third,
+// are exactly that.
 func (c RepoConfig) Empty() bool {
-	return len(c.DefaultCapabilities) == 0 && c.PromptExtension == ""
+	return len(c.DefaultCapabilities) == 0 && c.PromptExtension == "" && c.SetupCommand == ""
 }

@@ -507,6 +507,15 @@ type configResponse struct {
 	// somewhere, or its text goes on reaching every run against it with
 	// nowhere to see it.
 	ReposWithPromptExtension []string `json:"reposWithPromptExtension,omitempty"`
+	// ReposWithSetupCommand names every repo that has a setup command of
+	// its own (model.RepoConfig.SetupCommand) -- names alone, for the
+	// same two reasons as the field above: a shell command per repo is
+	// not something every open tab needs on every poll, and what the
+	// frontend needs the list for is making the repo appear on the repos
+	// page at all (state.js's repoRows). A repo whose only presence here
+	// is the command grain runs in its checkouts would otherwise be
+	// reachable from nowhere.
+	ReposWithSetupCommand []string `json:"reposWithSetupCommand,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -561,6 +570,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	for _, rc := range repoConfigs {
 		if rc.PromptExtension != "" {
 			resp.ReposWithPromptExtension = append(resp.ReposWithPromptExtension, rc.Repo.String())
+		}
+		if rc.SetupCommand != "" {
+			resp.ReposWithSetupCommand = append(resp.ReposWithSetupCommand, rc.Repo.String())
 		}
 		var ids []string
 		for _, id := range rc.DefaultCapabilities {
