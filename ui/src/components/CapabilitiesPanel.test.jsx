@@ -188,6 +188,96 @@ describe("CapabilitiesPanel", () => {
     expect(screen.queryByText(/Credentials? this needs:/)).not.toBeInTheDocument();
   });
 
+  // grain/task-172: "Ready" here means configured, and only the service
+  // that issued a standing credential knows whether the value stored for
+  // it still works. These cover the action that goes and asks.
+  it("tests a capability's standing credential and reports what came back", async () => {
+    api.mockResolvedValueOnce({
+      id: "gcp-key",
+      ok: true,
+      credentials: ["gcp-key-minter"],
+      detail: "GCP accepted the key held in `gcp-key-minter` and listed 2 user-managed key(s) on agent@example.",
+      checkedAt: "2026-09-03T10:00:00Z",
+    });
+    const user = userEvent.setup();
+    render(
+      <CapabilitiesPanel
+        capabilities={[{ id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, checkable: true }]}
+        showError={() => {}}
+        onSecretsChanged={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Test credential" }));
+
+    expect(api).toHaveBeenCalledWith("/api/capabilities/gcp-key/check", { method: "POST" });
+    expect(screen.getByText("Credential works")).toBeInTheDocument();
+    expect(screen.getByText(/listed 2 user-managed key\(s\)/)).toBeInTheDocument();
+    expect(screen.getByText(/checked as gcp-key-minter/)).toBeInTheDocument();
+  });
+
+  // The state no configuration pane could show before: configured,
+  // checked, and refused. It is drawn beside "Ready", not instead of it,
+  // and reads as this deployment's credential to replace.
+  it("shows a refused credential without changing the Ready badge", async () => {
+    api.mockResolvedValueOnce({
+      id: "gcp-key",
+      ok: false,
+      credentials: ["gcp-key-minter"],
+      detail: "GCP will not issue a token for the minter credential held in the `gcp-key-minter` secret.",
+      checkedAt: "2026-09-03T10:00:00Z",
+    });
+    const user = userEvent.setup();
+    render(
+      <CapabilitiesPanel
+        capabilities={[{ id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, checkable: true }]}
+        showError={() => {}}
+        onSecretsChanged={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Test credential" }));
+
+    expect(screen.getByText("Credential refused")).toBeInTheDocument();
+    expect(screen.getByText(/will not issue a token/)).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+  });
+
+  // A request that never got an answer is grain's own problem -- an
+  // unwired deployment, a capability this build does not know -- and
+  // belongs in the error banner, not drawn as a verdict on a credential.
+  it("reports a failed request through showError rather than as a refusal", async () => {
+    api.mockRejectedValueOnce(new Error("testing a capability's credential is not available"));
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <CapabilitiesPanel
+        capabilities={[{ id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, checkable: true }]}
+        showError={showError}
+        onSecretsChanged={() => {}}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Test credential" }));
+
+    expect(showError).toHaveBeenCalled();
+    expect(screen.queryByText("Credential refused")).not.toBeInTheDocument();
+  });
+
+  // Nothing offers a button that could not work: a capability with no
+  // standing credential, or a deployment whose UI cannot make the call,
+  // reports checkable false and gets no action at all.
+  it("offers no test for a capability that reports none", () => {
+    render(
+      <CapabilitiesPanel
+        capabilities={[{ id: "self-debug", name: "Self debug", description: "Read grain's source", ready: true }]}
+        showError={() => {}}
+        onSecretsChanged={() => {}}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Test credential" })).not.toBeInTheDocument();
+  });
+
   it("falls back to the id when no display name is given", () => {
     render(<CapabilitiesPanel capabilities={[{ id: "some-new-capability", description: "", ready: true }]} />);
     expect(screen.getByText("some-new-capability")).toBeInTheDocument();
