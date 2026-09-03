@@ -27,6 +27,8 @@ locals {
     ui_port                   = var.ui_port
     slots                     = var.slots
     poll_interval             = var.poll_interval
+    state_repo_url            = var.state_repo_url
+    state_repo_branch         = var.state_repo_branch
     agy_path                  = var.agy_path
     codex_path                = var.codex_path
     gemini_model              = var.gemini_model
@@ -263,7 +265,8 @@ resource "google_compute_instance" "host" {
     }
 
     # grain-github-token, grain-github-app-id/installation-id/private-key,
-    # grain-gemini-api-key, grain-claude-oauth-token, grain-openai-api-key
+    # grain-gemini-api-key, grain-claude-oauth-token, grain-openai-api-key,
+    # grain-secrets-key
     # and grain-gcp-minter-key are never declared here -- push-secrets.sh adds them directly with
     # `gcloud compute instances add-metadata` once this resource exists,
     # so no secret is written into a .tf file, a tfvars file, or anything
@@ -289,6 +292,14 @@ resource "google_compute_instance" "host" {
       metadata["grain-claude-oauth-token"],
       metadata["grain-openai-api-key"],
       metadata["grain-gcp-minter-key"],
+      # The secrets key is the one attribute here a *fresh* deployment
+      # can be expected to have none of: the host mints its own on first
+      # start, and push-secrets.sh pushes one only when a rebuild has to
+      # be given back the key its predecessor had. Ignored on the same
+      # terms as the rest either way -- an apply that erased it would
+      # leave the next deploy seeding nothing and the host minting a key
+      # its own repository's secrets are not encrypted to.
+      metadata["grain-secrets-key"],
     ]
   }
 }
