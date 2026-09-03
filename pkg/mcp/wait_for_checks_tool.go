@@ -111,8 +111,8 @@ func waitForChecksTool(client PullRequestReader, scope PullRequestScope) Tool {
 			"failing job's own log, so you can start fixing without waiting "+
 			"for the rest and without reproducing the failure first -- or "+
 			"once every check has finished with none failing, or when it "+
-			"times out. Push first: it reports "+
-			"on your latest pushed commit and does not watch for new ones. "+
+			"times out. Push first: it reports on your latest pushed "+
+			"commit and does not watch for new ones. "+
 			"Optional timeout_seconds bounds the wait (default %d, maximum "+
 			"%d); a timeout is reported, not an error, along with what each "+
 			"check was doing when the clock ran out. This only reads GitHub; "+
