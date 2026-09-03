@@ -1415,6 +1415,7 @@ func testConfig() model.Config {
 		TargetRepos:         []string{"acme/widgets", "acme/gadgets"},
 		SandboxCPUs:         4,
 		SandboxMemoryMB:     8192,
+		SandboxDiskGB:       40,
 		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
 	}
 }
@@ -2274,8 +2275,9 @@ func TestInitMigratesAnExistingDatabaseMissingSandboxShape(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB/SandboxDiskGB after migrating = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 
@@ -2644,8 +2646,9 @@ func TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB/SandboxDiskGB after migrating = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 

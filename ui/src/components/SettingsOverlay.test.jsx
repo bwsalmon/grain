@@ -208,6 +208,47 @@ describe("SettingsOverlay", () => {
     expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
   });
 
+  // grain/task-41: the same treatment for the third dimension of that
+  // shape. It has no placeholder default beside it, unlike vCPUs and
+  // memory -- an unset disk is however large the guest image behind it
+  // is, which is not a number the API can name (ui.Settings' own comment
+  // on why there is no sandboxDiskGbDefault).
+  it("sets sandboxDiskGb, with no placeholder default beside it", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    const diskInput = screen.getByLabelText(/Sandbox disk/);
+    expect(diskInput).toHaveValue(null);
+    expect(diskInput).not.toHaveAttribute("placeholder");
+    await user.type(diskInput, "40");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxDiskGb: 40 }),
+    });
+  });
+
+  it("sends an explicit 0 when sandboxDiskGb is cleared back to blank", async () => {
+    api.mockResolvedValueOnce({ ...settings, sandboxDiskGb: 40 }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Sandbox" }));
+
+    expect(screen.getByLabelText(/Sandbox disk/)).toHaveValue(40);
+    await user.clear(screen.getByLabelText(/Sandbox disk/));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ sandboxDiskGb: 0 }),
+    });
+  });
+
   // bwsalmon/agents#610: an unset override shows kontur's own default as a
   // placeholder -- fainter than a real value -- rather than a literal 0 that
   // reads as a deliberately zeroed-out sandbox.

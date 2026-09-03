@@ -140,12 +140,14 @@ function Declared({ t }) {
   if (t.base) rows.push(["Base", t.base]);
   if (t.reads && t.reads.length > 0) rows.push(["Reads", t.reads.join(", ")]);
   rows.push(["Auto-merge", String(t.autoMerge)]);
-  // bwsalmon/agents#534: a per-task sandbox shape override, shown only
-  // when set -- most tasks use the deployment default and have neither
-  // field, the same "0 means unset" convention that keeps them out of
-  // the JSON response at all (Task's own omitempty).
+  // bwsalmon/agents#534, grain/task-41: a per-task sandbox shape
+  // override, shown only when set -- most tasks use the deployment
+  // default and have none of the three fields, the same "0 means unset"
+  // convention that keeps them out of the JSON response at all (Task's
+  // own omitempty).
   if (t.sandboxCpus) rows.push(["Sandbox vCPUs", String(t.sandboxCpus)]);
   if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
+  if (t.sandboxDiskGb) rows.push(["Sandbox disk (GiB)", String(t.sandboxDiskGb)]);
   // Same treatment for a per-task agent framework: shown only when this
   // task overrides the deployment's own, which most do not.
   if (t.agentFramework) rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);

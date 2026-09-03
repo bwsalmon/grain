@@ -120,6 +120,12 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskSandboxShapeColumns(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureConfigSandboxDiskColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
+	if err := s.ensureTaskSandboxDiskColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	if err := s.ensureTaskInteractiveColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
@@ -437,6 +443,44 @@ func (s *Store) ensureTaskSandboxShapeColumns(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task` ADD COLUMN `sandbox_memory_mb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureConfigSandboxDiskColumn adds grain_config.sandbox_disk_gb, the
+// third dimension of the same VM shape (model.Config.SandboxDiskGB,
+// grain/task-41), to a database created before it existed.
+//
+// Its own migration rather than a third column in
+// ensureConfigSandboxShapeColumns above: that one's probe finds
+// sandbox_cpus/sandbox_memory_mb already present on every database
+// migrated by an earlier build and returns without adding anything, so a
+// column appended to it would only ever reach a database that had none
+// of the three. Defaults to 0, SandboxDiskGB's own "unset, take whatever
+// size the guest image gives it" zero value.
+func (s *Store) ensureConfigSandboxDiskColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `sandbox_disk_gb` INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
+// ensureTaskSandboxDiskColumn is ensureConfigSandboxDiskColumn's
+// per-task counterpart -- task.sandbox_disk_gb, Task.SandboxDiskGB's own
+// column -- added separately from ensureTaskSandboxShapeColumns for the
+// reason that function's doc comment gives. Defaults to 0, the "use the
+// deployment default" zero value, so every task already stored reads
+// back deferring to the deployment exactly as it did before a task could
+// ask for a disk size at all.
+func (s *Store) ensureTaskSandboxDiskColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `sandbox_disk_gb` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `sandbox_disk_gb` INTEGER NOT NULL DEFAULT 0")
 	return err
 }
 
@@ -794,13 +838,13 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `interactive`, `configuration`, `agent_framework`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `configuration`, `agent_framework`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
-		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.Interactive, t.Configuration,
+		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.SandboxDiskGB, t.Interactive, t.Configuration,
 		t.AgentFramework,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
@@ -1076,7 +1120,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`origin_actor_kind`,`origin_actor_id`,`origin_behalf_kind`,`origin_behalf_id`,`origin_reason`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
-	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`interactive`,`configuration`," +
+	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`interactive`,`configuration`," +
 	"`agent_framework`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
@@ -1093,7 +1137,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&oaKind, &oaID, &obKind, &obID, &oReason,
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
-		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.Interactive, &t.Configuration,
+		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.SandboxDiskGB, &t.Interactive, &t.Configuration,
 		&t.AgentFramework); err != nil {
 		return Task{}, err
 	}
@@ -2347,7 +2391,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
-	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`,`agent_framework`," +
+	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
 	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
@@ -2357,7 +2401,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 	var defaultCapabilities string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
-		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault,
+		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
 		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
 		&defaultCapabilities); err != nil {
 		return Config{}, err
@@ -2380,10 +2424,10 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
-			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault,
+			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
 			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,
 			joinCSV(c.DefaultCapabilities))
 		return err
