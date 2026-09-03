@@ -123,9 +123,9 @@ spec:
       args: ["run"]
       env:
         - name: CHV_DISK_IMAGE
-          value: {{yq .ResolvedDiskImage}}
-        - name: CHV_DISK_READONLY
-          value: {{yq (fmtBool .DiskReadOnly)}}
+          value: {{yq .DiskImage}}
+        - name: CHV_DISK_MODE
+          value: {{yq .DiskModeOrDerived}}
 {{- if .Kernel}}
         - name: CHV_KERNEL
           value: {{yq .Kernel}}
@@ -183,10 +183,6 @@ spec:
         - name: images
           mountPath: /images
           readOnly: true
-{{- if not .DiskReadOnly}}
-        - name: disk
-          mountPath: /disk
-{{- end}}
         - name: kvm
           mountPath: /dev/kvm
   volumes:
@@ -194,12 +190,6 @@ spec:
       hostPath:
         path: {{yq .ImagesHostPath}}
         type: Directory
-{{- if not .DiskReadOnly}}
-    - name: disk
-      hostPath:
-        path: {{yq .WritableDiskDir}}
-        type: Directory
-{{- end}}
     - name: kvm
       hostPath:
         path: /dev/kvm

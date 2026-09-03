@@ -1512,16 +1512,17 @@ proof none of that is consulted.
 Two details are worth knowing:
 
 - **`-kontur-exec-key` is a path inside the VM's container**, not on the
-  host -- the same deployment keypair `ensure_kontur_ssh_key` generates
-  and `scripts/kontur/guest-setup.sh` bakes into the guest's
-  `authorized_keys`, just named by where the container can read it.
-  `setup.sh` stages it into the images directory
-  `konturctl vm create -images-hostpath` already mounts read-only at
-  `/images`, so no new mount is involved. Left unset, `kontur exec` falls
-  back to the dedicated key kontur's own `Dockerfile` bakes in -- which
-  only a guest image built by that same Dockerfile authorizes, and a
-  deployment pointing `-disk` at `scripts/kontur/build-guest.sh`'s output is not
-  using one. That is why the flag is required rather than defaulted.
+  host. It named a deployment keypair `setup.sh` generated, staged into
+  a directory the VM's container already mounted, and
+  `guest-setup.sh` baked into the guest's `authorized_keys`.
+
+  No deployment does that any more: kontur generates a keypair in each
+  VM's own container at boot and hands the guest the public half on its
+  kernel command line, so there is no deployment keypair to generate,
+  nothing to stage, and `setup.sh` passes no `-kontur-exec-key` at all.
+  The flag stays for the case it is now the only answer to -- a guest
+  image that authorizes a key of its own rather than the one kontur
+  generates -- which is why it is optional rather than required.
 - **`docker exec` cannot distinguish a failure to reach the guest from a
   guest command that exited 1**, the way `ssh` can with its own reserved
   status: it reports the exit status of whatever it started, and
@@ -2690,13 +2691,13 @@ it. `setup.sh` uses the `grain` one itself, for `grain schema-version`
 and `grain secrets`.
 
 A kontur deployment runs *two* images, and only one of them is grain.
-The other is the sandbox container each task's VM runs inside
-(`scripts/kontur/build-oci-image.sh`'s output, published as
-`kontur-sandbox`), and it used to be built on every host from that
-host's own checkout — which is precisely how a deployment could end up
-running grain from one commit and a sandbox from another. It is pulled
-now, and which one is not something a deployment is told: CI publishes a
-sandbox per commit, and the grain image built from that same commit
+The other is the sandbox each task's VM runs — both the container and
+the guest inside it (`scripts/kontur/build-guest.sh`'s output, published
+as `guest`) — and it used to be built on every host from that host's own
+checkout, which is precisely how a deployment could end up running grain
+from one commit and a sandbox from another. It is pulled now, and which
+one is not something a deployment is told: CI publishes a sandbox per
+commit, and the grain image built from that same commit
 carries its reference, stamped in at link time
 (`cmd/grain/sandboximage.go`, the Dockerfile's `SANDBOX_IMAGE` build
 arg). `grain sandbox-image` prints it; `setup.sh` pulls whatever it
@@ -2706,25 +2707,28 @@ halves move together or not at all. The stamp names the immutable
 `sha-` tag rather than a branch, which is what makes a rollback ask for
 its own older sandbox rather than whatever that branch points at today.
 
-The guest *disk* is the one thing a deployment still builds, and that is
-not an oversight: `scripts/kontur/guest-setup.sh` bakes the deployment's
-own SSH public key into the image's `authorized_keys`, so a generically
-published disk would either carry a keypair everyone has or admit nobody
-at all. `kontur_image_bucket` still fetches one built centrally, for a
-fleet sharing a keypair.
+The guest *disk* used to be the one thing a deployment still built, and
+that was not an oversight: `guest-setup.sh` baked the deployment's own
+SSH public key into the image's `authorized_keys`, so a generically
+published disk would either have carried a keypair everyone has or
+admitted nobody at all. kontur generates that keypair per VM boot now
+(`internal/guestkey`), so nothing deployment-specific reaches the disk —
+and a guest is derived from a published kontur image by booting it,
+provisioning it and committing the result, which yields an image that is
+itself runnable. That is why the sandbox container and the guest stopped
+being two artifacts: they are one, built once in CI, and a host builds
+nothing at all.
 
 What did not stay on the host: the git checkout, and with it `git` and
 `jq`. `setup.sh` used to clone one, update it on every run, and re-exec
 itself out of it when that update replaced the script mid-run; it now
 needs nothing on a host but `docker` and systemd, and everything it
 wanted a checkout for comes out of the image instead. The source is in
-there (`/usr/local/share/grain/src`), so the guest disk build unpacks
-the source its own binary was built from rather than whatever a branch
-points at today — the same drift the self-debug capability was moved
-into the image to close. The two steps that want a real `git` (a `git
-ls-remote` at `GRAIN_TARGET_REPO`, and the empty commit pushed to it)
-and the two that wanted `curl` and `jq` (the GCP metadata token, and a
-guest disk fetched from a bucket) all run inside that image too —
+there (`/usr/local/share/grain/src`) for the self-debug capability,
+which is the same drift that move was meant to close. The two steps that
+want a real `git` (a `git ls-remote` at `GRAIN_TARGET_REPO`, and the
+empty commit pushed to it) and the one that wanted `curl` and `jq` (the
+GCP metadata token) all run inside that image too —
 `setup.sh`'s own `image_run`. Keeping the copy of `setup.sh` on a host
 current is the job of whatever put it there: on the GCP path,
 `deploy.sh`, which clones and updates that checkout itself.

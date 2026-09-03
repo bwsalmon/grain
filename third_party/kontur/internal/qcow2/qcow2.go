@@ -1,4 +1,4 @@
-package staticpod
+package qcow2
 
 import (
 	"encoding/binary"
@@ -27,8 +27,8 @@ const (
 	qcow2ClusterBits = 16
 	qcow2ClusterSize = 1 << qcow2ClusterBits // 64 KiB
 
-	qcow2Magic   = 0x514649fb // "QFI\xfb"
-	qcow2Version = 3
+	Magic   = 0x514649fb // "QFI\xfb"
+	Version = 3
 
 	// qcow2RefcountOrder selects a 16-bit refcount entry (1 <<
 	// qcow2RefcountOrder bits each), giving a single refcount block
@@ -38,30 +38,30 @@ const (
 	qcow2RefcountEntryBits  = 1 << qcow2RefcountOrder
 	qcow2EntriesPerRefBlock = qcow2ClusterSize * 8 / qcow2RefcountEntryBits
 
-	// qcow2HeaderSize is the fixed set of v3 header fields, from magic
+	// HeaderSize is the fixed set of v3 header fields, from magic
 	// through header_length itself.
-	qcow2HeaderSize = 104
+	HeaderSize = 104
 
 	// qcow2CompressionTypeAndPaddingSize covers the one-byte
 	// compression_type field at offset 104 and the 7 bytes of padding
 	// after it, which every v3 reader expects to find there whenever
-	// header_length is greater than qcow2HeaderSize -- regardless of
+	// header_length is greater than HeaderSize -- regardless of
 	// whether the image ever actually uses compressed clusters (this one
 	// never does).
 	qcow2CompressionTypeAndPaddingSize = 8
 
 	// qcow2HeaderLength is the value stored in the header's own
-	// header_length field: qcow2HeaderSize plus room for
+	// header_length field: HeaderSize plus room for
 	// compression_type and its padding, so that the header extension
 	// area below starts at a clean offset instead of colliding with
 	// compression_type. (An earlier version of this code set
-	// header_length to exactly qcow2HeaderSize -- 104 -- leaving no room
+	// header_length to exactly HeaderSize -- 104 -- leaving no room
 	// for compression_type, and a backing-file-format extension's own
 	// magic byte landed right on top of it; readers parsed that byte as
 	// an unrecognized compression type and rejected the image outright.
 	// Reserving these 8 bytes is what makes it safe to add the extension
 	// below.)
-	qcow2HeaderLength = qcow2HeaderSize + qcow2CompressionTypeAndPaddingSize
+	qcow2HeaderLength = HeaderSize + qcow2CompressionTypeAndPaddingSize
 
 	// qcow2ExtBackingFormatMagic identifies a header extension that
 	// pins the backing file's format, rather than leaving it to be
@@ -73,7 +73,7 @@ const (
 	// backing-chain-depth guard ("Maximum disk nesting depth exceeded"),
 	// apparently from repeatedly trying to reinterpret the raw image's
 	// bytes as further qcow2/backing headers. Every overlay
-	// writeQcow2Overlay creates is backed by a raw source disk image
+	// WriteOverlay creates is backed by a raw source disk image
 	// (see PrepareWritableDisk), so qcow2BackingFormat is always "raw".
 	qcow2ExtBackingFormatMagic = 0xE2792ACA
 	qcow2BackingFormat         = "raw"
@@ -93,7 +93,7 @@ const (
 	qcow2L1CoverageBytes = int64(qcow2ClusterSize) * int64(qcow2L2EntriesPerTable)
 )
 
-// writeQcow2Overlay creates a new qcow2 image at dest: a thin,
+// WriteOverlay creates a new qcow2 image at dest: a thin,
 // copy-on-write overlay presenting sizeBytes of virtual disk, with no
 // data clusters of its own -- every read falls through to backingFile
 // until the guest writes, at which point cloud-hypervisor's own qcow2
@@ -106,10 +106,10 @@ const (
 // path as seen inside the VM container (under ImagesMountPath), not a
 // host path.
 //
-// dest must not already exist; writeQcow2Overlay fails otherwise rather
+// dest must not already exist; WriteOverlay fails otherwise rather
 // than overwriting it, the same way the copy it replaces never
 // clobbered an existing writable disk.
-func writeQcow2Overlay(dest, backingFile string, sizeBytes int64) (err error) {
+func WriteOverlay(dest, backingFile string, sizeBytes int64) (err error) {
 	l1Size := (sizeBytes + qcow2L1CoverageBytes - 1) / qcow2L1CoverageBytes
 	if l1Size < 1 {
 		l1Size = 1
@@ -133,9 +133,9 @@ func writeQcow2Overlay(dest, backingFile string, sizeBytes int64) (err error) {
 	extensionAreaOffset := qcow2HeaderLength
 	backingFileOffset := uint64(extensionAreaOffset + qcow2BackingFormatExtSize + qcow2ExtEndSize)
 
-	h := buf[:qcow2HeaderSize]
-	binary.BigEndian.PutUint32(h[0:4], qcow2Magic)
-	binary.BigEndian.PutUint32(h[4:8], qcow2Version)
+	h := buf[:HeaderSize]
+	binary.BigEndian.PutUint32(h[0:4], Magic)
+	binary.BigEndian.PutUint32(h[4:8], Version)
 	binary.BigEndian.PutUint64(h[8:16], backingFileOffset)
 	binary.BigEndian.PutUint32(h[16:20], uint32(len(backingFile)))
 	binary.BigEndian.PutUint32(h[20:24], qcow2ClusterBits)
@@ -154,7 +154,7 @@ func writeQcow2Overlay(dest, backingFile string, sizeBytes int64) (err error) {
 	binary.BigEndian.PutUint32(h[100:104], uint32(qcow2HeaderLength))
 
 	// --- byte 104: compression_type, and 7 bytes padding after it: left
-	// zero, since writeQcow2Overlay never produces compressed clusters ---
+	// zero, since WriteOverlay never produces compressed clusters ---
 
 	// --- header extension: backing file format, pinned to "raw" (see
 	// qcow2ExtBackingFormatMagic's doc comment) ---

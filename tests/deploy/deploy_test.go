@@ -338,26 +338,31 @@ func TestEveryBuildPathAgreesTheModuleRootIsTheRepositoryRoot(t *testing.T) {
 // unnoticed until someone looked for the packages and found none.
 //
 // Both images need it and neither had it: the grain Dockerfile carried no
-// LABEL at all, and the sandbox is built from the vendored kontur
-// Dockerfile, whose label names kontur's repository instead. The
-// sandbox's is overridden at build time rather than by editing
-// third_party/, so an operator building into their own registry keeps the
-// vendored label.
+// LABEL at all, and the sandbox inherits kontur's, which names kontur's
+// repository. The sandbox's is overridden at build time rather than by
+// editing third_party/, so an operator building into their own registry
+// keeps the inherited label.
 func TestBothPublishedImagesClaimThisRepository(t *testing.T) {
 	if !strings.Contains(read(t, "Dockerfile"),
 		`org.opencontainers.image.source="https://github.com/bwsalmon/grain"`) {
 		t.Error("the grain image does not claim this repository")
 	}
 
-	oci := read(t, "scripts", "kontur", "build-oci-image.sh")
-	contains(t, oci, "KONTUR_OCI_SOURCE_REPO")
-	contains(t, oci, "org.opencontainers.image.source=")
-	// Unset must leave the vendored label alone -- the override is for the
+	// The guest is committed from a kontur image, and `docker commit`
+	// carries the base's config forward -- including this label, which on
+	// that base names kontur's repository. GHCR uses it alone to decide
+	// which repository a package belongs to, so without the override the
+	// build and the push both succeed and the package lands in someone
+	// else's namespace.
+	guest := read(t, "scripts", "kontur", "build-guest.sh")
+	contains(t, guest, "GUEST_SOURCE_REPO")
+	contains(t, guest, "org.opencontainers.image.source=")
+	// Unset must leave the inherited label alone -- the override is for the
 	// one publisher hosting this in another repository's namespace.
-	contains(t, oci, `if [ -n "${KONTUR_OCI_SOURCE_REPO:-}" ]; then`)
+	contains(t, guest, `if [ -n "${GUEST_SOURCE_REPO:-}" ]; then`)
 
 	// ...and CI is what sets it, next to the image name it pushes.
-	if !strings.Contains(jobBody(t, workflow(t), "sandbox-container:"), "KONTUR_OCI_SOURCE_REPO=") {
+	if !strings.Contains(jobBody(t, workflow(t), "sandbox-guest:"), "GUEST_SOURCE_REPO=") {
 		t.Error("CI builds the sandbox image without pointing it at this repository")
 	}
 }
@@ -403,7 +408,7 @@ func TestTheImageIsDrivenBeforeItIsPublished(t *testing.T) {
 func TestTheSharedNamesStayOnMain(t *testing.T) {
 	text := workflow(t)
 
-	for _, job := range []string{"sandbox-container:", "grain-container:"} {
+	for _, job := range []string{"sandbox-guest:", "grain-container:"} {
 		body := jobBody(t, text, job)
 		latest := strings.Index(body, `:latest"`)
 		if latest < 0 {
@@ -448,7 +453,11 @@ func TestTheImagesAreTheOnlyPublishedRelease(t *testing.T) {
 	}
 }
 
-// A deployment is told nothing about its sandbox container.
+// A deployment is told nothing about its sandbox image.
+//
+// One image, not two: the guest a task runs and the container it runs in
+// are the same artifact since the guest stopped being built per host, so
+// there is a single reference to stamp and a single one to pull.
 //
 // The grain image carries the reference of the sandbox built from its own
 // commit, so `grain sandbox-image` answers it -- which is what
@@ -458,10 +467,10 @@ func TestTheImagesAreTheOnlyPublishedRelease(t *testing.T) {
 // than whatever that branch points at now.
 func TestTheSandboxReferenceIsStampedIntoTheGrainImage(t *testing.T) {
 	job := from(t, workflow(t), "grain-container:")
-	contains(t, job, `sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${GITHUB_SHA:0:7}"`)
+	contains(t, job, `sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/guest:sha-${GITHUB_SHA:0:7}"`)
 	contains(t, job, `SANDBOX_IMAGE="$sandbox"`)
 	// And the sandbox has to exist before the grain naming it is pushed.
-	contains(t, upTo(t, job, "steps:"), "needs: sandbox-container")
+	contains(t, upTo(t, job, "steps:"), "needs: sandbox-guest")
 
 	// The Makefile turns it into a linker stamp, and the Dockerfile
 	// forwards the build arg into that.
@@ -489,8 +498,24 @@ func TestTheSandboxContainerIsPulledAndNeverBuilt(t *testing.T) {
 	// of its default image, which is what the local build used to do.
 	contains(t, code, "-kontur-create-arg -kontur-image")
 	absent(t, code, "localhost:5000/kontur:latest")
-	// The guest disk build stays.
-	contains(t, code, "build-guest.sh")
+
+	// Nothing is built here any more, guest included. The guest disk
+	// used to be, because guest-setup.sh baked this deployment's own SSH
+	// key into it; kontur generates that keypair per VM boot now, so the
+	// guest is derived from a published image at build time and pulled
+	// here like anything else. A host that starts building one again is
+	// a host paying a debootstrap on every deploy generation.
+	absent(t, code, "build-guest.sh")
+	absent(t, code, "ensure_kontur_guest_build")
+	absent(t, code, "ensure_kontur_guest_fetch")
+
+	// The guest travels inside the sandbox image, so konturctl is given
+	// no disk, kernel or initramfs, and no host directories to resolve
+	// them against. It does need a writable root: konturctl's own
+	// default is read-only, which a dispatched task cannot use.
+	absent(t, code, "-images-hostpath")
+	absent(t, code, "-disk-hostpath")
+	contains(t, code, "-disk-mode=overlay")
 }
 
 // setup.sh runs on a host with docker and systemd, and nothing else.
@@ -551,10 +576,11 @@ func TestTheInstallerNeitherClonesNorReplacesItself(t *testing.T) {
 	for _, gone := range []string{"sync_repo", "reexec_if_updated", "GRAIN_SRC_DIR", "GRAIN_REPO_URL"} {
 		absent(t, code, gone)
 	}
-	// The source the kontur guest build reads comes out of the image
-	// instead, so it is the same source the binary was built from.
-	contains(t, code, "unpack_image_source")
-	contains(t, code, `docker cp "$cid:/usr/local/share/grain/src/."`)
+	// Nothing here reads the source at all any more. The one thing that
+	// did -- the kontur guest build -- unpacked it out of the image so
+	// that it matched the binary; there is no guest build here now, so
+	// there is nothing to keep in step and no copy to unpack.
+	absent(t, code, "unpack_image_source")
 
 	// Which makes keeping the copy of setup.sh on a deployed host
 	// current the job of whatever put it there: on the GCP path, the

@@ -189,7 +189,7 @@ func TestVMUpdate_ExplicitCmdlineSurvivesLaterUpdates(t *testing.T) {
 	}
 }
 
-func TestVMLifecycle_WritableDisk(t *testing.T) {
+func TestVMLifecycle_WritableDiskNeedsNoHostState(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	podDir := filepath.Join(t.TempDir(), "manifests")
 	imagesDir := t.TempDir()
@@ -213,45 +213,35 @@ func TestVMLifecycle_WritableDisk(t *testing.T) {
 		t.Fatalf("create error = %v, stderr = %s", err, stderr)
 	}
 
-	writableDisk := filepath.Join(diskDir, "web", "disk.qcow2")
-	got, err := os.ReadFile(writableDisk)
-	if err != nil {
-		t.Fatalf("writable disk overlay not created: %v", err)
-	}
-	if len(got) < 4 || string(got[:4]) != "QFI\xfb" {
-		t.Fatalf("writable disk overlay does not start with the qcow2 magic: got %q", got[:min(4, len(got))])
+	// No host-side overlay any more: the VM's writable disk is a qcow2
+	// its own container creates against the shared image (see
+	// config.PrepareOverlay), so konturctl writes nothing here and
+	// -disk-hostpath has nothing left to configure.
+	if _, err := os.Stat(diskDir); !os.IsNotExist(err) {
+		t.Errorf("konturctl created the disk-hostpath directory (err = %v), want it untouched", err)
 	}
 
 	manifest, err := os.ReadFile(filepath.Join(podDir, "kontur-vm-web.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(manifest), "/disk/disk.qcow2") {
-		t.Errorf("manifest missing writable disk path:\n%s", manifest)
+	// The manifest names the source image and asks for an overlay, rather
+	// than pointing the guest at a host path this side had to prepare.
+	if !strings.Contains(string(manifest), "/images/disk.img") {
+		t.Errorf("manifest does not name the source disk image:\n%s", manifest)
+	}
+	if !strings.Contains(string(manifest), "overlay") {
+		t.Errorf("manifest does not ask for an overlay:\n%s", manifest)
+	}
+	if strings.Contains(string(manifest), "mountPath: /disk") {
+		t.Errorf("manifest still mounts a host writable-disk directory:\n%s", manifest)
 	}
 
-	// Simulate the guest having written state, then confirm an unrelated
-	// update leaves it alone rather than re-creating it.
-	if err := os.WriteFile(writableDisk, []byte("guest state"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	if _, stderr, err := runVMArgs(t, "update", "web", "--cpus", "4", "--state-dir", stateDir); err != nil {
 		t.Fatalf("update error = %v, stderr = %s", err, stderr)
 	}
-	got, err = os.ReadFile(writableDisk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "guest state" {
-		t.Errorf("update discarded guest-written disk state: got %q", got)
-	}
-
-	// delete removes the writable disk overlay along with everything else.
 	if _, stderr, err := runVMArgs(t, "delete", "web", "--state-dir", stateDir); err != nil {
 		t.Fatalf("delete error = %v, stderr = %s", err, stderr)
-	}
-	if _, err := os.Stat(filepath.Join(diskDir, "web")); !os.IsNotExist(err) {
-		t.Errorf("writable disk dir still exists after delete: err = %v", err)
 	}
 }
 

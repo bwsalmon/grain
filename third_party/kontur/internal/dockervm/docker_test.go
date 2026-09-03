@@ -159,22 +159,34 @@ func TestCreate_OmitsUnsetOptionalEnv(t *testing.T) {
 	}
 }
 
-func TestCreate_WritableDiskMountsDiskHostPathReadWrite(t *testing.T) {
+func TestCreate_WritableDiskMountsNothingExtra(t *testing.T) {
+	// A writable disk used to mean a second, read-write bind mount of the
+	// host directory holding this VM's qcow2. That overlay is made inside
+	// the VM's own container now, so the only mount left is the shared
+	// read-only images directory, and CHV_DISK_IMAGE names the source
+	// image rather than an overlay path.
 	d, calls := testDocker(t)
 	spec := testSpec()
 	spec.DiskReadOnly = false
-	spec.DiskHostPath = "/var/lib/kontur/vm-disks"
 
 	if err := Create(context.Background(), d, spec, &strings.Builder{}); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
 	vmCall := calls()[4]
-	if !containsArg(vmCall, "-v") || !containsArg(vmCall, "/var/lib/kontur/vm-disks/web:/disk") {
-		t.Errorf("VM call = %v, want a read-write /disk mount of the writable disk dir", vmCall)
+	for _, a := range vmCall {
+		if strings.HasSuffix(a, ":/disk") {
+			t.Errorf("VM call = %v, still bind-mounts a host directory for the overlay", vmCall)
+		}
 	}
-	if !containsArg(vmCall, "CHV_DISK_IMAGE=/disk/disk.qcow2") {
-		t.Errorf("VM call = %v, want CHV_DISK_IMAGE pointing at the writable overlay", vmCall)
+	if !containsArg(vmCall, "CHV_DISK_IMAGE=/images/disk.img") {
+		t.Errorf("VM call = %v, want CHV_DISK_IMAGE naming the source image", vmCall)
+	}
+	if !containsArg(vmCall, "CHV_DISK_MODE=overlay") {
+		t.Errorf("VM call = %v, want -disk-readonly=false to ask for an overlay", vmCall)
+	}
+	if !containsArg(vmCall, "/var/lib/vm-images:/images:ro") {
+		t.Errorf("VM call = %v, want the images mount still read-only", vmCall)
 	}
 }
 
@@ -193,6 +205,36 @@ func TestCreate_ReadOnlyDiskHasNoDiskMount(t *testing.T) {
 	}
 	if !containsArg(vmCall, "CHV_DISK_IMAGE=/images/disk.img") {
 		t.Errorf("VM call = %v, want CHV_DISK_IMAGE unchanged for a read-only disk", vmCall)
+	}
+}
+
+func TestCreate_NoDiskBootsTheImagesOwnGuest(t *testing.T) {
+	// A customized kontur image carries its guest inside it, so there is
+	// nothing on the host to mount and no CHV_DISK_IMAGE to set -- "kontur
+	// run"'s own default (internal/config's defaultDiskImage) is the
+	// whole point. Mounting -images-hostpath anyway would shadow nothing
+	// but would make a host directory a requirement for a VM that needs
+	// none.
+	d, calls := testDocker(t)
+	spec := testSpec()
+	spec.DiskImage = ""
+	spec.DiskReadOnly = false
+
+	if err := Create(context.Background(), d, spec, &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	vmCall := calls()[4]
+	for _, a := range vmCall {
+		if strings.HasPrefix(a, "CHV_DISK_IMAGE=") {
+			t.Errorf("VM call = %v, want no CHV_DISK_IMAGE so the image's own default applies", vmCall)
+		}
+		if strings.HasSuffix(a, ":/images:ro") || strings.HasSuffix(a, ":/disk") {
+			t.Errorf("VM call = %v, want no disk mounts at all", vmCall)
+		}
+	}
+	if !containsArg(vmCall, "CHV_DISK_MODE=overlay") {
+		t.Errorf("VM call = %v, want the disk mode still passed through", vmCall)
 	}
 }
 

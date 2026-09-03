@@ -133,62 +133,39 @@ func buildKonturctl(t *testing.T) string {
 	return dir
 }
 
-// buildKonturDockerImage builds bwsalmon/kontur's own OCI image
-// (third_party/kontur/Dockerfile) and returns its tag. No
-// GUEST_SSH_AUTHORIZED_KEY build-arg is given: this test overrides the
-// guest disk entirely (buildKonturGuestImage below, via -disk/-kernel/
-// -initramfs), so the bundled reference guest this image would otherwise
-// carry at /var/lib/kontur/guest/disk.img is never used.
-func buildKonturDockerImage(t *testing.T) (image string) {
-	t.Helper()
-	image = "grain-kontur-e2e-test:latest"
-	cmd := exec.Command("docker", "build", "-t", image, ".")
-	cmd.Dir = "../../third_party/kontur"
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building the kontur OCI image from third_party/kontur/Dockerfile: %v\n%s", err, out)
-	}
-	return image
-}
-
-// buildKonturGuestImage runs scripts/kontur/build-guest.sh for real -- one
-// `docker build` against third_party/kontur's Dockerfile, which
-// debootstraps the rootfs and packs it with `mke2fs -d` inside the build,
-// with scripts/kontur/guest-setup.sh handed to its GUEST_SETUP_SCRIPT hook
-// to add git/build tooling/docker/gcloud/terraform -- and returns the
-// directory holding the kernel/initramfs/disk triple konturctl's own
-// -kernel/-initramfs/-disk flags point at directly.
+// buildKonturGuestImage runs scripts/kontur/build-guest.sh for real and
+// returns the image reference it produced: kontur's published guest,
+// booted, provisioned by scripts/kontur/guest-setup.sh with
+// git/build tooling/docker/gcloud/terraform, scrubbed and committed.
+//
+// It returns one image reference rather than a directory of three files
+// because that is what a VM needs now. This used to hand back a
+// kernel/initramfs/disk triple for konturctl's -kernel/-initramfs/-disk
+// flags to point at, built by a `docker build` that debootstrapped a
+// rootfs from scratch; the guest travels inside the image itself since
+// bwsalmon/kontur#36, so there is nothing to unpack and nothing for the
+// caller to mount.
 //
 // No SSH key goes into it. This helper used to generate a throwaway
-// keypair and hand build-guest.sh the public half as
-// OPERATOR_SSH_PUBLIC_KEY, because that was the only entry in the guest's
-// authorized_keys. kontur now generates a keypair inside each VM's own
-// container at boot and hands the guest the public half on the kernel
-// command line (bwsalmon/kontur#35), so the image this builds carries no
+// keypair and hand the build the public half, because that was the only
+// entry in the guest's authorized_keys. kontur generates a keypair inside
+// each VM's own container at boot and hands the guest the public half on
+// the kernel command line (bwsalmon/kontur#35), so the image carries no
 // key and the callers below configure no ExecKeyPath.
 //
-// OUTPUT_DIR is what makes that directory this function's own to name:
-// build-guest.sh writes "vmlinuz"/"initrd.img"/"disk.img" straight into
-// it, so nothing here has to find, copy out of, or clean up the
-// version-stamped output/<image>-<sha>-<timestamp>/ directory a bare run
-// of that script produces (which is also why this no longer needs sudo to
-// chown the result back: the build writes as the user running it).
+// Cached by tag: the build boots a VM and installs several hundred MB of
+// packages inside it, which is the most expensive single step in this
+// already-expensive, opt-in test, and nothing in it changes between runs.
+// A rebuild is one `docker rmi` away.
 //
-// Cached under a stable directory beneath os.TempDir(), like
-// fetchTestKernel used to: the rootfs build plus ~120MB of package
-// downloads is the most expensive single step in this whole test, and
-// nothing in it needs to change between runs of an already-expensive,
-// opt-in test. Now that no per-run key is baked in, docker's own layer
-// cache would mostly cover this too -- the guest-setup.sh text is the
-// same on every run -- but this directory is also what OUTPUT_DIR points
-// at, so it stays.
-func buildKonturGuestImage(t *testing.T) (imagesDir string) {
+// The base it derives from is built by that script out of
+// third_party/kontur, so this exercises the vendored tree end to end --
+// konturctl, the base image and the guest all from the same source.
+func buildKonturGuestImage(t *testing.T) (image string) {
 	t.Helper()
-	imagesDir = filepath.Join(os.TempDir(), "grain-kontur-e2e-test-guest-image")
-	if _, err := os.Stat(filepath.Join(imagesDir, "disk.img")); err == nil {
-		return imagesDir
-	}
-	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
-		t.Fatalf("creating guest image cache directory: %v", err)
+	image = "grain-guest:e2e-test"
+	if err := exec.Command("docker", "image", "inspect", image).Run(); err == nil {
+		return image
 	}
 
 	konturDir, err := filepath.Abs("../../scripts/kontur")
@@ -197,32 +174,24 @@ func buildKonturGuestImage(t *testing.T) (imagesDir string) {
 	}
 	cmd := exec.Command("./build-guest.sh")
 	cmd.Dir = konturDir
-	// KONTUR_IMAGE_BUCKET and SANDBOX_SETUP_SCRIPT are pinned empty
-	// rather than inherited: set in the environment of whoever runs this
-	// test, the first would publish this throwaway image to a real GCS
-	// bucket and the second would bake unreviewed content into the guest
-	// the assertions below then run against. build-guest.sh treats both
-	// as unset when empty.
+	// Both pinned empty rather than inherited. Set in the environment of
+	// whoever runs this test, GUEST_SOURCE_REPO would relabel a throwaway
+	// image as if it were a published one, and KONTUR_GUEST_BASE would
+	// derive from some other image entirely -- defeating the point of
+	// building everything here from the vendored tree.
 	cmd.Env = append(os.Environ(),
-		"OUTPUT_DIR="+imagesDir,
-		"KONTUR_IMAGE_BUCKET=",
-		"SANDBOX_SETUP_SCRIPT=",
+		"IMAGE="+image,
+		"KONTUR_GUEST_BASE=",
+		"GUEST_SOURCE_REPO=",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("running scripts/kontur/build-guest.sh: %v\n%s", err, out)
 	}
-
-	// build-guest.sh already fails if any of the three is missing or
-	// empty, so this only catches it writing somewhere other than
-	// OUTPUT_DIR -- which would otherwise surface as a VM that never
-	// boots, saying nothing about why.
-	for _, name := range []string{"vmlinuz", "initrd.img", "disk.img"} {
-		if _, err := os.Stat(filepath.Join(imagesDir, name)); err != nil {
-			t.Fatalf("build-guest.sh reported success but %s is not in OUTPUT_DIR (%s): %v\n%s", name, imagesDir, err, out)
-		}
+	if err := exec.Command("docker", "image", "inspect", image).Run(); err != nil {
+		t.Fatalf("build-guest.sh reported success but %s does not exist: %v\n%s", image, err, out)
 	}
-	return imagesDir
+	return image
 }
 
 // TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently is the
@@ -254,8 +223,7 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
 	konturctlDir := buildKonturctl(t)
-	image := buildKonturDockerImage(t)
-	imagesHostPath := buildKonturGuestImage(t)
+	image := buildKonturGuestImage(t)
 
 	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -263,32 +231,27 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		StateDir: stateDir,
 		CreateArgs: []string{
+			// No -disk/-kernel/-initramfs, and no -images-hostpath: the
+			// guest travels inside -kontur-image, so konturctl boots
+			// what that image carries.
 			"-kontur-image", image,
-			"-images-hostpath", imagesHostPath,
-			"-disk", "/images/disk.img",
-			"-kernel", "/images/vmlinuz",
-			"-initramfs", "/images/initrd.img",
 			"-guest-port", "22",
 			// kontur authorizes this boot's generated key for root; the
 			// account SSHUser names has to be named too, or `kontur exec`
 			// logs in as someone the guest never authorized. Same flag
 			// scripts/setup.sh passes in a real deployment.
 			"-guest-user", "debian",
-			// -disk-readonly=false/-disk-hostpath give each VM its own
-			// private writable qcow2 overlay (one subdirectory per VM
-			// name under -disk-hostpath, so the two slots' VMs sharing
-			// this one directory is fine) instead of attaching -disk
-			// itself read-only. Without this, the guest's root filesystem
-			// stays read-only end to end (confirmed by hand: a real VM
-			// created without it reports "/dev/vda / ext4 ro,relatime" in
-			// /proc/mounts), which fails kontur-ssh-host-keys.service's
-			// first-boot `ssh-keygen -A` -- so sshd never has a host key
-			// to start with, and the guest never becomes reachable within
-			// ReadyTimeout at all. The same pair scripts/setup.sh's
-			// own GRAIN_KONTUR_ENABLE=1 branch always passes in a real
-			// deployment (bwsalmon/agents#510).
-			"-disk-readonly=false",
-			"-disk-hostpath", t.TempDir(),
+			// Each VM gets a writable root: a thin qcow2 created inside
+			// its own container, backed by the image's disk, which is
+			// only ever read (bwsalmon/kontur#37). konturctl's default is
+			// read-only, and without a writable root the guest fails
+			// kontur-ssh-host-keys.service's first-boot `ssh-keygen -A`
+			// -- so sshd never has a host key, and the guest never
+			// becomes reachable within ReadyTimeout at all (confirmed by
+			// hand: such a VM reports "/dev/vda / ext4 ro,relatime" in
+			// /proc/mounts). The same flag scripts/setup.sh's own
+			// GRAIN_KONTUR_ENABLE=1 branch passes in a real deployment.
+			"-disk-mode=overlay",
 		},
 		SSHUser:           "debian",
 		Workspace:         "/home/debian",
@@ -473,8 +436,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	konturDockerRealTestPrereqs(t)
 
 	konturctlDir := buildKonturctl(t)
-	image := buildKonturDockerImage(t)
-	imagesHostPath := buildKonturGuestImage(t)
+	image := buildKonturGuestImage(t)
 
 	t.Setenv("PATH", konturctlDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -482,11 +444,9 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
 		StateDir: stateDir,
 		CreateArgs: []string{
+			// No -disk/-kernel/-initramfs, and no -images-hostpath: the
+			// guest travels inside -kontur-image.
 			"-kontur-image", image,
-			"-images-hostpath", imagesHostPath,
-			"-disk", "/images/disk.img",
-			"-kernel", "/images/vmlinuz",
-			"-initramfs", "/images/initrd.img",
 			// Still 22, and still not optional -- konturctl's own default
 			// is 80. This transport never goes through the DNAT rule that
 			// forwards to it, but konturctl validates and netshim
@@ -509,24 +469,17 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// the concurrent test above" they used to carry was guarding
 			// a collision that shape makes impossible.
 			//
-			// -disk-readonly defaults to true (staticpod.Defaults),
-			// attaching -disk itself directly rather than a private
-			// overlay -- fine for a guest that only ever reads it, but
-			// this test also proves write_file/edit_file work over this
-			// transport (below), and those need a guest whose root
-			// filesystem is actually writable. Confirmed by hand against
-			// a real VM without this pair: `cat /proc/mounts` inside the
-			// guest reports "/dev/vda / ext4 ro,relatime", and write_file
-			// fails with "Read-only file system". -disk-hostpath (a
-			// directory only this test's VM uses, distinct from
-			// imagesHostPath, which is always mounted read-only since
-			// several VMs may share it) is where konturctl puts the
-			// private qcow2 overlay -disk-readonly=false backs onto
-			// -disk with -- the same pair scripts/setup.sh's own
-			// GRAIN_KONTUR_ENABLE=1 branch always passes in a real
-			// deployment (bwsalmon/agents#510).
-			"-disk-readonly=false",
-			"-disk-hostpath", t.TempDir(),
+			// konturctl's disk mode defaults to read-only, which is fine
+			// for a guest that only ever reads its disk -- but this test
+			// also proves write_file/edit_file work over this transport
+			// (below), and those need a root filesystem that is actually
+			// writable. Confirmed by hand against a real VM without this:
+			// `cat /proc/mounts` inside the guest reports "/dev/vda /
+			// ext4 ro,relatime", and write_file fails with "Read-only
+			// file system". overlay gives it one for free -- a thin qcow2
+			// in the VM's own container, backed by the image's disk
+			// (bwsalmon/kontur#37) -- and is what scripts/setup.sh passes.
+			"-disk-mode=overlay",
 		},
 		SSHUser:           "debian",
 		Workspace:         "/home/debian",

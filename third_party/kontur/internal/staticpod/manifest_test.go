@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bwsalmon/kontur/internal/config"
+
 	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
@@ -118,10 +120,14 @@ func TestRender_ReadOnlyDiskHasNoWritableMount(t *testing.T) {
 	}
 }
 
-func TestRender_WritableDiskAddsWritableMount(t *testing.T) {
+func TestRender_WritableDiskNeedsNoHostMount(t *testing.T) {
+	// A writable disk used to mean a second hostPath: konturctl created a
+	// qcow2 out here and mounted the directory holding it read-write.
+	// The overlay is created inside the VM's own container now, so the
+	// manifest names the source image directly and mounts only the shared,
+	// read-only images directory.
 	s := baseSpec()
 	s.DiskReadOnly = false
-	s.DiskHostPath = "/var/lib/kontur/vm-disks"
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
@@ -129,14 +135,17 @@ func TestRender_WritableDiskAddsWritableMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
-	if got, want := envValue(t, out, "CHV_DISK_IMAGE"), "/disk/disk.qcow2"; got != want {
-		t.Errorf("CHV_DISK_IMAGE = %q, want %q", got, want)
+	if got, want := envValue(t, out, "CHV_DISK_IMAGE"), s.DiskImage; got != want {
+		t.Errorf("CHV_DISK_IMAGE = %q, want the source image %q", got, want)
 	}
-	if !strings.Contains(out, "mountPath: /disk") {
-		t.Errorf("manifest missing /disk volumeMount:\n%s", out)
+	if got, want := envValue(t, out, "CHV_DISK_MODE"), config.DiskModeOverlay; got != want {
+		t.Errorf("CHV_DISK_MODE = %q, want %q", got, want)
 	}
-	if !strings.Contains(out, `path: "/var/lib/kontur/vm-disks/web"`) {
-		t.Errorf("manifest missing writable disk hostPath:\n%s", out)
+	if strings.Contains(out, "mountPath: /disk") {
+		t.Errorf("manifest still has a /disk volumeMount:\n%s", out)
+	}
+	if strings.Contains(out, "vm-disks") {
+		t.Errorf("manifest still has a host writable-disk path:\n%s", out)
 	}
 }
 

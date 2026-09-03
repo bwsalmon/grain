@@ -57,6 +57,61 @@ ARG GUEST_SSH_AUTHORIZED_KEY=""
 # place secrets -- it is as public as the image is.
 ARG GUEST_SETUP_SCRIPT=""
 
+# GUEST_KERNEL_PACKAGE, if set, names a distro kernel package to install
+# into the guest rootfs (e.g. "linux-image-amd64" on Debian). Left empty
+# -- the default, and what kontur's own bundled guest uses -- nothing is
+# installed and the guest boots the fetch-kernel stage's
+# cloud-hypervisor/linux release build baked into the final image.
+#
+# A guest whose workload needs a richer kernel config than that build
+# carries wants one of its own: overlayfs, cgroup v2, bridge netfilter
+# and veth -- i.e. running containers inside the guest -- are the usual
+# reasons, and a kernel built for cloud-hypervisor's own CI is not where
+# to look for them. Debian's stock linux-image-amd64 already sets
+# CONFIG_PVH and ships virtio-pci/virtio_blk/virtio_net as modules, which
+# is all direct kernel boot needs.
+#
+# It is installed in the "guest-customized" stage rather than through
+# debootstrap's --include, and that ordering is the whole point: see that
+# stage's own comment.
+ARG GUEST_KERNEL_PACKAGE=""
+
+# GUEST_CONSOLE_WRAP=0 leaves out the sshd drop-in that mirrors every SSH
+# session onto the serial console. On by default, as it has always been;
+# see overlay-common/etc/ssh/sshd_config.d/20-console-wrap.conf for what
+# it costs a caller that parses command output rather than reading it.
+ARG GUEST_CONSOLE_WRAP=1
+
+# GUEST_DISK_EXTRA_MB adds headroom to the guest disk, on top of the 20%
+# the guest-image stage sizes it with.
+#
+# That 20% is sized against the rootfs being packed, which is the right
+# answer for an image whose guest is finished at build time: it is space
+# for logs and runtime growth, not for installing anything.
+#
+# An image built to be *derived from* -- customized by
+# `konturctl guest build`, which boots it and provisions the running
+# guest -- needs room for what that provisioning installs, and by then
+# the filesystem is packed and cannot grow. A guest with 200MB free
+# fails an `apt-get install` of anything substantial with "You don't have
+# enough free space in /var/cache/apt/archives/", after booting
+# perfectly, which reads as a broken setup script rather than a disk that
+# was sized before anyone knew what would go on it.
+#
+# It is not free, though, and the cost is easy to misjudge. `truncate`
+# leaves the extra as a hole, and a pushed layer of zeros compresses to
+# almost nothing -- but a docker layer is a tar, and extracting one
+# materializes the hole. Every GB here is a GB on disk on every machine
+# that pulls the image. Size it against what the guest actually installs
+# rather than against what feels safe.
+#
+# The way to get real headroom without paying for it in the image is to
+# grow the disk at boot instead: `truncate` the raw file larger before
+# cloud-hypervisor opens it and let the guest `resize2fs` onto it. That
+# keeps the image sized to its rootfs and makes headroom a per-VM
+# setting. Worth doing if the amounts here ever get large.
+ARG GUEST_DISK_EXTRA_MB=0
+
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -179,6 +234,12 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 #   given, is still baked in for an operator's own interactive access.
 #   Root has no password at all either way (see
 #   overlay-common/etc/ssh/sshd_config.d).
+# - kontur-net-cmdline.service is enabled into sysinit.target rather than
+#   multi-user.target, unlike every other unit here: it establishes the
+#   guest's address, so it has to have run before sshd starts. It is a
+#   no-op on a guest booting the bundled kernel, which handles "ip="
+#   itself -- see overlay-debian/usr/local/libexec/kontur-configure-net
+#   for when it is not, and why.
 # - systemd-udevd's own /lib/udev/rules.d/80-net-setup-link.rules renames
 #   NICs to "predictable" names (e.g. virtio-pci's second NIC becomes
 #   "ens3", not "eth1") based on each device's PCI slot -- masked here by
@@ -195,6 +256,7 @@ RUN set -eux; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-authorized-key; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-configure-net; \
     for t in sed base64 awk mkdir chmod chown; do \
       [ -e "/rootfs/bin/$t" ] || [ -e "/rootfs/usr/bin/$t" ] || \
         { echo "kontur-authorized-key execs $t, which this rootfs does not have" >&2; exit 1; }; \
@@ -209,6 +271,9 @@ RUN set -eux; \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-control-net.service; \
     ln -sf /etc/systemd/system/kontur-authorized-key.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-authorized-key.service; \
+    install -d /rootfs/etc/systemd/system/sysinit.target.wants; \
+    ln -sf /etc/systemd/system/kontur-net-cmdline.service \
+      /rootfs/etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service; \
     rm -f /rootfs/etc/ssh/ssh_host_*; \
     install -d -m0700 /rootfs/root/.ssh; \
     : > /rootfs/root/.ssh/authorized_keys; \
@@ -312,6 +377,48 @@ COPY --from=guest-rootfs /rootfs/ /
 # where the whole point is running a caller's own script -- so it is set
 # explicitly rather than left to that fallback.
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Installs GUEST_KERNEL_PACKAGE, and drops the console-mirroring sshd
+# drop-in when GUEST_CONSOLE_WRAP=0. Both are done here, in the one stage
+# where the rootfs is a running container rather than a directory, and
+# for the kernel that is not incidental:
+#
+#   - debootstrap's --include would install the package while the
+#     overlays are not in place yet, so the initramfs its postinst
+#     generates would predate them. That matters concretely: the udev
+#     rules masked in guest-rootfs-debian (80-net-setup-link.rules) are
+#     snapshotted *into* the initramfs, and an initramfs carrying the
+#     unmasked rules renames the guest's NIC away from eth0 before the
+#     real root is ever mounted -- leaving the "ip=" spec naming a device
+#     that no longer exists, and the guest unreachable, with nothing in
+#     the boot log obviously about naming. Installing after the overlays
+#     means the first initramfs generated is already correct, with no
+#     second update-initramfs to remember.
+#   - It is also why this runs before GUEST_SETUP_SCRIPT below: a setup
+#     script that writes udev rules or modules-load.d entries of its own
+#     is responsible for its own `update-initramfs -u`, but one that only
+#     installs packages -- the common case -- needs nothing.
+#
+# Only Debian's apt is supported: the Alpine variant would need
+# `apk add linux-virt` and a different initramfs tool, so it fails here
+# with a message rather than a missing-binary error further on.
+ARG GUEST_KERNEL_PACKAGE
+ARG GUEST_CONSOLE_WRAP
+RUN set -eux; \
+    if [ "${GUEST_CONSOLE_WRAP}" = "0" ]; then \
+      rm -f /etc/ssh/sshd_config.d/20-console-wrap.conf; \
+    fi; \
+    if [ -n "${GUEST_KERNEL_PACKAGE}" ]; then \
+      command -v apt-get >/dev/null 2>&1 || \
+        { echo "GUEST_KERNEL_PACKAGE needs GUEST_DISTRO=debian; this rootfs has no apt-get" >&2; exit 1; }; \
+      export DEBIAN_FRONTEND=noninteractive; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends ${GUEST_KERNEL_PACKAGE} klibc-utils; \
+      rm -rf /var/lib/apt/lists/*; \
+      ls /boot/vmlinuz-* >/dev/null 2>&1 || \
+        { echo "${GUEST_KERNEL_PACKAGE} installed but left no /boot/vmlinuz-*" >&2; exit 1; }; \
+    fi
+
 ARG GUEST_SETUP_SCRIPT
 RUN if [ -n "${GUEST_SETUP_SCRIPT}" ]; then \
       printf '%s\n' "${GUEST_SETUP_SCRIPT}" > /tmp/kontur-guest-setup.sh; \
@@ -331,9 +438,10 @@ FROM debian:bookworm-slim AS guest-image
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=guest-customized / /rootfs
+ARG GUEST_DISK_EXTRA_MB
 RUN set -eux; \
     size_kb=$(du -sk /rootfs | cut -f1); \
-    img_kb=$(( (size_kb * 12 / 10) + 65536 )); \
+    img_kb=$(( (size_kb * 12 / 10) + 65536 + (${GUEST_DISK_EXTRA_MB:-0} * 1024) )); \
     truncate -s "${img_kb}K" /disk.img; \
     mke2fs -F -t ext4 -L kontur-root -d /rootfs /disk.img
 
@@ -379,6 +487,13 @@ COPY --from=build /out/kontur /usr/local/bin/kontur
 # it just also answers to "sh"/"bash" the way one would.
 COPY --from=build /out/shims/ /
 COPY --from=guest-image /disk.img /var/lib/kontur/guest/disk.img
+# The guest's own kernel and initramfs, when GUEST_KERNEL_PACKAGE put one
+# in the rootfs -- the same pair guest-artifacts exports, placed beside
+# the disk they belong to. The guest-image stage always creates /out, so
+# this copies nothing at all for a guest without one, and the
+# fetch-kernel vmlinux below stays what boots it. internal/config picks
+# between the two by which files exist; see its defaultKernel.
+COPY --from=guest-image /out/ /var/lib/kontur/guest/
 # See the "fetch-kernel" stage above and internal/config's defaultKernel:
 # a direct-kernel-boot VM works out of the box, the same way the guest
 # disk image above does, without anything needing to be supplied from

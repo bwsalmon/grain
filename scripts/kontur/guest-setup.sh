@@ -1,60 +1,59 @@
 #!/bin/sh
-# Customizes a bwsalmon/kontur guest image into a grain sandbox guest.
+# Turns a stock kontur guest into a grain sandbox guest: the toolchain a
+# dispatched task runs against, plus the accounts and daemon settings that
+# toolchain needs.
 #
-# This is the script handed to kontur's own build-time guest setup hook,
-# replacing scripts/kontur/provision.sh and the debootstrap pipeline
-# build.sh drove it from: kontur's Dockerfile already builds a guest
-# rootfs (debootstrap --variant=minbase, plus its own overlays) and packs
-# it into a disk image with `mke2fs -d`, so grain no longer builds one of
-# its own -- it only says what to add.
+# CONTRACT: runs as root, over `kontur exec`, inside a *booted* VM --
+# scripts/kontur/build-guest.sh boots the base image, runs this, scrubs
+# per-boot identity and commits the result (see `konturctl guest build`).
+# So unlike its predecessor, which ran as a RUN in a container during an
+# image build, this has a running kernel and a running systemd:
+# `systemctl start` works, dockerd can actually run, and anything that
+# needs to observe the machine it is configuring can.
 #
-# CONTRACT: runs as root with the guest rootfs as /, after kontur's own
-# guest stage has finished and before that rootfs is packed into
-# disk.img, with a real /proc and /dev and working network access. Not a
-# chroot, as an earlier version of this header assumed: kontur's
-# guest-customized stage (bwsalmon/kontur#28) promotes the rootfs to an
-# image of its own and runs this as an ordinary Dockerfile RUN, precisely
-# so that a chroot's need for CAP_SYS_ADMIN to bind-mount /proc and /dev
-# never arises. The practical guarantees are the ones provision.sh ran
-# under, which is why this stayed a port rather than becoming a rewrite;
-# the one difference worth knowing is that /sys may be read-only under
-# BuildKit where provision.sh's chroot had it read-write. Nothing here
-# writes to /sys. Neither environment has a running service manager:
-# `systemctl enable` works, `systemctl start` does not.
+# That is also the one hazard to keep in mind. A package whose postinst
+# *starts* a service starts it here for real, with whatever configuration
+# is on disk at that moment -- see the docker block below, which writes
+# /etc/docker/daemon.json before installing docker precisely because
+# dockerd would otherwise come up on the default bridge subnet and stay
+# there.
 #
-# ORDERING: the kernel package must already be installed by the time this
-# runs -- see "Networking" below, whose final `update-initramfs` has
-# nothing to regenerate otherwise, and whose failure mode is a guest that
-# boots with no address at all.
+# What this deliberately does NOT do, because the base image
+# (ghcr.io/bwsalmon/kontur:debian12-*, built with
+# GUEST_KERNEL_PACKAGE=linux-image-amd64 and GUEST_CONSOLE_WRAP=0) now
+# carries all of it:
 #
-# Inputs, all as environment variables rather than files (nothing here is
-# ever written into this repo). build-guest.sh splices each one into the
-# text of this script, since kontur's hook execs it with only its own
-# build stage's environment:
-#   GO_VERSION               required. The Go toolchain to install, read
-#                            out of this repo's own go.mod by
-#                            build-guest.sh -- see "The Go and Node
-#                            toolchains" below.
-#   GRAIN_DEP_MANIFESTS      required. base64 of a gzipped tar of go.mod,
-#                            go.sum, ui/package.json and
-#                            ui/package-lock.json, which is what the
-#                            module and npm caches are warmed from.
-#   SANDBOX_SETUP_SCRIPT     optional. An operator's own extra
-#                            customization, run after everything below.
+#   - install a kernel, or regenerate the initramfs. The base has Debian's
+#     linux-image-amd64 and an initramfs generated with kontur's udev
+#     mask already in place. Nothing here writes udev rules or
+#     modules-load.d entries, which is what would make a regeneration
+#     necessary.
+#   - configure networking from the "ip=" kernel parameter, or keep the
+#     guest's NICs named eth0/eth1. kontur-net-cmdline.service and the
+#     udev mask do both.
+#   - undo kontur's SSH console wrapper. The base is built without it, so
+#     `kontur exec` output is byte-transparent rather than passing
+#     through a pty that rewrites newlines and merges stderr into stdout.
+#   - install any SSH key. kontur generates a keypair per VM boot and
+#     passes the public half on the kernel command line.
 #
-# Notably no SSH key: see "No SSH key is baked in" at the bottom. This
-# image is generic, and every VM booted from it authorizes a different
-# key that kontur generates at boot.
+# There is no operator hook here either. Customizing this guest is
+# `konturctl guest build --from <this image>` with a script of your own,
+# which is the same mechanism that built it -- so the extension point is
+# the tool rather than an environment variable spliced into a script.
 #
-# What this deliberately does NOT do, because kontur's own guest stage
-# already does it: install openssh-server/systemd-sysv/iproute2/acpid,
-# wire up the ACPI power button for graceful shutdown, arrange for fresh
-# SSH host keys per VM, or authorize kontur's own `kontur exec` keypair.
-#
-# One thing it deliberately UNDOES: kontur's ForceCommand console wrapper.
-# See "Stop forcing kontur's console wrapper" below -- it is the one place
-# where building on kontur's guest actively breaks grain's tools rather
-# than merely not helping them.
+# Two inputs, both required, both environment variables rather than files
+# (nothing here is ever written into this repo). konturctl runs this
+# script with only the guest's own environment, so build-guest.sh splices
+# each one into the text of the script immediately after the shebang --
+# which has to stay on line 1:
+#   GO_VERSION               the Go toolchain to install, read out of this
+#                            repo's own go.mod by build-guest.sh -- see
+#                            "The Go and Node toolchains" below.
+#   GRAIN_DEP_MANIFESTS      base64 of a gzipped tar of go.mod, go.sum,
+#                            ui/package.json and ui/package-lock.json,
+#                            which is what the module and npm caches are
+#                            warmed from.
 set -eux
 
 KIND_VERSION="v0.32.0"
@@ -84,59 +83,84 @@ apt-get update
 # carries" (bwsalmon/agents#267), matching provision/sandbox.sh's list.
 # sudo and libnss-myhostname are not toolchain: see the "debian" account
 # and hostname blocks below for what needs each.
-# klibc-utils is named explicitly rather than left to arrive as a
-# transitive dependency: /usr/lib/klibc/bin/ipconfig is what the
-# networking unit below actually execs, and it reaches this image only via
-# linux-image-amd64 -> initramfs-tools -> klibc-utils. kontur's guest is
-# debootstrap --variant=minbase, which has none of that chain, so anything
-# that changes how the kernel gets in (a copied-in kernel rather than the
-# Debian package, say) would silently take ipconfig with it and leave
-# every guest without an address.
-# xz-utils is here for the same kind of reason: `tar -J` shells out to
-# the xz binary, and the Node tarball below is the only .tar.xz this
-# script unpacks. minbase has liblzma5 (dpkg needs it) but not the
-# command.
-# e2fsprogs is named for the same reason klibc-utils is: resize2fs is what
-# the grain-growfs unit below execs, and while e2fsprogs is a
-# Priority: required package that debootstrap --variant=minbase does
-# install today, a guest that silently lost it would boot fine and simply
-# never grow onto the disk its VM was created with -- a failure that looks
-# like "-disk-size-gb did nothing" several layers away from its cause.
+#
+# xz-utils is here because `tar -J` shells out to the xz binary, and the
+# Node tarball below is the only .tar.xz this script unpacks; minbase has
+# liblzma5 (dpkg needs it) but not the command. e2fsprogs is named for
+# the same kind of reason klibc-utils is in the base: resize2fs is what
+# the grain-growfs unit below execs, and while debootstrap --variant=
+# minbase does install this Priority: required package today, a guest
+# that silently lost it would boot fine and simply never grow onto the
+# disk its VM was created with -- a failure that looks like
+# "-disk-size-gb did nothing", several layers from its cause.
 apt-get install -y --no-install-recommends \
-  linux-image-amd64 \
-  sudo libnss-myhostname klibc-utils e2fsprogs \
+  sudo libnss-myhostname e2fsprogs \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
   pipx tmux unzip xz-utils ca-certificates bubblewrap gnupg
 
-# --- Hostname resolution. The chroot this runs in shares the build host's
-# UTS namespace, so anything above that asked for "the current hostname"
-# saw the build host's, not the guest's. Every guest getting the same
-# fixed name is fine -- nothing here needs a unique one, and konturctl's
-# addressing never relies on it -- but inheriting an arbitrary build
-# host's name would be actively misleading.
-echo kontur-guest > /etc/hostname
-
-# libnss-myhostname's postinst does not itself edit this conffile (an
-# existing /etc/nsswitch.conf predates it in every debootstrap run), so
-# the module has to be wired into the hosts line by hand to apply.
-# Without it sudo -- which resolves the local hostname for its own
-# logging -- blocks for a long DNS timeout against a guest with no real
-# nameserver. Confirmed by hand.
+# --- Hostname resolution. libnss-myhostname's postinst does not itself
+# edit this conffile (an existing /etc/nsswitch.conf predates it in every
+# debootstrap run), so the module has to be wired into the hosts line by
+# hand to apply. Without it sudo -- which resolves the local hostname for
+# its own logging -- blocks for a long DNS timeout against a guest with no
+# real nameserver. Confirmed by hand.
 sed -i 's/^hosts:.*/hosts:          files myhostname dns/' /etc/nsswitch.conf
 
 # --- The "debian" account. On v1's sandbox base (a stock Debian cloud
 # image) this was cloud-init's default_user; this image has no cloud-init,
 # so it is created here instead -- same name, so every assumption
-# downstream of it keeps holding: the operator's authorized_keys below,
-# grain/adapter/libvirt.py's v1 convention, and the docker group grant.
-# Passwordless sudo matches what cloud-init's default_user grants on every
-# cloud image v1 and this image's predecessor both used.
+# downstream of it keeps holding: grain/adapter/libvirt.py's v1
+# convention, and the docker group grant below. Passwordless sudo matches
+# what cloud-init's default_user grants on every cloud image v1 and this
+# image's predecessor both used.
 #
 # kontur's own guest authorizes its exec keypair for root; this account is
-# grain's, and -kontur-ssh-user names it.
+# grain's, and -kontur-ssh-user names it. konturctl's -guest-user is what
+# gets this boot's generated key authorized for it too.
 useradd -m -s /bin/bash debian
 echo 'debian ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-debian
 chmod 0440 /etc/sudoers.d/90-debian
+
+# The guest-side installer creates this too, but leaving it to that would
+# mean an image whose only correct permissions came from a script that had
+# not run yet.
+install -d -m0700 -o debian -g debian /home/debian/.ssh
+
+# --- Docker's bridge subnet, written BEFORE docker is installed.
+#
+# Docker's own default, 172.17.0.0/16, is not a guest-image choice -- it
+# is dockerd's hardcoded first entry in its default address pool, so an
+# operator host that also runs unconfigured Docker (the common case:
+# scripts/setup.sh needs docker to run the deployment image and to attach
+# a kontur VM's own container to it) ends up with its docker0 gateway at
+# that exact address too. GRAIN_KONTUR_GIT_PROXY_HOST (scripts/setup.sh's
+# ensure_kontur_git_proxy_host) defaults a VM's route to the host's git
+# proxy to be that same host-side gateway address. Confirmed live: the
+# moment this guest's own dockerd creates its identically-addressed local
+# bridge, the guest's routing table gains a directly-connected
+# 172.17.0.0/16 route that is *more specific* than its default route out
+# through eth0 -- so a packet to the host's real 172.17.0.1 never leaves
+# the guest at all, and lands on the guest's own unrelated docker0
+# instead, refused with nothing listening there. Giving this guest's
+# dockerd a different, deliberately unusual default bridge subnet up front
+# removes the collision at its actual source.
+#
+# The ordering is the part that is new. This used to run after the docker
+# install, which was harmless when nothing in the image was running: the
+# file was simply on disk before anything read it. Here systemd is up, so
+# docker-ce's postinst starts dockerd during the install -- with whatever
+# is in /etc/docker at that moment. Written afterwards, this file would
+# describe a bridge the running daemon did not have, and the collision it
+# exists to prevent would be back until something restarted docker.
+install -d -m0755 /etc/docker
+cat > /etc/docker/daemon.json <<'DOCKERD'
+{
+  "bip": "172.30.255.1/24",
+  "default-address-pools": [
+    {"base": "172.31.0.0/16", "size": 24}
+  ]
+}
+DOCKERD
 
 # --- Docker, from the official repo -- identical to provision/sandbox.sh's
 # own block, same reasoning (the documented path on Debian, no kernel
@@ -153,38 +177,21 @@ apt-get install -y --no-install-recommends \
   docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 usermod -aG docker debian
 
-# Docker's own default bridge subnet, 172.17.0.0/16, is not a guest-image
-# choice -- it is dockerd's hardcoded first entry in its default address
-# pool, so an operator host that also runs unconfigured Docker (the common
-# case: scripts/setup.sh needs docker to build/run the OCI image and
-# to attach a kontur VM's own container to it) ends up with its docker0
-# gateway at that exact address too. GRAIN_KONTUR_GIT_PROXY_HOST
-# (scripts/setup.sh's ensure_kontur_git_proxy_host) defaults a VM's
-# route to the host's git proxy to be that same host-side gateway
-# address. Confirmed live: the moment this guest's own dockerd creates
-# its identically-addressed local bridge, the guest's routing table gains
-# a directly-connected 172.17.0.0/16 route that is *more specific* than
-# its default route out through eth0 -- so a packet to the host's real
-# 172.17.0.1 never leaves the guest at all, and lands on the guest's own
-# unrelated docker0 instead, refused with nothing listening there. Giving
-# this guest's dockerd a different, deliberately unusual default bridge
-# subnet up front removes the collision at its actual source, without
-# touching the host-side networking or the address-selection logic at
-# all.
-install -d -m0755 /etc/docker
-cat > /etc/docker/daemon.json <<'DOCKERD'
-{
-  "bip": "172.30.255.1/24",
-  "default-address-pools": [
-    {"base": "172.31.0.0/16", "size": 24}
-  ]
-}
-DOCKERD
+# Asserted rather than assumed: this is the whole reason the guest boots a
+# distro kernel instead of kontur's own (overlayfs, cgroup v2, bridge
+# netfilter, veth). A dockerd that cannot start is a guest that looks fine
+# until the first dispatched task tries to run anything.
+systemctl enable docker
+systemctl start docker
+docker info >/dev/null
 
-# kind itself. The node image is not pre-pulled: that needs a running
-# docker daemon, which a chroot cannot provide. A first
-# `kind create cluster` inside a dispatched task pays that pull once
-# instead of paying it here on every image build.
+# kind itself. The node image is deliberately not pre-pulled here, though
+# for the first time it now could be -- there is a running dockerd a few
+# lines up. It needs kind's default node image tag for this exact kind
+# release pinned alongside KIND_VERSION, which is a version constant worth
+# adding on purpose rather than in passing, and it would add most of a
+# gigabyte to an image every deployment host pulls. A first
+# `kind create cluster` inside a dispatched task pays that pull instead.
 curl -fsSL -o /usr/local/bin/kind \
   "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
 chmod +x /usr/local/bin/kind
@@ -368,86 +375,14 @@ rm -rf "${grain_manifests}"
 # so the files are in the right places under the wrong owner.
 chown -R debian:debian /home/debian
 
-# --- Networking: kernel interface naming, and static addressing from the
-# kernel's own "ip=" boot parameter.
-#
-# kontur's own guest image needs neither, and its deploy/guest-image
-# README says so explicitly ("it relies on the kernel's built-in ip=
-# boot-time autoconfiguration ... no extra guest-side networking setup was
-# needed"). That holds only for a kernel with CONFIG_IP_PNP, and the
-# kernel this guest actually boots -- Debian's stock linux-image-amd64,
-# installed above rather than kontur's own (see README.md, "Why no custom
-# kernel") -- does NOT enable it, so nothing acts on "ip=" without the
-# unit below. konturctl derives that "ip=" value itself with "eth0"
-# hard-coded (internal/staticpod/spec.go), so the guest has to guarantee
-# that name rather than the other way around.
-#
-# Naming is done by turning systemd's predictable-naming policy off
-# wholesale rather than by pinning a name, because this guest can have
-# more than one NIC. kontur's flat networking mode gives it two: the
-# first is spliced onto the container's own network segment and carries
-# the identity "ip=" configures, the second is the private control link
-# "kontur exec" and the memory agent reach the guest on (kontur's
-# internal/netshim, "Flat mode"). A link file matching Type=ether and
-# forcing Name=eth0 -- which is what this did before -- matches *both* of
-# them and can only win once, leaving the other NIC under whatever name
-# systemd falls back to and the control link unconfigured. Masking the
-# default .link is the documented way to disable predictable naming, and
-# leaves the kernel's own names in place: eth0 and eth1, in the PCI probe
-# order cloud-hypervisor attaches them, which is the order kontur passes
-# --net (spliced NIC first, control link second -- netshim's
-# FlatGuestConfig). A single-NIC guest, i.e. kontur's original NAT mode,
-# still gets exactly eth0 out of this.
-#
-# Both were found by hand against a real booted guest. Their failure mode
-# is a VM that boots fine and has no address at all, which reaches the
-# daemon only as "the guest never became reachable".
-ln -sf /dev/null /etc/systemd/network/99-default.link
-
-cat > /usr/local/sbin/kontur-configure-net <<'EOF'
-#!/bin/sh
-# Configures the guest's network interface from the kernel's own "ip="
-# boot parameter. klibc's ipconfig(8) (from klibc-utils, pulled in by
-# initramfs-tools) implements the same static-addressing syntax the
-# kernel's own in-kernel IP-config code would if CONFIG_IP_PNP were
-# enabled, but (unlike that in-kernel code) does not read /proc/cmdline
-# itself -- it only accepts the spec as an explicit argument.
-set -e
-ipparam=$(sed -n 's/.*\bip=\([^ ]*\).*/\1/p' /proc/cmdline)
-[ -n "$ipparam" ] || exit 0
-exec /usr/lib/klibc/bin/ipconfig "$ipparam"
-EOF
-chmod 0755 /usr/local/sbin/kontur-configure-net
-
-cat > /etc/systemd/system/kontur-net-cmdline.service <<'EOF'
-[Unit]
-Description=Configure networking from the ip= kernel command line (kontur static addressing)
-DefaultDependencies=no
-After=systemd-udevd.service systemd-udev-trigger.service
-Before=network-pre.target sshd.service ssh.service
-Wants=systemd-udev-trigger.service network-pre.target
-
-[Service]
-Type=oneshot
-ExecStartPre=/sbin/modprobe -v virtio_net
-ExecStartPre=/bin/udevadm settle --timeout=10
-ExecStart=/usr/local/sbin/kontur-configure-net
-RemainAfterExit=yes
-
-[Install]
-WantedBy=sysinit.target
-EOF
-mkdir -p /etc/systemd/system/sysinit.target.wants
-ln -sf /etc/systemd/system/kontur-net-cmdline.service \
-  /etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service
-
 # --- Grow the root filesystem onto whatever disk this VM was actually
 # given (grain/task-41).
 #
 # `konturctl vm create -disk-size-gb` sizes the VM's own writable qcow2
 # overlay, and that is all it can do: the filesystem packed into the
 # backing guest image (kontur's `mke2fs -d`, sized to the rootfs plus 20%
-# headroom) still ends where it ended, so a VM asked for 40 GiB boots
+# plus whatever GUEST_DISK_EXTRA_MB asked for) still ends where it ended,
+# so a VM asked for 40 GiB boots
 # with the image's few hundred megabytes and tens of gigabytes of
 # unallocated space past the end of it. Nothing but the guest can close
 # that gap -- the hypervisor has no idea what filesystem is on the device
@@ -506,104 +441,16 @@ EOF
 ln -sf /etc/systemd/system/grain-growfs.service \
   /etc/systemd/system/sysinit.target.wants/grain-growfs.service
 
-# --- Stop forcing kontur's console wrapper on every SSH session.
-#
-# kontur's own guest overlay ships
-# /etc/ssh/sshd_config.d/10-console.conf with an unconditional
-# `ForceCommand /usr/local/libexec/kontur-ssh-console-wrap`, and that
-# wrapper runs the session's real command under `script`, mirroring its
-# output to the serial console so SSH activity shows up in the container's
-# own logs. That is a good property for kontur's reference guest. It is
-# incompatible with grain's sandbox tools, because `script` runs the
-# command under a *pty*, and a pty is not a transparent pipe.
-#
-# Measured against the real wrapper rather than reasoned about:
-#
-#   - Every "\n" on output becomes "\r\n" (the pty's ONLCR). read_file
-#     (`cat -- path`) would hand back every file with CRLF line endings it
-#     does not have on disk, and a write_file/read_file round trip would
-#     no longer agree with itself.
-#   - stdout and stderr are merged onto the one pty. run_command reports
-#     the two separately, and sshReadRemote/sshWriteRemote report a failed
-#     `cat`/`dd` by its stderr -- which would arrive empty, giving errors
-#     with no message.
-#
-# (Exit status and stdin both survive intact: `script --return` propagates
-# the command's status, and input passes through byte-for-byte. Only the
-# two above break.)
-#
-# So the drop-in is replaced rather than removed: its two hardening lines
-# are worth keeping, and only the ForceCommand has to go. The wrapper
-# script itself is left in place, unreferenced, for anyone who wants to
-# invoke it deliberately.
-cat > /etc/ssh/sshd_config.d/10-console.conf <<'EOF'
-# grain (scripts/kontur/guest-setup.sh) replaced kontur's own version of
-# this file. The hardening below is kept verbatim; the ForceCommand that
-# mirrored every session to the serial console is deliberately not, since
-# it runs each command under a pty -- which merges stdout with stderr and
-# rewrites every newline as CRLF, both of which grain's sandbox tools
-# depend on not happening. See guest-setup.sh for the measurements.
-PermitRootLogin prohibit-password
-PasswordAuthentication no
-EOF
-
-# --- Optional operator-supplied customization, run once everything above
-# has finished, so a custom script can rely on all of it being in place.
-if [ -n "${SANDBOX_SETUP_SCRIPT:-}" ]; then
-  script="$(mktemp)"
-  printf '%s\n' "${SANDBOX_SETUP_SCRIPT}" > "${script}"
-  chmod 0755 "${script}"
-  "${script}"
-  rm -f "${script}"
-fi
-
-# --- No SSH key is baked in, and that is the point.
-#
-# This used to install OPERATOR_SSH_PUBLIC_KEY -- the public half of a
-# keypair scripts/setup.sh generated per deployment -- as the debian
-# account's only authorized_keys entry. That is what made a guest image
-# deployment-specific, and so what stopped a published one from existing:
-# a generic disk would have carried either a private key everybody has or
-# no way in at all.
-#
-# kontur now generates a keypair in the VM's own container on every boot
-# and hands the guest the public half on the kernel command line, which
-# kontur-authorized-key installs before sshd starts (third_party/kontur's
-# internal/guestkey). The account it installs for is named by
-# `konturctl vm create -guest-user`, which setup.sh passes as "debian" --
-# the account created above. So nothing here has to know a key at all,
-# and every VM gets a different one that exists only while it runs.
-#
-# The .ssh directory is still created here: the guest-side installer
-# creates it too, but leaving it to that would mean an image whose only
-# correct permissions came from a script that had not run yet.
-install -d -m0700 -o debian -g debian /home/debian/.ssh
-
-# initramfs-tools' hooks bake a snapshot of /etc/udev's rules and
-# /etc/modules-load.d into the initramfs when update-initramfs runs. The
-# kernel package's own postinst already triggered at least one such run,
-# from before the eth0/ip= units above existed, so it has to be
-# regenerated now that they do: confirmed by hand, the guest's NIC still
-# got renamed away from "eth0" by the initramfs' stale udev snapshot until
-# this final regeneration was added.
-update-initramfs -u -k all
-
-mkdir -p /etc/kontur-guest
+install -d -m0755 /etc/kontur-guest
 cat > /etc/kontur-guest/README <<'DOC'
-This is a grain sandbox guest: a bwsalmon/kontur guest image plus the
-customization scripts/kontur/guest-setup.sh applies at build time. See that
+This is a grain sandbox guest: a bwsalmon/kontur guest image that was
+booted, provisioned by scripts/kontur/guest-setup.sh and committed. See that
 directory's README.md for the pipeline.
 
 Added on top of kontur's own guest image:
-- the "debian" account (passwordless sudo, docker group), with the
-  operator's public key as its only authorized_keys entry and no password
-  login -- this is the account -kontur-ssh-user names
-- a systemd unit that statically addresses eth0 from the kernel's own
-  "ip=" boot parameter, and predictable interface naming disabled so the
-  kernel's own eth0/eth1 names survive, neither of which kontur's own
-  guest needs (see guest-setup.sh's "Networking"). kontur's flat-mode
-  control link (its own kontur-control-net service, from kontur's guest
-  overlay) configures eth1 on top of that
+- the "debian" account (passwordless sudo, docker group) -- the account
+  -kontur-ssh-user names. No key is baked in: kontur generates one per VM
+  boot and authorizes it for the account konturctl's -guest-user names
 - a systemd unit (grain-growfs) that grows the root filesystem onto the
   whole virtual disk on each boot, so a VM created with
   `konturctl vm create -disk-size-gb` actually has that space rather than
@@ -628,3 +475,31 @@ Not baked in, on purpose:
   is wrapped to skip their download so that `npm ci` still works --
   guest-setup.sh's own "The Go and Node toolchains" explains it.
 DOC
+
+# Leaves the apt lists and the downloaded .debs out of the committed
+# image. Not identity, so not something konturctl's own scrub touches --
+# that only removes what would otherwise be shared between every VM
+# cloned from this image -- but a few hundred MB that no dispatched task
+# reads.
+#
+# The archives matter more than they look. apt keeps every .deb it
+# installed under /var/cache/apt/archives, so without this they are
+# committed into the image *and* still occupying the guest's disk when a
+# task runs -- on the very filesystem an install needs free space in.
+# This guest installs ~110MB of them.
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+
+# Best-effort: hand the blocks everything above freed back to the disk
+# image, so they stay holes in it rather than zeros. It matters because
+# of how this image travels: the headroom `GUEST_DISK_EXTRA_MB` asked for
+# is a hole in disk.img until something writes to it, a hole costs
+# nothing to push, and extracting the layer on the other side
+# materializes whatever the file actually occupies. Every byte trimmed
+# here is a byte off every pull.
+#
+# Guarded because it depends on the virtual disk supporting discard,
+# which is cloud-hypervisor's decision rather than this guest's: an
+# "operation not supported" is a missed optimization, not a broken image.
+# The build log says which happened -- fstrim -v reports the bytes.
+fstrim -v / || echo "guest-setup.sh: fstrim not supported on this disk -- the image keeps its unused blocks"

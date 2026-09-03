@@ -406,95 +406,61 @@ real `bwsalmon/kontur`-managed VMs, one per slot, over SSH
 this deployment shape (bwsalmon/agents#504) rather than only configurable
 by hand-editing the systemd unit afterward.
 
-Unlike most of this module, a first `terraform apply` with this left on
-pays a real, one-time cost on the host itself before it produces a fully
-working deployment -- but it no longer needs anything built or published
-by hand first (bwsalmon/agents#531): `scripts/setup.sh`'s own
-`ensure_kontur_ssh_key`/`ensure_kontur_images`/`ensure_konturctl`/
-`ensure_kontur_kvm_access` generate an SSH keypair, build the guest image
-(`scripts/kontur/build-guest.sh` -- one `docker build`, no VM boot and no
-root, several minutes against a real Debian mirror) and the OCI image
-(`build-oci-image.sh` -- a plain `docker build`, no push), build and
-install `konturctl` itself onto the host's `PATH` (`grain-daemon` execs
-it directly to manage each slot's VM -- see
-`third_party/kontur/README.md`'s "Operating a node (`konturctl` CLI)"),
-grant `$GRAIN_USER` `/dev/kvm` and `docker` group access, and seed the
-generated SSH key, all before `write_systemd_units` wires up
-`grain daemon`'s own `-kontur-*` flags. This runs every deploy
-generation, not just the first, but `ensure_kontur_images`'s own
-`kontur_image_tag` -- a content hash of `scripts/kontur` (what the guest
-image is provisioned from) and `third_party/kontur` (the kontur version
-baked into the OCI image), computed inside the deployment image that
-carries both -- names and caches the result, so a re-run with nothing
-changed rebuilds neither image; only a `guest-setup.sh` edit or a
-`third_party/kontur` vendor bump does. See
-`scripts/kontur/README.md` for what the guest-image build actually does
-and why.
+Nothing has to be built or published by hand first, and nothing is built
+on the host. `scripts/setup.sh`'s own `ensure_kontur_images`/
+`ensure_kontur_kvm_access` pull the sandbox image and grant `$GRAIN_USER`
+`/dev/kvm` and `docker` group access, before `write_systemd_units` wires
+up `grain daemon`'s own `-kontur-*` flags.
 
-Any one of those steps failing (the guest build unable to reach a Debian
-mirror, say) leaves `enable_kontur_sandboxes`'s intent unmet *for that run
-only*: the host still comes up dispatching into host directories, with a
-line in `journalctl -u grain-daemon -f`'s own deploy log and `setup.sh`'s
-own readiness report naming which prerequisite was not ready, rather than
-failing the whole install. Re-running `setup.sh` (or waiting for the next
-`config-sync` pass) picks it back up once it is.
+Which image is not a decision this deployment makes: CI publishes one per
+commit, and the grain image a host runs carries the reference of the one
+built from its own commit (`grain sandbox-image`), so the two are always
+one commit's worth of each other -- including after a rollback, which asks
+for its own older sandbox rather than whatever is newest
+(bwsalmon/agents#645). The guest a task actually runs in travels inside
+that same image, which is why there is one artifact here and not two.
 
-An operator who would rather build the guest/OCI image pair once,
-centrally, and share the result across many hosts than pay that build
-cost on each of them still can, the way every deployment before
-bwsalmon/agents#531 had to:
+That is a change worth knowing if you deployed an earlier version. A host
+used to *build* its guest disk on first use -- debootstrap plus the whole
+package set `guest-setup.sh` installs, several minutes against a real
+Debian mirror, on every host and every deploy generation, with a
+content-hash cache to avoid repeating it. It did that because
+`guest-setup.sh` baked that deployment's own SSH public key into the
+image, so no generic published disk could exist. kontur generates that
+keypair per VM boot now, so the guest is derived once in CI
+(`scripts/kontur/build-guest.sh`) and pulled here like anything else.
+`kontur_image_bucket`, which existed for an operator who wanted to build
+it once centrally and share it across a fleet, is gone with the build it
+was an alternative to.
 
-1. **Build and publish the guest image.** Needs docker and nothing else
-   (the rootfs is built inside the build, so no root and nothing to
-   install here). No SSH key is involved: kontur generates a keypair in
-   each VM's own container at boot and hands the guest the public half on
-   its kernel command line, so the disk this produces is generic and
-   carries no secret.
+`kontur_oci_image` overrides the pulled reference with one of your own --
+a mirror, a private copy, or a sandbox pinned apart from grain's. It is
+pulled either way, and built on the host in no case. (Pointing it at an
+Artifact Registry repository in this project works; create the repository
+yourself first.)
 
-   ```sh
-   export KONTUR_IMAGE_BUCKET="<a GCS bucket you control, name only, no gs://>"
-   ../../scripts/kontur/build-guest.sh
-   ```
-
-   Set `kontur_image_bucket` to the same bucket name. There is no secret
-   to push alongside it, and nothing to keep in sync: an image built
-   anywhere works for any deployment.
-
-2. **Nothing, for the sandbox container.** It is pulled, and which one
-   is not a decision this deployment makes: CI publishes a sandbox image
-   per commit, and the grain image a host runs carries the reference of
-   the one built from its own commit (`grain sandbox-image`), so the two
-   halves are always one commit's worth of each other -- including after
-   a rollback, which asks for its own older sandbox rather than whatever
-   is newest (bwsalmon/agents#645).
-
-   `kontur_oci_image` overrides that with a reference of your own -- a
-   mirror, a private copy, or a sandbox pinned apart from grain's. It is
-   pulled either way, and built on the host in no case. (Pointing it at
-   an Artifact Registry repository in this project works; create the
-   repository yourself first.)
-
-The two variables are independent, and each is optional on its own:
-`kontur_oci_image` names the sandbox *container*, `kontur_image_bucket`
-fetches a pre-built guest *disk*. Left at their empty defaults -- the
-common case -- the container is pulled and the disk is built here.
+A pull failing leaves `enable_kontur_sandboxes`'s intent unmet *for that
+run only*: the host still comes up dispatching into host directories,
+with a line in `journalctl -u grain-daemon -f`'s own deploy log and
+`setup.sh`'s own readiness report naming which prerequisite was not
+ready, rather than failing the whole install. Re-running `setup.sh` (or
+waiting for the next `config-sync` pass) picks it back up once it is.
 
 Set `enable_kontur_sandboxes = false` to keep a deployment on
 host-directory sandboxing indefinitely -- nothing above is required then,
 and `enable_nested_virtualization` can come off with it if nothing else
 on this host needs `/dev/kvm`.
 
-Each VM's root filesystem is genuinely persistent and writable, not just
-readable: `write_systemd_units` passes `-disk-readonly=false` and
-`-disk-hostpath` (bwsalmon/agents#510), so `konturctl` gives every VM its
-own private qcow2 overlay under `GRAIN_KONTUR_DISK_HOSTPATH` (default
-`/var/lib/kontur/vm-disks`, created and owned by `$GRAIN_USER` by
-`ensure_kontur_kvm_access`), backed by the shared, read-only guest image
-under `GRAIN_KONTUR_IMAGES_HOSTPATH`. That split exists because the
-latter is a node-local cache several VMs may read from concurrently, so
-it is never made writable regardless of `-disk-readonly` -- see
-`third_party/kontur/README.md`'s own "Operating a node (`konturctl`
-CLI)" section for the full mechanism.
+Each VM's root filesystem is writable, not read-only:
+`write_systemd_units` passes `-disk-mode=overlay`, so the guest writes
+into a thin qcow2 created inside its own container and backed by the
+disk the sandbox image carries, which is only ever read
+(bwsalmon/kontur#37). Creating it costs a fixed few hundred KiB whatever
+the disk's size, so booting a VM never copies a multi-gigabyte image and
+several VMs on a host share one copy of it. `konturctl`'s own default is
+read-only, which a dispatched task cannot use. The host directories this
+used to need -- one for the shared image, one for the overlays -- are
+gone with it.
 
 A freshly created VM's container/pod getting an IP is not the same moment
 as its nested guest actually accepting SSH connections -- confirmed by

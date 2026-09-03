@@ -208,12 +208,18 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 		"--network", "container:" + netnsName,
 		"--privileged",
 		"--device", "/dev/kvm",
-		"-v", spec.ImagesHostPath + ":" + staticpod.ImagesMountPath + ":ro",
-		"-e", "CHV_DISK_IMAGE=" + spec.ResolvedDiskImage(),
-		"-e", "CHV_DISK_READONLY=" + strconv.FormatBool(spec.DiskReadOnly),
+		"-e", "CHV_DISK_MODE=" + spec.DiskModeOrDerived(),
 	}
-	if !spec.DiskReadOnly {
-		vmArgs = append(vmArgs, "-v", spec.WritableDiskDir()+":"+staticpod.DiskMountPath)
+	// A spec with no disk of its own boots the one baked into the kontur
+	// image: nothing to mount, and CHV_DISK_IMAGE left unset so "kontur
+	// run"'s own default applies. See VMSpec.Validate.
+	if spec.DiskImage != "" {
+		// Read-only, always: a writable disk is a qcow2 overlay the VM's
+		// own container creates against this image now, so nothing here
+		// ever writes to the shared mount.
+		vmArgs = append(vmArgs,
+			"-v", spec.ImagesHostPath+":"+staticpod.ImagesMountPath+":ro",
+			"-e", "CHV_DISK_IMAGE="+spec.DiskImage)
 	}
 	if spec.Kernel != "" {
 		vmArgs = append(vmArgs, "-e", "CHV_KERNEL="+spec.Kernel)

@@ -9,14 +9,23 @@
 #     out to -- git, the docker CLI, konturctl, the claude and agy CLIs --
 #     in one image scripts/setup.sh pulls instead of building anything on
 #     the deployed host.
-#   - the default sandbox container: the generic kontur OCI image
-#     (scripts/kontur/build-oci-image.sh) a kontur-backed deployment runs
-#     to get the kontur binaries and a pinned cloud-hypervisor release,
-#     built with no guest-specific customization -- see that script's own
-#     comment ("The image this produces is deliberately generic"). Its
-#     per-commit tag is stamped into the grain image built from that same
-#     commit, which is how a deployment knows which sandbox goes with the
-#     grain it is running without being told (bwsalmon/agents#645).
+#   - the sandbox guest (scripts/kontur/build-guest.sh): the kontur image
+#     a task's VM runs, with grain's own toolchain provisioned into its
+#     guest. Its per-commit tag is stamped into the grain image built
+#     from that same commit, which is how a deployment knows which guest
+#     goes with the grain it is running without being told
+#     (bwsalmon/agents#645).
+#
+# That second one used to be two things. The "sandbox container" was
+# kontur's generic OCI image, published here; the guest *disk* was built
+# separately on every deployment host, because guest-setup.sh baked that
+# deployment's own SSH key into it and no generic published disk could
+# exist. Both halves of that stopped being true: kontur moved to a
+# keypair generated per VM boot, and bwsalmon/kontur#36/#37 made a guest
+# something you derive from a published kontur image by booting it,
+# provisioning it and committing the result -- which yields an image that
+# is itself runnable. So the guest and the container it runs in are now
+# one artifact, published once here, and a deployment builds nothing.
 #
 # There is deliberately no release of bare binaries any more. This
 # workflow used to publish `grain` and the three kontur binaries as
@@ -28,16 +37,6 @@
 # in this repository or in a deployment ever downloaded those assets, so
 # they were a second, unversioned answer to "what is the release" that
 # could silently drift from the image everything actually runs.
-#
-# Deliberately not published here either: the guest VM disk
-# (scripts/kontur/build-guest.sh's disk.img/vmlinuz/initrd.img) is a
-# per-deployment build (it bakes in an operator's own SSH key, and
-# optionally SANDBOX_SETUP_SCRIPT) rather than a single generic one this
-# workflow could publish for everybody, and that script's existing
-# KONTUR_IMAGE_BUCKET publishing path -- a deployment's own GCS bucket --
-# already covers it. "The default sandbox container" above is the OCI
-# image, not that disk; see build-oci-image.sh's doc comment for how the
-# two relate.
 #
 # Images go to GHCR -- GitHub's own registry, so still "in github" --
 # tagged with the commit's short SHA, the branch, and (on main) `latest`.
@@ -77,9 +76,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sandbox-container:
-    name: sandbox container (kontur OCI image)
+  sandbox-guest:
+    name: sandbox guest image
     runs-on: ubuntu-latest
+    # The build boots the guest to provision it, so this needs the same
+    # /dev/kvm the real-vm suite does. GitHub's ubuntu runners have it.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -87,41 +89,79 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Building the base, booting it and committing the result puts
+      # three multi-gigabyte copies of the guest disk on this runner --
+      # the base image's, the VM container's, and the commit's own layer
+      # -- and a hosted runner does not have room for all of them beside
+      # its preinstalled toolchains. kontur's own KVM job ran out here
+      # first; this is the same step.
+      #
+      # Not $AGENT_TOOLSDIRECTORY (/opt/hostedtoolcache): that is where
+      # actions/setup-go just put the Go this job builds konturctl with.
+      # Deleting it reclaims a couple of GB and costs the toolchain --
+      # "go: command not found", exit 127, from a step that has nothing
+      # to do with disk.
+      - name: Reclaim runner disk
+        run: |
+          echo "before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost || true
+          echo "after:"; df -h /
+
+      - name: Require KVM
+        run: |
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm is not present on this runner, and scripts/kontur/build-guest.sh boots the guest to provision it." >&2
+            exit 1
+          fi
+          ls -l /dev/kvm
+
       - name: Log in to GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      # build-oci-image.sh is the same script an operator publishing to
-      # their own registry would run (KONTUR_OCI_SKIP_PUSH unset here, so
-      # it pushes); this just points KONTUR_OCI_IMAGE at GHCR instead of
-      # a project's Artifact Registry. Tagged with the commit's short SHA
-      # first, then re-tagged below from the already-built local image,
-      # rather than building twice.
+      # One image, not two. build-guest.sh builds the kontur base out of
+      # third_party/kontur, boots it, provisions it with guest-setup.sh,
+      # scrubs and commits -- and what comes out is itself a runnable
+      # kontur image: the guest a task gets and the container a
+      # deployment runs are the same artifact now, so there is one
+      # reference to publish and one to stamp.
       #
-      # Every branch, not main only, since bwsalmon/agents#645: the grain
-      # image built from this same commit has *this* reference stamped
-      # into it (grain-container below passes it as --build-arg
-      # SANDBOX_IMAGE), and a deployment running that grain resolves the
-      # sandbox by that exact tag. A sandbox published on main alone
-      # would leave every branch build naming an image that does not
-      # exist.
+      # The base is built rather than pulled because a GITHUB_TOKEN is
+      # scoped to its own repository: this one can push grain's packages
+      # and cannot read kontur's, so pulling a private kontur package
+      # here is denied however the login went. Building it from the
+      # vendored tree also makes "konturctl and the guest are one commit"
+      # true by construction rather than by a pin someone has to remember
+      # to move.
+      #
+      # Every branch, not main only (bwsalmon/agents#645): the grain image
+      # built from this same commit has *this* reference stamped into it,
+      # and a deployment running that grain resolves it by that exact tag.
+      # A guest published on main alone would leave every branch build
+      # naming an image that does not exist.
       - name: Build and push (commit tag)
         id: build
         run: |
           set -euo pipefail
           short_sha="${GITHUB_SHA:0:7}"
-          image="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${short_sha}"
-          KONTUR_OCI_SOURCE_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-            KONTUR_OCI_IMAGE="$image" ./scripts/kontur/build-oci-image.sh
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/guest:sha-${short_sha}"
+          GUEST_SOURCE_REPO="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            IMAGE="$image" ./scripts/kontur/build-guest.sh
+          docker push "$image"
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # The branch tag, and -- on main alone -- `latest`. Same split, and
       # the same reasoning, as grain-container's own three names: a
-      # shared name that every kontur deployment resolves is main's to
-      # move, and nobody else's.
+      # shared name that every deployment resolves is main's to move, and
+      # nobody else's.
       - name: Tag and push
         run: |
           set -euo pipefail
-          image="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}/guest"
           branch_tag="${GITHUB_REF_NAME//\//-}"
           docker tag "${{ steps.build.outputs.image }}" "${image}:${branch_tag}"
           docker push "${image}:${branch_tag}"
@@ -137,7 +177,7 @@ jobs:
     # is what scripts/setup.sh pulls and what an upgrade pulls
     # alongside it, so publishing a grain that names a tag no job ever
     # pushed would be publishing a deployment that cannot dispatch.
-    needs: sandbox-container
+    needs: sandbox-guest
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -165,7 +205,7 @@ jobs:
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
-          sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/kontur-sandbox:sha-${GITHUB_SHA:0:7}"
+          sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/guest:sha-${GITHUB_SHA:0:7}"
           make image IMAGE="${image}:sha-${GITHUB_SHA:0:7}" SANDBOX_IMAGE="$sandbox"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"

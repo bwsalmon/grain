@@ -121,6 +121,13 @@ func runVM() error {
 		return err
 	}
 
+	// Before anything boots: in the default disk mode the guest writes
+	// into a qcow2 of its own rather than into the image, and this is
+	// what creates it and repoints the VM at it. See config.PrepareOverlay.
+	if err := cfg.PrepareOverlay(); err != nil {
+		return err
+	}
+
 	if err := ensureGuestKey(&cfg, guestexec.DefaultKeyPath); err != nil {
 		return err
 	}

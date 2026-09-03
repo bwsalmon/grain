@@ -1,4 +1,4 @@
-package staticpod
+package qcow2
 
 import (
 	"encoding/binary"
@@ -11,7 +11,7 @@ import (
 )
 
 // TestWriteQcow2Overlay_PinsRawBackingFormat guards against a real
-// regression: an earlier version of writeQcow2Overlay left the backing
+// regression: an earlier version of WriteOverlay left the backing
 // file's format unpinned, on the assumption that qcow2 readers fall back
 // to probing it from content, the way qcow2 v2 always did. cloud-hypervisor
 // doesn't -- given a raw backing file (every source disk image
@@ -36,8 +36,8 @@ func TestWriteQcow2Overlay_PinsRawBackingFormat(t *testing.T) {
 	}
 
 	overlay := filepath.Join(dir, "overlay.qcow2")
-	if err := writeQcow2Overlay(overlay, backing, 4096); err != nil {
-		t.Fatalf("writeQcow2Overlay() error = %v", err)
+	if err := WriteOverlay(overlay, backing, 4096); err != nil {
+		t.Fatalf("WriteOverlay() error = %v", err)
 	}
 
 	out, err := exec.Command("qemu-img", "info", "--output=json", overlay).CombinedOutput()
@@ -58,7 +58,7 @@ func TestWriteQcow2Overlay_PinsRawBackingFormat(t *testing.T) {
 	}
 }
 
-// TestWriteQcow2Overlay_LargeVirtualDisk exercises writeQcow2Overlay at a
+// TestWriteQcow2Overlay_LargeVirtualDisk exercises WriteOverlay at a
 // virtual disk size representative of a real kontur disk image, rather
 // than the 4096-byte one TestWriteQcow2Overlay_PinsRawBackingFormat uses.
 // qcow2L1CoverageBytes is 512MiB, so a 4096-byte disk always takes the
@@ -95,8 +95,8 @@ func TestWriteQcow2Overlay_LargeVirtualDisk(t *testing.T) {
 	}
 
 	overlay := filepath.Join(dir, "overlay.qcow2")
-	if err := writeQcow2Overlay(overlay, backing, sizeBytes); err != nil {
-		t.Fatalf("writeQcow2Overlay() error = %v", err)
+	if err := WriteOverlay(overlay, backing, sizeBytes); err != nil {
+		t.Fatalf("WriteOverlay() error = %v", err)
 	}
 
 	out, err := exec.Command("qemu-img", "info", "--output=json", overlay).CombinedOutput()
@@ -112,7 +112,7 @@ func TestWriteQcow2Overlay_LargeVirtualDisk(t *testing.T) {
 	}
 
 	// Independently check the header's own l1_size field against the
-	// formula writeQcow2Overlay is supposed to implement, rather than
+	// formula WriteOverlay is supposed to implement, rather than
 	// relying solely on qemu-img accepting whatever it wrote.
 	hdr, err := os.ReadFile(overlay)
 	if err != nil {

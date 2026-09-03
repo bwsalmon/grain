@@ -17,11 +17,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
+	"github.com/bwsalmon/kontur/internal/config"
 	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
@@ -38,21 +37,6 @@ const (
 	// manifestTemplateSrc (manifest.go) and the literal ":/images:ro"
 	// mount in internal/dockervm/docker.go.
 	ImagesMountPath = "/images"
-
-	// DiskMountPath is the container path a VM's own private writable
-	// qcow2 overlay (see WritableDiskDir, PrepareWritableDisk) is mounted
-	// read-write at, used only when DiskReadOnly is false.
-	//
-	// Must match the literal "/disk" mountPath/hostPath entries in
-	// manifestTemplateSrc (manifest.go).
-	DiskMountPath = "/disk"
-
-	// writableDiskFileName is the fixed name a VM's private writable
-	// qcow2 overlay is stored under within WritableDiskDir, regardless of
-	// the source image's own filename under ImagesMountPath -- so
-	// ResolvedDiskImage stays stable even if -disk changes across a "vm
-	// update".
-	writableDiskFileName = "disk.qcow2"
 )
 
 // VMSpec holds every parameter needed to run one VM, under either
@@ -64,10 +48,21 @@ type VMSpec struct {
 
 	DiskImage    string `json:"diskImage"`
 	DiskReadOnly bool   `json:"diskReadOnly"`
-	Kernel       string `json:"kernel,omitempty"`
-	Initramfs    string `json:"initramfs,omitempty"`
-	Firmware     string `json:"firmware,omitempty"`
-	Cmdline      string `json:"cmdline,omitempty"`
+
+	// DiskMode is how the VM attaches its disk: config.DiskModeOverlay,
+	// DiskModePersistent or DiskModeReadOnly, passed straight through as
+	// CHV_DISK_MODE. Empty means "derive it from DiskReadOnly", which is
+	// what a spec saved before this existed does.
+	//
+	// The overlay it names is made inside the VM's own container now, not
+	// here: that is why a writable disk no longer needs a host directory
+	// of its own, and why nothing on this side has to know that a qcow2
+	// is involved at all.
+	DiskMode  string `json:"diskMode,omitempty"`
+	Kernel    string `json:"kernel,omitempty"`
+	Initramfs string `json:"initramfs,omitempty"`
+	Firmware  string `json:"firmware,omitempty"`
+	Cmdline   string `json:"cmdline,omitempty"`
 
 	// CmdlineAuto records whether Cmdline was derived automatically (from
 	// IP/DiskReadOnly/BridgeCIDR) rather than given explicitly, so a later
@@ -235,16 +230,34 @@ func (s *VMSpec) Validate() error {
 	if tapName := "tap-" + s.Name; len(tapName) > 15 {
 		return fmt.Errorf("name %q too long: tap device name %q would exceed 15 characters", s.Name, tapName)
 	}
-	if s.DiskImage == "" {
-		return fmt.Errorf("disk image is required")
+	// An empty DiskImage means the guest disk baked into the kontur
+	// image itself (internal/config's defaultDiskImage), rather than one
+	// supplied from outside under ImagesMountPath. That is what a VM
+	// booted from a *customized* kontur image is: its guest travels
+	// inside the image, so there is no host path to name, nothing to
+	// mount, and no shared backing file to overlay -- the container's own
+	// writable layer is the per-VM copy. Every check below is about a
+	// supplied disk and so only applies when there is one.
+	if s.DiskImage == "" && s.BackendOrDefault() == BackendStaticPod {
+		// The docker backend can simply omit CHV_DISK_IMAGE and let the
+		// image's own default apply; the pod manifest always emits the
+		// variable, and an empty value there is not the same as an
+		// unset one. Rejecting it here beats submitting a manifest that
+		// fails inside the kubelet.
+		return fmt.Errorf("a disk image is required on the %q backend: booting the kontur image's own baked guest is supported on %q", BackendStaticPod, BackendDocker)
 	}
-	if !s.DiskReadOnly {
-		if !strings.HasPrefix(s.DiskImage, ImagesMountPath+"/") {
-			return fmt.Errorf("a writable disk (-disk-readonly=false) must be under %s (the shared -images-hostpath mount, the only place a source image can be used as a qcow2 backing file from), got %q", ImagesMountPath, s.DiskImage)
-		}
-		if s.DiskHostPath == "" {
-			return fmt.Errorf("disk-hostpath is required when disk-readonly is false")
-		}
+	// A writable disk used to have to live under ImagesMountPath, because
+	// the qcow2 overlay backing it was created out here and needed a host
+	// path to point at. The overlay is made inside the VM's container now
+	// (see config.PrepareOverlay), so any path the container can read
+	// works -- including the guest baked into the kontur image itself,
+	// which has no host path at all.
+	s.DiskMode = s.DiskModeOrDerived()
+	switch s.DiskMode {
+	case config.DiskModeOverlay, config.DiskModePersistent, config.DiskModeReadOnly:
+	default:
+		return fmt.Errorf("disk mode must be %q, %q or %q, got %q",
+			config.DiskModeOverlay, config.DiskModePersistent, config.DiskModeReadOnly, s.DiskMode)
 	}
 	s.NetMode = s.NetModeOrDefault()
 	switch s.NetMode {
@@ -308,7 +321,7 @@ func (s *VMSpec) Validate() error {
 	s.CmdlineAuto = false
 	if s.Firmware == "" && s.Cmdline == "" {
 		root := "rw"
-		if s.DiskReadOnly {
+		if s.DiskMode == config.DiskModeReadOnly {
 			root = "ro"
 		}
 		// Flat mode leaves the ip= parameter off: the address is only
@@ -361,23 +374,24 @@ func (s VMSpec) ExecAddr() string {
 	return net.JoinHostPort(netshim.ControlGuestIP(addr).String(), "22")
 }
 
-// WritableDiskDir is the host directory holding this VM's own private,
-// writable qcow2 overlay of its disk image (see PrepareWritableDisk), one
-// subdirectory per VM name so several VMs' overlays never collide. Only
-// meaningful when DiskReadOnly is false.
-func (s VMSpec) WritableDiskDir() string {
-	return filepath.Join(s.DiskHostPath, s.Name)
-}
-
-// ResolvedDiskImage is this VM's disk path as seen inside its container:
-// DiskImage unchanged when DiskReadOnly is true (read directly from the
-// shared, read-only ImagesMountPath mount), or the path of this VM's own
-// writable qcow2 overlay under DiskMountPath otherwise.
-func (s VMSpec) ResolvedDiskImage() string {
-	if s.DiskReadOnly {
-		return s.DiskImage
+// DiskModeOrDerived returns s.DiskMode, deriving it from DiskReadOnly
+// when unset -- a spec saved before DiskMode existed, or a caller still
+// passing only -disk-readonly.
+//
+// -disk-readonly=false has always meant "give this VM a private writable
+// disk", implemented as a per-VM overlay; it maps to DiskModeOverlay, so
+// that intent survives the move of the overlay into the container. (Note
+// this is not how the same-named CHV_DISK_READONLY maps inside the
+// container, where false meant writing through to the image -- see
+// config.diskModeFromEnv.)
+func (s VMSpec) DiskModeOrDerived() string {
+	if s.DiskMode != "" {
+		return s.DiskMode
 	}
-	return filepath.Join(DiskMountPath, writableDiskFileName)
+	if s.DiskReadOnly {
+		return config.DiskModeReadOnly
+	}
+	return config.DiskModeOverlay
 }
 
 // gatewayAndNetmask returns the address and dotted-decimal netmask encoded

@@ -154,7 +154,9 @@ even if the process is killed mid-snapshot.
 | Variable              | Required | Default                          | Description |
 |------------------------|:--------:|-----------------------------------|--------------|
 | `CHV_DISK_IMAGE`       | no       | the guest image baked into this image (`/var/lib/kontur/guest/disk.img`) | Path to the primary disk image. |
-| `CHV_DISK_READONLY`    | no       | `false`                           | Attach the primary disk read-only. |
+| `CHV_DISK_MODE`        | no       | `overlay`                         | How the primary disk is attached: `overlay` (the guest writes into a thin qcow2 of its own, created in this container, leaving the image untouched), `persistent` (the guest writes through to the image itself) or `readonly`. |
+| `CHV_DISK_OVERLAY_PATH`| no       | `/var/lib/kontur/overlay/disk.qcow2` | Where `overlay` mode puts that qcow2. Inside the container's own writable layer, so a restart keeps it and only removing the container discards it. |
+| `CHV_DISK_READONLY`    | no       | —                                 | Deprecated, replaced by `CHV_DISK_MODE`: `true` means `readonly`, `false` means `persistent`. Setting both is an error. |
 | `CHV_EXTRA_DISKS`      | no       | —                                 | Comma-separated additional disks: `path[:ro\|rw]`. |
 | `CHV_KERNEL`           | no       | the kernel baked into this image (`/var/lib/kontur/guest/vmlinux`), unless `CHV_FIRMWARE` is set | Path to a kernel for direct boot (PVH/`vmlinux`). Mutually exclusive with `CHV_FIRMWARE`. |
 | `CHV_INITRAMFS`        | no       | —                                 | Path to an initramfs, used with `CHV_KERNEL`. |
@@ -450,7 +452,8 @@ less commonly-run-as-a-guest distro. See
 guest disk image build (`guest-image`/`guest-rootfs-*` stages), how the
 two variants differ beyond package manager, and their own build args
 (`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`,
-`GUEST_SETUP_SCRIPT`).
+`GUEST_SETUP_SCRIPT`, `GUEST_KERNEL_PACKAGE`, `GUEST_CONSOLE_WRAP`,
+`GUEST_DISK_EXTRA_MB`).
 
 `GUEST_SETUP_SCRIPT` is worth calling out here, since it's what makes
 that guest more than a reference one: it holds a shell script's own text,
@@ -757,22 +760,31 @@ management into a day-to-day workflow, against either of two backends:
 `-images-hostpath` (default `/var/lib/vm-images`) is always mounted
 read-only under both backends -- it's a shared, node-local image cache
 several VMs may read `-disk`/`-kernel`/`-firmware` from concurrently, so
-it's never made writable, regardless of `-disk-readonly`. A VM that needs
-a genuinely writable root filesystem (to persist installed packages or
-other state across reboots) instead passes `-disk-readonly=false`: before
-the VM starts, `konturctl` creates a small qcow2 overlay file in its own
-private directory under `-disk-hostpath` (default
-`/var/lib/kontur/vm-disks/<name>`), with `-disk` itself as the overlay's
-qcow2 backing file, and mounts that overlay read-write instead. The
+it's never made writable.
+
+A VM that needs a writable root filesystem gets one from `-disk-mode`,
+which is `overlay` unless told otherwise: the VM's own container creates
+a small qcow2 backed by `-disk` and boots the guest from that. The
 guest's writes land in the overlay as new qcow2 clusters; anything it
-hasn't written yet still reads straight through to the shared,
-read-only `-disk`. Creating the overlay costs a fixed few hundred KiB
-regardless of `-disk`'s size, unlike copying it. The overlay is created
-once: a later `vm update` or container restart leaves it alone rather
-than overwriting whatever the guest has since written to it, and
-`vm delete` removes it. `-disk` must be a path under `-images-hostpath`
-for this to work, since that's the only place `konturctl` ever mounts a
-source image from.
+hasn't written yet reads straight through to the shared image
+underneath. Creating it costs a fixed few hundred KiB regardless of the
+image's size, so booting a VM never copies a multi-gigabyte disk, and
+several VMs on a node share one copy of it. The overlay is made once and
+reused, so restarting a container keeps whatever the guest wrote;
+removing the container discards it.
+
+`-disk-mode=persistent` instead lets the guest write through to `-disk`
+itself, which only makes sense for a VM that is the only one using that
+image -- `konturctl guest build` is the case that wants it, since the
+changes are the point. `-disk-mode=readonly` attaches the image
+read-only.
+
+Two things this used to require and no longer does: `-disk` had to live
+under `-images-hostpath` (the overlay was created out here and needed a
+host path to back onto), and `-disk-hostpath` named a directory to put
+overlays in. Both are gone with the overlay moving inside the container;
+`-disk-hostpath` is still accepted and ignored, and `-disk-readonly=false`
+still means `-disk-mode=overlay`, which is what it always did.
 
 Each VM's parameters (including which backend it uses) are saved as JSON
 under `-state-dir` (default `/var/lib/kontur/vms`) so a later `update` or

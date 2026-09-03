@@ -41,24 +41,20 @@ resource "google_project_iam_member" "host" {
   member   = "serviceAccount:${google_service_account.host.email}"
 }
 
-# setup.sh's own ensure_kontur_images (scripts/setup.sh) syncs the
-# guest image (scripts/kontur/build-guest.sh's published output) from
-# kontur_image_bucket and pulls the OCI image (third_party/kontur's own
-# Dockerfile) from kontur_oci_image -- both need the host's own service
-# account to actually read them, since instance.tf's own scopes =
-# ["cloud-platform"] only grants the *scope*, not the IAM role itself.
-# Conditioned on the bucket/image variables being set, not directly on
-# enable_kontur_sandboxes, so turning that variable back off after these
-# were once configured does not immediately revoke a grant a rollback
-# might still want -- matching the "belt, not just suspenders" reasoning
-# instance.tf's own precondition otherwise enforces at apply time.
-resource "google_storage_bucket_iam_member" "host_reads_kontur_images" {
-  count  = var.kontur_image_bucket != "" ? 1 : 0
-  bucket = var.kontur_image_bucket
-  role   = "roles/storage.objectViewer"
-  member = "serviceAccount:${google_service_account.host.email}"
-}
-
+# setup.sh pulls the sandbox image (scripts/kontur/build-guest.sh's
+# published output, which carries the guest as well as the container),
+# and when kontur_oci_image points at an Artifact Registry in this
+# project that needs the host's own service account to read it -- since
+# instance.tf's own scopes = ["cloud-platform"] only grants the *scope*,
+# not the IAM role itself. Conditioned on the image variable being set,
+# not directly on enable_kontur_sandboxes, so turning that variable back
+# off after it was once configured does not immediately revoke a grant a
+# rollback might still want -- matching the "belt, not just suspenders"
+# reasoning instance.tf's own precondition otherwise enforces at apply
+# time.
+#
+# The GCS grant that used to sit here is gone with the bucket: there is
+# no guest disk to fetch from one any more.
 resource "google_project_iam_member" "host_reads_kontur_registry" {
   count   = var.kontur_oci_image != "" ? 1 : 0
   project = var.project_id

@@ -43,7 +43,8 @@ Copied verbatim into the rootfs before it's packed into `disk.img`:
 
 | File | Purpose |
 |---|---|
-| `overlay-common/etc/ssh/sshd_config.d/10-console.conf` | Forces every SSH session through the wrapper below and disables password auth (root has no password at all -- only the key `kontur run` generates per boot, plus whatever `GUEST_SSH_AUTHORIZED_KEY` bakes in at build time). |
+| `overlay-common/etc/ssh/sshd_config.d/10-console.conf` | Disables password auth (root has no password at all -- only the key `kontur run` generates per boot, plus whatever `GUEST_SSH_AUTHORIZED_KEY` bakes in at build time). |
+| `overlay-common/etc/ssh/sshd_config.d/20-console-wrap.conf` | Forces every SSH session through the wrapper below. Removed at build time by `GUEST_CONSOLE_WRAP=0`; see "Why SSH output goes to the console". |
 | `overlay-common/usr/local/libexec/kontur-authorized-key` | Installs the per-boot `kontur exec` key from the kernel command line, before sshd starts. Run by `kontur-authorized-key.service` (Debian) / `/etc/init.d/kontur-authorized-key` (Alpine). |
 | `overlay-common/usr/local/libexec/kontur-ssh-console-wrap` | Runs the session under `script`, which mirrors its output to `/dev/console` (ttyS0) in addition to the real SSH client. |
 | `overlay-common/etc/acpi/events/powerbtn` | `acpid` event config matching the ACPI power button, pointing at `/etc/acpi/powerbtn.sh` -- see "Graceful shutdown" below for why that script's own contents differ per variant. |
@@ -53,6 +54,8 @@ Copied verbatim into the rootfs before it's packed into `disk.img`:
 | `overlay-debian/etc/systemd/system/kontur-mem-agent.service`, `overlay-alpine/etc/init.d/kontur-mem-agent` | Run `kontur-mem-agent` (copied into both variants straight from the top-level Dockerfile's own `build` stage, not part of either overlay) as a restart-always service. See the top-level README's "Memory hotplug". |
 | `overlay-common/usr/local/libexec/kontur-control-net` | Configures the guest's end of a flat-mode control link: brings up the second NIC at `169.254.100.2/24` and writes `KONTUR_MEM_AGENT_HOST` to `/run/kontur-control-net.env` for `kontur-mem-agent` to pick up. A guest with no second NIC (NAT mode, or flat mode with the control link disabled) has nothing to do and exits successfully, so the same image boots unchanged either way. See the top-level README's "Flat mode". |
 | `overlay-debian/etc/systemd/system/kontur-control-net.service`, `overlay-alpine/etc/init.d/kontur-control-net` | Run that script once at boot, ordered before `kontur-mem-agent` so the address it writes is in place before the agent starts. |
+| `overlay-debian/usr/local/libexec/kontur-configure-net` | Configures the primary NIC from the kernel command line's `ip=` for a guest whose kernel lacks `CONFIG_IP_PNP` -- i.e. a `GUEST_KERNEL_PACKAGE` build. Exits immediately when the interface is already addressed, so it is a no-op under the bundled kernel. See "Networking". |
+| `overlay-debian/etc/systemd/system/kontur-net-cmdline.service` | Runs that script after udev settles and before `sshd`. Debian only: it exists to compensate for a distro kernel, which is a Debian-variant option. |
 
 The Alpine variant has no equivalent of `kontur-ssh-host-keys.service`:
 unlike Debian's, Alpine's `openssh-server` package doesn't generate host
@@ -72,7 +75,10 @@ symlink, written directly:
 
 - Debian: `kontur-ssh-host-keys.service`, `kontur-mem-agent.service` and
   `kontur-control-net.service` are all symlinked into
-  `multi-user.target.wants/`. `acpid.socket`/
+  `multi-user.target.wants/`. `kontur-net-cmdline.service` goes into
+  `sysinit.target.wants/` instead, with `DefaultDependencies=no`: it
+  establishes the guest's address, so it has to have run before `sshd`
+  rather than alongside it. `acpid.socket`/
   `acpid.path` don't need the same treatment -- `acpid`'s own postinst
   already enables them via `deb-systemd-helper`, which (like `systemctl
   enable`) just writes symlinks and doesn't need a running systemd to do
@@ -98,6 +104,25 @@ Kubernetes port-forwarding/netshim's forwarded port -- so mirroring SSH
 session output onto the console is what makes SSH activity on this guest
 observable the same way everything else about the VM already is, without
 adding a separate logging pipeline inside the guest.
+
+It is not free, which is why it is its own drop-in
+(`20-console-wrap.conf`) and why `GUEST_CONSOLE_WRAP=0` leaves that file
+out. The wrapper runs each command under `script`, i.e. under a pty, and
+a pty is not a transparent pipe:
+
+| | through the wrapper |
+|---|---|
+| output with `\n` line endings | comes back `\r\n` |
+| stdout vs stderr | merged onto the one pty |
+| exit status | survives (`script --return`) |
+| stdin | survives byte for byte |
+
+For a human reading `kubectl logs` that is a good trade. For anything
+driving the guest programmatically over `kontur exec` -- reading a file
+back, or reporting a command's stderr separately -- it silently corrupts
+content and empties error messages, so such a guest wants
+`GUEST_CONSOLE_WRAP=0`. The wrapper script itself stays in the image
+either way, unreferenced, for anyone who wants to invoke it deliberately.
 
 ## Getting SSH access
 
@@ -131,8 +156,12 @@ This works the same way on both `GUEST_DISTRO` variants.
 
 To customize the guest beyond what the overlays above do -- installing
 extra packages, dropping in config files, enabling services, etc --
-there are two mechanisms, and which one to reach for is a question of
-*when* the customization should happen rather than what it can do.
+there are three mechanisms, and which one to reach for is mostly a
+question of *when* the customization should happen rather than what it
+can do. The exception is `konturctl guest build`, below, which is the
+only one that can do things a container build cannot; it is also the one
+to reach for if you are deriving a guest from a published image rather
+than building kontur yourself.
 
 `GUEST_SETUP_SCRIPT` is a build arg holding the script's own text (not a
 path, the same way `GUEST_SSH_AUTHORIZED_KEY` holds a key rather than a
@@ -146,6 +175,11 @@ The result is baked into `disk.img`, so it is paid once by whoever
 builds the image rather than once per host at first boot, and every VM
 booted from that image already has it. Anything the script writes is as
 public as the image is, so don't use it to place secrets.
+
+One thing not to put in it: a kernel package. `GUEST_KERNEL_PACKAGE`
+installs one *before* this script runs, and that ordering is load-bearing
+-- see "Networking" for what a kernel installed at the wrong point does
+to the initramfs, and the `guest-customized` stage for the mechanics.
 
 It runs in the `guest-customized` stage, which promotes the rootfs to an
 image of its own (`FROM scratch` + `COPY --from=guest-rootfs /rootfs/ /`)
@@ -175,6 +209,64 @@ So: `GUEST_SETUP_SCRIPT` for installing packages and dropping in files,
 running. They compose -- a build-time script can install what a boot-time
 one then configures against the live system.
 
+## Deriving a guest from a published image
+
+`GUEST_SETUP_SCRIPT` needs a checkout and a full image build. To
+customize a guest you *pulled*, boot it and commit the result:
+
+```sh
+konturctl guest build \
+  -from ghcr.io/bwsalmon/kontur:debian12 \
+  -setup ./my-setup.sh \
+  -t my-guest:dev
+```
+
+That boots the base image's own guest under cloud-hypervisor, runs
+`my-setup.sh` as root inside it over `kontur exec`, scrubs per-boot
+identity, powers the guest off, and commits the container. What comes out
+is the same *kind* of image as what went in -- kontur, cloud-hypervisor
+and a bootable guest disk -- so `docker run` boots it exactly as the base
+boots, and it can be the `-from` of another build.
+
+Why bother, when `GUEST_SETUP_SCRIPT` installs packages perfectly well:
+that hook runs in a container on the build host's kernel with no service
+manager, so it can install and cannot *exercise*. This boots the real
+guest, so `systemctl start` works, a docker image can be pulled into the
+guest's own cache ahead of first use, and a test suite can be run against
+the finished image before it is committed.
+
+What it costs:
+
+- **`/dev/kvm` on whatever runs the build.** It is a `docker run --device
+  /dev/kvm --cap-add NET_ADMIN`, not a `docker build` -- deliberately, since
+  a build cannot ask for a device without BuildKit's `security.insecure`
+  entitlement, and this needs no entitlement, no privileged builder and
+  no `mknod`. It does mean no building a customized guest on a machine
+  without KVM.
+- **The guest gets none of the builder's network context.** Its packages
+  are fetched from inside a VM, which has no `HTTPS_PROXY`, no custom CA
+  bundle and no registry credentials unless you pass them:
+  `-docker-run-arg` is repeatable and goes straight to `docker run`.
+- **Each build adds a full copy of the disk as a layer.** `disk.img` is
+  one large file in a read-only layer, so the guest's first write copies
+  all of it up, and `commit` captures that copy. Deriving two or three
+  deep is fine; a long chain wants squashing.
+
+The scrub is not optional and not the caller's to remember: `/etc/machine-id`,
+`/var/lib/dbus/machine-id`, the SSH host keys, systemd's random seed, DHCP
+leases and `/var/log` are emptied after the setup script and before
+shutdown. All of it is per-boot identity, and an image is cloned into many
+VMs -- a baked machine-id gives every one of them the same journald
+identity and DHCP DUID, and baked host keys make host-key verification
+meaningless across the fleet. What the setup script installed or left
+behind is left alone: that is size rather than correctness, and guessing
+would delete things a caller meant to keep.
+
+If the guest never becomes reachable, or its setup script fails,
+`-keep-on-failure` leaves the container up and the error names it, so
+`docker logs` shows the console and `docker exec <ctr> kontur exec` gets
+a shell in the guest.
+
 ## Exporting the built guest
 
 The `guest-artifacts` target publishes the built guest for booting
@@ -185,14 +277,36 @@ docker build --target guest-artifacts --output type=local,dest=./out .
 ```
 
 That yields `disk.img`, plus `vmlinuz` and `initrd.img` when the guest
-has its own -- i.e. when `GUEST_SETUP_SCRIPT` installed a distro kernel
-package, which a guest whose workload needs a richer kernel config than
-the `fetch-kernel` stage's `cloud-hypervisor/linux` release build carries
-(overlayfs, cgroup v2, bridge netfilter, veth, ...) will want to do. The
-newest `/boot/vmlinuz-*` and `/boot/initrd.img-*` in the rootfs are what
-get published; a guest with no kernel package installed produces neither,
-and `CHV_KERNEL`'s default (the `fetch-kernel` build, baked into the
-final image) is what boots the bundled guest either way.
+has its own -- i.e. when it was built with `GUEST_KERNEL_PACKAGE` (or a
+`GUEST_SETUP_SCRIPT` that installs a kernel by hand), which a guest whose
+workload needs a richer kernel config than the `fetch-kernel` stage's
+`cloud-hypervisor/linux` release build carries (overlayfs, cgroup v2,
+bridge netfilter, veth, ...) will want. The newest `/boot/vmlinuz-*` and
+`/boot/initrd.img-*` in the rootfs are what get published; a guest with
+no kernel package installed produces neither.
+
+`GUEST_DISK_EXTRA_MB` adds headroom to that disk, and an image built to
+be derived from wants it. The 20% the sizing above adds is space for logs
+and runtime growth on a guest that is already finished; a guest
+customized by `konturctl guest build` is provisioned *after* the
+filesystem is packed, and cannot grow it. Without headroom an
+`apt-get install` of anything substantial fails with "You don't have
+enough free space in `/var/cache/apt/archives/`" after a completely
+clean boot -- which reads as a broken setup script rather than a disk
+sized before anyone knew what would go on it. It is not free, and the cost
+is easy to misjudge: `truncate` leaves the extra as a hole and a pushed
+layer of zeros compresses to almost nothing, but extracting a layer
+materializes the hole, so every GB here is a GB on disk on every machine
+that pulls the image. Size it against what the guest installs. kontur's
+own published `debian12` variant uses 2GB, which is more free space than
+the 20% gave and small enough not to dominate the image.
+
+The same pair is copied into the final image beside the disk, and
+`internal/config` boots whichever is there: the guest's own kernel when
+the image has one, `fetch-kernel`'s `vmlinux` when it doesn't. So a
+`GUEST_KERNEL_PACKAGE` build needs no `CHV_KERNEL`/`CHV_INITRAMFS` of its
+own to boot correctly, and a default build behaves exactly as it always
+has.
 
 The target is `FROM scratch` and contains nothing else, so the exported
 directory holds exactly those files rather than a whole builder
@@ -228,9 +342,34 @@ config-compatible), pointing at `/etc/acpi/powerbtn.sh`:
 ## Networking
 
 The guest itself doesn't run a DHCP client: it relies on the kernel's
-built-in `ip=` boot-time autoconfiguration (see the top-level README's
+`ip=` boot-time autoconfiguration (see the top-level README's
 `CHV_CMDLINE` default and `deploy/k8s/pod-example.yaml`), same as every
 other guest example in this repo, so no extra guest-side networking setup
-was needed for SSH to be reachable once a caller has configured
+is needed for SSH to be reachable once a caller has configured
 `CHV_CMDLINE`/`netshim` port forwarding. This is also why neither
 variant enables an OpenRC/systemd `networking` service.
+
+That is the *kernel's* built-in autoconfiguration, and it holds only for
+a kernel with `CONFIG_IP_PNP` -- which the bundled `fetch-kernel` build
+sets and Debian's stock `linux-image-amd64` does not. So a guest built
+with `GUEST_KERNEL_PACKAGE` has nothing acting on `ip=` at all, and would
+come up with no address and simply never be reachable.
+`kontur-net-cmdline.service` closes that: it reads `ip=` out of
+`/proc/cmdline` and hands the spec to klibc's `ipconfig(8)`, which
+implements the same syntax in userspace. It runs before `sshd`, and exits
+immediately when the interface is already addressed -- so on a guest
+booting the bundled kernel it does nothing at all.
+
+Two details it depends on, both easy to lose:
+
+- The NIC has to keep the name the `ip=` spec gives it. `konturctl`
+  hard-codes `eth0` (`internal/staticpod/spec.go`), and udev's
+  predictable naming would rename a virtio-net device to `ens2`; the
+  `80-net-setup-link.rules` mask in the `guest-rootfs-debian` stage is
+  what stops it, for this and for the control link's `eth1` alike.
+- That mask has to reach the *initramfs*, whose own snapshot of
+  `/etc/udev` is what runs first. It does because `GUEST_KERNEL_PACKAGE`
+  is installed after the overlays are in place, so the initramfs its
+  postinst generates already has the mask -- see the `guest-customized`
+  stage. A setup script that writes udev rules of its own has to run
+  `update-initramfs -u` itself.

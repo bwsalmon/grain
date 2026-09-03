@@ -19,6 +19,7 @@ Usage:
   konturctl vm update <name> [flags]   change a VM's settings and re-submit it
   konturctl vm delete <name>           remove a VM
   konturctl vm list                    list VMs kontur knows about
+  konturctl guest build [flags]        boot a guest image, provision it, commit a new one
 
 Run "konturctl <command> -h" for a command's flags.
 `
@@ -38,6 +39,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		err = runSetup(ctx, rest, stdout, stderr)
 	case "vm":
 		err = runVM(ctx, rest, stdout, stderr)
+	case "guest":
+		err = runGuest(ctx, rest, stdout, stderr)
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0
