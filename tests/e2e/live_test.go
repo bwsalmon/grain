@@ -8,13 +8,45 @@ package e2e
 // left to decide its own tool calls, actually completes an issue the way
 // the scripted tests assume a model would:
 //
-//	GEMINI_API_KEY=... go test ./tests/e2e/... -run TestLiveIssueCompletesEndToEnd -v
+//	GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
+//	  go test ./tests/e2e/... -run TestLiveIssueCompletesEndToEnd -v
+//
+// # Why this test is the only one that can see the config file's name
+//
+// agy has no --mcp-config: it reads its MCP servers out of the HOME it
+// was started with, and agent/antigravity writes each run's own server
+// into ~/.gemini/config/mcp_config.json there. That path is a fact about
+// agy's on-disk layout, not about grain, and nothing else in this
+// repository can check it -- every other test that covers the wiring
+// drives a scripted runner or a stub CLI, which reads whatever file the
+// test itself was told to read. That is exactly how the wrong name
+// (~/.gemini/settings.json, where Gemini CLI kept the same map) survived:
+// the whole suite stayed green while a real agy loaded no MCP servers at
+// all. See README's "Proving a live run actually gets the tools".
+//
+// So the roster is asserted here, up front and on its own, rather than
+// left to be inferred from the run's outcome. An agy that loaded no tools
+// still starts, still answers, and still fails this test -- but it would
+// fail it at "the branch does not exist", which reads like a model that
+// declined to push rather than like a run that was never given a way to.
+//
+// # GRAIN_LIVE_AGENT_TEST
+//
+// The two gates below skip, so this file costs CI nothing (no credential
+// is available there, deliberately -- see .github/workflows/tests.yml).
+// A skip is also indistinguishable from a pass in `go test`'s summary
+// line, which is a bad property for the one test standing between this
+// package and a config file agy never opens. Setting
+// GRAIN_LIVE_AGENT_TEST turns both gates into failures, so a maintainer
+// running this by hand finds out that it did not run.
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,17 +54,18 @@ import (
 	"github.com/bwsalmon/grain/pkg/agent"
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/dispatch"
+	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
 func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
-		t.Skip("GEMINI_API_KEY not set; skipping live agent integration test")
+		skipUnlessLiveRequired(t, "GEMINI_API_KEY is not set")
 	}
 	agyPath, err := exec.LookPath("agy")
 	if err != nil {
-		t.Skip("agy binary not found on PATH; skipping live agent integration test")
+		skipUnlessLiveRequired(t, "no agy binary on $PATH")
 	}
 
 	w := newWorld(t)
@@ -66,13 +99,36 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 		"5. Push the " + branch + " branch to the origin remote (not main).\n" +
 		"Reply with a short confirmation once the push has succeeded."
 
-	result, err := fw.Run(ctx, agent.RunConfig{Prompt: prompt, SandboxRoot: w.prepareSandbox(dispatches[0]), MaxTurns: 15})
-	if err != nil {
-		t.Fatalf("agent run failed: %v", err)
+	// The raw stream-json is kept because agy's opening "init" event --
+	// the tool roster it actually loaded -- appears nowhere in the
+	// agent.Result the framework hands back. Framework.Run mirrors the
+	// stream here line by line as it arrives, so this file is readable
+	// even for a run that was cancelled or failed part-way.
+	transcriptPath := filepath.Join(t.TempDir(), "agy-stream.jsonl")
+
+	result, runErr := fw.Run(ctx, agent.RunConfig{
+		Prompt:         prompt,
+		SandboxRoot:    w.prepareSandbox(dispatches[0]),
+		MaxTurns:       15,
+		TranscriptPath: transcriptPath,
+	})
+	// Asserted ahead of runErr on purpose: a run given no tools fails
+	// somewhere further down every time, and every one of those failures
+	// describes a model that would not do as it was asked rather than the
+	// config file it was never handed.
+	assertGrainToolsAdvertised(t, transcriptPath)
+	if runErr != nil {
+		t.Fatalf("agent run failed: %v", runErr)
 	}
 	for _, c := range result.ToolCalls {
 		t.Logf("tool call: %s(%v) -> error=%v text=%q", c.Name, c.Arguments, c.IsError, c.Text)
 	}
+	// The roster proves agy was told about grain's tools; this proves it
+	// reached the sandbox through one. They are separate failures because
+	// they have separate causes: a published roster nothing calls is a
+	// model that ignored its tools, and no roster at all is this
+	// package's own wiring.
+	assertSandboxToolRan(t, result)
 
 	if err := w.store.FinishRun(w.ctx, d.RunID, clock.Add(time.Minute), "succeeded", ""); err != nil {
 		t.Fatal(err)
@@ -92,4 +148,141 @@ func TestLiveIssueCompletesEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertState(w, "iss-live", model.StateCompleted, false)
+}
+
+// liveAgentTestEnv is the opt-in that makes this file's gates loud. Set
+// it when running the live test by hand: an unset GEMINI_API_KEY or a
+// missing agy then fails the test instead of skipping it, so a `go test`
+// that could not do the one thing it exists to do says so rather than
+// printing "ok".
+const liveAgentTestEnv = "GRAIN_LIVE_AGENT_TEST"
+
+func skipUnlessLiveRequired(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv(liveAgentTestEnv) != "" {
+		t.Fatalf("%s is set, but %s: this run proved nothing about a live agy", liveAgentTestEnv, reason)
+	}
+	t.Skipf("%s; skipping the live agent integration test (set %s=1 to make this a failure)", reason, liveAgentTestEnv)
+}
+
+// assertGrainToolsAdvertised reads agy's own opening "init" event out of
+// a raw stream-json capture and fails unless the roster it reports
+// carries grain's sandbox tools.
+//
+// This is the assertion the whole live gate exists for. agy's roster is
+// whatever it loaded out of the HOME agent/antigravity built for the run,
+// so an empty one -- or one holding only agy's native tools -- means the
+// MCP config was written somewhere agy does not read, which is a bug no
+// scripted test in this repository can see (see this file's own doc
+// comment).
+func assertGrainToolsAdvertised(t *testing.T, transcriptPath string) {
+	t.Helper()
+
+	capture, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		t.Fatalf("reading agy's stream-json capture: %v", err)
+	}
+	tools, sawInit := advertisedTools(capture)
+	if !sawInit {
+		t.Fatalf("agy's stream carried no init event, so nothing here can say which tools the run was given; capture:\n%s", capture)
+	}
+
+	prefix := mcp.QualifiedToolName("")
+	var grainTools []string
+	for _, name := range tools {
+		if strings.HasPrefix(name, prefix) {
+			grainTools = append(grainTools, name)
+		}
+	}
+	t.Logf("agy's init event advertised %d tool(s), %d of them grain's: %v", len(tools), len(grainTools), tools)
+
+	if len(grainTools) == 0 {
+		t.Fatalf("agy's init event advertised no %s* tools (roster: %v).\n"+
+			"agy loaded no MCP server, which is what a config written to a file it does not read looks like: "+
+			"check that agent/antigravity's mcpConfigRelPath is still where this agy build keeps its servers "+
+			"(`agy mcp add` writes it, `agy mcp list` reads it back).", prefix, tools)
+	}
+	if want := mcp.QualifiedToolName("run_command"); !slices.Contains(grainTools, want) {
+		t.Fatalf("agy advertised grain's tools as %v, which does not include %s -- the one this run's prompt needs", grainTools, want)
+	}
+}
+
+// advertisedTools pulls the tool roster off the first "init" event in a
+// stream-json capture. Only the two fields this assertion reads are
+// modeled, and an unparseable line is skipped rather than treated as
+// fatal, for the same reason agent/antigravity's own parser tolerates one
+// -- including the truncated last line a capture read while agy is still
+// writing can end on.
+func advertisedTools(capture []byte) (tools []string, sawInit bool) {
+	for _, line := range strings.Split(string(capture), "\n") {
+		var ev struct {
+			Event string `json:"event"`
+			Init  *struct {
+				Tools []string `json:"tools"`
+			} `json:"init"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &ev); err != nil {
+			continue
+		}
+		if ev.Event == "init" && ev.Init != nil {
+			return ev.Init.Tools, true
+		}
+	}
+	return nil, false
+}
+
+// The roster assertion above only ever runs on a live agy, so nothing
+// would otherwise notice a typo in the one thing it reads -- and a
+// broken reader fails the live run for a reason that has nothing to do
+// with what the live run was there to check. This covers the reader
+// itself against agy's event shape, with the same fixtures
+// agent/antigravity's own parser tests use.
+func TestAdvertisedToolsReadsAgysInitEvent(t *testing.T) {
+	const initLine = `{"event":"init","init":{"cwd":"/w","tools":["mcp__grain-sandbox__run_command","Bash"],"permission_mode":"bypass"}}`
+	const resultLine = `{"event":"result","result":{"status":"SUCCESS","response":"done"}}`
+
+	tools, sawInit := advertisedTools([]byte(initLine + "\n" + resultLine + "\n"))
+	if !sawInit {
+		t.Fatal("advertisedTools found no init event in a capture that opens with one")
+	}
+	if !slices.Contains(tools, mcp.QualifiedToolName("run_command")) {
+		t.Errorf("advertisedTools = %v, want grain's run_command among them", tools)
+	}
+
+	// A run agy never loaded the MCP config for: the event is there, the
+	// roster is empty. This is the shape the live assertion has to catch,
+	// and "no init event" is not it.
+	tools, sawInit = advertisedTools([]byte(`{"event":"init","init":{"tools":[]}}` + "\n"))
+	if !sawInit || len(tools) != 0 {
+		t.Errorf("advertisedTools of an empty roster = %v, %v; want none, true", tools, sawInit)
+	}
+
+	// A capture read while agy is still writing can end mid-line, and
+	// one that never started can hold nothing at all.
+	if _, sawInit := advertisedTools([]byte(`{"event":"ini`)); sawInit {
+		t.Error("advertisedTools read an init event out of a truncated line")
+	}
+	if _, sawInit := advertisedTools(nil); sawInit {
+		t.Error("advertisedTools read an init event out of an empty capture")
+	}
+}
+
+// assertSandboxToolRan fails unless the run actually called one of
+// grain's tools and got an answer back -- the other half of what a live
+// run proves and the roster alone does not, since a roster is a promise
+// about tools that exist rather than evidence that calling one reaches
+// this run's sandbox.
+//
+// Names are compared bare ("run_command", not the mcp__-prefixed form
+// agy reports): every Framework strips the prefix before recording a
+// call, which is what the rest of grain matches on (mcp.BareToolName).
+func assertSandboxToolRan(t *testing.T, result *agent.Result) {
+	t.Helper()
+	for _, c := range result.ToolCalls {
+		if c.Name == "run_command" && !c.IsError {
+			return
+		}
+	}
+	t.Fatalf("no successful run_command call among the run's %d tool call(s): agy was handed grain's roster and never reached the sandbox through it",
+		len(result.ToolCalls))
 }
