@@ -4574,8 +4574,9 @@ it is.
 the report carries the two gauges it has to be read against: the backlog
 (by `task_state`'s own vocabulary, since "not finished" covers queued,
 blocked, awaiting a reply and failed, which are four different problems —
-and counting only the unfinished states, since every task ever completed
-is a census rather than a queue), and occupancy as a fraction of
+and counting only the unfinished states, since every task whose run is
+over, submitted or not, is a census rather than a queue), and occupancy
+as a fraction of
 `max_concurrent`. Idle capacity next to a
 deep queue is a scheduling problem; saturated capacity next to a deep
 queue is a capacity one. They are the first two numbers any optimization

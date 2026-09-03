@@ -136,8 +136,8 @@ func TestAFinishedRunWhoseBaseVanishedStillCompletesItsTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed: the branch is pushed and its pull request is open", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit: the branch is pushed and its pull request is open, waiting on a Submit click", st)
 	}
 	if len(sim.PullRequests) != 1 {
 		t.Fatalf("pull requests = %+v, want the one this finish opened", sim.PullRequests)

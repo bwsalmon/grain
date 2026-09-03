@@ -1006,11 +1006,23 @@ GROUP BY ` + "`tr`.`task_id`" + ``},
 	// MaxConsecutiveFailures, should still be let to finish), and a
 	// proposed task can carry no streak at all -- dispatch never ran an
 	// unapproved task -- so the two branches never compete in practice.
+	//
+	// 'awaiting_submit' sits immediately above 'completed' and tests the
+	// same completed_at: the two are one condition split by whether
+	// anything is going to land the pull request without a human
+	// (model.AwaitsSubmit, which this EXISTS clause and the auto_merge
+	// test spell out in SQL). EXISTS rather than a join to task_link,
+	// because a task carrying two fixes-links would otherwise appear
+	// twice in a view whose whole point is one row per task.
 	{"task_state", `
 SELECT
   ` + "`t`.`id`" + ` AS ` + "`task_id`" + `,
   CASE
     WHEN ` + "`o`.`closed_at`" + `    IS NOT NULL THEN 'closed'
+    WHEN ` + "`o`.`completed_at`" + ` IS NOT NULL AND ` + "`t`.`auto_merge`" + ` = FALSE AND EXISTS (
+           SELECT 1 FROM ` + "`task_link`" + ` AS ` + "`fl`" + `
+           WHERE ` + "`fl`.`task_id`" + ` = ` + "`t`.`id`" + ` AND ` + "`fl`.`kind`" + ` = '` + string(LinkFixes) + `'
+         ) THEN 'awaiting_submit'
     WHEN ` + "`o`.`completed_at`" + ` IS NOT NULL THEN 'completed'
     WHEN ` + "`o`.`pending_question_comment_id`" + ` IS NOT NULL THEN 'awaiting_reply'
     WHEN ` + "`r`.`id`" + ` IS NOT NULL THEN 'running'

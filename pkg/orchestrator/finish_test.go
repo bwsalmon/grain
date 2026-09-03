@@ -75,8 +75,11 @@ func TestProcessResultOpensAPullRequestForAPushedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed", st)
+	// A pull request opened and nobody has submitted it -- the finish path
+	// sets CompletedAt, and model.StateOf reads that plus the fixes-link
+	// below as "waiting on a human's Submit click" rather than as done.
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit", st)
 	}
 
 	got, err := store.GetTask(ctx, task.ID)
@@ -256,11 +259,14 @@ func TestProcessResultRelaysACommentAlongsideAPushedBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit", st)
 	}
 }
 
+// The comment-only ending, by contrast, stays 'completed': a task that
+// pushed nothing has no pull request to submit, so there is nothing for
+// a human to do next and no wait to name.
 func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	store, ctx := openStore(t)
 	_, client := newSim(t, "acme", "widgets", "main")

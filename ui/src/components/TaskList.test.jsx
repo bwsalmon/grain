@@ -55,18 +55,30 @@ describe("TaskList", () => {
     expect(screen.getByText("Ship the other thing")).toBeInTheDocument();
   });
 
-  it("shows a completion-phase chip for a completed task not on the merge queue", () => {
+  // Each row says where its pull request stands with its own state
+  // badge, whose title is STATE_LABELS[state] -- no chip repeating it.
+  it("tells a task waiting on Submit apart from one on the merge queue", () => {
     renderList({
       tasks: [
-        { id: 3, title: "Awaiting submit task", state: "completed", pullRequest: "acme/widgets#1", autoMerge: false, capabilities: [], blocked: false },
+        { id: 3, title: "Awaiting submit task", state: "awaiting_submit", pullRequest: "acme/widgets#1", autoMerge: false, capabilities: [], blocked: false },
         { id: 4, title: "Queued for merge task", state: "completed", pullRequest: "acme/widgets#2", autoMerge: true, capabilities: [], blocked: false },
       ],
     });
-    expect(screen.getByText("Awaiting submit")).toBeInTheDocument();
-    // The row for 4 says it with its state dot's own title, which is
-    // STATE_LABELS.completed -- no chip repeating it.
-    expect(screen.queryByText("Queued to merge")).not.toBeInTheDocument();
+    expect(screen.getAllByTitle("Awaiting submit").length).toBeGreaterThan(0);
     expect(screen.getAllByTitle("Queued for merge").length).toBeGreaterThan(0);
+  });
+
+  // The one correction still worth a chip: on the queue in name only.
+  it("shows a merge-blocked chip once the queue has given up", () => {
+    renderList({
+      tasks: [
+        {
+          id: 5, title: "Stuck task", state: "completed", pullRequest: "acme/widgets#3",
+          autoMerge: true, mergeQueueBlockedAt: "2026-08-01T00:00:00Z", capabilities: [], blocked: false,
+        },
+      ],
+    });
+    expect(screen.getByText("Merge blocked")).toBeInTheDocument();
   });
 
   it("shows an empty message when nothing matches the filter", () => {

@@ -317,11 +317,20 @@ type Runs struct {
 // and those are four different problems that the timings alone cannot
 // tell apart.
 type Backlog struct {
-	// ByState counts the unfinished states only. Completed and closed
-	// tasks are left out on purpose: they are a census of everything the
-	// deployment has ever done, which grows forever and is not work
-	// sitting in the system -- how many of them landed *in the window* is
-	// what Throughput already answers.
+	// ByState counts the unfinished states only. Completed, awaiting
+	// submit and closed tasks are left out on purpose: they are a census
+	// of everything the deployment has ever done, which grows forever and
+	// is not work sitting in the system -- how many of them landed *in the
+	// window* is what Throughput already answers.
+	//
+	// StateAwaitingSubmit is on that side of the line because it is a
+	// post-run state: the run is over and its lead time is already
+	// recorded, and a task nobody ever submits and nobody ever closes
+	// accumulates for exactly as long as a completed one does. It is
+	// still a queue of a kind -- of human clicks rather than of dispatch
+	// -- but not the one Utilization is read against, and counting it
+	// here would make a deployment that simply does not use auto-merge
+	// look permanently backed up.
 	ByState map[model.State]int
 	// Queued is ByState[StateQueued] -- the depth of the dispatch queue
 	// itself, lifted out because it is the one this report's own
@@ -672,7 +681,7 @@ func backlogOf(tasks []model.TaskTiming, states map[string]model.State, until ti
 	b := Backlog{ByState: map[model.State]int{}}
 	for _, t := range tasks {
 		state, ok := states[t.TaskID]
-		if !ok || state == model.StateCompleted || state == model.StateClosed {
+		if !ok || state == model.StateCompleted || state == model.StateAwaitingSubmit || state == model.StateClosed {
 			continue
 		}
 		b.ByState[state]++

@@ -127,7 +127,7 @@ describe("DetailOverlay", () => {
     expect(screen.getByPlaceholderText("Reply...")).toBeInTheDocument();
   });
 
-  it("shows the merge-blocked chip over awaiting-submit once the merge queue has given up", () => {
+  it("shows the merge-blocked chip once the merge queue has given up", () => {
     render(
       <DetailOverlay
         task={{ ...baseTask, state: "completed", pullRequest: "acme/widgets#42", autoMerge: true, mergeQueueBlockedAt: "2026-08-01T00:00:00Z" }}
@@ -141,10 +141,12 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("Merge blocked")).toBeInTheDocument();
   });
 
-  it("shows an awaiting-submit chip for a completed task with a pull request and no auto-merge", () => {
+  // Waiting on a Submit click is a state now, so the badge itself says
+  // it and no chip is added beside it (state.js's completionPhase).
+  it("says awaiting submit on the state badge, with no chip repeating it", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, state: "completed", pullRequest: "acme/widgets#42", autoMerge: false }}
+        task={{ ...baseTask, state: "awaiting_submit", pullRequest: "acme/widgets#42", autoMerge: false }}
         tasks={[]}
         config={config}
         onClose={() => {}}
@@ -152,7 +154,8 @@ describe("DetailOverlay", () => {
         act={vi.fn()}
       />
     );
-    expect(screen.getByText("Awaiting submit")).toBeInTheDocument();
+    expect(screen.getAllByText("Awaiting submit")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Submit" })).toBeInTheDocument();
   });
 
   it("opens the originating task when generatedFrom is clicked", async () => {

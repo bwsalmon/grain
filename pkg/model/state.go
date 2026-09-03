@@ -63,6 +63,8 @@ func StateOf(task Task, obs *Observation, activeRun bool, failureStreak int) Sta
 		switch {
 		case obs.ClosedAt != nil:
 			return StateClosed
+		case obs.CompletedAt != nil && AwaitsSubmit(task):
+			return StateAwaitingSubmit
 		case obs.CompletedAt != nil:
 			return StateCompleted
 		case obs.PendingQuestionCommentID != nil:
@@ -79,6 +81,36 @@ func StateOf(task Task, obs *Observation, activeRun bool, failureStreak int) Sta
 		return StateProposed
 	}
 	return StateQueued
+}
+
+// AwaitsSubmit reports whether a task that has finished running is
+// waiting on a human's Submit click rather than on the merge queue --
+// the condition that separates StateAwaitingSubmit from StateCompleted.
+// It says nothing about whether the run is over: StateOf is what pairs
+// it with Observation.CompletedAt, and this deliberately never reads an
+// Observation so a caller holding a Task alone can still ask.
+//
+// Two halves, both necessary. AutoMerge is what Submit sets
+// (ui.Client.Submit reuses it rather than adding a second field), so an
+// already-submitted task is on the queue and waiting on nobody. And a
+// task with no LinkFixes pull request has nothing to submit at all --
+// an analyze task that answered in a comment is finished, not parked,
+// and offering "Submit" as its next step would name a button it will
+// never grow.
+//
+// Nothing here asks whether the pull request is still open. A merged or
+// closed one closes the task itself (orchestrator.recordPullRequestEvents
+// sets ClosedAt), and StateClosed already outranks this in StateOf.
+func AwaitsSubmit(task Task) bool {
+	if task.AutoMerge {
+		return false
+	}
+	for _, l := range task.Links {
+		if l.Kind == LinkFixes {
+			return true
+		}
+	}
+	return false
 }
 
 // Transition is one point where a task's derived state changed --
@@ -170,7 +202,18 @@ func Transitions(task Task, obs *Observation, runs []Run, streak *FailureStreak,
 		}
 	}
 	if obs != nil {
-		add(StateCompleted, obs.CompletedAt)
+		// One moment, one entry, under whichever of the two names StateOf
+		// would give it right now. The record holds no separate "and then
+		// somebody submitted it" timestamp -- AutoMerge is a field on the
+		// declaration with no history of its own -- so a task submitted
+		// after the fact shows its completion as 'completed' and one still
+		// parked shows the same moment as 'awaiting_submit', rather than
+		// the timeline ending on a state the badge above it disagrees with.
+		completedState := StateCompleted
+		if AwaitsSubmit(task) {
+			completedState = StateAwaitingSubmit
+		}
+		add(completedState, obs.CompletedAt)
 		add(StateClosed, obs.ClosedAt)
 	}
 

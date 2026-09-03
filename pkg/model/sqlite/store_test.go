@@ -226,6 +226,82 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 	assertState(model.StateClosed)
 }
 
+// TestAnUnsubmittedPullRequestIsItsOwnStateAndStillSynced proves the
+// half of task_state's CASE that reads something other than
+// task_observation -- the task's own auto_merge column and its fixes-link
+// -- against a real database rather than only against model.StateOf, and
+// pins the query that keeps such a task's pull request under grain's
+// watch while it waits.
+func TestAnUnsubmittedPullRequestIsItsOwnStateAndStillSynced(t *testing.T) {
+	store, _, ctx := openStore(t)
+	tk := task("a1b2", true)
+	tk.Links = []model.Link{{Kind: model.LinkFixes, Target: "owner/payments-api#7"}}
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	done := now.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{TaskID: "a1b2", CompletedAt: &done}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertState := func(want model.State) {
+		t.Helper()
+		got, err := store.State(ctx, "a1b2")
+		if err != nil {
+			t.Fatalf("state: %v", err)
+		}
+		if got != want {
+			t.Fatalf("state = %q, want %q", got, want)
+		}
+		stored, err := store.GetTask(ctx, "a1b2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		obs, err := store.GetObservation(ctx, "a1b2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The two derivations of one rule, held together the way
+		// state_test.go holds the precedence: the view and StateOf must
+		// answer the same on the condition only one of them can see.
+		if derived := model.StateOf(*stored, obs, false, 0); derived != got {
+			t.Fatalf("task_state view = %q, model.StateOf = %q", got, derived)
+		}
+	}
+	assertState(model.StateAwaitingSubmit)
+
+	// A pull request waiting on a human is still watched: SyncPullRequests
+	// has to see a hand-merge on GitHub, or the task would never close.
+	links, err := store.OpenPullRequestLinks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].PullRequest != "owner/payments-api#7" {
+		t.Fatalf("OpenPullRequestLinks = %+v, want the unsubmitted pull request", links)
+	}
+
+	// Submit is AutoMerge (ui.Client.Submit), and it is the only way out.
+	tk.AutoMerge = true
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	assertState(model.StateCompleted)
+	if links, err := store.OpenPullRequestLinks(ctx); err != nil || len(links) != 1 {
+		t.Fatalf("OpenPullRequestLinks after submitting = %+v (err %v), want it still watched", links, err)
+	}
+
+	// And closing outranks both, which is what drops it out of the sync.
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: "a1b2", CompletedAt: &done, ClosedAt: &done,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertState(model.StateClosed)
+	if links, err := store.OpenPullRequestLinks(ctx); err != nil || len(links) != 0 {
+		t.Fatalf("OpenPullRequestLinks after closing = %+v (err %v), want none", links, err)
+	}
+}
+
 // Withdrawing approval is the one way a task moves back up the
 // precedence order rather than down it, so it is worth proving against a
 // real database rather than only against StateOf: the state comes out of

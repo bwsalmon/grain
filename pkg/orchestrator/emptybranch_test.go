@@ -307,8 +307,8 @@ func TestAnUnreadableCompareStillOpensAPullRequestForARealBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit: the pull request is open and nobody has submitted it", st)
 	}
 }
 

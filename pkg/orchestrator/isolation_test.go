@@ -253,8 +253,8 @@ func TestSyncPullRequestsClosesOutEveryTaskWhenOneFails(t *testing.T) {
 	if st := stateOf(t, ctx, store, second.ID); st != model.StateClosed {
 		t.Fatalf("second task state = %q, want closed: one unreadable PR should not strand the others", st)
 	}
-	if st := stateOf(t, ctx, store, first.ID); st != model.StateCompleted {
-		t.Fatalf("first task state = %q, want it left completed for the next tick to retry", st)
+	if st := stateOf(t, ctx, store, first.ID); st != model.StateAwaitingSubmit {
+		t.Fatalf("first task state = %q, want it left where it was for the next tick to retry", st)
 	}
 }
 
