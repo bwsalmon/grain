@@ -429,11 +429,14 @@ function CapabilityToggles({ t, config, act }) {
   const capabilities = config?.capabilities || [];
   const selected = t.capabilities || [];
   // A task can hold a grant the picker no longer offers -- a capability
-  // retired since it was attached (bwsalmon/agents#612's "scratch-repo").
-  // Without a row of its own it would show as a chip that nothing can
-  // untick, and a grant no provider is registered for fails every run of
-  // the task holding it, so it gets a row here purely to be turned off:
-  // rows come from the listing, and only rows can be toggled.
+  // renamed or dropped since it was attached ("scratch-repo", now
+  // github-sandbox, bwsalmon/agents#612). Without a row of its own it
+  // would show as a chip that nothing can untick, and a grant no
+  // provider is registered for fails every run of the task holding it,
+  // so it gets a row here purely to be turned off: rows come from the
+  // listing, and only rows can be toggled. SetCapability (pkg/ui,
+  // client.go) is the other half -- it validates on attach only, so the
+  // detach this row sends is accepted.
   const rows = capabilities.concat(
     selected
       .filter((id) => !capabilities.some((c) => c.id === id))

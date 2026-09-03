@@ -1114,23 +1114,22 @@ func (c *Client) mutate(ctx context.Context, id string, apply func(*model.Task) 
 // that is not attached is a no-op rather than an error, matching what
 // removing an absent label used to do.
 //
-// Only attaching checks the id against the picker listing. Detaching
-// accepts any name, including one no row (and so possibly no provider)
-// exists for any more: a grant a task already holds is a fact about that
-// task, and refusing to remove it because the offer has since been
-// withdrawn leaves the task stuck holding something that fails every one
-// of its runs -- model.ResolveGrants refuses a grant with no registered
-// provider, and orchestrator's prepareCapabilities makes that refusal
-// fatal to the dispatch -- with no route in the UI or the CLI to let go
-// of it. Retiring the "scratch-repo" row (bwsalmon/agents#612) is
-// exactly that case. DetailOverlay.jsx's CapabilityToggles is the other
-// half: it gives such a grant a picker row of its own purely so it can
-// be unticked, since only rows can be toggled off.
+// Only attaching checks the id against this deployment's listing.
+// Detaching an id with no row is allowed, because a task can be holding
+// a grant nothing offers any more -- a renamed capability
+// (DefaultCapabilities' own "scratch-repo", now github-sandbox), or one
+// a deployment stopped listing -- and such a grant is exactly the one an
+// operator most needs to remove: it fails the task's every dispatch at
+// model.ResolveGrants. Refusing to detach it would leave the only route
+// out through the store. Detaching can only ever shrink the grant set,
+// so nothing the validation protects is reachable this way.
+//
+// DetailOverlay.jsx's CapabilityToggles is the other half of that route:
+// it gives such a grant a picker row of its own purely so it can be
+// unticked, since only rows can be toggled off.
 func (c *Client) SetCapability(ctx context.Context, id, capabilityID string, attach bool) error {
-	if attach {
-		if _, ok := c.capabilityByID(capabilityID); !ok {
-			return validationErrorf("unknown capability %s", capabilityID)
-		}
+	if _, ok := c.capabilityByID(capabilityID); attach && !ok {
+		return validationErrorf("unknown capability %s", capabilityID)
 	}
 	// Rebuilding the grant set inside the closure is what lets two people
 	// attach two different capabilities without one losing: a retry runs
