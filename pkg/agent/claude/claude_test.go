@@ -377,16 +377,106 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	}
 }
 
-func TestAllowedToolsNamesAllEightGrainSandboxTools(t *testing.T) {
+// Nine now: the four sandbox tools, the four escape hatches, and
+// open_pull_request -- which is named here for every run even though only
+// a run whose mcpserver was given a daemon to ask actually gets it, since
+// --allowedTools filters what the server advertises rather than adding to
+// it (allowedTools' own comment).
+func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	names := allowedTools()
-	if len(names) != 8 {
-		t.Fatalf("allowedTools() = %v, want 8 entries", names)
+	if len(names) != 9 {
+		t.Fatalf("allowedTools() = %v, want 9 entries", names)
 	}
+	found := false
 	for _, n := range names {
 		if !strings.HasPrefix(n, "mcp__grain-sandbox__") {
 			t.Errorf("tool name %q missing mcp__grain-sandbox__ prefix", n)
 		}
+		if n == "mcp__grain-sandbox__open_pull_request" {
+			found = true
+		}
 	}
+	if !found {
+		t.Errorf("allowedTools() = %v, want open_pull_request admitted -- "+
+			"--strict-mcp-config refuses any tool this list does not name", names)
+	}
+}
+
+// The daemon's address and the run's task id are what the forked
+// mcpserver needs to offer open_pull_request at all, and they only travel
+// as its own arguments.
+func TestRunPassesTheGrainServerAndTaskToTheMCPServer(t *testing.T) {
+	root := t.TempDir()
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "/path/to/grain", WithGrainServer("http://127.0.0.1:8420"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "go", SandboxRoot: root, TaskID: "t1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args := mcpConfigArgs(t, fake.gotMCPConfig)
+	if !argsHave(args, "-server", "http://127.0.0.1:8420") || !argsHave(args, "-task", "t1") {
+		t.Errorf("mcpserver args = %v, want -server and -task among them", args)
+	}
+}
+
+// Both or neither: a task id with no daemon to ask names a question with
+// nowhere to send it, and mcpserver rejects either half on its own.
+func TestRunOmitsTheGrainServerWhenEitherHalfIsMissing(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		opts   []Option
+		taskID string
+	}{
+		{"no daemon configured", nil, "t1"},
+		{"no task id", []Option{WithGrainServer("http://127.0.0.1:8420")}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+			f := newFramework(fake, "/path/to/grain", tt.opts...)
+
+			if _, err := f.Run(context.Background(), agent.RunConfig{
+				Prompt: "go", SandboxRoot: t.TempDir(), TaskID: tt.taskID,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			args := mcpConfigArgs(t, fake.gotMCPConfig)
+			if argsHave(args, "-server", "") || argsHave(args, "-task", "") {
+				t.Errorf("mcpserver args = %v, want neither -server nor -task", args)
+			}
+		})
+	}
+}
+
+// mcpConfigArgs pulls the grain-sandbox server's own argument list out of
+// the --mcp-config file Run wrote.
+func mcpConfigArgs(t *testing.T, configJSON []byte) []string {
+	t.Helper()
+	var cfg struct {
+		MCPServers map[string]struct {
+			Args []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(configJSON, &cfg); err != nil {
+		t.Fatalf("mcp-config was not valid JSON: %v (%s)", err, configJSON)
+	}
+	server, ok := cfg.MCPServers["grain-sandbox"]
+	if !ok {
+		t.Fatalf("mcp-config missing grain-sandbox server: %+v", cfg)
+	}
+	return server.Args
+}
+
+// argsHave reports whether args carries name followed by value -- value
+// "" matches any value, i.e. "is this flag present at all".
+func argsHave(args []string, name, value string) bool {
+	for i, a := range args {
+		if a == name && i+1 < len(args) && (value == "" || args[i+1] == value) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunPassesTheDefaultModelWhenNoneIsGiven(t *testing.T) {

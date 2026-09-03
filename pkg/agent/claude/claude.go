@@ -148,6 +148,7 @@ type Framework struct {
 	konturSSHUser   string
 	konturExecKey   string
 	konturWorkspace string
+	grainServerURL  string
 }
 
 // Option configures a Framework at construction time.
@@ -205,6 +206,22 @@ func WithKonturSSH(sshUser, execKey, workspace string) Option {
 	}
 }
 
+// WithGrainServer names the running "grain daemon"'s own UI/API base URL
+// (e.g. "http://127.0.0.1:8420") for the forked "mcpserver" subprocess to
+// reach it at -- which, together with a RunConfig.TaskID, is what gives a
+// run the open_pull_request tool. That tool's effect is real and
+// immediate, unlike the mocked escape hatches, and it happens by asking
+// the daemon rather than by this process or its children holding a GitHub
+// credential (cmd/grain/mcpserver.go's daemonPullRequests).
+//
+// Unset -- a deployment serving no UI/API, or any caller that has no
+// daemon to name -- leaves the tool unregistered and every run exactly as
+// it was: a pushed branch still becomes a pull request when the run
+// finishes.
+func WithGrainServer(url string) Option {
+	return func(f *Framework) { f.grainServerURL = url }
+}
+
 // New builds a Framework that runs the real claude binary at claudePath
 // (typically just "claude", resolved against $PATH) and points every
 // run's --mcp-config at grainBinaryPath -- the same grain binary this
@@ -236,6 +253,15 @@ func allowedTools() []string {
 	for _, t := range mcp.NewMockTools(&mcp.MockSink{}) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
+	// Named unconditionally, even for a run whose mcpserver will not
+	// register it (no -server/-task): --allowedTools is a filter over
+	// what the server actually advertises, so admitting a tool that is
+	// not there costs nothing, while a run that *does* have it and is not
+	// admitted would be refused by --strict-mcp-config. nil is a
+	// PullRequestOpener no run ever gets -- this only wants the names.
+	for _, t := range mcp.NewPullRequestTools(nil) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
 	return names
 }
 
@@ -263,15 +289,23 @@ func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 // are -- RunDispatch never sets both at once in practice (a sandbox is
 // either host-rooted or kontur-named, never both), but a Framework this
 // simple is not the place to enforce that.
+//
+// The daemon's own address and this run's task id are appended to
+// whichever of those two the sandbox produced, when both are known: they
+// are what the forked server needs to offer open_pull_request (see
+// WithGrainServer). Both or neither -- one without the other names a
+// question with no address to send it to, or an address with nothing to
+// ask about, and mcpserver.go rejects either half on its own.
 func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
+	var args []string
 	switch {
 	case cfg.SandboxRoot != "":
-		return []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}, nil
+		args = []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}
 	case cfg.KonturVM != "":
 		if f.konturSSHUser == "" || f.konturWorkspace == "" {
 			return nil, fmt.Errorf("claude: RunConfig.KonturVM is set but this Framework has no kontur SSH config (see WithKonturSSH)")
 		}
-		args := []string{
+		args = []string{
 			"mcpserver", "-kontur-vm", cfg.KonturVM,
 			"-ssh-user", f.konturSSHUser, "-workspace", f.konturWorkspace,
 		}
@@ -283,10 +317,13 @@ func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 		if f.konturExecKey != "" {
 			args = append(args, "-exec-key", f.konturExecKey)
 		}
-		return args, nil
 	default:
 		return nil, fmt.Errorf("claude: RunConfig.SandboxRoot or .KonturVM is required")
 	}
+	if f.grainServerURL != "" && cfg.TaskID != "" {
+		args = append(args, "-server", f.grainServerURL, "-task", cfg.TaskID)
+	}
+	return args, nil
 }
 
 // Run implements agent.Framework: it writes an --mcp-config file pointing

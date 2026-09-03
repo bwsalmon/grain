@@ -36,7 +36,17 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
-                propose_task, add_review_comment). NewSandboxTools runs
+                propose_task, add_review_comment) -- plus one tool whose
+                effect is real and immediate rather than mocked and
+                deferred, open_pull_request (NewPullRequestTools): a run
+                that has pushed its branch can have grain open its pull
+                request there and then and read back what the repo's own
+                CI makes of it, instead of exiting blind and leaving the
+                pull request to orchestrator's finish path. It reaches
+                GitHub the only way anything on the agent's side of the
+                line ever does -- by asking the daemon (pkg/ui's
+                POST /api/tasks/{id}/pull-request), never by holding a
+                credential of its own. NewSandboxTools runs
                 those four locally, confined to a directory; NewSSHSandboxTools
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
@@ -201,7 +211,12 @@ cmd/grain/      the one binary this repo builds (bwsalmon/agents#313
                 pkg/kontur, above) for NewSSHSandboxTools against a real
                 kontur-managed VM -- what a running daemon (via
                 pkg/agent/claude) forks *this same binary* to get, rather
-                than needing a second one on disk. "demo" (demo.go,
+                than needing a second one on disk. -server plus -task adds
+                open_pull_request to that roster: the daemon to ask and
+                the task to ask about, so a run can have its own pull
+                request opened while it still has turns left to react to
+                what CI says about it (see "A run can open its own pull
+                request" below). "demo" (demo.go,
                 formerly `grain ui -demo`) is a fifth, smaller mode: a
                 throwaway pkg/ui.Server over fake data and a temp-directory
                 store, for trying out the frontend with no daemon, no
@@ -1202,10 +1217,12 @@ process. `Config.GrantTools` still assembles these tools and
 `RunDispatch` still passes them, but no `Framework` consumes them, so
 `selfrepair`/`selfdebug`'s host tools reach no running agent today.
 Closing that gap means giving the `mcpserver` subcommand a route back to
-the store -- it takes only a sandbox root or a kontur VM name now (see
-`cmd/grain/mcpserver.go`), which is exactly the isolation that makes the
-subprocess frameworks safe, so it is a design question rather than a
-missing flag.
+the store, which is a design question rather than a missing flag: the
+isolation that makes the subprocess frameworks safe is exactly that it
+holds no store handle and no credential. `-server`/`-task` (see "A run
+can open its own pull request", below) is the one route it has, and is
+deliberately not that route -- a REST client of the daemon, one endpoint,
+one task id -- so it answers `open_pull_request` and nothing else.
 
 bwsalmon/agents#621 turned that pair of capabilities into an explicit
 "configuration agent": an overlay button the frontend keeps reachable in
@@ -1299,10 +1316,13 @@ Interactive task's `run_host_command` confirmation prompt
 (`selfrepair.Confirm`, which blocks on `Store.Comments` from inside a
 tool call) is not reachable by a running agent today. Closing that gap
 means giving the `mcpserver` subcommand a route back to the store, which
-it deliberately does not have: it takes a sandbox root or a kontur VM
-name and nothing else, and that narrowness is exactly what makes the
-subprocess frameworks safe to run. It is a design question, not a missing
-flag, so it is recorded here rather than guessed at.
+it deliberately does not have: besides its sandbox, all it takes is a
+daemon URL and a task id (`-server`/`-task`, for `open_pull_request` --
+"A run can open its own pull request", below), which is a REST client of
+one endpoint rather than a store handle, and that narrowness is exactly
+what makes the subprocess frameworks safe to run. It is a design
+question, not a missing flag, so it is recorded here rather than guessed
+at.
 
 ### Operating it
 
@@ -1917,6 +1937,49 @@ its own disk, and every mode that ever took a store flag — `grain
 daemon`, and, before #363, the standalone `grain ui` and the CLI itself
 — takes just that one, with no "embedded, or a server" distinction left
 to make.
+
+## A run can open its own pull request
+
+grain has always opened a pull request for the branch a run pushed --
+after the run had already exited (`orchestrator.ProcessResult` ->
+`salvagePushedBranch` -> `finishWithPullRequest`). That ordering has one
+cost, and it is the expensive one: the agent never sees its own CI. A
+change that builds and tests cleanly in a sandbox and then fails the
+repo's own workflow is a fact nobody learns until a human opens the pull
+request, and fixing it costs a whole second dispatch -- of an agent that
+has by then forgotten everything it knew about the change.
+
+So a run can now ask for its pull request while it is still running, and
+read back what the checks say: the `open_pull_request` tool (`pkg/mcp`'s
+`NewPullRequestTools`). It takes no arguments -- repo, branch, base and
+title are grain's, exactly as they always were -- and it opens *the same*
+pull request the finish path would have (`EnsurePullRequest`, which finds
+an already-open one for the head before opening anything), so the run's
+own ending adopts it rather than colliding with it. Calling it again is
+how an agent watches a check that was still running: it never opens a
+second pull request, and the checks it reports are read fresh
+(`checkRunsFor`, the same reader the merge queue trusts, Actions-workflow
+fallback included).
+
+Two things it deliberately does not do. It does not mark the task
+completed -- that is what would put a still-running task into
+`SyncPullRequests`' merge queue, where a branch the agent is still
+pushing to could be merged out from under it; `CompletedAt` stays the
+finish path's to set. And it does not give the agent's side of the line a
+GitHub credential. The `mcpserver` process the agent's tools run in holds
+none (`pkg/gitproxy`'s whole shape is that grain reaches GitHub, never
+the agent), so `-server`/`-task` point it at the running daemon's own
+REST API instead -- `POST /api/tasks/{id}/pull-request`, one call about
+one task id, answered by `orchestrator.OpenPullRequestForTask` against
+the daemon's own GitHub client. Everything about which repo and which
+branch that means is read from the task's own record, so nothing an agent
+can put in a tool call reaches GitHub as data.
+
+That is a route back from a forked `mcpserver` to the daemon, which "What
+this cost" (above) records as not existing. It is a deliberately narrow
+one: a REST client, one endpoint, no store handle and no credential --
+not the in-process `*model.Store` `selfrepair.Confirm`'s blocking
+confirmation would still need.
 
 ## Deploying it
 

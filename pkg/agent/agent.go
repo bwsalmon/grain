@@ -41,7 +41,20 @@ type RunConfig struct {
 	// at instead of a local directory -- see agent/antigravity's and
 	// agent/claude's Framework.Run.
 	KonturVM string
-	Tools    []mcp.Tool
+	// TaskID is the task this run belongs to -- the one fact a forked
+	// "mcpserver" subprocess needs before it can ask the daemon to act on
+	// this run's behalf rather than only on its sandbox. It is passed as
+	// that subprocess's own -task, alongside the daemon URL the Framework
+	// itself was constructed with (agent/claude's WithGrainServer), and
+	// what it buys is the open_pull_request tool: a run that can open its
+	// own pull request while it still has turns left to react to CI.
+	//
+	// Empty -- a caller that has no task, or a Framework never told where
+	// its daemon is -- simply leaves that tool unregistered, and the run
+	// works exactly as it did before: its branch still becomes a pull
+	// request when orchestrator.ProcessResult finishes the run.
+	TaskID string
+	Tools  []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
 	// before Run gives up and returns an error, guarding against a run
 	// that never stops asking for tools. Zero means the framework's own

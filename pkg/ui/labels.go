@@ -242,6 +242,23 @@ type Config struct {
 	// ReconcilerDown and AutoMergeDegraded above give, and the honest
 	// answer where there is no running configuration to compare with.
 	RunningConfig func() model.Config
+	// PullRequests, when set, is what POST /api/tasks/{id}/pull-request
+	// calls to open (or find) a task's own pull request and read its
+	// checks -- cmd/grain/daemon.go's pullRequestOpener over
+	// orchestrator.OpenPullRequestForTask and that daemon's GitHub
+	// client. It is how a dispatched run opens its pull request before it
+	// exits, through the open_pull_request tool its own MCP server
+	// exposes: the mcpserver process holds no GitHub credential of its
+	// own (deliberately -- pkg/gitproxy's whole shape is that a run's
+	// route to GitHub is grain's, never the agent's), so it asks the
+	// daemon over this same REST API the CLI already speaks.
+	//
+	// nil means this deployment's UI was not handed one (`grain demo`'s
+	// throwaway UI, or any UI not colocated with a daemon that has a
+	// GitHub client), and the route answers 404 rather than erroring --
+	// the same nil-means-unavailable contract Reboot and Sandboxes above
+	// already give.
+	PullRequests PullRequests
 }
 
 // LiveTranscript is implemented by whatever can read back a still-running

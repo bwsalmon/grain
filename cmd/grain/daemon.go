@@ -722,6 +722,13 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	githubTransport.UseTLS = !cfg.githubInsecureHTTP
 	githubClient := github.NewClient(githubTransport, credentialTokenSource{credentials})
 
+	// Published for the UI/API server started above this one (see
+	// livePullRequests): from here on, a dispatched run asking for its own
+	// pull request through POST /api/tasks/{id}/pull-request reaches this
+	// same client, and so opens exactly the pull request this loop's own
+	// finish path would have opened for it.
+	livePullRequests.Store(&pullRequestOpener{store: store, client: githubClient})
+
 	registry := model.NewCapabilityRegistry(capabilityProviders(cfg)...)
 
 	// Recovering any run a previous process left running (bwsalmon/agents#425)
@@ -963,6 +970,9 @@ func buildAntigravityFramework(ctx context.Context, cfg config, secretStore *sec
 		// RunConfig.SandboxRoot instead.
 		opts = append(opts, antigravity.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
 	}
+	if url := daemonServerURL(cfg.uiAddr); url != "" {
+		opts = append(opts, antigravity.WithGrainServer(url))
+	}
 	return antigravity.New(agyPath, grainBinaryPath, opts...), nil
 }
 
@@ -1022,7 +1032,39 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 		// needs none of this.
 		opts = append(opts, claude.WithKonturSSH(cfg.konturSSHUser, cfg.konturExecKey, cfg.konturWorkspace))
 	}
+	if url := daemonServerURL(cfg.uiAddr); url != "" {
+		opts = append(opts, claude.WithGrainServer(url))
+	}
 	return claude.New(claudePath, grainBinaryPath, opts...), nil
+}
+
+// daemonServerURL is the base URL this same process's own UI/API server
+// is reachable at, for a run's forked mcpserver to ask it to open that
+// run's pull request (agent/claude's and agent/antigravity's
+// WithGrainServer). It is derived from -ui-addr rather than configured
+// separately: the two are the same server, and a second flag naming the
+// same thing is a second thing to get wrong.
+//
+// A host-less address (":8420", what a deployment serving on every
+// interface passes) becomes loopback, which is both correct and the only
+// address worth using here: the asker is a process on this very host.
+//
+// "" -- no UI/API server at all (-ui-addr emptied out), or one bound to
+// port 0, whose real port is only known to the listener rather than to
+// this string -- means runs simply get no open_pull_request tool, which
+// is the same deployment they had before it existed.
+func daemonServerURL(uiAddr string) string {
+	if uiAddr == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(uiAddr)
+	if err != nil || port == "" || port == "0" {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 // agentCredential reads the credential one agent framework runs as: the
@@ -1079,6 +1121,87 @@ func agentCredential(ctx context.Context, secretStore *secrets.Store, secret, fi
 // endpoint, can see reconciliation is dead without an operator having to
 // notice and interpret a single log line (bwsalmon/agents#576).
 var reconcilerDown atomic.Bool
+
+// livePullRequests holds the GitHub-backed pull request opener runDaemon
+// builds, for the UI/API server that was started before it to reach.
+//
+// The two halves of this process come up in that order on purpose: the
+// UI/API server starts as early as the store allows, precisely so a
+// deployment whose reconcile loop never comes up is still visible and
+// operable (bwsalmon/agents#576, and run()'s own comment on the
+// ordering). But the GitHub client belongs to runDaemon, below it, so
+// POST /api/tasks/{id}/pull-request has nothing to call until runDaemon
+// gets there. Set once, from runDaemon, and read through pullRequestGate
+// -- the same shape reconcilerDown above already uses to let these two
+// halves see one fact about each other without either owning the other.
+//
+// A run's mcpserver reaching this before it is set gets an honest "not
+// ready yet" rather than a nil dereference; in practice nothing can,
+// since no run exists to ask until the loop that dispatches runs is
+// already going.
+var livePullRequests atomic.Pointer[pullRequestOpener]
+
+// pullRequestOpener is ui.Config.PullRequests over
+// orchestrator.OpenPullRequestForTask: the one place this deployment's
+// store and its GitHub client are both in scope for a request that
+// arrived over the UI/API. Its caller is a dispatched run's own mcpserver
+// (cmd/grain/mcpserver.go's daemonPullRequests), which holds no GitHub
+// credential itself.
+//
+// It converts orchestrator.PullRequestStatus into ui.PullRequestStatus
+// field for field, for the same reason sandboxHealthAdapter converts
+// orchestrator.SandboxHealth: pkg/ui does not import pkg/orchestrator,
+// and this file is where both types are in scope.
+type pullRequestOpener struct {
+	store  *model.Store
+	client github.Client
+}
+
+func (o *pullRequestOpener) OpenForTask(ctx context.Context, taskID string) (ui.PullRequestStatus, error) {
+	task, err := o.store.GetTask(ctx, taskID)
+	if err != nil {
+		return ui.PullRequestStatus{}, err
+	}
+	if task == nil {
+		return ui.PullRequestStatus{}, fmt.Errorf("no task %s", taskID)
+	}
+	status, err := orchestrator.OpenPullRequestForTask(ctx, o.store, o.client, *task)
+	if err != nil {
+		return ui.PullRequestStatus{}, err
+	}
+	out := ui.PullRequestStatus{
+		Number:          status.PullRequest.Number,
+		URL:             status.PullRequest.HTMLURL,
+		ChecksAvailable: status.ChecksKnown,
+		ChecksError:     status.ChecksError,
+	}
+	if task.Target != nil {
+		out.Repo = task.Target.String()
+	}
+	for _, c := range status.Checks {
+		check := ui.CheckStatus{Name: c.Name, Status: c.Status}
+		if c.Conclusion != nil {
+			check.Conclusion = *c.Conclusion
+		}
+		out.Checks = append(out.Checks, check)
+	}
+	return out, nil
+}
+
+// pullRequestGate is the ui.Config.PullRequests the UI/API server is
+// given: whatever livePullRequests holds by the time a request actually
+// arrives, or a plain refusal until runDaemon has put one there.
+type pullRequestGate struct{}
+
+func (pullRequestGate) OpenForTask(ctx context.Context, taskID string) (ui.PullRequestStatus, error) {
+	opener := livePullRequests.Load()
+	if opener == nil {
+		return ui.PullRequestStatus{}, errors.New(
+			"this daemon has no GitHub client yet, so it cannot open a pull request: " +
+				"its reconcile loop has not started (or has failed -- check the daemon log)")
+	}
+	return opener.OpenForTask(ctx, taskID)
+}
 
 // reapInterval is how often reconcile calls reapCapabilities -- not
 // configurable, since nothing about it needs to race a deployment's own
@@ -1817,6 +1940,14 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// compares the stored row against to say which of the two
 		// restart-only settings have been saved but not yet applied.
 		RunningConfig: live.modelConfig,
+		// PullRequests is how a dispatched run opens its own pull request
+		// before it exits (ui.Config.PullRequests' own doc comment): its
+		// mcpserver asks this API, which asks the daemon's GitHub client.
+		// The gate, rather than that client directly, because this server
+		// starts before runDaemon has built one -- deliberately, so the
+		// UI survives a reconcile loop that never comes up at all -- and
+		// livePullRequests is what closes that gap once it does.
+		PullRequests: pullRequestGate{},
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

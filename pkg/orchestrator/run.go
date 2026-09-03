@@ -379,6 +379,10 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
+			// TaskID is what lets a Framework's own forked mcpserver ask
+			// the daemon to act for this run rather than only on its
+			// sandbox -- open_pull_request, today (see RunConfig.TaskID).
+			TaskID:   task.ID,
 			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
