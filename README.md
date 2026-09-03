@@ -1560,6 +1560,78 @@ passed alongside `--effort`. `antigravity.DefaultModel` is one of the
 catalog names, and a deployment overriding it in Settings or with
 `-gemini-model` should name one too.
 
+### Proving a live run actually gets the tools
+
+Where that private `HOME` puts the MCP config is a fact about agy's
+on-disk layout, and it is the one thing about this package no test in
+this repository can check for itself. `agent/antigravity` wrote the
+config to `~/.gemini/settings.json` for a while -- the file Gemini CLI
+kept the same `mcpServers` map in -- and agy, which reads
+`~/.gemini/config/mcp_config.json` and nothing else, silently loaded no
+MCP servers at all. Every test covering that wiring stayed green
+throughout, because every one of them drives a scripted runner or a stub
+CLI: a stub reads whichever file the test told it to read, so the tests
+agreed with the code about a name they had both got wrong. What that
+costs in production is not an error, which is the difficulty -- agy
+starts, answers, and has no way to touch the sandbox.
+
+Fixing it settled the name against the real binary, without a credential:
+on agy 1.1.25, `agy mcp add` writes `~/.gemini/config/mcp_config.json`,
+`agy mcp list` reads it back, and the identical `mcpServers` map placed
+in `~/.gemini/settings.json` lists no servers at all. That is static
+analysis of the binary, and it stops one step short of the end of the
+chain: it says which file agy reads, not that a real run holding a real
+credential comes up holding grain's tools.
+
+`tests/e2e/live_test.go` is where that last step is taken. It is the only
+test that execs the real `agy`, and it now asserts the two things a
+scripted run cannot show, separately and in this order:
+
+- **the roster.** agy's opening `init` event names the tools it actually
+  loaded, so the test keeps the run's raw `stream-json`
+  (`RunConfig.TranscriptPath`) and reads that event back: the roster must
+  carry `mcp__grain-sandbox__*` names, `run_command` among them. This is
+  checked before the run's own error is, deliberately -- a run given no
+  tools fails later on anyway, and every one of those later failures
+  reads like a model that would not do as it was asked rather than like
+  one that was never handed a way to.
+- **a call that landed.** At least one `run_command` call has to have
+  returned without error, and the assertions already there -- the pushed
+  branch, the line in `NOTES.md` -- are what say it reached this run's
+  own sandbox rather than merely existing on a roster.
+
+**CI cannot run this, by design.** `tests.yml` holds no credential at
+all: it triggers on `pull_request`, which runs code from an unreviewed
+branch, and is only safe to trigger that way for as long as there is
+nothing in it worth stealing. Giving that job a `GEMINI_API_KEY` to make
+this one test run would hand every PR branch the deployment's own model
+credential. So the test stays gated and stays skipped there, and this is
+a check a **maintainer runs by hand**:
+
+```
+GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
+  go test ./tests/e2e/ -run TestLiveIssueCompletesEndToEnd -v
+```
+
+with `agy` on `$PATH` and a Go toolchain to build `cmd/grain` with (agy
+reaches the sandbox by forking grain's own `mcpserver` subcommand, so a
+live run needs the binary as well as the key). `GRAIN_LIVE_AGENT_TEST` is
+there because a skip and a pass are the same `ok` in `go test`'s summary:
+with it set, an unset key or a missing `agy` fails the run instead of
+skipping it, so nobody comes away believing the roster was checked when
+nothing checked it. The `-v` output logs the whole advertised roster,
+which is the line to read.
+
+**Last exercised: not yet, as of 2026-09-03.** The assertions above and
+this note landed together, written and reviewed without ever being run
+against a live agy: the sandbox they were written in had no
+`GEMINI_API_KEY`, no `agy`, and no route to the network either credential
+or binary would have come from. So the claim that a live run comes up
+holding grain's tools still rests on the binary analysis above and on an
+assertion nothing has yet executed. Whoever first runs the command above
+against a real key should replace this paragraph with the agy version
+they ran, the date, and what the roster came back as.
+
 ## Letting a run watch its own CI
 
 A run could always push more than once — the git proxy authorizes every
