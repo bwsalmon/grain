@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
@@ -58,10 +60,87 @@ func CloneURL(base string, repo model.RepoRef) string {
 	return strings.TrimSuffix(base, "/") + "/" + repo.Owner + "/" + repo.Name + ".git"
 }
 
+// checkout is what prepareCheckout left in a sandbox: the clone, and
+// what the repo's own setup command did to it.
+type checkout struct {
+	// Dir is where the clone landed, relative to the sandbox's working
+	// directory (CheckoutDir), or "" when there was nothing to clone --
+	// a task with no target, or a deployment running no git proxy.
+	Dir string
+	// Setup is what model.RepoConfig.SetupCommand did in that directory,
+	// or nil when the repo configures none -- which is every repo until
+	// somebody writes one. A setup that *failed* is still a non-nil
+	// Setup and not an error: see runSetupCommand.
+	Setup *SetupResult
+}
+
+// SetupResult is one run of a repo's setup command: what was run, how it
+// ended, and enough of what it printed to act on.
+//
+// It exists to be told to the agent (setupSection, in run.go, and
+// restoreCheckout's own warning on the recreate path). Nothing else
+// reads it, and nothing here decides anything on it -- a failed setup is
+// the run's own problem to work around, which it can only do if it is
+// told.
+//
+// Exported for the one reason the checkout that carries it is not:
+// BuildPrompt takes one, and BuildPrompt is what a caller outside this
+// package (cmd/grain's `demo`) already builds a sample prompt with.
+type SetupResult struct {
+	// Command is the shell that was run, verbatim, so a prompt can name
+	// it rather than describing "the setup command" the run cannot see.
+	Command string
+	// ExitCode is the status it ended on, read off the exit= line both
+	// run_command transports produce (mcp.formatRunCommandResult). -1
+	// when that line could not be read at all, which is also what the
+	// local transport reports for a command that never started.
+	ExitCode int
+	// Output is the tail of what it printed -- run_command's whole
+	// answer, exit line and both streams, cut to setupOutputBudget from
+	// the end. The end is the part worth keeping: a build's error is its
+	// last lines, not its first.
+	Output string
+}
+
+// failed reports whether the setup command ended on anything but a clean
+// exit -- the one thing a reader of this has to branch on.
+func (r *SetupResult) failed() bool { return r != nil && r.ExitCode != 0 }
+
+// setupCommandTimeout bounds a repo's setup command, and is the line
+// between "the agent's problem" and "a failed dispatch": a setup that
+// exits, however badly, is reported into the prompt and the run goes
+// ahead, while one still running at this bound ends the dispatch before
+// an agent is ever started.
+//
+// The two are treated differently because they fail differently. A
+// setup that exits non-zero has told grain and the run everything there
+// is to know, and the run may well be able to work around it -- or be
+// the very task filed to fix it. A setup that does not finish has told
+// nobody anything and would otherwise spend the whole of a run's
+// wall-clock budget inside a single tool call the agent cannot see, at
+// the end of which the sandbox is destroyed with nothing to show.
+// Failing the dispatch instead leaves a run whose detail names the
+// timeout, which is a thing a human can act on.
+//
+// Ten minutes is mcp's own maxRunCommandTimeout, the ceiling run_command
+// clamps any caller's bound to, so this asks for exactly as long as a
+// sandbox tool call can ever last. A var, not a const, only so a test
+// can shrink it rather than actually wait it out.
+var setupCommandTimeout = 10 * time.Minute
+
+// setupOutputBudget is how much of the setup command's output reaches
+// the prompt. Enough for a compiler's or a package manager's last words,
+// far short of the whole log of a build that printed for ten minutes --
+// which would cost the run more context than the failure is worth, and
+// bury the task it was actually given.
+const setupOutputBudget = 4000
+
 // prepareCheckout clones task.Target into CheckoutDir inside the slot's
-// sandbox and leaves task's own branch checked out, returning the
-// directory it prepared ("" when there is nothing to prepare, which is
-// what a deployment or test with no proxy URL configured gets).
+// sandbox, leaves task's own branch checked out, and runs the repo's own
+// setup command (setup, model.RepoConfig.SetupCommand -- "" for the
+// repos that need none) in the result, returning what it prepared: a
+// zero checkout when there is nothing to prepare, which is what a
+// deployment or test with no proxy URL configured gets.
 //
 // It runs through the sandbox's own run_command tool rather than
 // exec.Command or SSH, which is what makes it work for either backend:
@@ -74,18 +153,20 @@ func CloneURL(base string, repo model.RepoRef) string {
 // rather than branched over: a redispatch is usually the second attempt
 // at the same task, and its push is a fast-forward of what the first
 // attempt pushed instead of a rejected non-fast-forward.
-func prepareCheckout(ctx context.Context, tools []mcp.Tool, remoteBase string, task model.Task) (string, error) {
+func prepareCheckout(ctx context.Context, tools []mcp.Tool, remoteBase string, task model.Task,
+	setup string) (checkout, error) {
+
 	if remoteBase == "" || task.Target == nil {
-		return "", nil
+		return checkout{}, nil
 	}
 	branch := model.BranchName(task.ID)
 	for _, v := range []string{task.Target.Owner, task.Target.Name, branch} {
 		if !gitSafe.MatchString(v) {
-			return "", fmt.Errorf("orchestrator: %q is not a usable git name", v)
+			return checkout{}, fmt.Errorf("orchestrator: %q is not a usable git name", v)
 		}
 	}
 	if task.Base != "" && !gitSafe.MatchString(task.Base) {
-		return "", fmt.Errorf("orchestrator: %q is not a usable base branch", task.Base)
+		return checkout{}, fmt.Errorf("orchestrator: %q is not a usable base branch", task.Base)
 	}
 
 	// The base is checked out only in the branch-does-not-exist-yet case:
@@ -110,11 +191,12 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 
 	run, ok := runCommandTool(tools)
 	if !ok {
-		return "", fmt.Errorf("orchestrator: slot's sandbox exposes no run_command tool to clone %s with", task.Target)
+		return checkout{}, fmt.Errorf("orchestrator: slot's sandbox exposes no run_command tool to clone %s with", task.Target)
 	}
 	result := run(ctx, map[string]any{"command": script})
 	if result.IsError {
-		return "", fmt.Errorf("orchestrator: cloning %s into %s: %s", task.Target, CheckoutDir, strings.TrimSpace(result.Text))
+		return checkout{}, fmt.Errorf("orchestrator: cloning %s into %s: %s",
+			task.Target, CheckoutDir, strings.TrimSpace(result.Text))
 	}
 	// The survivable half of baseCheck: the run is going ahead on a branch
 	// that already exists, and the only record of what this found is
@@ -128,7 +210,100 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 			log.Printf("orchestrator: task %s: %s", task.ID, strings.TrimSpace(said))
 		}
 	}
-	return CheckoutDir, nil
+	out := checkout{Dir: CheckoutDir}
+	ran, err := runSetupCommand(ctx, run, task, setup)
+	if err != nil {
+		return checkout{}, err
+	}
+	out.Setup = ran
+	return out, nil
+}
+
+// runSetupCommand runs this repo's setup command in the checkout that
+// was just cloned, through the same run_command handler the clone above
+// went through -- so it works on either sandbox backend for the reason
+// prepareCheckout's own doc comment gives.
+//
+// nil, nil for a repo with no setup command, which is the ordinary case.
+//
+// A command that exits non-zero comes back as a SetupResult with that
+// status in it and no error at all: the run goes ahead and is told what
+// happened (setupSection). Hiding it would leave an agent working in a
+// tree that does not build with no idea why, which is exactly the state
+// this field exists to prevent -- and grain cannot know whether a failed
+// `make deps` is fatal to the task in hand, whereas the run can find out
+// in one command.
+//
+// The one error it does return is the bound: a command still running at
+// setupCommandTimeout fails the dispatch, which that var's own doc
+// comment explains.
+func runSetupCommand(ctx context.Context, run func(context.Context, map[string]any) mcp.Result,
+	task model.Task, setup string) (*SetupResult, error) {
+
+	setup = strings.TrimSpace(setup)
+	if setup == "" {
+		return nil, nil
+	}
+	// cd first, in its own line, so a setup command is written the way
+	// somebody would type it at the top of the checkout rather than
+	// having to know where grain put the clone. `set -e` is deliberately
+	// not applied over it: the command is whoever wrote it's to compose,
+	// and a multi-line setup that means `a || b` should get it.
+	script := fmt.Sprintf("cd '%s'\n%s", CheckoutDir, setup)
+	started := time.Now()
+	result := run(ctx, map[string]any{
+		"command": script,
+		"timeout": float64(setupCommandTimeout / time.Millisecond),
+	})
+	// The bound, told apart from an ordinary failure by the clock rather
+	// than by the text: both transports answer a killed command with a
+	// non-zero status like any other (mcp/run_command_result.go), and the
+	// only thing that distinguishes "the bound ended it" is that it ran
+	// for the whole of it.
+	if elapsed := time.Since(started); elapsed >= setupCommandTimeout {
+		return nil, fmt.Errorf(
+			"orchestrator: %s's setup command was still running after %s and was killed; "+
+				"no agent was started (%s)",
+			task.Target, humanDuration(setupCommandTimeout), setup)
+	}
+	return &SetupResult{
+		Command:  setup,
+		ExitCode: runCommandExitCode(result),
+		Output:   tailBytes(strings.TrimSpace(result.Text), setupOutputBudget),
+	}, nil
+}
+
+// runCommandExitCode reads the status off a run_command answer, whose
+// first line is `exit=N` on both transports
+// (mcp.formatRunCommandResult). -1 for an answer that has no such line,
+// which is what a tool refusing the call outright looks like -- the same
+// number the local transport already uses for a command that could not
+// be started.
+func runCommandExitCode(result mcp.Result) int {
+	first, _, _ := strings.Cut(result.Text, "\n")
+	if code, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(first, "exit="))); err == nil &&
+		strings.HasPrefix(first, "exit=") {
+		return code
+	}
+	if result.IsError {
+		return -1
+	}
+	return 0
+}
+
+// tailBytes cuts s to its last budget bytes, on a line boundary, and
+// says that it did. The last lines are the ones worth keeping: what a
+// failed build printed as it gave up, rather than the package list it
+// started with.
+func tailBytes(s string, budget int) string {
+	if len(s) <= budget {
+		return s
+	}
+	cut := s[len(s)-budget:]
+	if i := strings.IndexByte(cut, '\n'); i >= 0 {
+		cut = cut[i+1:]
+	}
+	return "[grain] earlier output omitted\n" + cut
 }
 
 // commitMarker prefixes each commit line checkoutCommits has git print, so

@@ -128,6 +128,14 @@ func TestRepoLine(t *testing.T) {
 			want:    []string{"acme/widgets", "prompt extension"},
 		},
 		{
+			// Named rather than printed for the same reason: a setup
+			// command can be several lines of shell, and `grain repo
+			// setup-command` is what prints it.
+			name:    "a repo with a setup command says so without printing it",
+			summary: ui.RepoSummary{Repo: "acme/widgets", SetupCommand: true},
+			want:    []string{"acme/widgets", "setup command"},
+		},
+		{
 			// A state RepoStateOrder does not name must not vanish from
 			// a breakdown printed next to a total it would then
 			// contradict.
@@ -219,6 +227,31 @@ func TestParseRepoPromptExtension(t *testing.T) {
 	}
 }
 
+// parseRepoSetupCommand makes that same distinction, and the cost of
+// getting it wrong is the same shape: `grain repo setup-command
+// acme/widgets` that stored the flag's own empty default would clear the
+// command grain runs in every checkout of that repo, in the act of
+// printing it.
+func TestParseRepoSetupCommand(t *testing.T) {
+	repo, set, err := parseRepoSetupCommand([]string{"acme/widgets"})
+	if err != nil || repo != "acme/widgets" || set != nil {
+		t.Fatalf("parseRepoSetupCommand(read) = (%q, %v, %v), want acme/widgets and no set", repo, set, err)
+	}
+	repo, set, err = parseRepoSetupCommand([]string{"-set", "make deps", "acme/widgets"})
+	if err != nil || repo != "acme/widgets" || set == nil || *set != "make deps" {
+		t.Fatalf("parseRepoSetupCommand(write) = (%q, %v, %v), want the command it was given", repo, set, err)
+	}
+	// Given empty, -set is still a write -- the only way to turn a repo's
+	// setup command back off.
+	if _, set, err = parseRepoSetupCommand([]string{"-set", "", "acme/widgets"}); err != nil ||
+		set == nil || *set != "" {
+		t.Fatalf("parseRepoSetupCommand(clear) = (%v, %v), want a non-nil empty set", set, err)
+	}
+	if _, _, err = parseRepoSetupCommand([]string{"-set", "make deps"}); err == nil {
+		t.Error("parseRepoSetupCommand with no repo returned no error")
+	}
+}
+
 func ptr(s string) *string { return &s }
 
 // "none" rather than a blank: an empty line after a label reads as a
@@ -280,6 +313,8 @@ func TestRunCLIDispatchesTheRepoFamily(t *testing.T) {
 		{"-server", server, "repo", "capabilities", "acme/widgets"},
 		{"-server", server, "repo", "prompt-extension", "-set", "Read db/README.md first.", "acme/widgets"},
 		{"-server", server, "repo", "prompt-extension", "acme/widgets"},
+		{"-server", server, "repo", "setup-command", "-set", "make deps", "acme/widgets"},
+		{"-server", server, "repo", "setup-command", "acme/widgets"},
 		{"-server", server, "repo", "remove", "acme/widgets"},
 		{"-json", "-server", server, "repo", "list"},
 	} {
@@ -296,12 +331,13 @@ func TestRunCLIDispatchesTheRepoFamily(t *testing.T) {
 	if err := runCLI([]string{"-server", server, "repo", "nonesuch"}); err == nil {
 		t.Error("`grain repo nonesuch` returned no error")
 	}
-	// Each of the four that take one needs a repo, and none of them
+	// Each of the five that take one needs a repo, and none of them
 	// invents a default from Config.DefaultTarget: acting on a repo
 	// nobody named is exactly the mistake worth failing on.
 	for _, args := range [][]string{
 		{"-server", server, "repo", "capabilities"},
 		{"-server", server, "repo", "prompt-extension"},
+		{"-server", server, "repo", "setup-command"},
 		{"-server", server, "repo", "add"},
 		{"-server", server, "repo", "remove"},
 	} {
