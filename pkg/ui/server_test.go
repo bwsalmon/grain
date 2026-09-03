@@ -227,6 +227,11 @@ func TestMutatingRoutesRespondWithTheTask(t *testing.T) {
 		want model.State
 	}{
 		{name: "approve", path: "/approve", want: model.StateQueued},
+		// Approve's own undo, and then the re-approval that undoes that:
+		// the route answers with the task in whichever state its approval
+		// now implies, the same as every other row here.
+		{name: "withdraw approval", path: "/withdraw-approval", want: model.StateProposed},
+		{name: "approve again", path: "/approve", want: model.StateQueued},
 		{name: "capability", path: "/capabilities", body: `{"id":"gemini-key","attach":true}`, want: model.StateQueued},
 		{name: "comment", path: "/comments", body: `{"body":"hello"}`, want: model.StateQueued},
 		{name: "close", path: "/close", want: model.StateClosed},

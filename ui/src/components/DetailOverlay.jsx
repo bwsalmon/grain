@@ -178,6 +178,16 @@ function Actions({ t, config, act }) {
           Approve
         </Button>
       )}
+      {/* Approve's own undo, offered on exactly the state it applies to:
+          a queued task has been approved and has not started, so
+          clearing that approval puts it back among the proposals rather
+          than closing it (Client.WithdrawApproval, which refuses the
+          states this button is never shown for). */}
+      {t.state === "queued" && (
+        <Button variant="outlined" onClick={() => act(() => api(`/api/tasks/${t.id}/withdraw-approval`, { method: "POST" }), t.id)}>
+          Withdraw approval
+        </Button>
+      )}
       {/* Once a task's run has produced a pull request, submitting is
           what puts it on the merge queue for automatic conflict
           resolution and merging. Already-submitted tasks (autoMerge

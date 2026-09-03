@@ -1573,6 +1573,28 @@ func approve(ctx context.Context, tx *sql.Tx, taskID string, a Attribution, appr
 	return err
 }
 
+// WithdrawApproval is approve's exact inverse, down to the columns it
+// writes: it clears a task's approval, and a task with no approval is a
+// proposal again -- task_state reads it as 'proposed' and task_ready
+// never selects one, so nothing dispatches it until somebody approves it
+// a second time. Withdrawing from a task that carries no approval writes
+// the NULLs that are already there.
+//
+// approved_at goes with it rather than being kept as history, because
+// keeping it would make the row ambiguous: Task.ApprovedAt's own doc
+// comment reads a nil approval alongside a set approved_at as "approved
+// before this column existed", and Transitions would go on reporting the
+// task as having queued at an instant its approval no longer claims.
+func (s *Store) WithdrawApproval(ctx context.Context, taskID string) error {
+	return s.write(ctx, "withdraw approval from task "+taskID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task` SET `approval_actor_kind` = NULL, `approval_actor_id` = NULL, "+
+				"`approval_behalf_kind` = NULL, `approval_behalf_id` = NULL, `approved_at` = NULL "+
+				"WHERE `id` = ?", taskID)
+		return err
+	})
+}
+
 // Observe records what grain has seen about a task.
 func (s *Store) Observe(ctx context.Context, o Observation) error {
 	return s.write(ctx, "observe task "+o.TaskID, func(tx *sql.Tx) error { return observe(ctx, tx, o) })

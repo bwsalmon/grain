@@ -162,6 +162,10 @@ func (c *HTTPClient) Approve(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/approve", nil, nil)
 }
 
+func (c *HTTPClient) WithdrawApproval(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/withdraw-approval", nil, nil)
+}
+
 func (c *HTTPClient) AddComment(ctx context.Context, id, body string, attachments []AttachmentUpload) error {
 	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/comments",
 		addCommentRequest{Body: body, Attachments: attachments}, nil)

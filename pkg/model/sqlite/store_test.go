@@ -226,6 +226,58 @@ func TestStateIsDerivedThroughEveryTransition(t *testing.T) {
 	assertState(model.StateClosed)
 }
 
+// Withdrawing approval is the one way a task moves back up the
+// precedence order rather than down it, so it is worth proving against a
+// real database rather than only against StateOf: the state comes out of
+// task_state's own CASE on approval_actor_kind, and dispatch stops
+// seeing the task because task_ready reads that view.
+func TestWithdrawingApprovalReturnsATaskToTheProposalsAndOutOfReady(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", false)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Approve(ctx, "a1b2", model.Attribution{Actor: human}, now); err != nil {
+		t.Fatal(err)
+	}
+	if ready, _ := store.Ready(ctx); len(ready) != 1 || ready[0] != "a1b2" {
+		t.Fatalf("ready after approval = %v, want [a1b2]", ready)
+	}
+
+	if err := store.WithdrawApproval(ctx, "a1b2"); err != nil {
+		t.Fatalf("withdrawing approval: %v", err)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil || state != model.StateProposed {
+		t.Fatalf("state = %q (err %v), want proposed", state, err)
+	}
+	if ready, _ := store.Ready(ctx); len(ready) != 0 {
+		t.Fatalf("ready after withdrawal = %v, want nothing dispatchable", ready)
+	}
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Approval != nil || got.ApprovedAt != nil {
+		t.Fatalf("approval = %+v, approvedAt = %v, want both cleared", got.Approval, got.ApprovedAt)
+	}
+
+	// Approving again is the whole of re-queueing it, and the row comes
+	// back with a live timestamp rather than the withdrawn one.
+	later := now.Add(time.Hour)
+	if err := store.Approve(ctx, "a1b2", model.Attribution{Actor: human}, later); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ApprovedAt == nil || !got.ApprovedAt.Equal(later) {
+		t.Fatalf("approvedAt after re-approval = %v, want %v", got.ApprovedAt, later)
+	}
+	if ready, _ := store.Ready(ctx); len(ready) != 1 || ready[0] != "a1b2" {
+		t.Fatalf("ready after re-approval = %v, want [a1b2]", ready)
+	}
+}
+
 func TestReadyExcludesBlockedAndUnblocksItself(t *testing.T) {
 	store, _, ctx := openStore(t)
 	blocker := task("c3d4", true)

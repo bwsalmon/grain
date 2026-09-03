@@ -1407,6 +1407,58 @@ func (c *Client) Approve(ctx context.Context, id string) error {
 	return c.Store.Approve(ctx, id, model.Attribution{Actor: c.Config.Actor}, c.now())
 }
 
+// WithdrawApproval takes an approved task back out of the queue: it
+// clears the approval Approve recorded, which is all it takes for
+// model.StateOf to read the task as 'proposed' again and for task_ready
+// to stop offering it to dispatch. It is the way to stop a task that has
+// been queued -- reconsidered, filed too early, or simply not wanted
+// this week -- without closing it, and re-approving it later is the
+// ordinary Approve call, nothing special.
+//
+// "Withdraw approval" rather than "unapprove" because that is what
+// docs/data-model.md already calls it, in the same paragraph that gave
+// this operation its reason to exist: approval is a declaration, so
+// "cancellation gets a mechanism it did not have ... withdrawing
+// approval is [available], and it is [reviewable] like any other
+// declaration change". Nothing here writes a state -- the state moves
+// because the declaration behind it went away.
+//
+// Two boundaries, both about not rewriting history:
+//
+//   - A task with no approval is untouched, mirroring Approve's own
+//     no-op on an already-approved task.
+//   - A task that is running, completed or closed is refused. Its
+//     approval has already been spent on work that happened, so clearing
+//     it would erase the record (Task.ApprovedAt, which metrics reads as
+//     "queued since") of a queue wait that was real, and it would stop
+//     nothing: the way to stop a run in flight is Close, which cancels
+//     it. The check races a dispatch that starts a run just after it --
+//     harmlessly, since the withdrawal only means that run is the last
+//     one, which is what withdrawing asks for anyway.
+func (c *Client) WithdrawApproval(ctx context.Context, id string) error {
+	task, err := c.Store.GetTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	if task == nil {
+		return &NotFoundError{ID: id}
+	}
+	if task.Approval == nil {
+		return nil
+	}
+	state, err := c.Store.State(ctx, id)
+	if err != nil {
+		return err
+	}
+	switch state {
+	case model.StateRunning:
+		return validationErrorf("task %s is running: close it to cancel the run", id)
+	case model.StateCompleted, model.StateClosed:
+		return validationErrorf("task %s is %s: its approval is a record of work that already happened", id, state)
+	}
+	return c.Store.WithdrawApproval(ctx, id)
+}
+
 // Submit is the UI's own "submit" button: once a task has a pull request
 // open, this is what puts it on its target repo's merge queue for
 // automatic conflict resolution and merging -- see
