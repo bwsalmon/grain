@@ -361,4 +361,90 @@ describe("SchedulesList", () => {
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "everyNHours must be positive" }));
     expect(screen.getByRole("heading", { name: "New schedule" })).toBeInTheDocument();
   });
+
+  // --- schedules that run a task suite ---------------------------------
+
+  const suites = [{ id: "suite-1", name: "Bug sweep" }, { id: "suite-2", name: "Dependency sweep" }];
+  const suiteBacked = {
+    ...schedule, id: "sched-suite", title: "Bug sweep", base: "main",
+    suiteId: "suite-1", suiteName: "Bug sweep",
+  };
+
+  it("shows which suite a suite-backed schedule runs", () => {
+    render(<SchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    expect(screen.getByText("Suite: Bug sweep")).toBeInTheDocument();
+  });
+
+  it("creates a schedule that runs a task suite", async () => {
+    api.mockResolvedValueOnce({});
+    const onRefresh = vi.fn();
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
+    await user.click(screen.getByLabelText("Fires"));
+    await user.click(await screen.findByRole("option", { name: "A task suite" }));
+    await user.click(screen.getByLabelText("Task suite"));
+    await user.click(await screen.findByRole("option", { name: "Bug sweep" }));
+
+    // The suite decides all of this schedule's content, so none of the
+    // task fields (nor the template picker) are on offer.
+    expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Template")).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.type(screen.getByLabelText(/Base branch/), "main");
+    await user.click(screen.getByRole("button", { name: "Add schedule" }));
+
+    expect(api).toHaveBeenCalledWith("/api/schedules", {
+      method: "POST",
+      body: JSON.stringify({
+        suiteId: "suite-1",
+        recurrence: { kind: "everyNHours", everyNHours: 24 },
+        repo: "acme/widgets",
+        base: "main",
+      }),
+    });
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it("refuses to submit a suite-backed schedule with no suite chosen", async () => {
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={noop} showError={showError} />);
+
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
+    await user.click(screen.getByLabelText("Fires"));
+    await user.click(await screen.findByRole("option", { name: "A task suite" }));
+    await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.type(screen.getByLabelText(/Base branch/), "main");
+    await user.click(screen.getByRole("button", { name: "Add schedule" }));
+
+    expect(api).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "choose a task suite for this schedule to run" }));
+  });
+
+  // What a schedule fires is fixed when it is created (ui.
+  // UpdateScheduleRequest's own doc comment), so editing one offers no
+  // "Fires" picker -- only which suite it runs.
+  it("repoints an existing suite-backed schedule at another suite", async () => {
+    api.mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByText("Bug sweep"));
+    expect(screen.queryByLabelText("Fires")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Task suite")).toHaveTextContent("Bug sweep");
+
+    await user.click(screen.getByLabelText("Task suite"));
+    await user.click(await screen.findByRole("option", { name: "Dependency sweep" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.suiteId).toBe("suite-2");
+    expect(payload.templateId).toBeUndefined();
+    expect(payload.title).toBeUndefined();
+  });
 });

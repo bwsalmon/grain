@@ -4,6 +4,7 @@ package ui_test
 // against a real embedded store rather than a fake.
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -456,6 +457,219 @@ func TestUpdateScheduleRejectsAnUnknownTemplate(t *testing.T) {
 	}
 	nope := "nope"
 	_, err = c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{TemplateID: &nope})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+// --- schedules that run a task suite -------------------------------------
+
+// suiteToSchedule is the setup every suite-backed schedule test below
+// shares: a template, and a suite that runs it.
+func suiteToSchedule(t *testing.T, c *ui.Client, ctx context.Context, name string) ui.Suite {
+	t.Helper()
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: name + " template", Title: "Find and fix a bug"})
+	if err != nil {
+		t.Fatalf("creating a template: %v", err)
+	}
+	suite, err := c.CreateSuite(ctx, ui.CreateSuiteRequest{
+		Name: name, TemplateIDs: []string{tmpl.ID}, Mode: "until_clean", MaxPasses: 5,
+	})
+	if err != nil {
+		t.Fatalf("creating a suite: %v", err)
+	}
+	return suite
+}
+
+// A suite-backed schedule needs no title or content of its own: the
+// suite decides what runs, and its name stands in as the schedule's own
+// display title.
+func TestCreateScheduleFromATaskSuite(t *testing.T) {
+	c, _, ctx := testClient(t)
+	suite := suiteToSchedule(t, c, ctx, "Bug sweep")
+
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: suite.ID, Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating a suite-backed schedule: %v", err)
+	}
+	if sched.SuiteID != suite.ID || sched.SuiteName != suite.Name {
+		t.Errorf("suite = %q/%q, want %q/%q", sched.SuiteID, sched.SuiteName, suite.ID, suite.Name)
+	}
+	if sched.TemplateID != "" {
+		t.Errorf("templateId = %q, want empty: a schedule fires a suite or a task, never both", sched.TemplateID)
+	}
+	if sched.Title != suite.Name {
+		t.Errorf("title = %q, want the suite's own name %q", sched.Title, suite.Name)
+	}
+	if sched.Repo != "acme/widgets" || sched.Base != "main" {
+		t.Errorf("target = %q@%q, want acme/widgets@main", sched.Repo, sched.Base)
+	}
+
+	// It comes back off the list the same way, suite name and all.
+	list, err := c.ListSchedules(ctx)
+	if err != nil {
+		t.Fatalf("listing: %v", err)
+	}
+	if len(list) != 1 || list[0].SuiteID != suite.ID || list[0].SuiteName != suite.Name {
+		t.Fatalf("listed %+v, want one schedule naming %s (%s)", list, suite.ID, suite.Name)
+	}
+}
+
+func TestCreateScheduleRejectsASuiteAndATemplateTogether(t *testing.T) {
+	c, _, ctx := testClient(t)
+	suite := suiteToSchedule(t, c, ctx, "Bug sweep")
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "Bump", Title: "Bump dependencies"})
+	if err != nil {
+		t.Fatalf("creating a template: %v", err)
+	}
+
+	_, err = c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: suite.ID, TemplateID: tmpl.ID, Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+// CreateSuiteRunRequest's own rule, applied to the schedule that starts
+// such a run on a cadence: a suite run stacks its tasks against one named
+// branch, so there is no default to fall back to.
+func TestCreateScheduleFromASuiteRejectsAMissingBase(t *testing.T) {
+	c, _, ctx := testClient(t)
+	suite := suiteToSchedule(t, c, ctx, "Bug sweep")
+
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: suite.ID, Repo: "acme/widgets", Recurrence: everyDay,
+	})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+func TestCreateScheduleRejectsAnUnknownSuite(t *testing.T) {
+	c, _, ctx := testClient(t)
+	_, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: "suite-nope", Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+// Which suite a schedule runs is editable; everything else about a
+// suite-backed schedule that is its own (repo, branch, cadence, paused)
+// still edits exactly as any other schedule's does.
+func TestUpdateScheduleRepointsASuiteBackedScheduleAtAnotherSuite(t *testing.T) {
+	c, _, ctx := testClient(t)
+	first := suiteToSchedule(t, c, ctx, "Bug sweep")
+	second := suiteToSchedule(t, c, ctx, "Dependency sweep")
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: first.ID, Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating: %v", err)
+	}
+
+	paused := false
+	updated, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{
+		SuiteID: &second.ID, Enabled: &paused,
+	})
+	if err != nil {
+		t.Fatalf("repointing: %v", err)
+	}
+	if updated.SuiteID != second.ID || updated.SuiteName != second.Name {
+		t.Errorf("suite = %q/%q, want %q/%q", updated.SuiteID, updated.SuiteName, second.ID, second.Name)
+	}
+	if updated.Title != second.Name {
+		t.Errorf("title = %q, want the new suite's own name %q", updated.Title, second.Name)
+	}
+	if updated.Enabled {
+		t.Error("want the schedule paused")
+	}
+}
+
+// What a schedule fires is fixed when it is created -- neither direction
+// of "convert it into the other kind" is supported, since there is
+// nothing sensible to carry across (model.ScheduledTask.SuiteID's own doc
+// comment).
+func TestUpdateScheduleRefusesToChangeWhatAScheduleFires(t *testing.T) {
+	c, _, ctx := testClient(t)
+	suite := suiteToSchedule(t, c, ctx, "Bug sweep")
+	suiteBacked, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: suite.ID, Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating a suite-backed schedule: %v", err)
+	}
+	taskBacked, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "Nightly dependency bump", Repo: "acme/widgets", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating a task schedule: %v", err)
+	}
+
+	empty := ""
+	var ve *ui.ValidationError
+	if _, err := c.UpdateSchedule(ctx, suiteBacked.ID, ui.UpdateScheduleRequest{SuiteID: &empty}); !errors.As(err, &ve) {
+		t.Errorf("detaching a suite: error = %v, want a ValidationError", err)
+	}
+	if _, err := c.UpdateSchedule(ctx, taskBacked.ID, ui.UpdateScheduleRequest{SuiteID: &suite.ID}); !errors.As(err, &ve) {
+		t.Errorf("attaching a suite to a task schedule: error = %v, want a ValidationError", err)
+	}
+
+	// Still exactly as they were.
+	list, err := c.ListSchedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range list {
+		if s.ID == suiteBacked.ID && s.SuiteID != suite.ID {
+			t.Errorf("suite-backed schedule lost its suite: %+v", s)
+		}
+		if s.ID == taskBacked.ID && s.SuiteID != "" {
+			t.Errorf("task schedule gained a suite: %+v", s)
+		}
+	}
+}
+
+func TestUpdateScheduleRejectsAnUnknownSuite(t *testing.T) {
+	c, _, ctx := testClient(t)
+	suite := suiteToSchedule(t, c, ctx, "Bug sweep")
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: suite.ID, Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating: %v", err)
+	}
+
+	nope := "suite-nope"
+	_, err = c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{SuiteID: &nope})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+// A suite-backed schedule's base branch cannot be emptied, for the same
+// reason it was required at creation.
+func TestUpdateScheduleRejectsEmptyingASuiteBackedScheduleBase(t *testing.T) {
+	c, _, ctx := testClient(t)
+	suite := suiteToSchedule(t, c, ctx, "Bug sweep")
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: suite.ID, Repo: "acme/widgets", Base: "main", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating: %v", err)
+	}
+
+	empty := ""
+	_, err = c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{Base: &empty})
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)

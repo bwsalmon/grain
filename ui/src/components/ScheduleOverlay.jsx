@@ -112,12 +112,23 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
 // Repo and base branch are never among them -- a template carries no
 // target of its own (model.TaskTemplate's own doc comment on why) -- so
 // those two always render, template selected or not.
-export default function ScheduleOverlay({ schedule, repoOptions, templates = [], config, onClose, onSaved, showError }) {
+//
+// "Fires" (fires/suiteId) is the same idea one step out: a schedule can
+// run a whole task suite on its cadence instead of filing one task, in
+// which case the suite decides everything a template would have and
+// more, so every content field here gives way to a single suite picker.
+// It is offered on a new schedule only -- what a schedule fires is fixed
+// when it is created (ui.UpdateScheduleRequest's own doc comment on why),
+// though which suite a suite-backed one runs stays editable.
+export default function ScheduleOverlay({ schedule, repoOptions, templates = [], suites = [], config, onClose, onSaved, showError }) {
   const isNew = !schedule;
   const [capabilities, setCapabilities] = useState(schedule?.capabilities || []);
   const [kind, setKind] = useState(schedule?.recurrence?.kind || "everyNHours");
   const [weekday, setWeekday] = useState(schedule?.recurrence?.weekday || "monday");
   const [templateId, setTemplateId] = useState(schedule?.templateId || "");
+  const [fires, setFires] = useState(schedule?.suiteId ? "suite" : "task");
+  const [suiteId, setSuiteId] = useState(schedule?.suiteId || "");
+  const firesSuite = fires === "suite";
 
   const submit = async (evt) => {
     evt.preventDefault();
@@ -133,19 +144,32 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
       if (kind === "monthly") recurrence.dayOfMonth = Number(data.get("dayOfMonth"));
     }
 
-    // templateId is always sent, even "" -- CreateScheduleRequest reads
-    // "" as "no template"; UpdateScheduleRequest reads a given-at-all
-    // templateId (its own doc comment) the same way, "" meaning detach
-    // rather than leave alone, which is exactly what re-submitting this
-    // form with "None" selected should do. repo/base are always sent too
-    // -- a template carries no target of its own, so they are this
-    // schedule's own fields regardless of templateId.
+    // Caught here rather than left to the API, which would read a blank
+    // suiteId as "this schedule files a task" and complain about a
+    // missing title instead of about the picker actually left empty.
+    if (firesSuite && suiteId === "") {
+      showError(new Error("choose a task suite for this schedule to run"));
+      return;
+    }
+
+    // templateId is always sent for a task schedule, even "" --
+    // CreateScheduleRequest reads "" as "no template";
+    // UpdateScheduleRequest reads a given-at-all templateId (its own doc
+    // comment) the same way, "" meaning detach rather than leave alone,
+    // which is exactly what re-submitting this form with "None" selected
+    // should do. A suite schedule sends suiteId in its place and nothing
+    // else: the suite decides the content, the passes, the approval and
+    // the auto-merge of everything a firing runs. repo/base are always
+    // sent either way -- neither a template nor a suite carries a target
+    // of its own, so they are this schedule's own fields whatever it
+    // fires.
     const payload = {
-      templateId, recurrence,
+      ...(firesSuite ? { suiteId } : { templateId }),
+      recurrence,
       repo: data.get("repo") || "",
       base: data.get("base") || "",
     };
-    if (templateId === "") {
+    if (!firesSuite && templateId === "") {
       const reads = (data.get("reads") || "")
         .split(",").map((r) => r.trim()).filter((r) => r !== "");
       payload.title = data.get("title");
@@ -196,28 +220,75 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
     <Overlay onClose={onClose}>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New schedule" : "Edit schedule"}</Typography>
       <form onSubmit={submit}>
-        <FormControl fullWidth margin="normal" size="small">
-          <InputLabel id="schedule-template-label">Template</InputLabel>
-          <Select
-            labelId="schedule-template-label"
-            label="Template"
-            value={templateId}
-            onChange={(e) => setTemplateId(e.target.value)}
-          >
-            <MenuItem value="">None -- fill in the fields below</MenuItem>
-            {templates.map((t) => (
-              <MenuItem key={t.id} value={t.id}>{t.name}</MenuItem>
-            ))}
-          </Select>
-        </FormControl>
+        {isNew && (
+          <FormControl fullWidth margin="normal" size="small">
+            <InputLabel id="schedule-fires-label">Fires</InputLabel>
+            <Select
+              labelId="schedule-fires-label"
+              label="Fires"
+              value={fires}
+              onChange={(e) => setFires(e.target.value)}
+            >
+              <MenuItem value="task">A task</MenuItem>
+              <MenuItem value="suite">A task suite</MenuItem>
+            </Select>
+          </FormControl>
+        )}
+        {firesSuite ? (
+          <FormControl fullWidth margin="normal" size="small">
+            <InputLabel id="schedule-suite-label">Task suite</InputLabel>
+            <Select
+              labelId="schedule-suite-label"
+              label="Task suite"
+              value={suiteId}
+              onChange={(e) => setSuiteId(e.target.value)}
+            >
+              {suites.map((s) => (
+                <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        ) : (
+          <FormControl fullWidth margin="normal" size="small">
+            <InputLabel id="schedule-template-label">Template</InputLabel>
+            <Select
+              labelId="schedule-template-label"
+              label="Template"
+              value={templateId}
+              onChange={(e) => setTemplateId(e.target.value)}
+            >
+              <MenuItem value="">None -- fill in the fields below</MenuItem>
+              {templates.map((t) => (
+                <MenuItem key={t.id} value={t.id}>{t.name}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        )}
         <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
             Target repo <span className="hint">owner/name</span>
           </Typography>
           <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
         </Box>
-        <TextField name="base" label="Base branch" defaultValue={schedule?.base} helperText="optional" placeholder="main" autoComplete="off" fullWidth margin="normal" />
-        {templateId !== "" ? (
+        <TextField
+          name="base"
+          label="Base branch"
+          defaultValue={schedule?.base}
+          helperText={firesSuite ? "required: a suite run stacks its tasks against one branch" : "optional"}
+          placeholder="main"
+          required={firesSuite}
+          InputLabelProps={{ required: false }}
+          autoComplete="off"
+          fullWidth
+          margin="normal"
+        />
+        {firesSuite ? (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
+            Every firing starts one run of the selected suite against this repo
+            and branch -- the suite decides which tasks run, how many passes,
+            and whether they need approval.
+          </Typography>
+        ) : templateId !== "" ? (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
             Title, description, reads, capabilities and auto-merge all come from
             the selected template, and stay in sync with it.

@@ -74,6 +74,48 @@ func TestScheduledTaskRoundTrips(t *testing.T) {
 	}
 }
 
+// A schedule that runs a task suite instead of filing a task: SuiteID is
+// what says so, and SchedulesUsingSuite is what reads it back for
+// ui.Client.DeleteSuite's own "not out from under a schedule still
+// running it" guard.
+func TestSuiteBackedScheduledTaskRoundTrips(t *testing.T) {
+	store, _, ctx := openStore(t)
+	suiteID := "suite-1"
+	want := schedule("sched-1", now)
+	want.Title = "nightly"
+	want.Base = "main"
+	want.SuiteID = &suiteID
+
+	if err := store.PutScheduledTask(ctx, want); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := store.GetScheduledTask(ctx, "sched-1")
+	if err != nil || got == nil {
+		t.Fatalf("get: %v (nil=%v)", err, got == nil)
+	}
+	if got.SuiteID == nil || *got.SuiteID != suiteID {
+		t.Fatalf("suiteId = %v, want %q", got.SuiteID, suiteID)
+	}
+	if got.TemplateID != nil {
+		t.Errorf("templateId = %v, want nil: a schedule fires a suite or a task, never both", got.TemplateID)
+	}
+
+	using, err := store.SchedulesUsingSuite(ctx, suiteID)
+	if err != nil {
+		t.Fatalf("SchedulesUsingSuite: %v", err)
+	}
+	if len(using) != 1 || using[0].ID != "sched-1" {
+		t.Fatalf("schedules using %s = %+v, want just sched-1", suiteID, using)
+	}
+	other, err := store.SchedulesUsingSuite(ctx, "suite-nobody-uses")
+	if err != nil {
+		t.Fatalf("SchedulesUsingSuite: %v", err)
+	}
+	if len(other) != 0 {
+		t.Errorf("schedules using an unreferenced suite = %+v, want none", other)
+	}
+}
+
 func TestScheduledTaskRoundTripsEveryRecurrenceKind(t *testing.T) {
 	store, _, ctx := openStore(t)
 	cases := []model.Recurrence{

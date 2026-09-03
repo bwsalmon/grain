@@ -16,7 +16,9 @@ import (
 // filed it.
 var scheduler = model.Principal{Kind: model.PrincipalAutomation, ID: "schedule"}
 
-// reconcileSchedule fires every schedule whose interval has come due.
+// reconcileSchedule fires every schedule whose interval has come due --
+// filing a task, or starting a task suite run, depending on which of the
+// two that schedule names (fireSchedule).
 //
 // One schedule failing to file (or a store error while checking it)
 // does not stop the others -- Reconciler's own doc comment on why each
@@ -30,11 +32,23 @@ func reconcileSchedule(ctx context.Context, deps Deps, now time.Time) error {
 	}
 	var errs []error
 	for _, sched := range due {
-		if err := fireScheduledTask(ctx, deps.Store, sched, now); err != nil {
+		if err := fireSchedule(ctx, deps.Store, sched, now); err != nil {
 			errs = append(errs, fmt.Errorf("orchestrator: firing scheduled task %s: %w", sched.ID, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// fireSchedule fires sched, whichever of the two things a schedule can
+// fire it names: a task suite run (SuiteID set) or a single task. The
+// two paths differ only in what a firing *is* -- both check that the
+// previous firing has finished first, and both advance the schedule's own
+// timing afterwards through advanceSchedule.
+func fireSchedule(ctx context.Context, store *model.Store, sched model.ScheduledTask, now time.Time) error {
+	if sched.SuiteID != nil {
+		return fireScheduledSuite(ctx, store, sched, now)
+	}
+	return fireScheduledTask(ctx, store, sched, now)
 }
 
 // firingTag is the idempotency marker every task a schedule files
@@ -49,7 +63,9 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // fireScheduledTask files sched's next task, unless its previous firing
 // has not finished yet -- in which case this is a no-op, tried again
 // next cycle with NextRunAt left exactly where it was, so the check
-// costs nothing and cannot skip a firing outright, only delay it.
+// costs nothing and cannot skip a firing outright, only delay it. This is
+// the path for a schedule that files a single task; fireScheduledSuite is
+// the one for a schedule that runs a whole task suite instead.
 //
 // The filed task lands already approved: docs/data-model.md's "the
 // SCHEDULED special case dissolves" is why -- a schedule is itself a
@@ -123,19 +139,7 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		return fmt.Errorf("filing task: %w", err)
 	}
 
-	// Recurrence is validated at creation (ui.Client.CreateSchedule/
-	// UpdateSchedule), so Next always moves strictly forward -- the loop
-	// below is what gives a schedule paused (or a daemon down) through
-	// several missed occurrences exactly one firing on resume, resynced to
-	// its normal cadence, rather than one firing per missed occurrence or
-	// drift against wall-clock time (Recurrence.Next's own doc comment).
-	next := sched.NextRunAt
-	for !next.After(now) {
-		next = sched.Recurrence.Next(next)
-	}
-	if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
-		s.LastRunAt = &now
-		s.NextRunAt = next
+	return advanceSchedule(ctx, store, sched, now, func(s *model.ScheduledTask) {
 		// Keeps the schedule's own display cache in sync with the
 		// template it fired from (ScheduledTask.TemplateID's own doc
 		// comment) -- a no-op assignment when TemplateID is nil, since
@@ -143,6 +147,78 @@ func fireScheduledTask(ctx context.Context, store *model.Store, sched model.Sche
 		if sched.TemplateID != nil {
 			s.Title, s.Body, s.AutoMerge, s.Reads, s.Grants =
 				content.Title, content.Body, content.AutoMerge, content.Reads, content.Grants
+		}
+	})
+}
+
+// fireScheduledSuite starts one run of the task suite sched names --
+// bwsalmon/agents#642's own "run the suite against a repo and branch",
+// started by sched's cadence instead of by a human clicking "Run…", and
+// otherwise exactly the run ui.Client.CreateSuiteRun would have made: the
+// suite decides its own items, mode, passes, approval and auto-merge, and
+// sched decides only when it runs and what it runs against.
+//
+// The gate here is a run of this schedule that has not finished yet, not
+// an open task: a suite run is a whole sequence of tasks over as many
+// passes as its mode asks for, so "has the previous firing finished" is a
+// question about the run, which is what Store.HasActiveRunForSchedule
+// answers. Same reasoning as the task path's own tag check (and the same
+// consequence: a suppressed firing leaves NextRunAt where it was, so it
+// is delayed rather than skipped).
+//
+// A suite deleted out from under a schedule (ui.Client.DeleteSuite tries
+// to prevent this, the same way DeleteTemplate does for a template) fails
+// this one firing with a plain error, retried next cycle --
+// fireScheduledTask's own missing-template path, unchanged in shape.
+func fireScheduledSuite(ctx context.Context, store *model.Store, sched model.ScheduledTask, now time.Time) error {
+	active, err := store.HasActiveRunForSchedule(ctx, sched.ID)
+	if err != nil {
+		return fmt.Errorf("checking for a previous unfinished firing: %w", err)
+	}
+	if active {
+		return nil
+	}
+
+	suite, err := store.GetTaskSuite(ctx, *sched.SuiteID)
+	if err != nil {
+		return fmt.Errorf("resolving task suite %s: %w", *sched.SuiteID, err)
+	}
+	if suite == nil {
+		return fmt.Errorf("task suite %s no longer exists", *sched.SuiteID)
+	}
+	if _, err := store.CreateScheduledTaskSuiteRun(ctx, *suite, sched.Target, sched.Base, sched.ID, now); err != nil {
+		return fmt.Errorf("starting a run of task suite %s: %w", suite.ID, err)
+	}
+
+	return advanceSchedule(ctx, store, sched, now, func(s *model.ScheduledTask) {
+		// The suite's own name, as this schedule's display cache -- the
+		// same one-firing-behind sync a template-backed schedule keeps
+		// (ScheduledTask.SuiteID's own doc comment), so ui.scheduleFrom
+		// can name what a schedule runs with no extra lookup.
+		s.Title = suite.Name
+	})
+}
+
+// advanceSchedule records that sched fired at now and moves it on to its
+// next occurrence, applying whatever display-cache sync the firing itself
+// implies (sync, which may be nil).
+//
+// Recurrence is validated at creation (ui.Client.CreateSchedule/
+// UpdateSchedule), so Next always moves strictly forward -- the loop here
+// is what gives a schedule paused (or a daemon down) through several
+// missed occurrences exactly one firing on resume, resynced to its normal
+// cadence, rather than one firing per missed occurrence or drift against
+// wall-clock time (Recurrence.Next's own doc comment).
+func advanceSchedule(ctx context.Context, store *model.Store, sched model.ScheduledTask, now time.Time, sync func(*model.ScheduledTask)) error {
+	next := sched.NextRunAt
+	for !next.After(now) {
+		next = sched.Recurrence.Next(next)
+	}
+	if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
+		s.LastRunAt = &now
+		s.NextRunAt = next
+		if sync != nil {
+			sync(s)
 		}
 		return nil
 	}); err != nil {

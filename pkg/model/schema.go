@@ -278,6 +278,15 @@ var Tables = []string{
 	// This replaces the original bare interval_ms (every N hours since it
 	// last fired, with no wall-clock alignment); a database from before
 	// that widening is migrated by ensureScheduledTaskRecurrenceColumns.
+	//
+	// template_id and suite_id are what a firing actually is: both NULL
+	// for a schedule carrying its own inline task content, template_id
+	// for one firing a task_template's content instead, suite_id for one
+	// starting a task_suite run instead of filing a task at all
+	// (model.ScheduledTask's own doc comment on why the two are mutually
+	// exclusive). A database created before either existed gets the
+	// column from ensureScheduledTaskTemplateColumn/
+	// ensureScheduledTaskSuiteColumn rather than from this DDL.
 	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task`" + ` (
   ` + "`id`" + `                    TEXT     NOT NULL,
   ` + "`title`" + `                 TEXT     NOT NULL,
@@ -287,6 +296,7 @@ var Tables = []string{
   ` + "`base`" + `                  TEXT     NULL,
   ` + "`auto_merge`" + `            INTEGER  NOT NULL,
   ` + "`template_id`" + `           TEXT     NULL,
+  ` + "`suite_id`" + `              TEXT     NULL,
   ` + "`recurrence_kind`" + `       TEXT     NOT NULL,
   ` + "`every_n_hours`" + `         INTEGER  NULL,
   ` + "`time_of_day_minutes`" + `   INTEGER  NULL,
@@ -673,10 +683,20 @@ var Tables = []string{
 	// KEY AUTOINCREMENT for the same reason release/candidate/
 	// qualification_run all use it: starting a run has to stay correct
 	// with more than one writer.
+	//
+	// schedule_id is NULL for a run a human started by hand, and names
+	// the scheduled_task that fired it otherwise -- Store.
+	// HasActiveRunForSchedule reads it back as the "a previous firing
+	// that has not finished suppresses the next one" check a schedule
+	// firing a suite needs, exactly what task_tag's own firing tag is for
+	// a schedule filing a task. A database created before schedules could
+	// fire a suite gets this column from
+	// ensureTaskSuiteRunScheduleColumn rather than from this DDL.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run`" + ` (
   ` + "`id`" + `                INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`suite_id`" + `          TEXT     NOT NULL,
   ` + "`suite_name`" + `        TEXT     NOT NULL,
+  ` + "`schedule_id`" + `       TEXT     NULL,
   ` + "`owner`" + `             TEXT     NOT NULL,
   ` + "`repo`" + `              TEXT     NOT NULL,
   ` + "`base`" + `              TEXT     NOT NULL,

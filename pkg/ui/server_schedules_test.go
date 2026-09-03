@@ -81,3 +81,43 @@ func TestSchedulesDeleteOnAnUnknownIDIs404(t *testing.T) {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
 	}
 }
+
+// The suite-backed half of the same surface: a schedule that runs a task
+// suite goes through the very same four routes, with suiteId in place of
+// the title and content fields (ui.CreateScheduleRequest's own doc
+// comment on why they are mutually exclusive).
+func TestSchedulesCreateFromATaskSuite(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/templates",
+		`{"name":"Find bugs","title":"Find and fix a bug"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create template status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	tmpl := decode[ui.Template](t, rec)
+
+	rec = do(t, srv, http.MethodPost, "/api/suites",
+		`{"name":"Bug sweep","templateIds":["`+tmpl.ID+`"],"mode":"until_clean","maxPasses":5}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create suite status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	suite := decode[ui.Suite](t, rec)
+
+	rec = do(t, srv, http.MethodPost, "/api/schedules",
+		`{"suiteId":"`+suite.ID+`","repo":"acme/widgets","base":"main",`+
+			`"recurrence":{"kind":"daily","timeOfDay":"09:00"}}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create schedule status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	created := decode[ui.Schedule](t, rec)
+	if created.SuiteID != suite.ID || created.SuiteName != "Bug sweep" {
+		t.Fatalf("created = %+v, want it naming the suite it runs", created)
+	}
+
+	// Deleting that suite while the schedule still runs it is a 400, not
+	// a silent orphaning (ui.Client.DeleteSuite's own guard).
+	rec = do(t, srv, http.MethodDelete, "/api/suites/"+suite.ID, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("delete-in-use status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}

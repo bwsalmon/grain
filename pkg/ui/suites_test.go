@@ -105,6 +105,44 @@ func TestDeleteTemplateRefusesWhileASuiteStillUsesIt(t *testing.T) {
 	}
 }
 
+// DeleteTemplate's own guard, one level out: a suite a schedule still
+// runs on a cadence cannot be deleted out from under it, since that
+// schedule would otherwise have nothing to fire.
+func TestDeleteSuiteRefusesWhileAScheduleStillRunsIt(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
+	if err != nil {
+		t.Fatalf("creating a template: %v", err)
+	}
+	suite, err := c.CreateSuite(ctx, ui.CreateSuiteRequest{
+		Name: "x", TemplateIDs: []string{tmpl.ID}, Mode: "count", Count: 1,
+	})
+	if err != nil {
+		t.Fatalf("creating a suite: %v", err)
+	}
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		SuiteID: suite.ID, Repo: "acme/widgets", Base: "main",
+		Recurrence: ui.Recurrence{Kind: "daily", TimeOfDay: "09:00"},
+	})
+	if err != nil {
+		t.Fatalf("creating a schedule: %v", err)
+	}
+
+	err = c.DeleteSuite(ctx, suite.ID)
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError refusing the delete", err)
+	}
+
+	// Delete that schedule and the suite goes.
+	if err := c.DeleteSchedule(ctx, sched.ID); err != nil {
+		t.Fatalf("deleting the schedule: %v", err)
+	}
+	if err := c.DeleteSuite(ctx, suite.ID); err != nil {
+		t.Fatalf("deleting the suite once nothing runs it: %v", err)
+	}
+}
+
 func TestCreateSuiteRunStartsARunAgainstARepoAndBranch(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "Do the thing"})

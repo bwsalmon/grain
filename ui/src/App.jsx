@@ -257,11 +257,11 @@ export default function App() {
           setDetail(await api(`/api/tasks/${openTaskId}`));
         }
         if (view === "schedules") {
-          // Both, not just schedules: ScheduleOverlay's own "Template"
-          // picker (opened from SchedulesList.jsx) needs an up-to-date
-          // template list too, since it can open at any time while this
-          // pane is on screen.
-          await Promise.all([refreshSchedules(), refreshTemplates()]);
+          // All three, not just schedules: ScheduleOverlay's own
+          // "Template" and "Task suite" pickers (opened from
+          // SchedulesList.jsx) need up-to-date lists too, since either can
+          // open at any time while this pane is on screen.
+          await Promise.all([refreshSchedules(), refreshTemplates(), refreshSuites()]);
         } else if (view === "templates") {
           await refreshTemplates();
         } else if (view === "suites") {
@@ -381,6 +381,7 @@ export default function App() {
             <SchedulesList
               schedules={schedules}
               templates={templates}
+              suites={suites}
               config={config}
               tasks={tasks}
               onRefresh={refreshSchedules}

@@ -67,6 +67,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
             <Chip size="small" label={r.repo} />
             <Chip size="small" variant="outlined" label={r.base} />
             <Chip size="small" color={STATUS_COLORS[r.status]} label={STATUS_LABELS[r.status] || r.status} />
+            {r.scheduleId && <Chip size="small" variant="outlined" label="Scheduled" />}
             <span className="template-title hint">pass {r.pass} · {describeMode(r)}</span>
             {r.error && <span className="template-title hint" style={{ color: "var(--mui-palette-error-main, #c62828)" }}>{r.error}</span>}
           </li>
