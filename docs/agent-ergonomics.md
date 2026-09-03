@@ -1,0 +1,350 @@
+# Agent ergonomics: what a run actually hits, and what to do about it
+
+**Status: proposal.** Nothing here is implemented. This is a review of
+grain's agent-facing surface — the tools a dispatched run holds, the
+prompt it is given, and what grain records about how it went — written
+from the code as it stands, with a proposal per finding. The follow-up
+tasks filed alongside it are named at the bottom.
+
+The question behind it is narrow: **where does a run lose turns, context
+or work to grain itself, rather than to the task it was given?** Every
+finding below is something a competent agent cannot fix from inside the
+sandbox, because it is grain that is telling it the wrong thing, telling
+it nothing, or throwing away the evidence that would say which.
+
+The findings are ordered by what they cost a run, not by how hard they
+are to fix. The first four are all cheap.
+
+---
+
+## 1. The escape-hatch tools tell every production run their calls were mocked
+
+`ask_question`, `comment_on_issue` and `propose_task` answer a real
+dispatch with, respectively:
+
+- `"Recorded (mocked -- no GitHub comment was posted). In a real dispatch
+  this ends your turn and waits on a human reply; treat it the same way
+  here."` (`pkg/mcp/mock_tools.go:122`)
+- `"Recorded (mocked -- no GitHub comment was posted)."` (`:158`)
+- `"Recorded (N proposed task(s) so far this run, mocked -- no GitHub
+  issue was filed)."` (`:243`)
+
+None of that is true of a real run. `cmd/grain/mcpserver.go` registers
+`mcp.NewMockTools(&mcp.MockSink{})` with a sink nobody reads, but the
+calls are not recovered from that sink: `orchestrator.ProcessResult`
+reads them off `agent.Result.ToolCalls`, parsed out of the CLI's own
+transcript, and relays each one for real — a question becomes a
+`model.Comment` and parks the task on it, a comment becomes the task's
+closing note, a proposal becomes a real `model.Task` with real
+`depends_on` edges (`pkg/orchestrator/finish.go`, `ProcessResult` and
+`relayProposedTasks`). The sink's "mocked" wording is a leftover from
+when there was genuinely nothing downstream of it, and the comment in
+`mcpserver.go` saying so is still there.
+
+The descriptions have the same drift in the other direction: they
+describe v1's workflow — a GitHub issue, a trigger label to re-apply, an
+issue filed per proposal — and grain has had none of those since tasks
+became rows. A task's conversation is in grain's own UI, and that is
+where the human replies.
+
+What it costs: an agent that is told its question went nowhere has three
+bad options and takes one of them — ask again, work around the block it
+was supposed to park on, or downgrade the question into its final text,
+which nothing relays at all. The same goes for a closing comment on an
+investigation task: told the comment was mocked, the sensible move looks
+like writing the answer into a file nobody will read.
+
+**Proposal.** Rewrite the four descriptions and the four confirmation
+texts to describe what v2 actually does, in v2's vocabulary (task,
+conversation, task queue — not issue, label, GitHub). Keep the "this ends
+your turn" contract on `ask_question`, which is real. `MockSink` stays
+exactly as it is; it is a test seam, and the fix is to stop narrating the
+seam to the agent.
+
+## 2. `add_review_comment` is registered on every run and relayed by nothing
+
+Its description promises "a draft code review ... posted once you finish
+... a human opens the draft review and submits it themselves".
+`ProcessResult`'s own doc comment says the truth: *"`add_review_comment`
+is not relayed here at all"* — there is no PR in hand on an ordinary
+dispatch, and the `/review-intent` dispatch that would have one is not
+built. A run that spends twenty turns writing careful review feedback
+gets that feedback counted in its outcome detail and discarded.
+
+**Proposal.** Two halves, either of which is an improvement on its own:
+
+- Register it only for a dispatch that is actually a review — which means
+  `grain mcpserver` needs a flag saying so, the same way
+  `-pr-repo`/`-pr-branch` scope the CI tools. A tool that is not on the
+  roster costs nothing; a tool that is on the roster and lies costs a
+  run's whole budget.
+- Until review dispatches exist, have its confirmation text say where the
+  feedback really lands (this run's outcome, and nowhere else), so an
+  agent can decide to put it in a `comment_on_issue` call instead.
+
+## 3. A `run_command` that timed out does not say so
+
+Both transports bound the command — `defaultRunCommandTimeout` is five
+minutes and applies even when the caller passes no `timeout`
+(`pkg/mcp/sandbox_tools.go`) — and neither tells the agent when that
+bound is what ended the command:
+
+- local (`sandbox_tools.go:187`): the context deadline kills the process
+  group, `cmd.Run` returns a killed-by-signal `*exec.ExitError`, and the
+  answer is `exit=-1` with whatever partial output there was. `exit=-1`
+  is also what "the command could not be started at all" looks like.
+- remote (`ssh_tools.go:65`): the guest-side `timeout N bash -c ...`
+  exits 124, and the answer is a bare `exit=124`.
+
+Neither answer names the timeout, says what it was, or says that a larger
+one can be asked for — and since the default applies when the agent
+passed nothing, the number that just killed its build is one it never
+chose and cannot see.
+
+What it costs: the failure mode is re-running the same long command
+verbatim, twice, before concluding something is wrong with the sandbox.
+It is the single cheapest fix in this document.
+
+**Proposal.** In both handlers, when the command was ended by the bound
+rather than by itself, append one line: *"the command was killed after
+300s (run_command's default bound); pass a larger `timeout` — up to
+600000 ms — or narrow the command"*. Locally that is
+`ctx.Err() == context.DeadlineExceeded`; remotely it is exit 124, which
+is `timeout`'s own reserved status. `runCommandTimeout` already computes
+the number, and both handlers already share it.
+
+## 4. No tool result has an upper bound on its size
+
+`run_command` returns the whole of stdout and stderr
+(`sandbox_tools.go:187`, `ssh_tools.go:65`). `read_file` with no `limit`
+returns the whole file, line-numbered (`numberedRange`,
+`sandbox_tools.go:210`). Nothing anywhere caps either.
+
+One `go test ./...` on a failing suite, one `git log -p`, one `grep -r`
+that matched more than expected, one 250 KB `README.md` read without a
+`limit` — each of those is a large fraction of the run's context spent in
+a single turn, and the run cannot get it back.
+
+What happens past that point is currently left to whichever CLI is
+driving the run. `claude` caps an MCP tool's output itself
+(`MAX_MCP_OUTPUT_TOKENS`) and rejects a result that exceeds it, so an
+oversized answer costs the run the wall clock the command took and buys
+it nothing at all; `agy` is a different CLI with its own answer. grain
+already reaches into exactly this set of knobs where it needs a
+guarantee — `mcpToolTimeout` sets `MCP_TOOL_TIMEOUT` so that a
+`wait_for_checks` call is not killed before it can report
+(`pkg/agent/claude/claude.go:331-363`) — and sets nothing for output. So
+the size at which a tool result stops working is a per-framework default
+grain has not chosen, does not know, and cannot explain to the agent when
+it is hit.
+
+Capping in the server fixes it once for every framework, and is the only
+place that can produce the thing that makes a truncated answer usable: a
+statement of what was cut and how to get the rest.
+
+**Proposal.** Bound every tool result where it is formatted, keeping the
+head and the tail and saying what was dropped: *"... 412 KB elided (of
+430 KB); re-run narrowed, or redirect to a file and read it with
+`read_file`'s `offset`/`limit`"*. Both `run_command` handlers already
+build their text with the same format string, and `numberedRange` is
+already shared by both `read_file`s, so this is two call sites and a
+helper. Size the cap from the data in finding 11 rather than from taste;
+64 KB is a defensible starting guess.
+
+## 5. The remote `run_command` has no process-group discipline
+
+`procgroup` exists because killing a command has to kill everything it
+forked, and the local `run_command` uses it. The remote one has no
+equivalent: it runs `timeout N bash -c '...'` through `kontur exec`, and
+`timeout` signals only its direct child.
+
+The suspected consequence — worth confirming on a real guest before
+fixing — is that a command which backgrounds anything holding the SSH
+channel's stdout (`npm run dev &`, a spawned server, a daemonized helper)
+does not return when the foreground command finishes. It returns when the
+outer `timeout` fires, which is up to five minutes later, and then
+reports `exit=124` for a command that actually succeeded. That is finding
+3's confusing answer arriving on top of five wasted minutes.
+
+**Proposal.** Confirm it with a test that backgrounds a long sleep inside
+a real sandbox VM (the shape `procgroup`'s own test already has). If
+confirmed, `timeout --foreground --kill-after=5s` plus a sentence in the
+tool description about redirecting a backgrounded process's output is the
+whole fix.
+
+## 6. The git proxy denies a push and a fetch with the same sentence
+
+A denied request comes back as `"<owner>/<repo> is not in scope for this
+sandbox"` (`pkg/gitproxy/core.go:103`) — the same words whether the repo
+is unknown to the task entirely or is one of `task.Reads`, which the
+agent may fetch and may not push (`authorize.go`). The message names
+neither the action nor the repo the sandbox *may* push to.
+
+**Proposal.** Say which of the two it is, and name the write target:
+*"pushing to x/y is not allowed for this sandbox; it may fetch x/y, and
+may push only to a/b"*. The authorizer has all three facts at the point
+it says no.
+
+## 7. A run is never told how long it has
+
+`Config.MaxRunRuntime` cancels `framework.Run`'s context outright, and
+its default is two hours (`pkg/orchestrator/orchestrator.go:385`).
+`BuildPrompt` (`run.go:154`) never mentions it. Neither does any tool.
+
+A run that does not know a deadline exists has no reason to commit early,
+no reason to push a half-finished branch before reaching for one more
+refactor, and no way to choose between "wait 15 minutes for CI" and
+"finish now". `salvagePushedBranch` rescues what was *pushed* when the
+clock runs out; everything only committed, and everything only edited, is
+in a sandbox that is about to be destroyed.
+
+**Proposal.** Two parts, in order of value:
+
+- One sentence in `BuildPrompt`, with the real number: *"This run will be
+  cancelled after 2h0m; commit and push work as you finish it rather than
+  saving it all for the end."* It is exactly the class of fact
+  `BuildPrompt` already exists to state — grain's own, not the agent's to
+  guess, the same argument its doc comment makes for the branch name.
+- Once less than some fraction of the budget remains, append a line to
+  every tool result saying how long is left. A run does not read the
+  prompt again at turn 200, and the deadline matters most exactly when
+  the prompt is furthest away.
+
+## 8. Attempt N is told nothing about attempt N−1
+
+A redispatch gets the task, the conversation (`commentThreadSection`),
+its attachments, the prompt extensions, and a checkout that continues the
+previous attempt's branch (`prepareCheckout` — already correct, and
+deliberately so). It is told nothing about what the previous attempt
+*did* or how it ended, even though the store has all of it: each
+`task_run` row carries `outcome`, `detail` — which since `outcomeOf`
+includes the tool census for every ending, not just the failures — and
+the full `transcript`.
+
+So attempt 2 opens on a branch with commits it did not make and no
+account of what they were for or why the attempt that made them stopped.
+The commonest waste is re-doing the diagnosis attempt 1 already paid for;
+the sharpest is re-attempting exactly the thing that timed out.
+
+**Proposal.** A `previousAttemptsSection` in `BuildPrompt`: for each prior
+run, its attempt number, outcome, `detail`, and the commits it left on
+the branch (`git log <base>..<branch>` is already available where the
+checkout is prepared). Bounded to the last few attempts and to a couple
+of hundred bytes of detail each — the goal is orientation, not a
+transcript store. The transcript itself stays where it is; it is prose,
+per-framework and unbounded, and none of that belongs in a prompt.
+
+## 9. There is no way to say how to set a repo up
+
+`RepoConfig` carries `DefaultCapabilities` and `PromptExtension`
+(`pkg/model/repo_config.go`) and nothing else. A repo whose tests need
+`make deps`, a `node_modules`, a Python venv or a generated file has no
+way to say so except in prose in its prompt extension, which every run
+then re-discovers by running the wrong command first.
+
+**Proposal.** `RepoConfig.SetupCommand`, run by `prepareCheckout` after
+the clone and before the agent's first turn, with its exit status and
+tail of output stated in the prompt (a setup that failed is something the
+agent must know, not something to hide). It has to be re-run by the
+`recreate_sandbox` path too, which restores the checkout and would
+otherwise hand back a directory that no longer builds. This is the one
+finding here with real surface area — a new field, a settings form, a UI
+row — which is why it is ninth rather than third.
+
+## 10. Minor, and worth doing while nearby
+
+- **`run_command` has no `workdir` argument.** Every call in a
+  repo-bearing task starts `cd work && `. It is a small tax paid on every
+  single call of the most-used tool, and the local handler already sets
+  `cmd.Dir`, the remote one already composes a `cd`.
+- **`edit_file`'s "String not found" answer** (`sandbox_tools.go`) reports
+  the string and nothing else. Whitespace and indentation are the usual
+  cause, and the file is already in memory: saying "no exact match; the
+  closest line is N" would end the guess-again loop that follows.
+- **`read_file` has no default `limit`.** Even with finding 4's cap in
+  place, a default window (with the total line count stated, so the agent
+  knows to ask for more) is the more useful shape.
+
+---
+
+## Metrics: everything above is currently argued from anecdote
+
+`pkg/metrics` measures what the deployment delivers — throughput, latency
+by stage, run outcomes, backlog, cycle behaviour. It measures nothing
+about what happens *inside* a run, which is where every finding above
+lives. The evidence for this document is code-reading and individual
+transcripts, and it should not have had to be.
+
+The data is very nearly there already. `outcomeOf` and `toolCallSummary`
+(`pkg/orchestrator/finish.go:314`) build a per-tool census with error
+counts for **every** run, successful ones included — and then render it
+into English and store it in `task_run.detail`, a column a human reads
+one row at a time. Nothing aggregates it, and nothing can, because it is
+prose.
+
+### 11. Persist the tool census structurally, and report on it
+
+Store what `toolCallSummary` already computes — per run, per tool: calls,
+errored calls — as data rather than a sentence (a `task_run_tool` table,
+or a JSON column alongside `detail`, which the migration ladder in
+`pkg/model/store.go` makes routine). Then report, over a window:
+
+- **calls per run**, and **errored calls as a share of all calls**. The
+  ordinary shape of agentic work is a handful of errors; a deployment
+  drifting upward is a deployment whose tools got worse.
+- **error rate per tool.** `edit_file`'s is finding 10's second bullet
+  measured; `run_command`'s is the sandbox's health; a spike in one tool
+  is a specific, actionable thing in a way that a run's outcome is not.
+- **tool result sizes** (p50/p95/max, per tool). This is what sizes
+  finding 4's cap with data instead of a guess, and it names the commands
+  that blow a run's context.
+- **`run_command` timeout rate**, once finding 3 makes timeouts
+  distinguishable at all.
+
+### 12. Split the endings that are ergonomics problems out of `Outcomes`
+
+`metrics.Runs.Outcomes` counts `task_run.outcome` strings, and the
+interesting distinctions are inside them. `"cancelled"` is both "a human
+closed the task" and "the run hit the two-hour wall" — the first is
+routine and the second is finding 7 happening. `"no_action"` is a run
+that had tools, used them, and produced nothing, which is the purest
+measure of the agent surface failing, and it is currently one key in a
+map next to `"succeeded"`.
+
+Report them as their own series: runs ended by the runtime cap, runs
+ended by exhausting `MaxAgentTurns`, `no_action` runs, and runs paused by
+a usage limit. Each has a different fix, and today they are
+indistinguishable in aggregate.
+
+### 13. Measure the CI loop the prompt sends every run around
+
+`BuildPrompt` now tells every run to push, call `wait_for_checks`, fix
+and push again, and that loop is unmeasured end to end. Worth counting:
+how often a wait ends in each of its four verdicts (failed, passed,
+nothing registered, clock ran out), how long it blocks, and how many
+pushes a run makes before its checks go green. A deployment where most
+waits end with "still running when the clock ran out" is one where
+`DefaultWaitForChecksTimeout` is set wrong for its CI, and nothing today
+would ever show that.
+
+---
+
+## Follow-up tasks
+
+Filed as separate proposals, each depending on this document:
+
+1. Truthful escape-hatch tool descriptions and confirmations (findings 1
+   and 2).
+2. `run_command`: say when a command timed out, and bound result size
+   (findings 3, 4, and the check in 5).
+3. Tell a run its wall-clock budget (finding 7).
+4. Tell a redispatched run what its previous attempts did (finding 8).
+5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13).
+6. A per-repo setup command (finding 9).
+
+Findings 6 and 10 are small enough to fold into whichever of those
+touches the same file first.
+
+Each is proposed for human review rather than auto-merge: all six change
+what every dispatched run sees or how its behaviour is recorded, and that
+is not a surface to change unread.
