@@ -5,10 +5,12 @@ import Overlay from "./Overlay.jsx";
 import LogsPage from "./LogsPage.jsx";
 import MetricsPage from "./MetricsPage.jsx";
 import SandboxHealthPage from "./SandboxHealthPage.jsx";
+import TopPage from "./TopPage.jsx";
 
 const TABS = [
   { id: "logs", label: "Logs" },
   { id: "sandboxHealth", label: "Sandbox health" },
+  { id: "top", label: "Top" },
   { id: "metrics", label: "Metrics" },
   { id: "restart", label: "Restart" },
 ];
@@ -20,6 +22,11 @@ const TABS = [
 // than staying folded into Settings' Debug tab (bwsalmon/agents#623).
 // Each gets its own tab, the same layout SettingsOverlay.jsx already
 // uses for its own General/Capabilities/Upgrade split.
+//
+// Top (GET /api/host/top) sits directly after Sandbox health because it
+// is the question that follows it: that panel's host section says the
+// daemon's machine is loaded, and only a per-process view says by what
+// (grain/task-120).
 //
 // Metrics (GET /api/metrics) joined them later rather than taking a
 // sidebar entry of its own: it is the same kind of thing the
@@ -74,6 +81,7 @@ export default function DebugOverlay({ config, onClose, onOpenTask, showError })
       </Tabs>
       {tab === "logs" && <LogsPage showError={showError} />}
       {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
+      {tab === "top" && <TopPage showError={showError} />}
       {tab === "metrics" && <MetricsPage showError={showError} onOpenTask={onOpenTask} />}
       {tab === "restart" && (
         config && config.rebootEnabled ? (

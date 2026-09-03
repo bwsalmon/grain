@@ -93,6 +93,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/capability/selfrepair"
 	"github.com/bwsalmon/grain/pkg/github"
 	"github.com/bwsalmon/grain/pkg/gitproxy"
+	"github.com/bwsalmon/grain/pkg/hosttop"
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/metrics"
@@ -2151,6 +2152,16 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// directory because the disk figure has to name a filesystem
 		// (hostStats' own doc comment on why that one).
 		HostStats: func() (ui.HostPressure, error) { return hostStats(cfg.dataDir) },
+		// hostTop is the per-process half of that same reading -- which
+		// processes are spending the machine HostStats above says is
+		// busy (pkg/hosttop's own doc comment). Same machine, and in a
+		// container deployment the same PID namespace this process is
+		// in: `docker run` is given no --pid=host (scripts/setup.sh's
+		// own docker_run_args), so what this lists is the daemon and
+		// everything it forked, which is where daemon-side load comes
+		// from. A sandbox's own processes belong to its VM and are not
+		// in it -- that is what the sandbox rows beside this report.
+		HostTop: hostTop,
 		// ReconcilerDown mirrors this same process's own package-level
 		// reconcilerDown (daemon.go), the same way AutoMergeDegraded above
 		// mirrors orchestrator.ChecksUnavailable -- bwsalmon/agents#576.
@@ -2399,6 +2410,26 @@ func hostStats(dataDir string) (ui.HostPressure, error) {
 		DiskUsedMB:    diskUsedMB,
 		DiskTotalMB:   diskTotalMB,
 	}, nil
+}
+
+// hostTopTimeout bounds one `top` run. Its own sampling interval is a
+// fraction of a second (pkg/hosttop), so anything near this means top is
+// stuck rather than slow -- and the Debug pane polls, so a request left
+// hanging would pile a second one on top of it every few seconds.
+const hostTopTimeout = 15 * time.Second
+
+// hostTop is startUIServer's ui.Config.HostTop: a `top` snapshot of this
+// same process's own machine, for the Debug overlay's Top tab.
+//
+// The timeout is added here rather than inside pkg/hosttop for the same
+// reason hostStats above takes its path as an argument: the package
+// reads what it is asked to read, and how long this deployment is
+// willing to wait for it is the daemon's own policy. The request's ctx
+// still bounds it from the other end -- whichever fires first kills top.
+func hostTop(ctx context.Context, lines int) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, hostTopTimeout)
+	defer cancel()
+	return hosttop.Read(ctx, lines)
 }
 
 // openBrowser best-effort launches url in the system's default browser --

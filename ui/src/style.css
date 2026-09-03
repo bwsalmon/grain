@@ -611,6 +611,11 @@ fieldset legend {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* `top` output is a table held together by its columns: wrapping a row
+   that overflows (which .logs-view does, and should, for a log line)
+   would interleave halves of one process's row with the next one's. It
+   scrolls sideways instead. */
+.top-view { white-space: pre; word-break: normal; }
 .upgrade-status dd { margin: 0; word-break: break-word; }
 .upgrade-phase-running { color: var(--accent); }
 .upgrade-phase-ok { color: var(--state-completed); }
