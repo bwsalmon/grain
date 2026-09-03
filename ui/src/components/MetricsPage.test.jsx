@@ -1,7 +1,9 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import MetricsPage, { backlogRows, formatSeconds, isThinPercentile, sortedOutcomes } from "./MetricsPage.jsx";
+import MetricsPage, {
+  backlogRows, formatBytes, formatSeconds, isThinPercentile, percent, sortedOutcomes,
+} from "./MetricsPage.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
@@ -60,6 +62,40 @@ function report(over = {}) {
     },
     ...over,
   };
+}
+
+// tools and checks are the two sections a deployment only has once its
+// runs have recorded a census: report() above deliberately carries
+// neither, so that every test written before they existed still describes
+// a report the API really sends -- one from a store whose runs all
+// predate them.
+function withCensus(over = {}) {
+  return report({
+    tools: {
+      runs: 2, calls: 110, errored: 15, erroredShare: 15 / 110,
+      callsPerRun: { n: 2, min: 50, p50: 50, p90: 60, p99: 60, max: 60, mean: 55, total: 110 },
+      byTool: [
+        {
+          name: "run_command", runs: 2, calls: 100, errored: 10, errorRate: 0.1,
+          timedOut: 2, timeoutRate: 0.02,
+          resultBytes: { n: 100, meanBytes: 2048, maxBytes: 70000, p50AtMostBytes: 4095, p95AtMostBytes: 65535, p99AtMostBytes: 131071 },
+        },
+        {
+          name: "edit_file", runs: 2, calls: 10, errored: 5, errorRate: 0.5,
+          timedOut: 0, timeoutRate: 0,
+          resultBytes: { n: 10, meanBytes: 40, maxBytes: 80, p50AtMostBytes: 63, p95AtMostBytes: 127, p99AtMostBytes: 127 },
+        },
+      ],
+    },
+    checks: {
+      waits: 4, runs: 2,
+      verdicts: { timed_out: 2, failed: 1, passed: 1 },
+      blocked: { n: 4, minSeconds: 240, p50Seconds: 540, p90Seconds: 900, p99Seconds: 900, maxSeconds: 900, meanSeconds: 660 },
+      pushesToGreen: { n: 1, min: 2, p50: 2, p90: 2, p99: 2, max: 2, mean: 2, total: 2 },
+      greenRuns: 1,
+    },
+    ...over,
+  });
 }
 
 describe("formatSeconds", () => {
@@ -364,5 +400,85 @@ describe("MetricsPage", () => {
 
     expect(screen.getByText(/nothing was filed or attempted inside this window/i)).toBeInTheDocument();
     expect(screen.getByText(/the backlog is empty/i)).toBeInTheDocument();
+  });
+
+  it("reports the tool census, busiest tool first", async () => {
+    api.mockResolvedValue(withCensus());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Tool use");
+
+    expect(screen.getByText("110")).toBeInTheDocument();
+    expect(screen.getByText("14% of all calls")).toBeInTheDocument();
+
+    const rows = screen.getAllByRole("row").filter((r) => within(r).queryByText(/run_command|edit_file/));
+    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["run_command", "edit_file"]);
+    // edit_file's error rate is the "String not found" loop measured, and
+    // the reason the table is per tool rather than one number.
+    expect(within(rows[1]).getByText("5 (50%)")).toBeInTheDocument();
+    // Only a tool that bounds its own work reports timeouts; the rest
+    // show a dash rather than a zero they cannot vouch for.
+    expect(within(rows[0]).getByText("2 (2%)")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("—")).toBeInTheDocument();
+    // The p95 is a bucket bound, and is shown as one.
+    expect(within(rows[0]).getByText("≤ 64 KB")).toBeInTheDocument();
+  });
+
+  it("reports the CI loop: verdicts, how long it blocked, and pushes before green", async () => {
+    api.mockResolvedValue(withCensus());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("CI waits");
+
+    expect(screen.getByText("timed_out 2")).toBeInTheDocument();
+    expect(screen.getByText("passed 1")).toBeInTheDocument();
+    // The median blocked time, read through its own sub-line: "9m 0s"
+    // alone is a number several sections of this report can produce.
+    expect(screen.getByText(/p90 15m 0s . max 15m 0s/)).toBeInTheDocument();
+    expect(screen.getByText("2.0")).toBeInTheDocument();
+    expect(screen.getByText(/over 1 attempt that went green/i)).toBeInTheDocument();
+  });
+
+  it("splits the endings out of the outcome words", async () => {
+    api.mockResolvedValue(report({
+      runs: {
+        outcomes: { succeeded: 45, cancelled: 2 },
+        endings: { succeeded: 45, runtime_cap: 1, task_closed: 1 },
+        attemptsPerCompletion: 1.5, meanConcurrent: 0.4, maxConcurrent: 3, utilization: 0.13, live: 0,
+      },
+    }));
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Capacity");
+
+    expect(screen.getByText("cancelled 2")).toBeInTheDocument();
+    expect(screen.getByText("runtime_cap 1")).toBeInTheDocument();
+    expect(screen.getByText("task_closed 1")).toBeInTheDocument();
+  });
+
+  // A store whose runs all predate the census reports nothing rather than
+  // a table of zeroes: "nobody measured this" is not "the tools never
+  // failed".
+  it("shows no tool or CI section at all when nothing recorded one", async () => {
+    api.mockResolvedValue(report());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Latency");
+
+    expect(screen.queryByText("Tool use")).not.toBeInTheDocument();
+    expect(screen.queryByText("CI waits")).not.toBeInTheDocument();
+  });
+});
+
+describe("formatBytes", () => {
+  it("renders a size in the units a cap would be written in", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(65535)).toBe("64 KB");
+    expect(formatBytes(3 * 1024 * 1024)).toBe("3.0 MB");
+    expect(formatBytes(undefined)).toBe("—");
+  });
+});
+
+describe("percent", () => {
+  it("renders a rate as whole percent", () => {
+    expect(percent(0.5)).toBe("50%");
+    expect(percent(0.024)).toBe("2%");
+    expect(percent(0)).toBe("0%");
   });
 });
