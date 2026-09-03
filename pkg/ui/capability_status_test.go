@@ -172,6 +172,75 @@ func TestCapabilitiesReportNothingMissingWithNoSecretsStoreColocated(t *testing.
 	if len(status.MissingSecrets) != 0 {
 		t.Fatalf("github-sandbox: MissingSecrets = %v, want none reported with no store to check", status.MissingSecrets)
 	}
+	// Nothing to offer either: with no store colocated there is nowhere
+	// to write a value, so the pane gets no field to write it in rather
+	// than one whose every use would 404 (grain/task-110).
+	if len(status.Secrets) != 0 {
+		t.Fatalf("github-sandbox: Secrets = %+v, want none offered with no store to write to", status.Secrets)
+	}
+}
+
+// grain/task-110: each capability's own secrets are set from the pane
+// that reports them missing, so every Requires entry is reported --
+// whether or not it is set -- with the secret and key a write would
+// address it by.
+func TestCapabilitiesReportWhereEachRequiredSecretIsWritten(t *testing.T) {
+	c, _, ctx := testClient(t)
+	c.Config.Secrets = secrets.New(t.TempDir())
+	if err := c.Config.Secrets.Set("github-app", "app-id", []byte("123")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The "<secret>/<key>" form is split exactly as written: one set,
+	// one not, both offered.
+	status := capabilityStatus(t, got.Capabilities, "github-sandbox")
+	want := []ui.CapabilitySecret{
+		{Name: githubsandbox.DefaultAppIDCredential, Secret: "github-app", Key: "app-id", Set: true},
+		{Name: githubsandbox.DefaultPrivateKeyCredential, Secret: "github-app", Key: "private-key", Set: false},
+	}
+	if !reflect.DeepEqual(status.Secrets, want) {
+		t.Fatalf("github-sandbox: Secrets = %+v, want %+v", status.Secrets, want)
+	}
+
+	// The bare "<secret>" form, with nothing stored under it yet: it
+	// gets the default key name, which is one Resolve's sole-key form
+	// finds.
+	minter := capabilityStatus(t, got.Capabilities, "gcp-key").Secrets
+	wantMinter := []ui.CapabilitySecret{
+		{Name: gcpkey.DefaultMinterCredential, Secret: gcpkey.DefaultMinterCredential, Key: "value", Set: false},
+	}
+	if !reflect.DeepEqual(minter, wantMinter) {
+		t.Fatalf("gcp-key: Secrets = %+v, want %+v", minter, wantMinter)
+	}
+}
+
+// A bare "<secret>" credential someone seeded under a key of their own
+// (scripts/setup.sh writes the minter key as gcp-key-minter/key.json) is
+// replaced in place rather than joined by a second key -- two keys is
+// exactly the state secrets.Store.Resolve refuses to read the bare name
+// out of.
+func TestCapabilitiesWriteABareSecretBackToTheKeyItAlreadyHas(t *testing.T) {
+	c, _, ctx := testClient(t)
+	c.Config.Secrets = secrets.New(t.TempDir())
+	if err := c.Config.Secrets.Set(gcpkey.DefaultMinterCredential, "key.json", []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []ui.CapabilitySecret{
+		{Name: gcpkey.DefaultMinterCredential, Secret: gcpkey.DefaultMinterCredential, Key: "key.json", Set: true},
+	}
+	if status := capabilityStatus(t, got.Capabilities, "gcp-key"); !reflect.DeepEqual(status.Secrets, want) {
+		t.Fatalf("gcp-key: Secrets = %+v, want %+v", status.Secrets, want)
+	}
 }
 
 // Grantable is the half of "is this capability usable" that Ready says

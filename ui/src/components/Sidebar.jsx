@@ -11,7 +11,10 @@ import GrainMark from "./GrainMark.jsx";
 // live in their own nav pane / the repo pane (bwsalmon/agents#455,
 // bwsalmon/agents#398), rather than their own buttons here.
 //
-// Secrets and Upgrade live as tabs inside Settings (bwsalmon/agents#456).
+// Upgrade lives as a tab inside Settings (bwsalmon/agents#456), as
+// Secrets did until grain/task-110 broke it up: every secret is now set
+// from whatever uses it -- the agent credentials on Settings' Agents
+// tab, a capability's own on its row on the Capabilities tab.
 // Logs, Sandbox health and the reboot control (previously their own nav
 // entries/a "danger zone" on the general tab -- bwsalmon/agents#457,
 // bwsalmon/agents#536, bwsalmon/agents#395) went through Settings' own

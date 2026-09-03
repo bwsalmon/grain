@@ -19,7 +19,7 @@ const TABS = [
 // configuration that it warranted a nav entry of its own again rather
 // than staying folded into Settings' Debug tab (bwsalmon/agents#623).
 // Each gets its own tab, the same layout SettingsOverlay.jsx already
-// uses for its own General/Capabilities/Secrets/Upgrade split.
+// uses for its own General/Capabilities/Upgrade split.
 //
 // Metrics (GET /api/metrics) joined them later rather than taking a
 // sidebar entry of its own: it is the same kind of thing the

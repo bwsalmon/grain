@@ -1,18 +1,25 @@
 import { Alert, Box, Chip, Stack, Typography } from "@mui/material";
+import { SecretFields } from "./SecretField.jsx";
 
-// bwsalmon/agents#611: a read-only view of GET /api/settings' own
+// bwsalmon/agents#611: a mostly read-only view of GET /api/settings' own
 // "capabilities" field -- every capability grain ships a provider for,
 // and whether this deployment currently has enough configuration for a
 // task granted one to actually work. It takes settings straight from
 // SettingsOverlay rather than fetching its own copy, unlike SecretsPanel/
 // UpgradePanel: the data is already loaded by the time a tab can be
-// clicked, and there is nothing here for a human to submit -- the GCP
-// project/service account fields that satisfy the gcp-key/gemini-key
-// capabilities, and the picker choosing which capabilities every new
-// task is filed holding, both sit above this panel on the same
-// Capabilities tab (this reports that choice back as cap.default);
-// fixing a missing secret means visiting the Secrets tab instead, which
-// each capability's own hint below points at.
+// clicked. The GCP project/service account fields that satisfy the
+// gcp-key/gemini-key capabilities, and the picker choosing which
+// capabilities every new task is filed holding, both sit above this panel
+// on the same Capabilities tab (this reports that choice back as
+// cap.default).
+//
+// The one thing here that is not read-only is a capability's own secrets
+// (grain/task-110): each row carries a write-only field per credential
+// the capability resolves (cap.secrets), so the pane that reports one
+// missing is the pane that fills it in. A value written there changes
+// nothing this component holds, so it asks SettingsOverlay to re-read
+// settings through onSecretsChanged; without a colocated secrets store
+// the API reports no secrets at all and no field is offered.
 //
 // The list is not quite fixed: a deployment's extra named GitHub tokens
 // are capabilities too (grain/task-117, "github-credential:<name>"), and
@@ -26,7 +33,7 @@ import { Alert, Box, Chip, Stack, Typography } from "@mui/material";
 // cap.default rather than folded into it: with two layers, a single
 // "Default" chip would describe a deployment-wide default that only some
 // tasks actually get.
-export default function CapabilitiesPanel({ capabilities }) {
+export default function CapabilitiesPanel({ capabilities, showError, onSecretsChanged }) {
   const list = capabilities || [];
   return (
     <>
@@ -34,7 +41,9 @@ export default function CapabilitiesPanel({ capabilities }) {
         Every capability grain ships a provider for -- plus one per named GitHub token this
         deployment has configured beyond its default one, which a task can be given to push and
         pull through that token instead -- and whether this deployment is currently
-        configured for it to work. Secrets live on the Secrets tab. A capability marked "not
+        configured for it to work. Each one&apos;s own credentials are set here too, beneath it;
+        the agent frameworks&apos; keys live on the Agents tab, beside the choice of framework. A
+        capability marked "not
         grantable" is one no task can ask for at all, however this deployment is configured; one
         marked "default" is attached to every new task as it is filed, and one marked "default in"
         only to tasks filed against the repos named (set on the repos page, per repo).
@@ -109,6 +118,12 @@ export default function CapabilitiesPanel({ capabilities }) {
                 Missing secrets: {cap.missingSecrets.join(", ")}
               </Typography>
             )}
+            {/* Last in the row, under everything that says what is
+                wrong: the fields are what to do about it, and a
+                capability with nothing missing still gets them so a
+                credential can be rotated or cleared from the same
+                place it was set. */}
+            <SecretFields secrets={cap.secrets} showError={showError} onChanged={onSecretsChanged} />
           </Box>
         ))}
       </Stack>

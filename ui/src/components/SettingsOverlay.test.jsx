@@ -440,7 +440,11 @@ describe("SettingsOverlay", () => {
         missingConfig: ["GCP project", "GCP service account email"],
       },
     ];
-    api.mockResolvedValueOnce({ ...settings, capabilities, gcpProject: "acme-proj" });
+    // The tab's own second request: "Other secrets" at its foot lists
+    // whatever nothing above claims (grain/task-110).
+    api
+      .mockResolvedValueOnce({ ...settings, capabilities, gcpProject: "acme-proj" })
+      .mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -455,7 +459,10 @@ describe("SettingsOverlay", () => {
   });
 
   it("only includes changed GCP fields in the Capabilities tab's own payload", async () => {
-    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce(settings)
+      .mockResolvedValueOnce({ enabled: false })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -480,7 +487,10 @@ describe("SettingsOverlay", () => {
       { id: "gemini-key", name: "Gemini key", description: "Mint a Gemini key", ready: true, grantable: true },
       { id: "retired", name: "Retired", description: "No picker row", ready: true, grantable: false },
     ];
-    api.mockResolvedValueOnce({ ...settings, capabilities }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({ ...settings, capabilities })
+      .mockResolvedValueOnce({ enabled: false })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -509,6 +519,7 @@ describe("SettingsOverlay", () => {
     const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
     api
       .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key", "scratch-repo"] })
+      .mockResolvedValueOnce({ enabled: false })
       .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
@@ -533,6 +544,7 @@ describe("SettingsOverlay", () => {
     const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
     api
       .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key"] })
+      .mockResolvedValueOnce({ enabled: false })
       .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
@@ -548,16 +560,78 @@ describe("SettingsOverlay", () => {
     });
   });
 
-  it("switches to the Secrets tab and shows its panel", async () => {
-    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
-    const user = userEvent.setup();
-    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
-    await screen.findByDisplayValue("30s");
+  // grain/task-110: Secrets is not a tab any more. Each secret is set
+  // where it is used -- the agent credentials on Agents, a capability's
+  // own beside it on Capabilities -- and what is left over is listed at
+  // the foot of that same Capabilities tab.
+  describe("secrets, where they are used", () => {
+    const capabilities = [
+      {
+        id: "gcp-key",
+        name: "GCP key",
+        description: "Mint a GCP key",
+        ready: false,
+        grantable: true,
+        missingSecrets: ["gcp-key-minter"],
+        secrets: [{ name: "gcp-key-minter", secret: "gcp-key-minter", key: "value", set: false }],
+      },
+    ];
 
-    await user.click(screen.getByRole("tab", { name: "Secrets" }));
+    it("has no Secrets tab of its own", async () => {
+      api.mockResolvedValueOnce(settings);
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
 
-    expect(await screen.findByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("tab", { name: "Secrets" })).not.toBeInTheDocument();
+    });
+
+    it("sets a capability's own secret from the Capabilities tab, then re-reads settings", async () => {
+      api
+        .mockResolvedValueOnce({ ...settings, capabilities })
+        .mockResolvedValueOnce({ enabled: true, secrets: [] })
+        .mockResolvedValueOnce({})
+        .mockResolvedValueOnce({ ...settings, capabilities: [{ ...capabilities[0], ready: true }] });
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+      await user.type(await screen.findByLabelText("gcp-key-minter"), "a-key");
+      await user.click(screen.getByRole("button", { name: "Set" }));
+
+      expect(api).toHaveBeenCalledWith("/api/secrets/gcp-key-minter/value", {
+        method: "PUT",
+        body: JSON.stringify({ value: "a-key" }),
+      });
+      // The write moves the capability's readiness, which only a fresh
+      // GET reports -- the mutation's own reply is the secrets listing.
+      expect(await screen.findByText("Ready")).toBeInTheDocument();
+    });
+
+    it("lists a secret nothing on the pane claims, and leaves out the ones something does", async () => {
+      api.mockResolvedValueOnce({ ...settings, capabilities }).mockResolvedValueOnce({
+        enabled: true,
+        secrets: [
+          { name: "gcp-key-minter", keys: ["value"] },
+          { name: "gemini-api-key", keys: ["value"] },
+          { name: "buildkite", keys: ["token"] },
+        ],
+      });
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+
+      await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+      expect(await screen.findByText("Other secrets")).toBeInTheDocument();
+      expect(screen.getByText("buildkite")).toBeInTheDocument();
+      expect(screen.queryByText("gemini-api-key")).not.toBeInTheDocument();
+      // Asserted through the per-key delete control, which only the
+      // "Other secrets" list has: the minter's name appears above too,
+      // on the gcp-key field that owns it.
+      expect(screen.getByTitle("delete buildkite/token")).toBeInTheDocument();
+      expect(screen.queryByTitle("delete gcp-key-minter/value")).not.toBeInTheDocument();
+    });
   });
 
   it("switches to the Upgrade tab and shows its panel", async () => {
