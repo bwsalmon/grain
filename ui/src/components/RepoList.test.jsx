@@ -565,4 +565,88 @@ describe("RepoList", () => {
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "unknown capability nope" }));
   });
+
+  // grain/task-114: a repo's own standing instructions, edited here for
+  // the same reason its capabilities are -- next to the repo they belong
+  // to -- and shown alongside the deployment-wide text they are appended
+  // to, which is the thing somebody writing them is writing after.
+  it("opens a row's Prompt form and loads that repo's own text", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      promptExtension: "Migrations live in db/.",
+      deploymentPromptExtension: "Run `make lint` before you push.",
+      effectivePromptExtension: "Run `make lint` before you push.\n\nMigrations live in db/.",
+    });
+    const onOpenRepo = vi.fn();
+    const user = userEvent.setup();
+    renderList({ onOpenRepo });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Prompt" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/prompt-extension");
+    expect(await screen.findByLabelText(/Prompt extension for acme\/gadgets/))
+      .toHaveValue("Migrations live in db/.");
+    expect(screen.getByText(/Run `make lint` before you push./)).toBeInTheDocument();
+    expect(onOpenRepo).not.toHaveBeenCalled();
+  });
+
+  it("saves a repo's own prompt extension", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      promptExtension: "",
+      deploymentPromptExtension: "",
+      effectivePromptExtension: "",
+    });
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      promptExtension: "Migrations live in db/.",
+      deploymentPromptExtension: "",
+      effectivePromptExtension: "Migrations live in db/.",
+    });
+    const user = userEvent.setup();
+    renderList();
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Prompt" }));
+    await user.type(await screen.findByLabelText(/Prompt extension for acme\/gadgets/), "Migrations live in db/.");
+    await user.click(within(row).getByRole("button", { name: "Save prompt extension" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/prompt-extension", {
+      method: "PUT", body: JSON.stringify({ promptExtension: "Migrations live in db/." }),
+    });
+  });
+
+  it("reports the error when saving a repo's prompt extension fails", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      promptExtension: "",
+      deploymentPromptExtension: "",
+      effectivePromptExtension: "",
+    });
+    api.mockRejectedValueOnce(new Error("store is down"));
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    renderList({ showError });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Prompt" }));
+    await screen.findByLabelText(/Prompt extension for acme\/gadgets/);
+    await user.click(within(row).getByRole("button", { name: "Save prompt extension" }));
+
+    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "store is down" }));
+  });
+
+  // A repo whose only configuration is standing instructions of its own
+  // still gets a row: this page is the only place that text can be read
+  // or edited, and it reaches every run against the repo either way
+  // (state.js's repoRows, ui.configResponse.ReposWithPromptExtension).
+  it("also lists a repo known only for its own prompt extension", () => {
+    const config = { reposWithPromptExtension: ["acme/prompt-only"] };
+    renderList({ config });
+
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.getByText("acme/prompt-only")).toBeInTheDocument();
+    expect(screen.getByText("Defaults only")).toBeInTheDocument();
+  });
 });

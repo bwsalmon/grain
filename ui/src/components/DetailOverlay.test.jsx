@@ -73,6 +73,23 @@ describe("DetailOverlay", () => {
     expect(screen.queryByText("Agent framework")).not.toBeInTheDocument();
   });
 
+  // grain/task-114: a per-task prompt extension override, shown the same
+  // way and for the same reason -- and shown in full, since what it says
+  // is the whole of what makes this task's runs different.
+  it("shows the prompt extension only when the task overrides it", () => {
+    const { rerender } = render(
+      <DetailOverlay
+        task={{ ...baseTask, promptExtension: "Ignore the house rules." }}
+        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Prompt extension")).toBeInTheDocument();
+    expect(screen.getByText("Ignore the house rules.")).toBeInTheDocument();
+
+    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.queryByText("Prompt extension")).not.toBeInTheDocument();
+  });
+
   // bwsalmon/agents#534: a per-task sandbox shape override.
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(

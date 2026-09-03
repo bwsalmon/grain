@@ -286,7 +286,7 @@ func (c *HTTPClient) ListRepos(ctx context.Context) ([]RepoSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	return repoSummaries(cfg.TargetRepos, tasks, cfg.RepoDefaultCapabilities), nil
+	return repoSummaries(cfg.TargetRepos, tasks, cfg.RepoDefaultCapabilities, cfg.ReposWithPromptExtension), nil
 }
 
 // RepoDefaults reads repo's own default capability set, alongside the

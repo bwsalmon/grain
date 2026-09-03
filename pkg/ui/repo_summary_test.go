@@ -3,7 +3,8 @@ package ui
 // repoSummaries' own tests -- what `grain repo list` is a rendering of.
 // They live in package ui rather than ui_test because the function is
 // unexported: the three sources a repo can come from (the allowlist, a
-// task's target, a stored default set) are exactly what is worth testing
+// task's target, stored configuration of its own) are exactly what is
+// worth testing
 // directly, and going through HTTPClient.ListRepos to reach them would
 // only add a server to the setup of every case.
 
@@ -33,11 +34,17 @@ func TestRepoSummariesUnionsAllThreeSources(t *testing.T) {
 			// that dropped the row would hide a set somebody saved.
 			"acme/configured-only": {"self-debug"},
 		},
+		// The same third source's other half: a repo whose only
+		// configuration is standing instructions of its own
+		// (grain/task-114), which must put up a row for the same reason
+		// a stored default set does.
+		[]string{"acme/widgets", "acme/prompt-only"},
 	)
 
 	want := []RepoSummary{
 		{Repo: "acme/allowed-only", Configured: true},
 		{Repo: "acme/configured-only", DefaultCapabilities: []string{"self-debug"}},
+		{Repo: "acme/prompt-only", PromptExtension: true},
 		{Repo: "acme/task-only", Tasks: 1, States: map[model.State]int{model.StateRunning: 1}},
 		{
 			Repo:                "acme/widgets",
@@ -46,6 +53,7 @@ func TestRepoSummariesUnionsAllThreeSources(t *testing.T) {
 			Blocked:             1,
 			States:              map[model.State]int{model.StateQueued: 2, model.StateCompleted: 1},
 			DefaultCapabilities: []string{"gcp-key"},
+			PromptExtension:     true,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -59,7 +67,7 @@ func TestRepoSummariesUnionsAllThreeSources(t *testing.T) {
 func TestRepoSummariesIgnoresReadOnlyRepos(t *testing.T) {
 	got := repoSummaries(nil, []Task{
 		{Repo: "acme/widgets", State: model.StateQueued, Reads: []string{"acme/docs"}},
-	}, nil)
+	}, nil, nil)
 	if len(got) != 1 || got[0].Repo != "acme/widgets" {
 		t.Fatalf("repoSummaries() = %+v, want just the write target", got)
 	}
@@ -69,7 +77,7 @@ func TestRepoSummariesIgnoresReadOnlyRepos(t *testing.T) {
 // every row it has is unconfigured -- which is what stops `grain repo
 // list` claiming a repo was left off a list that does not exist.
 func TestRepoSummariesLeavesEveryRowUnconfiguredWhenUnrestricted(t *testing.T) {
-	got := repoSummaries(nil, []Task{{Repo: "acme/widgets", State: model.StateQueued}}, nil)
+	got := repoSummaries(nil, []Task{{Repo: "acme/widgets", State: model.StateQueued}}, nil, nil)
 	if len(got) != 1 || got[0].Configured {
 		t.Fatalf("repoSummaries() = %+v, want one row that is not configured", got)
 	}

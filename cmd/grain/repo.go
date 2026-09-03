@@ -282,6 +282,13 @@ func repoLine(r ui.RepoSummary) string {
 	if len(r.DefaultCapabilities) > 0 {
 		notes = append(notes, "defaults: "+strings.Join(r.DefaultCapabilities, ", "))
 	}
+	// Named rather than quoted: a repo's standing instructions can be a
+	// paragraph, and a line-per-repo listing is the wrong place for one
+	// (ui.RepoSummary.PromptExtension). This is the pointer at "grain
+	// repo prompt-extension owner/name", which prints the text.
+	if r.PromptExtension {
+		notes = append(notes, "prompt extension")
+	}
 	return strings.TrimRight(fmt.Sprintf("%-30s %-12s %s", r.Repo, allowlisted, strings.Join(notes, "; ")), " ")
 }
 

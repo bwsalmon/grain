@@ -88,6 +88,17 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
   const [capsRepo, setCapsRepo] = useState(null);
   const [caps, setCaps] = useState(null);
   const [capsSelection, setCapsSelection] = useState([]);
+  // promptRepo/prompt/promptText are that same one-slot shape again, for
+  // the per-repo prompt extension (grain/task-114): which repo's form is
+  // open, what GET /api/repos/{owner}/{name}/prompt-extension last said
+  // (the same whole-defaults document the capabilities route answers
+  // with, so all three layers of text come back with it), and the
+  // unsaved edit. prompt is null while that read is in flight -- an
+  // empty box would otherwise look like "this repo says nothing", which
+  // is a real and different state.
+  const [promptRepo, setPromptRepo] = useState(null);
+  const [prompt, setPrompt] = useState(null);
+  const [promptText, setPromptText] = useState("");
 
   const q = search.trim().toLowerCase();
   const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
@@ -246,6 +257,53 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
     }
   };
 
+  const loadPromptExtension = async (repo) => {
+    try {
+      const [owner, name] = repo.split("/");
+      const loaded = await api(`/api/repos/${owner}/${name}/prompt-extension`);
+      setPrompt(loaded);
+      setPromptText(loaded.promptExtension || "");
+    } catch (err) {
+      // Closed again rather than left loading, the same as
+      // loadCapabilities: there is nothing to edit if the read failed.
+      setPromptRepo(null);
+      showError(err);
+    }
+  };
+
+  const togglePromptForm = (evt, repo) => {
+    evt.stopPropagation();
+    if (promptRepo === repo) {
+      setPromptRepo(null);
+      return;
+    }
+    setPromptRepo(repo);
+    setPrompt(null);
+    setPromptText("");
+    loadPromptExtension(repo);
+  };
+
+  // savePromptExtension replaces this repo's own text wholesale (PUT's
+  // whole body is the new text, ui.SetRepoPromptExtensionRequest). No
+  // onRefreshConfig after it, unlike saveCapabilities: nothing the
+  // new-task form seeds itself from changes here -- a repo's own text is
+  // read at dispatch, not written onto the task -- so there is nothing
+  // cached to go stale.
+  const savePromptExtension = async (evt, repo) => {
+    evt.preventDefault();
+    try {
+      const [owner, name] = repo.split("/");
+      const updated = await api(`/api/repos/${owner}/${name}/prompt-extension`, {
+        method: "PUT",
+        body: JSON.stringify({ promptExtension: promptText.trim() }),
+      });
+      setPrompt(updated);
+      setPromptText(updated.promptExtension || "");
+    } catch (err) {
+      showError(err);
+    }
+  };
+
   // createBranch only ever records the request -- the branches reconciler
   // (pkg/orchestrator.SyncBranches) is what actually creates it on GitHub,
   // typically within one cycle, so a freshly submitted name reappears
@@ -345,7 +403,7 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                       size="small"
                       variant="outlined"
                       label="Defaults only"
-                      title="No tasks, and not on this deployment's target repos -- listed here because it has default capabilities of its own, which Capabilities edits."
+                      title="No tasks, and not on this deployment's target repos -- listed here because it has configuration of its own, which Capabilities and Prompt edit."
                     />
                   )}
                 </span>
@@ -373,6 +431,13 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                   onClick={(evt) => toggleCapabilitiesForm(evt, r.repo)}
                 >
                   Capabilities
+                </Button>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={(evt) => togglePromptForm(evt, r.repo)}
+                >
+                  Prompt
                 </Button>
                 <Button
                   size="small"
@@ -481,6 +546,43 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                       </Typography>
                       <Stack direction="row" justifyContent="flex-end">
                         <Button type="submit" variant="contained" size="small">Save capabilities</Button>
+                      </Stack>
+                    </Stack>
+                  )}
+                </Box>
+              )}
+              {promptRepo === r.repo && (
+                <Box sx={{ px: "1.75rem", py: 1.25, borderTop: "1px solid", borderColor: "divider" }}>
+                  {prompt === null ? (
+                    <Typography variant="body2" color="text.secondary">Loading prompt extension…</Typography>
+                  ) : (
+                    <Stack component="form" spacing={1} onSubmit={(evt) => savePromptExtension(evt, r.repo)}>
+                      <TextField
+                        name="repoPromptExtension"
+                        label={`Prompt extension for ${r.repo}`}
+                        helperText="Added to this deployment's own standing instructions for a run against this repo, never replacing them. A task can replace both for itself (New task -> Advanced options). Leave empty for a repo that adds nothing."
+                        value={promptText}
+                        onChange={(e) => setPromptText(e.target.value)}
+                        multiline
+                        minRows={4}
+                        autoComplete="off"
+                        fullWidth
+                        size="small"
+                      />
+                      {/* What the deployment already says, read-only and
+                          shown whether or not this repo adds anything:
+                          text appended to instructions nobody can see
+                          from here cannot be written sensibly, and this
+                          is the layer somebody editing here is appending
+                          to (ui.RepoDefaults.DeploymentPromptExtension). */}
+                      <Typography variant="body2" color="text.secondary">
+                        Deployment-wide, set in Settings &rarr; Agents:{" "}
+                        {prompt.deploymentPromptExtension
+                          ? <Box component="span" sx={{ whiteSpace: "pre-wrap" }}>{prompt.deploymentPromptExtension}</Box>
+                          : "nothing"}
+                      </Typography>
+                      <Stack direction="row" justifyContent="flex-end">
+                        <Button type="submit" variant="contained" size="small">Save prompt extension</Button>
                       </Stack>
                     </Stack>
                   )}

@@ -458,13 +458,30 @@ type configResponse struct {
 	// list of ids, and this response is fetched on every poll by every
 	// open tab. The repos pane reads a repo's own through GET
 	// /api/repos/{owner}/{name}/prompt-extension, one repo at a time,
-	// which is where the editing of it happens anyway.
+	// which is where the editing of it happens anyway --
+	// ReposWithPromptExtension below is all this response says about
+	// them.
 	//
 	// omitempty: absent and empty both mean a deployment that adds
 	// nothing, and App.jsx replaces this response wholesale on every
 	// poll, so there is nothing here for a cleared value to have to
 	// overwrite.
 	PromptExtension string `json:"promptExtension,omitempty"`
+	// ReposWithPromptExtension names every repo that has standing
+	// instructions of its own -- the names alone, not the text, for the
+	// reason PromptExtension above gives.
+	//
+	// Names are enough for what the frontend needs it for, which is the
+	// same job RepoDefaultCapabilities does for a repo whose only
+	// presence here is its stored defaults: making the repo appear on the
+	// repos page at all (state.js's repoRows). A repo can carry
+	// configuration without being allow-listed and without any task
+	// targeting it (SetRepoPromptExtension's own doc comment), and this
+	// page is the only place that configuration can be read or edited --
+	// so a repo missing from every other source has to come from
+	// somewhere, or its text goes on reaching every run against it with
+	// nowhere to see it.
+	ReposWithPromptExtension []string `json:"reposWithPromptExtension,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -512,6 +529,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, rc := range repoConfigs {
+		if rc.PromptExtension != "" {
+			resp.ReposWithPromptExtension = append(resp.ReposWithPromptExtension, rc.Repo.String())
+		}
 		var ids []string
 		for _, id := range rc.DefaultCapabilities {
 			if _, ok := s.tasks.capabilityByID(id); ok {

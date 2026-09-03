@@ -663,4 +663,54 @@ describe("SettingsOverlay", () => {
       expect(screen.queryByText(/Takes effect when the daemon restarts/)).not.toBeInTheDocument();
     });
   });
+
+  // The deployment-wide layer of the prompt extension (grain/task-114),
+  // on the Agents tab because it is about what the agent is told.
+  describe("prompt extension", () => {
+    it("populates the box with what the deployment already says", async () => {
+      api.mockResolvedValueOnce({ ...settings, promptExtension: "Run `make lint` before you push." });
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+
+      await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+      expect(screen.getByLabelText(/Standing instructions for every run/))
+        .toHaveValue("Run `make lint` before you push.");
+    });
+
+    it("sends the edited text with the Agents tab's own save", async () => {
+      api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+      await user.type(screen.getByLabelText(/Standing instructions for every run/), "Run `make lint`.");
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(api).toHaveBeenCalledWith("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ promptExtension: "Run `make lint`." }),
+      });
+    });
+
+    // Cleared back to blank is a deliberate "tell runs nothing extra",
+    // not "leave it alone" -- so it has to reach the PUT as "".
+    it("sends an empty string when the box is cleared", async () => {
+      api.mockResolvedValueOnce({ ...settings, promptExtension: "Run `make lint`." }).mockResolvedValueOnce({});
+      const user = userEvent.setup();
+      render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+      await screen.findByDisplayValue("30s");
+      await user.click(screen.getByRole("tab", { name: "Agents" }));
+
+      await user.clear(screen.getByLabelText(/Standing instructions for every run/));
+      await user.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(api).toHaveBeenCalledWith("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify({ promptExtension: "" }),
+      });
+    });
+  });
 });

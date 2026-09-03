@@ -161,6 +161,11 @@ function Declared({ t }) {
   // Same treatment for a per-task agent framework: shown only when this
   // task overrides the deployment's own, which most do not.
   if (t.agentFramework) rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);
+  // Same treatment again for a task that replaces the standing
+  // instructions its deployment and repo would otherwise give its runs
+  // (grain/task-114): shown only when it has one, since most tasks do
+  // not and an empty row would suggest they had opted out of something.
+  if (t.promptExtension) rows.push(["Prompt extension", t.promptExtension]);
   // Most tasks are not interactive, so this row only shows up for the
   // ones that are -- the same "shown only when set" treatment the
   // sandbox override rows above already get. Configuration is always

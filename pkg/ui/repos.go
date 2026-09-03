@@ -340,6 +340,13 @@ type RepoSummary struct {
 	// three sets, and a list of every repo is the wrong place to repeat
 	// the deployment-wide layer once per row.
 	DefaultCapabilities []string `json:"defaultCapabilities,omitempty"`
+	// PromptExtension is whether this repo has standing instructions of
+	// its own (model.RepoConfig.PromptExtension) -- whether, not what,
+	// since a list of every repo is no place for a paragraph per row and
+	// GET /api/config carries only the names for the same reason
+	// (configResponse.ReposWithPromptExtension). `grain repo
+	// prompt-extension <owner/name>` is what prints the text.
+	PromptExtension bool `json:"promptExtension,omitempty"`
 }
 
 // RepoStateOrder is the order a repo's per-state counts are meant to be
@@ -361,21 +368,34 @@ var RepoStateOrder = []model.State{
 // allowlist, the tasks that target it, and the defaults it carries.
 //
 // That third source is where this deviates from state.js's repoRows,
-// deliberately. SetRepoDefaultCapabilities does not require a repo to be
-// allow-listed (its own doc comment: a repo can be configured before it
-// is allowed, and stays configured after it is removed), so a repo can
-// hold defaults while matching neither of the other two sources.
-// Dropping it would mean `grain repo capabilities` could write a set
+// deliberately. Neither SetRepoDefaultCapabilities nor
+// SetRepoPromptExtension requires a repo to be
+// allow-listed (their own doc comments: a repo can be configured before
+// it is allowed, and stays configured after it is removed), so a repo
+// can hold either kind of configuration while matching neither of the
+// other two sources.
+// Dropping it would mean `grain repo capabilities` or `grain repo
+// prompt-extension` could write something
 // that `grain repo list` then never admits exists -- and a list whose
-// whole job includes reporting per-repo defaults must not be the one
-// place they are invisible.
-func repoSummaries(targetRepos []string, tasks []Task, repoDefaults map[string][]string) []RepoSummary {
+// whole job includes reporting per-repo configuration must not be the
+// one place it is invisible.
+func repoSummaries(targetRepos []string, tasks []Task, repoDefaults map[string][]string,
+	reposWithPromptExtension []string) []RepoSummary {
+
+	withPrompt := make(map[string]bool, len(reposWithPromptExtension))
+	for _, repo := range reposWithPromptExtension {
+		withPrompt[repo] = true
+	}
 	byRepo := make(map[string]*RepoSummary)
 	row := func(repo string) *RepoSummary {
 		if r, ok := byRepo[repo]; ok {
 			return r
 		}
-		r := &RepoSummary{Repo: repo, DefaultCapabilities: repoDefaults[repo]}
+		r := &RepoSummary{
+			Repo:                repo,
+			DefaultCapabilities: repoDefaults[repo],
+			PromptExtension:     withPrompt[repo],
+		}
 		byRepo[repo] = r
 		return r
 	}
@@ -383,6 +403,9 @@ func repoSummaries(targetRepos []string, tasks []Task, repoDefaults map[string][
 		row(repo).Configured = true
 	}
 	for repo := range repoDefaults {
+		row(repo)
+	}
+	for _, repo := range reposWithPromptExtension {
 		row(repo)
 	}
 	for _, t := range tasks {
