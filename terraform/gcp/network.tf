@@ -10,6 +10,11 @@ locals {
   subnetwork_name = var.create_network ? google_compute_subnetwork.this[0].name : var.subnetwork_name
   host_tag        = "${var.name_prefix}-host"
 
+  # The tag a task's own VMs carry, so agent_iap_ssh below reaches them
+  # and nothing else -- see that rule, and this module's README,
+  # "Creating a VM as the agent."
+  agent_vm_tag = "${var.name_prefix}-agent-vm"
+
   # IAP's TCP forwarding range -- where a `gcloud compute start-iap-tunnel`
   # connection arrives from. Fixed by Google, and deliberately not
   # ssh_source_ranges: an operator may widen that to their own CIDR for
@@ -39,6 +44,38 @@ resource "google_compute_firewall" "ssh" {
   direction     = "INGRESS"
   source_ranges = var.ssh_source_ranges
   target_tags   = [local.host_tag]
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+}
+
+# The same IAP-tunnelled SSH, for the VMs a task creates rather than this
+# deployment's own host. Every rule in this file is target_tags-scoped to
+# host_tag, which is correct for each of them and left
+# agent_can_manage_compute_instances granting a capability that stopped
+# working halfway through: the agent can create an instance in this VPC
+# and holds roles/iap.tunnelResourceAccessor to tunnel to it, but no rule
+# admits 35.235.240.0/20 to port 22 on anything but the host, so
+# `gcloud compute ssh --tunnel-through-iap` hangs and then times out --
+# and instanceAdmin.v1 can read firewall rules but not create them, so
+# the agent cannot open the path itself either.
+#
+# Scoped to its own tag rather than the whole network so this does not
+# silently become a second way in to the host (or to any unrelated
+# instance an operator runs here), and so an instance created without the
+# tag stays unreachable by default. Reaching through this range at all
+# still requires roles/iap.tunnelResourceAccessor, exactly as
+# tunnel_to_ui's own comment argues: the range is not the control, the
+# IAM grant is.
+resource "google_compute_firewall" "agent_iap_ssh" {
+  count         = var.create_network && var.agent_can_manage_compute_instances ? 1 : 0
+  name          = "${var.name_prefix}-allow-agent-iap-ssh"
+  network       = google_compute_network.this[0].name
+  direction     = "INGRESS"
+  source_ranges = [local.iap_tunnel_range]
+  target_tags   = [local.agent_vm_tag]
 
   allow {
     protocol = "tcp"

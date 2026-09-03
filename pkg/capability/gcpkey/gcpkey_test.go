@@ -255,6 +255,25 @@ func TestPromptSectionNamesThePathAndNoSecret(t *testing.T) {
 	}
 }
 
+// A key with no project selected is a key every gcloud command fails on,
+// with a message that names no credential -- see PromptSection's own doc
+// comment.
+func TestPromptSectionNamesTheProject(t *testing.T) {
+	p := testProvider(newFakeMinter())
+	text, err := p.PromptSection(context.Background(), model.CapabilityContext{}, []model.Placement{
+		{Side: model.SideSandbox, Path: SandboxKeyPath, Content: "super-secret-private-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(text, "gcloud config set project example-project") {
+		t.Errorf("prompt section = %q, want it to set the project", text)
+	}
+	if !contains(text, "GOOGLE_CLOUD_PROJECT=example-project") {
+		t.Errorf("prompt section = %q, want it to name the project for SDKs too", text)
+	}
+}
+
 func TestPromptSectionRejectsWrongPlacementCount(t *testing.T) {
 	p := testProvider(newFakeMinter())
 	if _, err := p.PromptSection(context.Background(), model.CapabilityContext{}, nil); err == nil {
