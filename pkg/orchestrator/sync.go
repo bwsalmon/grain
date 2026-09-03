@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,12 +22,30 @@ import (
 // lets recordPullRequestEvents tell a task's timeline "PR merged" from
 // "PR closed unmerged" (bwsalmon/agents#493).
 //
-// Only a "failure" conclusion reads as PrFailing. GitHub's Checks API also
-// reports "cancelled", "timed_out", "action_required" and others
-// CheckRun's own doc comment says are a caller's policy to interpret, not
-// this package's; treating every non-"success" completed run as failing
-// would make a merge queue's own "cancelled, will retry" check block a PR
-// this package has no business blocking.
+// A check GitHub has not finished running reads PrPending, and pending
+// beats every CI answer below it: a PR whose tests are still going is
+// neither clean (merging it would land untested code, the whole point of
+// running tests at all) nor yet failing. Only "completed" runs are
+// judged, so the answer settles on its own within a cycle or two of CI
+// finishing.
+//
+// Pending deliberately outranks failing, so a red check alongside a
+// still-running one waits rather than escalating immediately. The queue
+// files exactly one automatic fix per PR (fileFixTask, escalateToUser),
+// so it is worth spending a cycle to file that one against CI's whole
+// verdict instead of against whichever job happened to go red first.
+//
+// Of the conclusions a completed run can carry, "failure", "timed_out"
+// and "startup_failure" (the last only ever from the Actions fallback,
+// where a workflow file too broken to run at all lands) read as
+// PrFailing: each is a check that ran, or tried to, and did not pass --
+// which is what a fix task exists to repair. "cancelled",
+// "action_required", "neutral", "skipped" and "stale" do not: CheckRun's
+// own doc comment leaves which conclusions count as broken to the
+// caller, and treating every non-"success" run as failing would make a
+// merge queue's own "cancelled, will retry" check block a PR this
+// package has no business blocking, or file a fix task against a
+// workflow waiting on a human's approval, which no agent can fix.
 func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, checksKnown bool) model.PrHealth {
 	if detail.State == "closed" {
 		if detail.Merged {
@@ -50,16 +69,39 @@ func healthFrom(detail github.PullRequestDetail, checks []github.CheckRun, check
 	}
 	for _, c := range checks {
 		if c.Status != "completed" {
-			continue
+			return model.PrPending
 		}
-		if c.Conclusion != nil && *c.Conclusion == "failure" {
-			return model.PrFailing
-		}
+	}
+	if len(failingChecks(checks)) > 0 {
+		return model.PrFailing
 	}
 	if detail.Mergeable == nil {
 		return model.PrUnknown
 	}
 	return model.PrClean
+}
+
+// failingChecks returns the names of the completed runs in checks that
+// did not pass, in the order GitHub reported them -- what decides
+// PrFailing above, and what healthReason names in the fix task's own
+// body so the agent repairing the PR is told which jobs to look at
+// rather than being left to rediscover them.
+func failingChecks(checks []github.CheckRun) []string {
+	var names []string
+	for _, c := range checks {
+		if c.Status != "completed" || c.Conclusion == nil {
+			continue
+		}
+		switch *c.Conclusion {
+		case "failure", "timed_out", "startup_failure":
+			name := c.Name
+			if name == "" {
+				name = "(unnamed check)"
+			}
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // workflowFallbackOnce keeps the "falling back to Actions" notice to one
@@ -345,6 +387,15 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// else -- an ordinary queue member -- only merges once it is actually
 	// the head: merging task 2 while task 1 is still ahead of it would
 	// defeat the reason to queue at all.
+	//
+	// PrPending matches neither arm on purpose, and neither does
+	// PrUnknown: CI is still running (or its verdict is unreadable), so
+	// there is nothing to merge yet and nothing to file a fix for. The
+	// entry is simply left where it is -- still the head of its queue,
+	// holding the position -- and the next cycle asks GitHub again. That
+	// is what makes a merge wait for the tests rather than race them,
+	// and it is deliberately the same "do nothing, look again" the
+	// asynchronous Mergeable read has always taken.
 	switch {
 	case health == model.PrClean && task.AutoMerge && (isFixTask || isHead || blocked):
 		if err := client.MergePullRequest(ref.Repo.Owner, ref.Repo.Name, ref.Number); err != nil {
@@ -361,7 +412,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		health = healthFrom(detail, checks, checksKnown)
 
 	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
-		if err := advanceMergeQueueHead(ctx, store, task, ref, detail, health, now); err != nil {
+		if err := advanceMergeQueueHead(ctx, store, task, ref, detail, health, checks, now); err != nil {
 			return err
 		}
 	}
@@ -432,11 +483,11 @@ func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID str
 // filed has finished and decide whether that resolved things.
 func advanceMergeQueueHead(ctx context.Context, store *model.Store,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
-	health model.PrHealth, now time.Time) error {
+	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
 	fixTaskID, hasFix := fixTaskLink(task)
 	if !hasFix {
-		return fileFixTask(ctx, store, task, ref, detail, health, now)
+		return fileFixTask(ctx, store, task, ref, detail, health, checks, now)
 	}
 
 	fixState, err := store.State(ctx, fixTaskID)
@@ -469,13 +520,20 @@ func fixTaskLink(task model.Task) (string, bool) {
 }
 
 // healthReason renders why a PR is not mergeable, for a human or an
-// agent reading the fix task's own body.
-func healthReason(health model.PrHealth, detail github.PullRequestDetail) string {
+// agent reading the fix task's own body. A failing PR names the checks
+// that failed (failingChecks) rather than saying only that something
+// did: the agent sent to repair it starts from that list, and "one or
+// more required checks are failing" left it to go and find out which.
+func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks []github.CheckRun) string {
 	switch health {
 	case model.PrConflicted:
 		return fmt.Sprintf("it has conflicts with `%s`", detail.BaseRef)
 	case model.PrFailing:
-		return "one or more required checks are failing"
+		failing := failingChecks(checks)
+		if len(failing) == 0 {
+			return "one or more required checks are failing"
+		}
+		return fmt.Sprintf("its checks are failing (`%s`)", strings.Join(failing, "`, `"))
 	default:
 		return "it is not mergeable"
 	}
@@ -510,9 +568,9 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail) string
 // original task's own issue.
 func fileFixTask(ctx context.Context, store *model.Store,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
-	health model.PrHealth, now time.Time) error {
+	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
-	reason := healthReason(health, detail)
+	reason := healthReason(health, detail, checks)
 	queue := model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}
 
 	id, err := store.NewTaskID(ctx)
