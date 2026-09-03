@@ -278,12 +278,13 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 	return f
 }
 
-// allowedTools names the exact tools NewSandboxTools, NewMockTools and
-// NewPullRequestTools register, mcp__-prefixed the way claude reports
-// them once loaded from --mcp-config -- computed from those constructors
-// directly rather than hand-copied, so this can never drift from what
-// the "mcpserver" subcommand actually advertises the way v1's
-// hand-maintained _ALLOWED_TOOLS constant could (dispatch.py).
+// allowedTools names the exact tools NewSandboxTools, NewMockTools,
+// NewPullRequestTools and NewOpenPullRequestTools register, mcp__-
+// prefixed the way claude reports them once loaded from --mcp-config --
+// computed from those constructors directly rather than hand-copied, so
+// this can never drift from what the "mcpserver" subcommand actually
+// advertises the way v1's hand-maintained _ALLOWED_TOOLS constant could
+// (dispatch.py).
 //
 // pull_request_status is named unconditionally, not only for a run that
 // passed pullRequestArgs. --strict-mcp-config admits a tool only if it

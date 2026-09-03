@@ -270,12 +270,13 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 	return f
 }
 
-// allowedTools names the exact tools NewSandboxTools, NewMockTools and
-// NewPullRequestTools register, mcp__-prefixed the way agy reports them
-// once loaded from its settings -- computed from those constructors
-// directly rather than hand-copied, so this can never drift from what
-// the "mcpserver" subcommand actually advertises the way v1's
-// hand-maintained _ALLOWED_TOOLS constant could (dispatch.py).
+// allowedTools names the exact tools NewSandboxTools, NewMockTools,
+// NewPullRequestTools and NewOpenPullRequestTools register, mcp__-
+// prefixed the way agy reports them once loaded from its settings --
+// computed from those constructors directly rather than hand-copied, so
+// this can never drift from what the "mcpserver" subcommand actually
+// advertises the way v1's hand-maintained _ALLOWED_TOOLS constant could
+// (dispatch.py).
 //
 // pull_request_status is named unconditionally rather than only for a
 // run that passed pullRequestArgs, for the reason agent/claude's own
