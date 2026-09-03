@@ -16,8 +16,9 @@ export default function CapabilitiesPanel({ capabilities }) {
   return (
     <>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Every capability a task can be granted, and whether this deployment is currently
-        configured for it to work. Secrets live on the Secrets tab.
+        Every capability grain ships a provider for, and whether this deployment is currently
+        configured for it to work. Secrets live on the Secrets tab. A capability marked "not
+        grantable" is one no task can ask for at all, however this deployment is configured.
       </Typography>
       {list.length === 0 && <Alert severity="info">No capabilities known.</Alert>}
       <Stack spacing={1.5}>
@@ -31,10 +32,24 @@ export default function CapabilitiesPanel({ capabilities }) {
                 color={cap.ready ? "success" : "default"}
                 variant={cap.ready ? "filled" : "outlined"}
               />
+              {cap.grantable === false && (
+                <Chip size="small" label="Not grantable" color="warning" variant="filled" />
+              )}
             </Stack>
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
               {cap.description}
             </Typography>
+            {/* Ahead of the two "missing ..." hints deliberately: this one
+                cannot be fixed by anything on this pane, so an operator who
+                reads no further than the first line under a capability is
+                the one who most needs to see it. */}
+            {cap.grantable === false && (
+              <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
+                No task can be granted this: grain registers a provider for it, but the task
+                capability picker does not offer it, so attaching it is rejected as an unknown
+                capability. Configuration cannot fix this one.
+              </Typography>
+            )}
             {(cap.missingConfig || []).length > 0 && (
               <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
                 Needs: {cap.missingConfig.join(", ")}

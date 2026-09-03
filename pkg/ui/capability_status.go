@@ -27,11 +27,37 @@ import (
 // registering is not the same as working, and a task granted an
 // unready capability today only discovers that later as a refused
 // resolution or a failed materialize.
+//
+// Ready answers "would this work if a task were granted it", which is a
+// different question from "can a task be granted it at all" -- see
+// Grantable, which is the half a deployment configured perfectly can
+// still fail on.
 type CapabilityStatus struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Ready       bool   `json:"ready"`
+	// Grantable reports whether any task can actually be granted this
+	// capability: whether Config.Capabilities -- the picker's own
+	// listing, and the one list (*Client).grantsFor and SetCapability
+	// validate an id against before writing a model.Grant -- carries a
+	// row for it. False means grain registers a provider for this
+	// capability that nothing can ever reach it through: every attempt to
+	// attach it, from the UI's picker or from `grain create
+	// -capability`, is rejected as "unknown capability", so the provider
+	// is never resolved, never materialized, and places nothing in any
+	// sandbox.
+	//
+	// It is reported separately from Ready, and deliberately not folded
+	// into it, because the two name opposite kinds of gap and are fixed
+	// in opposite places: an unready capability is this deployment's
+	// configuration (set a project, paste a secret), while an
+	// ungrantable one is grain's own code -- ui.DefaultCapabilities and
+	// cmd/grain/daemon.go's capabilityProviders having drifted apart --
+	// and no amount of configuring will move it. Showing only Ready is
+	// what let a deployment sit with a fully configured, "Ready" gcp-key
+	// that no task had ever been able to ask for.
+	Grantable bool `json:"grantable"`
 	// MissingConfig is every deployment setting (this Settings tab's own
 	// General fields) this capability still needs -- e.g. "GCP project"
 	// for gcp-key/gemini-key. Empty for a capability with no such gate
@@ -151,8 +177,9 @@ func missingSecretsFor(requires []string, list []secrets.SecretInfo) []string {
 }
 
 // capabilityStatuses builds every CapabilityStatus for cfg -- the
-// deployment's current store-backed settings -- and c.Config.Secrets,
-// this Client's own secrets store, if any.
+// deployment's current store-backed settings -- c.Config.Secrets, this
+// Client's own secrets store, if any, and c.Config.Capabilities, the
+// picker listing that decides Grantable.
 func (c *Client) capabilityStatuses(cfg model.Config) []CapabilityStatus {
 	var secretList []secrets.SecretInfo
 	if c.Config.Secrets != nil {
@@ -169,10 +196,12 @@ func (c *Client) capabilityStatuses(cfg model.Config) []CapabilityStatus {
 	catalog := capabilityCatalog()
 	out := make([]CapabilityStatus, 0, len(catalog))
 	for _, spec := range catalog {
+		_, grantable := c.capabilityByID(spec.Name)
 		status := CapabilityStatus{
 			ID:            spec.Name,
 			Name:          capabilityDisplayNames[spec.Name],
 			Description:   spec.Description,
+			Grantable:     grantable,
 			MissingConfig: missingConfigFor(spec.Name, cfg),
 		}
 		if c.Config.Secrets != nil {

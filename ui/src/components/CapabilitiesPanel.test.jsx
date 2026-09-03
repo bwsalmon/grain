@@ -40,6 +40,34 @@ describe("CapabilitiesPanel", () => {
     expect(screen.getByText(/Missing secrets: gcp-key-minter/)).toBeInTheDocument();
   });
 
+  // A capability can be perfectly configured and still be one no task
+  // can attach -- the gap that leaves a "Ready" gcp-key placing nothing
+  // in any sandbox, because the task capability picker never offered it.
+  it("flags a ready capability no task can be granted", () => {
+    render(
+      <CapabilitiesPanel
+        capabilities={[
+          { id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, grantable: false },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("Not grantable")).toBeInTheDocument();
+    expect(screen.getByText(/No task can be granted this/)).toBeInTheDocument();
+  });
+
+  it("says nothing about grantability for a capability a task can be granted", () => {
+    render(
+      <CapabilitiesPanel
+        capabilities={[
+          { id: "gemini-key", name: "Gemini key", description: "Mint a key", ready: true, grantable: true },
+        ]}
+      />,
+    );
+    expect(screen.queryByText("Not grantable")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No task can be granted this/)).not.toBeInTheDocument();
+  });
+
   it("falls back to the id when no display name is given", () => {
     render(<CapabilitiesPanel capabilities={[{ id: "scratch-repo", description: "", ready: true }]} />);
     expect(screen.getByText("scratch-repo")).toBeInTheDocument();
