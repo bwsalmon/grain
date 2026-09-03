@@ -83,6 +83,12 @@ type MetricsReport struct {
 	Latency []MetricsStage `json:"latency"`
 	Runs    MetricsRuns    `json:"runs"`
 	Backlog MetricsBacklog `json:"backlog"`
+	// Cycles sits beside Runs because it answers the question Runs
+	// raises. Runs.Utilization says whether the deployment was full;
+	// this says what the tick itself cost regardless -- the two together
+	// are what tell a queue_wait spent waiting for capacity from one
+	// spent waiting for the scheduler.
+	Cycles MetricsCycles `json:"cycles"`
 }
 
 // MetricsThroughput is how much crossed each line during the window, and
@@ -149,12 +155,89 @@ type MetricsBacklog struct {
 	OldestQueuedTaskID  string              `json:"oldestQueuedTaskId,omitempty"`
 }
 
+// MetricsCycles is how this daemon's own RunCycle ticks have been
+// behaving -- the one section of the report that describes the process
+// serving it rather than the store behind it, and so the one that is
+// empty right after a restart and reaches back only as far as that
+// daemon's own in-memory ring does (pkg/metrics' Cycles, and
+// orchestrator.CycleTimes behind it).
+//
+// Enabled is false when this UI was not handed a daemon to ask
+// (Config.Cycles nil), which is a different answer from a daemon that
+// has run no ticks yet -- the same nil-means-unavailable convention
+// sandboxHealthResponse.Enabled already gives its own pane.
+type MetricsCycles struct {
+	Enabled  bool `json:"enabled"`
+	N        int  `json:"n"`
+	Observed int  `json:"observed"`
+	// Truncated says the daemon has run more ticks than it still
+	// remembers, so First below is where its ring begins rather than
+	// where this deployment's history does.
+	Truncated bool `json:"truncated"`
+	// First and Last are the oldest and newest tick this section covers
+	// -- the real span behind N, which is not the requested window when
+	// the ring is shorter than it (the usual case). Both are the zero
+	// time when N is 0; there is no omitempty for a time.Time, and a
+	// pointer here would only move the same check.
+	First time.Time `json:"first"`
+	Last  time.Time `json:"last"`
+
+	Tick     MetricsDistribution `json:"tick"`
+	Interval MetricsDistribution `json:"interval"`
+	// DispatchWait is how far into a tick the dispatch decision was
+	// reached. Interval plus this is the queue wait a task pays for
+	// grain's own scheduling with no contention involved at all -- the
+	// floor under the queue_wait stage in Latency above.
+	DispatchWait MetricsDistribution      `json:"dispatchWait"`
+	Reconcilers  []MetricsCycleReconciler `json:"reconcilers"`
+}
+
+// MetricsCycleReconciler is one reconciler's share of a tick. They arrive
+// in the order the cycle runs them, which is the order that explains
+// them: they run in sequence, so a slow one delays every decision behind
+// it.
+type MetricsCycleReconciler struct {
+	Name     string              `json:"name"`
+	Wait     MetricsDistribution `json:"wait"`
+	Duration MetricsDistribution `json:"duration"`
+	Failures int                 `json:"failures"`
+}
+
+// MetricsDistribution is a distribution on the wire, in seconds --
+// MetricsStage above without the stage/label/description a latency stage
+// carries, since the cycles section names each of its own numbers with a
+// field rather than with a row in a list. Kept as a separate type rather
+// than factored out of MetricsStage so the latency stages' existing flat
+// shape is untouched.
+type MetricsDistribution struct {
+	N           int     `json:"n"`
+	MinSeconds  float64 `json:"minSeconds"`
+	P50Seconds  float64 `json:"p50Seconds"`
+	P90Seconds  float64 `json:"p90Seconds"`
+	P99Seconds  float64 `json:"p99Seconds"`
+	MaxSeconds  float64 `json:"maxSeconds"`
+	MeanSeconds float64 `json:"meanSeconds"`
+}
+
+func distributionOf(d metrics.Distribution) MetricsDistribution {
+	return MetricsDistribution{
+		N:           d.N,
+		MinSeconds:  d.Min.Seconds(),
+		P50Seconds:  d.P50.Seconds(),
+		P90Seconds:  d.P90.Seconds(),
+		P99Seconds:  d.P99.Seconds(),
+		MaxSeconds:  d.Max.Seconds(),
+		MeanSeconds: d.Mean.Seconds(),
+	}
+}
+
 // Metrics computes a report over the window ending now. buckets is how
 // many points the time series carries; 0 takes pkg/metrics' own default.
 //
 // It reads the store and derives everything else, so it takes no lock,
 // caches nothing, and cannot be stale: a report is exactly what the rows
-// said at the moment it was asked for.
+// said at the moment it was asked for. The one exception is the cycles
+// section, which no row could ever say -- see Config.Cycles.
 func (c *Client) Metrics(ctx context.Context, window time.Duration, buckets int) (MetricsReport, error) {
 	if window <= 0 {
 		window = DefaultMetricsWindow
@@ -186,14 +269,27 @@ func (c *Client) Metrics(ctx context.Context, window time.Duration, buckets int)
 	if cfg != nil {
 		in.MaxConcurrent = cfg.MaxConcurrent
 	}
+	// The one input that is not a row: a tick leaves no record, so the
+	// daemon that ran it is the only thing that can say how long it took
+	// (Config.Cycles). nil means this UI has no reconcile loop to ask,
+	// which the report says rather than reporting zero ticks.
+	if c.Config.Cycles != nil {
+		in.Cycles = c.Config.Cycles.CycleTimes()
+	}
 
-	return metricsReportFrom(metrics.Compute(in)), nil
+	return metricsReportFrom(metrics.Compute(in), c.Config.Cycles != nil), nil
 }
 
 // metricsReportFrom is the whole of the conversion to the wire: durations
 // become seconds, and the Latency struct becomes the ordered list a
 // reader walks a task's life through.
-func metricsReportFrom(rep metrics.Report) MetricsReport {
+//
+// cycles is whether this deployment had a reconcile loop to ask about
+// its own ticks at all. It is a separate argument rather than something
+// read off the report because metrics.Compute cannot tell "no daemon to
+// ask" from "a daemon that has run no ticks yet", and those are
+// different answers to give an operator.
+func metricsReportFrom(rep metrics.Report, cycles bool) MetricsReport {
 	out := MetricsReport{
 		Since:         rep.Window.Since,
 		Until:         rep.Window.Until,
@@ -223,6 +319,26 @@ func metricsReportFrom(rep metrics.Report) MetricsReport {
 			OldestQueuedSeconds: rep.Backlog.OldestQueuedWait.Seconds(),
 			OldestQueuedTaskID:  rep.Backlog.OldestQueuedTaskID,
 		},
+		Cycles: MetricsCycles{
+			Enabled:      cycles,
+			N:            rep.Cycles.N,
+			Observed:     rep.Cycles.Observed,
+			Truncated:    rep.Cycles.Truncated,
+			First:        rep.Cycles.First,
+			Last:         rep.Cycles.Last,
+			Tick:         distributionOf(rep.Cycles.Tick),
+			Interval:     distributionOf(rep.Cycles.Interval),
+			DispatchWait: distributionOf(rep.Cycles.DispatchWait),
+			Reconcilers:  make([]MetricsCycleReconciler, 0, len(rep.Cycles.Reconcilers)),
+		},
+	}
+	for _, r := range rep.Cycles.Reconcilers {
+		out.Cycles.Reconcilers = append(out.Cycles.Reconcilers, MetricsCycleReconciler{
+			Name:     r.Name,
+			Wait:     distributionOf(r.Wait),
+			Duration: distributionOf(r.Duration),
+			Failures: r.Failures,
+		})
 	}
 	for _, b := range rep.Throughput.Buckets {
 		out.Throughput.Buckets = append(out.Throughput.Buckets, MetricsBucket{
@@ -242,7 +358,8 @@ func metricsReportFrom(rep metrics.Report) MetricsReport {
 		{"approval_wait", "filed -> approved",
 			"how long a proposed task sat before a human accepted it (tasks approved as they were filed are not counted)", l.ApprovalWait},
 		{"queue_wait", "approved -> attempt started",
-			"the backlog wait: grain's own scheduling, and what more concurrency or a faster tick would shrink", l.QueueWait},
+			"the backlog wait: grain's own scheduling. Read against runs.utilization and the cycles section, " +
+				"which are its two possible causes -- a deployment with no headroom, or a slow tick", l.QueueWait},
 		{"sandbox_setup", "attempt started -> agent's first turn",
 			"a sandbox built, a repo cloned, capabilities minted -- the cost a golden image or a warm spare would cut", l.SandboxSetup},
 		{"agent_work", "agent's first turn -> attempt finished",

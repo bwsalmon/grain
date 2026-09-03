@@ -24,6 +24,7 @@ import (
 	"context"
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
+	"github.com/bwsalmon/grain/pkg/metrics"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/upgrade"
@@ -276,6 +277,38 @@ type Config struct {
 	// the same nil-means-unavailable contract Reboot and Sandboxes above
 	// already give.
 	PullRequests PullRequests
+	// Cycles, when set, is what GET /api/metrics' own "cycles" section
+	// reads to report how long this daemon's RunCycle ticks have been
+	// taking -- cmd/grain/daemon.go's cycleTimesAdapter over the
+	// orchestrator.CycleTimes its reconcile loop writes into. It is the
+	// one part of a metrics report that is not derived from rows,
+	// because a tick leaves none (see pkg/metrics' Cycles), so unlike
+	// every other number there it has to be handed in by the process
+	// that produced it.
+	//
+	// nil means this deployment's UI was not handed one (`grain demo`'s
+	// throwaway UI, or any UI not colocated with a reconcile loop whose
+	// ticks it could speak for), and the section reports itself
+	// unavailable rather than an empty distribution that would read as
+	// "no ticks happened" -- the same nil-means-unavailable contract
+	// Sandboxes and PullRequests above already give.
+	Cycles CycleTimes
+}
+
+// CycleTimes is implemented by whatever can report the RunCycle ticks a
+// daemon has recently run -- cmd/grain/daemon.go's own cycleTimesAdapter
+// over orchestrator.CycleTimes, in a real deployment. Named here and
+// filled there for the same reason SandboxHealth is: this package does
+// not import pkg/orchestrator (see sandbox_health.go's own doc comment),
+// so cmd/grain is the one place both types are ever in scope.
+//
+// It is stated in pkg/metrics' own terms rather than in a third set of
+// types, unlike SandboxHealth: this is not a shape the API renders
+// directly, it is an *input* to the same metrics.Compute call the rest of
+// the report already comes from, and pkg/ui already imports pkg/metrics
+// to make that call.
+type CycleTimes interface {
+	CycleTimes() metrics.CycleHistory
 }
 
 // LiveTranscript is implemented by whatever can read back a still-running

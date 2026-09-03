@@ -40,9 +40,24 @@
 // every Distribution carries its own N. Two stages of the same report
 // legitimately have different sample counts.
 //
+// **One thing measured here is not a row, because it never was.** A
+// RunCycle tick -- the daemon's own scheduling pass -- reads the store,
+// decides, and returns, leaving nothing behind to derive its duration
+// from afterwards. It is also the missing half of Latency.QueueWait: a
+// task waiting because the deployment was full and a task waiting
+// because the tick was slow to reach dispatch produce the same number.
+// So the daemon measures its own ticks into a bounded in-memory ring
+// (orchestrator.CycleTimes -- no table, no write per tick, nothing
+// stored, and lost on restart, which its own doc comment argues for),
+// and hands them here as Input.Cycles. The rules above still hold for it
+// as far as they can: it is windowed on the same "the moment it ended"
+// rule, it carries its own N, and Report.Cycles says outright how far
+// back it actually reaches, which is however long that daemon's ring is
+// rather than however long a window was asked for.
+//
 // This package holds no state and touches no database: pkg/model reads
-// the rows (Store.TaskTimings, Store.RunTimings), this decides what they
-// mean, and pkg/ui serves the answer.
+// the rows (Store.TaskTimings, Store.RunTimings), the daemon reports its
+// own ticks, this decides what they mean, and pkg/ui serves the answer.
 package metrics
 
 import (
@@ -99,6 +114,43 @@ type Input struct {
 	States        map[string]model.State
 	MaxConcurrent int
 	Buckets       int
+	// Cycles is what the daemon's own reconcile loop measured about
+	// itself, and the one input here that does not come from a row --
+	// see Cycles below for why it cannot. Optional, like States and
+	// MaxConcurrent: a caller with no daemon to ask (the CLI over REST
+	// against another process, a test) supplies none and gets an empty
+	// Cycles rather than a wrong one.
+	Cycles CycleHistory
+}
+
+// CycleHistory is a daemon's own record of its recent RunCycle ticks --
+// orchestrator.CycleTimes' contents, converted at the one boundary where
+// both types are in scope (cmd/grain).
+//
+// Samples are oldest first, and are the most recent ones that daemon
+// still remembers rather than all of them: Observed is how many it has
+// ever run, so a caller can tell a full history from a truncated tail.
+type CycleHistory struct {
+	Observed int
+	Samples  []CycleSample
+}
+
+// CycleSample is one RunCycle tick -- orchestrator.CycleTiming, in this
+// package's own terms.
+type CycleSample struct {
+	Start        time.Time
+	Duration     time.Duration
+	DispatchWait time.Duration
+	Reconcilers  []ReconcilerSample
+}
+
+// ReconcilerSample is one reconciler's share of one tick. Wait is how far
+// into the cycle it started; Duration is how long it then took.
+type ReconcilerSample struct {
+	Name     string
+	Wait     time.Duration
+	Duration time.Duration
+	Failed   bool
 }
 
 // Distribution summarises one latency series. Percentiles are
@@ -263,6 +315,85 @@ type Backlog struct {
 	OldestQueuedTaskID string
 }
 
+// Cycles is how the daemon's own reconcile loop has been behaving: how
+// long a RunCycle tick takes, how often one actually happens, and where
+// inside a tick the time goes.
+//
+// It is here because Latency.QueueWait cannot be attributed without it.
+// A queued task waits for two entirely different reasons that produce
+// the same number -- the deployment was at max_concurrent and there was
+// genuinely no room (which Runs.Utilization near 1.0 shows), or there
+// was room the whole time and the task was waiting on the tick. Nothing
+// showed the second. A DispatchWait that has quietly grown to minutes
+// under a large store looks exactly like a busy deployment from
+// QueueWait alone, and the fix for each is the opposite of the fix for
+// the other: more concurrency for one, a faster or better-ordered cycle
+// for the second.
+//
+// It is also the one part of a Report not derived from rows, because a
+// tick leaves none -- see orchestrator.CycleTimes on why the record is a
+// ring in the daemon rather than a table. What that costs is stated
+// rather than hidden: this section describes the process serving the
+// report, is empty right after a restart, and reaches back only as far
+// as that daemon's ring does, however long a window the caller asked
+// for.
+type Cycles struct {
+	// N is how many ticks the window holds, and Observed is how many
+	// this daemon has run since it started -- so N below Observed is
+	// either a window narrower than the ring or a ring that has
+	// forgotten the rest, and Truncated is which.
+	N        int
+	Observed int
+	// Truncated says the daemon has run more ticks than it still
+	// remembers: First below is where its ring begins rather than where
+	// this deployment's history does. It is a fact about the history
+	// supplied, not about the window, which is why it is not simply
+	// Observed > N.
+	Truncated bool
+	// First and Last are the oldest and newest tick this section
+	// actually covers -- the real span behind N, which is not the
+	// requested window when the ring is shorter than it (the usual
+	// case).
+	First time.Time
+	Last  time.Time
+	// Tick is the whole of a RunCycle call: the stored-configuration
+	// refresh plus every reconciler.
+	Tick Distribution
+	// Interval is one tick's start to the next one's -- the loop's real
+	// period, which is the -poll-interval only while a tick is fast
+	// compared to it. Ticks do not overlap (cmd/grain's reconcile waits
+	// for one to return), so this is what the wait for the *next*
+	// dispatch decision is really drawn from.
+	Interval Distribution
+	// DispatchWait is how far into a tick the dispatch decision was
+	// reached. Interval plus this is the queue wait a task pays purely
+	// for grain's own scheduling, with no contention involved at all:
+	// the floor under Latency.QueueWait, and the number to compare it
+	// against before concluding a deployment needs more concurrency.
+	DispatchWait Distribution
+	// Reconcilers is where a tick's time went, in the order the cycle
+	// ran them. A single tick duration cannot say which reconciler grew;
+	// this can, and the ordering matters because they run in sequence --
+	// a pull-request sync that has grown to a minute delays every
+	// decision behind it by a minute.
+	Reconcilers []ReconcilerCycles
+}
+
+// ReconcilerCycles is one reconciler's numbers across the window.
+type ReconcilerCycles struct {
+	Name string
+	// Wait is how far into a cycle this reconciler started -- what
+	// everything before it cost it. For the dispatch reconciler this is
+	// the same series as Cycles.DispatchWait.
+	Wait Distribution
+	// Duration is how long it took, and Failures is how many of those
+	// ticks it ended in an error. The two are worth reading together: a
+	// reconciler that is fast because it fails immediately is not a
+	// reconciler that is fast.
+	Duration Distribution
+	Failures int
+}
+
 // Report is one measurement of a deployment. Its gauges (Runs.Live,
 // Backlog) describe Window.Until rather than the window as a whole, which
 // for the report a caller actually asks for is the moment it was taken.
@@ -272,6 +403,7 @@ type Report struct {
 	Latency    Latency
 	Runs       Runs
 	Backlog    Backlog
+	Cycles     Cycles
 }
 
 // Compute derives a Report. It reads its input and nothing else -- no
@@ -403,7 +535,82 @@ func Compute(in Input) Report {
 	if in.States != nil {
 		rep.Backlog = backlogOf(in.Tasks, in.States, w.Until)
 	}
+
+	// --- the daemon's own tick ----------------------------------------
+	rep.Cycles = cyclesOf(w, in.Cycles)
 	return rep
+}
+
+// cyclesOf summarises the daemon's own ticks over the window.
+//
+// A tick belongs to the window on the same rule everything else here
+// follows -- the moment it *ended* falls inside -- so a cycle that began
+// before Since and was still running at it contributes in full, which is
+// the case a report of slow ticks most wants to see.
+//
+// Interval is measured between consecutive ticks in the history rather
+// than between consecutive ticks in the window, and attributed to the
+// later of the two: the gap a tick waited is a fact about that tick, and
+// dropping the pair whose earlier half fell outside the window would
+// silently understate the very first interval in every report.
+func cyclesOf(w Window, h CycleHistory) Cycles {
+	out := Cycles{Observed: h.Observed, Truncated: h.Observed > len(h.Samples)}
+	var tick, interval, dispatch []time.Duration
+	// Reconcilers keep the order the cycle ran them in, which is the
+	// order that explains them -- so they are collected in a slice, with
+	// a map only to find the entry a name already has.
+	type series struct {
+		wait, duration []time.Duration
+		failures       int
+	}
+	var names []string
+	byName := map[string]*series{}
+
+	for i, s := range h.Samples {
+		end := s.Start.Add(s.Duration)
+		if !w.holds(&end) {
+			continue
+		}
+		out.N++
+		if out.First.IsZero() || s.Start.Before(out.First) {
+			out.First = s.Start
+		}
+		if s.Start.After(out.Last) {
+			out.Last = s.Start
+		}
+		tick = appendIfPositive(tick, s.Duration)
+		dispatch = appendIfPositive(dispatch, s.DispatchWait)
+		if i > 0 {
+			interval = appendIfPositive(interval, s.Start.Sub(h.Samples[i-1].Start))
+		}
+		for _, r := range s.Reconcilers {
+			entry, ok := byName[r.Name]
+			if !ok {
+				entry = &series{}
+				byName[r.Name] = entry
+				names = append(names, r.Name)
+			}
+			entry.wait = appendIfPositive(entry.wait, r.Wait)
+			entry.duration = appendIfPositive(entry.duration, r.Duration)
+			if r.Failed {
+				entry.failures++
+			}
+		}
+	}
+
+	out.Tick = summarize(tick)
+	out.Interval = summarize(interval)
+	out.DispatchWait = summarize(dispatch)
+	for _, name := range names {
+		entry := byName[name]
+		out.Reconcilers = append(out.Reconcilers, ReconcilerCycles{
+			Name:     name,
+			Wait:     summarize(entry.wait),
+			Duration: summarize(entry.duration),
+			Failures: entry.failures,
+		})
+	}
+	return out
 }
 
 // runsByTask groups attempts by their task, oldest first. The store

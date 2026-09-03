@@ -132,7 +132,12 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 (see "Input is a model update, not a GitHub issue").
                 RunCycle runs the two halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
-                pipeline" below.
+                pipeline" below. It also times itself
+                (orchestrator.CycleTimes): a bounded in-memory ring of how
+                long recent ticks took and how far into each one the
+                dispatch decision was reached, which is the one thing a
+                deployment measures about itself rather than derives from
+                a row -- see "Measuring the daemon's own tick" below
 pkg/metrics/    what the deployment actually delivers: tasks completed per
                 day (throughput) and where a task's wall-clock time goes
                 (latency), computed from rows that already exist -- filed,
@@ -142,8 +147,10 @@ pkg/metrics/    what the deployment actually delivers: tasks completed per
                 It holds no state and opens no database: pkg/model reads
                 the rows (Store.TaskTimings/RunTimings), this decides what
                 they mean, pkg/ui serves it as GET /api/metrics and
-                `grain metrics` prints it. See "Measuring throughput and
-                latency" below
+                `grain metrics` prints it. Its one non-derived input is
+                the daemon's own RunCycle tick, which leaves no row to
+                derive anything from -- see "Measuring the daemon's own
+                tick" below. See "Measuring throughput and latency" below
 tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
@@ -2846,6 +2853,79 @@ The sandbox-health pane changed meaning with everything else: it reports
 live sandboxes, so an idle deployment shows nothing rather than a table
 of idle slots.
 
+## Disk is the third dimension of a sandbox's shape
+
+A sandbox VM's size had two knobs — `sandbox-cpus` and
+`sandbox-memory-mb`, deployment-wide in Settings and overridable per task
+— and no third. Its disk was whatever the guest image happened to be:
+`konturctl` gives each VM a copy-on-write qcow2 overlay backed by that
+image, and an overlay is created at exactly the image's own virtual size,
+which `scripts/kontur/build-guest.sh` packs to the rootfs plus 20%
+headroom. That is a few hundred megabytes of slack for every run, and a
+build-heavy checkout spends it: the run fails part way through with a
+disk-full error, on a VM that had CPUs and memory to spare.
+
+`sandbox-disk-gb` is that knob, everywhere the other two already are:
+`model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
+tab in Settings and the shape override under New task -> Advanced
+options, `orchestrator.Shape.DiskGB` resolved per dimension against the
+deployment default, and `konturctl vm create -disk-size-gb` at the one
+moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
+is left off the create entirely, so a deployment that never sets one
+passes exactly the arguments it passed before.
+
+Two things about it are genuinely unlike CPUs and memory, and both are
+visible in the code:
+
+- **There is no default to show.** `ui.Settings` reports
+  `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
+  what is really in effect rather than a misleading literal 0. Disk has
+  no such constant: an unset disk is however large *this deployment's*
+  guest image is, which is a property of an image somebody built, not a
+  number this build can name. The field has no placeholder, and says so
+  in words instead.
+- **A bigger disk is not by itself more space.** The image's filesystem
+  ends where it ended; the extra is unallocated until something grows it.
+  `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
+  runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
+  disk was not enlarged and a one-line grow on one whose was.
+
+**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
+snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
+disk-size field, and `writeQcow2Overlay` — which already takes the
+virtual size as an argument — is called with the source image's size
+unconditionally. Passing the flag against a `konturctl` without it fails
+the create, which is why zero omits it rather than sending an explicit
+size: a deployment that has not set one is unaffected either way, and a
+deployment that sets one has said out loud that it expects the flag to
+work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
+the other half of this, and belongs there rather than as a local patch
+here — see `third_party/kontur/VENDORED.md`.
+
+### Monitoring it
+
+Setting a size is half the ask; the other half is seeing whether it was
+the right one. The sandbox-health pane now reports disk alongside load
+average and memory, from both ends:
+
+- **Per sandbox.** `KonturSandboxes.sandboxHealth` already pulled
+  `/proc/loadavg` and `/proc/meminfo` out of the guest in one command
+  over the same transport a run's own tools use; it now asks for
+  `df -Pk /` in that same command rather than paying a second guest login
+  out of the five-second health budget. `-P` is what makes the parse
+  reliable — one line per filesystem, six columns — and the row is found
+  by shape ("the line whose last field is `/`") rather than by position,
+  so the `/proc` lines sharing the stream cannot be mistaken for it.
+- **For the host.** `pkg/sysstat` gains `DiskUsage`, one `statfs` call,
+  which `hostStats` asks about the daemon's own `-data-dir` rather than
+  about `/`: the daemon runs in a container whose root filesystem is an
+  image layer nobody's runs fill, while the data directory is on the host
+  volume that holds the store *and* every VM's disk overlay. That is the
+  disk a deployment actually runs out of.
+
+Both report 0/0 when there is no reading to be had, which the pane shows
+as a dash and the trend charts skip rather than plotting as an empty
+disk — the same "unavailable is not zero" treatment memory already got.
 ## Measuring throughput and latency
 
 The previous section ends with "worth measuring before reaching for
@@ -2953,76 +3033,119 @@ CLI only for now — and no history of its own: because nothing is stored,
 a report can only ever be computed from rows that still exist, so a task
 deleted from the store takes its own past contribution with it.
 
-## Disk is the third dimension of a sandbox's shape
+## Measuring the daemon's own tick
 
-A sandbox VM's size had two knobs — `sandbox-cpus` and
-`sandbox-memory-mb`, deployment-wide in Settings and overridable per task
-— and no third. Its disk was whatever the guest image happened to be:
-`konturctl` gives each VM a copy-on-write qcow2 overlay backed by that
-image, and an overlay is created at exactly the image's own virtual size,
-which `scripts/kontur/build-guest.sh` packs to the rootfs plus 20%
-headroom. That is a few hundred megabytes of slack for every run, and a
-build-heavy checkout spends it: the run fails part way through with a
-disk-full error, on a VM that had CPUs and memory to spare.
+The section above ends with the pair worth reading together — idle
+capacity next to a deep queue is a scheduling problem — and leaves the
+next question unanswered. `queue_wait` (approved -> the first attempt
+starting) is the one latency stage that is grain's own scheduling rather
+than anyone's work, and two entirely different causes produce the same
+number:
 
-`sandbox-disk-gb` is that knob, everywhere the other two already are:
-`model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
-tab in Settings and the shape override under New task -> Advanced
-options, `orchestrator.Shape.DiskGB` resolved per dimension against the
-deployment default, and `konturctl vm create -disk-size-gb` at the one
-moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
-is left off the create entirely, so a deployment that never sets one
-passes exactly the arguments it passed before.
+1. the deployment was at `max_concurrent` and the task genuinely waited
+   for headroom, which `runs.utilization` near 1.0 already shows; or
+2. there was headroom the whole time, and the task waited on the tick —
+   `-poll-interval`, plus however long a `RunCycle` pass itself takes
+   before it reaches the dispatch decision.
 
-Two things about it are genuinely unlike CPUs and memory, and both are
-visible in the code:
+Nothing measured the second, so a tick that had quietly grown to minutes
+under a large store looked exactly like a busy deployment. `GET
+/api/metrics` now carries a `cycles` section beside `runs`, and `grain
+metrics` prints it right after capacity, so both causes are on screen
+before the `queue_wait` row is:
 
-- **There is no default to show.** `ui.Settings` reports
-  `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
-  what is really in effect rather than a misleading literal 0. Disk has
-  no such constant: an unset disk is however large *this deployment's*
-  guest image is, which is a property of an image somebody built, not a
-  number this build can name. The field has no placeholder, and says so
-  in words instead.
-- **A bigger disk is not by itself more space.** The image's filesystem
-  ends where it ended; the extra is unallocated until something grows it.
-  `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
-  runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
-  disk was not enlarged and a one-line grow on one whose was.
+```console
+reconcile tick (this daemon, since it started -- not stored, so not over the window)
+  ticks measured              720  (of 5304 run; older ones forgotten)
+                                    p50        p90        max
+  tick duration                    83.4ms      1.42s      4.9s
+  tick to tick                        30s        30s     34.9s
+  cycle start -> dispatch          21.1ms     34.6ms    212.7ms
+  scheduling floor: 30.02s  (tick-to-tick p50 + dispatch p50 -- the queue wait a task pays
+    for grain's own scheduling with no contention at all)
 
-**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
-snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
-disk-size field, and `writeQcow2Overlay` — which already takes the
-virtual size as an argument — is called with the source image's size
-unconditionally. Passing the flag against a `konturctl` without it fails
-the create, which is why zero omits it rather than sending an explicit
-size: a deployment that has not set one is unaffected either way, and a
-deployment that sets one has said out loud that it expects the flag to
-work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
-the other half of this, and belongs there rather than as a local patch
-here — see `third_party/kontur/VENDORED.md`.
+  reconciler         wait p50        p50        p90   failed
+  schedule             1.1ms      2.4ms      8.9ms        0
+  dispatch            21.1ms     11.2ms     48.0ms        0
+  sync                32.4ms     47.1ms      1.31s        3
+```
 
-### Monitoring it
+**The number the section builds to is the scheduling floor.** Ticks do
+not overlap (`cmd/grain`'s `reconcile` waits for one to return before the
+next interval starts), so tick-to-tick is the loop's real period, which
+is the `-poll-interval` only while a tick is fast compared to it. Adding
+the dispatch wait to it gives what a task pays for grain's own scheduling
+with no contention involved at all. A `queue_wait` p50 near that floor is
+the tick; a `queue_wait` p50 far above it is the deployment being full.
+They are opposite problems with opposite fixes — more concurrency for one,
+a faster or better-ordered cycle for the other — and until now the report
+could not tell them apart.
 
-Setting a size is half the ask; the other half is seeing whether it was
-the right one. The sandbox-health pane now reports disk alongside load
-average and memory, from both ends:
+**A per-reconciler breakdown, not one number for the tick.** The
+reconcilers run in order ("Reconcilers, not a pipeline"), so a
+pull-request sync that has grown to a minute is a minute every decision
+behind it did not get to spend, and a single tick duration cannot say
+which one grew. Each reconciler reports how far into the cycle it
+started, how long it took, and how many of those cycles it ended in an
+error — that last one because a reconciler that is fast *because* it
+fails immediately is not a fast reconciler, and a duration alone cannot
+tell the two apart.
 
-- **Per sandbox.** `KonturSandboxes.sandboxHealth` already pulled
-  `/proc/loadavg` and `/proc/meminfo` out of the guest in one command
-  over the same transport a run's own tools use; it now asks for
-  `df -Pk /` in that same command rather than paying a second guest login
-  out of the five-second health budget. `-P` is what makes the parse
-  reliable — one line per filesystem, six columns — and the row is found
-  by shape ("the line whose last field is `/`") rather than by position,
-  so the `/proc` lines sharing the stream cannot be mistaken for it.
-- **For the host.** `pkg/sysstat` gains `DiskUsage`, one `statfs` call,
-  which `hostStats` asks about the daemon's own `-data-dir` rather than
-  about `/`: the daemon runs in a container whose root filesystem is an
-  image layer nobody's runs fill, while the data directory is on the host
-  volume that holds the store *and* every VM's disk overlay. That is the
-  disk a deployment actually runs out of.
+**The dispatch wait is recorded by the cycle, not picked out of the list
+by name.** `pkg/orchestrator` is the package that knows which reconciler
+is the decision a queued task is actually waiting for — it names them —
+so it reports that offset as its own field (`CycleTiming.DispatchWait`)
+rather than leaving every consumer to hardcode the string `"dispatch"`.
 
-Both report 0/0 when there is no reading to be had, which the pane shows
-as a dash and the trend charts skip rather than plotting as an empty
-disk — the same "unavailable is not zero" treatment memory already got.
+### Why this one measurement is in memory
+
+Everything else in `pkg/metrics` is derived from rows that already exist,
+and holds to `docs/data-model.md`'s "anything derivable is derived, never
+stored." A tick is the one thing that leaves no row at all: it reads the
+store, decides, and returns. That left two options.
+
+A **row per cycle** would be durable across restarts and queryable over
+any window. It costs a new table, a write on every single tick forever
+(2,880 a day at the default 30s `-poll-interval`) and a growth curve
+nothing prunes — to measure something whose whole purpose is to say
+whether *this process, right now* is dispatching promptly. It would also
+make the measurement change what it measures: a tick that writes a row is
+a tick with a store write in it.
+
+A **ring in the process** — `orchestrator.CycleTimes`, 720 cycles, six
+hours at the default interval — costs bounded memory, no schema, no
+write, and stores nothing, which keeps the doctrine intact rather than
+carving an exception into it. That is what this is. The honest cost is
+that it is lost on restart, and the report says so rather than hiding it:
+the section is scoped to "this daemon, since it started", carries
+`observed` alongside `n` so a truncated ring is visible, and reports
+`first`/`last` as the span it really covers, which is however long the
+ring is rather than however long a window was asked for. Tick history
+belongs to the process that produced it anyway — a daemon that has just
+restarted has a fresh tick, with none of the accumulated store the slow
+tick this exists to catch would have been slow because of.
+
+The wiring follows the same seam the sandbox-health pane already uses:
+`pkg/ui` does not import `pkg/orchestrator`, so `cmd/grain`'s own
+`cycleTimesAdapter` is the one place both types are in scope, and the
+ring is package-level in `cmd/grain` because the UI/API server starts
+before the reconcile loop that writes into it (the same ordering
+`reconcilerDown` and `livePullRequests` already straddle). A UI with no
+reconcile loop behind it reports `"enabled": false` rather than a tick of
+zero: "nobody measured it" and "the tick costs nothing" are opposite
+answers, and only one of them is ever true.
+
+`tests/e2e/loadtest_test.go` had measured `RunCycle` tick duration with
+instrumentation of its own since it was written ("RunCycle tick duration:
+n=… p50=… p95=…"), and no longer does. The harness passes a `CycleTimes`
+into the `Deps` it ticks and reports out of that instead, so the load
+test and a deployment read one measurement taken by one piece of code,
+rather than two that agree only for as long as nobody changes either. It
+is also the more useful of the two: the harness now reports the dispatch
+wait and the per-reconciler breakdown alongside the tick, and fails on
+what a stopwatch around `RunCycle` could not see at all — a cycle that did
+not run every reconciler, and a p95 dispatch wait past a third of the
+per-tick budget, which is a queued task waiting on the tick itself rather
+than on a deployment that was full. A tick growing under a large store is
+the thing a load test is best placed to catch, and that is the shape it
+now catches it in.

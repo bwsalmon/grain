@@ -165,8 +165,8 @@ Commands:
   retry <id>                           clear a failed task's retry cap so it dispatches again
   config                               show the capabilities this deployment offers
   settings [flags]                     show, or change, the daemon's stored configuration (bwsalmon/agents#320)
-  metrics [-window 7d]                 throughput and latency over a window (see metrics.go)
   repo <subcommand> [args]             list repos, and read or change one repo's own settings (see repo.go)
+  metrics [-window 7d]                 throughput and latency over a window (see metrics.go)
 `
 
 const defaultServerURL = "http://127.0.0.1:8420"

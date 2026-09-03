@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/metrics"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -147,6 +148,99 @@ func TestMetricsEndpointServesAReportAndRejectsNonsense(t *testing.T) {
 		if rec := do(t, srv, http.MethodGet, "/api/metrics"+query, ""); rec.Code != http.StatusBadRequest {
 			t.Errorf("GET /api/metrics%s = %d, want 400", query, rec.Code)
 		}
+	}
+}
+
+// stubCycleTimes is ui.CycleTimes over a fixed history -- standing in
+// for cmd/grain's own adapter over the ring its reconcile loop writes
+// into, which is the only thing that can speak for a tick, since a tick
+// leaves no row for the rest of this report to be derived from.
+type stubCycleTimes struct{ history metrics.CycleHistory }
+
+func (s stubCycleTimes) CycleTimes() metrics.CycleHistory { return s.history }
+
+// The cycles section is what makes the queue_wait stage above
+// attributable: without it, a task that waited because the deployment
+// was full and a task that waited on a slow tick are the same number.
+func TestMetricsReportsTheDaemonsOwnTick(t *testing.T) {
+	client, _, _ := testClient(t)
+	client.Now = func() time.Time { return baseTime.Add(time.Hour) }
+	start := baseTime.Add(30 * time.Minute)
+	client.Config.Cycles = stubCycleTimes{history: metrics.CycleHistory{
+		Observed: 900,
+		Samples: []metrics.CycleSample{
+			{
+				Start:        start,
+				Duration:     80 * time.Millisecond,
+				DispatchWait: 20 * time.Millisecond,
+				Reconcilers: []metrics.ReconcilerSample{
+					{Name: "schedule", Wait: time.Millisecond, Duration: 19 * time.Millisecond},
+					{Name: "dispatch", Wait: 20 * time.Millisecond, Duration: 10 * time.Millisecond},
+					{Name: "sync", Wait: 30 * time.Millisecond, Duration: 50 * time.Millisecond, Failed: true},
+				},
+			},
+			{
+				Start:        start.Add(30 * time.Second),
+				Duration:     120 * time.Millisecond,
+				DispatchWait: 40 * time.Millisecond,
+				Reconcilers: []metrics.ReconcilerSample{
+					{Name: "schedule", Wait: time.Millisecond, Duration: 39 * time.Millisecond},
+					{Name: "dispatch", Wait: 40 * time.Millisecond, Duration: 10 * time.Millisecond},
+					{Name: "sync", Wait: 50 * time.Millisecond, Duration: 70 * time.Millisecond},
+				},
+			},
+		},
+	}}
+
+	srv := ui.NewServerWithClient(client)
+	rec := do(t, srv, http.MethodGet, "/api/metrics", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	c := decode[ui.MetricsReport](t, rec).Cycles
+
+	if !c.Enabled || c.N != 2 {
+		t.Fatalf("cycles = (enabled=%v, n=%d), want the two ticks the daemon reported", c.Enabled, c.N)
+	}
+	if c.Observed != 900 || !c.Truncated {
+		t.Errorf("observed = %d, truncated = %v; want 900 and true -- the ring has forgotten the rest",
+			c.Observed, c.Truncated)
+	}
+	// Everything crosses this boundary in seconds, named as such.
+	// Nearest-rank over two samples puts p50 on the lower of them.
+	if got, want := c.Tick.P50Seconds, 0.08; got != want {
+		t.Errorf("tick p50 = %vs, want %vs", got, want)
+	}
+	if got, want := c.Tick.MaxSeconds, 0.12; got != want {
+		t.Errorf("tick max = %vs, want %vs", got, want)
+	}
+	if got, want := c.DispatchWait.P50Seconds, 0.02; got != want {
+		t.Errorf("dispatch wait p50 = %vs, want %vs", got, want)
+	}
+	if got, want := c.Interval.P50Seconds, 30.0; got != want {
+		t.Errorf("interval p50 = %vs, want the loop's real period (%vs)", got, want)
+	}
+	if len(c.Reconcilers) != 3 || c.Reconcilers[1].Name != "dispatch" {
+		t.Fatalf("reconcilers = %+v, want all three in cycle order", c.Reconcilers)
+	}
+	if c.Reconcilers[2].Failures != 1 {
+		t.Errorf("sync failures = %d, want the one cycle it failed in", c.Reconcilers[2].Failures)
+	}
+}
+
+// A UI with no reconcile loop to ask says so, rather than reporting a
+// tick of zero -- "nobody measured it" and "the tick costs nothing" are
+// opposite answers, and the second would be read as a deployment whose
+// scheduling is free.
+func TestMetricsWithNoDaemonToAskReportsCyclesUnavailable(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodGet, "/api/metrics", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	c := decode[ui.MetricsReport](t, rec).Cycles
+	if c.Enabled || c.N != 0 {
+		t.Errorf("cycles = (enabled=%v, n=%d), want an unavailable section", c.Enabled, c.N)
 	}
 }
 
