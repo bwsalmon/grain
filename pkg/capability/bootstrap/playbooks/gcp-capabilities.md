@@ -89,9 +89,18 @@ terraform plan -backend-config=backend-local.hcl \
   -target=google_service_account.agent \
   -target=google_service_account.minter \
   -target=google_project_iam_member.host \
-  -target=google_project_iam_member.agent_can_manage_compute_instances \
-  -target=google_project_iam_member.agent_can_manage_gke \
-  -target=google_project_service.apis
+  -target=google_project_iam_member.agent_compute \
+  -target=google_project_iam_member.agent_iap_tunnel \
+  -target=google_project_iam_member.agent_gke \
+  -target=google_service_account_iam_member.agent_acts_as_self \
+  -target=google_service_account_iam_member.minter_manages_agent_keys \
+  -target=google_service_account_iam_member.deployer_manages_minter_keys \
+  -target=google_project_iam_member.minter_gemini_keys \
+  -target=google_project_service.compute \
+  -target=google_project_service.container \
+  -target=google_project_service.artifactregistry \
+  -target=google_project_service.generativelanguage \
+  -target=google_project_service.apikeys
 ```
 
 (Check `iam.tf` and `network.tf`/`variables.tf` for the exact resource
@@ -99,6 +108,24 @@ addresses this version of the module declares -- names drift; the point
 is every `-target` names a service account, an IAM member, or an API
 enablement, never `google_compute_instance.host`, its disks, or
 anything network-shaped.)
+
+Watch the plan's own count rather than trusting the list above:
+`-target` with an address the module does not declare is a *warning*,
+not an error, so a stale name here plans nothing and applies nothing
+while still exiting 0 -- which looks exactly like "already up to date."
+If the plan says "No changes" on a project that has never been
+bootstrapped, suspect the addresses before believing it. A `-target`
+naming a `for_each` resource (`agent_compute`, `agent_gke`) correctly
+covers every instance of it; the `count = 0` ones (whichever of
+`enable_gemini_key`/`agent_can_manage_*` are off) are simply absent, and
+warn the same harmless way.
+
+`google_service_account_iam_member.agent_acts_as_self` is easy to leave
+out and does not fail visibly until much later: without it the agent
+account holds instance and cluster admin but cannot attach any service
+account to what it creates, so a task's first `gcloud compute instances
+create` fails on a permission this plan looked like it had granted. See
+`terraform/gcp/README.md`, "Creating a VM as the agent."
 
 **Stop and ask the human before applying** if the plan proposes
 creating, destroying, or modifying anything outside that set -- most

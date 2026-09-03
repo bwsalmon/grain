@@ -532,6 +532,62 @@ reasoning, and `variables.tf` for the on/off switches:
   keys project-wide. Its own key never touches Terraform; see
   "Secrets never touch Terraform" above.
 
+## Creating a VM as the agent
+
+`agent_can_manage_compute_instances` grants the roles, but a bare
+`gcloud compute instances create my-vm --zone=...` run with a
+`gcp-key` credential still fails, twice over, for reasons that name no
+role this module sets:
+
+- **The default service account.** `create` with no
+  `--service-account` attaches the project's default Compute Engine
+  account, and GCP refuses unless the caller holds
+  `iam.serviceAccounts.actAs` on *that* account. Nothing here grants
+  that, deliberately -- the default account usually carries broad legacy
+  roles, so an instance running as it is a wider identity than the agent
+  itself. `iam.tf`'s `agent_acts_as_self` grants `actAs` on the agent
+  account only, so pass `--service-account=<agent email>` (or
+  `--no-service-account --no-scopes` for an instance that needs no GCP
+  identity).
+- **Port 22.** This VPC opens SSH to Google's IAP range only, and only
+  for tagged instances. `network.tf`'s `agent_iap_ssh` covers the
+  `<name_prefix>-agent-vm` tag, so an instance created without
+  `--tags=<name_prefix>-agent-vm` cannot be reached even though the agent
+  holds `roles/iap.tunnelResourceAccessor` -- and it cannot fix that
+  itself, since `compute.instanceAdmin.v1` can read firewall rules but
+  not create them.
+
+The agent's SSH grant is `roles/compute.osLogin`, so create the instance
+with `--metadata=enable-oslogin=TRUE` (or set that project-wide) to keep
+OS Login the path in. Left off, `gcloud compute ssh` falls back to
+pushing a key into project-wide metadata instead, which is both a wider
+write than this needs and a different permission from the one granted
+here.
+
+The `agent_vm_create_flags` output prints the whole set for this
+deployment. The full lifecycle is then:
+
+```
+gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS
+gcloud config set project <project_id>
+
+gcloud compute instances create my-vm $(terraform output -raw agent_vm_create_flags) \
+  --machine-type=e2-medium --image-family=debian-12 --image-project=debian-cloud \
+  --metadata=enable-oslogin=TRUE
+gcloud compute ssh my-vm --zone <zone> --tunnel-through-iap --command 'hostname'
+gcloud compute instances delete my-vm --zone <zone> --quiet
+```
+
+`--tunnel-through-iap` is not optional: `--no-address` above leaves the
+instance with no external IP, which is what lets `enable_cloud_nat` give
+it egress without giving the internet a path in.
+
+Two things this deployment does *not* let a task do to itself:
+`agent_compute`'s IAM condition excludes this deployment's own host VM
+from both instance management and SSH, and `agent_iap_ssh` is scoped to
+its own tag rather than the network, so a task cannot tag its way onto
+the host's rules either.
+
 ## Repo enforcement
 
 `test_repos` is now wired into the daemon's own `-target-repos`

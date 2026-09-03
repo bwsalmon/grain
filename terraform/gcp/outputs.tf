@@ -52,6 +52,33 @@ output "minter_service_account" {
   description = "The identity push-secrets.sh mints a key for, to seed the host with -- see that script."
 }
 
+# The flags a task's own `gcloud compute instances create` needs for the
+# instance to land somewhere iam.tf's grants and network.tf's
+# agent_iap_ssh rule actually cover -- a bare `create` with none of them
+# fails on the default Compute Engine service account, and an instance
+# created without --tags is unreachable over IAP once it exists. See this
+# module's README, "Creating a VM as the agent." Null when
+# agent_can_manage_compute_instances is off, since then there is no agent
+# account and no rule for these to refer to.
+#
+# --no-address assumes enable_cloud_nat (the default) for the instance's
+# own egress, and the tag only means anything when create_network is on;
+# with an operator-supplied network, opening 35.235.240.0/20 to port 22
+# for that tag is theirs to do.
+output "agent_vm_create_flags" {
+  value = var.agent_can_manage_compute_instances ? join(" ", [
+    "--project=${var.project_id}",
+    "--zone=${var.zone}",
+    "--network=${local.network_name}",
+    "--subnet=${local.subnetwork_name}",
+    "--no-address",
+    "--tags=${local.agent_vm_tag}",
+    "--service-account=${google_service_account.agent[0].email}",
+    "--scopes=cloud-platform",
+  ]) : null
+  description = "Flags for a task creating its own VM, so that IAM permits the create and IAP can reach port 22 afterwards. Null when agent_can_manage_compute_instances is off."
+}
+
 output "ssh_command" {
   value       = "gcloud compute ssh ${google_compute_instance.host.name} --zone ${var.zone} --project ${var.project_id} --tunnel-through-iap"
   description = "How to get a shell on the host despite it having no external IP and no open SSH port."

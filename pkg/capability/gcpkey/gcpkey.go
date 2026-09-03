@@ -241,6 +241,16 @@ func (p *Provider) Materialize(ctx context.Context, cc model.CapabilityContext) 
 	}, nil
 }
 
+// PromptSection names the key's path *and* Config.ProjectID, because
+// neither line it prints selects a project on its own: activating a key
+// (or pointing GOOGLE_APPLICATION_CREDENTIALS at one) authenticates the
+// caller and nothing more. Without the project set, the very first
+// gcloud command a task runs fails with "The required property [project]
+// is not currently set" -- a message that names no credential at all and
+// reads, to an agent that has just been handed a key, like the key is
+// the thing that is broken. Config.ProjectID is deployment config rather
+// than secret material (Spec's own comment says so), so stating it here
+// costs nothing.
 func (p *Provider) PromptSection(ctx context.Context, cc model.CapabilityContext, placements []model.Placement) (string, error) {
 	if len(placements) != 1 {
 		return "", fmt.Errorf("gcpkey: expected exactly one placement, got %d", len(placements))
@@ -250,8 +260,14 @@ func (p *Provider) PromptSection(ctx context.Context, cc model.CapabilityContext
 		"A GCP service-account key is at %s, readable only by you:\n\n"+
 			"    export GOOGLE_APPLICATION_CREDENTIALS=%q\n\n"+
 			"or, for the gcloud CLI:\n\n"+
-			"    gcloud auth activate-service-account --key-file=%s\n",
-		path, path, path,
+			"    gcloud auth activate-service-account --key-file=%s\n"+
+			"    gcloud config set project %s\n\n"+
+			"That second line is not optional: activating a key authenticates "+
+			"you but does not select a project, so gcloud without it fails with "+
+			"\"The required property [project] is not currently set\" rather "+
+			"than anything about the key. Export GOOGLE_CLOUD_PROJECT=%s for "+
+			"SDKs reading the file directly.\n",
+		path, path, path, p.Config.ProjectID, p.Config.ProjectID,
 	), nil
 }
 

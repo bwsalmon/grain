@@ -231,20 +231,43 @@ resource "google_project_iam_member" "agent_gke" {
   depends_on = [google_project_service.container, google_project_service.artifactregistry]
 }
 
-# container.admin alone cannot create a cluster -- every GKE node pool
-# runs as some service account, and GCP refuses to attach one unless the
-# caller separately holds iam.serviceAccountUser on it (confirmed live
-# against v1's own deployment, its iam.tf's
+# Neither container.admin nor compute.instanceAdmin.v1 can create the
+# thing it names, on its own: a GKE node pool and a GCE instance both run
+# as some service account, and GCP refuses to attach one unless the
+# caller separately holds iam.serviceAccountUser on *that* account
+# (confirmed live against v1's own deployment, its iam.tf's
 # agent_acts_as_self_for_gke_nodes, bwsalmon/agents#146). Granting it
 # here, on the agent account acting as itself, is what makes
-# `--service-account=<agent email>` work when a task creates a cluster --
-# and is the node identity worth using: the project's default Compute
-# Engine service account often carries broader legacy roles than this
-# one, so pointing node pools at it would be a privilege escalation for
-# anything that ends up running as a pod.
-resource "google_service_account_iam_member" "agent_acts_as_self_for_gke_nodes" {
-  count              = var.agent_can_manage_gke ? 1 : 0
+# `--service-account=<agent email>` work -- and is the identity worth
+# using in both cases: the project's default Compute Engine service
+# account often carries broader legacy roles than this one, so pointing a
+# node pool or an instance at it would be a privilege escalation for
+# anything that ends up running there.
+#
+# This used to be conditioned on agent_can_manage_gke alone, which left
+# agent_can_manage_compute_instances granting a set of roles that could
+# not actually create an instance: a bare `gcloud compute instances
+# create` defaults to attaching the project's default Compute Engine
+# service account and fails with "The user does not have access to
+# service account '<N>-compute@developer.gserviceaccount.com'", naming a
+# permission nothing in this file grants. Widening the count fixes the
+# `--service-account=<agent email>` form; the *default* form still fails,
+# deliberately -- see this module's README, "Creating a VM as the agent",
+# for the flags a task should use instead, including
+# `--no-service-account --no-scopes` for an instance that needs no GCP
+# identity at all.
+resource "google_service_account_iam_member" "agent_acts_as_self" {
+  count              = var.agent_can_manage_gke || var.agent_can_manage_compute_instances ? 1 : 0
   service_account_id = google_service_account.agent[0].name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.agent[0].email}"
+}
+
+# Renamed when the count above stopped being GKE-specific. Without this,
+# the next apply against an existing deployment destroys the binding and
+# recreates it under the new address -- a window in which a running task
+# holding a key for this account cannot create anything.
+moved {
+  from = google_service_account_iam_member.agent_acts_as_self_for_gke_nodes
+  to   = google_service_account_iam_member.agent_acts_as_self
 }
