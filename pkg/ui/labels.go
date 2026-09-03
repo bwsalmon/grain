@@ -418,6 +418,26 @@ type Config struct {
 	// "no ticks happened" -- the same nil-means-unavailable contract
 	// Sandboxes and PullRequests above already give.
 	Cycles CycleTimes
+	// AgentPause, when set, is the deployment-wide dispatch gate an
+	// agent's own usage limit closes -- the *orchestrator.Pause
+	// cmd/grain/daemon.go hands both this UI and its reconcile loop.
+	// GET /api/config reports it as agentPause so a banner can say why
+	// a queue of ready tasks has nothing running, GET /api/pause is the
+	// same answer on its own, and DELETE /api/pause lifts it by hand.
+	//
+	// Before this field existed, a paused deployment said so only in a
+	// daemon log line and in the detail of the attempts the pause ended
+	// -- so an operator looking at a full queue and an idle deployment
+	// had nowhere on screen to learn that grain was waiting out a
+	// provider's window on purpose (grain/task-132).
+	//
+	// nil means this deployment's UI was not handed one (`grain demo`'s
+	// throwaway UI, or any UI not colocated with a reconcile loop whose
+	// dispatching it could speak for): no banner, GET /api/pause reports
+	// itself unavailable rather than claiming nothing is paused, and
+	// DELETE /api/pause 404s -- the same nil-means-unavailable contract
+	// Cycles and Sandboxes above already give.
+	AgentPause AgentPause
 }
 
 // CycleTimes is implemented by whatever can report the RunCycle ticks a

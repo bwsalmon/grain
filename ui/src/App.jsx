@@ -18,6 +18,7 @@ import DebugOverlay from "./components/DebugOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
 import ReconcilerDownBanner from "./components/ReconcilerDownBanner.jsx";
+import AgentPauseBanner from "./components/AgentPauseBanner.jsx";
 
 // POLL_INTERVAL_MS is how long the UI can be out of date by.
 //
@@ -340,6 +341,11 @@ export default function App() {
         // current: it is the one /api/config field that can flip from
         // false to true mid-session, on a process this same UI is still
         // otherwise happily serving (bwsalmon/agents#576).
+        // config.agentPause is the second such field and the reason this
+        // poll now also matters on the way back: a pause appears when the
+        // agent's usage limit is met and disappears again when the
+        // provider's window resets, with nothing on this end to notice
+        // either (grain/task-132).
         await Promise.all([refreshList(), refreshConfig()]);
         if (openTaskId !== null) {
           setDetail(await api(`/api/tasks/${openTaskId}`));
@@ -559,7 +565,15 @@ export default function App() {
       {config !== null && (
         <ConfigurationAgentButton defaultRepo={openRepo} onOpenTask={openTask} showError={showError} />
       )}
-      {config?.reconcilerDown && <ReconcilerDownBanner />}
+      {/* One banner at a time: both are pinned to the same strip at the
+          top of the page, and a dead reconcile loop is the larger fact
+          -- a deployment that is not dispatching at all has no use for
+          being told why it is also not dispatching. */}
+      {config?.reconcilerDown ? (
+        <ReconcilerDownBanner />
+      ) : config?.agentPause?.paused ? (
+        <AgentPauseBanner pause={config.agentPause} onLifted={refreshConfig} showError={showError} />
+      ) : null}
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
         <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} showError={showError} />

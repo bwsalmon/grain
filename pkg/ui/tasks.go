@@ -417,6 +417,18 @@ type configResponse struct {
 	// rather than an operator having to notice tasks have stopped moving
 	// and go searching logs to learn why (bwsalmon/agents#576).
 	ReconcilerDown bool `json:"reconcilerDown,omitempty"`
+	// AgentPause mirrors Config.AgentPause's own doc comment: set when
+	// this deployment's agent has said it has no budget left in the
+	// current window, so nothing is being dispatched until that window
+	// resets. It rides on this response, rather than only on
+	// GET /api/pause beside it, for the reason ReconcilerDown above does
+	// -- it drives a standing banner on every page, and this is the one
+	// call the frontend already polls from every view (grain/task-132).
+	//
+	// nil for a deployment that is not paused as well as for one with no
+	// gate wired: a banner has nothing to draw either way, and the
+	// difference between them is what GET /api/pause exists to state.
+	AgentPause *AgentPauseStatus `json:"agentPause,omitempty"`
 	// AgentFramework mirrors model.Config.AgentFramework -- this
 	// deployment's default -- read from the store the same way
 	// ShowClosedByDefault above is. NewTaskOverlay.jsx names it in the
@@ -569,6 +581,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.tasks.Config.ReconcilerDown != nil {
 		resp.ReconcilerDown = s.tasks.Config.ReconcilerDown()
+	}
+	if status, ok := s.tasks.AgentPause(); ok && status.Paused {
+		resp.AgentPause = &status
 	}
 	if s.tasks.Config.DefaultTarget != nil {
 		resp.DefaultTarget = s.tasks.Config.DefaultTarget.String()
