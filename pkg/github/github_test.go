@@ -638,6 +638,101 @@ func TestMergePullRequestRaisesOnANon200(t *testing.T) {
 	}
 }
 
+// The merges endpoint's three answers are three status codes, which is
+// the whole reason the merge queue reaches for it rather than for the
+// asynchronous update-branch endpoint. Each one is load-bearing
+// separately, so each gets its own case: a 204 misread as "merged" burns
+// the one refresh attempt without refreshing anything, and a 409 misread
+// as an ordinary error turns a genuine conflict into a cycle that errors
+// forever instead of filing a fix.
+func TestMergeBranchPostsToTheMergesEndpoint(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 201, Body: []byte(`{"sha":"cafef00d"}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	got, err := client.MergeBranch("o", "r", "grain/task-27", "main", "Merge main into grain/task-27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Merged || got.SHA != "cafef00d" {
+		t.Fatalf("got %+v, want the merge commit reported", got)
+	}
+	call := transport.Calls[0]
+	if call.Method != "POST" || call.Path != "/repos/o/r/merges" {
+		t.Fatalf("got %+v", call)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(call.Body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	// base is what is being caught up, head is what is merged into it --
+	// the opposite way round from a pull request, and the mistake worth
+	// pinning.
+	if sent["base"] != "grain/task-27" || sent["head"] != "main" {
+		t.Fatalf("body = %+v, want the base branch merged into the head branch", sent)
+	}
+	if sent["commit_message"] != "Merge main into grain/task-27" {
+		t.Fatalf("body = %+v, want the caller's own commit message", sent)
+	}
+}
+
+// 204: the base already contained the head. Nothing was written, and the
+// caller has its authoritative answer to "was this branch behind at all"
+// -- not an error, and not a merge.
+func TestMergeBranchReportsAnUpToDateBranchAsNotMerged(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 204})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	got, err := client.MergeBranch("o", "r", "grain/task-27", "main", "")
+	if err != nil {
+		t.Fatalf("204 is an answer, not a failure: %v", err)
+	}
+	if got.Merged || got.SHA != "" {
+		t.Fatalf("got %+v, want nothing merged", got)
+	}
+}
+
+func TestMergeBranchOmitsAnEmptyCommitMessage(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 204})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if _, err := client.MergeBranch("o", "r", "grain/task-27", "main", ""); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(transport.Calls[0].Body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sent["commit_message"]; ok {
+		t.Fatalf("body = %+v, want no commit_message key when none was given", sent)
+	}
+}
+
+func TestMergeBranchSurfacesAConflictAsA409(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 409, Body: []byte(`{"message":"Merge conflict"}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	_, err := client.MergeBranch("o", "r", "grain/task-27", "main", "")
+	if err == nil {
+		t.Fatal("expected a conflicting merge to be refused")
+	}
+	if !IsMergeConflict(err) {
+		t.Fatalf("got %v, want a conflict this caller can tell from a transient failure", err)
+	}
+}
+
+// Everything else stays an ordinary error, and specifically is not a
+// conflict: 404 is what a fork pull request's head branch reads as (it
+// lives in another repository), and the caller's answer to that is "leave
+// this one alone", not "resolve a conflict".
+func TestMergeBranchRaisesOnAnyOtherStatus(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 404, Body: []byte(`{"message":"Not Found"}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	_, err := client.MergeBranch("o", "r", "grain/task-27", "main", "")
+	ghErr, ok := err.(*Error)
+	if !ok || ghErr.Status != 404 {
+		t.Fatalf("got %v, want a 404 *Error", err)
+	}
+	if IsMergeConflict(err) {
+		t.Fatal("a 404 read as a merge conflict")
+	}
+}
+
 func checkRunsJSON(runs ...CheckRun) map[string]any {
 	items := make([]map[string]any, len(runs))
 	for i, r := range runs {

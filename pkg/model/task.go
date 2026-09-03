@@ -518,7 +518,20 @@ type Observation struct {
 	// task itself, in case a human pushes the fix by hand or the checks
 	// it was waiting on turn up green after all.
 	MergeQueueBlockedAt *time.Time
-	ObservedAt          *time.Time
+	// MergeQueueRefreshedAt is set the cycle the merge queue tried to
+	// bring this task's pull request branch up to date with its base --
+	// whether or not that merge landed, and whether or not it helped. It
+	// is what stops a head whose refresh went red from being refreshed
+	// again on the next cycle, the same one-attempt-then-a-person policy
+	// MergeQueueBlockedAt above already records for the fix task the
+	// queue files (orchestrator.refreshStaleHead).
+	//
+	// Persisted rather than kept in memory, unlike the two CI clocks
+	// orchestrator.sync.go runs: losing one of those costs another window
+	// of waiting, where losing this one costs a repeated *write to
+	// GitHub*, so a process restarting in a loop would merge in a loop.
+	MergeQueueRefreshedAt *time.Time
+	ObservedAt            *time.Time
 	// RetryRequestedAt is a human's "clear the failure streak and let it
 	// try again" signal (Store.Retry) -- the only way a task stuck in
 	// StateFailed becomes dispatchable again, since nothing else ever

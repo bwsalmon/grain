@@ -169,6 +169,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigEnvironmentNameColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureTaskObservationRefreshedColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_observation: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -366,6 +369,30 @@ func (s *Store) ensureTaskRunAgentStartedAtColumn(ctx context.Context) error {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `agent_started_at` DATETIME NULL")
+	return err
+}
+
+// ensureTaskObservationRefreshedColumn adds
+// task_observation.merge_queue_refreshed_at (Observation's own field has
+// the reasoning) to a database created before it existed, the same
+// probe-then-ALTER approach ensureTaskRunTranscriptColumn already uses
+// for the same reason: CREATE TABLE IF NOT EXISTS never alters a table
+// that is already there.
+//
+// No SchemaVersion bump goes with it: the column is nullable and added
+// here, so an existing database migrates into the new shape rather than
+// being one this build "cannot simply be re-created into" (SchemaVersion's
+// own doc comment). A pull request the merge queue looked at before this
+// column existed reads back as never refreshed, which is the direction
+// that errs toward one more merge attempt rather than toward never making
+// one.
+func (s *Store) ensureTaskObservationRefreshedColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `merge_queue_refreshed_at` FROM `task_observation` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task_observation` ADD COLUMN `merge_queue_refreshed_at` DATETIME NULL")
 	return err
 }
 
@@ -1583,11 +1610,13 @@ func (s *Store) Observe(ctx context.Context, o Observation) error {
 func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
 	_, err := tx.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
-			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`,"+
-			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,"+
+			"`merge_queue_refreshed_at`,`observed_at`,"+
+			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
 		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID),
-		timeOf(o.MergeQueueBlockedAt), timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt),
+		timeOf(o.MergeQueueBlockedAt), timeOf(o.MergeQueueRefreshedAt),
+		timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt),
 		timeOf(o.PrOpenedAt), timeOf(o.PrMergedAt), timeOf(o.PrClosedAt))
 	return err
 }
@@ -1599,13 +1628,14 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 func getObservation(ctx context.Context, q querier, taskID string) (*Observation, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
-			"`baseline_comment_id`,`merge_queue_blocked_at`,`observed_at`,`retry_requested_at`,"+
+			"`baseline_comment_id`,`merge_queue_blocked_at`,`merge_queue_refreshed_at`,"+
+			"`observed_at`,`retry_requested_at`,"+
 			"`pr_opened_at`,`pr_merged_at`,`pr_closed_at` "+
 			"FROM `task_observation` WHERE `task_id` = ?", taskID)
 	o := Observation{TaskID: taskID}
-	var closed, completed, blocked, observed, retried, prOpened, prMerged, prClosed sql.NullTime
+	var closed, completed, blocked, refreshed, observed, retried, prOpened, prMerged, prClosed sql.NullTime
 	var pending, baseline sql.NullInt64
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &observed, &retried,
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &refreshed, &observed, &retried,
 		&prOpened, &prMerged, &prClosed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -1614,7 +1644,7 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	}
 	o.ClosedAt, o.CompletedAt, o.ObservedAt = timePtr(closed), timePtr(completed), timePtr(observed)
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
-	o.MergeQueueBlockedAt = timePtr(blocked)
+	o.MergeQueueBlockedAt, o.MergeQueueRefreshedAt = timePtr(blocked), timePtr(refreshed)
 	o.RetryRequestedAt = timePtr(retried)
 	o.PrOpenedAt, o.PrMergedAt, o.PrClosedAt = timePtr(prOpened), timePtr(prMerged), timePtr(prClosed)
 	return &o, nil

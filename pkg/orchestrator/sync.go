@@ -862,7 +862,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		health = healthFrom(detail, checks, checksKnown, checksSettled)
 
 	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
-		if err := advanceMergeQueueHead(ctx, store, client, task, ref, detail, health, checks, now); err != nil {
+		if err := advanceMergeQueueHead(ctx, store, client, task, e.obs, ref, detail, health, checks, now); err != nil {
 			return err
 		}
 
@@ -936,18 +936,28 @@ func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID str
 }
 
 // advanceMergeQueueHead is what makes task -- the head of its repo's
-// merge queue, its PR conflicted or failing checks -- progress: file an
-// automatic fix the first time this happens, or notice the fix already
-// filed has finished and decide whether that resolved things, or give up
-// on a fix that has not finished and is not going to
+// merge queue, its PR conflicted or failing checks -- progress: bring a
+// stale branch up to date with its base and re-ask next cycle, file an
+// automatic fix the first time a genuine failure happens, or notice the
+// fix already filed has finished and decide whether that resolved things,
+// or give up on a fix that has not finished and is not going to
 // (defaultFixTaskDeadline).
 func advanceMergeQueueHead(ctx context.Context, store *model.Store, client github.Client,
-	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
+	task model.Task, obs *model.Observation, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
 	fixTaskID, hasFix := fixTaskLink(task)
 	if !hasFix {
-		return fileFixTask(ctx, store, client, task, ref, detail, health, checks, now)
+		outcome, err := refreshStaleHead(ctx, store, client, task, obs, ref, detail, now)
+		if err != nil {
+			return err
+		}
+		if outcome == refreshUpdated {
+			// CI is running again against a tree somebody would merge.
+			// Decide next cycle, on that answer rather than this one.
+			return nil
+		}
+		return fileFixTask(ctx, store, client, task, ref, detail, health, checks, outcome, now)
 	}
 
 	fixState, err := store.State(ctx, fixTaskID)
@@ -974,6 +984,173 @@ func advanceMergeQueueHead(ctx context.Context, store *model.Store, client githu
 	// the deployment's whole policy here -- see fileFixTask's own doc
 	// comment on why a second attempt is not just retried outright.
 	return escalateToUser(ctx, store, task, ref, health, now)
+}
+
+// refreshOutcome is what refreshStaleHead did about a broken queue head.
+// It is also the queue's whole classification of "was this head simply
+// behind its base": rather than guess from a signal that cannot answer it
+// (see refreshStaleHead), the queue asks GitHub to make the merge and
+// reads the answer off what GitHub does.
+type refreshOutcome int
+
+const (
+	// refreshUpdated: the head really was behind, the merge landed, and CI
+	// is re-running against a tree somebody would actually merge. Nothing
+	// is filed this cycle -- the next one decides on the fresh answer.
+	refreshUpdated refreshOutcome = iota
+	// refreshUpToDate: GitHub's own 204. The head branch already contained
+	// its base, so whatever CI reported, it reported about the tree that
+	// would merge. Nothing was stale and the failure is genuine.
+	refreshUpToDate
+	// refreshConflicted: GitHub's own 409. Behind *and* genuinely
+	// conflicting, which is exactly the case a fix task is for -- and now
+	// one the queue has watched fail rather than inferred.
+	refreshConflicted
+	// refreshUnreachable: there was no merge to attempt. A pull request
+	// from a fork has its head branch in another repository, which POST
+	// /merges answers 404 for, and a detail with no branch names on it
+	// (very nearly unreachable) has nothing to name in the call.
+	refreshUnreachable
+	// refreshAlreadyTried: this pull request has had the one attempt it
+	// gets. See Observation.MergeQueueRefreshedAt.
+	refreshAlreadyTried
+)
+
+// refreshStaleHead is the cheap half of repairing a broken queue head:
+// before a fix task is filed and an agent dispatched, merge the pull
+// request's base branch into its head branch and let the next cycle
+// decide on CI that ran against a tree somebody would actually merge.
+//
+// Nearly every automatic fix this deployment has filed was resolved by
+// exactly this commit -- a plain merge of main into the task's branch,
+// with nothing to arbitrate (docs/merge-queue-staleness.md lists them).
+// The shape is always the same: a branch whose checks last ran against a
+// base that has since moved, so either GitHub can no longer compute a
+// merge ref and every `on: pull_request` job dies at checkout (which
+// healthFrom reads as PrFailing -- the jobs exist, they completed, they
+// concluded `failure`), or the verdict that did report is about a tree
+// nobody would ever merge. Either way the fix task's body would name
+// failures that are not what is actually wrong with the branch, so the
+// agent starts from a false description of its own job.
+//
+// The queue deliberately does not classify "behind and stale" against
+// "genuinely failing" before acting, because neither available signal
+// answers it. detail.MergeableState is one value where two independent
+// facts are wanted, and `dirty` and `blocked` outrank `behind` -- so a
+// pull request that is both behind and failing a required check reports
+// `blocked` and never says "behind" at all, which is precisely this case.
+// A check run carries no sha of the base it was merged onto, either; the
+// staleness lives in the merge ref, which the Checks API does not name.
+// So the queue asks the question it can get an authoritative answer to,
+// at the moment it matters, with the write it wants to make anyway: 201
+// means it was behind and is not now, 204 means nothing was stale, 409
+// means it conflicts for real. The 204 is the whole answer to "is this
+// failure genuine".
+//
+// One attempt per pull request, persisted
+// (Observation.MergeQueueRefreshedAt), mirroring fileFixTask's own
+// one-fix-then-a-person policy for the same reason: a refresh that lands
+// and still leaves the branch red has told us the failure is real, and
+// re-merging every time the base moves again would spend writes re-asking
+// a question that has been answered. The attempt is recorded whether or
+// not the merge landed -- what must not repeat is the *attempt*, not just
+// its success.
+//
+// A merge, not a rebase, and made by GitHub rather than by a clone here:
+// a rebase would need a force push to a branch an agent may still hold a
+// clone of, would move the base out from under any stacked fix branch
+// (fileFixTask's Base *is* this head branch), and would discard review
+// history. The merge is also exactly what the agents were doing by hand.
+func refreshStaleHead(ctx context.Context, store *model.Store, client github.Client,
+	task model.Task, obs *model.Observation, ref model.PullRequestRef,
+	detail github.PullRequestDetail, now time.Time) (refreshOutcome, error) {
+
+	if obs != nil && obs.MergeQueueRefreshedAt != nil {
+		return refreshAlreadyTried, nil
+	}
+	if detail.HeadRef == "" || detail.BaseRef == "" {
+		return refreshUnreachable, nil
+	}
+
+	result, err := client.MergeBranch(ref.Repo.Owner, ref.Repo.Name,
+		detail.HeadRef, detail.BaseRef, refreshCommitMessage(detail))
+	switch {
+	case err == nil:
+	case github.IsMergeConflict(err):
+		if err := recordRefreshAttempt(ctx, store, task.ID, now); err != nil {
+			return refreshConflicted, err
+		}
+		return refreshConflicted, nil
+	case notFound(err):
+		// The head branch is not in this repository -- a pull request from
+		// a fork, which grain never opens itself (finishWithPullRequest
+		// pushes into the target repo) but may well have found -- or it is
+		// gone. Nothing to refresh, and the attempt is recorded so the
+		// next cycle does not re-ask.
+		if err := recordRefreshAttempt(ctx, store, task.ID, now); err != nil {
+			return refreshUnreachable, err
+		}
+		return refreshUnreachable, nil
+	default:
+		// An ordinary failure, including a permission this credential does
+		// not hold: not latched the way checksUnavailable is, since this
+		// is a write on the same permission MergePullRequest already
+		// needs, so a deployment that cannot make it has a broken merge
+		// queue anyway and should say so loudly.
+		return refreshUnreachable, fmt.Errorf(
+			"orchestrator: merging %q into %q for %s: %w", detail.BaseRef, detail.HeadRef, ref, err)
+	}
+
+	// GitHub's 204: nothing was written because nothing was behind. No
+	// attempt is recorded -- there was no merge to not repeat, and the fix
+	// task filed this cycle is what stops the queue coming back here
+	// anyway (advanceMergeQueueHead's own hasFix check).
+	if !result.Merged {
+		return refreshUpToDate, nil
+	}
+
+	if err := recordRefreshAttempt(ctx, store, task.ID, now); err != nil {
+		return refreshUpdated, err
+	}
+	// Not optional: a human working in this branch who did not want a
+	// merge commit has one now, and the only thing that tells them who
+	// made it is this.
+	comment := fmt.Sprintf(
+		"%s last had its checks run against a `%s` that has moved since, so the merge "+
+			"queue merged `%s` into `%s` rather than filing a fix for a failure that "+
+			"may not be real. CI is re-running against a tree that could actually "+
+			"merge; if it is still broken next cycle, a fix task is filed then.",
+		ref, detail.BaseRef, detail.BaseRef, detail.HeadRef,
+	)
+	if err := queueComment(ctx, store, task.ID, comment, now); err != nil {
+		return refreshUpdated, err
+	}
+	return refreshUpdated, nil
+}
+
+// refreshCommitMessage is what the merge queue's own merge commit says:
+// who made it and why, since the first person to find it will be reading
+// `git log` on a branch they thought only an agent had touched.
+func refreshCommitMessage(detail github.PullRequestDetail) string {
+	return fmt.Sprintf(
+		"Merge %s into %s (grain merge queue)\n\n"+
+			"Its checks last ran against a base that has moved since; re-running\n"+
+			"them against a tree that could actually merge.",
+		detail.BaseRef, detail.HeadRef)
+}
+
+// recordRefreshAttempt writes down that this pull request has had its one
+// refresh -- see Observation.MergeQueueRefreshedAt for why this is
+// persisted where the CI clocks above are not.
+func recordRefreshAttempt(ctx context.Context, store *model.Store, taskID string, now time.Time) error {
+	return observeField(ctx, store, taskID, now, func(o *model.Observation) { o.MergeQueueRefreshedAt = &now })
+}
+
+// notFound reports whether err is GitHub answering 404 -- for the merges
+// endpoint, a branch that is not in this repository at all.
+func notFound(err error) bool {
+	var e *github.Error
+	return errors.As(err, &e) && e.Status == 404
 }
 
 // fixTaskLink returns the ID task's own LinkFixTask names, if it has filed
@@ -1055,6 +1232,23 @@ func fixTaskOverdue(ctx context.Context, store *model.Store, fixTaskID string, n
 // that failed (failingChecks) rather than saying only that something
 // did: the agent sent to repair it starts from that list, and "one or
 // more required checks are failing" left it to go and find out which.
+//
+// A conflict the queue has just watched GitHub refuse (refreshConflicted)
+// is described as that rather than as the inference healthReason would
+// otherwise make from detail.Mergeable: the queue tried the merge, so it
+// can tell the agent what its job actually is -- a real resolution rather
+// than the plain merge that fixes a merely stale branch.
+func fixReason(outcome refreshOutcome, health model.PrHealth,
+	detail github.PullRequestDetail, checks []github.CheckRun) string {
+
+	if outcome == refreshConflicted {
+		return fmt.Sprintf(
+			"the merge queue tried to merge `%s` into `%s` and it conflicted, so this "+
+				"needs a real resolution rather than a merge", detail.BaseRef, detail.HeadRef)
+	}
+	return healthReason(health, detail, checks)
+}
+
 func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks []github.CheckRun) string {
 	switch health {
 	case model.PrConflicted:
@@ -1204,17 +1398,19 @@ func fixTaskTitle(task model.Task, ref model.PullRequestRef) string {
 // out whatever else the deployment is running. Filing at the head of the
 // backlog decides when it runs; that decides whether there is room to.
 //
-// Its body carries the failure itself, not just the verdict: healthReason
-// names the jobs that went red, and for a failing pull request
-// failingJobLogs appends what those jobs printed. The comment on the
+// Its body carries the failure itself, not just the verdict: fixReason
+// names the jobs that went red -- or, for a head refreshStaleHead has
+// just watched GitHub refuse to merge, says that in place of the
+// inference healthReason would have made -- and for a failing pull
+// request failingJobLogs appends what those jobs printed. The comment on the
 // parent task stays the one-line version -- it is read by a person
 // watching the queue, who has the pull request itself a click away, where
 // the agent dispatched into a sandbox has neither.
 func fileFixTask(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
-	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
+	health model.PrHealth, checks []github.CheckRun, outcome refreshOutcome, now time.Time) error {
 
-	reason := healthReason(health, detail, checks)
+	reason := fixReason(outcome, health, detail, checks)
 	queue := model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}
 
 	id, err := store.NewTaskID(ctx)

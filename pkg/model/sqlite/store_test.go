@@ -597,6 +597,32 @@ func TestPullRequestEventTimestampsRoundTrip(t *testing.T) {
 	}
 }
 
+// MergeQueueRefreshedAt is the merge queue's record that it has already
+// merged a stale head's base into it once (orchestrator.refreshStaleHead),
+// and it is only worth having because it is durable: losing it costs a
+// repeated write to GitHub rather than another window of waiting, so a
+// process that restarted in a loop would merge in a loop. That makes this
+// round trip the property, not an incidental one.
+func TestMergeQueueRefreshedAtRoundTrips(t *testing.T) {
+	store, _, ctx := openStore(t)
+	refreshed := now.Add(-time.Hour)
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: "a1b2", MergeQueueRefreshedAt: &refreshed, ObservedAt: &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetObservation(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get observation: %v", err)
+	}
+	if got.MergeQueueRefreshedAt == nil || !got.MergeQueueRefreshedAt.Equal(refreshed) {
+		t.Errorf("MergeQueueRefreshedAt did not survive: %+v", got.MergeQueueRefreshedAt)
+	}
+	if got.MergeQueueBlockedAt != nil {
+		t.Errorf("refreshing is not giving up: MergeQueueBlockedAt = %+v, want nil", got.MergeQueueBlockedAt)
+	}
+}
+
 // --- task identity and the conversation --------------------------------
 
 func TestNewTaskIDAllocatesDistinctIncreasingIDs(t *testing.T) {
@@ -1810,6 +1836,80 @@ func TestInitMigratesAnExistingDatabaseMissingTranscript(t *testing.T) {
 	}
 	if transcript, _, err := store.RunTranscript(ctx, "a1b2", 1); err != nil || transcript != "found it" {
 		t.Fatalf("RunTranscript after set = (%q, %v), want (\"found it\", nil)", transcript, err)
+	}
+}
+
+// The merge queue's own record of having refreshed a stale head
+// (task_observation.merge_queue_refreshed_at) was added to a table every
+// existing deployment already has rows in, and CREATE TABLE IF NOT EXISTS
+// never alters one of those -- so this simulates a database built without
+// the column, directly, and checks Store.Init's own migration step
+// (ensureTaskObservationRefreshedColumn) both leaves the pre-existing
+// observation readable and makes the new field durable afterwards.
+func TestInitMigratesAnExistingDatabaseMissingMergeQueueRefreshedAt(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_observation`"+` (
+  `+"`task_id`"+`                     TEXT     NOT NULL,
+  `+"`closed_at`"+`                   DATETIME NULL,
+  `+"`completed_at`"+`                DATETIME NULL,
+  `+"`pending_question_comment_id`"+` INTEGER  NULL,
+  `+"`baseline_comment_id`"+`         INTEGER  NULL,
+  `+"`merge_queue_blocked_at`"+`      DATETIME NULL,
+  `+"`observed_at`"+`                 DATETIME NULL,
+  `+"`retry_requested_at`"+`          DATETIME NULL,
+  `+"`pr_opened_at`"+`                DATETIME NULL,
+  `+"`pr_merged_at`"+`                DATETIME NULL,
+  `+"`pr_closed_at`"+`                DATETIME NULL,
+  PRIMARY KEY (`+"`task_id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-106 task_observation table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_observation` (`task_id`,`completed_at`,`observed_at`) VALUES ('a1b2',?,?)",
+		now, now); err != nil {
+		t.Fatalf("seeding a pre-task-106 observation row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task_observation.merge_queue_refreshed_at: %v", err)
+	}
+
+	// The pre-existing row is intact, and reads back as a pull request
+	// the queue has never refreshed -- which is the direction that errs
+	// toward one merge attempt rather than toward never making one.
+	got, err := store.GetObservation(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get observation after migrating: (%+v, %v)", got, err)
+	}
+	if got.CompletedAt == nil || !got.CompletedAt.Equal(now) {
+		t.Fatalf("CompletedAt after migrating = %+v, want the seeded row's own %v", got.CompletedAt, now)
+	}
+	if got.MergeQueueRefreshedAt != nil {
+		t.Fatalf("MergeQueueRefreshedAt after migrating = %+v, want nil", got.MergeQueueRefreshedAt)
+	}
+
+	// And durable afterwards, which is the whole point: observe binds
+	// this column now, so a refresh recorded after the upgrade survives a
+	// restart rather than being merged all over again.
+	refreshed := now.Add(time.Minute)
+	if err := store.ObserveField(ctx, "a1b2", refreshed, func(o *model.Observation) {
+		o.MergeQueueRefreshedAt = &refreshed
+	}); err != nil {
+		t.Fatalf("observe after migrating: %v", err)
+	}
+	got, err = store.GetObservation(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get observation: (%+v, %v)", got, err)
+	}
+	if got.MergeQueueRefreshedAt == nil || !got.MergeQueueRefreshedAt.Equal(refreshed) {
+		t.Fatalf("MergeQueueRefreshedAt = %+v, want %v", got.MergeQueueRefreshedAt, refreshed)
 	}
 }
 

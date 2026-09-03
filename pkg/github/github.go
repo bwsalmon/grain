@@ -252,6 +252,32 @@ func IsPermissionDenied(err error) bool {
 	return strings.HasPrefix(body.Message, "Resource not accessible by")
 }
 
+// IsMergeConflict reports whether err is GitHub refusing a MergeBranch
+// because the two branches genuinely conflict -- a 409 from the merges
+// endpoint, which is unambiguous there in a way 403 is not for
+// IsPermissionDenied above: that endpoint answers 409 for a merge
+// conflict and for nothing else, so this needs none of that predicate's
+// message-sniffing.
+//
+// A caller uses it to tell the one case an automatic merge cannot fix
+// from the ordinary failures it should retry on the next cycle. Reading
+// a conflict as a transient error would have the merge queue re-ask
+// forever instead of asking a person; reading a transient error as a
+// conflict would file a fix task describing a conflict that is not
+// there.
+func IsMergeConflict(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Status == 409
+}
+
+// MergeResult is what MergeBranch did. Merged is false, with a nil error,
+// for GitHub's own 204: the base branch already contained the head, so
+// nothing was written and there is no commit to name.
+type MergeResult struct {
+	Merged bool
+	SHA    string
+}
+
 // Issue is one issue or pull request from the issues endpoint (GitHub
 // unifies the two; ListIssues filters pull requests out itself).
 type Issue struct {
@@ -584,6 +610,7 @@ type Client interface {
 	FindOpenPullRequestForBranch(owner, repo, branch string) (*PullRequest, error)
 	CreateIssue(owner, repo, title, body string, labels []string) (Issue, error)
 	MergePullRequest(owner, repo string, number int, headSHA string) error
+	MergeBranch(owner, repo, base, head, commitMessage string) (MergeResult, error)
 	GetPullRequest(owner, repo string, number int) (PullRequestDetail, error)
 	DefaultBranch(owner, repo string) (string, error)
 	ListReviewComments(owner, repo string, number int) ([]ReviewComment, error)
@@ -1075,6 +1102,63 @@ func (c *RESTClient) MergePullRequest(owner, repo string, number int, headSHA st
 		return &Error{Status: resp.Status, Body: resp.Body}
 	}
 	return nil
+}
+
+// MergeBranch merges head into base server-side, both named as branches
+// -- GitHub's own POST /repos/{owner}/{repo}/merges, the write behind the
+// "Update branch" button when the merge queue brings a pull request's own
+// branch up to date with the branch it targets.
+//
+// Named by branch rather than by sha on purpose: GitHub takes whatever
+// head's tip is at the moment it processes the call, which is fresher
+// than any revision this caller could have read a moment earlier, and a
+// merge of the base into a branch has no equivalent of MergePullRequest's
+// "only if the head still matches" to protect -- there is nothing being
+// judged on a commit's CI here, only a branch being caught up.
+//
+// Its three answers are three status codes, which is why this is the
+// endpoint rather than PUT .../pulls/{n}/update-branch (a 202 Accepted
+// that says only that GitHub will try, and signals a conflict as a 422
+// with a message to parse):
+//
+//   - 201: the merge landed; MergeResult.Merged is true and SHA names the
+//     merge commit.
+//   - 204: base already contained head; nothing was written, and
+//     MergeResult is zero with a nil error. That is not a failure -- it
+//     is the authoritative answer to "was this branch behind at all".
+//   - 409: the two genuinely conflict. Returned as an *Error, which
+//     IsMergeConflict identifies.
+//
+// Anything else -- notably 404, which is what a head branch in another
+// repository (a fork's) or a base branch that is gone reads as -- comes
+// back as an ordinary *Error for the caller to decide about.
+func (c *RESTClient) MergeBranch(owner, repo, base, head, commitMessage string) (MergeResult, error) {
+	payload := map[string]string{"base": base, "head": head}
+	if commitMessage != "" {
+		payload["commit_message"] = commitMessage
+	}
+	data, _ := json.Marshal(payload)
+	resp, err := c.Transport.Request(
+		"POST", fmt.Sprintf("/repos/%s/%s/merges", owner, repo),
+		c.headers(owner, repo, true), data,
+	)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	switch resp.Status {
+	case 201:
+		var data struct {
+			SHA string `json:"sha"`
+		}
+		if err := json.Unmarshal(resp.Body, &data); err != nil {
+			return MergeResult{}, err
+		}
+		return MergeResult{Merged: true, SHA: data.SHA}, nil
+	case 204:
+		return MergeResult{}, nil
+	default:
+		return MergeResult{}, &Error{Status: resp.Status, Body: resp.Body}
+	}
 }
 
 func (c *RESTClient) GetPullRequest(owner, repo string, number int) (PullRequestDetail, error) {
@@ -1622,6 +1706,16 @@ func (d DryRunClient) MergePullRequest(owner, repo string, number int, headSHA s
 	}
 	fmt.Printf("+ merge PR %s/%s#%d\n", owner, repo, number)
 	return nil
+}
+
+// MergeBranch prints and reports that nothing was merged -- the honest
+// dry-run answer, since nothing was written. It is also the useful one:
+// a caller that reads Merged as "I brought this branch up to date" would
+// otherwise wait a cycle for CI that never re-ran, where false leaves it
+// on whatever path it already took for a branch that was not behind.
+func (d DryRunClient) MergeBranch(owner, repo, base, head, commitMessage string) (MergeResult, error) {
+	fmt.Printf("+ merge %s/%s:%s into %s/%s:%s\n", owner, repo, head, owner, repo, base)
+	return MergeResult{}, nil
 }
 
 func (d DryRunClient) GetPullRequest(owner, repo string, number int) (PullRequestDetail, error) {
