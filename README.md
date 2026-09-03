@@ -1927,7 +1927,8 @@ for `gcp-project`/`gcp-agent-service-account`, and
 `KonturSandboxes.SetDefaultShape` for
 `sandbox-cpus`/`sandbox-memory-mb`/`sandbox-disk-gb`.
 The rest were already read per cycle or per dispatch, or gained it here:
-`RunCycle` re-reads `max-workers`/`max-mergers` *and* `max-agent-turns`;
+`RunCycle` re-reads `max-workers`/`max-mergers`, `max-agent-turns` *and*
+`prompt-extension`;
 `dispatchConfig` re-reads `agent-framework`, `gemini-model` and
 `claude-model` when a run's framework is built (which is per dispatch,
 for the same reason the credential is); and `target-repos`,
@@ -2103,11 +2104,14 @@ on top of whatever the deployment already defaults.
 
 **Where it is stored is a new `repo_config` table**, keyed `(owner,
 name)` the same way `qualification_config` already is, holding
-`model.RepoConfig` — one field today, `DefaultCapabilities`, with the
-same comma-separated storage `grain_config.default_capabilities` uses.
+`model.RepoConfig` — `DefaultCapabilities`, with the
+same comma-separated storage `grain_config.default_capabilities` uses,
+and since grain/task-114 `PromptExtension` beside it ("Standing
+instructions: the prompt extension" below).
 A new table rather than a column somewhere: `base`, `preamble` and
 `max_concurrent` are docs/data-model.md's own next three per-repo
-settings, and this is the row they would join. A repo has a row only
+settings, and this is the row they would join — as the second of them
+since has. A repo has a row only
 while it has something of its own to say — `PutRepoConfig` deletes rather
 than writing one that says nothing, so "has a row" and "adds something"
 stay one fact and nothing has to filter empty rows back out.
@@ -2178,7 +2182,8 @@ prints what each repo defaults ("default in: `owner/name`", on the
 capability line it already printed) with no way from a shell to act on
 what it just showed. `grain repo` (`cmd/grain/repo.go`, grain/task-36) is
 that missing half — `list`, `capabilities [-set a,b] <owner/name>`, `add`
-and `remove` — over four new `ui.HTTPClient` methods mirroring the
+and `remove`, joined since by `prompt-extension [-set text]
+<owner/name>` — over `ui.HTTPClient` methods mirroring the
 `ui.Client` ones the repos pane already calls.
 
 **Why this and not schedules, templates or suites**, which are still
@@ -2222,8 +2227,79 @@ way, deliberately: a repo that carries defaults while being neither
 allow-listed nor targeted still gets a row, because
 `SetRepoDefaultCapabilities` permits exactly that repo to exist and a
 list whose job includes reporting per-repo defaults must not be the one
-place they are invisible. (The repos *page* still drops such a row; that
-is a UI gap, filed separately, not a difference of opinion.)
+place they are invisible. The repos *page* rows such a repo too, from the
+same sources, so the two agree on which repos this deployment knows
+about.
+
+### Standing instructions: the prompt extension
+
+`orchestrator.BuildPrompt` is deliberately only the facts that are
+grain's own — the task, the branch it must push, the repos it may read,
+the push/check/repair loop — because everything it says has to be true of
+every deployment there will ever be. A deployment has facts of its own
+that grain cannot know and that a task author should not retype on every
+task: a house style, the command that actually runs the tests, "this
+repo's migrations live in `db/`, read `db/README.md` first." With nowhere
+to put those, the only place they fit is each task's body, which is the
+same paragraph written again per task and drifting one task at a time.
+
+The prompt extension (grain/task-114) is that place, in three layers —
+`model.Config.PromptExtension`, `model.RepoConfig.PromptExtension` and
+`model.Task.PromptExtension`, composed by
+`model.PromptExtensionFor` and appended to the prompt as its last
+section:
+
+- **the deployment's**, on every run it dispatches;
+- **the target repo's**, appended after it for a task that targets that
+  repo;
+- **the task's own**, which *replaces* both for that one task.
+
+**Deployment and repo append; a task replaces.** The first is the rule
+per-repo default capabilities already follow, for the same reason: two
+people write these at different times, and a repo silently discarding
+what the deployment said would be a setting that fails where nobody is
+looking. The second is what "overridable for specific tasks" has to mean
+— an override that could only append leaves no way to run one task
+without instructions that are wrong for it, and a repo-wide "never touch
+the generated client" is exactly what a task regenerating that client has
+to be exempt from. The cost is that a task keeping the deployment's text
+and adding a line restates it, and the forms show what is being replaced
+while that choice is made, which is where restating it is cheap. What
+there is deliberately no spelling for is "this task gets nothing at all":
+empty means "no override", the same `zero means unset` every other
+per-task override uses.
+
+**Read at dispatch, not seeded at creation** — the opposite of the
+default capability layers next to it, and the difference is what each
+thing is. A capability is a grant, which belongs on the task so it can be
+seen and detached; standing instructions are text an operator tunes by
+watching runs go wrong, and a seed would leave every task already queued
+carrying the wording that was wrong. So `RunCycle` refreshes the
+deployment layer out of `grain_config` every tick (beside
+`max-agent-turns`), `RunDispatch` reads the repo's row from the task's
+own target, and the task's own is already on the task. Editing any of
+them reaches the next run rather than the next restart — and not a run
+already live, whose prompt was built when it began.
+
+**Where each is edited is where the thing being edited lives**: the
+deployment's on Settings → Agents (beside which agent and which model,
+since it is the same question of what the agent is told), a repo's on the
+repos page next to that repo (`GET`/`PUT /api/repos/{owner}/{name}/
+prompt-extension`, reporting the same whole-defaults document the
+capabilities route answers with, so a pane editing one field can show
+what the other holds), and a task's on the new-task form under Advanced
+options, beside the deployment text it would replace. `grain settings
+-prompt-extension` and `grain repo prompt-extension [-set text]
+<owner/name>` are the same two from a shell, printing all three layers
+and the composition they produce.
+
+Because a repo can be configured without being allow-listed and without
+any task targeting it, `GET /api/config` also names the repos that carry
+one (`reposWithPromptExtension` — the names, never the text, which would
+be a paragraph per repo on a response every open tab polls). That is what
+puts up a row for a repo whose only configuration is standing
+instructions, so text that reaches every run against it is not text with
+nowhere to read it.
 
 ## Write-only secrets access when colocated
 
