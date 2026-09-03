@@ -920,11 +920,34 @@ dropped. `add_review_comment` calls from a run are recorded (`agent.
 Result.ToolCalls` carries them, the same seam `ProcessResult` reads
 `ask_question`/`comment_on_issue`/`propose_task` off of) but never turned
 into a real `CreateReview` call for the same reason: nothing yet dispatches
-with review intent for one to attach to. `propose_task`'s `depends_on`
-also files today without resolving a same-run local `id` to the real issue
-number GitHub assigned it — each proposal lands as its own issue, with
-`depends_on` printed into nothing yet, since resolving it needs holding a
-whole batch open and rewriting cross-references after every one is filed.
+with review intent for one to attach to. `propose_task`'s `depends_on` is
+resolved now: `relayProposedTasks` files each entry as a real
+`model.LinkDependsOn`, against an existing task id (the proposing task's
+own included, which is what a piece split out of the work in hand names)
+or the local `id` of an *earlier* `propose_task` call in the same run —
+earlier, not any, since a batch resolved in call order cannot contain a
+cycle, and a `depends-on` cycle is two tasks neither of which is ever
+dispatchable again. An entry naming neither is kept in the proposal's own
+body for a human instead of filed as a link: `task_blocked` inner-joins
+`task` on the target and so ignores a dangling one, while `model.IsBlocked`
+counts it as open forever, and a proposal blocked by something that does
+not exist has nothing that could ever unblock it.
+
+Resolving it is half of it; an agent has to be told to write one at all,
+and told the two facts it needs to. `propose_task`'s description now asks
+for `depends_on` in so many words — a proposal that names nothing is
+unblocked the moment a human approves it and can be dispatched beside the
+work it was meant to follow — and `BuildPrompt` names the running task's
+own id, which an agent otherwise could only reverse out of its branch
+name. The same schema carries `auto_merge`: a proposal inherits the
+proposing task's setting as before (bwsalmon/agents#345), an explicit
+`false` opts a proposal out of that inheritance for work an agent judges
+deserves its own review, and an explicit `true` is still capped at what
+the proposing task itself holds (`proposedAutoMerge`) — a run that could
+mark its own proposals auto-merge would be granting itself the unreviewed
+merge a human withheld. `BuildPrompt` mentions `auto_merge` only to a task
+that is itself an auto-merge job, since there is nothing another task
+could do with it.
 
 Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every

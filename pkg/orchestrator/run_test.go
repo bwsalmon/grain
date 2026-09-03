@@ -169,6 +169,33 @@ func TestBuildPromptExplainsThereIsNoRepo(t *testing.T) {
 	}
 }
 
+// An agent can only follow propose_task's own etiquette if it knows two
+// things about itself grain never otherwise tells it: which task it is
+// (what a proposal's depends_on names) and whether that task auto-merges
+// (what caps a proposal's auto_merge -- orchestrator.proposedAutoMerge).
+func TestBuildPromptTellsAnAgentWhatItsProposalsCanSay(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, "")
+	for _, want := range []string{"task t1", "depends_on"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+	// Nothing to say about auto_merge to a task that cannot pass it on.
+	if strings.Contains(prompt, "auto_merge") {
+		t.Errorf("prompt offers auto_merge to a task that is not an auto-merge job: %q", prompt)
+	}
+
+	task.AutoMerge = true
+	prompt = orchestrator.BuildPrompt(task, "")
+	if !strings.Contains(prompt, "auto_merge") {
+		t.Errorf("prompt does not tell an auto-merge job it can pass that on: %q", prompt)
+	}
+}
+
 func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
 	task := model.Task{
 		ID: "t1", Title: "Do the thing", Body: "details",
