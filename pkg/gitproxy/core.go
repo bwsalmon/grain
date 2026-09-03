@@ -85,6 +85,22 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 		}
 	}
 
+	// A repo that is refused to every sandbox, checked ahead of the
+	// scope: this is not "you are not scoped to it" but "nobody is", and
+	// the two deserve different answers. The only one today is grain's
+	// own state repository when it carries the encrypted secrets file --
+	// see ModelAuthorizer.Forbidden for why that cannot be enforced any
+	// more finely than per repository.
+	if refuser, ok := p.Authorizer.(Refuser); ok {
+		if reason, refused := refuser.Refusal(req.Owner, req.Repo); refused {
+			p.audit().Record(AuditEntry{
+				Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
+				Action: req.Action, Outcome: "denied: forbidden repository",
+			})
+			return ProxyResponse{Status: 403, Body: ErrPkt(fmt.Sprintf("%s/%s: %s", req.Owner, req.Repo, reason))}
+		}
+	}
+
 	allowed, err := p.Authorizer.Authorize(ctx, sandbox, req.Owner, req.Repo, req.Action)
 	if err != nil {
 		p.audit().Record(AuditEntry{

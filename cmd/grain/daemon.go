@@ -2305,8 +2305,13 @@ func transcriptFramework(data string) string {
 // own outbound NAT routes through to reach this host) instead of the
 // address it actually bound.
 func startGitProxy(dataDir string, store *model.Store, githubHost string, insecureHTTP bool, advertiseHost string) (url string, stop func(context.Context) error, err error) {
+	forbidden, err := forbiddenRepos(context.Background(), dataDir)
+	if err != nil {
+		return "", nil, err
+	}
 	proxy, err := gitproxy.BuildProxy(gitproxy.BuildConfig{
 		DataDir: dataDir, Store: store, ForwardHost: githubHost, ForwardTLS: !insecureHTTP,
+		Forbidden: forbidden,
 	})
 	if err != nil {
 		return "", nil, err

@@ -1641,20 +1641,26 @@ reformat_store_if_schema_changed() {
   # lost that a remote does not still have, and a local-only deployment
   # keeps the old tree right here under its timestamped name.
   #
-  # The secrets file lives in that tree and is *not* regenerable, so it
-  # is carried across rather than archived with it: the key it is
-  # encrypted to has not changed, and an operator who kept their key
-  # keeps their credentials across a reformat.
+  # The encrypted secrets file used to live in that tree, and had to be
+  # carried across by hand here because it is the one thing in there
+  # that cannot be regenerated. It lives beside its own private key
+  # under $GRAIN_DATA_DIR/secrets now (grain/task-186: everything a
+  # sandbox can clone is everything a sandbox can read, and the state
+  # repository is somewhere agents are dispatched to work), which this
+  # step never touches -- so a schema bump no longer goes anywhere near
+  # it. A tree written by an older build still has its copy carried
+  # across, since grain moves it out on its next start and a tree that
+  # was archived first would take it with it.
   local repo_dir="$GRAIN_DATA_DIR/state-repo"
   if [ -d "$repo_dir" ]; then
     local repo_backup="${repo_dir}.schema${old_version}-${stamp}"
     log "Schema changed -- moving $repo_dir aside to $repo_backup; grain re-seeds it on its next start"
     mv "$repo_dir" "$repo_backup"
-    if [ -s "$repo_backup/secrets.enc" ]; then
-      install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$repo_dir"
-      cp -p "$repo_backup/secrets.enc" "$repo_dir/secrets.enc"
-      chown "$GRAIN_USER:$GRAIN_USER" "$repo_dir/secrets.enc"
-      log "  carried this deployment's encrypted secrets across to the fresh repository"
+    if [ -s "$repo_backup/secrets.enc" ] && [ ! -s "$GRAIN_DATA_DIR/secrets/secrets.enc" ]; then
+      install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
+      cp -p "$repo_backup/secrets.enc" "$GRAIN_DATA_DIR/secrets/secrets.enc"
+      chown "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/secrets.enc"
+      log "  carried this deployment's encrypted secrets across, beside its key in $GRAIN_DATA_DIR/secrets"
     fi
   fi
   printf '%s\n' "$new_version" > "$marker"

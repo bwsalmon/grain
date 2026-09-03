@@ -29,7 +29,6 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
-	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/staterepo"
 )
 
@@ -358,7 +357,7 @@ func throwawayStore() (*sql.DB, func(), error) {
 // reading it is `cat` on a file they already own, and a command that
 // prints one invites it into a terminal's scrollback.
 func stateKey(dataDir string, args []string) error {
-	store := secrets.Open(secretsConfig(dataDir))
+	store := openSecrets(dataDir)
 	if len(args) == 0 {
 		return errors.New("usage: grain state key show|path")
 	}

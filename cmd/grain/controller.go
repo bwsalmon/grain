@@ -27,7 +27,6 @@ import (
 	"github.com/pkg/browser"
 
 	"github.com/bwsalmon/grain/pkg/capability/githubsandbox"
-	"github.com/bwsalmon/grain/pkg/secrets"
 )
 
 // manifestPermissions is exactly what pkg/capability/githubsandbox's own
@@ -203,7 +202,7 @@ func bootstrapGitHubApp(args []string) error {
 // read -- an operator had to separately run `grain secrets set` by hand
 // for bootstrap-github-app's output to take effect at all.
 func writeAppCredentials(dataDir, appID, privateKey string) error {
-	store := secrets.Open(secretsConfig(dataDir))
+	store := openSecrets(dataDir)
 	if err := store.Set("github-app", "app-id", []byte(appID)); err != nil {
 		return fmt.Errorf("writing app-id: %w", err)
 	}

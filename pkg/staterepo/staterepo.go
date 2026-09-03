@@ -351,6 +351,36 @@ func (r *Repo) Head(ctx context.Context) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
+// HasSecrets reports whether this repository holds, or has ever held,
+// the encrypted secrets file.
+//
+// "Has ever" is the whole point, and it is why this asks git rather than
+// the filesystem. A sandbox that may clone a repository may read every
+// object in it: a `git log -p` reaches a file deleted three commits ago
+// exactly as easily as one still in the tree. So a state repository an
+// earlier build wrote secrets.enc into stays a repository grain must not
+// let a sandbox near, however long ago the file was removed, and the
+// only remedy is a repository that never held one.
+//
+// A directory that is not a repository, or a repository with no commits,
+// answers on the working tree alone -- there is no history to ask.
+func (r *Repo) HasSecrets(ctx context.Context) (bool, error) {
+	if _, err := os.Stat(filepath.Join(r.cfg.Dir, SecretsFile)); err == nil {
+		return true, nil
+	}
+	if empty, _ := r.isEmpty(ctx); empty {
+		return false, nil
+	}
+	// --all rather than the current branch: a repository whose secrets
+	// file only ever existed on a branch somebody else pushed is one a
+	// sandbox can still fetch it from.
+	out, err := r.git(ctx, "log", "--all", "--max-count=1", "--format=%H", "--", SecretsFile)
+	if err != nil {
+		return false, fmt.Errorf("staterepo: looking for %s in %s's history: %w", SecretsFile, r.cfg.Dir, err)
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // loadedHeadFile is where the commit this host last loaded or wrote is
 // recorded: inside the git directory, so it is neither part of the
 // working tree nor something a commit, a clone or a push can carry. That

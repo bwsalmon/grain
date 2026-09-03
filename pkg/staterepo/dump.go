@@ -25,11 +25,20 @@ const (
 	// written by, so a build that would misread it can say so instead of
 	// importing rows into a schema they do not fit.
 	SchemaVersionFile = "schema-version"
-	// SecretsFile is the encrypted secrets blob (pkg/secrets). It lives
-	// in the same repository as everything else on purpose -- one thing
-	// to back up, one thing to clone -- and is the only file here that is
-	// not plain text, because it is the only one whose contents nobody
-	// but the holder of the private key may read.
+	// SecretsFile is the encrypted secrets blob (pkg/secrets). It used to
+	// live in this repository -- one thing to clone, one thing to back up
+	// -- and no longer does: the state repository is now somewhere agents
+	// are dispatched to work, and a repository a sandbox can clone is a
+	// repository a sandbox can read every byte of, ciphertext included.
+	// It sits beside the private key under <data-dir>/secrets instead
+	// (cmd/grain's secretsConfig), which is the one directory an operator
+	// already had to back up, since the key was never in here either.
+	//
+	// The name stays here because this package is still what knows about
+	// it: EnsureIgnored keeps a stray copy from being committed, and
+	// HasSecrets asks whether a repository is one an earlier build wrote
+	// it into -- which is a question about history, and history does not
+	// forget.
 	SecretsFile = "secrets.enc"
 	// ReadmeFile explains the repository to whoever opens it next.
 	ReadmeFile = "README.md"
