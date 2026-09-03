@@ -84,8 +84,8 @@ func TestTemplatesDeleteOnAnUnknownIDIs404(t *testing.T) {
 // schedule created over HTTP naming templateId comes back carrying that
 // template's content, the same as ui.Client.CreateSchedule already
 // checks directly (schedules_test.go). Repo is never among that content
-// (model.TaskTemplate's own doc comment on why a template carries no
-// target of its own), so the schedule request supplies it directly.
+// (model.Template's own doc comment on why a template carries no target
+// of its own), so the schedule request supplies it directly.
 func TestScheduleCreatedFromATemplateOverHTTP(t *testing.T) {
 	srv, _ := testServer(t)
 	rec := do(t, srv, http.MethodPost, "/api/templates",

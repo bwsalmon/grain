@@ -250,10 +250,9 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 //
 // What that leaves behind is bounded, which is why it is the choice made:
 // grain itself never touches that pull request again.
-// Store.OpenPullRequestLinks only returns links belonging to a
-// *completed* task, and a closed task is not completed, so it never
-// becomes a merge queue entry and SyncPullRequests never so much as reads
-// it. The thing "nobody wants a closed task's work merged" is protecting
+// Store.OpenPullRequestLinks only returns links belonging to a task whose
+// run is over and which has not closed, so a closed task never becomes a
+// merge queue entry and SyncPullRequests never so much as reads it. The thing "nobody wants a closed task's work merged" is protecting
 // is protected either way; all that remains is a pull request visible on
 // a task somebody just closed.
 //
@@ -717,8 +716,9 @@ func argStrings(v any) []string {
 // finishWithPullRequest records that task's run pushed a real branch:
 // find or open its PR, link it onto the task, and observe the task
 // completed -- StateOf's own precedence means a task with CompletedAt set
-// and no ClosedAt yet reads as 'completed', exactly the state
-// SyncPullRequests watches for.
+// and no ClosedAt yet reads as one of the two post-run states
+// ('awaiting_submit' until somebody submits it, 'completed' once they
+// have), both of which SyncPullRequests watches.
 func finishWithPullRequest(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, now time.Time) error {
 

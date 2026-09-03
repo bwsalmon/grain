@@ -538,3 +538,71 @@ func TestReapStillErrorsWhenTheAppIsConfiguredButFailing(t *testing.T) {
 		t.Fatal("expected a configured-but-failing App to surface its error")
 	}
 }
+
+// --- CheckCredential ---------------------------------------------------
+
+// The App's private key is a standing credential like gcp-key's minter,
+// and goes stale the same invisible way -- so the check has to come back
+// with what GitHub actually said, not with a repeat of the **Ready**
+// badge that was already true while every dispatch failed.
+func TestCheckCredentialReportsTheInstallation(t *testing.T) {
+	client := newFakeAppClient("grain-bot")
+	p := testProvider(client)
+	creds := testCredentials()
+
+	check, err := p.CheckCredential(context.Background(), creds)
+	if err != nil {
+		t.Fatalf("CheckCredential: %v", err)
+	}
+	if !strings.Contains(check.Detail, "grain-bot") {
+		t.Errorf("detail %q does not name the account the App is installed on", check.Detail)
+	}
+	// Both halves of the App credential are named: a refusal's remedy is
+	// pasting a fresh private key beside the app id it belongs to.
+	want := []string{DefaultAppIDCredential, DefaultPrivateKeyCredential}
+	if len(check.Credentials) != 2 || check.Credentials[0] != want[0] || check.Credentials[1] != want[1] {
+		t.Errorf("Credentials = %v, want %v", check.Credentials, want)
+	}
+	// A read and nothing else: no token minted, no repo created. This is
+	// a button an operator presses whenever they doubt the deployment.
+	if len(client.mintedRepos) != 0 || len(client.repos) != 0 {
+		t.Errorf("the check minted or created something: tokens=%v repos=%v", client.mintedRepos, client.repos)
+	}
+}
+
+func TestCheckCredentialExplainsAnAppGitHubWontAnswerFor(t *testing.T) {
+	client := newFakeAppClient("grain-bot")
+	client.findErr = errors.New("401 Bad credentials")
+	p := testProvider(client)
+
+	check, err := p.CheckCredential(context.Background(), testCredentials())
+	if err == nil {
+		t.Fatal("expected a refused App credential to fail the check")
+	}
+	if !strings.Contains(err.Error(), DefaultPrivateKeyCredential) {
+		t.Errorf("error %q does not name the secret holding the key GitHub refused", err)
+	}
+	if !strings.Contains(err.Error(), "401 Bad credentials") {
+		t.Errorf("error %q dropped GitHub's own message", err)
+	}
+	if len(check.Credentials) != 2 {
+		t.Errorf("Credentials = %v, want both named even on failure", check.Credentials)
+	}
+}
+
+// An App nobody ever configured is a different answer from one GitHub
+// refuses, and says the thing that can be done about it.
+func TestCheckCredentialSaysWhenNoAppIsConfigured(t *testing.T) {
+	p := NewProvider(Config{})
+	_, err := p.CheckCredential(context.Background(), &fakeCredentials{material: map[string]string{}})
+	if err == nil {
+		t.Fatal("expected a check with no App configured to fail")
+	}
+	if !strings.Contains(err.Error(), "bootstrap-github-app") {
+		t.Errorf("error %q does not name the command that configures one", err)
+	}
+}
+
+func TestProviderSatisfiesCredentialChecker(t *testing.T) {
+	var _ model.CredentialChecker = (*Provider)(nil)
+}

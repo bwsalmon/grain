@@ -129,7 +129,7 @@ func TestSyncPullRequestsClosesATaskWhosePullRequestWasClosedWithoutMerging(t *t
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
 		t.Fatalf("RunCycle (push): %v", err)
 	}
-	assertState(w, "t-declined", model.StateCompleted, false)
+	assertState(w, "t-declined", model.StateAwaitingSubmit, false)
 	if len(sim.PullRequests) != 1 {
 		t.Fatalf("expected exactly one pull request, got %+v", sim.PullRequests)
 	}

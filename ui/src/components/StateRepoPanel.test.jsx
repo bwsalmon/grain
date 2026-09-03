@@ -70,7 +70,7 @@ describe("StateRepoPanel", () => {
     expect(screen.getByLabelText(/Secrets key/)).toHaveValue("");
   });
 
-  it("says when the repository's secrets are sealed to a key this host lacks", async () => {
+  it("says when this host's secrets file is sealed to a key it lacks", async () => {
     api.mockResolvedValueOnce({
       ...local,
       secretsError: "secrets: this file is encrypted to a different key",
@@ -78,7 +78,7 @@ describe("StateRepoPanel", () => {
     });
     render(<StateRepoPanel showError={() => {}} />);
 
-    expect(await screen.findByText(/cannot read the secrets in this repository/i)).toBeInTheDocument();
+    expect(await screen.findByText(/cannot read this host's secrets file/i)).toBeInTheDocument();
     // Which key it wants is the question the operator has to answer, so
     // the pane answers it rather than leaving them to guess.
     expect(screen.getByText("grain-secret-pub-v1:BBBB")).toBeInTheDocument();
@@ -92,7 +92,7 @@ describe("StateRepoPanel", () => {
     });
     const user = userEvent.setup();
     render(<StateRepoPanel showError={() => {}} />);
-    await screen.findByText(/cannot read the secrets in this repository/i);
+    await screen.findByText(/cannot read this host's secrets file/i);
 
     await user.type(screen.getByLabelText(/Import a private key/), "grain-secret-key-v1:BBBB");
     api.mockResolvedValueOnce({ ...local, secretsPublicKey: "grain-secret-pub-v1:BBBB" });
@@ -103,7 +103,7 @@ describe("StateRepoPanel", () => {
       body: JSON.stringify({ key: "grain-secret-key-v1:BBBB" }),
     }));
     expect(screen.getByLabelText(/Import a private key/)).toHaveValue("");
-    expect(screen.queryByText(/cannot read the secrets in this repository/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cannot read this host's secrets file/i)).not.toBeInTheDocument();
   });
 
   it("offers dropping the remote only when there is one", async () => {

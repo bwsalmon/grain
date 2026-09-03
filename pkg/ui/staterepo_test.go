@@ -142,7 +142,7 @@ func TestBootstrapAdoptsARepository(t *testing.T) {
 	}
 }
 
-// The other half of adopting somebody else's repository: the clone
+// The other half of moving a deployment onto this host: a restore
 // brings the sealed file, and this brings the key that opens it.
 func TestBootstrapImportsASecretsKey(t *testing.T) {
 	fake := &fakeStateRepo{status: ui.StateRepoStatus{

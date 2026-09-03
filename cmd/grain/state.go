@@ -20,15 +20,16 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/staterepo"
 )
@@ -48,6 +49,10 @@ Commands:
                             one's contents replace the database; an empty one is
                             seeded from it
   sync                      export the database, commit and push, now
+  check DIR                 load a state repository's files into a throwaway
+                            database and report what breaks. Needs no -data-dir
+                            and touches nothing: this is the CI step a state
+                            repository runs against a proposed change
   key show                  print this installation's secrets public key
   key path                  print where the private key is read from
   key import [-key-file F]  install a secrets private key this operator holds,
@@ -68,16 +73,24 @@ func runState(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *dataDir == "" {
-		fs.Usage()
-		return errors.New("-data-dir is required")
-	}
 	rest := fs.Args()
 	if len(rest) == 0 {
 		fs.Usage()
 		return errors.New("a command is required")
 	}
 	ctx := context.Background()
+	// check is the one command here that is not about this host's own
+	// installation: it reads a directory somebody hands it, in a CI
+	// runner that has no data directory, no store and no deployment. So
+	// it is dispatched before -data-dir is insisted on rather than being
+	// made to invent one.
+	if rest[0] == "check" {
+		return stateCheck(ctx, rest[1:])
+	}
+	if *dataDir == "" {
+		fs.Usage()
+		return errors.New("-data-dir is required")
+	}
 	switch cmd, cmdArgs := rest[0], rest[1:]; cmd {
 	case "status":
 		return stateStatus(ctx, *dataDir)
@@ -124,7 +137,7 @@ func stateStatus(ctx context.Context, dataDir string) error {
 	fmt.Printf("secrets:    %s (key: %s)\n",
 		secretsConfig(dataDir).File, secretsConfig(dataDir).KeyFile)
 	// Whether this host can actually open that file, which is a separate
-	// question from whether it is there: a repository adopted from
+	// question from whether it is there: a data directory restored from
 	// another installation arrives sealed to that installation's key, and
 	// an operator should learn that here rather than from the first run
 	// that cannot resolve a credential.
@@ -134,6 +147,28 @@ func stateStatus(ctx context.Context, dataDir string) error {
 		if want, err := store.FileRecipient(); err == nil && want != "" {
 			fmt.Printf("            encrypted to %s -- install that key with `grain state key import`\n", want)
 		}
+	}
+	// Whether a task can be dispatched at this repository, which is not
+	// something an operator can tell by looking: it turns on whether
+	// grain's encrypted secrets file appears anywhere in the history, and
+	// a repository that has one looks exactly like one that has not until
+	// the first push through the proxy is refused.
+	held, err := repo.HasSecrets(ctx)
+	switch {
+	case err != nil:
+		fmt.Printf("dispatch:   unknown -- could not read this repository's history (%v), "+
+			"so the git proxy refuses it to every sandbox\n", err)
+	case settings.Remote == "":
+		fmt.Printf("dispatch:   not applicable -- a local-only repository is not reachable " +
+			"through the git proxy at all\n")
+	case held:
+		fmt.Printf("dispatch:   refused -- %s appears in this repository, so the git proxy "+
+			"refuses it to every sandbox. Removing it does not undo that: a clone reads "+
+			"history. Adopt a repository that has never held one to file settings tasks "+
+			"against it\n", staterepo.SecretsFile)
+	default:
+		fmt.Printf("dispatch:   allowed -- a task may be filed against this repository " +
+			"(`grain create -repo <owner>/<name> ...`)\n")
 	}
 	return nil
 }
@@ -179,8 +214,9 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 	branch := fs.String("branch", staterepo.DefaultBranch, "branch state lives on")
 	tokenFile := fs.String("token-file", "", "file holding the credential to push with; "+
 		"defaults to the GitHub credential ladder under <data-dir>/secrets/github")
-	keyFile := fs.String("secrets-key-file", "", "file holding the secrets private key this repository's "+
-		"secrets.enc is encrypted to; required to read the secrets of an installation this host has not run before")
+	keyFile := fs.String("secrets-key-file", "", "file holding the secrets private key "+
+		"<data-dir>/secrets/secrets.enc is encrypted to; required to read the secrets of an "+
+		"installation this host has not run before")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -219,13 +255,6 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 	if err != nil {
 		return err
 	}
-	carried, err := carrySecretsFile(archived, repo.Dir())
-	if err != nil {
-		return err
-	}
-	if carried {
-		fmt.Printf("carried this installation's secrets across into %s\n", repo.Dir())
-	}
 	if *keyFile != "" {
 		if err := secrets.Open(secretsConfig(dataDir)).ImportKey(secretsKey); err != nil {
 			return err
@@ -247,9 +276,14 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 
 // archiveStateRepo moves an existing working tree aside, if there is
 // one, keeping a dated copy rather than removing it. It returns where it
-// went, or "" when there was nothing there -- both because the caller
-// says so in its own voice (a terminal or the daemon's journal) and
-// because carrySecretsFile has to go looking in it.
+// went, or "" when there was nothing there, so that the caller says so
+// in its own voice -- a terminal for `grain state adopt`, the daemon's
+// journal for the pane's own button.
+//
+// Nothing has to be carried out of the archived tree any more: the
+// encrypted secrets file lives under <data-dir>/secrets (secretsConfig)
+// rather than in the repository, so adopting no longer moves the one
+// unregenerable thing this deployment has out from under itself.
 func archiveStateRepo(dataDir string) (string, error) {
 	dir := stateRepoDir(dataDir)
 	if _, err := os.Stat(dir); err != nil {
@@ -263,47 +297,6 @@ func archiveStateRepo(dataDir string) (string, error) {
 		return "", fmt.Errorf("moving the existing state repository aside: %w", err)
 	}
 	return moved, nil
-}
-
-// carrySecretsFile brings the encrypted secrets file across from the
-// working tree an adopt moved aside.
-//
-// Everything else in the old tree is regenerable -- it is a dump of a
-// database that is still right here -- and the secrets file is not: it
-// is the one thing in the repository that is not a materialisation of
-// something else. Adopting an empty repository, which is the bootstrap's
-// "start from scratch", would otherwise leave every secret this
-// deployment holds behind in a directory nothing looks at again, and
-// silently: the store would come back up reporting no secrets set rather
-// than reporting anything wrong.
-//
-// A repository that already carries its own secrets file keeps it. That
-// file is the adopted installation's, sealed to the adopted
-// installation's key, and it is the source of truth for the same reason
-// its tables are; the key to read it is what ImportKey is for.
-func carrySecretsFile(fromDir, toDir string) (bool, error) {
-	if fromDir == "" {
-		return false, nil
-	}
-	src := filepath.Join(fromDir, secrets.DefaultFileName)
-	data, err := os.ReadFile(src)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("reading %s: %w", src, err)
-	}
-	dst := filepath.Join(toDir, secrets.DefaultFileName)
-	switch _, err := os.Stat(dst); {
-	case err == nil:
-		return false, nil
-	case !os.IsNotExist(err):
-		return false, fmt.Errorf("inspecting %s: %w", dst, err)
-	}
-	if err := os.WriteFile(dst, data, 0o600); err != nil {
-		return false, fmt.Errorf("writing %s: %w", dst, err)
-	}
-	return true, nil
 }
 
 // timestampSuffix names an archived directory by when it was archived,
@@ -333,13 +326,106 @@ func stateSync(ctx context.Context, dataDir string) error {
 	return nil
 }
 
+// stateCheck loads a directory of state files into a database it throws
+// away, and says what broke.
+//
+// The point is where it runs: not here, on the deployment, but in the
+// state repository's own CI, against a pull request nobody has merged
+// yet. staterepo.Import is already the validator -- one transaction,
+// foreign keys deferred, rolled back whole on any inconsistency -- and
+// until this command existed the only thing that ever ran it was a
+// daemon starting up. A dump that was malformed, or a row missing a NOT
+// NULL column, therefore failed at import time on the next start: after
+// the merge, in the deployment, to whoever was on call rather than to
+// whoever wrote the diff.
+//
+// It needs no -data-dir and reads nothing but the directory named, so a
+// CI runner needs this binary and a checkout and nothing else:
+//
+//	grain state check .
+func stateCheck(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("grain state check", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, "usage: grain state check DIR\n\n"+
+			"DIR is the root of a state repository -- the directory holding tables/ and\n"+
+			"schema-version, which for a CI step run at the top of the checkout is \".\".\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	dir := "."
+	switch fs.NArg() {
+	case 0:
+	case 1:
+		dir = fs.Arg(0)
+	default:
+		fs.Usage()
+		return errors.New("check takes one directory")
+	}
+
+	db, cleanup, err := throwawayStore()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	report, err := staterepo.Check(ctx, db, dir, model.SchemaVersion)
+	if err != nil {
+		// Whatever the import objected to, printed before the error, so a
+		// CI log says which schema the dump claimed as well as why it did
+		// not load.
+		for _, w := range report.Warnings {
+			fmt.Printf("warning: %s\n", w)
+		}
+		return err
+	}
+	for _, w := range report.Warnings {
+		fmt.Printf("warning: %s\n", w)
+	}
+	fmt.Printf("schema:  %d, which is what this build of grain knows\n", report.SchemaVersion)
+	fmt.Printf("loaded:  %d rows across %d tables\n", report.Total(), len(report.Rows))
+	for _, t := range report.Tables() {
+		fmt.Printf("  %-28s %d\n", t, report.Rows[t])
+	}
+	fmt.Println("ok: grain can load this")
+	return nil
+}
+
+// throwawayStore opens an empty database in a temporary directory, at
+// this build's schema, for a check to import into and nothing else.
+//
+// Temporary and its own, because staterepo.Import replaces every row in
+// whatever database it is given: a check that ran against the store
+// under -data-dir would be a check that cost the deployment its state.
+// Check tightens the connection pool and the pragmas on it from there.
+func throwawayStore() (*sql.DB, func(), error) {
+	dir, err := os.MkdirTemp("", "grain-state-check-")
+	if err != nil {
+		return nil, nil, err
+	}
+	db, err := sqlite.Open(sqlite.DefaultConfig(dir))
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, nil, err
+	}
+	cleanup := func() {
+		db.Close()
+		os.RemoveAll(dir)
+	}
+	if err := model.New(db).Init(context.Background()); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("applying schema: %w", err)
+	}
+	return db, cleanup, nil
+}
+
 // stateKey is the operator's view of the secrets key: the public half,
 // which is safe to print, and where the private half is read from, which
 // is what they have to back up. It never prints the private key --
 // reading it is `cat` on a file they already own, and a command that
 // prints one invites it into a terminal's scrollback.
 func stateKey(dataDir string, args []string) error {
-	store := secrets.Open(secretsConfig(dataDir))
+	store := openSecrets(dataDir)
 	if len(args) == 0 {
 		return errors.New("usage: grain state key show|path|import")
 	}
@@ -362,7 +448,7 @@ func stateKey(dataDir string, args []string) error {
 }
 
 // stateKeyImport installs a key the operator already holds, which is
-// what makes "clone the repository onto a new machine" a restore rather
+// what makes "put this deployment on a new machine" a restore rather
 // than a fresh install with an unreadable file in it.
 //
 // The key is read from a file or from stdin and never from a flag: a

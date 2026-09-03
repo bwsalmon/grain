@@ -346,7 +346,7 @@ func TestMCPServerRecreatesARealSandboxOverStdio(t *testing.T) {
 	if cycleErr != nil {
 		t.Fatalf("RunCycle: %v", cycleErr)
 	}
-	assertState(w, taskID, model.StateCompleted, false)
+	assertState(w, taskID, model.StateAwaitingSubmit, false)
 	if len(sim.PullRequests) != 1 {
 		t.Errorf("expected one pull request for the work pushed from the rebuilt sandbox, got %+v", sim.PullRequests)
 	}

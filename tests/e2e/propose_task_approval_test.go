@@ -386,7 +386,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		// The parent's own push still finishes normally -- relayProposedTasks
 		// runs unconditionally before anything else, it does not replace the
 		// rest of ProcessResult.
-		assertState(w, parentID, model.StateCompleted, false)
+		assertState(w, parentID, model.StateAwaitingSubmit, false)
 
 		proposals := proposedBy(w, parentID)
 		if len(proposals) != 1 {
@@ -458,7 +458,7 @@ func TestProposedTaskWaitsForApprovalThenRunsThroughTheCLI(t *testing.T) {
 		if err := orchestrator.ProcessResult(ctx, store, rig.client, *proposal, result, dispatches[0].RunID, clock); err != nil {
 			t.Fatalf("ProcessResult after approval: %v", err)
 		}
-		assertState(w, proposalID, model.StateCompleted, false)
+		assertState(w, proposalID, model.StateAwaitingSubmit, false)
 
 		rig.mergeOnGitHub(proposalBranch, pullRequestNumber(w, proposalID))
 
@@ -532,7 +532,7 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		if err := orchestrator.ProcessResult(ctx, store, rig.client, *parentTask, result, dispatches[0].RunID, clock); err != nil {
 			t.Fatalf("ProcessResult: %v", err)
 		}
-		assertState(w, parentID, model.StateCompleted, false)
+		assertState(w, parentID, model.StateAwaitingSubmit, false)
 
 		proposals := proposedBy(w, parentID)
 		format, ok := proposals[formatProposalTitle]
@@ -637,9 +637,10 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		if err := orchestrator.ProcessResult(ctx, store, rig.client, *format, result, dispatches[0].RunID, clock); err != nil {
 			t.Fatalf("ProcessResult for %s: %v", formatID, err)
 		}
-		assertState(w, formatID, model.StateCompleted, false)
+		assertState(w, formatID, model.StateAwaitingSubmit, false)
 
-		// Completed is not closed, and a depends_on waits for closed --
+		// A finished run is not a closed task, and a depends_on waits for
+		// closed --
 		// which is the whole reason IsBlocked is re-read every cycle rather
 		// than settled when the link was written.
 		assertBlocked(w, lintID, true)
@@ -685,6 +686,6 @@ func TestProposedChainStaysBlockedUntilTheTasksItNamedClose(t *testing.T) {
 		if err := orchestrator.ProcessResult(ctx, store, rig.client, *lint, lintResult, last[0].RunID, clock); err != nil {
 			t.Fatalf("ProcessResult for %s: %v", lintID, err)
 		}
-		assertState(w, lintID, model.StateCompleted, false)
+		assertState(w, lintID, model.StateAwaitingSubmit, false)
 	})
 }

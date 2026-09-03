@@ -173,14 +173,14 @@ func monthlyOccurrence(y int, m time.Month, dayOfMonth, timeOfDay int) time.Time
 	return time.Date(y, m, day, timeOfDay/60, timeOfDay%60, 0, 0, time.UTC)
 }
 
-// Schedule is what a human sets up once and grain refiles as a real Task
-// on a fixed cadence -- bwsalmon/agents#376's v2 equivalent of v1's
-// scheduled_jobs.py, with one deliberate difference: there is no template
-// directory here, because the whole point of this package's own shape
-// (README, "Input is a model update, not a GitHub issue") is that a
-// schedule is a store row a UI can create, edit and delete, not a file an
-// operator drops on a server's disk. ("Template" here used to describe
-// this type itself, before TaskTemplate (bwsalmon/agents#516,
+// Schedule is what a human sets up once and grain refiles as a real
+// Task on a fixed cadence -- bwsalmon/agents#376's v2 equivalent of
+// v1's scheduled_jobs.py, with one deliberate difference: there is no
+// template directory here, because the whole point of this package's
+// own shape (README, "Input is a model update, not a GitHub issue") is
+// that a schedule is a store row a UI can create, edit and delete, not
+// a file an operator drops on a server's disk. ("Template" here used to
+// describe this type itself, before Template (bwsalmon/agents#516,
 // template.go) existed to name the reusable half of a schedule's own
 // content -- TemplateID below is what points at one.)
 //
@@ -201,7 +201,7 @@ func monthlyOccurrence(y int, m time.Month, dayOfMonth, timeOfDay int) time.Time
 // approval is not a per-firing choice.
 //
 // SuiteID is the one field that changes *what* a firing is: set, this
-// schedule starts a TaskSuiteRun instead of filing a single Task. Every
+// schedule starts a SuiteRun instead of filing a single Task. Every
 // other field here means the same thing either way -- the cadence, the
 // enabled switch, the target repo and base branch, and the "a previous
 // firing that has not finished suppresses the next one" rule are the
@@ -217,38 +217,38 @@ type Schedule struct {
 	Reads     []RepoRef
 	Grants    []Grant
 
-	// TemplateID, if set, names the TaskTemplate (template.go) this
+	// TemplateID, if set, names the Template (template.go) this
 	// schedule fires from instead of its own
 	// Title/Body/AutoMerge/Reads/Grants above (bwsalmon/agents#516) --
-	// Target and Base are never among them: a template carries no target
-	// of its own (TaskTemplate's own doc comment on why), so this
+	// Target and Base are never among them: a template carries no
+	// target of its own (Template's own doc comment on why), so this
 	// schedule's own Target and Base always decide what every firing
 	// targets, whether or not TemplateID is set. TemplateID is resolved
-	// fresh at firing time (orchestrator.fireTaskSchedule), not copied in
-	// once, so editing the template changes what every schedule pointing
-	// at it files next -- the same way editing this schedule's own fields
-	// already changes what it itself files next. The fields above still
-	// hold a value even when this is set: fireTaskSchedule keeps them in
-	// sync as a display cache each time it fires, so ui.scheduleFrom can
-	// render a schedule's effective title and the rest with no extra
-	// lookup, but while TemplateID is set they are not what decides what
-	// gets filed.
+	// fresh at firing time (orchestrator.fireTaskSchedule), not copied
+	// in once, so editing the template changes what every schedule
+	// pointing at it files next -- the same way editing this schedule's
+	// own fields already changes what it itself files next. The fields
+	// above still hold a value even when this is set: fireTaskSchedule
+	// keeps them in sync as a display cache each time it fires, so
+	// ui.scheduleFrom can render a schedule's effective title and the
+	// rest with no extra lookup, but while TemplateID is set they are
+	// not what decides what gets filed.
 	TemplateID *string
 
-	// SuiteID, if set, names the TaskSuite (suite.go) this schedule runs
-	// on its cadence instead of filing a single task: every firing is one
+	// SuiteID, if set, names the Suite (suite.go) this schedule runs on
+	// its cadence instead of filing a single task: every firing is one
 	// CreateScheduledSuiteRun against this schedule's own Target and
 	// Base, the same run a human starts by hand from the suites page,
-	// started by the clock instead. Mutually exclusive with TemplateID --
-	// a suite already resolves its own items' templates, so there is no
-	// second template for a firing to also carry -- and, like it,
+	// started by the clock instead. Mutually exclusive with TemplateID
+	// -- a suite already resolves its own items' templates, so there is
+	// no second template for a firing to also carry -- and, like it,
 	// resolved fresh at firing time (orchestrator.fireSuiteSchedule),
 	// never copied in once, so editing the suite changes what every
 	// schedule pointing at it runs next. Title is kept in sync with the
 	// suite's own Name as a display cache while this is set, exactly as
 	// the content fields above are for TemplateID;
-	// Body/AutoMerge/Reads/Grants are unused, since a suite run takes all
-	// of those from the suite and its templates.
+	// Body/AutoMerge/Reads/Grants are unused, since a suite run takes
+	// all of those from the suite and its templates.
 	//
 	// What a schedule fires -- a task or a suite -- is fixed when it is
 	// created: ui.UpdateSchedule will repoint a suite-backed schedule at

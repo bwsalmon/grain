@@ -313,11 +313,12 @@ func TestDeleteScheduleOnAnUnknownIDIsNotFound(t *testing.T) {
 	}
 }
 
-// TestCreateScheduleFromATemplateCopiesItsContent is bwsalmon/agents#516's
-// whole point: a schedule created with TemplateID needs no Title of its
-// own, and reads it off the template instead. Repo and Base are never
-// among the fields a template supplies (model.TaskTemplate's own doc
-// comment on why), so they always come from this same request.
+// TestCreateScheduleFromATemplateCopiesItsContent is
+// bwsalmon/agents#516's whole point: a schedule created with TemplateID
+// needs no Title of its own, and reads it off the template instead.
+// Repo and Base are never among the fields a template supplies
+// (model.Template's own doc comment on why), so they always come from
+// this same request.
 func TestCreateScheduleFromATemplateCopiesItsContent(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
@@ -463,7 +464,7 @@ func TestUpdateScheduleRejectsAnUnknownTemplate(t *testing.T) {
 	}
 }
 
-// --- schedules that run a task suite -------------------------------------
+// --- schedules that run a suite -------------------------------------
 
 // suiteToSchedule is the setup every suite-backed schedule test below
 // shares: a template, and a suite that runs it.
@@ -485,7 +486,7 @@ func suiteToSchedule(t *testing.T, c *ui.Client, ctx context.Context, name strin
 // A suite-backed schedule needs no title or content of its own: the
 // suite decides what runs, and its name stands in as the schedule's own
 // display title.
-func TestCreateScheduleFromATaskSuite(t *testing.T) {
+func TestCreateScheduleFromASuite(t *testing.T) {
 	c, _, ctx := testClient(t)
 	suite := suiteToSchedule(t, c, ctx, "Bug sweep")
 

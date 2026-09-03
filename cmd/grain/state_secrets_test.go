@@ -1,261 +1,157 @@
 package main
 
-// Adopting a repository, from the secrets' point of view.
+// Where the encrypted secrets file lives, and what the git proxy makes
+// of a state repository that holds one.
 //
-// The state repository carries everything grain knows, and its secrets
-// file is the one part of it that neither the database nor a clone can
-// reconstitute: the ciphertext travels with the repository, and the key
-// that opens it deliberately does not. That leaves two ways to lose
-// every secret a deployment holds, and this file is both of them --
-// adopting an empty repository must carry this installation's own
-// secrets across rather than leave them in the tree it moved aside, and
-// adopting somebody else's must let their key be installed rather than
-// leaving a file nothing here can open.
+// The two are one subject: the file moved out of the state repository
+// (secretsConfig) precisely because that repository is now somewhere
+// agents are dispatched to work, and the repositories that already carry
+// it in their history are the ones forbiddenRepos refuses to every
+// sandbox.
 
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/secrets"
-	"github.com/bwsalmon/grain/pkg/ui"
+	"github.com/bwsalmon/grain/pkg/staterepo"
 )
 
-// bareRemote creates an empty repository, which is what "create one on
-// GitHub and point grain at it" produces.
-func bareRemote(t *testing.T) string {
-	t.Helper()
-	remote := filepath.Join(t.TempDir(), "state.git")
-	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
-		t.Fatalf("creating the remote: %v: %s", err, out)
-	}
-	return remote
-}
-
-func TestAdoptingAnEmptyRepositoryCarriesTheSecretsAcross(t *testing.T) {
+func TestSecretsLiveBesideTheKeyNotInTheStateRepository(t *testing.T) {
 	dataDir := t.TempDir()
-	store := secrets.Open(secretsConfig(dataDir))
-	if err := store.Set("db", "password", []byte("hunter2")); err != nil {
-		t.Fatalf("setting a secret: %v", err)
+	cfg := secretsConfig(dataDir)
+	if got, want := filepath.Dir(cfg.File), filepath.Dir(cfg.KeyFile); got != want {
+		t.Errorf("the encrypted file is in %s and the key in %s; they belong together", got, want)
 	}
-
-	if err := stateAdopt(context.Background(), dataDir, []string{"-remote", bareRemote(t)}); err != nil {
-		t.Fatalf("adopting: %v", err)
-	}
-
-	// The working tree the adopt moved aside is not where this
-	// deployment's secrets live now.
-	got, err := secrets.Open(secretsConfig(dataDir)).Resolve(context.Background(), "db/password")
-	if err != nil {
-		t.Fatalf("resolving after the adopt: %v", err)
-	}
-	if got != "hunter2" {
-		t.Fatalf("got %q", got)
-	}
-	// And it is in the repository, so it reaches the remote with
-	// everything else rather than living only on this host.
-	if _, err := os.Stat(filepath.Join(stateRepoDir(dataDir), secrets.DefaultFileName)); err != nil {
-		t.Fatalf("the secrets file is not in the adopted repository: %v", err)
+	if filepath.Dir(cfg.File) == stateRepoDir(dataDir) {
+		t.Error("the encrypted file is still inside the state repository, where a sandbox can clone it")
 	}
 }
 
-// The restore: a repository written by another installation, adopted on
-// a host that has never held its key.
-func TestAdoptingAnotherInstallationNeedsItsKey(t *testing.T) {
-	ctx := context.Background()
-	remote := bareRemote(t)
-
-	// The installation that owns the repository. Its key is what its
-	// operator has to have kept.
-	origin := t.TempDir()
-	originStore := secrets.Open(secretsConfig(origin))
-	if err := originStore.Set("db", "password", []byte("hunter2")); err != nil {
-		t.Fatalf("setting a secret: %v", err)
-	}
-	if err := stateAdopt(ctx, origin, []string{"-remote", remote}); err != nil {
-		t.Fatalf("seeding the remote: %v", err)
-	}
-	originPublic, err := originStore.PublicKey()
-	if err != nil {
-		t.Fatalf("reading the origin's public key: %v", err)
-	}
-
-	// The new host, which has never seen any of this.
-	host := t.TempDir()
-	if err := stateAdopt(ctx, host, []string{"-remote", remote}); err != nil {
-		t.Fatalf("adopting: %v", err)
-	}
-	hostStore := secrets.Open(secretsConfig(host))
-	if err := hostStore.Check(); err == nil {
-		t.Fatal("a host with none of the origin's key material claimed it could read its secrets")
-	}
-	// No key was minted over the file, which would have made the secrets
-	// permanently unreadable while looking like it had worked.
-	if hostStore.KeyCreated() {
-		t.Fatal("a fresh key was minted over an adopted secrets file")
-	}
-	// What it needs is named, since the operator may hold several keys.
-	recipient, err := hostStore.FileRecipient()
-	if err != nil {
-		t.Fatalf("reading the recipient: %v", err)
-	}
-	if recipient != originPublic {
-		t.Fatalf("recipient %q, want %q", recipient, originPublic)
-	}
-
-	// Somebody else's key does not do.
-	wrong, err := secrets.GenerateKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	wrongFile := filepath.Join(t.TempDir(), "wrong.key")
-	if err := secrets.WriteKeyFile(wrongFile, wrong); err != nil {
-		t.Fatal(err)
-	}
-	if err := stateKeyImport(hostStore, []string{"-key-file", wrongFile}); err == nil {
-		t.Fatal("a key that cannot open the file was installed")
-	}
-
-	// The operator's own key does, and that is the whole restore.
-	if err := stateKeyImport(hostStore, []string{"-key-file", secretsConfig(origin).KeyFile}); err != nil {
-		t.Fatalf("importing the origin's key: %v", err)
-	}
-	got, err := secrets.Open(secretsConfig(host)).Resolve(ctx, "db/password")
-	if err != nil {
-		t.Fatalf("resolving after the import: %v", err)
-	}
-	if got != "hunter2" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-// The same restore in one step, which is what the bootstrap's "point
-// grain at an existing repository" form does: URL, credential and key
-// together.
-func TestAdoptCanTakeTheSecretsKeyWithIt(t *testing.T) {
-	ctx := context.Background()
-	remote := bareRemote(t)
-	origin := t.TempDir()
-	if err := secrets.Open(secretsConfig(origin)).Set("db", "password", []byte("hunter2")); err != nil {
-		t.Fatalf("setting a secret: %v", err)
-	}
-	if err := stateAdopt(ctx, origin, []string{"-remote", remote}); err != nil {
-		t.Fatalf("seeding the remote: %v", err)
-	}
-
-	host := t.TempDir()
-	if err := stateAdopt(ctx, host, []string{
-		"-remote", remote, "-secrets-key-file", secretsConfig(origin).KeyFile,
-	}); err != nil {
-		t.Fatalf("adopting with a key: %v", err)
-	}
-	got, err := secrets.Open(secretsConfig(host)).Resolve(ctx, "db/password")
-	if err != nil {
-		t.Fatalf("resolving after the adopt: %v", err)
-	}
-	if got != "hunter2" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-// A key that is not a key stops the adopt before anything has moved, so
-// a typo does not leave the installation halfway between repositories.
-func TestAdoptRejectsARubbishKeyBeforeTouchingAnything(t *testing.T) {
+// An installation written by a build that kept the file in the state
+// repository has to catch up on its own, without an operator running
+// anything: opening the store is what every path that touches a secret
+// does first.
+func TestOpeningSecretsMovesAnOlderFileOutOfTheStateRepository(t *testing.T) {
 	dataDir := t.TempDir()
-	if err := secrets.Open(secretsConfig(dataDir)).Set("db", "password", []byte("hunter2")); err != nil {
-		t.Fatalf("setting a secret: %v", err)
-	}
-	before, err := os.ReadFile(filepath.Join(stateRepoDir(dataDir), secrets.DefaultFileName))
-	if err != nil {
+	if err := os.MkdirAll(stateRepoDir(dataDir), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	bad := filepath.Join(t.TempDir(), "bad.key")
-	if err := os.WriteFile(bad, []byte("hunter2\n"), 0o600); err != nil {
+	inRepo := filepath.Join(stateRepoDir(dataDir), secrets.DefaultFileName)
+	if err := os.WriteFile(inRepo, []byte("ciphertext an older build wrote"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = stateAdopt(context.Background(), dataDir, []string{
-		"-remote", bareRemote(t), "-secrets-key-file", bad,
-	})
-	if err == nil {
-		t.Fatal("an unparseable key was accepted")
+
+	openSecrets(dataDir)
+
+	if _, err := os.Stat(inRepo); !os.IsNotExist(err) {
+		t.Errorf("the secrets file is still in the state repository (err=%v)", err)
 	}
-	if !strings.Contains(err.Error(), "must start with") {
-		t.Fatalf("the error does not say what is wrong with the key: %v", err)
-	}
-	after, err := os.ReadFile(filepath.Join(stateRepoDir(dataDir), secrets.DefaultFileName))
+	moved, err := os.ReadFile(secretsConfig(dataDir).File)
 	if err != nil {
-		t.Fatalf("the working tree was moved aside by a failed adopt: %v", err)
+		t.Fatalf("reading the moved file: %v", err)
 	}
-	if string(after) != string(before) {
-		t.Fatal("the secrets file changed under a failed adopt")
+	if string(moved) != "ciphertext an older build wrote" {
+		t.Errorf("the moved file = %q, want the bytes that were in the repository", moved)
 	}
 }
 
-// The same restore through the manager the UI's bootstrap pane talks to,
-// rather than through the CLI: the pane is where an operator who has
-// never opened a terminal on this host does this, so the path it uses is
-// worth exercising as itself.
-func TestTheBootstrapPaneCanRestoreAnInstallation(t *testing.T) {
-	ctx := context.Background()
-	remote := bareRemote(t)
-
-	origin := t.TempDir()
-	if err := secrets.Open(secretsConfig(origin)).Set("db", "password", []byte("hunter2")); err != nil {
-		t.Fatalf("setting a secret: %v", err)
+// A secret written through one path must be readable through another,
+// which is the whole reason secretsConfig is one function -- and the
+// thing a move would break if it were done anywhere else.
+func TestASecretSurvivesTheMove(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := openSecrets(dataDir).Set("github-app", "app-id", []byte("12345")); err != nil {
+		t.Fatalf("setting: %v", err)
 	}
-	if err := stateAdopt(ctx, origin, []string{"-remote", remote}); err != nil {
-		t.Fatalf("seeding the remote: %v", err)
-	}
-	originKey, err := os.ReadFile(secretsConfig(origin).KeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// A running grain, local-only, being pointed at that repository.
-	host := t.TempDir()
-	_, db, err := openStore(host)
-	if err != nil {
-		t.Fatalf("opening the store: %v", err)
-	}
-	defer db.Close()
-	repo, err := openStateRepo(ctx, host)
-	if err != nil {
-		t.Fatalf("opening the state repository: %v", err)
-	}
-	manager := newStateManager(host, db, repo, openSecrets(host))
-
-	status, err := manager.Adopt(ctx, ui.AdoptRequest{Remote: remote})
-	if err != nil {
-		t.Fatalf("adopting: %v", err)
-	}
-	// Adopted without the key, the pane has to say the secrets are
-	// unreadable and which key would read them -- not report success and
-	// leave it to a run to discover.
-	if status.SecretsError == "" {
-		t.Fatalf("the pane reports nothing wrong about secrets it cannot read: %+v", status)
-	}
-	if status.SecretsFileRecipient == "" {
-		t.Fatalf("the pane does not say which key the repository wants: %+v", status)
-	}
-
-	if _, err := manager.ImportSecretsKey(ctx, "not a key"); err == nil {
-		t.Fatal("rubbish was accepted as a key")
-	}
-	status, err = manager.ImportSecretsKey(ctx, string(originKey))
-	if err != nil {
-		t.Fatalf("importing the key: %v", err)
-	}
-	if status.SecretsError != "" {
-		t.Fatalf("the store is still unreadable after its key arrived: %+v", status)
-	}
-	got, err := secrets.Open(secretsConfig(host)).Resolve(ctx, "db/password")
+	got, err := openSecrets(dataDir).Resolve(context.Background(), "github-app/app-id")
 	if err != nil {
 		t.Fatalf("resolving: %v", err)
 	}
-	if got != "hunter2" {
-		t.Fatalf("got %q", got)
+	if got != "12345" {
+		t.Errorf("secret = %q, want 12345", got)
+	}
+}
+
+// stateRepoWithSecrets stands up a real state repository holding a real
+// commit, with a remote configured so that there is an owner/repo for a
+// sandbox to ask the proxy about at all.
+func stateRepoWithSecrets(t *testing.T, dataDir string, holdSecrets bool) {
+	t.Helper()
+	ctx := context.Background()
+	if err := staterepo.SaveSettings(dataDir, staterepo.Settings{
+		Remote: "https://github.com/acme/grain-state.git",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: stateRepoDir(dataDir)})
+	if err != nil {
+		t.Fatalf("opening a state repository: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.Dir(), "README.md"), []byte("state\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if holdSecrets {
+		if err := os.WriteFile(filepath.Join(repo.Dir(), staterepo.SecretsFile), []byte("ciphertext"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := repo.Commit(ctx, "seed"); err != nil {
+		t.Fatalf("committing: %v", err)
+	}
+	if holdSecrets {
+		// Removed from the tip, exactly as this build's own migration
+		// leaves it -- and still readable from every clone.
+		if err := os.Remove(filepath.Join(repo.Dir(), staterepo.SecretsFile)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.Commit(ctx, "remove it"); err != nil {
+			t.Fatalf("committing the removal: %v", err)
+		}
+	}
+}
+
+func TestForbiddenReposRefusesAStateRepositoryThatCarriesSecrets(t *testing.T) {
+	dataDir := t.TempDir()
+	stateRepoWithSecrets(t, dataDir, true)
+
+	forbidden, err := forbiddenRepos(context.Background(), dataDir)
+	if err != nil {
+		t.Fatalf("forbiddenRepos: %v", err)
+	}
+	want := model.RepoRef{Owner: "acme", Name: "grain-state"}
+	if len(forbidden) != 1 || forbidden[0] != want {
+		t.Fatalf("forbidden = %v, want exactly %v", forbidden, want)
+	}
+}
+
+// The point of all of this: a state repository that has never held the
+// secrets file is an ordinary target, and a task can be dispatched at it.
+func TestForbiddenReposAllowsAStateRepositoryWithNoSecretsInIt(t *testing.T) {
+	dataDir := t.TempDir()
+	stateRepoWithSecrets(t, dataDir, false)
+
+	forbidden, err := forbiddenRepos(context.Background(), dataDir)
+	if err != nil {
+		t.Fatalf("forbiddenRepos: %v", err)
+	}
+	if len(forbidden) != 0 {
+		t.Fatalf("forbidden = %v, want nothing refused", forbidden)
+	}
+}
+
+// A local-only installation has no owner/repo on any host for a sandbox
+// to ask for, so there is nothing to refuse.
+func TestForbiddenReposIsEmptyForALocalOnlyInstallation(t *testing.T) {
+	dataDir := t.TempDir()
+	forbidden, err := forbiddenRepos(context.Background(), dataDir)
+	if err != nil {
+		t.Fatalf("forbiddenRepos: %v", err)
+	}
+	if len(forbidden) != 0 {
+		t.Fatalf("forbidden = %v, want nothing refused", forbidden)
 	}
 }

@@ -155,8 +155,8 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state after attempt 1 = %q, want completed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state after attempt 1 = %q, want awaiting_submit: the pull request is open and unsubmitted", st)
 	}
 	if len(sim.PullRequests) != 1 {
 		t.Fatalf("expected one pull request after attempt 1, got %+v", sim.PullRequests)
@@ -203,8 +203,8 @@ func TestSecondAttemptPushReusesTheFirstAttemptsOpenPullRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state after attempt 2 = %q, want completed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state after attempt 2 = %q, want awaiting_submit: the pull request is open and unsubmitted", st)
 	}
 	if n, err := store.Attempts(ctx, task.ID); err != nil || n != 2 {
 		t.Fatalf("Attempts(%s) = %d (%v), want 2", task.ID, n, err)

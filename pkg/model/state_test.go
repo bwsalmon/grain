@@ -48,8 +48,14 @@ func goPrecedence() []string {
 	id := int64(5)
 	approved := task(true)
 	unapproved := task(false)
+	// The one condition that is not an Observation field: an unsubmitted
+	// pull request on the task itself (StateAwaitingSubmit, which splits
+	// the same completed_at the branch below tests).
+	unsubmitted := task(true)
+	unsubmitted.Links = []Link{{Kind: LinkFixes, Target: "acme/widgets#1"}}
 	got := []State{
 		StateOf(approved, &Observation{ClosedAt: &now}, true, 0),
+		StateOf(unsubmitted, &Observation{CompletedAt: &now}, true, 0),
 		StateOf(approved, &Observation{CompletedAt: &now}, true, 0),
 		StateOf(approved, &Observation{PendingQuestionCommentID: &id}, true, 0),
 		StateOf(approved, nil, true, 0),
@@ -94,10 +100,92 @@ func TestEveryStateIsReachable(t *testing.T) {
 		seen[s] = true
 	}
 	for _, s := range []State{StateProposed, StateQueued, StateRunning,
-		StateAwaitingReply, StateFailed, StateCompleted, StateClosed} {
+		StateAwaitingReply, StateFailed, StateAwaitingSubmit, StateCompleted,
+		StateClosed} {
 		if !seen[string(s)] {
 			t.Errorf("state %q is not reachable from the derivation", s)
 		}
+	}
+}
+
+// TestAwaitsSubmitNeedsAPullRequestNobodySubmitted pins the two halves
+// of the condition that splits the post-run life in two: a task with
+// nothing to submit and a task already submitted are both waiting on
+// nobody, and neither should be told a human owes it a click.
+func TestAwaitsSubmitNeedsAPullRequestNobodySubmitted(t *testing.T) {
+	withPR := func(autoMerge bool) Task {
+		tk := task(true)
+		tk.AutoMerge = autoMerge
+		tk.Links = []Link{{Kind: LinkFixes, Target: "acme/widgets#1"}}
+		return tk
+	}
+	if !AwaitsSubmit(withPR(false)) {
+		t.Error("an unsubmitted pull request is exactly what awaits a Submit click")
+	}
+	if AwaitsSubmit(withPR(true)) {
+		t.Error("auto-merge is what Submit sets, so a submitted task awaits nobody")
+	}
+	// An analyze task that answered in a comment: finished, not parked.
+	// Its other links are no substitute -- only a fixes-link is a pull
+	// request.
+	noPR := task(true)
+	noPR.Links = []Link{{Kind: LinkProposedBy, Target: "c3d4"}, {Kind: LinkDependsOn, Target: "e5f6"}}
+	if AwaitsSubmit(noPR) {
+		t.Error("a task with no pull request has nothing to submit")
+	}
+}
+
+// TestSubmittingMovesATaskOffAwaitingSubmit is the whole point of the
+// state: it is the one post-run state a task cannot leave on its own,
+// and Submit (which sets AutoMerge, ui.Client.Submit) is what lets it.
+func TestSubmittingMovesATaskOffAwaitingSubmit(t *testing.T) {
+	now := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	tk := task(true)
+	tk.Links = []Link{{Kind: LinkFixes, Target: "acme/widgets#1"}}
+	obs := &Observation{CompletedAt: &now}
+
+	if got := StateOf(tk, obs, false, 0); got != StateAwaitingSubmit {
+		t.Fatalf("StateOf on an unsubmitted pull request = %q, want %q", got, StateAwaitingSubmit)
+	}
+	tk.AutoMerge = true
+	if got := StateOf(tk, obs, false, 0); got != StateCompleted {
+		t.Fatalf("StateOf once submitted = %q, want %q", got, StateCompleted)
+	}
+	// Closing still outranks it, the same as it outranks 'completed':
+	// there is nothing left to submit on a task somebody closed.
+	tk.AutoMerge = false
+	if got := StateOf(tk, &Observation{CompletedAt: &now, ClosedAt: &now}, false, 0); got != StateClosed {
+		t.Fatalf("StateOf on a closed task = %q, want %q", got, StateClosed)
+	}
+}
+
+// TestTransitionsNamesTheCompletionMomentAwaitingSubmit keeps the
+// timeline's last entry and the state badge above it saying the same
+// thing -- the record has no separate "somebody submitted it" timestamp
+// to hang a second entry on.
+func TestTransitionsNamesTheCompletionMomentAwaitingSubmit(t *testing.T) {
+	created := time.Date(2026, 8, 27, 10, 0, 0, 0, time.UTC)
+	finished := created.Add(time.Hour)
+	tk := task(true)
+	tk.CreatedAt, tk.ApprovedAt = &created, &created
+	tk.Links = []Link{{Kind: LinkFixes, Target: "acme/widgets#1"}}
+	obs := &Observation{CompletedAt: &finished}
+
+	got := Transitions(tk, obs, nil, nil, nil)
+	want := []Transition{
+		{StateProposed, created},
+		{StateQueued, created},
+		{StateAwaitingSubmit, finished},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions = %+v, want %+v", got, want)
+	}
+
+	tk.AutoMerge = true
+	got = Transitions(tk, obs, nil, nil, nil)
+	want[2] = Transition{StateCompleted, finished}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Transitions once submitted = %+v, want %+v", got, want)
 	}
 }
 

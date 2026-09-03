@@ -200,10 +200,10 @@ func (s *Store) PublicKey() (string, error) {
 }
 
 // ImportKey installs a private key the operator already holds, which is
-// the other half of adopting a state repository: the repository carries
-// the encrypted file, and this carries the one thing the repository
-// deliberately does not. Without it, cloning a repository onto a new
-// host gets every secret grain has in a form nothing on that host can
+// the other half of restoring an installation: a backup carries the
+// encrypted file, and this carries the key, which travels by hand and is
+// deliberately in no backup of anything else. Without it, that file on a
+// new host is every secret grain has in a form nothing on that host can
 // open -- which is the correct security property and a dead end as a
 // restore path.
 //
@@ -257,10 +257,10 @@ func (s *Store) ImportKey(k Key) error {
 // store with nothing stored yet passes, because an absent file is an
 // empty store rather than a broken one.
 //
-// The bootstrap asks this, so that "the repository you adopted is
-// encrypted to a key this host does not have" is something an operator
-// is told where they can fix it, rather than something they discover
-// when a run fails to resolve a credential.
+// The bootstrap asks this, so that "the secrets on this host are
+// encrypted to a key it does not have" is something an operator is told
+// where they can fix it, rather than something they discover when a run
+// fails to resolve a credential.
 func (s *Store) Check() error {
 	_, err := s.load()
 	return err
@@ -269,7 +269,7 @@ func (s *Store) Check() error {
 // FileRecipient reports the public key the secrets file is encrypted to,
 // or "" when there is no file yet. Shown beside PublicKey in the
 // bootstrap: seeing the two differ is what tells an operator holding
-// several keys which one this repository needs.
+// several keys which one this deployment needs.
 func (s *Store) FileRecipient() (string, error) {
 	if s.cfg.File == "" {
 		return "", nil

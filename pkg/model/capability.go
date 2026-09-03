@@ -188,6 +188,65 @@ type Reaper interface {
 	Reap(ctx context.Context, creds CredentialResolver, now time.Time) ([]string, error)
 }
 
+// CredentialCheck is what CheckCredential below reports back: which
+// standing credentials grain authenticated as, and one sentence naming
+// what the far end said when it did.
+//
+// Detail is human-facing text, the same bar Resolution.Reason holds to:
+// it is shown verbatim on Settings' Capabilities tab and printed by
+// `grain settings`, so it should read as a sentence somebody can act on
+// rather than as a status code or a dump of an API response.
+type CredentialCheck struct {
+	// Credentials names every standing credential the check
+	// authenticated as -- CapabilitySpec.Requires' own names, so a
+	// caller reporting a refusal can name the secret to replace without
+	// knowing anything about the capability. Usually one; github-sandbox
+	// signs as a GitHub App, which is two.
+	Credentials []string
+	// Detail is what came back, on the way through: how many keys the
+	// account has, which installation answered. It is the evidence that
+	// the credential is live rather than merely present -- an empty
+	// Detail with a nil error would say "checked" and show nothing for
+	// it, which is the shape of answer this whole check exists to
+	// replace.
+	Detail string
+}
+
+// CredentialChecker is implemented by a capability provider that holds a
+// *standing* credential -- one an operator pasted once, which every
+// later mint authenticates as. Such a credential can stop working with
+// no setting on this deployment changing: the key inside the secret is
+// deleted or rotated away at the far end, and nothing grain stores can
+// see it. A configuration pane reads that deployment as configured, and
+// says so, until a task fails.
+//
+// CheckCredential is the one call that can tell the difference. It
+// authenticates as the credential and makes the cheapest, most harmless
+// request that proves the far end still accepts it -- a listing of what
+// the provider already administers (gcp-key lists the agent account's
+// own keys, exactly as Reap does), never a mint, never a write, and
+// never anything needing permission beyond what an ordinary
+// Materialize already needs.
+//
+// It is called on demand, by a human who asked for it, not on a timer:
+// every call is a real round trip to somebody else's API, and the answer
+// is true only at the moment it is given.
+//
+// An error means the check ran and the answer is no -- the credential
+// was refused, or the API refused the call it was used for -- and it
+// should be the provider's own explained error, the one naming the
+// secret to replace, rather than the raw error the API returned. A
+// provider that cannot even attempt the check (this deployment never
+// configured it) says so with an error too; there is no third return.
+//
+// Optional, exactly as Reaper is: a capability holding no standing
+// credential -- self-debug, self-repair, bootstrap-playbooks -- has
+// nothing that could go stale behind grain's back and need not implement
+// this.
+type CredentialChecker interface {
+	CheckCredential(ctx context.Context, creds CredentialResolver) (CredentialCheck, error)
+}
+
 // CapabilityRegistry holds providers in registration order --
 // deterministic, so two providers that both act on the same task
 // compose predictably rather than by map iteration order -- and looks

@@ -178,12 +178,12 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
         </ListItemButton>
         <ListItemButton selected={view === "templates"} onClick={() => onSetView("templates")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <span className="dot dot-all" />
-          <ListItemText primary="Task templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+          <ListItemText primary="Templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{templates.length}</Typography>
         </ListItemButton>
         <ListItemButton selected={view === "suites"} onClick={() => onSetView("suites")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <span className="dot dot-all" />
-          <ListItemText primary="Task suites" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+          <ListItemText primary="Suites" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{suites.length}</Typography>
         </ListItemButton>
       </List>

@@ -29,6 +29,15 @@ describe("Sidebar", () => {
     expect(screen.queryByRole("button", { name: /Queued for merge/ })).not.toBeInTheDocument();
   });
 
+  // The whole point of making the wait a state rather than a chip: it is
+  // countable, so "what is sitting here waiting on me?" has an entry in
+  // the rail and a filter behind it.
+  it("counts tasks waiting on a Submit click under their own entry", () => {
+    render(<Sidebar {...baseProps} config={null} tasks={[...tasks, { id: 4, state: "awaiting_submit", blocked: false }]} />);
+    expect(screen.getByRole("button", { name: /Awaiting submit 1/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Queued for merge/ })).not.toBeInTheDocument();
+  });
+
   it("shows a blocked nav entry only when a task is blocked", () => {
     render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
     expect(screen.getByRole("button", { name: /Blocked 1/ })).toBeInTheDocument();
