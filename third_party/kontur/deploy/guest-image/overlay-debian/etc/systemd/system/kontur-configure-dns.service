@@ -1,0 +1,23 @@
+[Unit]
+Description=Write /etc/resolv.conf from the ip= kernel command line
+Documentation=file:///usr/local/libexec/kontur-configure-dns
+# Early, and for the same reason kontur-net-cmdline.service is: this is
+# part of the guest's own networking rather than something layered on top
+# of it, and anything that resolves a name -- a setup script's package
+# mirror, an agent's first HTTPS call -- wants it already done.
+# DefaultDependencies=no keeps it out of the ordering cycle an ordinary
+# unit gets against sysinit.target, which this is itself a part of.
+DefaultDependencies=no
+After=kontur-net-cmdline.service
+Wants=network-pre.target
+Before=network-pre.target sshd.service ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/kontur-configure-dns
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target

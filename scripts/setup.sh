@@ -369,6 +369,20 @@ GRAIN_KONTUR_WORKSPACE="${GRAIN_KONTUR_WORKSPACE:-/home/debian}"
 GRAIN_KONTUR_NET="${GRAIN_KONTUR_NET:-flat}"
 GRAIN_KONTUR_BASE_IP="${GRAIN_KONTUR_BASE_IP:-169.254.100.10}"
 GRAIN_KONTUR_BASE_PORT="${GRAIN_KONTUR_BASE_PORT:-12000}"
+# The nameserver every sandbox guest resolves through, comma separated
+# for a second one. Left empty, konturctl picks its own default -- a
+# public resolver, which is the only answer that is right on an arbitrary
+# host: the guest cannot reach this host's own resolver (routinely an
+# address that exists only in this host's network namespace) or docker's
+# embedded one on 127.0.0.11 (the *namespace's* loopback, not on the
+# wire), so a guest pointed at either has open IP egress and hangs on
+# every name it looks up.
+#
+# Set it on a deployment whose network has a resolver of its own, or one
+# where reaching a public resolver is not allowed. It reaches the guest
+# on its ip= kernel parameter, per boot, so a change here takes effect on
+# the next sandbox rather than needing a new guest image.
+GRAIN_KONTUR_DNS="${GRAIN_KONTUR_DNS:-}"
 GRAIN_KONTUR_GIT_PROXY_HOST="${GRAIN_KONTUR_GIT_PROXY_HOST:-}"
 
 # On by default -- the common case is a single, directly-managed host
@@ -587,6 +601,15 @@ Recognized variables:
   GRAIN_KONTUR_BASE_PORT     "-port" slot 1's kontur VM forwards; every later
                              slot's is this plus its own number minus one
                              (default: 12000)
+  GRAIN_KONTUR_DNS           nameserver each sandbox guest resolves through,
+                             comma separated for a second one. Empty (the
+                             default) leaves konturctl's own default, a
+                             public resolver -- neither this host's own
+                             resolver nor docker's embedded one is
+                             reachable from inside a guest. Set it on a
+                             network with its own resolver, or one where a
+                             public resolver is not reachable; it applies
+                             per boot, so no new guest image is needed.
   GRAIN_KONTUR_GIT_PROXY_HOST  host (no port) a kontur VM reaches this
                              daemon's own git proxy through, in place of the
                              loopback address it otherwise binds to -- a
@@ -2102,6 +2125,13 @@ write_systemd_units() {
       # the two cannot disagree.
       -kontur-create-arg -guest-user -kontur-create-arg "$GRAIN_KONTUR_SSH_USER"
     )
+    # Only when this deployment named one: konturctl's own default is a
+    # public resolver, and passing nothing is how a deployment says
+    # "that one". See GRAIN_KONTUR_DNS above for why a guest cannot
+    # simply use this host's resolver.
+    if [ -n "$GRAIN_KONTUR_DNS" ]; then
+      daemon_args+=(-kontur-create-arg -dns -kontur-create-arg "$GRAIN_KONTUR_DNS")
+    fi
     # Addressing and the forwarded guest port are NAT-mode concerns: flat
     # mode takes its address from docker, and konturctl rejects "-ip"
     # outright under it.

@@ -78,6 +78,13 @@ func netshimEnvArgs(spec staticpod.VMSpec) []string {
 		"-e", "NETSHIM_BRIDGE=" + spec.Bridge,
 		"-e", "NETSHIM_CONTROL_CIDR=" + spec.ControlCIDR,
 		"-e", "NETSHIM_EXTERNAL_IFACE=" + spec.ExternalIface,
+		// Always passed, empty value included: the VM container is what
+		// assembles the guest's ip= parameter in flat mode (see
+		// cmd/kontur's applyFlatNet), so an unset variable there would
+		// mean netshim's own default rather than the nameservers this
+		// VM was created with -- and "-dns ''" is how a caller asks for
+		// the guest image's own resolv.conf to be left alone.
+		"-e", "NETSHIM_DNS=" + spec.DNS,
 	}
 }
 

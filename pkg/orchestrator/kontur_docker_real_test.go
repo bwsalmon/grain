@@ -556,6 +556,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 
 	assertGuestHasEgress(t, byName["run_command"], name)
+	assertGuestResolvesNames(t, byName["run_command"])
 	assertSandboxDiskSizeApplies(t, k, stateDir, byName["run_command"])
 
 	// A guest command's own exit status has to survive the guest's sshd
@@ -890,6 +891,50 @@ func guestStdout(t *testing.T, text string) string {
 		t.Fatalf("run_command result %q has no stderr section to bound stdout with", text)
 	}
 	return strings.TrimSpace(out)
+}
+
+// assertGuestResolvesNames covers the other half of "the guest has a
+// network": egress to an address is not egress to a name.
+//
+// Every sandbox guest booted with no working DNS for as long as this
+// image has existed. Its /etc/resolv.conf was whatever debootstrap copied
+// off the machine that built the kontur base -- on GitHub's own runners,
+// the Azure host-only wireserver -- which is reachable in that host's
+// network namespace and unroutable from a guest on a tap. Nothing here
+// caught it, because nothing a run does needs a name: the git proxy and
+// the UI are literal IPs, and `kontur exec` reaches the guest by address.
+// What it cost was every task that ran `apt`, `npm`, `pip`, `gcloud` or
+// `curl` against an API, each failing with a timeout that reads as a
+// blocked network rather than as a missing resolver.
+//
+// The resolver arrives on the guest's own ip= parameter now
+// (netshim.DefaultDNS, konturctl's -dns, GRAIN_KONTUR_DNS), and
+// kontur-configure-dns writes it into /etc/resolv.conf on each boot. Both
+// halves are asserted: the file, which is this repo's own contract, and
+// then a real lookup, which is the thing that was actually broken.
+func assertGuestResolvesNames(t *testing.T, runCommand *mcp.Tool) {
+	t.Helper()
+
+	result := runCommand.Handler(context.Background(), map[string]any{
+		"command": "cat /etc/resolv.conf",
+	})
+	if result.IsError {
+		t.Fatalf("reading the guest's /etc/resolv.conf: %s", result.Text)
+	}
+	if !strings.Contains(result.Text, "nameserver") {
+		t.Errorf("guest /etc/resolv.conf = %q, want it to name a nameserver -- without one the guest resolves nothing, however open its egress is", result.Text)
+	}
+
+	// A name this runner itself has to be able to resolve to have
+	// checked out this repo at all, looked up with the guest's own
+	// resolver and bounded so a broken one fails here rather than
+	// hanging until the suite's own timeout.
+	lookup := runCommand.Handler(context.Background(), map[string]any{
+		"command": "timeout 20 getent hosts github.com",
+	})
+	if lookup.IsError || !strings.Contains(lookup.Text, "github.com") {
+		t.Errorf("resolving github.com inside the guest failed: %s\nthe guest has a resolver on paper (above) but cannot use it", lookup.Text)
+	}
 }
 
 func assertGuestHasEgress(t *testing.T, runCommand *mcp.Tool, vmName string) {

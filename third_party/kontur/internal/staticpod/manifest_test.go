@@ -178,6 +178,11 @@ func TestRender_FlatMode(t *testing.T) {
 	if got, want := envValue(t, out, "NETSHIM_VM"), "web"; got != want {
 		t.Errorf("NETSHIM_VM = %q, want %q", got, want)
 	}
+	// The VM container derives the guest's ip= parameter at boot in this
+	// mode, nameservers included, so it has to be told them here.
+	if got, want := envValue(t, out, "NETSHIM_DNS"), netshim.DefaultDNS; got != want {
+		t.Errorf("NETSHIM_DNS = %q, want %q", got, want)
+	}
 	// NAT-only settings must not leak into a flat-mode manifest, where
 	// they describe a subnet and forwarding rules that do not exist.
 	for _, unwanted := range []string{"NETSHIM_VMS", "NETSHIM_GUEST_PORT", "NETSHIM_BRIDGE_CIDR", "CHV_NET"} {

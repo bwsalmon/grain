@@ -102,8 +102,13 @@ apt-get install -y --no-install-recommends \
 # edit this conffile (an existing /etc/nsswitch.conf predates it in every
 # debootstrap run), so the module has to be wired into the hosts line by
 # hand to apply. Without it sudo -- which resolves the local hostname for
-# its own logging -- blocks for a long DNS timeout against a guest with no
-# real nameserver. Confirmed by hand.
+# its own logging -- sends that name to whatever nameserver the guest has
+# and waits out the timeout, since no resolver on the internet answers for
+# a VM's own hostname. Confirmed by hand, back when the guest had no
+# reachable nameserver at all and the wait was the full DNS timeout; it
+# has a real one now (third_party/kontur's kontur-configure-dns), which
+# makes this a wrong answer rather than a slow one. Still the fix either
+# way: the hostname is resolved locally and never leaves the guest.
 sed -i 's/^hosts:.*/hosts:          files myhostname dns/' /etc/nsswitch.conf
 
 # --- The "debian" account. On v1's sandbox base (a stock Debian cloud

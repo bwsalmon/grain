@@ -185,6 +185,60 @@ func TestFromEnv_FlatControlDisabled(t *testing.T) {
 	}
 }
 
+// The nameservers reach the guest on its own ip= parameter, which is
+// what makes a deployment able to name the resolver its network
+// actually has -- rather than every guest booting with whatever
+// /etc/resolv.conf the machine that built the image happened to have,
+// on an address nothing in the guest can route to.
+func TestFromEnv_FlatDNS(t *testing.T) {
+	tests := []struct {
+		name string
+		// set is whether NETSHIM_DNS is in the environment at all,
+		// which is a different thing from it being empty.
+		set   bool
+		value string
+		want  string
+	}{
+		{name: "unset means the default", want: ":" + DefaultDNS},
+		{name: "one", set: true, value: "10.0.0.53", want: ":10.0.0.53"},
+		{name: "two", set: true, value: "10.0.0.53,10.0.1.53", want: ":10.0.0.53:10.0.1.53"},
+		// Explicitly empty is the opt-out, the same shape
+		// NETSHIM_CONTROL_CIDR has: the guest keeps whatever resolver
+		// its image ships with, and the parameter stays the length it
+		// has always been.
+		{name: "explicitly empty", set: true, value: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envMode, ModeFlat)
+			t.Setenv(envVM, "web")
+			if tc.set {
+				t.Setenv(envDNS, tc.value)
+			}
+			cfg, err := FromEnv()
+			if err != nil {
+				t.Fatalf("FromEnv() error = %v", err)
+			}
+			if got := DNSFields(cfg.DNS); got != tc.want {
+				t.Errorf("DNSFields(cfg.DNS) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDNS_Rejects(t *testing.T) {
+	// A third nameserver has nowhere to go (the ip= parameter has two
+	// fields), and neither a name nor an IPv6 address is something the
+	// parameter can carry -- all refused rather than quietly dropped,
+	// since the guest is where the mistake would otherwise surface, as
+	// lookups that hang.
+	for _, spec := range []string{"nameserver", "8.8.8.8,1.1.1.1,9.9.9.9", "2001:4860:4860::8888"} {
+		if _, err := ParseDNS(spec); err == nil {
+			t.Errorf("ParseDNS(%q) = nil error, want one", spec)
+		}
+	}
+}
+
 func TestFromEnv_FlatErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -193,6 +247,7 @@ func TestFromEnv_FlatErrors(t *testing.T) {
 		{"no VM name", map[string]string{envMode: ModeFlat}},
 		{"name too long", map[string]string{envMode: ModeFlat, envVM: "averylongvmname"}},
 		{"bad control CIDR", map[string]string{envMode: ModeFlat, envVM: "web", envControlCIDR: "nonsense"}},
+		{"bad DNS", map[string]string{envMode: ModeFlat, envVM: "web", envDNS: "nonsense"}},
 		{"unknown mode", map[string]string{envMode: "bridged", envVM: "web"}},
 	}
 	for _, tc := range tests {
@@ -242,7 +297,10 @@ func TestFlatGuestConfig(t *testing.T) {
 	if g.Nets[1] != "tap=ctl-web" {
 		t.Errorf("Nets[1] = %q, want tap=ctl-web", g.Nets[1])
 	}
-	if wantIP := "ip=172.17.0.2::172.17.0.1:255.255.0.0::eth0:off"; g.IPParam != wantIP {
+	// The trailing field is dns0: FromEnv filled DNS in from
+	// DefaultDNS, since NETSHIM_DNS is unset here. See
+	// TestFromEnv_FlatDNS for the rest of that.
+	if wantIP := "ip=172.17.0.2::172.17.0.1:255.255.0.0::eth0:off:8.8.8.8"; g.IPParam != wantIP {
 		t.Errorf("IPParam = %q, want %q", g.IPParam, wantIP)
 	}
 	if g.ControlIP != "169.254.100.2" {

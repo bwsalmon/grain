@@ -504,7 +504,7 @@ guest disk image build (`guest-image`/`guest-rootfs-*` stages), how the
 two variants differ beyond package manager, and their own build args
 (`GUEST_SUITE`/`GUEST_ALPINE_VERSION`, `GUEST_SSH_AUTHORIZED_KEY`,
 `GUEST_SETUP_SCRIPT`, `GUEST_KERNEL_PACKAGE`, `GUEST_CONSOLE_WRAP`,
-`GUEST_DISK_EXTRA_MB`).
+`GUEST_DISK_EXTRA_MB`, `GUEST_DNS`).
 
 `GUEST_SETUP_SCRIPT` is worth calling out here, since it's what makes
 that guest more than a reference one: it holds a shell script's own text,
@@ -740,6 +740,7 @@ the control link, which both guests' service definitions pick up.
 | `NETSHIM_MODE`            | no       | `nat`           | `nat` for the shared-IP mode above, `flat` for this one. |
 | `NETSHIM_VM`              | yes      | —               | The single VM's name, in place of `NETSHIM_VMS`: flat mode needs no address or port for it. |
 | `NETSHIM_CONTROL_CIDR`    | no       | `169.254.100.1/24` | The control link's address and subnet. Empty disables the control link. |
+| `NETSHIM_DNS`             | no       | `8.8.8.8`       | Nameserver(s) the guest resolves through, comma separated, at most two. They travel on the guest's `ip=` parameter and become its `/etc/resolv.conf`. Empty leaves the guest with whatever its image ships. |
 | `NETSHIM_BRIDGE`          | no       | `kontur0`       | Name of the control link's bridge. |
 | `NETSHIM_EXTERNAL_IFACE`  | no       | `eth0`          | The interface whose identity the guest takes over. |
 
@@ -753,9 +754,14 @@ manifest stays privileged in both modes.
 
 Known gaps, none of which flat mode closes on its own:
 
-- **DNS.** Docker's embedded resolver listens on `127.0.0.11`, the
-  *namespace's loopback*, which is not on the wire -- so other containers
-  resolve the VM by name, but the guest cannot resolve them.
+- **Resolving sibling containers by name.** Docker's embedded resolver
+  listens on `127.0.0.11`, the *namespace's loopback*, which is not on
+  the wire -- so other containers resolve the VM by name, but the guest
+  cannot resolve them. The guest's own outbound DNS is not part of this
+  gap: it resolves through `NETSHIM_DNS` (a public resolver by default),
+  which reaches it on the `ip=` parameter's `dns0`/`dns1` fields. Naming
+  a resolver that does answer for those container names is the way to
+  close the rest.
 - **IPv4 only**, as with the NAT path.
 - **Single queue.** The tap is created without `IFF_MULTI_QUEUE`, so
   `num_queues` cannot be raised without also handing cloud-hypervisor
@@ -794,7 +800,11 @@ management into a day-to-day workflow, against either of two backends:
   kubelet notices the new file and starts the pod within a few seconds --
   no `kubectl apply`, since there's no apiserver to apply to. Under
   `-backend docker` it runs `docker run` directly instead; see "Docker
-  backend" below.
+  backend" below. `-dns` is worth knowing about beside the addressing
+  flags: it names the resolver the guest gets (a public one by default,
+  since neither the host's own resolver nor docker's embedded one is
+  reachable from inside a guest), and it is per VM rather than baked into
+  a guest image -- see `deploy/guest-image/README.md`'s "DNS".
 - `konturctl vm update <name> [flags]`: changes the flags given and
   leaves the rest as they were, keeping whichever backend the VM was
   created with (there's no `-backend` flag here -- migrating a running VM

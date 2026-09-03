@@ -388,12 +388,17 @@ which is the whole thing the queue exists to avoid. So the image carries:
 These caches were written as the load-bearing half rather than an
 optimization, on the premise that a dispatched sandbox reached nothing
 but the git proxy and a cold cache therefore could not build anything at
-all. That premise was a bug: flat mode derived the guest's `ip=`
-parameter with an empty gateway field, so every sandbox booted without a
-default route and lost the open egress `docs/design.md` says it has. The
-fix is in the runtime image, not this one
+all. That premise was a bug, twice over: flat mode derived the guest's
+`ip=` parameter with an empty gateway field, so every sandbox booted
+without a default route and lost the open egress `docs/design.md` says it
+has -- and once that was fixed, the guest still had no working resolver,
+since its `/etc/resolv.conf` was whatever the machine that built the
+kontur base happened to have (`grain/task-200`). Both fixes are in the
+vendored runtime tree, not this one
 (`third_party/kontur/VENDORED.md`, "Local patches") -- nothing in this
-directory changed. With it, a cold cache is survivable, and the caches
+directory changed. A deployment names its own resolver with
+`GRAIN_KONTUR_DNS` (`scripts/setup.sh`), which reaches the guest on its
+`ip=` parameter per boot, so it needs no image of its own. With it, a cold cache is survivable, and the caches
 earn their place the ordinary way: not re-fetching the same module graph
 on every dispatch, and still working if a deployment narrows egress again
 (`egress_policy(allowlist)`).

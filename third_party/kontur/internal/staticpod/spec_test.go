@@ -151,7 +151,10 @@ func TestValidate_Minimal(t *testing.T) {
 	// kernel boot, via kontur run's own baked-in CHV_KERNEL default (see
 	// internal/config's defaultKernel) -- so Cmdline is still
 	// auto-derived here, the same as if Kernel had been given explicitly.
-	want := "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"
+	// The trailing field is the dns0 the guest resolves through --
+	// Defaults()' netshim.DefaultDNS, since baseSpec names none of its
+	// own. See TestValidate_AutoCmdlineDNS.
+	want := "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:8.8.8.8"
 	if s.Cmdline != want {
 		t.Errorf("Cmdline = %q, want %q", s.Cmdline, want)
 	}
@@ -181,12 +184,61 @@ func TestValidate_AutoCmdline(t *testing.T) {
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	want := "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"
+	// The trailing field is the dns0 the guest resolves through --
+	// Defaults()' netshim.DefaultDNS, since baseSpec names none of its
+	// own. See TestValidate_AutoCmdlineDNS.
+	want := "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:8.8.8.8"
 	if s.Cmdline != want {
 		t.Errorf("Cmdline = %q, want %q", s.Cmdline, want)
 	}
 	if !s.CmdlineAuto {
 		t.Errorf("CmdlineAuto = false, want true")
+	}
+}
+
+// The nameservers a guest is given ride on the same ip= parameter that
+// carries its address, in the dns0/dns1 fields past the ones that
+// configure the interface -- which is what makes the resolver a per-VM
+// setting rather than something baked into a guest image (see
+// deploy/guest-image/overlay-common's kontur-configure-dns).
+func TestValidate_AutoCmdlineDNS(t *testing.T) {
+	tests := []struct {
+		name string
+		dns  string
+		want string
+	}{
+		{"default", Defaults().DNS, "ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:8.8.8.8"},
+		{"two", "1.1.1.1, 9.9.9.9", "ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:1.1.1.1:9.9.9.9"},
+		// The empty string is how a deployment says "leave the guest's
+		// own /etc/resolv.conf alone", and it has to come out as the
+		// seven-field parameter this always was rather than as one with
+		// empty fields hanging off it.
+		{"none", "", "ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := baseSpec()
+			s.DNS = tc.dns
+			if err := s.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if !strings.Contains(s.Cmdline, tc.want) {
+				t.Errorf("Cmdline = %q, want it to carry %q", s.Cmdline, tc.want)
+			}
+		})
+	}
+}
+
+// Rejected at "vm create" time, where the operator is standing there to
+// read it, rather than by a guest that boots with a resolver it cannot
+// use and hangs on every lookup.
+func TestValidate_RejectsBadDNS(t *testing.T) {
+	for _, dns := range []string{"not-an-address", "8.8.8.8,1.1.1.1,9.9.9.9", "2001:4860:4860::8888"} {
+		s := baseSpec()
+		s.DNS = dns
+		if err := s.Validate(); err == nil {
+			t.Errorf("Validate() = nil for DNS %q, want an error", dns)
+		}
 	}
 }
 
