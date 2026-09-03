@@ -1606,11 +1606,20 @@ type defaultShaper interface {
 //	                                  built at (refresh, via defaultShaper)
 //	max-workers, max-mergers, max-agent-turns
 //	                                  orchestrator.RunCycle's own per-cycle re-read
-//	agent-framework, gemini-model, claude-model
+//	agent-framework, gemini-model, claude-model, codex-model
 //	                                  dispatchConfig's own per-dispatch re-read
-//	target-repos, newest-first, show-closed-by-default,
+//	prompt-extension                  the deployment-wide standing instructions
+//	                                  RunCycle refreshes every cycle
+//	                                  (orchestrator.resolvePromptExtension)
+//	target-repos, default-capabilities, environment-name,
+//	newest-first, show-closed-by-default,
 //	approved-by-default, auto-merge-by-default
 //	                                  pkg/ui, which reads grain_config per request
+//
+// That list is prose, and prose about a growing struct goes stale: pkg/ui's
+// own settings_restart_drift_test.go is the check, requiring every
+// ui.UpdateSettingsRequest field to be accounted for as one of these or as
+// restart-only.
 //
 // What is left is github-host and github-insecure-http, which are baked
 // into the git proxy's forwarder, the GitHub REST transport and the

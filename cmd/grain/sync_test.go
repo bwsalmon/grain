@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -113,58 +114,143 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 // (ui.Client.UpdateSettings's own doc comment) filled in.
 func settingsRequest(pollInterval string, maxWorkers int, geminiModel, claudeModel, githubHost string) *ui.UpdateSettingsRequest {
 	return &ui.UpdateSettingsRequest{
-		PollInterval:  &pollInterval,
-		MaxWorkers:    &maxWorkers,
-		GeminiModel:   &geminiModel,
-		ClaudeModel:   &claudeModel,
-		GitHubHost:    &githubHost,
+		PollInterval: &pollInterval,
+		MaxWorkers:   &maxWorkers,
+		GeminiModel:  &geminiModel,
+		ClaudeModel:  &claudeModel,
+		GitHubHost:   &githubHost,
 	}
 }
 
 // printSettingsDiff is the whole of what a sync run reports, and its one
-// failure mode is silence: a setting the config file really changed, left
-// out of the table, prints as "nothing changed" against a deployment that
-// just changed. That has happened once already (the sandbox VM shape),
-// so this walks every field a "settings" section can set and insists the
-// diff names it.
-func TestPrintSettingsDiffNamesEverySettingASyncCanChange(t *testing.T) {
-	before := ui.Settings{
-		EnvironmentName: "staging", PollInterval: "30s", MaxWorkers: 1, MaxMergers: 1,
-		GeminiModel: "gemini-old", ClaudeModel: "claude-old", MaxAgentTurns: 40,
-		GitHubHost: "github.com", GCPProject: "grain-old", GCPServiceAccountEmail: "old@example.com",
-		SandboxCPUs: 2, SandboxMemoryMB: 2048, SandboxDiskGB: 20,
-		TargetRepos: []string{"acme/widgets"}, DefaultCapabilities: []string{"self-debug"},
-		AgentFramework: "antigravity",
+// failure mode is silence: a setting the config file really changed, with
+// no row in settingsDiffRows, prints as "nothing changed" against a
+// deployment that just changed. That has happened twice -- the sandbox VM
+// shape, then seven settings at once -- and both times the table was a
+// hand-written list nobody was reminded to add to.
+//
+// This is the reminder, and it is derived rather than written down:
+// ui.UpdateSettingsRequest's own JSON tags are the definition of what a
+// config file can set (syncSettings hands UpdateSettings the whole
+// request), so every one of them must be a row here or a deliberate,
+// reasoned entry in settingsDiffExceptions.
+func TestSettingsDiffRowsCoverEveryUpdatableSetting(t *testing.T) {
+	rows := map[string]string{}
+	for _, row := range settingsDiffRows {
+		if other, dup := rows[row.field]; dup {
+			t.Errorf("settingsDiffRows has two rows for %q (%q and %q); one setting is one line of output",
+				row.field, other, row.name)
+		}
+		rows[row.field] = row.name
 	}
-	after := ui.Settings{
-		EnvironmentName: "prod", PollInterval: "45s", MaxWorkers: 3, MaxMergers: 2,
-		GeminiModel: "gemini-new", ClaudeModel: "claude-new", MaxAgentTurns: 80,
-		GitHubHost: "github.example", GitHubInsecureHTTP: true,
-		GCPProject: "grain-new", GCPServiceAccountEmail: "new@example.com",
-		SandboxCPUs: 4, SandboxMemoryMB: 8192, SandboxDiskGB: 30,
-		TargetRepos: []string{"acme/widgets", "acme/gadgets"}, DefaultCapabilities: []string{"self-debug", "gcp-key"},
-		AgentFramework: "claude", NewestFirst: true, ShowClosedByDefault: true,
-		ApprovedByDefault: true, AutoMergeByDefault: true,
-		PromptExtension: "Run `make lint` before you push.",
+
+	settable := map[string]bool{}
+	for _, field := range updateSettingsFields() {
+		settable[field] = true
+		if _, ok := rows[field]; ok {
+			continue
+		}
+		if why, excused := settingsDiffExceptions[field]; excused {
+			if strings.TrimSpace(why) == "" {
+				t.Errorf("settingsDiffExceptions excuses %q with no reason", field)
+			}
+			continue
+		}
+		t.Errorf("ui.UpdateSettingsRequest has a %q field with no settingsDiffRows row: "+
+			"a config file setting it changes the deployment, and `grain sync` prints "+
+			"\"already up to date, nothing changed\" -- add a row, or a settingsDiffExceptions "+
+			"entry saying why it cannot be diffed", field)
 	}
+
+	// The other direction, so the table cannot drift into naming settings
+	// that no longer exist: a row (or an exception) for a field
+	// UpdateSettingsRequest does not have reports on nothing, and reads as
+	// coverage it isn't.
+	for field := range rows {
+		if !settable[field] {
+			t.Errorf("settingsDiffRows has a row for %q, which is not a ui.UpdateSettingsRequest field -- "+
+				"no config file can set it, so the row diffs something no sync ever changes", field)
+		}
+	}
+	for field := range settingsDiffExceptions {
+		if !settable[field] {
+			t.Errorf("settingsDiffExceptions excuses %q, which is not a ui.UpdateSettingsRequest field -- "+
+				"a stale exception excuses nothing and hides the next real one", field)
+		}
+	}
+}
+
+// updateSettingsFields is every setting a "settings" section can carry,
+// by the JSON name it is spelled with -- ui.UpdateSettingsRequest's own
+// tags, which is where cmdSync unmarshals that section into.
+func updateSettingsFields() []string {
+	t := reflect.TypeOf(ui.UpdateSettingsRequest{})
+	fields := make([]string, 0, t.NumField())
+	for i := range t.NumField() {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name == "" || name == "-" {
+			continue
+		}
+		fields = append(fields, name)
+	}
+	return fields
+}
+
+// Having a row is half of it; the row has to actually report the change.
+// Every setting is moved off its zero value at once (settingsWithEveryFieldChanged)
+// rather than by a hand-written pair of ui.Settings, so this cannot go
+// stale the way the list it replaced did: a row reading a field nothing
+// changed, or reading nothing at all, fails here.
+func TestPrintSettingsDiffReportsEveryRowItHas(t *testing.T) {
+	before := ui.Settings{}
+	after := settingsWithEveryFieldChanged()
 
 	out := captureStdout(t, func() { printSettingsDiff(before, after) })
 
-	for _, name := range []string{
-		"environment name", "poll interval", "max workers", "max mergers",
-		"gemini model", "claude model", "max agent turns",
-		"github host", "github insecure http", "gcp project", "gcp agent service account",
-		"sandbox cpus", "sandbox memory mb", "sandbox disk gb", "prompt extension",
-		"target repos", "default capabilities", "agent framework",
-		"newest first", "show closed by default", "approved by default", "auto merge by default",
-	} {
-		if !strings.Contains(out, "  "+name+": ") {
-			t.Errorf("printSettingsDiff did not report %q as changed; it printed:\n%s", name, out)
+	for _, row := range settingsDiffRows {
+		if !strings.Contains(out, "  "+row.name+": ") {
+			t.Errorf("printSettingsDiff did not report %q (%s) as changed; it printed:\n%s",
+				row.name, row.field, out)
 		}
 	}
-	// The two lists read as lists, not as Go slices: this is a workflow
-	// log, and `["acme/widgets" "acme/gadgets"]` is not how anything else
-	// here names a set.
+}
+
+// settingsWithEveryFieldChanged is a settings row with every field moved
+// off its zero value, so that a diff against the zero ui.Settings has to
+// report every row there is.
+func settingsWithEveryFieldChanged() ui.Settings {
+	var s ui.Settings
+	v := reflect.ValueOf(&s).Elem()
+	for i := range v.NumField() {
+		switch f := v.Field(i); f.Kind() {
+		case reflect.String:
+			f.SetString("changed")
+		case reflect.Int:
+			f.SetInt(7)
+		case reflect.Bool:
+			f.SetBool(true)
+		case reflect.Slice:
+			// Only the []string ones matter here -- they are what the two
+			// list rows join -- and a slice of anything else (the
+			// capability statuses) is left alone rather than filled with a
+			// zero element that would say nothing.
+			if f.Type().Elem().Kind() == reflect.String {
+				f.Set(reflect.ValueOf([]string{"one", "two"}))
+			}
+		}
+	}
+	return s
+}
+
+// The lists read as lists, not as Go slices: this is a workflow log, and
+// `["acme/widgets" "acme/gadgets"]` is not how anything else here names a
+// set.
+func TestPrintSettingsDiffJoinsListSettings(t *testing.T) {
+	before := ui.Settings{TargetRepos: []string{"acme/widgets"}}
+	after := ui.Settings{TargetRepos: []string{"acme/widgets", "acme/gadgets"}}
+
+	out := captureStdout(t, func() { printSettingsDiff(before, after) })
+
 	if !strings.Contains(out, `"acme/widgets" -> "acme/widgets, acme/gadgets"`) {
 		t.Errorf("target repos are not reported as a joined list; printed:\n%s", out)
 	}
