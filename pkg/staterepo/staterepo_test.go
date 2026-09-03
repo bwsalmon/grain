@@ -582,6 +582,13 @@ func TestApplyRefusesADumpFromANewerBuild(t *testing.T) {
 	if tmpl.Title != "Run the nightly sweep" {
 		t.Fatalf("a dump this build cannot read was imported anyway: %q", tmpl.Title)
 	}
+	// And it keeps saying so. The commit is already fetched, so a second
+	// Apply pulls nothing new -- if that were what it keyed on it would
+	// report all clear, and the caller would export the database over a
+	// working tree holding a merge nothing has taken up.
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); !errors.Is(err, staterepo.ErrNotApplied) {
+		t.Fatalf("applying again with nothing left to fetch: got %v, want an ErrNotApplied", err)
+	}
 }
 
 func read(t *testing.T, path string) string {

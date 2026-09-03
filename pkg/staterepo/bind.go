@@ -107,16 +107,36 @@ var SettingsTables = []string{
 // throw away every task filed since it arrived. What the database holds
 // for its own tables wins, and the next export writes it back out.
 //
-// Reports whether anything was imported. A pull that brought nothing is
+// What it imports is decided by the same marker Load reads -- the commit
+// this host last loaded or wrote -- rather than by whether this
+// particular Pull brought something down. The two differ exactly when it
+// matters: an import that failed on one tick (the database was busy, a
+// merged row would not insert) has left the working tree at a commit
+// nothing has taken up, and the next tick's Pull, having nothing further
+// to fetch, would report no news and let the export write over it.
+// Against the marker, that tick tries the import again.
+//
+// Reports whether anything was imported. Nothing to apply is
 // (false, nil), which is the ordinary case on almost every tick.
 func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
-	arrived, err := r.Pull(ctx)
-	if err != nil || !arrived {
+	if _, err := r.Pull(ctx); err != nil {
 		return false, err
 	}
 	head, err := r.Head(ctx)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
+	}
+	marker, err := r.loadedHead(ctx)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrNotApplied, err)
+	}
+	// head == marker is the ordinary tick: the repository is exactly
+	// where this host left it. An empty head is a repository with no
+	// commits yet, and an empty marker is a working tree Load has not
+	// decided about -- neither is Apply's to import, and Load is where
+	// both are answered.
+	if head == "" || marker == "" || marker == head {
+		return false, nil
 	}
 	// A repository with no dump in it has nothing to say about the
 	// database -- an initial commit holding only a README, say. Left
