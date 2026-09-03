@@ -68,7 +68,7 @@ describe("SchedulesList", () => {
   it("shows an empty message when there are none", () => {
     render(<SchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
 
-    expect(screen.getByText("No scheduled tasks.")).toBeInTheDocument();
+    expect(screen.getByText("No schedules yet.")).toBeInTheDocument();
     // Nothing to search or sort when the list is empty.
     expect(screen.queryByPlaceholderText("Search schedules…")).not.toBeInTheDocument();
   });

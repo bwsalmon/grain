@@ -80,7 +80,7 @@ describe("Sidebar", () => {
     const user = userEvent.setup();
     render(<Sidebar {...baseProps} config={null} tasks={[]} schedules={schedules} onSetView={onSetView} />);
 
-    const button = screen.getByRole("button", { name: /Scheduled tasks 2/ });
+    const button = screen.getByRole("button", { name: /Schedules 2/ });
     await user.click(button);
 
     expect(onSetView).toHaveBeenCalledWith("schedules");

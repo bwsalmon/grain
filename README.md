@@ -2033,7 +2033,7 @@ that" is asked from a shell on the host at least as often as from a
 browser. A repo's own defaults are deployment configuration by that
 reading, and were the one member of the category with no spelling here.
 Schedules, templates and suites are authored *content*: written once, in
-a form built for writing them, and docs/scheduled-tasks.md records their
+a form built for writing them, and docs/schedules.md records their
 absence from the CLI as an open gap waiting on somebody who needs it
 rather than as a decision. Adding a `repo` family does not make them
 next.

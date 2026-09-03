@@ -8,7 +8,7 @@ const SIDEBAR_WIDTH = 232;
 // view around: a fixed rail with the workspace identity up top, a state
 // list styled like Plane's own status groups (a dot standing in for the
 // state's badge color, a count on the right), and the deployment-level
-// actions (settings) pinned to the bottom. Scheduled tasks and Releases
+// actions (settings) pinned to the bottom. Schedules and Releases
 // live in their own nav pane / the repo pane (bwsalmon/agents#455,
 // bwsalmon/agents#398), rather than their own buttons here.
 //
@@ -127,7 +127,7 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
         </ListItemButton>
         <ListItemButton selected={view === "schedules"} onClick={() => onSetView("schedules")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <span className="dot dot-all" />
-          <ListItemText primary="Scheduled tasks" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+          <ListItemText primary="Schedules" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{schedules.length}</Typography>
         </ListItemButton>
         <ListItemButton selected={view === "templates"} onClick={() => onSetView("templates")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>

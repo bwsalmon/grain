@@ -40,7 +40,7 @@ export default function SchedulesList({ schedules, templates = [], suites = [], 
   return (
     <main>
       <ListHeader
-        title="Scheduled tasks"
+        title="Schedules"
         count={visible.length}
         action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New schedule</Button>}
       />
@@ -68,7 +68,7 @@ export default function SchedulesList({ schedules, templates = [], suites = [], 
           </li>
         ))}
       </ul>
-      {schedules.length === 0 && <ListEmpty>No scheduled tasks.</ListEmpty>}
+      {schedules.length === 0 && <ListEmpty>No schedules yet.</ListEmpty>}
       {schedules.length > 0 && visible.length === 0 && <ListEmpty>No schedules match your search.</ListEmpty>}
 
       {showNew && (

@@ -64,8 +64,8 @@
 // Schedules, templates, suites and qualification plans remain UI-only,
 // and repo.go's own doc comment has why that is not the same question:
 // they are authored content rather than deployment configuration, and
-// docs/scheduled-tasks.md records their absence here as an open gap
-// waiting on somebody who needs it.
+// docs/schedules.md records their absence here as an open gap waiting on
+// somebody who needs it.
 package main
 
 import (
