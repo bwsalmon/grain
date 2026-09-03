@@ -57,13 +57,128 @@ func TestHealthFromAFailedCompletedCheckIsFailing(t *testing.T) {
 	}
 }
 
-func TestHealthFromAnInProgressCheckIsNotYetFailing(t *testing.T) {
+// The merge gate's whole point: a check that has not finished is not a
+// check that passed. Reading an in-progress run as clean is how a merge
+// queue lands a change before its tests have said anything at all about
+// it, so this must read pending -- an answer syncEntry neither merges on
+// nor files a fix for, and one that resolves itself a cycle or two later
+// when CI finishes.
+func TestHealthFromAnInProgressCheckIsPending(t *testing.T) {
 	yes := true
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "build", Status: "in_progress"},
 	}, true)
-	if got != model.PrClean {
-		t.Fatalf("got %q, want clean (an in-progress check is not a failure)", got)
+	if got != model.PrPending {
+		t.Fatalf("got %q, want pending (an unfinished check must never read as clean)", got)
+	}
+}
+
+// A queued check has not even started, which is if anything further from
+// "passed" than an in-progress one -- and it is the state a check spends
+// its first seconds in, exactly when a freshly opened PR is first synced.
+func TestHealthFromAQueuedCheckIsPendingEvenAlongsideAPassingOne(t *testing.T) {
+	yes := true
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
+		{Name: "lint", Status: "completed", Conclusion: strPtr("success")},
+		{Name: "tests", Status: "queued"},
+	}, true)
+	if got != model.PrPending {
+		t.Fatalf("got %q, want pending: one green check says nothing about the one still queued", got)
+	}
+}
+
+// Pending outranks failing on purpose. The queue files exactly one
+// automatic fix per pull request, so waiting a cycle for the rest of CI
+// buys that one fix task the whole verdict to work from instead of
+// whichever job happened to go red first.
+func TestHealthFromAFailedCheckAlongsideARunningOneIsStillPending(t *testing.T) {
+	yes := true
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
+		{Name: "lint", Status: "completed", Conclusion: strPtr("failure")},
+		{Name: "tests", Status: "in_progress"},
+	}, true)
+	if got != model.PrPending {
+		t.Fatalf("got %q, want pending until every check has reported", got)
+	}
+}
+
+// A conflict is read off the PR itself and needs no CI at all, so it
+// still answers straight away -- a PR that cannot merge into its base
+// will not start merging because its tests eventually go green.
+func TestHealthFromConflictedBeatsPending(t *testing.T) {
+	no := false
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, []github.CheckRun{
+		{Name: "tests", Status: "in_progress"},
+	}, true)
+	if got != model.PrConflicted {
+		t.Fatalf("got %q, want conflicted", got)
+	}
+}
+
+// A check that ran out of time, or a workflow too broken to start at all
+// (the Actions fallback's own conclusion for that), is a check that ran
+// and did not pass -- the same thing a fix task exists to repair as an
+// outright "failure".
+func TestHealthFromATimedOutOrUnstartableCheckIsFailing(t *testing.T) {
+	for _, conclusion := range []string{"failure", "timed_out", "startup_failure"} {
+		t.Run(conclusion, func(t *testing.T) {
+			yes := true
+			got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
+				{Name: "tests", Status: "completed", Conclusion: strPtr(conclusion)},
+			}, true)
+			if got != model.PrFailing {
+				t.Fatalf("got %q, want failing", got)
+			}
+		})
+	}
+}
+
+// The other completed conclusions are not failures, and reading them as
+// failures would have the queue file a fix task for something no agent
+// can repair: a merge queue's own "cancelled, will retry" check, a
+// workflow waiting on a human's approval, or a job deliberately skipped.
+func TestHealthFromTheNonFailureConclusionsStayClean(t *testing.T) {
+	for _, conclusion := range []string{"success", "neutral", "skipped", "cancelled", "action_required", "stale"} {
+		t.Run(conclusion, func(t *testing.T) {
+			yes := true
+			got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
+				{Name: "tests", Status: "completed", Conclusion: strPtr(conclusion)},
+			}, true)
+			if got != model.PrClean {
+				t.Fatalf("got %q, want clean", got)
+			}
+		})
+	}
+}
+
+// The fix task's body is the whole brief an agent gets, so it names the
+// jobs that went red rather than leaving it to go and find them.
+func TestHealthReasonNamesTheFailingChecks(t *testing.T) {
+	checks := []github.CheckRun{
+		{Name: "lint", Status: "completed", Conclusion: strPtr("success")},
+		{Name: "unit tests", Status: "completed", Conclusion: strPtr("failure")},
+		{Name: "e2e", Status: "completed", Conclusion: strPtr("timed_out")},
+	}
+	got := healthReason(model.PrFailing, github.PullRequestDetail{BaseRef: "main"}, checks)
+	for _, want := range []string{"unit tests", "e2e"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("healthReason = %q, want it to name %q", got, want)
+		}
+	}
+	if strings.Contains(got, "lint") {
+		t.Errorf("healthReason = %q, want it to leave the check that passed out", got)
+	}
+}
+
+// The general sentence stays as the floor. Nothing reaches it today --
+// syncEntry passes healthReason the very checks health was computed from
+// -- but a fix task whose body said only "its checks are failing ()"
+// would read as a bug to whoever picked it up, so the empty list keeps
+// the sentence it had before check names went in.
+func TestHealthReasonStillExplainsFailingWithNoNamedChecks(t *testing.T) {
+	got := healthReason(model.PrFailing, github.PullRequestDetail{BaseRef: "main"}, nil)
+	if !strings.Contains(got, "checks") {
+		t.Fatalf("healthReason = %q, want it to still say the checks are failing", got)
 	}
 }
 

@@ -2258,6 +2258,7 @@ class PullRequestRef:
 class PrHealth(Enum):
     UNKNOWN = "unknown"        # GitHub hasn't computed mergeability yet
     CLEAN = "clean"
+    PENDING = "pending"        # checks are still running
     CONFLICTED = "conflicted"
     FAILING = "failing"
     MERGED = "merged"
@@ -2279,6 +2280,16 @@ folded in as an enum instead of a tri-state of booleans. `UNKNOWN` keeps
 the distinction that matters and that `_close_finished_prs` already
 depends on: GitHub computes mergeability asynchronously, so `None` right
 after a push means *check again next cycle*, never *conflicted*.
+
+`PENDING` is the same idea one step further out, for CI rather than for
+mergeability: a check run that has not reached a conclusion is not a
+check that passed, so a pull request with anything still running is
+neither `CLEAN` (nothing merges on it — that is how a queue lands a
+change before its tests have said a word about it) nor yet `FAILING`. It
+differs from `UNKNOWN` in who is missing the answer: `PENDING` is *CI has
+not finished*, and resolves by itself; `UNKNOWN` is *grain could not find
+out*, and may never resolve without an operator granting a permission.
+Neither is acted on, which is what makes waiting the default.
 
 **The wire types stay separate.** `PullRequestDetail`, `Issue`, and
 `Comment` in `github.py` are projections of GitHub's records, shaped by

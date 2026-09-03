@@ -1,9 +1,13 @@
 package orchestrator_test
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/github"
+	"github.com/bwsalmon/grain/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 )
@@ -326,6 +330,184 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 		t.Fatal("did not expect a fix task for the second queue entry while the head is still unresolved")
 	}
 }
+
+// queuedTaskWithPullRequest is the four-step setup every merge queue test
+// here repeats: file an auto-merge task, push its branch, open its pull
+// request, and record it as completed so SyncPullRequests picks it up. It
+// returns the task as stored and the pull request's own head branch, which
+// is what a test seeds check runs under (Sim.CheckRuns' own doc comment).
+func queuedTaskWithPullRequest(t *testing.T, ctx context.Context, store *model.Store,
+	sim *githubsim.Sim, client *github.RESTClient, id string, repo model.RepoRef) (model.Task, string) {
+
+	t.Helper()
+	task := filedTask(t, ctx, store, id, repo)
+	task.AutoMerge = true
+	task.CreatedAt = &baseTime
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	branch := model.BranchName(task.ID)
+	pushBranch(t, sim.BareRepo, branch)
+	pr, err := orchestrator.EnsurePullRequest(client, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Links = append(task.Links, model.Link{
+		Kind: model.LinkFixes, Target: model.PullRequestRef{Repo: repo, Number: pr.Number}.String(),
+	})
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &baseTime}); err != nil {
+		t.Fatal(err)
+	}
+	return task, branch
+}
+
+// setMergeable is GitHub having finished computing mergeability for every
+// pull request the sim knows about.
+func setMergeable(sim *githubsim.Sim, mergeable bool) {
+	for i := range sim.PullRequests {
+		sim.PullRequests[i].Mergeable = &mergeable
+	}
+}
+
+// A pull request whose tests are still running must not merge, however
+// mergeable GitHub says it is: a queue that merges on "no failures
+// reported yet" lands changes before CI has said anything about them.
+// The task holds its place at the head of the queue and merges on a
+// later cycle, once the checks it is waiting for come back green.
+func TestSyncPullRequestsWaitsForRunningChecksBeforeMerging(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task, branch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+
+	setMergeable(sim, true)
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "lint", Status: "completed", Conclusion: strPtr("success")},
+		{Name: "tests", Status: "in_progress"},
+	}
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests with CI still running: %v", err)
+	}
+
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("the pull request was merged while its tests were still running")
+		}
+	}
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateCompleted {
+		t.Fatalf("state = %q, want still completed: nothing has happened yet", st)
+	}
+	// Waiting is not the same as giving up on: an unfinished check is not
+	// a broken one, so nothing is filed and nobody is told anything.
+	got, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fixTaskLinkOf(got); ok {
+		t.Fatal("a fix task was filed for a pull request whose checks had not finished")
+	}
+	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 0 {
+		t.Fatalf("expected no comments while simply waiting for CI, got %q", bodies)
+	}
+
+	// CI finishes, green -- and the same task, still the head of its
+	// queue, merges on the very next cycle.
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "lint", Status: "completed", Conclusion: strPtr("success")},
+		{Name: "tests", Status: "completed", Conclusion: strPtr("success")},
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests once CI passed: %v", err)
+	}
+	st, err = store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed once the checks passed and auto-merge landed", st)
+	}
+}
+
+// The other half of the same rule: once the tests do finish and they are
+// red, a failing head is a broken head, and it gets exactly the automatic
+// fix task a conflicted one gets -- filed pre-approved, based on the
+// branch it repairs, naming the checks that failed so the agent sent to
+// repair it knows where to look.
+func TestSyncPullRequestsFilesAFixOnceRunningChecksFinishFailing(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task, branch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+
+	setMergeable(sim, true)
+	// One job has already gone red, but another is still running: the
+	// queue files nothing yet, so the one fix task it is allowed gets
+	// CI's whole verdict rather than the first job to report.
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "unit tests", Status: "completed", Conclusion: strPtr("failure")},
+		{Name: "e2e", Status: "in_progress"},
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests with CI still running: %v", err)
+	}
+	got, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fixTaskLinkOf(got); ok {
+		t.Fatal("a fix task was filed before the rest of the checks had reported")
+	}
+
+	sim.CheckRuns[branch] = []github.CheckRun{
+		{Name: "unit tests", Status: "completed", Conclusion: strPtr("failure")},
+		{Name: "e2e", Status: "completed", Conclusion: strPtr("failure")},
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests once CI failed: %v", err)
+	}
+
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("a pull request with failing checks was merged")
+		}
+	}
+	got, err = store.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixTaskID, ok := fixTaskLinkOf(got)
+	if !ok {
+		t.Fatalf("expected a fix task for the failing queue head, links: %+v", got.Links)
+	}
+	fixTask, err := store.GetTask(ctx, fixTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fixTask == nil {
+		t.Fatal("fix task not filed in the store")
+	}
+	if fixTask.Approval == nil || !fixTask.AutoMerge || fixTask.Base != branch {
+		t.Fatalf("fix task = %+v, want pre-approved, auto-merging, based on %q", fixTask, branch)
+	}
+	for _, want := range []string{"unit tests", "e2e"} {
+		if !strings.Contains(fixTask.Body, want) {
+			t.Errorf("fix task body does not name the failing check %q:\n%s", want, fixTask.Body)
+		}
+	}
+	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 1 {
+		t.Fatalf("expected one comment announcing the fix, got %q", bodies)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 func fixTaskLinkOf(task *model.Task) (string, bool) {
 	if task == nil {

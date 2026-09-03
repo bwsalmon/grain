@@ -933,7 +933,16 @@ queue's head — the earliest submitted, per repo — is ever acted on in a
 cycle; a fix filed for the second task while the first is still being
 repaired would likely need refiling the moment the first merges and
 changes what the second is based against, so everything behind the head
-just waits. A conflicted or failing head gets a fix task filed straight
+just waits. Nothing merges while CI is still
+running: a check run GitHub has not finished reads `PrHealth.PENDING`
+(`healthFrom`), which is neither clean nor failing, so the head simply
+holds its place and the next cycle asks again — a queue that merged on
+"no failure reported yet" would land changes before their tests had said
+anything about them. Pending outranks failing on purpose, so a red job
+alongside a still-running one waits too: the queue files exactly one
+automatic fix per pull request, and it is worth a cycle to file that one
+against CI's whole verdict rather than against whichever job went red
+first. A conflicted or failing head gets a fix task filed straight
 into the store already approved (`Task.Approval` set by
 `PrincipalAutomation`, `LinkFixTask` recording which one) rather than
 `core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`

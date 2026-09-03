@@ -46,6 +46,14 @@ func ParsePullRequestRef(s string) (PullRequestRef, error) {
 // depends on: GitHub computes mergeability asynchronously, so a fresh push
 // reading UNKNOWN means "check again next cycle," never "conflicted."
 //
+// PrPending is CI still running: at least one check has not reached a
+// conclusion yet, so neither "clean" nor "failing" is known. It is
+// distinct from UNKNOWN, which is "grain could not find out" (GitHub has
+// not computed mergeability, or the credential cannot read checks at
+// all) -- PENDING is a definite answer that resolves by itself, given
+// time. Nothing merges on it: a PR whose tests have not finished is
+// exactly the PR the merge queue must wait on rather than merge.
+//
 // PrMerged is orchestrator.healthFrom's answer for a closed PR GitHub's
 // own Merged field says merged, as opposed to PrClosed for one that
 // closed without merging -- the distinction bwsalmon/agents#493's task
@@ -57,6 +65,7 @@ type PrHealth string
 const (
 	PrUnknown    PrHealth = "unknown"
 	PrClean      PrHealth = "clean"
+	PrPending    PrHealth = "pending"
 	PrConflicted PrHealth = "conflicted"
 	PrFailing    PrHealth = "failing"
 	PrMerged     PrHealth = "merged"
