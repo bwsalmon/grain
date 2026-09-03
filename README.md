@@ -1460,13 +1460,21 @@ for its own branch or nothing. The tool is registered whatever those
 flags said, so a task with no repo attached gets its own explanation
 rather than an "unknown tool" that reads like a broken grain.
 
-Two things had to be said out loud rather than left implicit. `BuildPrompt`
-now names the push/check/repair loop, because nothing about a tool
-description tells a run that it may push a second time and the sentences
-around it read like one final act. And an unfinished check is reported as
-carrying no verdict, never as passing — the same call `healthFrom` makes
-at the merge gate, made again here so a run that pushes and sees three
-queued jobs does not declare itself done.
+Three things had to be said out loud rather than left implicit.
+`BuildPrompt` names the push/check/repair loop, because nothing about a
+tool description tells a run that it may push a second time and the
+sentences around it read like one final act. An unfinished check is
+reported as carrying no verdict, never as passing — the same call
+`healthFrom` makes at the merge gate, made again here so a run that
+pushes and sees three queued jobs does not declare itself done. And
+`BuildPrompt` says where the loop ends: the job is done when the checks
+have finished and passed *and* the branch still merges cleanly into its
+base — `task.Base` where the task names one, described rather than
+guessed where it does not. A conflict is read off the pull request before
+any check is (`healthFrom`'s `PrConflicted`), so a green branch that
+conflicts still never merges, and the run holding the checkout can fetch
+and merge in a turn — which is cheaper than the fix task the merge queue
+would otherwise file for it minutes later in a cold sandbox.
 
 ## Reaching a sandbox guest without a route into it
 
