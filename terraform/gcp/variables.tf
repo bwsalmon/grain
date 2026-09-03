@@ -629,6 +629,38 @@ variable "poll_interval" {
   default     = "30s"
 }
 
+variable "state_repo_url" {
+  type        = string
+  description = <<-EOT
+    Git URL of the repository this deployment's database lives in
+    (pkg/staterepo): the same rows as text, imported at startup and
+    exported back on a timer, so an agent can propose a settings change
+    as a pull request and an operator can back the deployment up by
+    cloning it.
+
+    files/deploy.sh passes it to scripts/setup.sh, which writes it into
+    <data-dir>/state-repo.json -- so a host comes up already pointed at
+    its repository rather than needing someone to open the UI's
+    bootstrap pane and say where state goes. Changing it on an existing
+    deployment moves the old working tree aside, timestamped, before
+    adopting the new one; nothing is deleted.
+
+    Empty (the default) leaves the host with the local-only repository a
+    fresh install gets: a real git repository under the data directory,
+    committed to and pushed nowhere. Authentication is the ordinary
+    GitHub credential ladder push-secrets.sh already seeds, so a state
+    repository sitting beside this deployment's test_repos needs no
+    second credential.
+  EOT
+  default     = ""
+}
+
+variable "state_repo_branch" {
+  type        = string
+  description = "Branch state lives on in state_repo_url (pkg/staterepo.DefaultBranch)."
+  default     = "main"
+}
+
 # --------------------------------------------------------------- kontur ---
 #
 # Wires the daemon's -kontur-* flags (cmd/grain/daemon.go) through so

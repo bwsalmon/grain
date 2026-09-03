@@ -142,6 +142,12 @@ TARGET_REPOS="$(cfg target_repos)"
 UI_PORT="$(cfg ui_port)"
 SLOTS="$(cfg slots)"
 POLL_INTERVAL="$(cfg poll_interval)"
+# Where this deployment's database lives as text (pkg/staterepo).
+# setup.sh writes these into <data-dir>/state-repo.json, so a host that
+# has just been rebuilt is pointed at its own repository by the deploy
+# rather than by a human opening the UI's bootstrap pane.
+STATE_REPO_URL="$(cfg state_repo_url)"
+STATE_REPO_BRANCH="$(cfg state_repo_branch)"
 GEMINI_MODEL="$(cfg gemini_model)"
 CLAUDE_MODEL="$(cfg claude_model)"
 CODEX_MODEL="$(cfg codex_model)"
@@ -210,6 +216,15 @@ GITHUB_APP_PRIVATE_KEY="$(md_optional instance/attributes/grain-github-app-priva
 GEMINI_API_KEY="$(md_optional instance/attributes/grain-gemini-api-key)"
 CLAUDE_OAUTH_TOKEN="$(md_optional instance/attributes/grain-claude-oauth-token)"
 OPENAI_API_KEY="$(md_optional instance/attributes/grain-openai-api-key)"
+# The secrets private key (pkg/secrets), and the one value here whose
+# absence a *rebuild* pays for rather than the first deploy: the
+# encrypted secrets file travels in the state repository, so a host that
+# mints itself a fresh key cannot read the secrets its own repository
+# still holds. Seeded once by setup.sh -- a key already on the host
+# always wins, since it is the key that host's secrets were encrypted
+# to -- and normally unset on a first deploy, where the host minting its
+# own is exactly right.
+SECRETS_KEY="$(md_optional instance/attributes/grain-secrets-key)"
 # Only needed for a private image package; ghcr.io/bwsalmon/grain's is
 # public and pulls anonymously (variables.tf's own
 # grain_image_pull_user).
@@ -245,6 +260,9 @@ log "  image=${GRAIN_IMAGE}:${GRAIN_IMAGE_TAG:-<follows grain_ref>}" \
     "| pull credential: $([ -n "$IMAGE_PULL_TOKEN" ] && echo present || echo 'absent, pulling anonymously')"
 log "  target_repos=${TARGET_REPOS:-<empty: every task parks>}"
 log "  default_target_repo=${DEFAULT_TARGET_REPO:-<empty: a task with no repo parks>}"
+log "  state_repo_url=${STATE_REPO_URL:-<empty: state stays in a local-only repository on the host>}" \
+    "branch=$STATE_REPO_BRANCH" \
+    "| secrets key: $([ -n "$SECRETS_KEY" ] && echo 'pushed, seeded if this host has none' || echo 'absent, the host mints its own')"
 log "  gcp_project=${GCP_PROJECT:-<empty: gcp-key and gemini-key are disabled>}"
 log "  gcp_agent_service_account=${GCP_AGENT_SERVICE_ACCOUNT:-<empty>}"
 log "  github token: $([ -n "$GITHUB_TOKEN" ] && echo present || echo absent)" \
@@ -298,6 +316,9 @@ env \
   GRAIN_GCP_PROJECT="$GCP_PROJECT" \
   GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="$GCP_AGENT_SERVICE_ACCOUNT" \
   GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="$MINTER_KEY_FILE" \
+  GRAIN_STATE_REPO_URL="$STATE_REPO_URL" \
+  GRAIN_STATE_REPO_BRANCH="$STATE_REPO_BRANCH" \
+  GRAIN_SECRETS_KEY="$SECRETS_KEY" \
   GRAIN_TARGET_REPO="$DEFAULT_TARGET_REPO" \
   GRAIN_TARGET_REPOS="$TARGET_REPOS" \
   GRAIN_KONTUR_ENABLE="$([ "$ENABLE_KONTUR_SANDBOXES" = "true" ] && echo 1 || echo 0)" \

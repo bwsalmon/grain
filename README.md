@@ -2493,6 +2493,18 @@ encrypted file remains is reported as the unrecoverable state it is,
 never replaced with a new one -- minting silently there would leave an
 undecryptable file behind and look like it had worked.
 
+Which makes that key the one file a redeploy has to carry, and the one
+thing about a fresh install that is urgent: a rebuilt host clones its
+repository back, mints itself a new key, and then cannot read a line of
+the secrets in it. So it is seeded the way every other credential a
+deployment needs is -- `GRAIN_SECRETS_KEY`, through `scripts/setup.sh`'s
+own seed-once contract, pushed into instance metadata on the GCP path
+alongside the GitHub PAT and the minter's key -- and reported where an
+operator is already looking: `grain state status` prints the file and its
+public half, and the installer's readiness summary names it on every run.
+Seed-once rather than converging, because a key already on the host is
+the key that host's own secrets were encrypted to.
+
 ### The bootstrap
 
 Three answers, offered in the UI's Settings pane (its State tab) and by
@@ -2505,6 +2517,13 @@ Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
 previous working tree is moved aside with a timestamped name rather than
 deleted, and the pane says as much before you press the button.
+
+A deployment answers the same question without anyone opening the pane:
+`GRAIN_STATE_REPO_URL` (`terraform/gcp`'s `state_repo_url`) writes
+`<data-dir>/state-repo.json` from the deploy itself, so a host comes up
+pointed at its own state rather than at whatever the last person to open
+a browser said. Pointing it somewhere else moves the working tree aside
+exactly as adopting does.
 
 ## Deployment configuration lives in the store too
 

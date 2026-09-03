@@ -110,6 +110,13 @@ default) the host mints the daemon's own key for itself -- see "The
 daemon's own Gemini key" below. Export one anyway to use a key of your
 own instead.
 
+`GRAIN_SECRETS_KEY` is optional too, and for the opposite reason: a first
+deploy has no secrets yet, so the host minting its own key is the right
+answer. Export it when standing a deployment back up on a rebuilt VM, so
+it can read the secrets its state repository still holds -- see "The
+secrets key is the one file a redeploy must carry" below, and copy that
+file off the host before you are the one who needs it.
+
 `GRAIN_GITHUB_APP_ID`, `GRAIN_GITHUB_APP_INSTALLATION_ID` and
 `GRAIN_GITHUB_APP_PRIVATE_KEY` are an alternative to `GRAIN_GITHUB_TOKEN`,
 stored under the same `credential_name`: set all three (never a subset)
@@ -292,7 +299,7 @@ own project.
 
 ## Secrets never touch Terraform
 
-Four kinds of value never appear in a `.tf` file, a `tfvars` file, or any
+Five kinds of value never appear in a `.tf` file, a `tfvars` file, or any
 plan this module is applied from:
 
 - **The GitHub PAT** -- a fine-grained token scoped, on GitHub's own side,
@@ -319,6 +326,12 @@ plan this module is applied from:
   credentials.
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
+- **The secrets key** -- grain's own key rather than a credential to
+  anything else: what decrypts the secrets file the state repository
+  carries, pushed as `GRAIN_SECRETS_KEY`. Unset on a first deploy, where
+  the host mints its own. See "The secrets key is the one file a redeploy
+  must carry" below, which is the only one of these five that a rebuilt
+  host cannot be handed a fresh replacement for.
 
 All of them go straight into the host instance's own metadata via
 `push-secrets.sh`, which any identity with `deployer_manages_minter_keys`
@@ -400,6 +413,87 @@ Three things worth knowing:
 
 Set `enable_gemini_key = false`, or supply `GRAIN_GEMINI_API_KEY`
 yourself, and none of this runs.
+
+## Where this deployment's state lives
+
+grain keeps its database in a git repository, written out as text
+(`pkg/staterepo`): settings, templates, suites, repo config -- and the
+encrypted secrets file -- imported into the store at startup and
+exported back on a timer. That is what makes a settings change something
+an agent can propose as a pull request, and what makes a backup of this
+deployment a `git clone`.
+
+`state_repo_url` (and `state_repo_branch`, `main` by default) is how a
+deployment here gets pointed at one. It travels in the non-secret
+`grain-config` metadata attribute like every other knob, and
+`files/deploy.sh` hands it to `scripts/setup.sh`, which writes
+`<data-dir>/state-repo.json` -- the one file that cannot live in the
+repository, because it is what says where the repository is. So a host
+comes up already pointed at its own state, rather than waiting for
+somebody to open the UI's bootstrap pane and answer that question by
+hand. Changing the variable on a live deployment moves the old working
+tree aside under a timestamped name before adopting the new one, exactly
+as `grain state adopt` does; nothing is deleted, and the encrypted
+secrets file is carried across.
+
+Left empty -- the default -- the host gets the local-only repository a
+fresh install gets: a real git repository under the data directory,
+committed to on every sync and pushed nowhere. Everything works, and a
+rebuilt VM starts from an empty database, since the data disk is the only
+copy (`prevent_destroy` on `google_compute_disk.data` is what stands
+between that and a `terraform destroy`).
+
+Authentication is the GitHub credential ladder `push-secrets.sh` already
+seeds: a state repository under the same owner as this deployment's
+`test_repos`, reachable by the same PAT or App installation, needs no
+second credential configured anywhere. A repository outside that reach
+wants its own token in a file and a `tokenFile` in `state-repo.json`
+(`grain state adopt -token-file`), which a re-run of `setup.sh` leaves
+alone.
+
+## The secrets key is the one file a redeploy must carry
+
+Every other value on the host is either reissued by the next deploy or
+cloned back from the state repository. The secrets key is neither. The
+encrypted secrets file lives *in* that repository, encrypted to a public
+key whose private half is one file under the data directory
+(`<data-dir>/secrets/secrets.key`) that grain never commits anywhere --
+which is exactly what makes cloning the repository safe. It also means a
+rebuilt host, having minted a fresh key of its own on first start, cannot
+read a line of the secrets its own repository still holds. `pkg/secrets`
+reports that as the unrecoverable state it is rather than starting over
+silently, and it is right to: there is no escrow here and no recovery
+path.
+
+So keep a copy, and push it back when you rebuild:
+
+```sh
+# on the host, once, after the first deploy -- prints the file to copy
+# and the public key that identifies it
+gcloud compute ssh "$INSTANCE" --zone "$ZONE" --project "$PROJECT" \
+  --tunnel-through-iap --command 'sudo grain state -data-dir /var/lib/grain status'
+
+# rebuilding: hand the new host the key its predecessor had
+export GRAIN_SECRETS_KEY="$(cat grain-secrets.key)"
+./deploy/push-secrets.sh
+```
+
+Three things worth knowing:
+
+- **It is seed-once**, like the agent credentials: `setup.sh` writes it
+  only when the host has no key, so a key already on the host always wins
+  -- it is the key that host's own secrets were encrypted to -- and
+  `config-sync` re-running the deploy on every generation never replaces
+  it. Pushing it on every deploy is therefore harmless; never pushing it
+  is what costs a redeploy every secret it had.
+- **Leave it unset on a first deploy.** A host with no key mints its own,
+  which is the right answer for a deployment that has no secrets yet.
+- **It is reported where you are already looking.** `setup.sh`'s
+  readiness summary names the key (or says none exists yet) on every run,
+  and `grain state status` prints the file, its public key, and what
+  happens if nobody backs it up. That is deliberate: the deploy that
+  needs this file is the *next* one, and a key nobody copied is only
+  discovered missing once it is gone.
 
 ## Kontur sandboxing
 
@@ -829,7 +923,7 @@ files/
   deploy.sh       translate this deployment's config into a scripts/setup.sh call
 bootstrap-gcp.sh   one-time: state bucket, deployer service account, optional WIF
 deploy/
-  push-secrets.sh     post-apply: push the GitHub PAT, the Gemini key, the kontur SSH key, and a minted minter key
+  push-secrets.sh     post-apply: push the GitHub PAT, the agent credentials, the secrets key a rebuild has to carry, and a minted minter key
   terraform-apply.sh  init, validate, apply -- creates the state bucket if it is missing
   read-outputs.sh     Terraform outputs -> Actions step outputs
   wait-for-host.sh    block until the host reports it converged on this generation
