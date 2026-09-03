@@ -743,7 +743,7 @@ func assertSandboxDiskSizeApplies(t *testing.T, k *orchestrator.KonturSandboxes,
 	if result.IsError {
 		t.Fatalf("reading the sized guest's root filesystem: %s", result.Text)
 	}
-	fields := strings.Fields(result.Text)
+	fields := strings.Fields(guestStdout(t, result.Text))
 	if len(fields) < 2 {
 		t.Fatalf("guest df line = %q, want at least a device and a block total", result.Text)
 	}
@@ -770,11 +770,29 @@ func guestRootDeviceMB(t *testing.T, runCommand *mcp.Tool) int {
 	if result.IsError {
 		t.Fatalf("reading the guest's root device size: %s", result.Text)
 	}
-	sectors, err := strconv.ParseInt(strings.TrimSpace(result.Text), 10, 64)
+	sectors, err := strconv.ParseInt(guestStdout(t, result.Text), 10, 64)
 	if err != nil {
-		t.Fatalf("parsing /sys/block/vda/size %q: %v", result.Text, err)
+		t.Fatalf("parsing /sys/block/vda/size out of %q: %v", result.Text, err)
 	}
 	return int(sectors * 512 / (1024 * 1024))
+}
+
+// guestStdout is the command's own stdout out of a run_command result,
+// which reports the exit status and both streams together
+// ("exit=%d\nstdout:\n%s\nstderr:\n%s", mcp.NewSSHSandboxTools). Every
+// other assertion in this file matches on a substring of the whole thing
+// and so never had to care; one that parses a number does.
+func guestStdout(t *testing.T, text string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(text, "stdout:\n")
+	if !ok {
+		t.Fatalf("run_command result %q has no stdout section", text)
+	}
+	out, _, ok := strings.Cut(rest, "\nstderr:")
+	if !ok {
+		t.Fatalf("run_command result %q has no stderr section to bound stdout with", text)
+	}
+	return strings.TrimSpace(out)
 }
 
 func assertGuestHasEgress(t *testing.T, runCommand *mcp.Tool, vmName string) {
