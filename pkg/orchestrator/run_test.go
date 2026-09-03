@@ -148,8 +148,17 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 			t.Fatalf("prompt does not mention %q: %q", want, prompt)
 		}
 	}
-	if bare := orchestrator.BuildPrompt(task, ""); strings.Contains(bare, orchestrator.CheckoutDir) {
-		t.Fatalf("prompt mentions a checkout that was never prepared: %q", bare)
+	// Against the checkout sentence's own phrasing rather than against
+	// CheckoutDir alone: that constant is "work", an ordinary English word
+	// the rest of the prompt is entitled to use (proposalSection does), so
+	// a bare substring search for it fails on prose that mentions no
+	// checkout at all. "./work" and "rather than cloning" are what only
+	// that sentence says, which is what this is checking is absent.
+	bare := orchestrator.BuildPrompt(task, "")
+	for _, unwanted := range []string{"./" + orchestrator.CheckoutDir, "rather than cloning"} {
+		if strings.Contains(bare, unwanted) {
+			t.Fatalf("prompt mentions %q, a checkout that was never prepared: %q", unwanted, bare)
+		}
 	}
 }
 
