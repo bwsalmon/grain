@@ -349,24 +349,60 @@ func (s *sandboxRecreation) restoreAttachments(ctx context.Context, out *Sandbox
 		fmt.Sprintf("this task's %d attachment(s), under ./%s", len(attachments), AttachmentsDir))
 }
 
-// restoreCheckout clones the task's repo again and checks its branch
-// out, exactly as prepareCheckout does before a run's first turn --
-// including picking up whatever the run had already pushed to that
-// branch, since prepareCheckout continues an existing remote branch
-// rather than branching over it. That is what makes a rebuild cost a run
-// only its *unpushed* work.
+// restoreCheckout clones the task's repo again, checks its branch out
+// and runs the repo's own setup command in it, exactly as
+// prepareCheckout does before a run's first turn -- including picking up
+// whatever the run had already pushed to that branch, since
+// prepareCheckout continues an existing remote branch rather than
+// branching over it. That is what makes a rebuild cost a run only its
+// *unpushed* work.
+//
+// The setup command has to run again here for the same reason it runs at
+// all: the rebuild took the whole sandbox with it, `make deps` and the
+// node_modules and the virtualenv included, and handing a run back a
+// checkout in exactly the state model.RepoConfig.SetupCommand exists to
+// prevent would be worse than the first time -- the run has already been
+// told, at turn 1, that setup was done for it.
+//
+// It is re-read from the store rather than remembered from dispatch, the
+// same way restoreAttachments re-reads the attachments: a setup command
+// written while this run was working is the one a rebuilt sandbox should
+// get.
 func (s *sandboxRecreation) restoreCheckout(ctx context.Context, out *SandboxRecreation) {
-	dir, err := prepareCheckout(ctx, s.tools, s.cfg.GitRemoteBase, s.task)
+	setup, err := resolveSetupCommand(ctx, s.store, s.task)
+	if err != nil {
+		// Not fatal to the re-clone: a repo whose setup command could not
+		// be read still wants its checkout back, and the warning below
+		// tells the run which half it is missing.
+		out.Warnings = append(out.Warnings,
+			fmt.Sprintf("this repo's setup command could not be read out of grain's store (%v), "+
+				"so the fresh checkout has not been set up", err))
+		setup = ""
+	}
+	prepared, err := prepareCheckout(ctx, s.tools, s.cfg.GitRemoteBase, s.task, setup)
 	if err != nil {
 		out.Warnings = append(out.Warnings,
 			fmt.Sprintf("this task's repo could not be cloned again: %v", err))
 		return
 	}
-	if dir == "" {
+	if prepared.Dir == "" {
 		return
 	}
-	out.CheckoutDir = dir
+	out.CheckoutDir = prepared.Dir
 	out.Restored = append(out.Restored, fmt.Sprintf(
 		"a fresh clone of %s at ./%s, with %s checked out (including anything you had already pushed to it)",
-		s.task.Target, dir, model.BranchName(s.task.ID)))
+		s.task.Target, prepared.Dir, model.BranchName(s.task.ID)))
+	switch {
+	case prepared.Setup == nil:
+	case prepared.Setup.failed():
+		out.Warnings = append(out.Warnings, fmt.Sprintf(
+			"this repo's setup command (%s) failed in the fresh checkout, exit %d -- so it may be "+
+				"missing dependencies or generated files, and a build failing for that reason is "+
+				"this rather than your change. The last of what it printed:\n\n%s",
+			prepared.Setup.Command, prepared.Setup.ExitCode, prepared.Setup.Output))
+	default:
+		out.Restored = append(out.Restored, fmt.Sprintf(
+			"this repo's own setup command (%s), run again in that checkout and successful",
+			prepared.Setup.Command))
+	}
 }

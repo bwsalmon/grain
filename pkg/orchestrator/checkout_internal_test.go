@@ -2,12 +2,14 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
@@ -67,12 +69,15 @@ func TestPrepareCheckoutClonesTheTargetAndCreatesTheBranch(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
-	dir, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task)
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "")
 	if err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
-	if dir != CheckoutDir {
-		t.Fatalf("prepareCheckout returned %q, want %q", dir, CheckoutDir)
+	if prepared.Dir != CheckoutDir {
+		t.Fatalf("prepareCheckout returned %q, want %q", prepared.Dir, CheckoutDir)
+	}
+	if prepared.Setup != nil {
+		t.Fatalf("a repo with no setup command reported one: %+v", prepared.Setup)
 	}
 
 	work := filepath.Join(root, CheckoutDir)
@@ -103,7 +108,7 @@ func TestPrepareCheckoutStartsFromTheTasksBase(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "release"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, CheckoutDir, "RELEASE")); err != nil {
@@ -130,7 +135,7 @@ func TestPrepareCheckoutContinuesAnExistingBranch(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	work := filepath.Join(root, CheckoutDir)
@@ -161,7 +166,7 @@ func TestPrepareCheckoutReplacesALeftoverCheckout(t *testing.T) {
 	}
 
 	task := model.Task{ID: "t2", Target: &repo}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
 		t.Fatalf("prepareCheckout over a leftover checkout: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(stale, "LEFTOVER")); !os.IsNotExist(err) {
@@ -175,9 +180,9 @@ func TestPrepareCheckoutReplacesALeftoverCheckout(t *testing.T) {
 func TestPrepareCheckoutSkippedWithoutARemoteBase(t *testing.T) {
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "widgets"}}
-	dir, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), "", task)
-	if err != nil || dir != "" {
-		t.Fatalf("prepareCheckout with no remote base = (%q, %v), want (\"\", nil)", dir, err)
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), "", task, "")
+	if err != nil || prepared.Dir != "" {
+		t.Fatalf("prepareCheckout with no remote base = (%q, %v), want (\"\", nil)", prepared.Dir, err)
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 		t.Fatalf("sandbox contents = %v (%v), want it untouched", entries, err)
@@ -190,7 +195,7 @@ func TestPrepareCheckoutSkippedWithoutARemoteBase(t *testing.T) {
 func TestPrepareCheckoutRefusesAnUnusableRef(t *testing.T) {
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "widgets"}, Base: "x';touch pwned;'"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task); err == nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task, ""); err == nil {
 		t.Fatal("prepareCheckout accepted a base branch carrying shell syntax")
 	}
 	if _, err := os.Stat(filepath.Join(root, "pwned")); !os.IsNotExist(err) {
@@ -207,7 +212,7 @@ func TestPrepareCheckoutReportsAFailedClone(t *testing.T) {
 	}
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "nope"}}
-	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task)
+	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task, "")
 	if err == nil {
 		t.Fatal("prepareCheckout reported success cloning a repo that does not exist")
 	}
@@ -230,7 +235,7 @@ func TestPrepareCheckoutNamesABaseBranchThatNoLongerExists(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
-	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task)
+	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "")
 	if err == nil {
 		t.Fatal("prepareCheckout succeeded against a base branch that does not exist")
 	}
@@ -277,7 +282,7 @@ func TestPrepareCheckoutContinuesAnExistingBranchWhenTheBaseIsGone(t *testing.T)
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
 		t.Fatalf("prepareCheckout over a branch that already exists: %v", err)
 	}
 	work := filepath.Join(root, CheckoutDir)
@@ -307,10 +312,121 @@ func TestPrepareCheckoutSaysNothingAboutABaseThatIsStillThere(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "main"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	if journal.String() != "" {
 		t.Errorf("journal = %q, want silence", journal.String())
+	}
+}
+
+// A repo's setup command runs in the checkout, not beside it: `make
+// deps` written by whoever configured the repo assumes it is standing at
+// the top of the tree, which is the one thing that has to be true of it
+// wherever grain decided to put the clone.
+func TestPrepareCheckoutRunsTheReposSetupCommandInTheCheckout(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+
+	root := t.TempDir()
+	task := model.Task{ID: "t1", Target: &repo}
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task,
+		"test -f README.md && echo deps installed > DEPS")
+	if err != nil {
+		t.Fatalf("prepareCheckout: %v", err)
+	}
+	if prepared.Setup == nil {
+		t.Fatal("nothing reported about the setup command that ran")
+	}
+	if prepared.Setup.failed() {
+		t.Errorf("setup reported as failed: %+v", prepared.Setup)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, CheckoutDir, "DEPS")); err != nil {
+		t.Fatalf("the setup command did not run in the checkout: %v", err)
+	} else if strings.TrimSpace(string(got)) != "deps installed" {
+		t.Errorf("DEPS = %q, want what the setup command wrote", got)
+	}
+}
+
+// A setup command that fails does not fail the dispatch: the run goes
+// ahead, holding an account of what happened, because grain cannot know
+// whether a broken `make deps` is fatal to the task in hand and the run
+// can find out in one command -- while a run told nothing is a run
+// debugging the repo's toolchain from a failure it has no context for.
+func TestPrepareCheckoutReportsAFailedSetupRatherThanFailingTheDispatch(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+
+	root := t.TempDir()
+	task := model.Task{ID: "t1", Target: &repo}
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task,
+		"echo no such package >&2; exit 3")
+	if err != nil {
+		t.Fatalf("a failed setup command failed the dispatch: %v", err)
+	}
+	if prepared.Dir != CheckoutDir {
+		t.Errorf("Dir = %q, want the checkout the run still has %q", prepared.Dir, CheckoutDir)
+	}
+	if prepared.Setup == nil || !prepared.Setup.failed() {
+		t.Fatalf("Setup = %+v, want a failure reported", prepared.Setup)
+	}
+	if prepared.Setup.ExitCode != 3 {
+		t.Errorf("ExitCode = %d, want the command's own 3", prepared.Setup.ExitCode)
+	}
+	if !strings.Contains(prepared.Setup.Output, "no such package") {
+		t.Errorf("Output = %q, want what the command printed as it gave up", prepared.Setup.Output)
+	}
+}
+
+// The bound is the other half of that rule: a setup command that has not
+// finished has told nobody anything, and letting it run would spend the
+// run's whole wall-clock budget inside one tool call the agent never
+// sees. That one fails the dispatch, which leaves a human a run whose
+// detail says so.
+func TestPrepareCheckoutFailsTheDispatchWhenSetupOutrunsItsBound(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+
+	was := setupCommandTimeout
+	setupCommandTimeout = time.Second
+	t.Cleanup(func() { setupCommandTimeout = was })
+
+	root := t.TempDir()
+	task := model.Task{ID: "t1", Target: &repo}
+	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "sleep 30")
+	if err == nil {
+		t.Fatal("a setup command that outran its bound was reported as a prepared checkout")
+	}
+	for _, want := range []string{"setup command", "no agent was started"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to mention %q", err, want)
+		}
+	}
+}
+
+// The tail, not the head: a build that printed for ten minutes says what
+// went wrong in its last lines, and the whole log would cost the run more
+// context than the failure is worth.
+func TestSetupOutputKeepsTheEnd(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	b.WriteString("the actual error")
+	got := tailBytes(b.String(), setupOutputBudget)
+	if len(got) > setupOutputBudget+len("[grain] earlier output omitted\n") {
+		t.Errorf("kept %d bytes, want no more than the budget plus its notice", len(got))
+	}
+	if !strings.HasSuffix(got, "the actual error") {
+		t.Errorf("tail = %q, want it to end on the last thing printed", got[max(0, len(got)-80):])
+	}
+	if !strings.Contains(got, "earlier output omitted") {
+		t.Error("a cut tail does not say it was cut")
+	}
+	if strings.Contains(got, "line 0\n") {
+		t.Error("the head survived, which is the part worth dropping")
 	}
 }

@@ -92,3 +92,45 @@ func TestOutcomeOfStillDistinguishesARunThatNeverStarted(t *testing.T) {
 		t.Errorf("detail = %q, want it to say the agent never called a tool", detail)
 	}
 }
+
+// --- what the prompt says about the repo's setup command ---------------
+//
+// A run reads its prompt once, at turn 1, and there is nothing in the
+// sandbox that says a setup command was ever run in it. So these pin the
+// two facts a run has to be given: that the setup happened at all, and
+// -- the case this whole field exists for -- that it failed, before the
+// run reads the first broken build as its own doing.
+
+func TestSetupSectionSaysNothingWhenTheRepoHasNoSetupCommand(t *testing.T) {
+	if got := setupSection(nil); got != "" {
+		t.Errorf("setupSection(nil) = %q, want nothing at all", got)
+	}
+}
+
+func TestSetupSectionNamesASucceededSetupSoItIsNotRunAgain(t *testing.T) {
+	got := setupSection(&setupResult{Command: "make deps", ExitCode: 0, Output: "exit=0"})
+	for _, want := range []string{"make deps", "succeeded"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt section = %q, want it to mention %q", got, want)
+		}
+	}
+	if strings.Contains(got, "FAILED") {
+		t.Errorf("prompt section = %q, want nothing said about a failure", got)
+	}
+}
+
+func TestSetupSectionTellsTheRunAFailedSetupIsNotItsChange(t *testing.T) {
+	got := setupSection(&setupResult{
+		Command:  "make deps",
+		ExitCode: 2,
+		Output:   "exit=2\nstderr:\nno such package: widgetlib",
+	})
+	// The exit status, the command, and the tail -- and the sentence that
+	// makes the difference between a run working around the failure and a
+	// run "fixing" the code until the broken tree stops complaining.
+	for _, want := range []string{"make deps", "exit 2", "no such package: widgetlib", "not your change"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt section = %q, want it to mention %q", got, want)
+		}
+	}
+}

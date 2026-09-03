@@ -384,6 +384,73 @@ func resolvePromptExtension(ctx context.Context, store *model.Store, deployment 
 	return model.PromptExtensionFor(deployment, repo, task.PromptExtension), nil
 }
 
+// resolveSetupCommand is the shell this run's checkout needs before its
+// first turn -- model.RepoConfig.SetupCommand for the task's target repo,
+// and "" for a task with no target or a repo that configures none.
+//
+// A second read of the row resolvePromptExtension just read, rather than
+// one read threaded through both: they are two independent facts about
+// the repo, read at two different moments (the extension composes with
+// two other layers before it reaches a prompt; this one is handed
+// straight to prepareCheckout), and one sqlite row read twice per
+// dispatch costs nothing measurable against the clone that follows it.
+//
+// A store read that fails fails the dispatch, for the reason
+// resolvePromptExtension's does: a run started in a checkout that was
+// never set up, because grain could not read the row saying how, is a
+// run that fails later for reasons nothing in its prompt explains.
+func resolveSetupCommand(ctx context.Context, store *model.Store, task model.Task) (string, error) {
+	if task.Target == nil {
+		return "", nil
+	}
+	rc, err := store.GetRepoConfig(ctx, *task.Target)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: reading %s's setup command: %w", task.Target, err)
+	}
+	if rc == nil {
+		return "", nil
+	}
+	return rc.SetupCommand, nil
+}
+
+// setupSection tells the run what the repo's setup command did in the
+// checkout it is about to work in -- "" for a repo that configures none,
+// which is most of them.
+//
+// A *failed* setup is the case this exists for. The alternative is a run
+// handed a working directory that does not build, with nothing saying
+// so: the first `go test` or `npm test` fails on a missing dependency,
+// and the run spends its turns debugging the repo's toolchain -- or
+// worse, "fixing" the code to match a broken tree. Told plainly, the
+// same run can install the missing thing itself in one command, or say
+// what is wrong in its closing note.
+//
+// A setup that *succeeded* is worth a line too, though a much shorter
+// one: it tells a run that `make deps` has already happened, so it does
+// not run it again, and names the command so that a run which needs it
+// again after touching a manifest knows exactly what to re-run.
+func setupSection(r *setupResult) string {
+	if r == nil {
+		return ""
+	}
+	if !r.failed() {
+		return fmt.Sprintf(
+			"\n\ngrain ran this repo's own setup command in that checkout before your "+
+				"first turn, and it succeeded (exit 0):\n\n%s\n\nSo whatever it installs "+
+				"or generates is already in place -- you do not need to run it again "+
+				"unless you change something it depends on.",
+			r.Command)
+	}
+	return fmt.Sprintf(
+		"\n\ngrain ran this repo's own setup command in that checkout before your first "+
+			"turn, and it FAILED (exit %d):\n\n%s\n\nThe last of what it printed:\n\n%s\n\n"+
+			"So the checkout may be missing dependencies or generated files, and a build "+
+			"or test failing for that reason is this, not your change. Deal with it first "+
+			"-- fix it or work around it if you can, and if you cannot, say so plainly in "+
+			"what you report rather than reading it as a failure of the task.",
+		r.ExitCode, r.Command, r.Output)
+}
+
 // promptExtensionSection is how that text is handed to the agent: named
 // as standing instructions, so a run can tell something somebody chose
 // for work here in general apart from the task it was filed under and
@@ -637,10 +704,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	// "cancelled" exactly as it did before. A read error here is treated
 	// as "not closed": the cancellation path re-reads it anyway, so the
 	// cost of being wrong is one clone, not a run that ignores a close.
-	var checkoutDir string
+	setupCommand, err := resolveSetupCommand(ctx, store, task)
+	if err != nil {
+		return nil, err
+	}
+	var prepared checkout
 	var checkoutErr error
 	if closed, err := taskClosed(ctx, store, task.ID); err != nil || !closed {
-		checkoutDir, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task)
+		prepared, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task, setupCommand)
 	}
 
 	var materialized []model.Materialized
@@ -648,7 +719,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prepErr error
 	if checkoutErr == nil {
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
-			attachments, checkoutDir, frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
+			attachments, prepared, frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
 	}
 	// Told to the recreate path, which is registered one level up in
 	// runOne and so never sees this: what a rebuilt sandbox needs is
@@ -1064,11 +1135,12 @@ func erroredCallSuffix(result *agent.Result) string {
 // -- leaves the prompt exactly as it was before any of this existed.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
-	attachments []model.Attachment, checkoutDir string,
+	attachments []model.Attachment, prepared checkout,
 	canOpenPullRequest bool, promptExtension string, maxRuntime time.Duration) (materialized []model.Materialized, prompt string, err error) {
 
 	extension := promptExtensionSection(promptExtension)
-	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest, maxRuntime)
+	prompt = BuildPrompt(cc.Task, prepared.Dir, canOpenPullRequest, maxRuntime)
+	prompt += setupSection(prepared.Setup)
 	if thread := commentThreadSection(comments); thread != "" {
 		prompt += "\n\n" + thread
 	}

@@ -184,6 +184,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureRepoConfigPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating repo_config: %w", err)
 	}
+	if err := s.ensureRepoConfigSetupCommandColumn(ctx); err != nil {
+		return fmt.Errorf("migrating repo_config: %w", err)
+	}
 	if err := s.ensureTaskPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
@@ -788,6 +791,23 @@ func (s *Store) ensureRepoConfigPromptExtensionColumn(ctx context.Context) error
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `repo_config` ADD COLUMN `prompt_extension` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureRepoConfigSetupCommandColumn adds repo_config.setup_command
+// (model.RepoConfig.SetupCommand -- the shell a repo needs run in a
+// fresh checkout before a run's first turn, grain/task-154) to a
+// repo_config created before it existed, the same probe-then-ALTER the
+// column beside it uses. It defaults to the empty string, which is a
+// repo that needs no setup at all -- what every repo was doing until
+// somebody writes one.
+func (s *Store) ensureRepoConfigSetupCommandColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `setup_command` FROM `repo_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `repo_config` ADD COLUMN `setup_command` TEXT NOT NULL DEFAULT ''")
 	return err
 }
 
