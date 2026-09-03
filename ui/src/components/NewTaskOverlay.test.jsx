@@ -50,6 +50,27 @@ describe("NewTaskOverlay", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
 
+  // bwsalmon/agents#612: both checkboxes are seeded from the
+  // deployment's own defaults (GET /api/config), which are on unless an
+  // operator has turned one off -- so the ordinary task files queued and
+  // set to auto-merge without anyone touching either box.
+  it("seeds Queue immediately and Auto-merge from the deployment's defaults", async () => {
+    const config = { approvedByDefault: true, autoMergeByDefault: true };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    expect(screen.getByLabelText(/Queue immediately/)).toBeChecked();
+    expect(screen.getByLabelText(/Auto-merge once checks pass/)).toBeChecked();
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.approved).toBe(true);
+    expect(payload.autoMerge).toBe(true);
+  });
+
   it("greys out Create task until the title and target repo are both filled", async () => {
     const user = userEvent.setup();
     render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);

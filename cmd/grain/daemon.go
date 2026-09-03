@@ -1409,16 +1409,23 @@ func (c config) logStoreOverrides(mc model.Config) {
 // toModelConfig is the flag-parsed subset of config that mirrors
 // model.Config -- the seed loadConfig writes when a deployment has never
 // stored one.
+//
+// It starts from model.DefaultConfig rather than a zero model.Config:
+// the settings with no flag behind them here (ApprovedByDefault and
+// AutoMergeByDefault, whose default is on) still have to be seeded as
+// what a deployment that has never chosen them runs, and PutConfig binds
+// every column, so anything left at its Go zero value here is stored as a
+// deliberate-looking value nobody chose.
 func (c config) toModelConfig() model.Config {
-	return model.Config{
-		PollInterval: c.pollInterval, MaxConcurrent: c.maxConcurrent,
-		AgentFramework: c.agentFramework,
-		GeminiModel:    c.geminiModel, ClaudeModel: c.claudeModel, MaxAgentTurns: c.maxAgentTurns,
-		GitHubHost: c.githubHost, GitHubInsecureHTTP: c.githubInsecureHTTP,
-		GCPProject: c.gcpProject, GCPServiceAccountEmail: c.gcpServiceAccountEmail,
-		TargetRepos: c.targetRepos,
-		SandboxCPUs: c.sandboxCPUs, SandboxMemoryMB: c.sandboxMemoryMB,
-	}
+	mc := model.DefaultConfig()
+	mc.PollInterval, mc.MaxConcurrent = c.pollInterval, c.maxConcurrent
+	mc.AgentFramework = c.agentFramework
+	mc.GeminiModel, mc.ClaudeModel, mc.MaxAgentTurns = c.geminiModel, c.claudeModel, c.maxAgentTurns
+	mc.GitHubHost, mc.GitHubInsecureHTTP = c.githubHost, c.githubInsecureHTTP
+	mc.GCPProject, mc.GCPServiceAccountEmail = c.gcpProject, c.gcpServiceAccountEmail
+	mc.TargetRepos = c.targetRepos
+	mc.SandboxCPUs, mc.SandboxMemoryMB = c.sandboxCPUs, c.sandboxMemoryMB
+	return mc
 }
 
 // withLiveModelConfig is withModelConfig restricted to what a *running*

@@ -106,6 +106,12 @@ type Settings struct {
 	// (configResponse, tasks.go) the same way ShowClosedByDefault is, so
 	// that form has them to seed its checkboxes with before Settings has
 	// ever been opened this session.
+	//
+	// Both are true on a deployment that has stored no configuration at
+	// all, not false: unlike ShowClosedByDefault, off is not what "never
+	// chosen" means here (model.DefaultConfig), and a pane describing an
+	// unconfigured deployment should say what filing a task there would
+	// actually do.
 	ApprovedByDefault  bool `json:"approvedByDefault"`
 	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 	// AgentFramework is model.Config's own field of the same name
@@ -312,6 +318,12 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 		// operator does on a deployment that has never had its settings
 		// saved at all.
 		geminiKeySet, claudeTokenSet := c.agentKeysSet()
+		// The two task defaults are reported as model.DefaultConfig has
+		// them rather than as the zero values around them: what a pane
+		// showing an unconfigured deployment should check those two boxes
+		// as is what filing a task there would actually do, and with no
+		// row yet that is the built-in default rather than off.
+		def := model.DefaultConfig()
 		return Settings{
 			SandboxCPUsDefault:     kontur.DefaultCPUs,
 			SandboxMemoryMBDefault: kontur.DefaultMemoryMB,
@@ -319,6 +331,8 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			AgentKeysEnabled:       c.Config.Secrets != nil,
 			GeminiAPIKeySet:        geminiKeySet,
 			ClaudeOAuthTokenSet:    claudeTokenSet,
+			ApprovedByDefault:      def.ApprovedByDefault,
+			AutoMergeByDefault:     def.AutoMergeByDefault,
 			// Reported before anything has been saved for the same
 			// reason it is reported at all: the annotation belongs on
 			// the field from the first time it is looked at. Nothing can
@@ -379,7 +393,12 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	if err != nil {
 		return Settings{}, err
 	}
-	var cfg model.Config
+	// model.DefaultConfig, not a zero model.Config, is what a first save
+	// applies req on top of: PutConfig binds every column, so a setting
+	// whose default is not its zero value (ApprovedByDefault and
+	// AutoMergeByDefault, both on) would otherwise be written off by a
+	// request that never mentioned it.
+	cfg := model.DefaultConfig()
 	firstTime := current == nil
 	if current != nil {
 		cfg = *current

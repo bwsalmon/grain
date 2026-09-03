@@ -2067,6 +2067,139 @@ func TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault(t *testing.T) 
 	}
 }
 
+// TestInitMigratesAnExistingDatabaseMissingTaskDefaults is the same
+// pattern, applied to the pair grain_config.approved_by_default/
+// auto_merge_by_default (bwsalmon/agents#612) -- except that what an
+// upgraded row lands on is true rather than the column's Go zero value:
+// both settings default on (model.DefaultConfig), so a deployment
+// upgrading across this migration gets the same "Queue immediately" and
+// "Auto-merge once checks pass" starting state a fresh one does.
+func TestInitMigratesAnExistingDatabaseMissingTaskDefaults(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-#612 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-#612 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing the task-default columns: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !got.ApprovedByDefault || !got.AutoMergeByDefault {
+		t.Fatalf("ApprovedByDefault/AutoMergeByDefault after migrating = %v/%v, want true/true",
+			got.ApprovedByDefault, got.AutoMergeByDefault)
+	}
+}
+
+// TestInitTurnsTaskDefaultsOnOnceForARowStoringTheOldDefault is
+// Store.ensureConfigTaskDefaultsOn: a row written by a build whose
+// default for these two was off stores 0 in columns that already exist,
+// so no ensure*Column migration would ever touch it and the new default
+// would reach fresh databases only. The backfill turns both on, exactly
+// once -- an operator who turns either off afterwards has made a
+// deliberate choice, and a restart must not overwrite it.
+func TestInitTurnsTaskDefaultsOnOnceForARowStoringTheOldDefault(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	// grain_config as it stood with both settings present and defaulting
+	// off: the columns are there, so only the backfill can move them.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  `+"`approved_by_default`"+`          INTEGER NOT NULL DEFAULT 0,
+  `+"`auto_merge_by_default`"+`        INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the old-default grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`,"+
+			"`approved_by_default`,`auto_merge_by_default`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0,0,0)"); err != nil {
+		t.Fatalf("seeding a config row storing the old default: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against a row storing the old task defaults: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !got.ApprovedByDefault || !got.AutoMergeByDefault {
+		t.Fatalf("ApprovedByDefault/AutoMergeByDefault after backfilling = %v/%v, want true/true",
+			got.ApprovedByDefault, got.AutoMergeByDefault)
+	}
+
+	// An operator turns one back off through Settings, and the daemon
+	// restarts: PutConfig is a REPLACE that doesn't bind the ledger
+	// column, so this is also what pins that re-defaulting it cannot
+	// re-arm the backfill.
+	off := *got
+	off.ApprovedByDefault = false
+	if err := store.PutConfig(ctx, off); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := model.New(db).Init(ctx); err != nil {
+		t.Fatalf("re-Init after an operator turned a task default off: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.ApprovedByDefault {
+		t.Errorf("ApprovedByDefault = true after a restart, want the false an operator chose")
+	}
+	if !got.AutoMergeByDefault {
+		t.Errorf("AutoMergeByDefault = false after a restart, want the true it was left at")
+	}
+}
+
 // TestInitMigratesAnExistingDatabaseMissingClaudeModel is the same
 // migration, applied to grain_config.claude_model
 // (model.Config.ClaudeModel's own doc comment has the reasoning).

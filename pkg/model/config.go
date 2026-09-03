@@ -167,24 +167,54 @@ type Config struct {
 	ShowClosedByDefault bool
 	// ApprovedByDefault is the deployment-wide default for whether a new
 	// task's "Queue immediately" checkbox starts checked (bwsalmon/
-	// agents#612): false, the default, matches grain's original shape --
-	// NewTaskOverlay.jsx's own checkbox starts unchecked, so a task files
-	// as a proposal needing Approve unless someone checks it. true starts
-	// it checked instead, so filing a task takes one fewer click on a
-	// deployment that approves nearly everything anyway. Like
-	// NewestFirst and ShowClosedByDefault, this only ever seeds the
+	// agents#612): true, the default (DefaultConfig), starts it checked,
+	// so filing a task queues it for dispatch rather than parking it for
+	// an Approve nobody was waiting to give -- a deployment that approves
+	// nearly everything it files should not have to say so twice. false
+	// starts it unchecked instead, grain's original shape, where a task
+	// files as a proposal until someone approves it.
+	//
+	// Unlike NewestFirst and ShowClosedByDefault, whose default is also
+	// their Go zero value, false here is a zero value that does not mean
+	// "nobody has chosen". Nothing has to tell those two apart from the
+	// field alone: every path that builds a Config with no stored row
+	// behind it goes through DefaultConfig, and the store's own column
+	// defaults say the same thing in SQL.
+	//
+	// Like NewestFirst and ShowClosedByDefault, this only ever seeds the
 	// form's *starting* state -- whoever is filing a task can still
 	// uncheck it, and CreateTaskRequest.Approved is what actually decides
 	// each task's own Approval, not this.
 	ApprovedByDefault bool
 	// AutoMergeByDefault is ApprovedByDefault's counterpart for
 	// NewTaskOverlay.jsx's "Auto-merge once checks pass" checkbox
-	// (bwsalmon/agents#612): false, the default, keeps a new task's
-	// Task.AutoMerge off unless someone checks it. true starts it checked
-	// instead. Same "starting state only" caveat as ApprovedByDefault --
-	// CreateTaskRequest.AutoMerge, not this, is what a filed task actually
-	// gets.
+	// (bwsalmon/agents#612): true, the default (DefaultConfig), starts a
+	// new task's Task.AutoMerge on, so a run whose checks pass lands
+	// without a human clicking Merge on it; false keeps it off unless
+	// someone checks it. Same "starting state only" caveat as
+	// ApprovedByDefault -- CreateTaskRequest.AutoMerge, not this, is what
+	// a filed task actually gets.
 	AutoMergeByDefault bool
+}
+
+// DefaultConfig is the configuration a deployment that has never chosen
+// one runs: every field's own zero value, except the two whose default
+// is not it.
+//
+// Every path that builds a Config with nothing stored behind it starts
+// here -- cmd/grain/daemon.go's flag seed for a fresh database,
+// ui.UpdateSettings' first save, and the two API responses that have to
+// describe a deployment whose grain_config row does not exist yet
+// (ui.GetSettings, ui's handleConfig) -- so "on unless somebody turned it
+// off" is one fact in one place rather than a literal true repeated at
+// each of them. schema.go's grain_config DDL, and the store migrations
+// that add these columns to a database predating them, carry the same
+// defaults in SQL for the rows this constructor never touches.
+func DefaultConfig() Config {
+	return Config{
+		ApprovedByDefault:  true,
+		AutoMergeByDefault: true,
+	}
 }
 
 // AgentFramework's own vocabulary -- the two agent.Framework

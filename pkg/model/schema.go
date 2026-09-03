@@ -424,6 +424,19 @@ var Tables = []string{
 	// counterpart to gemini_model, added the same way (DEFAULT '' both
 	// here and in Store.ensureConfigClaudeModelColumn for an
 	// already-created grain_config).
+	//
+	// approved_by_default and auto_merge_by_default (Config.ApprovedByDefault/
+	// AutoMergeByDefault) are DEFAULT 1, not 0: both settings are on for a
+	// deployment that has never chosen either way, the same default
+	// model.DefaultConfig carries for every row written from Go rather
+	// than defaulted by the engine. task_defaults_on_backfilled is not a
+	// setting at all but the ledger for that change of default: its
+	// *presence* records that Store.ensureConfigTaskDefaultsOn has
+	// already run against this database, so the one-time backfill it does
+	// can never run twice and undo an operator who has since turned
+	// either setting off. Its value is never read by anything -- PutConfig
+	// does not name it, and REPLACE re-defaults it on every settings save,
+	// so the value carries no information to read.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -440,9 +453,10 @@ var Tables = []string{
   ` + "`sandbox_memory_mb`" + `            INTEGER NOT NULL DEFAULT 0,
   ` + "`show_closed_by_default`" + `       INTEGER NOT NULL DEFAULT 0,
   ` + "`agent_framework`" + `              TEXT    NOT NULL DEFAULT 'antigravity',
-  ` + "`approved_by_default`" + `          INTEGER NOT NULL DEFAULT 0,
-  ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 0,
+  ` + "`approved_by_default`" + `          INTEGER NOT NULL DEFAULT 1,
+  ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 1,
   ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
+  ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
