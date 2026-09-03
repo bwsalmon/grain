@@ -224,14 +224,14 @@ func Import(ctx context.Context, db *sql.DB, dir string) error {
 		}
 	}
 	for _, t := range tables {
-		if err := importTable(ctx, tx, db, dir, t); err != nil {
+		if err := importTable(ctx, tx, dir, t); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func importTable(ctx context.Context, tx *sql.Tx, db *sql.DB, dir, table string) error {
+func importTable(ctx context.Context, tx *sql.Tx, dir, table string) error {
 	path := filepath.Join(dir, TablesDir, table+".json")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -243,7 +243,7 @@ func importTable(ctx context.Context, tx *sql.Tx, db *sql.DB, dir, table string)
 	if err != nil {
 		return fmt.Errorf("staterepo: reading %s: %w", path, err)
 	}
-	cols, err := columns(ctx, db, table)
+	cols, err := columns(ctx, tx, table)
 	if err != nil {
 		return err
 	}
@@ -337,7 +337,16 @@ type column struct {
 	pk       int // 1-based position in the primary key, 0 if not part of one
 }
 
-func columns(ctx context.Context, db *sql.DB, table string) ([]column, error) {
+// querier is whatever can run a read: a *sql.DB, or the *sql.Tx an
+// import is already inside. The distinction matters to more than tidiness
+// -- a caller that has pinned its pool to one connection (Check) would
+// deadlock the moment a statement inside the transaction reached for a
+// second one.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func columns(ctx context.Context, db querier, table string) ([]column, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+quote(table)+")")
 	if err != nil {
 		return nil, fmt.Errorf("staterepo: describing %s: %w", table, err)
@@ -390,7 +399,7 @@ func orderBy(cols []column) []string {
 // excluded by sqlite_master's own type column: pkg/model derives
 // task_state as a view precisely so that nothing writes it, and a dump
 // that carried one would invite exactly that.
-func tableNames(ctx context.Context, db *sql.DB) ([]string, error) {
+func tableNames(ctx context.Context, db querier) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
 		"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
 	if err != nil {
