@@ -70,6 +70,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -588,6 +589,16 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (needs a daemon restart to take effect)")
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
+	// The deployment-wide sandbox VM shape (ui.Settings.SandboxCPUs/
+	// SandboxMemoryMB, bwsalmon/agents#534). 0 is a real value for both
+	// -- "leave bwsalmon/kontur's own default in place" -- so an
+	// operator shrinking a deployment back to that default sets the flag
+	// to 0 rather than omitting it, the same way an empty -target-repos
+	// clears the allowlist.
+	sandboxCPUs := fs.Int("sandbox-cpus", 0,
+		"deployment-wide default vCPU count for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
+	sandboxMemoryMB := fs.Int("sandbox-memory-mb", 0,
+		"deployment-wide default guest memory, in MiB, for a kontur-managed sandbox VM; 0 leaves bwsalmon/kontur's own default in place")
 	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any")
 	defaultCapabilities := fs.String("default-capabilities", "",
 		"comma-separated capability IDs every new task is filed holding -- empty files each task with only what it asks for")
@@ -625,6 +636,12 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "gcp-agent-service-account":
 			v := *gcpServiceAccountEmail
 			req.GCPServiceAccountEmail = &v
+		case "sandbox-cpus":
+			v := *sandboxCPUs
+			req.SandboxCPUs = &v
+		case "sandbox-memory-mb":
+			v := *sandboxMemoryMB
+			req.SandboxMemoryMB = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -759,6 +776,14 @@ func (p *printer) settings(s ui.Settings) {
 	if s.GCPServiceAccountEmail != "" {
 		fmt.Printf("gcp agent service account: %s\n", s.GCPServiceAccountEmail)
 	}
+	// The sandbox shape prints what is actually in effect, not the bare
+	// stored value: 0 means "whatever bwsalmon/kontur defaults to", and
+	// printing that literal 0 would read as a deliberately empty VM.
+	// ui.Settings carries kontur's own defaults alongside the stored
+	// values (SandboxCPUsDefault/SandboxMemoryMBDefault) for exactly
+	// this.
+	fmt.Printf("sandbox cpus:   %s\n", sandboxShapeValue(s.SandboxCPUs, s.SandboxCPUsDefault))
+	fmt.Printf("sandbox memory mb: %s\n", sandboxShapeValue(s.SandboxMemoryMB, s.SandboxMemoryMBDefault))
 	if len(s.TargetRepos) > 0 {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {
@@ -785,6 +810,23 @@ func (p *printer) settings(s ui.Settings) {
 			fmt.Println(capabilityStatusLine(cp))
 		}
 	}
+}
+
+// sandboxShapeValue renders one dimension of the deployment-wide sandbox
+// VM shape: the stored value when there is one, and otherwise the shape
+// actually in effect -- bwsalmon/kontur's own default -- named as the
+// default rather than printed as the bare 0 that is stored, so that
+// "unset" and "in effect" are both legible from one line. A build whose
+// ui.Settings reports no default to fall back on (0) says only that the
+// setting is unset, which is all it can honestly say.
+func sandboxShapeValue(stored, konturDefault int) string {
+	if stored != 0 {
+		return strconv.Itoa(stored)
+	}
+	if konturDefault != 0 {
+		return fmt.Sprintf("%d (kontur default, unset)", konturDefault)
+	}
+	return "unset"
 }
 
 // capabilityStatusLine renders one ui.CapabilityStatus as a line of
