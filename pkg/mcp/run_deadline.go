@@ -19,8 +19,15 @@ package mcp
 // rescues a branch that was pushed when the clock runs out, and nothing
 // rescues a commit that was not -- so the line says that too rather than
 // leaving an agent to guess how much of its work the cancellation eats.
+//
+// The same deadline is also handed to the handlers themselves, on their
+// ctx (runDeadlineContextKey). A notice is advice a tool prints after
+// the fact; a tool that *blocks* has to know the number beforehand, to
+// bound itself by it -- see wait_for_checks, which is the reason that
+// half exists.
 
 import (
+	"context"
 	"fmt"
 	"time"
 )
@@ -80,13 +87,69 @@ func (r *Registry) AnnounceDeadline(at time.Time, now func() time.Time) {
 	r.deadline = &runDeadline{at: at, now: now}
 }
 
+// remaining is how much of the run is left as of now.
+func (d *runDeadline) remaining() time.Duration {
+	return d.at.Sub(d.now())
+}
+
 // deadlineNotice is the line to append to a tool result answered now, or
 // "" when there is no deadline or it is still comfortably far off.
 func (r *Registry) deadlineNotice() string {
 	if r.deadline == nil {
 		return ""
 	}
-	return runDeadlineNotice(r.deadline.at.Sub(r.deadline.now()))
+	return runDeadlineNotice(r.deadline.remaining())
+}
+
+// runDeadlineContextKey is how a tool that blocks gets at the number
+// itself, rather than only at the notice above.
+//
+// The notice is enough for a tool that answers immediately: it tells the
+// run what to do next. It is not enough for wait_for_checks, which
+// decides how long to block *before* it answers -- a run with eight
+// minutes left that asks for a fifteen-minute wait spends the whole of
+// its remaining life inside one tool call, is cancelled mid-wait, and so
+// never sees the verdict it blocked for nor gets the turn it would have
+// used to act on it. So the deadline the registry holds is put on the
+// ctx every handler runs under, and a tool that can bound itself by it
+// reads it from there (waitForChecksBudget).
+//
+// On the ctx rather than through the tool constructors because the
+// registry is already the one place AnnounceDeadline puts it: a second
+// copy threaded into NewPullRequestTools would be a second thing to keep
+// in step, at every call site including the ones that build the tools
+// only to read their names (agent/claude's allowedTools).
+//
+// A context *value*, deliberately, and not context.WithDeadline: this
+// must tell a handler how much time there is, never cancel it. The run's
+// own cancellation already arrives on this ctx from outside, and a
+// second deadline layered on here would cut tool calls short of it.
+type runDeadlineContextKey struct{}
+
+// withRunDeadline hands the announced deadline to the handler about to
+// run. A registry that was told none leaves the ctx exactly as it is,
+// which is what makes runDeadlineRemaining's "nobody said" case honest.
+func (r *Registry) withRunDeadline(ctx context.Context) context.Context {
+	if r.deadline == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, runDeadlineContextKey{}, r.deadline)
+}
+
+// runDeadlineRemaining is how long the run this call belongs to has
+// left, and whether anything told this server about a deadline at all.
+//
+// The false case is every caller with none to give -- pkg/mcp's own
+// tests, tests/e2e, a `grain mcpserver` run by hand -- and a tool
+// reading it must then behave exactly as it did before rather than
+// inventing a bound of its own: "no deadline announced" is not "no time
+// left". The duration may be negative, for a run already past it.
+func runDeadlineRemaining(ctx context.Context) (time.Duration, bool) {
+	deadline, ok := ctx.Value(runDeadlineContextKey{}).(*runDeadline)
+	if !ok {
+		return 0, false
+	}
+	return deadline.remaining(), true
 }
 
 // runDeadlineNotice words the notice for a run with remaining left.

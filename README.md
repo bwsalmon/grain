@@ -1726,12 +1726,20 @@ a build that already has to be fixed and the sooner the run is told the
 more of its budget is left to fix it in. Every check completing with
 none failing ends it too, and that is the one green light in there.
 
-Three clocks bound it, none of them an agent's to invent:
+Four clocks bound it, none of them an agent's to invent:
 
 - `timeout_seconds`, the only argument, defaulting to 15 minutes and
   clamped to 30s..60m. A timeout is *reported* — with what each check was
   doing when it ran out, and the reminder that an unfinished check has
   not passed — rather than raised as an error.
+- the run's own deadline, when grain told this server about one (see
+  "Telling a run how long it has"). A wait is worth running only if the
+  run outlives it, so each one is cut to what is left minus two minutes
+  to act on the answer, and the report says when that is what bounded it
+  — *"I waited up to 8m0s: the 10m0s this run has left before grain
+  cancels it, less 2m0s to act on the answer — not the 15m0s asked
+  for"*. Below the shortest wait there is, it does not wait at all and
+  says so.
 - a 3-minute grace on an entirely empty check list. GitHub reports no
   checks both when CI has not registered them yet and when the repo has
   no CI at all, and blocking the full timeout to tell those apart would
@@ -1830,6 +1838,25 @@ sandbox…` — with the same advice, escalating in the last five minutes
 from "finish this piece and push it" to "there is no time for another
 edit-and-test cycle". It rides on failed results too: that is the likelier
 moment for a run to start a long repair it will never get to push.
+
+**And in `wait_for_checks`' own arithmetic**, which is the one tool that
+can do better than report the deadline. It decides how long to block
+before it answers, and a run eight minutes from the wall that asked for
+a fifteen-minute wait used to spend the whole of its remaining life
+inside that single call: cancelled mid-wait, never shown the verdict it
+blocked for, never given the turn it would have used to react — and the
+wait itself was what ate the time the fix would have been pushed in. So
+the registry hands the deadline to the handler on its ctx as well as
+appending it to the answer, and the wait is clamped to what is left less
+two minutes to act on the result, with the clamp stated on the report
+(*"not the 15m0s asked for"*) since a clamp a run cannot see reads as CI
+being slow. A timed-out clamped wait is told its own clock ran out
+rather than to retry with a bigger `timeout_seconds`, and a call with
+less than the shortest wait's worth of run left answers immediately with
+*"there is no time to wait on CI"* and what to do with the turn instead.
+`claude`'s `MCP_TOOL_TIMEOUT` is unchanged by this: it is set once, with
+the whole run ahead of it, and still has to cover the longest wait a run
+with time to spare may ask for.
 
 The deadline reaches that server the way the branch already does. Each
 `Framework.Run` receives the very context `RunDispatch` derived with the
