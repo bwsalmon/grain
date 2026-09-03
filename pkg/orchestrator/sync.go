@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -861,7 +862,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		health = healthFrom(detail, checks, checksKnown, checksSettled)
 
 	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
-		if err := advanceMergeQueueHead(ctx, store, task, ref, detail, health, checks, now); err != nil {
+		if err := advanceMergeQueueHead(ctx, store, client, task, ref, detail, health, checks, now); err != nil {
 			return err
 		}
 
@@ -940,13 +941,13 @@ func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID str
 // filed has finished and decide whether that resolved things, or give up
 // on a fix that has not finished and is not going to
 // (defaultFixTaskDeadline).
-func advanceMergeQueueHead(ctx context.Context, store *model.Store,
+func advanceMergeQueueHead(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
 	fixTaskID, hasFix := fixTaskLink(task)
 	if !hasFix {
-		return fileFixTask(ctx, store, task, ref, detail, health, checks, now)
+		return fileFixTask(ctx, store, client, task, ref, detail, health, checks, now)
 	}
 
 	fixState, err := store.State(ctx, fixTaskID)
@@ -1069,6 +1070,80 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks
 	}
 }
 
+// fixLogTailLines is how many lines of each failing job's log a fix
+// task's body carries. Enough for a Go test failure's own output and the
+// package lines around it; short enough that four of them stay a thing a
+// person scrolls rather than a file they search.
+const fixLogTailLines = 80
+
+// actionsLogTimestamp is the RFC3339 stamp GitHub prefixes every line of
+// a job log with. It is the same on every line, says nothing about the
+// failure, and costs about a quarter of each line, so it comes off.
+var actionsLogTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z `)
+
+// failingJobLogs is the rest of what a fix task needs and healthReason
+// cannot give it: not just which jobs are red, but what they printed.
+//
+// healthReason already names the failing checks, which is what a person
+// reading the fix task needs to know where to look. An agent dispatched
+// into a sandbox needs more than that, because the sandbox is not a CI
+// runner -- it may not be able to run the failing suite at all -- so
+// "which test is red" has to travel with the task rather than be
+// rediscovered inside it. A job name plus the tail of its log is the
+// difference between "one or more required checks are failing" and a
+// stack trace.
+//
+// Best effort, deliberately: this is three extra GitHub reads
+// (github.FailedJobLogs) against a credential that may not be allowed to
+// make them, for a CI provider that may not be Actions at all, at the
+// one moment the queue has finally decided to act on a broken head.
+// Failing the whole cycle over the *annotation* on a fix task would cost
+// the fix itself, so an error is logged and the body says what it said
+// before this existed.
+func failingJobLogs(client github.Client, ref model.PullRequestRef, headSHA string) string {
+	logs, err := client.FailedJobLogs(ref.Repo.Owner, ref.Repo.Name, headSHA)
+	if err != nil {
+		log.Printf("orchestrator: reading the failing job logs for %s: %v -- "+
+			"filing the fix task with the check names alone", ref, err)
+		return ""
+	}
+	if len(logs) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n## What CI printed\n\n" +
+		"The end of each failing job's own log, copied here because the sandbox " +
+		"this fix runs in is not the runner that produced it:")
+	for _, l := range logs {
+		fmt.Fprintf(&b, "\n\n### %s\n", l.Name)
+		if l.URL != "" {
+			fmt.Fprintf(&b, "\n%s\n", l.URL)
+		}
+		// Four backticks, so a log that itself contains a fenced block --
+		// any Go test printing three backticks does -- cannot close this
+		// one early.
+		fmt.Fprintf(&b, "\n````\n%s\n````\n", jobLogExcerpt(l.Log))
+		if l.Truncated {
+			b.WriteString("\n(the tail of the log, not all of it)\n")
+		}
+	}
+	return b.String()
+}
+
+// jobLogExcerpt is one job's log as it goes into a task body: its last
+// fixLogTailLines lines, without Actions' own per-line timestamps.
+func jobLogExcerpt(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) > fixLogTailLines {
+		lines = lines[len(lines)-fixLogTailLines:]
+	}
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(actionsLogTimestamp.ReplaceAllString(line, ""), "\r")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // fixTaskTitle names a fix after the task it repairs -- "Resolve: Add
 // pagination to the tasks API" -- where it used to be named after the
 // pull request that went red ("🤖 grain: fix acme/widgets#104").
@@ -1121,7 +1196,14 @@ func fixTaskTitle(task model.Task, ref model.PullRequestRef) string {
 // task it repairs says so -- both writes grain owns, where the GitHub
 // version needed an issue created for the fix and a comment posted on the
 // original task's own issue.
-func fileFixTask(ctx context.Context, store *model.Store,
+//
+// Its body carries the failure itself, not just the verdict: healthReason
+// names the jobs that went red, and for a failing pull request
+// failingJobLogs appends what those jobs printed. The comment on the
+// parent task stays the one-line version -- it is read by a person
+// watching the queue, who has the pull request itself a click away, where
+// the agent dispatched into a sandbox has neither.
+func fileFixTask(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
@@ -1152,6 +1234,9 @@ func fileFixTask(ctx context.Context, store *model.Store,
 			"merge queue dispatches it itself.",
 		task.ID, ref, detail.HTMLURL, reason, detail.HeadRef, detail.HeadRef,
 	)
+	if health == model.PrFailing {
+		body += failingJobLogs(client, ref, detail.HeadSHA)
+	}
 
 	fixTask := model.Task{
 		ID:     id,
