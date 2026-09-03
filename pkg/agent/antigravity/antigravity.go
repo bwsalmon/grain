@@ -582,6 +582,12 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 
 	stdout, runErr := f.run.Run(runCtx, args, stdin, env, cfg.SandboxRoot, io.MultiWriter(sinks...))
 	result, parseErr := parseTranscript(stdout)
+	// Read once, from the terminal event's own text plus whatever the
+	// subprocess itself reported, because a quota refusal can arrive
+	// either way: agy usually reports it as a failed terminal status
+	// (parseErr, below) but a hard enough refusal kills the process
+	// first (runErr). See usagelimit.go.
+	limit := usageLimitFailure(parseEvents(stdout).resultText, runErr)
 	switch {
 	case capWatch.tripped():
 		// The cap cancelled the subprocess, so runErr is that
@@ -590,6 +596,20 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		// is returned alongside the error, never instead of it.
 		return partialResult(result, stdout),
 			fmt.Errorf("antigravity: exceeded max turns (%d) without a final answer", maxTurns)
+	case limit != nil:
+		// Ahead of both branches below, which would otherwise render
+		// this as "running agy: exit status 1" or as agy's own generic
+		// "run ended in status FAILURE", and lose the one thing about it
+		// a deployment can act on: nothing is wrong with this run, the
+		// credential it used has no quota left until its window resets.
+		// orchestrator.RunDispatch reads the type (agent.UsageLimit) and
+		// pauses dispatch rather than sending the next task at the same
+		// refusal.
+		//
+		// result travels back alongside it, as everywhere else here: a
+		// run that pushed a branch and then ran out of quota has already
+		// changed the world.
+		return partialResult(result, stdout), limit
 	case runErr != nil:
 		return partialResult(result, stdout), fmt.Errorf("antigravity: running agy: %w", runErr)
 	case parseErr != nil:

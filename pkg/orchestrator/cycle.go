@@ -406,6 +406,33 @@ func reconcileSuites(ctx context.Context, deps Deps, now time.Time) error {
 // is no separate ctx.Err() check to make before launching them the way
 // the old sequential loop needed one before each iteration.
 func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
+	// Nothing is dispatched while the deployment's agent has no budget
+	// left: a task started now would spend a sandbox and an attempt
+	// reaching the same refusal the run that closed this gate already
+	// reached (Config.Pause). Only this reconciler stops -- syncing pull
+	// requests, advancing the merge queue and cutting releases cost no
+	// agent tokens and are exactly what should keep working while the
+	// window is shut.
+	//
+	// Asked once per tick, and level-triggered like every other
+	// reconciler: the pause lifts because a later tick found its instant
+	// passed, not because anything here holds a timer.
+	//
+	// The configuration agent waits too, unlike every other exemption it
+	// has (dispatch.dispatchConfiguration starts it regardless of how
+	// much of this deployment's capacity is spent). Capacity is grain's
+	// own choice and can be overridden; budget is the provider's, and a
+	// configuration run dispatched now would reach the same refusal
+	// without ever answering the question it was filed for.
+	//
+	// Silent per tick on purpose: Pause logs the one line worth having
+	// when it closes and the one worth having when it opens again, and a
+	// line per tick for however many hours a provider's window lasts
+	// would bury both.
+	if _, _, blocked := deps.Config.Pause.Blocked(now); blocked {
+		return nil
+	}
+
 	// dispatch.Busy is what keeps a task this process is still finishing
 	// with out of this cycle's reach: a run's row is finished before
 	// runOne has turned its result into the effects it implies, and a

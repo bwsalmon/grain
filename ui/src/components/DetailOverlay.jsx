@@ -264,11 +264,19 @@ function Actions({ t, config, act }) {
 // (orchestrator.ProcessResult). Every one of them takes the "failed"
 // badge rather than the fallback's "queued", which would read as "hasn't
 // run yet" for a run that did.
+//
+// "paused" (model.PausedOutcome) is the exception among those: it is a
+// run grain stopped because the deployment's agent had no budget left in
+// its provider's current window (orchestrator.Pause), so it takes the
+// "closed" badge "cancelled" takes rather than a red one. Nothing about
+// it failed, and the backend does not count it against the task's own
+// failure streak either.
 const OUTCOME_LABELS = {
   "": "Running",
   succeeded: "Succeeded",
   failed: "Failed",
   cancelled: "Cancelled",
+  paused: "Paused (agent usage limit)",
   "setup-failed": "Setup failed",
   "finish-failed": "Finish failed",
   no_action: "No action",
@@ -279,6 +287,7 @@ const OUTCOME_BADGES = {
   succeeded: "completed",
   failed: "failed",
   cancelled: "closed",
+  paused: "closed",
   "setup-failed": "failed",
   "finish-failed": "failed",
   no_action: "failed",

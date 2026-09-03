@@ -169,8 +169,14 @@ type parsedEvents struct {
 	// turns counts completed agent_response steps -- what Run's own
 	// turn cap is measured in, agy having no --max-turns flag of its
 	// own to pass one down to (see Framework.Run).
-	turns      int
-	resultErr  error
+	turns     int
+	resultErr error
+	// resultText is the terminal result event's own error (or, failing
+	// that, its response) verbatim -- what agy itself said about how the
+	// run ended, kept apart from resultErr's rendered sentence so
+	// usagelimit.go can read the provider's own words rather than text
+	// this file wrote. Empty for a capture with no result event.
+	resultText string
 	transcript strings.Builder
 }
 
@@ -204,6 +210,7 @@ func parseEvents(stdout string) *parsedEvents {
 				if detail == "" {
 					detail = ev.Result.Response
 				}
+				p.resultText = detail
 				p.resultErr = fmt.Errorf("antigravity: run ended in status %s: %s", ev.Result.Status, detail)
 				continue
 			}

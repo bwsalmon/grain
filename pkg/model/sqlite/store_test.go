@@ -1372,6 +1372,76 @@ func TestFailureStreakIsNarrowedByARetryRequest(t *testing.T) {
 	}
 }
 
+// TestAPausedRunCountsAgainstNeitherStreak is model.PausedOutcome's own
+// rule, held against both implementations of it at once: Store.
+// FailureStreak's walk in Go, and task_streak's WHERE clause in SQL
+// (which task_state reads, and which State answers out of). A run grain
+// stopped because the deployment's agent had no budget left says nothing
+// about the task it was given, so it neither adds to the streak nor
+// clears the failures before it -- otherwise a single provider outage
+// would spend the retry budget of every task that happened to be running
+// when it began.
+func TestAPausedRunCountsAgainstNeitherStreak(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every run this task has ever had was stopped by a usage limit.
+	for i := 0; i < model.MaxConsecutiveFailures+1; i++ {
+		id := fmt.Sprintf("r%d", i+1)
+		at := now.Add(time.Duration(i) * time.Hour)
+		if err := store.StartRun(ctx, model.Run{
+			ID: id, TaskID: "a1b2", Sandbox: "s1", Attempt: i + 1, StartedAt: at,
+		}, model.Limits{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.FinishRun(ctx, id, at.Add(time.Minute), model.PausedOutcome, "usage limit"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	streak, err := store.FailureStreak(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if streak == nil || streak.Count != 0 {
+		t.Fatalf("FailureStreak over paused runs = %+v, want Count 0", streak)
+	}
+	if state, err := store.State(ctx, "a1b2"); err != nil {
+		t.Fatal(err)
+	} else if state != model.StateQueued {
+		t.Fatalf("state after %d paused runs = %q, want %q: task_streak must skip them too",
+			model.MaxConsecutiveFailures+1, state, model.StateQueued)
+	}
+
+	// And a paused run is not a success either: the failures before it
+	// still stand.
+	failedAt := now.Add(100 * time.Hour)
+	if err := store.StartRun(ctx, model.Run{
+		ID: "f1", TaskID: "a1b2", Sandbox: "s1", Attempt: 100, StartedAt: failedAt,
+	}, model.Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "f1", failedAt.Add(time.Minute), "failed", "boom"); err != nil {
+		t.Fatal(err)
+	}
+	pausedAt := failedAt.Add(time.Hour)
+	if err := store.StartRun(ctx, model.Run{
+		ID: "p1", TaskID: "a1b2", Sandbox: "s1", Attempt: 101, StartedAt: pausedAt,
+	}, model.Limits{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "p1", pausedAt.Add(time.Minute), model.PausedOutcome, "usage limit"); err != nil {
+		t.Fatal(err)
+	}
+	if streak, err := store.FailureStreak(ctx, "a1b2"); err != nil {
+		t.Fatal(err)
+	} else if streak == nil || streak.Count != 1 {
+		t.Fatalf("FailureStreak = %+v, want Count 1: a pause neither counts nor forgives", streak)
+	}
+}
+
 // TestStartRunRejectsASecondLiveRunOnTheSameTask pins what is left of
 // the bwsalmon/agents#434 guard once slots stopped existing. It used to
 // be one live run per slot, catching two overlapping dispatch.Cycle

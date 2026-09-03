@@ -442,6 +442,13 @@ func addendaPoller(store *model.Store, taskID string, seen []model.Comment) func
 // actually running it, only because both share the one store. A run
 // killed this way finishes with outcome "cancelled", distinct from
 // "failed", and returns a non-nil error wrapping errTaskClosed.
+//
+// A run whose framework reports the agent's own usage limit
+// (agent.UsageLimitError) ends a third way: outcome model.PausedOutcome,
+// cfg.Pause closed behind it so that nothing else is dispatched until
+// the provider's window resets, and every other run in flight cancelled
+// with errUsageLimit -- which lands those runs on this same path, with
+// the same outcome and a detail saying whose limit it was. See Pause.
 func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framework,
 	cfg Config, task model.Task, d dispatch.Dispatch, tools []mcp.Tool, sandboxRoot, konturVM string,
 	placer SandboxPlacer, at time.Time) (*agent.Result, error) {
@@ -542,6 +549,19 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			watchForTaskClosed(runCtx, ctx, store, task.ID, cfg.cancelPollInterval(), cancelRun)
 		}()
 
+		// The third thing that can end this run from outside it: another
+		// run meeting the agent's own usage limit, which cancels every
+		// run in flight rather than letting each spend an agent's worth
+		// of wall-clock time discovering the same refusal (Pause). Same
+		// runCtx the watcher cancels, so a run stopped this way lands in
+		// exactly the same place a task-closed one does, with its own
+		// cause to tell them apart.
+		//
+		// Unregistered the moment framework.Run returns, below, so a
+		// pause begun by *this* run's own limit never cancels the
+		// already-finished context it is about to read the cause of.
+		stopPause := cfg.Pause.register(d.RunID, cfg.now(), cancelRun)
+
 		// Repo/Branch are the same pair BuildPrompt names in the prompt,
 		// passed structurally as well so a Framework can scope its
 		// forked mcpserver's pull_request_status to exactly this run's
@@ -578,10 +598,40 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
 		cancelAgentCtx()
+		stopPause()
 		cancelRun(nil)
 		<-watcherDone
 
+		// Read once, before the switch, because it decides the first two
+		// branches between them: a run that met the limit itself is what
+		// begins the pause, and a run cancelled by somebody else's limit
+		// is what the pause did.
+		limit, hitLimit := agent.UsageLimit(runErr)
+
 		switch {
+		case hitLimit:
+			// This run is the one that found the wall. Pausing is what
+			// stops the rest of the queue walking into it -- see Pause --
+			// and cancels whatever else is in flight on the same
+			// credential right now.
+			//
+			// Recorded as model.PausedOutcome rather than "failed": the
+			// agent did not fail, the deployment ran out of budget, and
+			// nothing about this task earned a place in its own failure
+			// streak for it (that constant's own doc comment).
+			until := cfg.Pause.Begin(cfg.now(), limit)
+			detail = usageLimitDetail(limit, until) + partialWorkSuffix(result)
+			outcome = model.PausedOutcome
+			runErr = fmt.Errorf("orchestrator: running %s: %w", d.RunID, runErr)
+		case runErr != nil && errors.Is(context.Cause(agentCtx), errUsageLimit):
+			// Somebody else's limit, cancelled mid-run. Same outcome for
+			// the same reason, and the detail says whose doing it was so
+			// that a human reading this attempt is not left looking for a
+			// fault in a run that had none.
+			outcome = model.PausedOutcome
+			detail = "another run reached the agent's usage limit; this one was cancelled until that window resets" +
+				partialWorkSuffix(result)
+			runErr = fmt.Errorf("orchestrator: run %s: %w", d.RunID, errUsageLimit)
 		case runErr != nil && errors.Is(context.Cause(agentCtx), errTaskClosed):
 			outcome = "cancelled"
 			detail = "the task was closed while this run was still live"
@@ -655,6 +705,27 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		return result, runErr
 	}
 	return result, nil
+}
+
+// usageLimitDetail is what a run stopped by the agent's own usage limit
+// records in task_run.detail: what the provider said, and when this
+// deployment will try again. Both halves matter to the person reading
+// the attempt -- the first says the run was not at fault, the second
+// says nothing is stuck and roughly how long the queue is standing
+// still.
+//
+// A zero until is a deployment with no Pause wired (Config.Pause): the
+// limit was still real and still worth recording, there is simply
+// nothing paused to name an end for.
+func usageLimitDetail(limit *agent.UsageLimitError, until time.Time) string {
+	what := "the agent's usage limit was reached"
+	if limit != nil {
+		what = limit.Error()
+	}
+	if until.IsZero() {
+		return what
+	}
+	return fmt.Sprintf("%s; dispatch is paused until %s", what, until.UTC().Format(time.RFC3339))
 }
 
 // partialWorkSuffix names what a failed run got done before it failed, or
