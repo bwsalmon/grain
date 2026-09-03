@@ -52,7 +52,8 @@ type fakeSandbox struct {
 	rebuildErr error
 }
 
-func (s *fakeSandbox) Name() string                              { return s.name }
+func (s *fakeSandbox) Name() string { return s.name }
+
 func (s *fakeSandbox) Tools(context.Context) ([]mcp.Tool, error) { return nil, nil }
 
 func (s *fakeSandbox) ConfigureGitCredentials(_ context.Context, remoteURL, token string) error {
