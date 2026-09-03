@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Radio, RadioGroup, Select, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import AgentKeysSection, { AGENT_KEY_SECRETS } from "./AgentKeysSection.jsx";
+import StateRepoPanel from "./StateRepoPanel.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
+import GitHubTokensSection from "./GitHubTokensSection.jsx";
 import Overlay from "./Overlay.jsx";
 import SecretsPanel from "./SecretsPanel.jsx";
 import UpgradePanel from "./UpgradePanel.jsx";
@@ -52,6 +54,7 @@ const TABS = [
   { id: "github", label: "GitHub" },
   { id: "sandbox", label: "Sandbox" },
   { id: "capabilities", label: "Capabilities" },
+  { id: "state", label: "State" },
   { id: "upgrade", label: "Upgrade" },
 ];
 
@@ -555,6 +558,7 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
           </form>
         )}
         {tab === "github" && (
+          <>
           <form onSubmit={submitGithub}>
             <TextField
               name="githubHost"
@@ -584,6 +588,13 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
               <Button type="submit" variant="contained">Save</Button>
             </Stack>
           </form>
+          {/* Outside the form above, deliberately: the named tokens are
+              not deployment settings saved with that button -- each one
+              is written the moment it is added (grain/task-137), the
+              same way the agent credentials on the Agents tab are, and a
+              stray Enter in one of its fields must not save this tab. */}
+          <GitHubTokensSection showError={showError} />
+          </>
         )}
         {tab === "sandbox" && (
           <form onSubmit={submitSandbox}>
@@ -696,6 +707,7 @@ export default function SettingsOverlay({ onClose, onSaved, showError }) {
             <SecretsPanel showError={showError} claimed={claimedSecrets} />
           </>
         )}
+        {tab === "state" && <StateRepoPanel showError={showError} />}
         {tab === "upgrade" && <UpgradePanel showError={showError} />}
       </div>
     </Overlay>

@@ -102,6 +102,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 	"github.com/bwsalmon/grain/pkg/secrets"
+	"github.com/bwsalmon/grain/pkg/staterepo"
 	"github.com/bwsalmon/grain/pkg/sysstat"
 	"github.com/bwsalmon/grain/pkg/systemlog"
 	"github.com/bwsalmon/grain/pkg/ui"
@@ -597,6 +598,37 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer db.Close()
 
+	// The state repository is opened and loaded into the database before
+	// anything reads a row out of it: what is in the repository is what
+	// this deployment is configured with, including whatever an agent's
+	// merged pull request changed since the last start, and loadConfig
+	// immediately below is the first thing that would read a stale
+	// answer. See staterepo.go for the direction of travel and why the
+	// import only happens here rather than on every tick.
+	stateRepo, err := openStateRepo(ctx, cfg.dataDir)
+	if err != nil {
+		return fmt.Errorf("opening the state repository: %w", err)
+	}
+	if err := staterepo.Load(ctx, stateRepo, db, model.SchemaVersion); err != nil {
+		return fmt.Errorf("loading the state repository: %w", err)
+	}
+	// One manager over that repository, shared by the timer below and the
+	// UI's bootstrap pane: adopting a different repository swaps the
+	// repository out from under the timer, so both go through the same
+	// lock rather than holding two handles on one working tree.
+	stateManager := newStateManager(cfg.dataDir, db, stateRepo, openSecrets(cfg.dataDir))
+	syncStopped := make(chan struct{})
+	go func() {
+		defer close(syncStopped)
+		stateSyncLoop(ctx, stateManager.sync)
+	}()
+	// Waited for here, and deliberately after `defer db.Close()` above so
+	// that it runs *before* it: the loop's last act on the way out is one
+	// final export, and an export against a closed database writes
+	// nothing and reports why in the journal of a process that is already
+	// leaving.
+	defer func() { <-syncStopped }()
+
 	cfg, err = loadConfig(ctx, store, cfg)
 	if err != nil {
 		return fmt.Errorf("loading deployment configuration: %w", err)
@@ -692,7 +724,7 @@ func run(ctx context.Context, cfg config) error {
 	// longer happens: runDaemon's own failure is logged, not fatal, and
 	// run() itself only returns once ctx is actually cancelled.
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes, live)
+		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes, live, stateManager)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -791,7 +823,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	// into, and the one orchestrator.Config.Credentials below already
 	// resolves a capability's own secrets through -- the same directory,
 	// opened once and shared by both.
-	secretStore := secrets.New(filepath.Join(cfg.dataDir, "secrets"))
+	secretStore := openSecrets(cfg.dataDir)
 
 	// Built per dispatch now rather than here (agentFrameworks' own doc
 	// comment), so nothing about a missing or not-yet-pasted agent
@@ -2317,7 +2349,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // mode is gone -- see this file's own doc comment), it always has that
 // directory to hand; there is no longer a cross-process case where it
 // would not.
-func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes, live *liveConfig) (stop func(context.Context) error, err error) {
+func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes, live *liveConfig, stateRepo ui.StateRepoManager) (stop func(context.Context) error, err error) {
 	// A second CredentialSet, loaded the same way BuildProxy (above) and
 	// run's own githubClient each load their own: not hot-reloaded,
 	// cheap to load again, and this is the one Settings checks
@@ -2336,7 +2368,11 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// the matching providers from, so every id the picker offers is
 		// one a dispatch can actually resolve.
 		Capabilities: append(ui.OfferedCapabilities(), ui.GitHubTokenCapabilities(live.gitHubTokens())...),
-		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
+		Secrets:      openSecrets(cfg.dataDir),
+		// The bootstrap pane: this process owns the state repository its
+		// store is exported to, so the UI it serves is the one place that
+		// can offer the choice of where state lives (pkg/ui/staterepo.go).
+		StateRepo: stateRepo,
 		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,
 		Credentials:  uiCredentials,

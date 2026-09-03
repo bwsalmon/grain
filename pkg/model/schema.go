@@ -733,11 +733,18 @@ var Tables = []string{
 	// default_capabilities it *is* newer than the table, so it carries a
 	// DEFAULT '' and Store.ensureRepoConfigPromptExtensionColumn adds it
 	// to a repo_config that already exists.
+	//
+	// setup_command is RepoConfig.SetupCommand's own column -- the shell
+	// orchestrator.prepareCheckout runs in the fresh checkout before a
+	// run's first turn (grain/task-154). Newer than the table again, so
+	// it carries the same DEFAULT '' and the same
+	// Store.ensureRepoConfigSetupCommandColumn migration alongside it.
 	`CREATE TABLE IF NOT EXISTS ` + "`repo_config`" + ` (
   ` + "`owner`" + `                TEXT NOT NULL,
   ` + "`name`" + `                 TEXT NOT NULL,
   ` + "`default_capabilities`" + ` TEXT NOT NULL,
   ` + "`prompt_extension`" + `     TEXT NOT NULL DEFAULT '',
+  ` + "`setup_command`" + `        TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
 )`,
 

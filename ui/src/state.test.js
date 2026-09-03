@@ -237,6 +237,18 @@ describe("repoRows", () => {
     ]);
   });
 
+  // And the third kind (grain/task-154): a repo whose only presence here
+  // is the setup command grain runs in every checkout it makes there
+  // (ui.configResponse.ReposWithSetupCommand), which is as invisible
+  // from anywhere else as the two above.
+  it("gives a repo that only carries a setup command a row of its own", () => {
+    const config = { targetRepos: [], reposWithSetupCommand: ["acme/orphan"] };
+    const rows = repoRows(config, []);
+    expect(rows).toEqual([
+      { repo: "acme/orphan", total: 0, counts: {}, blocked: 0, configured: false, defaults: true },
+    ]);
+  });
+
   it("does not duplicate a repo that carries defaults and is also allow-listed or targeted", () => {
     const config = {
       targetRepos: ["acme/widgets"],

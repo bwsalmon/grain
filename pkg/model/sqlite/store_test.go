@@ -1868,6 +1868,19 @@ func TestPutRepoConfigKeepsARowThatOnlyHasStandingInstructions(t *testing.T) {
 		t.Fatalf("list = %+v, want %+v", list, []model.RepoConfig{want})
 	}
 
+	// A setup command alone is the third such term (grain/task-154), and
+	// keeps the row for the same reason: it is run in every checkout made
+	// for this repo, so a row dropped here would leave a command grain
+	// still runs and nothing admits exists.
+	setupOnly := model.RepoConfig{Repo: repo, SetupCommand: "make deps"}
+	if err := store.PutRepoConfig(ctx, setupOnly); err != nil {
+		t.Fatalf("put with only a setup command: %v", err)
+	}
+	if got, err := store.GetRepoConfig(ctx, repo); err != nil || got == nil ||
+		!reflect.DeepEqual(*got, setupOnly) {
+		t.Fatalf("get = (%+v, %v), want %+v", got, err, setupOnly)
+	}
+
 	// And clearing that last thing it had to say does delete it, exactly
 	// as unticking a last capability does.
 	if err := store.PutRepoConfig(ctx, model.RepoConfig{Repo: repo}); err != nil {
@@ -3060,6 +3073,65 @@ func TestInitMigratesAnExistingDatabaseMissingRepoConfigPromptExtension(t *testi
 	}
 
 	want.PromptExtension = "Widgets keeps its migrations in db/."
+	if err := store.PutRepoConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+}
+
+// repo_config.setup_command is newer again (grain/task-154), so the
+// same migration has to hold for a deployment that upgrades across it:
+// the prompt extension and the capabilities a repo already had survive,
+// and a setup command can be written onto the row that holds them.
+func TestInitMigratesAnExistingDatabaseMissingRepoConfigSetupCommand(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`repo_config`"+` (
+  `+"`owner`"+`                TEXT NOT NULL,
+  `+"`name`"+`                 TEXT NOT NULL,
+  `+"`default_capabilities`"+` TEXT NOT NULL,
+  `+"`prompt_extension`"+`     TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (`+"`owner`"+`, `+"`name`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-154 repo_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `repo_config` (`owner`,`name`,`default_capabilities`,`prompt_extension`) "+
+			"VALUES ('acme','widgets','gcp-key','Read db/README.md.')"); err != nil {
+		t.Fatalf("seeding a pre-task-154 repo_config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing repo_config.setup_command: %v", err)
+	}
+
+	widgets := model.RepoRef{Owner: "acme", Name: "widgets"}
+	got, err := store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", got, err)
+	}
+	want := model.RepoConfig{
+		Repo:                widgets,
+		DefaultCapabilities: []string{"gcp-key"},
+		PromptExtension:     "Read db/README.md.",
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v -- what it already had, and no setup command", *got, want)
+	}
+
+	want.SetupCommand = "make deps"
 	if err := store.PutRepoConfig(ctx, want); err != nil {
 		t.Fatalf("put after migrating: %v", err)
 	}

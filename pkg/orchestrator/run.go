@@ -191,7 +191,15 @@ func frameworkOpensPullRequests(framework agent.Framework) bool {
 // to stop the re-diagnosis it exists to prevent. History{} -- a first
 // attempt at a task nobody has said anything about -- leaves the prompt
 // exactly as it reads without either section.
-func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, maxRuntime time.Duration, history History) string {
+//
+// setup is what the repo's own setup command did in that checkout before
+// this run's first turn (SetupResult, nil for the repos that configure
+// none), and it goes immediately after the checkout sentence for the
+// reason history goes where it does: it is a fact about the directory
+// those sentences just pointed at, and a run reading it late has already
+// spent turns on the failure it explains. See setupSection.
+func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, maxRuntime time.Duration,
+	history History, setup *SetupResult) string {
 	branch := model.BranchName(task.ID)
 	var prompt string
 	if task.Target == nil {
@@ -217,6 +225,7 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 			checkoutDir, branch, branch,
 		)
 	}
+	prompt += setupSection(setup)
 	// The two history sections, together and in that order: what the
 	// attempts before this one did, then what has been said about the
 	// task. Both are the same kind of fact -- something a run would
@@ -414,6 +423,73 @@ func resolvePromptExtension(ctx context.Context, store *model.Store, deployment 
 		}
 	}
 	return model.PromptExtensionFor(deployment, repo, task.PromptExtension), nil
+}
+
+// resolveSetupCommand is the shell this run's checkout needs before its
+// first turn -- model.RepoConfig.SetupCommand for the task's target repo,
+// and "" for a task with no target or a repo that configures none.
+//
+// A second read of the row resolvePromptExtension just read, rather than
+// one read threaded through both: they are two independent facts about
+// the repo, read at two different moments (the extension composes with
+// two other layers before it reaches a prompt; this one is handed
+// straight to prepareCheckout), and one sqlite row read twice per
+// dispatch costs nothing measurable against the clone that follows it.
+//
+// A store read that fails fails the dispatch, for the reason
+// resolvePromptExtension's does: a run started in a checkout that was
+// never set up, because grain could not read the row saying how, is a
+// run that fails later for reasons nothing in its prompt explains.
+func resolveSetupCommand(ctx context.Context, store *model.Store, task model.Task) (string, error) {
+	if task.Target == nil {
+		return "", nil
+	}
+	rc, err := store.GetRepoConfig(ctx, *task.Target)
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: reading %s's setup command: %w", task.Target, err)
+	}
+	if rc == nil {
+		return "", nil
+	}
+	return rc.SetupCommand, nil
+}
+
+// setupSection tells the run what the repo's setup command did in the
+// checkout it is about to work in -- "" for a repo that configures none,
+// which is most of them.
+//
+// A *failed* setup is the case this exists for. The alternative is a run
+// handed a working directory that does not build, with nothing saying
+// so: the first `go test` or `npm test` fails on a missing dependency,
+// and the run spends its turns debugging the repo's toolchain -- or
+// worse, "fixing" the code to match a broken tree. Told plainly, the
+// same run can install the missing thing itself in one command, or say
+// what is wrong in its closing note.
+//
+// A setup that *succeeded* is worth a line too, though a much shorter
+// one: it tells a run that `make deps` has already happened, so it does
+// not run it again, and names the command so that a run which needs it
+// again after touching a manifest knows exactly what to re-run.
+func setupSection(r *SetupResult) string {
+	if r == nil {
+		return ""
+	}
+	if !r.failed() {
+		return fmt.Sprintf(
+			"\n\ngrain ran this repo's own setup command in that checkout before your "+
+				"first turn, and it succeeded (exit 0):\n\n%s\n\nSo whatever it installs "+
+				"or generates is already in place -- you do not need to run it again "+
+				"unless you change something it depends on.",
+			r.Command)
+	}
+	return fmt.Sprintf(
+		"\n\ngrain ran this repo's own setup command in that checkout before your first "+
+			"turn, and it FAILED (exit %d):\n\n%s\n\nThe last of what it printed:\n\n%s\n\n"+
+			"So the checkout may be missing dependencies or generated files, and a build "+
+			"or test failing for that reason is this, not your change. Deal with it first "+
+			"-- fix it or work around it if you can, and if you cannot, say so plainly in "+
+			"what you report rather than reading it as a failure of the task.",
+		r.ExitCode, r.Command, r.Output)
 }
 
 // promptExtensionSection is how that text is handed to the agent: named
@@ -862,10 +938,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	// "cancelled" exactly as it did before. A read error here is treated
 	// as "not closed": the cancellation path re-reads it anyway, so the
 	// cost of being wrong is one clone, not a run that ignores a close.
-	var checkoutDir string
+	setupCommand, err := resolveSetupCommand(ctx, store, task)
+	if err != nil {
+		return nil, err
+	}
+	var prepared checkout
 	var checkoutErr error
 	if closed, err := taskClosed(ctx, store, task.ID); err != nil || !closed {
-		checkoutDir, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task)
+		prepared, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task, setupCommand)
 	}
 
 	// The commits those earlier attempts pushed, read out of the checkout
@@ -874,7 +954,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	// checkout: a first attempt's branch has nothing on it that is not
 	// the base's, so this would be a tool call spent proving that.
 	history := History{Attempt: d.Attempt, Attempts: previous, Comments: comments}
-	if len(previous) > 0 && checkoutErr == nil && checkoutDir != "" {
+	if len(previous) > 0 && checkoutErr == nil && prepared.Dir != "" {
 		history.Commits = checkoutCommits(ctx, tools, task, maxBranchCommits+1)
 	}
 
@@ -883,7 +963,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prepErr error
 	if checkoutErr == nil {
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, history,
-			attachments, checkoutDir, frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
+			attachments, prepared, frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
 	}
 	// Told to the recreate path, which is registered one level up in
 	// runOne and so never sees this: what a rebuilt sandbox needs is
@@ -1323,10 +1403,12 @@ func erroredCallSuffix(result *agent.Result) string {
 // Silently running an agent without a capability its task is recorded as
 // holding would trade that for a run that quietly does the wrong work.
 //
-// history, checkoutDir, canOpenPullRequest and maxRuntime are passed
-// straight through to BuildPrompt, which is where all four are explained:
-// nothing here reads any of them, this being the one path that assembles
-// a dispatch's prompt.
+// history, prepared, canOpenPullRequest and maxRuntime are passed
+// straight through to BuildPrompt -- prepared as the two things it
+// carries, the checkout's directory and what the repo's setup command
+// did in it -- which is where all of them are explained: nothing here
+// reads any of them, this being the one path that assembles a dispatch's
+// prompt.
 //
 // promptExtension is the standing instructions for this
 // run, already resolved across the three layers that can carry them
@@ -1339,11 +1421,11 @@ func erroredCallSuffix(result *agent.Result) string {
 // -- leaves the prompt exactly as it was before any of this existed.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, history History,
-	attachments []model.Attachment, checkoutDir string,
+	attachments []model.Attachment, prepared checkout,
 	canOpenPullRequest bool, promptExtension string, maxRuntime time.Duration) (materialized []model.Materialized, prompt string, err error) {
 
 	extension := promptExtensionSection(promptExtension)
-	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest, maxRuntime, history)
+	prompt = BuildPrompt(cc.Task, prepared.Dir, canOpenPullRequest, maxRuntime, history, prepared.Setup)
 	attachmentsSection, err := placeAttachments(ctx, tools, attachments)
 	if err != nil {
 		return nil, "", err

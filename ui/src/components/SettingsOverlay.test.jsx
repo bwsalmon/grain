@@ -474,7 +474,14 @@ describe("SettingsOverlay", () => {
   });
 
   it("switches to the GitHub tab and shows its fields", async () => {
-    api.mockResolvedValueOnce(settings);
+    // The tab's own second request: the named GitHub tokens listed under
+    // the host fields (GitHubTokensSection, grain/task-137).
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({
+      enabled: true,
+      dir: "/data/secrets/github",
+      tokens: [{ name: "bot", default: true, patterns: ["*"], present: true }],
+      restartRequired: false,
+    });
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -483,6 +490,9 @@ describe("SettingsOverlay", () => {
 
     expect(screen.getByDisplayValue("github.com")).toBeInTheDocument();
     expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith("/api/github-tokens");
+    expect(await screen.findByText("Named tokens")).toBeInTheDocument();
+    expect(await screen.findByText("deployment default")).toBeInTheDocument();
   });
 
   it("switches to the Capabilities tab, offers the GCP fields and shows the panel", async () => {

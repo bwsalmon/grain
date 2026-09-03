@@ -211,6 +211,58 @@ func (c *Capability) Resolve(ctx context.Context, cc model.CapabilityContext) (m
 	return model.Honoured(), nil
 }
 
+// explainRefusedCredential names the one failure that is about the
+// standing minter credential itself rather than about the project being
+// minted in: GCP refusing to issue a token for it at all, so that
+// nothing this package does ever reaches the API Keys API
+// (isCredentialRefused, and see it for the shape that error arrives in).
+//
+// It is the failure task 163 fixed for gcp-key, and it lands here for
+// the same reason it landed there: gemini-key mints through the very
+// same standing credential (cmd/grain/daemon.go hands geminikey.New
+// gcpkey.DefaultMinterCredential), so a minter key deleted or rotated
+// away in GCP breaks every Gemini mint exactly as it breaks a
+// service-account one. What an operator got was Google's own
+// `invalid_grant` / "Invalid JWT Signature" -- a sentence naming no
+// credential, no secret, no project and nothing about grain, on a
+// deployment whose Settings pane reads **Ready** because a project and a
+// secret are both set. Nothing on any configuration pane can see that
+// the key inside that secret has stopped working: only GCP knows, and
+// only when something authenticates with it.
+//
+// Every cause comes down to "the key in that secret is not one GCP will
+// accept any more", so the sentence names the ways that happens --
+// including the one this deployment shape actually hits, a deployer that
+// rotates the minter key underneath a host that had only ever seeded its
+// own copy once -- and the two places a current key is pasted. Wrapped,
+// never replaced: GCP's own words survive, the same rule advise holds
+// to. The wording is deliberately all but identical to
+// gcpkey.explainRefusedCredential's, past the name of the API nothing
+// reached: an operator who has read one of these sentences in a task's
+// error detail should recognise the other on sight rather than have to
+// work out whether it is the same problem.
+//
+// The credential's *name* is the reason this sits out here rather than
+// beside advise, down with the minter: a minter is handed material and
+// never told which secret it came out of, while a Capability (and
+// MintOperatingKey, which is handed the name directly) is the only thing
+// that knows both.
+func explainRefusedCredential(err error, credential string) error {
+	if !isCredentialRefused(err) {
+		return err
+	}
+	return fmt.Errorf(
+		"GCP will not issue a token for the minter credential held in the `%s` secret, so "+
+			"nothing here reached the API Keys API at all: the service-account key that secret "+
+			"holds has been deleted or rotated away in GCP (terraform/gcp's push-secrets.sh "+
+			"mints a fresh minter key and invalidates older ones on every run), or the "+
+			"account it belongs to is gone or disabled, or this host's clock is too far out "+
+			"for Google to accept a request signed by it. Paste a current key file into "+
+			"Settings -> Capabilities, or run `grain secrets set %s key.json -value-file "+
+			"<path>` on the host: %w",
+		credential, credential, err)
+}
+
 // Materialize mints a fresh key named grain-<run id> -- the janitor's
 // positive signal falling out of ordinary use, the same reasoning
 // docs/data-model.md gives for gemini_keys.py's own display_name -- and
@@ -224,7 +276,8 @@ func (c *Capability) Materialize(ctx context.Context, cc model.CapabilityContext
 	displayName := displayNamePrefix + cc.Run.ID
 	name, keyString, err := m.CreateKey(ctx, displayName, c.apiTargetService())
 	if err != nil {
-		return model.Materialization{}, fmt.Errorf("geminikey: minting a key for run %s: %w", cc.Run.ID, err)
+		return model.Materialization{}, fmt.Errorf("geminikey: minting a key for run %s: %w",
+			cc.Run.ID, explainRefusedCredential(err, c.Credential.Name))
 	}
 	expires := cc.Now.Add(maxLease)
 	return model.Materialization{
@@ -249,13 +302,23 @@ func (c *Capability) PromptSection(ctx context.Context, cc model.CapabilityConte
 // Revoke deletes the key Materialize minted, by the resource name the
 // Lease carries. Idempotent: a lease revoked twice, or one whose key is
 // already gone, is not an error -- see (*apiKeysMinter).DeleteKey.
+//
+// A refused minter credential breaks releasing a key exactly as it
+// breaks minting one, so this goes through explainRefusedCredential too.
+// It names this Capability's own credential rather than the lease's
+// MintedBy, because that is the one it authenticated as: unlike
+// gcpkey.Provider.Revoke, which builds its minter from whatever the
+// lease names, c.minter always resolves c.Credential -- and pointing an
+// operator at a secret this call never touched would send them to
+// replace the wrong one.
 func (c *Capability) Revoke(ctx context.Context, cc model.CapabilityContext, lease model.Lease) error {
 	m, err := c.minter(ctx, cc)
 	if err != nil {
 		return err
 	}
 	if err := m.DeleteKey(ctx, lease.Resource); err != nil {
-		return fmt.Errorf("geminikey: revoking key %s: %w", lease.Resource, err)
+		return fmt.Errorf("geminikey: revoking key %s: %w",
+			lease.Resource, explainRefusedCredential(err, c.Credential.Name))
 	}
 	return nil
 }
@@ -320,7 +383,7 @@ func (c *Capability) Reap(ctx context.Context, creds model.CredentialResolver, n
 	if err != nil {
 		return nil, err
 	}
-	return deleteExpired(ctx, m, now, maxLease)
+	return deleteExpired(ctx, m, now, maxLease, c.Credential.Name)
 }
 
 // MintOperatingKey mints the daemon's own long-lived Gemini API key --
@@ -348,13 +411,21 @@ func MintOperatingKey(ctx context.Context, credentials model.CredentialResolver,
 	if err != nil {
 		return "", "", err
 	}
-	return mintOperatingKey(ctx, m)
+	return mintOperatingKey(ctx, m, credentialName)
 }
 
-func mintOperatingKey(ctx context.Context, m minter) (name, keyString string, err error) {
+// mintOperatingKey names the credential in a refused-credential failure
+// for a reader this package's other paths do not have: scripts/setup.sh's
+// mint_gemini_operating_key runs this during a deploy, so a minter key
+// the deploy has itself just rotated away turns up as one line in a
+// deploy log -- where "invalid_grant" alone reads like the deploy broke,
+// rather than like the secret on the host is a key GCP no longer holds
+// the other half of.
+func mintOperatingKey(ctx context.Context, m minter, credential string) (name, keyString string, err error) {
 	name, keyString, err = m.CreateKey(ctx, OperatingKeyDisplayName, DefaultAPITargetService)
 	if err != nil {
-		return "", "", fmt.Errorf("geminikey: minting the daemon's operating key: %w", err)
+		return "", "", fmt.Errorf("geminikey: minting the daemon's operating key: %w",
+			explainRefusedCredential(err, credential))
 	}
 	return name, keyString, nil
 }
@@ -384,13 +455,18 @@ func DeleteExpired(ctx context.Context, credentials model.CredentialResolver, cr
 	if err != nil {
 		return nil, err
 	}
-	return deleteExpired(ctx, m, now, maxAge)
+	return deleteExpired(ctx, m, now, maxAge, credentialName)
 }
 
-func deleteExpired(ctx context.Context, m minter, now time.Time, maxAge time.Duration) ([]string, error) {
+// deleteExpired is given the credential's name only to say it in the one
+// error it can fail with outright: a listing refused because GCP will
+// not issue a token for the minter at all leaves every leaked key in the
+// project uncollected, hourly, and says so in a log line naming no
+// secret unless this does -- see explainRefusedCredential.
+func deleteExpired(ctx context.Context, m minter, now time.Time, maxAge time.Duration, credential string) ([]string, error) {
 	keys, err := m.ListKeys(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("geminikey: listing keys: %w", err)
+		return nil, fmt.Errorf("geminikey: listing keys: %w", explainRefusedCredential(err, credential))
 	}
 	cutoff := now.Add(-maxAge)
 	var deleted []string
@@ -615,6 +691,43 @@ func advise(projectID string, err error) error {
 	}
 	return fmt.Errorf("the minter credential is not permitted to administer API keys in "+
 		"project %s (it needs roles/serviceusage.apiKeysAdmin) -- %s: %w", projectID, remedy, err)
+}
+
+// isCredentialRefused reports whether err is Google's *token* endpoint
+// refusing the standing credential this client was built with, rather
+// than the API Keys API refusing a call it made. It is unlike every
+// other failure this package classifies: it happens before any request
+// reaches apikeys.googleapis.com, so it carries no googleapi.Error, no
+// status code errors.As can read and no resource name at all -- only the
+// token endpoint's own JSON body, quoted inside an oauth2 transport
+// error:
+//
+//	Post "https://apikeys.googleapis.com/v2/projects/.../keys?alt=json":
+//	auth: cannot fetch token: 400 Response:
+//	{"error":"invalid_grant","error_description":"Invalid JWT Signature."}
+//
+// So the only thing to match on is that body. `invalid_grant` is
+// conclusive on its own -- it is the OAuth error for "this grant is not
+// one I will exchange", which for a service-account JWT means the key
+// signing it is not one Google holds the public half of any more -- and
+// the signature description is matched too because it is the spelling a
+// deleted or rotated key produces, which is the common case by a wide
+// margin.
+//
+// Restated from gcpkey.isCredentialRefused rather than shared, for the
+// same reason isServiceDisabled below is: the two packages have no
+// dependency on each other, and one small predicate is a smaller thing
+// to repeat than a package to introduce for it. It is deliberately not
+// folded into advise, which classifies a googleapi.Error a call came
+// back with and would have to grow a second, unrelated shape of error to
+// take this one.
+func isCredentialRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := err.Error()
+	return strings.Contains(detail, "invalid_grant") ||
+		strings.Contains(detail, "Invalid JWT Signature")
 }
 
 // isServiceDisabled reports whether a 403 is Google's "this API has

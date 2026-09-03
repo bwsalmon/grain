@@ -314,6 +314,18 @@ read off the very ctx `framework.Run` is given
 drift from the one that actually cancels the run. See README.md's
 "Telling a run how long it has".
 
+**Also done** (grain/task-156): `wait_for_checks` acts on that deadline
+instead of only reporting it. The registry puts it on the ctx each
+handler runs under, and the wait is clamped to what is left of the run
+less two minutes to act on the answer — a run eight minutes from the
+wall that asked for fifteen used to spend the whole of its remaining
+life inside one tool call and be cancelled mid-wait, having seen no
+verdict. The clamp is stated on the report, a clamped wait that times
+out is told the run's clock ran out rather than to retry with a longer
+one, and a call with no room left for a wait at all answers immediately
+with "there is no time to wait on CI" instead of blocking for thirty
+seconds and reporting nothing.
+
 ## 8. Attempt N is told nothing about attempt N−1
 
 A redispatch gets the task, the conversation (`commentThreadSection`),
@@ -375,6 +387,25 @@ agent must know, not something to hide). It has to be re-run by the
 otherwise hand back a directory that no longer builds. This is the one
 finding here with real surface area — a new field, a settings form, a UI
 row — which is why it is ninth rather than third.
+
+**Done** (grain/task-154). `RepoConfig.SetupCommand` is run by
+`prepareCheckout` through the same `run_command` tool the clone goes
+through, so it works on either sandbox backend, and by
+`restoreCheckout` on the `recreate_sandbox` path, whose answer names it
+among what was restored — or warns, with the exit status and the tail,
+when it failed there. The prompt gets `setupSection`: the command, its
+exit status, the tail of its output, and the sentence that separates a
+broken checkout from a broken change. A failed setup is deliberately not
+a failed dispatch (grain cannot know whether a broken `make deps` is
+fatal to the task in hand, and the run can find out in one command); a
+setup still running at `setupCommandTimeout` — ten minutes, `mcp`'s own
+ceiling for a sandbox tool call — is, since it has told nobody anything
+and would otherwise burn the run's whole budget inside a tool call the
+agent never sees. The surface area landed with it: the column and its
+migration, `GET`/`PUT /api/repos/{owner}/{name}/setup-command` beside
+the two routes already there, a box on the repo page, `grain repo
+setup-command`, and `reposWithSetupCommand` on `GET /api/config` so a
+repo whose only configuration is the command is still reachable.
 
 ## 10. Minor, and worth doing while nearby
 
@@ -516,7 +547,7 @@ Filed as separate proposals, each depending on this document:
    **done**, grain/task-152.
 5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13)
    — **done**, grain/task-153.
-6. A per-repo setup command (finding 9).
+6. A per-repo setup command (finding 9) — **done**, grain/task-154.
 
 Findings 6 and 10 are small enough to fold into whichever of those
 touches the same file first.
