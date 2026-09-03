@@ -2676,6 +2676,25 @@ set, where a failed materialize reads as `materializing capabilities:
 geminikey: resolving credential ...` — grain describing its own
 internals.
 
+There is a fourth gap no configuration pane can see, and it is the one
+"Debugging `gcp-key` again" below is about: `gemini-key` mints through
+the *same* standing minter credential `gcp-key` does
+(`cmd/grain/daemon.go` hands `geminikey.New`
+`gcpkey.DefaultMinterCredential`), so a minter key deleted or rotated
+away in GCP breaks every Gemini mint in exactly the same way, as
+`invalid_grant` / "Invalid JWT Signature" from Google's token endpoint.
+That failure arrives before any request reaches
+`apikeys.googleapis.com`, carrying no `googleapi.Error` at all, so
+`advise` — which classifies a 403 the API answered with — never sees it.
+`geminikey` has its own `isCredentialRefused` and
+`explainRefusedCredential` now, deliberately word-for-word with
+`gcpkey`'s past the name of the API nothing reached, so an operator who
+has read one of those sentences recognises the other. The mint, the
+revoke, the hourly reap and `MintOperatingKey` all go through it — that
+last one runs during a deploy (`scripts/setup.sh`'s
+`mint_gemini_operating_key`), where the reader of the failure is a line
+in a deploy log with no task and no Settings pane to look at.
+
 ### Debugging `gcp-key`: a diagnosis that was confidently wrong
 
 "Attempting to add a gcp key fails tasks." Same shape as `gemini-key`

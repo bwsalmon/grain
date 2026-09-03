@@ -394,6 +394,118 @@ func TestRevokePropagatesAnError(t *testing.T) {
 	}
 }
 
+// --- a refused minter credential -----------------------------------------
+
+// refusedCredentialError is what a stored minter key GCP no longer holds
+// the public half of actually produces -- an oauth2 transport error with
+// the token endpoint's own body quoted inside it, no googleapi.Error and
+// no status code anywhere errors.As can reach, so advise's 403
+// classification never fires. It is task 163's failure, arriving at this
+// capability rather than at gcp-key: both mint through the same standing
+// minter credential, so one deleted or rotated key breaks both the same
+// way.
+//
+// The URL is one string to anyone reading the error; it is split here
+// only so the API Keys API's own `/v2/` does not read as a leftover v2/
+// path segment to tests/deploy's check for v1's removed subdirectory.
+var refusedCredentialError = errors.New(
+	`Post "https://apikeys.googleapis.com/v2` +
+		`/projects/test-project/locations/global/keys` +
+		`?alt=json&prettyPrint=false": auth: cannot fetch token: 400 Response: ` +
+		`{"error":"invalid_grant","error_description":"Invalid JWT Signature."}`)
+
+// namesTheDeadSecret is the whole of what this explanation owes an
+// operator, checked the same way on every path that can hit it: which
+// secret holds the key GCP refused, the command that replaces it, and
+// GCP's own words still underneath -- wrapped, never replaced.
+func namesTheDeadSecret(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected a refused credential to fail the call")
+	}
+	if !strings.Contains(err.Error(), "test-gcp-credential") {
+		t.Errorf("error %q does not name the secret holding the dead credential", err)
+	}
+	if !strings.Contains(err.Error(), "grain secrets set") {
+		t.Errorf("error %q does not name the command that replaces it", err)
+	}
+	if !strings.Contains(err.Error(), "invalid_grant") {
+		t.Errorf("error %q dropped GCP's own message", err)
+	}
+}
+
+// The failure this explanation exists for. What an operator saw was
+// Google's `invalid_grant`, which names no secret, no project and
+// nothing about grain -- on a deployment reading **Ready**, because the
+// secret is set and only GCP knows the key inside it has stopped
+// working.
+func TestMaterializeNamesTheSecretWhenGCPRefusesTheMinterCredential(t *testing.T) {
+	fm := newFakeMinter()
+	fm.createErr = refusedCredentialError
+	c := testCapability(fm)
+
+	_, err := c.Materialize(context.Background(), testContext("run-1"))
+	namesTheDeadSecret(t, err)
+}
+
+// A dead minter credential breaks releasing a key exactly as it breaks
+// minting one -- and the lease's own key stays in the project until
+// somebody replaces the secret, so the revoke is the wrong place to say
+// nothing about which one.
+func TestRevokeNamesTheSecretWhenGCPRefusesTheMinterCredential(t *testing.T) {
+	fm := newFakeMinter()
+	fm.deleteErr = refusedCredentialError
+	c := testCapability(fm)
+
+	err := c.Revoke(context.Background(), testContext("run-1"), model.Lease{
+		Capability: "gemini-key", Resource: "projects/p/locations/global/keys/k",
+		MintedBy: model.CredentialRef{Name: "test-gcp-credential"},
+	})
+	namesTheDeadSecret(t, err)
+}
+
+// The operating-key mint runs during a deploy (scripts/setup.sh's
+// mint_gemini_operating_key), where this failure is one line in a deploy
+// log -- the reader least able to guess which secret on the host it is
+// about.
+func TestMintOperatingKeyNamesTheSecretWhenGCPRefusesTheMinterCredential(t *testing.T) {
+	fm := newFakeMinter()
+	fm.createErr = refusedCredentialError
+
+	_, _, err := mintOperatingKey(context.Background(), fm, "test-gcp-credential")
+	namesTheDeadSecret(t, err)
+}
+
+// A refused listing leaves every leaked key in the project uncollected,
+// hourly, so the sweep's own error has to say which secret to replace
+// too.
+func TestReapNamesTheSecretWhenGCPRefusesTheMinterCredential(t *testing.T) {
+	fm := newFakeMinter()
+	fm.listErr = refusedCredentialError
+	c := testCapability(fm)
+
+	_, err := c.Reap(context.Background(), fakeResolver{"test-gcp-credential": "the-minter-key-material"}, time.Now())
+	namesTheDeadSecret(t, err)
+}
+
+// Anything else is passed through as it is: wrapping every failure in
+// advice about a dead credential would bury the ones that already say
+// what they are, the same restraint advise shows in leaving a non-403
+// alone.
+func TestAnOrdinaryFailureIsNotBlamedOnTheCredential(t *testing.T) {
+	fm := newFakeMinter()
+	fm.createErr = errors.New("googleapi: Error 500: backend error")
+	c := testCapability(fm)
+
+	_, err := c.Materialize(context.Background(), testContext("run-1"))
+	if err == nil {
+		t.Fatal("expected the mint to fail")
+	}
+	if strings.Contains(err.Error(), "grain secrets set") {
+		t.Errorf("error %q volunteers a credential replacement for a failure that is not one", err)
+	}
+}
+
 // --- DeleteExpired -------------------------------------------------------
 
 func TestDeleteExpiredOnlyDeletesOldGrainKeys(t *testing.T) {
@@ -406,7 +518,7 @@ func TestDeleteExpiredOnlyDeletesOldGrainKeys(t *testing.T) {
 		"exactly-edge": {Name: "exactly-edge", DisplayName: "grain-task-3", CreateTime: now.Add(-24 * time.Hour)},
 	}
 
-	deleted, err := deleteExpired(context.Background(), fm, now, 24*time.Hour)
+	deleted, err := deleteExpired(context.Background(), fm, now, 24*time.Hour, "test-gcp-credential")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +560,7 @@ func TestDeleteExpiredIsBestEffortPerKey(t *testing.T) {
 	// second fake type.
 	c := &failOnceMinter{fakeMinter: fm, failFor: "stuck"}
 
-	deleted, err := deleteExpired(context.Background(), c, now, 24*time.Hour)
+	deleted, err := deleteExpired(context.Background(), c, now, 24*time.Hour, "test-gcp-credential")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +596,7 @@ func TestDeleteExpiredNeverReapsTheOperatingKey(t *testing.T) {
 		"old-task":  {Name: "old-task", DisplayName: "grain-task-1", CreateTime: now.Add(-25 * time.Hour)},
 	}
 
-	deleted, err := deleteExpired(context.Background(), fm, now, 24*time.Hour)
+	deleted, err := deleteExpired(context.Background(), fm, now, 24*time.Hour, "test-gcp-credential")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -509,7 +621,7 @@ func TestOperatingKeyNameKeepsTheGrainPrefix(t *testing.T) {
 
 func TestMintOperatingKeyNamesAndRestrictsTheKey(t *testing.T) {
 	fm := newFakeMinter()
-	name, key, err := mintOperatingKey(context.Background(), fm)
+	name, key, err := mintOperatingKey(context.Background(), fm, "test-gcp-credential")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,7 +643,7 @@ func TestMintOperatingKeyNamesAndRestrictsTheKey(t *testing.T) {
 func TestMintOperatingKeyRestrictsToTheGenerativeLanguageAPI(t *testing.T) {
 	var gotTarget string
 	fm := &recordingMinter{fakeMinter: newFakeMinter(), target: &gotTarget}
-	if _, _, err := mintOperatingKey(context.Background(), fm); err != nil {
+	if _, _, err := mintOperatingKey(context.Background(), fm, "test-gcp-credential"); err != nil {
 		t.Fatal(err)
 	}
 	if gotTarget != DefaultAPITargetService {
@@ -552,7 +664,7 @@ func (r *recordingMinter) CreateKey(ctx context.Context, displayName, apiTargetS
 func TestMintOperatingKeyPropagatesAFailure(t *testing.T) {
 	fm := newFakeMinter()
 	fm.createErr = errors.New("apikeys is angry")
-	if _, _, err := mintOperatingKey(context.Background(), fm); err == nil {
+	if _, _, err := mintOperatingKey(context.Background(), fm, "test-gcp-credential"); err == nil {
 		t.Fatal("expected the underlying create error to propagate")
 	}
 }
