@@ -1,113 +1,81 @@
 #!/bin/bash
-# Builds a grain sandbox guest image through bwsalmon/kontur's own guest
-# build -- one `docker build` against third_party/kontur's Dockerfile,
-# with guest-setup.sh handed to its GUEST_SETUP_SCRIPT hook and its
-# `guest-artifacts` target exporting the result.
+# Builds the grain sandbox guest image: boots the pinned kontur base,
+# runs guest-setup.sh inside it, and commits the result.
 #
-# This replaces the debootstrap-and-chroot build that used to live in
-# build.sh/provision.sh. That build duplicated, as root, work kontur's own
-# Dockerfile already does without any privileges at all: kontur's
-# guest-rootfs-debian stage debootstraps the rootfs, its guest-customized
-# stage runs a caller's script inside it as an ordinary RUN (no chroot, so
-# no CAP_SYS_ADMIN), and its guest-image stage packs it with `mke2fs -d`
-# (no loop mount). Building on top of that instead of beside it also means
-# the guest carries kontur's own guest overlays -- among them
-# kontur-control-net, which configures the control link kontur's flat
-# networking mode reaches the guest on, and which a rootfs built here from
-# scratch would not have had.
+# What comes out is an ordinary OCI image, and specifically the same kind
+# of image as the base -- kontur, cloud-hypervisor and a bootable guest
+# disk -- so `docker run` on it boots a VM. That is why grain has one
+# artifact here rather than two: this image *is* the sandbox container a
+# deployment runs, and the guest inside it is the one every dispatched
+# task gets. cmd/grain/sandboximage.go stamps its reference into the
+# binary, and scripts/setup.sh pulls it and nothing else.
 #
-# What it produces is unchanged: ${OUTPUT_DIR}/{disk.img,vmlinuz,initrd.img},
-# published to gs://${KONTUR_IMAGE_BUCKET}/kontur-guest/ when that is set.
-# The kernel is still Debian's own linux-image-amd64, installed by
-# guest-setup.sh rather than kontur's baked-in cloud-hypervisor release
-# build -- see README.md, "Why no custom kernel".
+# This replaces a `docker build` that produced disk.img/vmlinuz/initrd.img
+# for every deployment host to build for itself. The reason that build
+# existed at all -- guest-setup.sh baking a per-deployment SSH key --
+# stopped being true when kontur moved to a per-boot keypair, and
+# bwsalmon/kontur#36 gave `konturctl guest build` as the way to derive a
+# guest from a published image instead. See third_party/kontur/VENDORED.md.
 #
-# Needs: docker. Notably *not* root, debootstrap, or mke2fs, all of which
-# the previous build did need.
+# Needs: docker, /dev/kvm, and Go (to build konturctl from the vendored
+# tree). The KVM requirement is new and is the cost of provisioning
+# inside a booted VM rather than a container: it buys a setup script that
+# runs against the real kernel and a real systemd, with none of the
+# install-only restrictions a container build imposes. CI has KVM;
+# a machine without it cannot build this image.
 #
 # Usage:
-#   ./build-guest.sh
+#   ./build-guest.sh                       # -> grain-guest:dev
+#   IMAGE=ghcr.io/... ./build-guest.sh     # -> that reference
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# The base is pinned to the exact kontur commit third_party/kontur is
+# vendored from, by the immutable per-commit tag kontur's CI writes once
+# for that SHA. konturctl below is built from that same tree, and the two
+# only agree on the guest-side contract -- the authorized-key installer,
+# the control-net overlay, the mem-agent, the disk modes -- because they
+# are one commit. Re-vendoring moves both, and this SHA appearing in
+# VENDORED.md too is what makes a mismatch visible.
+KONTUR_GUEST_BASE="${KONTUR_GUEST_BASE:-ghcr.io/bwsalmon/kontur:debian12-e2b8b4506babe9c787f6b3943d8a20cfd549eeb1}"
+IMAGE="${IMAGE:-grain-guest:dev}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "build-guest.sh: docker not found" >&2
   exit 1
 fi
-
-# shquote renders a value as a single-quoted POSIX shell word, so it can
-# be embedded in the script text below whatever it contains.
-shquote() {
-  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
-# kontur's hook writes GUEST_SETUP_SCRIPT to a file and execs it with only
-# its own build stage's environment (third_party/kontur's Dockerfile,
-# guest-customized stage), so the one variable guest-setup.sh reads has
-# to travel inside the script text itself. It is inserted immediately
-# after the shebang, which has to stay on line 1 for the exec to work.
-#
-# There used to be a second, OPERATOR_SSH_PUBLIC_KEY, and it was the
-# reason the image this produces was deployment-specific. kontur now
-# generates a keypair per boot and passes the public half to the guest on
-# the kernel command line, so what comes out of here is generic -- see
-# guest-setup.sh's "No SSH key is baked in".
-setup_script="$(
-  head -n 1 guest-setup.sh
-  printf 'SANDBOX_SETUP_SCRIPT=%s\n' "$(shquote "${SANDBOX_SETUP_SCRIPT:-}")"
-  tail -n +2 guest-setup.sh
-)"
-
-image_name="${IMAGE_NAME:-kontur-guest}"
-version="$(git -C .. rev-parse --short HEAD 2>/dev/null || echo unknown)-$(date -u +%Y%m%d%H%M%S)"
-# OUTPUT_DIR lets a caller that already knows exactly where it wants the
-# result -- scripts/setup.sh's own ensure_kontur_images, building this
-# locally on every host and caching the result by a content hash of its
-# own choosing -- skip parsing this script's stdout (or the timestamp in
-# $version, different on every invocation) to find it afterward. Unset,
-# this is exactly the path a human running this by hand always got.
-output_dir="${OUTPUT_DIR:-output/${image_name}-${version}}"
-mkdir -p "$output_dir"
-
-echo "building guest into ${output_dir} from ../../third_party/kontur"
-# The Dockerfile uses `RUN --mount=type=cache`, which only the BuildKit
-# builder understands -- the classic builder fails outright on it ("the
-# --mount option requires BuildKit"). --output likewise needs BuildKit.
-DOCKER_BUILDKIT=1 docker build \
-  --target guest-artifacts \
-  --build-arg GUEST_SETUP_SCRIPT="$setup_script" \
-  --output "type=local,dest=${output_dir}" \
-  ../../third_party/kontur
-
-# guest-artifacts publishes vmlinuz/initrd.img only when the guest has its
-# own -- i.e. when the setup script installed a kernel package. This one
-# does (linux-image-amd64), so their absence means that install silently
-# didn't happen, and a disk.img alone would boot under kontur's own baked
-# kernel instead: a guest without the config docker and kind need, failing
-# much later and much less legibly than here.
-for f in disk.img vmlinuz initrd.img; do
-  if [ ! -s "${output_dir}/${f}" ]; then
-    echo "build-guest.sh: ${output_dir}/${f} missing or empty after the build -- guest-setup.sh's linux-image-amd64 install is the usual cause" >&2
-    exit 1
-  fi
-done
-
-echo "built: ${output_dir}/{vmlinuz,initrd.img,disk.img}"
-
-if [ -n "${KONTUR_IMAGE_BUCKET:-}" ]; then
-  dest="gs://${KONTUR_IMAGE_BUCKET}/kontur-guest/${image_name}-${version}"
-  gsutil -m cp "${output_dir}/vmlinuz" "${output_dir}/initrd.img" "${output_dir}/disk.img" "${dest}/"
-  echo "published: ${dest}/{vmlinuz,initrd.img,disk.img}"
-
-  # Also publish under a stable "latest" prefix, alongside the versioned
-  # one above -- scripts/setup.sh's own ensure_kontur_images always
-  # fetches this fixed location rather than discovering or hardcoding
-  # today's <git-sha>-<timestamp> version string itself. The versioned
-  # copy above is kept too, so a previous guest image is still there to
-  # roll back to by hand if a new one turns out to be broken.
-  latest="gs://${KONTUR_IMAGE_BUCKET}/kontur-guest/latest"
-  gsutil -m cp "${output_dir}/vmlinuz" "${output_dir}/initrd.img" "${output_dir}/disk.img" "${latest}/"
-  echo "published: ${latest}/{vmlinuz,initrd.img,disk.img} (alias for ${image_name}-${version})"
-else
-  echo "KONTUR_IMAGE_BUCKET not set -- not published, image left at ${output_dir}"
+if [ ! -e /dev/kvm ]; then
+  echo "build-guest.sh: /dev/kvm is not present -- this build boots the guest to provision it" >&2
+  exit 1
 fi
+
+# Built from the vendored tree rather than taken from PATH: the whole
+# point of the pin above is that one commit drives both halves, and a
+# konturctl that happened to be installed on this machine is not that.
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT
+echo "building konturctl from third_party/kontur"
+(cd ../../third_party/kontur && go build -o "$workdir/konturctl" ./cmd/konturctl)
+
+echo "building ${IMAGE} from ${KONTUR_GUEST_BASE}"
+"$workdir/konturctl" guest build \
+  -from "$KONTUR_GUEST_BASE" \
+  -setup ./guest-setup.sh \
+  -t "$IMAGE" \
+  "$@"
+
+# Re-label, because `docker commit` carries the base image's config
+# forward -- including org.opencontainers.image.source, which on the
+# kontur base names *kontur's* repository. GHCR uses that label alone to
+# decide which repository a package belongs to, so publishing this
+# unchanged would attach grain's guest to kontur's namespace, silently:
+# the build succeeds, the push succeeds, and the package lands somewhere
+# nobody is looking. Left unset the vendored label stands, which is right
+# for an operator building into their own registry.
+if [ -n "${GUEST_SOURCE_REPO:-}" ]; then
+  echo "labelling ${IMAGE} as ${GUEST_SOURCE_REPO}"
+  printf 'FROM %s\nLABEL org.opencontainers.image.source=%s\n' "$IMAGE" "$GUEST_SOURCE_REPO" \
+    | docker build -t "$IMAGE" -f - "$workdir"
+fi
+
+echo "built: ${IMAGE}"
