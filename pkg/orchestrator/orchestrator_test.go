@@ -100,7 +100,18 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.email", "agent@example.com")
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "checkout", "-q", "-b", branch)
-	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit")
+	// Named after the branch, so two branches pushed off the same base in
+	// the same test never share a commit sha. They used to: both are an
+	// empty commit with the same message, the same author and -- inside
+	// one second, which is all git's timestamps resolve -- the same
+	// timestamp, so git hashed them to the same object. That was harmless
+	// until the merge queue started reading checks by head sha rather
+	// than by branch, at which point one branch's check runs
+	// (Sim.CheckRuns, keyed by sha) were served for the other branch's
+	// pull request too, and a test holding one pull request's CI queued
+	// silently held every other pull request in the same sim queued with
+	// it.
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit on "+branch)
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 

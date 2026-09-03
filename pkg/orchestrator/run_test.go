@@ -195,6 +195,44 @@ func TestBuildPromptDescribesThePushAndCheckCILoop(t *testing.T) {
 	}
 }
 
+// The other half of that loop: when it is over. Every sentence before it
+// is about how to push and how to look, and a run that pushed once, read
+// one status and stopped has obeyed all of them -- so the prompt says
+// outright that unfinished checks are not passes and that a conflict
+// with the base is the run's own to resolve while it still has the
+// checkout.
+func TestBuildPromptSaysGreenChecksAndACleanMergeAreTheFinishLine(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false)
+	for _, want := range []string{"not done", "merges cleanly", "carries no verdict", "conflicts with", "git fetch origin"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+	// With no /base directive grain does not know the repo's default
+	// branch, so the sentence describes the base rather than naming one:
+	// a guessed branch name is one an agent would try to merge and fail.
+	if strings.Contains(prompt, "conflicts with `") {
+		t.Errorf("prompt names a base branch this task never set: %q", prompt)
+	}
+
+	task.Base = "release-2"
+	based := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false)
+	if !strings.Contains(based, "`release-2`") {
+		t.Errorf("prompt does not name the base this task is built on: %q", based)
+	}
+
+	// A task with no repo has no branch, no base and no CI, the same
+	// reason the paragraph above it is absent.
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false)
+	if strings.Contains(bare, "merges cleanly") {
+		t.Errorf("prompt talks about merging to a task with no repo: %q", bare)
+	}
+}
+
 // open_pull_request is only on a run's roster when the Framework driving
 // it was given a daemon to ask (agent.PullRequestFramework), so the
 // prompt names it on exactly that condition: a run that has it and is
