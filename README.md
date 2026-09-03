@@ -1695,7 +1695,15 @@ read-modify-write against whatever `grain_config` currently holds (or
 the zero `model.Config`, the first time). `grain settings` is the CLI
 side of the same `Client` methods — no flags prints what is stored (or
 that nothing is, yet); any flags apply just those, the way `grain
-update` already treats a task's own flags.
+update` already treats a task's own flags. Every store-backed field has
+a flag there, the deployment-wide sandbox VM shape
+(`-sandbox-cpus`/`-sandbox-memory-mb`) included: a setting reachable only
+from the Settings pane would be one a deployment could not be configured
+from a shell, which is where `grain sync` and every scripted setup
+already live. Unset, that shape prints as the shape actually in effect —
+`bwsalmon/kontur`'s own default, carried alongside the stored value as
+`sandboxCpusDefault`/`sandboxMemoryMbDefault` — rather than as the bare
+`0` that is stored, since a literal `0` reads as a deliberately empty VM.
 
 `ui/` (bwsalmon/agents#333) now has a settings panel too — the topbar's
 "Settings" button opens a form reading `GET /api/settings`,
