@@ -320,6 +320,150 @@ func TestPrepareCheckoutSaysNothingAboutABaseThatIsStillThere(t *testing.T) {
 	}
 }
 
+// The commits an earlier attempt left on the branch are the other half of
+// what a redispatch is told about it (History, previousAttemptsSection):
+// the store says how each attempt ended, and this says what it actually
+// built. Read here, through the same sandbox tool prepareCheckout clones
+// with, because this is the only place in a dispatch that has a
+// repository rather than a string.
+func TestCheckoutCommitsListsWhatEarlierAttemptsPushed(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seed := seedRemote(t, remoteBase, repo)
+	branch := model.BranchName("t1")
+
+	git(t, seed, "checkout", "--quiet", "-b", branch)
+	for _, subject := range []string{"add the failing test", "bound the CI answer"} {
+		if err := os.WriteFile(filepath.Join(seed, strings.ReplaceAll(subject, " ", "-")), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git(t, seed, "add", ".")
+		git(t, seed, "commit", "--quiet", "-m", subject)
+	}
+	git(t, seed, "push", "--quiet", "origin", branch)
+
+	root := t.TempDir()
+	tools := mcp.NewSandboxTools(root)
+	task := model.Task{ID: "t1", Target: &repo}
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+		t.Fatalf("prepareCheckout: %v", err)
+	}
+
+	commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1)
+	if len(commits) != 2 {
+		t.Fatalf("commits = %v, want the two the earlier attempt pushed", commits)
+	}
+	// Newest first, git's own order: the last thing an earlier attempt
+	// did is the thing its successor most needs to see.
+	if !strings.Contains(commits[0], "bound the CI answer") || !strings.Contains(commits[1], "add the failing test") {
+		t.Errorf("commits = %v, want them newest first with their subjects", commits)
+	}
+	// The abbreviated hash rides along, so a run can `git show` one
+	// without going looking for it first.
+	if fields := strings.Fields(commits[0]); len(fields) < 2 || len(fields[0]) < 7 {
+		t.Errorf("commit line %q does not start with an abbreviated hash", commits[0])
+	}
+	// Nothing of git's own chatter, and nothing of the run_command
+	// framing the marker exists to be picked out of.
+	for _, c := range commits {
+		if strings.Contains(c, "exit=") || strings.Contains(c, commitMarker) {
+			t.Errorf("commit line %q carries the tool's own framing", c)
+		}
+	}
+}
+
+// A first attempt's branch has nothing on it that its base does not, and
+// says so with no commits rather than with the base's whole history --
+// which is what a `git log` with no range would have given it.
+func TestCheckoutCommitsIsEmptyOnAFreshBranch(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+
+	root := t.TempDir()
+	tools := mcp.NewSandboxTools(root)
+	task := model.Task{ID: "t1", Target: &repo}
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+		t.Fatalf("prepareCheckout: %v", err)
+	}
+	if commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1); len(commits) != 0 {
+		t.Errorf("commits on a branch nobody has pushed to = %v, want none", commits)
+	}
+}
+
+// A base that has since been merged and deleted is the same survivable
+// case baseCheck carries on through -- and the attempt's commits are
+// still worth describing, so the range falls back to origin/HEAD rather
+// than the read failing with the base.
+func TestCheckoutCommitsFallsBackWhenTheBaseIsGone(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seed := seedRemote(t, remoteBase, repo)
+	branch := model.BranchName("t1")
+
+	git(t, seed, "checkout", "--quiet", "-b", branch)
+	if err := os.WriteFile(filepath.Join(seed, "ATTEMPT1"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, seed, "add", "ATTEMPT1")
+	git(t, seed, "commit", "--quiet", "-m", "first attempt")
+	git(t, seed, "push", "--quiet", "origin", branch)
+
+	log.SetOutput(&strings.Builder{})
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	root := t.TempDir()
+	tools := mcp.NewSandboxTools(root)
+	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+		t.Fatalf("prepareCheckout: %v", err)
+	}
+	commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1)
+	if len(commits) != 1 || !strings.Contains(commits[0], "first attempt") {
+		t.Errorf("commits = %v, want the one commit the earlier attempt pushed", commits)
+	}
+}
+
+// Every ref this composes a command out of goes through gitSafe first,
+// exactly as prepareCheckout's do: /base accepts any non-space token, and
+// a task body must not be able to put shell syntax into a command this
+// package runs. A refused base is not an error here -- orientation that
+// could fail a dispatch would be a worse trade than the re-diagnosis it
+// saves -- it just falls back to the base every clone has.
+func TestCheckoutCommitsRefusesAnUnusableBase(t *testing.T) {
+	remoteBase := t.TempDir()
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	seedRemote(t, remoteBase, repo)
+
+	root := t.TempDir()
+	tools := mcp.NewSandboxTools(root)
+	task := model.Task{ID: "t1", Target: &repo}
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+		t.Fatalf("prepareCheckout: %v", err)
+	}
+	task.Base = "x';touch pwned;'"
+	if commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1); len(commits) != 0 {
+		t.Errorf("commits = %v, want none", commits)
+	}
+	for _, dir := range []string{root, filepath.Join(root, CheckoutDir)} {
+		if _, err := os.Stat(filepath.Join(dir, "pwned")); !os.IsNotExist(err) {
+			t.Fatalf("the refused base ran anyway in %s (err=%v)", dir, err)
+		}
+	}
+}
+
+// No checkout at all -- a sandbox whose clone never happened, or a
+// deployment running no proxy -- is silence, not a failure: the whole
+// section this feeds is orientation, and there is nothing to orient
+// against.
+func TestCheckoutCommitsSaysNothingWithoutACheckout(t *testing.T) {
+	root := t.TempDir()
+	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "widgets"}}
+	if commits := checkoutCommits(context.Background(), mcp.NewSandboxTools(root), task, maxBranchCommits+1); len(commits) != 0 {
+		t.Errorf("commits with no checkout = %v, want none", commits)
+	}
+}
+
 // A repo's setup command runs in the checkout, not beside it: `make
 // deps` written by whoever configured the repo assumes it is standing at
 // the top of the tree, which is the one thing that has to be true of it

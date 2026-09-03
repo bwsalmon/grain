@@ -338,7 +338,27 @@ type Config struct {
 	// forks a CLI that manages its own MCP connection and cannot be
 	// handed an in-process registry. See selfrepair.Confirm's own doc
 	// comment for what closing that gap would take.
+	//
+	// self-debug is the one capability that no longer depends on this,
+	// and it is worth reading why: its tools are read-only, so they need
+	// no route back to a live run's own conversation, and a forked
+	// "grain mcpserver" can therefore build them for itself out of a
+	// flag (agent.SelfDebugArgs) and a REST client of the daemon. What
+	// travels is the fact of the grant, not the tools --
+	// agent.RunConfig.SelfDebug, set by RunDispatch. selfrepair cannot
+	// follow it: its one tool blocks on a human reply in the task's own
+	// chat, which is a store handle that process deliberately lacks.
 	GrantTools map[string]func(store *model.Store, taskID string) []mcp.Tool
+	// GrainSourceDir is the checkout of grain's own source a self-debug
+	// run may read -- cmd/grain's own sourceDir (the copy baked into the
+	// deployment image, or -upgrade-src-dir's checkout), passed on as
+	// agent.RunConfig.GrainSourceDir for the tasks that hold the grant
+	// and to nobody else.
+	//
+	// "" is a deployment with no such checkout: the run still gets the
+	// tools, and they answer that there is no source here to read rather
+	// than vanishing from its roster (selfdebug.SourceTools).
+	GrainSourceDir string
 	// SandboxRecreations, when non-nil, is the registry each dispatched
 	// run parks itself in so that it can later ask for its own sandbox to
 	// be destroyed and rebuilt -- the daemon-side half of pkg/mcp's

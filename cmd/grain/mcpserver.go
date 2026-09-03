@@ -46,6 +46,21 @@
 // clean one, and carry on in the turns it has left instead of failing
 // every remaining call in a sandbox it cannot repair from inside.
 //
+// -self-debug adds the self-debug capability's own read-only tools, for
+// a run whose task holds that grant. Two halves: read_grain_source and
+// list_grain_source read the checkout -grain-src-dir names
+// (pkg/capability/selfdebug), and list_grain_tasks, read_grain_task,
+// read_grain_task_prompt and read_grain_task_transcript read grain's
+// *other* tasks -- their prompts, their sessions, and the errors their
+// attempts recorded (pkg/mcp's task_tools.go). The second half reads
+// them through -server, the same daemonTasks-over-REST hop
+// open_pull_request already takes, since this process holds no store
+// handle and deliberately gains none. Until this flag existed both
+// halves were assembled by orchestrator.Config.GrantTools and consumed
+// by nobody: every framework that remains forks a CLI and ignores
+// agent.RunConfig.Tools, so the capability granted tools no running
+// agent could call.
+//
 // -run-deadline is the moment grain will cancel the run this process
 // serves. It adds no tool: it makes every tool result carry how much
 // wall-clock time is left, once there is little enough of it to change
@@ -72,6 +87,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/pkg/github"
 	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/kontur"
@@ -139,6 +155,98 @@ type daemonSandbox struct {
 	taskID string
 }
 
+// daemonTasks implements mcp.TaskReader by asking a running "grain
+// daemon" about its own tasks over the same REST API daemonPullRequests
+// and daemonSandbox above use -- the read half of that hop, serving the
+// tools a self-debug run gets for looking at grain's other tasks
+// (pkg/mcp's task_tools.go).
+//
+// It asks the daemon rather than opening the store because this process
+// deliberately holds no store handle at all: that isolation is what
+// makes the subprocess frameworks safe (README's own "Nothing satisfies
+// that any more" section), and a second SQLite writer is exactly what
+// pkg/ui's HTTPClient was introduced to stop the CLI being. Reading is
+// no different in kind here -- the daemon already serves every one of
+// these facts to a browser, and this asks for them the same way.
+//
+// Unlike daemonPullRequests and daemonSandbox, which are pinned to this
+// run's own -task, every method here takes a task id from the tool call:
+// the whole point is to look at a task other than this one. That is the
+// self-debug grant's own decision, made by a human before the run
+// started, and it widens nothing a person with the UI open cannot
+// already read.
+type daemonTasks struct{ client *ui.HTTPClient }
+
+func (d daemonTasks) ListTasks(ctx context.Context) ([]mcp.TaskSummary, error) {
+	tasks, err := d.client.ListTasks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]mcp.TaskSummary, 0, len(tasks))
+	for _, t := range tasks {
+		summaries = append(summaries, taskSummary(t))
+	}
+	return summaries, nil
+}
+
+func (d daemonTasks) Task(ctx context.Context, id string) (mcp.TaskRecord, error) {
+	detail, err := d.client.GetTask(ctx, id)
+	if err != nil {
+		return mcp.TaskRecord{}, err
+	}
+	record := mcp.TaskRecord{
+		TaskSummary:       taskSummary(detail.Task),
+		Description:       detail.Description,
+		Author:            detail.Author,
+		AuthorKind:        detail.AuthorKind,
+		Base:              detail.Base,
+		Capabilities:      detail.Capabilities,
+		PullRequest:       detail.PullRequest,
+		FailedAttempts:    detail.FailedAttempts,
+		LastFailureAt:     detail.LastFailureAt,
+		LastFailureReason: detail.LastFailureReason,
+	}
+	for _, a := range detail.Attempts {
+		record.Attempts = append(record.Attempts, mcp.TaskAttempt{
+			Number:    a.Number,
+			StartedAt: a.StartedAt, FinishedAt: a.FinishedAt,
+			Outcome: a.Outcome, Detail: a.Detail,
+		})
+	}
+	for _, c := range detail.Comments {
+		record.Comments = append(record.Comments, mcp.TaskComment{
+			Author: c.Author, AuthorKind: c.AuthorKind,
+			Body: c.Body, CreatedAt: c.CreatedAt,
+		})
+	}
+	return record, nil
+}
+
+func (d daemonTasks) TaskPrompt(ctx context.Context, id string) (mcp.TaskPromptRecord, error) {
+	prompt, err := d.client.TaskPrompt(ctx, id)
+	if err != nil {
+		return mcp.TaskPromptRecord{}, err
+	}
+	return mcp.TaskPromptRecord{Prompt: prompt.Prompt, Attempt: prompt.Attempt}, nil
+}
+
+func (d daemonTasks) AttemptTranscript(ctx context.Context, id string, attempt int) (string, error) {
+	return d.client.AttemptTranscript(ctx, id, attempt)
+}
+
+// taskSummary projects the daemon's own JSON task shape onto the one
+// pkg/mcp renders. The projection exists because pkg/ui imports
+// pkg/capability/selfdebug and pkg/mcp is under both, so the wire types
+// cannot travel into the tools themselves -- see mcp.TaskSummary's own
+// doc comment.
+func taskSummary(t ui.Task) mcp.TaskSummary {
+	return mcp.TaskSummary{
+		ID: t.ID, Title: t.Title, State: string(t.State), Repo: t.Repo,
+		Interactive: t.Interactive, Configuration: t.Configuration,
+		CreatedAt: t.CreatedAt,
+	}
+}
+
 func (d daemonSandbox) RecreateSandbox(ctx context.Context) (mcp.SandboxRecreationReport, error) {
 	recreation, err := d.client.RecreateSandbox(ctx, d.taskID)
 	if err != nil {
@@ -187,6 +295,17 @@ func mcpserver(args []string) {
 			"pull request rather than opening one from here")
 	taskID := fs.String("task", "",
 		"id of the task this server's run belongs to (required with -server)")
+
+	selfDebug := fs.Bool("self-debug", false,
+		"serve the self-debug capability's own read-only tools: read_grain_source/list_grain_source "+
+			"over -grain-src-dir, and list_grain_tasks/read_grain_task/read_grain_task_prompt/"+
+			"read_grain_task_transcript over the daemon named by -server. Passed by a Framework only "+
+			"for a run whose task holds the self-debug grant (agent.RunConfig.SelfDebug).")
+	grainSrcDir := fs.String("grain-src-dir", "",
+		"directory holding grain's own source for read_grain_source/list_grain_source to read, "+
+			"read-only (cmd/grain/daemon.go's sourceDir: the copy baked into the deployment image, "+
+			"or -upgrade-src-dir's checkout). Only used with -self-debug; unset, both tools answer "+
+			"that this deployment has no source checkout to read.")
 
 	runDeadline := fs.String("run-deadline", "",
 		"RFC3339 time at which grain cancels the run this server serves -- the deadline on "+
@@ -238,6 +357,7 @@ func mcpserver(args []string) {
 	// serves -- a run driven from a bare `grain mcpserver -sandbox-root`
 	// (pkg/mcp's own tests, tests/e2e/) has no daemon to ask and is
 	// better off not advertising tools that could only ever refuse.
+	var client *ui.HTTPClient
 	switch {
 	case *server != "" && *taskID == "":
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -task is required with -server")
@@ -246,11 +366,38 @@ func mcpserver(args []string) {
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -server is required with -task")
 		os.Exit(2)
 	case *server != "":
-		client := ui.NewHTTPClient(*server)
+		client = ui.NewHTTPClient(*server)
 		registry.Register(mcp.NewOpenPullRequestTools(
 			daemonPullRequests{client: client, taskID: *taskID})...)
 		registry.Register(mcp.NewRecreateSandboxTools(
 			daemonSandbox{client: client, taskID: *taskID})...)
+	}
+
+	// The self-debug capability's own tools, and the only ones here that
+	// depend on which *task* this run belongs to rather than only on
+	// which sandbox: a run gets them exactly when a human attached the
+	// self-debug grant to its task, which is what -self-debug says (see
+	// that flag, and agent.RunConfig.SelfDebug for how a Framework
+	// learns it). Everything they expose is read-only -- grain's own
+	// source, and the records of grain's own tasks -- so there is no
+	// confirmation step, matching pkg/capability/selfdebug and unlike
+	// pkg/capability/selfrepair.
+	//
+	// Registered together, source and tasks, because they are one
+	// question asked two ways: the source says what grain is built to
+	// do, and the task records say what this deployment actually did.
+	// Either half can be unavailable without the other disappearing -- a
+	// deployment with no source checkout, or an mcpserver with no daemon
+	// to ask -- and each tool then says so on the call rather than being
+	// absent from the roster (mcp.NewTaskTools' and selfdebug.SourceTools'
+	// own doc comments).
+	if *selfDebug {
+		registry.Register(selfdebug.SourceTools(*grainSrcDir)...)
+		var tasks mcp.TaskReader
+		if client != nil {
+			tasks = daemonTasks{client: client}
+		}
+		registry.Register(mcp.NewTaskTools(tasks)...)
 	}
 
 	// Serve returns io.EOF once its caller closes the write end of our

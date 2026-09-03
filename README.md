@@ -1374,7 +1374,9 @@ no Runner" stays true of the package itself even though a deployment can
 now wire one in from outside it. `selfdebug.SourceTools` is read-only --
 `read_grain_source`/`list_grain_source`, confined to whatever directory
 a deployment's `-upgrade-src-dir` already names, needing no confirmation
-of any kind, since nothing it exposes can change anything.
+of any kind, since nothing it exposes can change anything -- and the same
+grant now also carries `pkg/mcp`'s four task tools, for reading grain's
+*other* tasks (see below).
 `selfrepair.HostCommandTools`' `run_host_command` is the opposite: it
 runs a shell command directly against the same host `grain daemon`
 itself runs on -- no sandbox, no adapter, the real machine -- so every
@@ -1394,7 +1396,32 @@ Every framework that remains (`agent/antigravity`, `agent/claude`,
 ignores `RunConfig.Tools` entirely, because there is no in-process
 registry to hand a forked process. `Config.GrantTools` still assembles these tools and
 `RunDispatch` still passes them, but no `Framework` consumes them, so
-`selfrepair`/`selfdebug`'s host tools reach no running agent today.
+`selfrepair`'s host tool reaches no running agent today.
+
+`self-debug` is the half that no longer depends on any of that, because
+everything it offers is read-only and so needs no route back into a live
+run's own conversation. `grain mcpserver` takes `-self-debug` (and
+`-grain-src-dir`), and a `Framework` passes both to the subprocess it
+forks exactly when `agent.RunConfig.SelfDebug` says this task holds the
+grant — `RunDispatch` reads that off the task's own `Grants`, and
+`agent.SelfDebugArgs` is the one translation from "what this run may do"
+to "what that process is told", shared by all three frameworks the way
+`RunDeadlineArgs` already is. What the flag turns on is two halves of one
+question. `selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`
+answer what grain is *built* to do. `mcp.NewTaskTools`'
+`list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
+`read_grain_task_transcript` answer what this deployment actually *did*:
+another task's record, every attempt it has had with the error each one
+recorded, the prompt its agent was really handed, and its session
+transcript — a still-running attempt's included, since the daemon serves
+one from `Config.LiveTranscripts`. Those reads take the same hop
+`open_pull_request` takes for its write: `cmd/grain/mcpserver.go`'s
+`daemonTasks` asks the daemon over its REST API, so that process still
+holds no store handle and `docs/design.md`'s split surface is untouched.
+Both halves refuse politely rather than disappearing when a deployment
+has no source checkout, or an `mcpserver` no daemon to ask, so a run's
+tool roster is a property of the vocabulary rather than of one
+deployment's configuration.
 Closing that gap means giving the `mcpserver` subcommand a route back to
 the store, which is a design question rather than a missing flag: the
 isolation that makes the subprocess frameworks safe is exactly that it
@@ -1904,6 +1931,63 @@ snaps to line boundaries so that numbering stays whole.
 summary and far short of an unbounded `git log -p`. The result-size
 telemetry in `docs/agent-ergonomics.md`'s finding 11 is what should
 eventually set it from what runs actually ask for, rather than taste.
+
+## Telling attempt N what attempt N−1 did
+
+A redispatch got the task, the conversation, its attachments and a
+checkout continuing the previous attempt's branch (`prepareCheckout`,
+which is the right thing to hand it), and nothing at all about the
+attempt that made those commits. So attempt 2 opened on a branch it had
+not written, with no account of what any of it was for, or of why the
+attempt that wrote it stopped — and grain had all of it the whole time.
+Every `task_run` row carries `outcome` and `detail`, and since `outcomeOf`
+that detail describes a run that succeeded as well as one that failed.
+The cheapest thing that costs is re-doing a diagnosis grain already paid
+for. The dearest is re-attempting exactly the thing that ran out of wall
+clock, which is the one ending a branch cannot reveal.
+
+`BuildPrompt` now takes an `orchestrator.History`: the attempts before
+this one, the commits they left on the branch, and the conversation. The
+first comes from `store.Runs` with this run's own row filtered out —
+`dispatch.Cycle` writes that row before `RunDispatch` ever sees the
+dispatch, so a prompt that listed it would be telling a run about itself,
+with an empty outcome because it has not happened yet. The second comes
+from `checkoutCommits`, a `git log <base>..HEAD` run through the same
+sandbox `run_command` tool `prepareCheckout` clones with — the only place
+in a dispatch that has a repository rather than a string — with each line
+marked so it can be picked back out of the tool's own `exit=`/`stdout:`
+framing, exactly as `baseGoneMarker` already is.
+
+It reads as a list: per attempt its number, outcome and `detail`, then
+the branch's commits newest first. Bounded on purpose — three attempts,
+240 bytes of one-line detail each, ten commits, and a pointer at `git
+log` for the rest, which `RunDispatch` can say without a second read
+because it asks `checkoutCommits` for one commit more than the list holds.
+This is orientation, not a transcript store: the transcript stays in
+`task_run.transcript` and the UI's pane over it, being prose,
+per-framework and unbounded.
+
+Where it sits is part of the fix. Both history sections go together,
+immediately after the sentences saying where the checkout is and which
+branch is in it — the facts they explain — and ahead of the
+commit-message, CI and budget paragraphs, which is why
+`commentThreadSection` moved out of `prepareCapabilities` and into
+`BuildPrompt` alongside it. The conversation and the attempt history are
+the same kind of fact, something a run would otherwise pay to
+rediscover, and a run told to read the thread before doing anything else
+should not have to find it three paragraphs past the one telling it how
+to push.
+
+Neither read can fail a dispatch for nothing. The store read is fatal for
+the same reason the conversation and attachment reads either side of it
+are: a store that cannot answer it cannot record how this run ends
+either. The git read is best effort and silent — a missing base (it falls
+back to `origin/HEAD`, the survivable case `baseCheck` already carries on
+through), a branch with nothing on it, a sandbox with no checkout at all
+— because the commits are on the branch for the agent to read either way,
+and orientation that could fail a run would be a worse trade than the
+re-diagnosis it saves. On a first attempt it is not read at all: there is
+nothing on that branch its base does not already have.
 
 ## Reaching a sandbox guest without a route into it
 

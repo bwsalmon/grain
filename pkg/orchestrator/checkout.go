@@ -71,10 +71,10 @@ type checkout struct {
 	// or nil when the repo configures none -- which is every repo until
 	// somebody writes one. A setup that *failed* is still a non-nil
 	// Setup and not an error: see runSetupCommand.
-	Setup *setupResult
+	Setup *SetupResult
 }
 
-// setupResult is one run of a repo's setup command: what was run, how it
+// SetupResult is one run of a repo's setup command: what was run, how it
 // ended, and enough of what it printed to act on.
 //
 // It exists to be told to the agent (setupSection, in run.go, and
@@ -82,7 +82,11 @@ type checkout struct {
 // reads it, and nothing here decides anything on it -- a failed setup is
 // the run's own problem to work around, which it can only do if it is
 // told.
-type setupResult struct {
+//
+// Exported for the one reason the checkout that carries it is not:
+// BuildPrompt takes one, and BuildPrompt is what a caller outside this
+// package (cmd/grain's `demo`) already builds a sample prompt with.
+type SetupResult struct {
 	// Command is the shell that was run, verbatim, so a prompt can name
 	// it rather than describing "the setup command" the run cannot see.
 	Command string
@@ -100,7 +104,7 @@ type setupResult struct {
 
 // failed reports whether the setup command ended on anything but a clean
 // exit -- the one thing a reader of this has to branch on.
-func (r *setupResult) failed() bool { return r != nil && r.ExitCode != 0 }
+func (r *SetupResult) failed() bool { return r != nil && r.ExitCode != 0 }
 
 // setupCommandTimeout bounds a repo's setup command, and is the line
 // between "the agent's problem" and "a failed dispatch": a setup that
@@ -207,11 +211,11 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 		}
 	}
 	out := checkout{Dir: CheckoutDir}
-	setupResult, err := runSetupCommand(ctx, run, task, setup)
+	ran, err := runSetupCommand(ctx, run, task, setup)
 	if err != nil {
 		return checkout{}, err
 	}
-	out.Setup = setupResult
+	out.Setup = ran
 	return out, nil
 }
 
@@ -222,7 +226,7 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 //
 // nil, nil for a repo with no setup command, which is the ordinary case.
 //
-// A command that exits non-zero comes back as a setupResult with that
+// A command that exits non-zero comes back as a SetupResult with that
 // status in it and no error at all: the run goes ahead and is told what
 // happened (setupSection). Hiding it would leave an agent working in a
 // tree that does not build with no idea why, which is exactly the state
@@ -234,7 +238,7 @@ fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, br
 // setupCommandTimeout fails the dispatch, which that var's own doc
 // comment explains.
 func runSetupCommand(ctx context.Context, run func(context.Context, map[string]any) mcp.Result,
-	task model.Task, setup string) (*setupResult, error) {
+	task model.Task, setup string) (*SetupResult, error) {
 
 	setup = strings.TrimSpace(setup)
 	if setup == "" {
@@ -262,7 +266,7 @@ func runSetupCommand(ctx context.Context, run func(context.Context, map[string]a
 				"no agent was started (%s)",
 			task.Target, humanDuration(setupCommandTimeout), setup)
 	}
-	return &setupResult{
+	return &SetupResult{
 		Command:  setup,
 		ExitCode: runCommandExitCode(result),
 		Output:   tailBytes(strings.TrimSpace(result.Text), setupOutputBudget),
@@ -300,6 +304,83 @@ func tailBytes(s string, budget int) string {
 		cut = cut[i+1:]
 	}
 	return "[grain] earlier output omitted\n" + cut
+}
+
+// commitMarker prefixes each commit line checkoutCommits has git print, so
+// those lines can be picked back out of a run_command result that also
+// carries the tool's own `exit=`/`stdout:`/`stderr:` framing and whatever
+// git said on the way -- the same trick baseGoneMarker plays for
+// prepareCheckout's own diagnosis, and the reason neither has to parse
+// that framing.
+const commitMarker = "grain-commit:"
+
+// checkoutCommits lists the commits already on task's own branch and not on
+// its base -- `git log <base>..HEAD` in the checkout prepareCheckout has
+// just made, newest first, one "<abbrev> <subject>" per entry.
+//
+// This is the other half of what a redispatch needs to make sense of the
+// branch it wakes up on (History, previousAttemptsSection): the store
+// says how each earlier attempt ended, and this says what those attempts
+// actually left behind. It is read here because here is the only place
+// that has the checkout at all -- by the time BuildPrompt runs there is a
+// string, not a repository.
+//
+// Not description.go's branchCommits, which asks GitHub for the same
+// range over its API. That one runs at the end of a run, to describe a
+// pull request and to decide whether there is anything to open one for,
+// and needs an answer it can tell apart from a failed read. This one
+// runs before the agent's first turn, in the sandbox, against a
+// checkout that exists precisely because the run is about to work in
+// it -- and treats every failure as nothing to say.
+//
+// Best effort, and never fatal: a missing base, a branch with nothing on
+// it, a git that refuses for a reason nobody predicted, and a sandbox
+// whose run_command is gone all come back as no commits. Orientation
+// that could fail a dispatch would be a worse trade than the
+// re-diagnosis it exists to save -- the commits are on the branch either
+// way, and the agent has `git log` of its own.
+//
+// The base is resolved to whichever of origin/<task.Base> and origin/HEAD
+// exists, in that order: a task with no base branched off whatever the
+// clone left at origin/HEAD (prepareCheckout), and a task whose base has
+// since been merged and deleted still has a branch worth describing --
+// the same survivable case baseCheck carries on through.
+func checkoutCommits(ctx context.Context, tools []mcp.Tool, task model.Task, limit int) []string {
+	branch := model.BranchName(task.ID)
+	if !gitSafe.MatchString(branch) {
+		return nil
+	}
+	refs := []string{"origin/HEAD"}
+	if task.Base != "" && gitSafe.MatchString(task.Base) {
+		refs = []string{"origin/" + task.Base, "origin/HEAD"}
+	}
+	run, ok := runCommandTool(tools)
+	if !ok {
+		return nil
+	}
+	script := fmt.Sprintf(`cd '%s' || exit 0
+for ref in %s; do
+  if git rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1; then
+    git log --format='%s %%h %%s' -n %d "$ref..HEAD" 2>/dev/null
+    exit 0
+  fi
+done`, CheckoutDir, "'"+strings.Join(refs, "' '")+"'", commitMarker, limit)
+
+	result := run(ctx, map[string]any{"command": script})
+	if result.IsError {
+		log.Printf("orchestrator: task %s: reading what earlier attempts left on %s: %s",
+			task.ID, branch, strings.TrimSpace(result.Text))
+		return nil
+	}
+	var commits []string
+	for _, line := range strings.Split(result.Text, "\n") {
+		if said, ok := strings.CutPrefix(strings.TrimSpace(line), commitMarker); ok {
+			if said = strings.TrimSpace(said); said != "" {
+				commits = append(commits, said)
+			}
+		}
+	}
+	return commits
 }
 
 // baseGoneMarker prefixes what baseCheck prints when a task's base is not

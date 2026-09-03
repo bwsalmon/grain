@@ -1,10 +1,12 @@
 package orchestrator
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/model"
 )
 
 // --- what a finished run's detail records about its tool calls ---------
@@ -93,6 +95,138 @@ func TestOutcomeOfStillDistinguishesARunThatNeverStarted(t *testing.T) {
 	}
 }
 
+// --- what a redispatch is told about the attempts before it -----------
+//
+// Internal because the interesting cases are the bounds: how much of an
+// arbitrarily long history reaches a prompt, and how much of one
+// attempt's task_run.detail does. BuildPrompt is what a run actually
+// reads, and run_test.go drives that end to end; these pin the shape the
+// section is bounded to, which is the half that keeps a task on its
+// ninth attempt from opening on a page of its own past.
+
+func TestPreviousAttemptsSectionNamesEachAttemptsOutcomeAndDetail(t *testing.T) {
+	section := previousAttemptsSection(History{
+		Attempt: 3,
+		Attempts: []model.Run{
+			{Attempt: 1, Outcome: "failed", Detail: "the agent made no tool calls at all"},
+			{Attempt: 2, Outcome: "cancelled", Detail: "the run hit grain's own wall-clock cap"},
+		},
+		Commits: []string{"9f8e7d6 Bound the CI answer", "1a2b3c4 Add the failing test"},
+	}, "grain/task-152")
+
+	for _, want := range []string{
+		"you are attempt 3",
+		"attempt 1", "no tool calls at all",
+		"attempt 2", "wall-clock cap",
+		"grain/task-152",
+		"9f8e7d6 Bound the CI answer",
+		"1a2b3c4 Add the failing test",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("section does not mention %q:\n%s", want, section)
+		}
+	}
+}
+
+// A first attempt has no history, and gets no section at all rather than
+// a heading saying so -- the same rule commentThreadSection follows for
+// a task nobody has commented on.
+func TestPreviousAttemptsSectionIsEmptyForAFirstAttempt(t *testing.T) {
+	if s := previousAttemptsSection(History{Attempt: 1}, "grain/task-152"); s != "" {
+		t.Errorf("section for a first attempt = %q, want nothing at all", s)
+	}
+}
+
+// Bounded to the last few attempts, and honest about the ones it left
+// out: a task grain has run nine times has nothing more to teach its
+// tenth attempt than its last three endings do, and a prompt is not a
+// run listing.
+func TestPreviousAttemptsSectionKeepsOnlyTheMostRecentAttempts(t *testing.T) {
+	var runs []model.Run
+	for i := 1; i <= 9; i++ {
+		runs = append(runs, model.Run{Attempt: i, Outcome: "failed", Detail: fmt.Sprintf("ending %d", i)})
+	}
+	section := previousAttemptsSection(History{Attempt: 10, Attempts: runs}, "grain/task-152")
+
+	if !strings.Contains(section, "ending 9") || !strings.Contains(section, "ending 7") {
+		t.Errorf("section drops the most recent attempts:\n%s", section)
+	}
+	if strings.Contains(section, "ending 6") {
+		t.Errorf("section is not bounded to %d attempts:\n%s", maxPreviousAttempts, section)
+	}
+	if !strings.Contains(section, "6 earlier one(s) not listed") {
+		t.Errorf("section does not say how many attempts it left out:\n%s", section)
+	}
+}
+
+// One attempt's detail is a column nothing bounds -- a framework's own
+// error text is whatever its CLI printed -- so it is trimmed to one line
+// and to maxAttemptDetail here, the same shape agent.TrimLimitMessage
+// gives the details it writes.
+func TestPreviousAttemptsSectionTrimsAnUnboundedDetail(t *testing.T) {
+	section := previousAttemptsSection(History{
+		Attempt:  2,
+		Attempts: []model.Run{{Attempt: 1, Outcome: "failed", Detail: "panic:\n" + strings.Repeat("stack frame ", 200)}},
+	}, "grain/task-152")
+
+	var line string
+	for _, l := range strings.Split(section, "\n") {
+		if strings.HasPrefix(l, "- attempt 1") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no line for attempt 1 at all:\n%s", section)
+	}
+	// The whole attempt, on one line: the heading and the detail's own
+	// ceiling and nothing else. A stack trace pasted in as its own
+	// paragraphs would break the list this section is.
+	if len(line) > maxAttemptDetail+len("- attempt 1 ended \"failed\": ")+len("...") {
+		t.Errorf("attempt line is %d bytes, want it bounded by maxAttemptDetail (%d): %q",
+			len(line), maxAttemptDetail, line)
+	}
+	if !strings.Contains(section, "panic:") {
+		t.Errorf("the start of the detail was trimmed away with the rest:\n%s", section)
+	}
+}
+
+// The commit list is bounded too, and says so: RunDispatch asks
+// checkoutCommits for one more than the list holds precisely so "there is
+// more" can be said without a second, unbounded read.
+func TestPreviousAttemptsSectionSaysWhenThereAreMoreCommits(t *testing.T) {
+	var commits []string
+	for i := 0; i <= maxBranchCommits; i++ {
+		commits = append(commits, fmt.Sprintf("00000%02d commit %d", i, i))
+	}
+	section := previousAttemptsSection(History{
+		Attempt:  2,
+		Attempts: []model.Run{{Attempt: 1, Outcome: "failed"}},
+		Commits:  commits,
+	}, "grain/task-152")
+
+	if strings.Contains(section, fmt.Sprintf("commit %d", maxBranchCommits)) {
+		t.Errorf("section is not bounded to %d commits:\n%s", maxBranchCommits, section)
+	}
+	for _, want := range []string{"older ones still", "`git log`"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("section does not point at the rest of the log (%q):\n%s", want, section)
+		}
+	}
+}
+
+// A run whose row was never finished -- a daemon that died mid-run,
+// before recover.go's sweep reached it -- reads as the unknown it is
+// rather than as a blank where an outcome should be.
+func TestPreviousAttemptsSectionSaysWhenAnAttemptHasNoOutcome(t *testing.T) {
+	section := previousAttemptsSection(History{
+		Attempt:  2,
+		Attempts: []model.Run{{Attempt: 1}},
+	}, "grain/task-152")
+	if !strings.Contains(section, "no outcome recorded") {
+		t.Errorf("section does not say the attempt's outcome is unknown:\n%s", section)
+	}
+}
+
 // --- what the prompt says about the repo's setup command ---------------
 //
 // A run reads its prompt once, at turn 1, and there is nothing in the
@@ -108,7 +242,7 @@ func TestSetupSectionSaysNothingWhenTheRepoHasNoSetupCommand(t *testing.T) {
 }
 
 func TestSetupSectionNamesASucceededSetupSoItIsNotRunAgain(t *testing.T) {
-	got := setupSection(&setupResult{Command: "make deps", ExitCode: 0, Output: "exit=0"})
+	got := setupSection(&SetupResult{Command: "make deps", ExitCode: 0, Output: "exit=0"})
 	for _, want := range []string{"make deps", "succeeded"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt section = %q, want it to mention %q", got, want)
@@ -120,7 +254,7 @@ func TestSetupSectionNamesASucceededSetupSoItIsNotRunAgain(t *testing.T) {
 }
 
 func TestSetupSectionTellsTheRunAFailedSetupIsNotItsChange(t *testing.T) {
-	got := setupSection(&setupResult{
+	got := setupSection(&SetupResult{
 		Command:  "make deps",
 		ExitCode: 2,
 		Output:   "exit=2\nstderr:\nno such package: widgetlib",
