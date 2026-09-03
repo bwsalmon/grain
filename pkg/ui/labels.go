@@ -45,28 +45,42 @@ type Capability struct {
 	Description string `json:"description"`
 }
 
-// DefaultCapabilities matches labels.py's _STYLES table, human-toggled
-// rows only -- minus any row v2 ships no provider for.
+// DefaultCapabilities is every capability a human can attach to a task,
+// and -- because grantsFor and SetCapability reject an id with no row
+// here as "unknown capability" before a model.Grant is ever written --
+// the only route by which any capability is ever granted at all. It
+// started as labels.py's _STYLES table, human-toggled rows only; it is
+// now kept in step with the set of providers grain ships instead, which
+// is what capabilityCatalog (capability_status.go) enumerates and what
+// TestDefaultCapabilitiesOffersEveryShippedCapability holds to.
 //
-// That subtraction is not cosmetic. A row here is a grant a task can be
-// given, and model.ResolveGrants refuses a grant naming a capability no
-// provider is registered for; orchestrator's prepareCapabilities turns
-// any refusal into an error that stops the dispatch before the agent's
-// first turn. So an offered row with nothing behind it does not degrade
-// to "the grant is quietly ignored" -- it fails the run of every task
-// that ticks it. labels.py's scratch_repo_label was such a row: v1 had
-// a real implementation behind it (grain/automation/scratch_repo.py),
-// v2 has none, and offering it anyway made "Scratch repo" a button that
-// broke the task it was ticked on (bwsalmon/agents#612). It is dropped
-// here rather than backed by a new provider; the nearest thing v2 does
-// have is pkg/capability/githubsandbox, which mints a single-use GitHub
-// repo per task and is not offered here either.
+// That drift is why this comment is longer than the table. gcp-key and
+// github-sandbox both had providers cmd/grain/daemon.go registered and
+// no row here, so no task on any deployment, however configured, could
+// ask for either: gcp-key's symptom was that no sandbox ever got
+// gcpkey.SandboxKeyPath, with nothing refused, logged or failed
+// anywhere, because model.ResolveGrants was never reached (an
+// ungrantable capability is rejected a step earlier than a
+// misconfigured one). The reverse drift was here too: "scratch-repo" is
+// v1's label name for what v2's provider calls github-sandbox, so
+// ticking it wrote a grant no provider answers to and
+// prepareCapabilities failed the dispatch outright. The row below
+// carries the provider's own id.
 //
-// cmd/grain/daemon_test.go's TestEveryPickerCapabilityHasAProvider holds
-// this list and capabilityProviders together, so the next such row fails
-// a test rather than a run.
+// These are opt-in rows rather than something every dispatch gets,
+// including gcp-key, which v1 minted for every sandbox unconditionally
+// (grain/automation/gcp_keys.py). Restoring that would mean more than a
+// grant path: v1 wrapped its mint in a local except, so a broken minter
+// degraded one dispatch, while prepareCapabilities here treats a failed
+// materialize as no dispatch at all -- an expired minter credential
+// would become a standing veto on every task in the deployment. A
+// deployment-level always-grant set is still open to whoever wants it,
+// but it needs that failure mode decided first, and it needs this list
+// to have a row for the capability either way.
 func DefaultCapabilities() []Capability {
 	return []Capability{
+		{ID: "gcp-key", Name: "GCP key",
+			Description: "Mint a short-lived GCP service-account key for this task and place it in its sandbox"},
 		{ID: "gemini-key", Name: "Gemini key",
 			Description: "Mint a short-lived Gemini API key for this task"},
 		{ID: "self-debug", Name: "Self debug",
@@ -75,6 +89,8 @@ func DefaultCapabilities() []Capability {
 			Description: "Let this task run commands on grain's own host -- restart services, edit config, call the grain CLI -- each one needing a live reply in the task's chat before it runs"},
 		{ID: "bootstrap-playbooks", Name: "Bootstrap playbooks",
 			Description: "Let this task read grain's own bootstrap playbooks -- the runbooks for setting up GCP service accounts, the primary GitHub connection, CloudRun-based IAP access, and test repos -- so it can walk whoever is on the other end of this chat through one of them"},
+		{ID: "github-sandbox", Name: "GitHub sandbox",
+			Description: "Create a private, single-use GitHub sandbox repo for this task to work in instead of /repo"},
 	}
 }
 

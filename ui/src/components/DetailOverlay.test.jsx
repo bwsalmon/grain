@@ -321,10 +321,11 @@ describe("DetailOverlay", () => {
     });
   });
 
-  // A capability retired from the picker since the task was granted it
-  // (bwsalmon/agents#612's "scratch-repo") still needs a row of its own,
-  // or the chip for it has nothing to untick and the grant -- which
-  // fails every run of the task holding it -- can never be removed.
+  // A capability the picker stopped listing since the task was granted
+  // it ("scratch-repo", renamed to github-sandbox in
+  // bwsalmon/agents#612) still needs a row of its own, or the chip for
+  // it has nothing to untick and the grant -- which fails every run of
+  // the task holding it -- can never be removed.
   it("offers a row for a granted capability the picker no longer lists", async () => {
     const act = vi.fn((mutate) => mutate());
     const user = userEvent.setup();

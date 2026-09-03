@@ -70,12 +70,10 @@ human's word for it -- ask them to open (or start) a task with the
 failure to mint a token there means the install didn't take, or is
 scoped to the wrong account. (This step named `scratch-repo` until
 bwsalmon/agents#612 -- v1's name for it, which v2 ships no provider
-under. `github-sandbox` is the provider that actually mints the App's
-tokens, but the task capability picker offers no row for it either, so
-if this deployment gives no way to attach it, say so and treat the
-install as unverified rather than reporting it confirmed.) If this
-deployment also has a fixed list of
-real target repos (`test_repos` in `terraform/gcp/variables.tf`, or
+under; `github-sandbox` is the provider that actually mints the App's
+tokens, and the row the capability picker now offers.) If this
+deployment also has a fixed list of real target repos (`test_repos` in
+`terraform/gcp/variables.tf`, or
 `pkg/model.Config.TargetRepos`), confirm those repos already exist
 under the account the App is installed on -- `githubsandbox` only ever
 creates its own ephemeral scratch repos, never the deployment's real
