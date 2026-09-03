@@ -596,7 +596,7 @@ func TestUpdateScheduleRepointsASuiteBackedScheduleAtAnotherSuite(t *testing.T) 
 
 // What a schedule fires is fixed when it is created -- neither direction
 // of "convert it into the other kind" is supported, since there is
-// nothing sensible to carry across (model.ScheduledTask.SuiteID's own doc
+// nothing sensible to carry across (model.Schedule.SuiteID's own doc
 // comment).
 func TestUpdateScheduleRefusesToChangeWhatAScheduleFires(t *testing.T) {
 	c, _, ctx := testClient(t)

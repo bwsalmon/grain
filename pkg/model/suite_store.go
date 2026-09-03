@@ -10,8 +10,8 @@ import (
 )
 
 // NewTaskSuiteID allocates a task suite identity from its own sequence,
-// distinct from every other id sequence here -- NewScheduledTaskID's own
-// doc comment on why.
+// distinct from every other id sequence here -- NewScheduleID's own doc
+// comment on why.
 func (s *Store) NewTaskSuiteID(ctx context.Context) (id string, err error) {
 	err = s.write(ctx, "allocate a task suite id", func(tx *sql.Tx) error {
 		id, err = newTaskSuiteID(ctx, tx)
@@ -117,8 +117,8 @@ func (s *Store) ListTaskSuites(ctx context.Context) ([]TaskSuite, error) {
 }
 
 // PutTaskSuite inserts or replaces a task suite wholesale --
-// putScheduledTask's own "child rows are deleted and re-inserted rather
-// than diffed" for a suite's own items.
+// putSchedule's own "child rows are deleted and re-inserted rather than
+// diffed" for a suite's own items.
 func (s *Store) PutTaskSuite(ctx context.Context, suite TaskSuite) error {
 	return s.write(ctx, "put task suite "+suite.ID,
 		func(tx *sql.Tx) error { return putTaskSuite(ctx, tx, suite) })
@@ -147,7 +147,7 @@ func putTaskSuite(ctx context.Context, tx *sql.Tx, suite TaskSuite) error {
 }
 
 // UpdateTaskSuite reads a suite, applies mutate, and writes it back --
-// UpdateScheduledTask's own read-modify-write shape.
+// UpdateSchedule's own read-modify-write shape.
 func (s *Store) UpdateTaskSuite(ctx context.Context, id string, mutate func(*TaskSuite) error) error {
 	var missing bool
 	err := s.write(ctx, "update task suite "+id, func(tx *sql.Tx) error {
@@ -174,12 +174,12 @@ func (s *Store) UpdateTaskSuite(ctx context.Context, id string, mutate func(*Tas
 	return nil
 }
 
-// DeleteTaskSuite removes a suite outright -- DeleteScheduledTask's own
-// doc comment gives the reasoning: a suite is only ever a standing
-// declaration, so there is no history on the row itself worth keeping.
-// A run already started from this suite is untouched -- it carries its
-// own snapshot of everything it needs (model.TaskSuiteRun's own doc
-// comment) and does not join back to task_suite for anything.
+// DeleteTaskSuite removes a suite outright -- DeleteSchedule's own doc
+// comment gives the reasoning: a suite is only ever a standing
+// declaration, so there is no history on the row itself worth keeping. A
+// run already started from this suite is untouched -- it carries its own
+// snapshot of everything it needs (model.TaskSuiteRun's own doc comment)
+// and does not join back to task_suite for anything.
 func (s *Store) DeleteTaskSuite(ctx context.Context, id string) error {
 	return s.write(ctx, "delete task suite "+id, func(tx *sql.Tx) error {
 		// Both tables, in one transaction: task_suite_item carries no
@@ -398,7 +398,7 @@ func (s *Store) ActiveTaskSuiteRuns(ctx context.Context) ([]TaskSuiteRun, error)
 // HasOpenTaskWithTag for a schedule that files a task instead: a chore
 // that runs long must not get a duplicate, and one that finishes early is
 // still held to its own cadence rather than refiring immediately
-// (docs/scheduled-tasks.md).
+// (docs/schedules.md).
 func (s *Store) HasActiveRunForSchedule(ctx context.Context, scheduleID string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
@@ -509,14 +509,14 @@ func (s *Store) CreateTaskSuiteRun(ctx context.Context, suite TaskSuite, target 
 	return s.createTaskSuiteRun(ctx, suite, target, base, "", now)
 }
 
-// CreateScheduledTaskSuiteRun is CreateTaskSuiteRun for a run a schedule
+// CreateScheduledSuiteRun is CreateTaskSuiteRun for a run a schedule
 // fired rather than a human started -- identical in every respect except
 // that the run records the schedule it came from
 // (TaskSuiteRun.ScheduleID's own doc comment on the two things that
 // buys). Its own method rather than a fifth positional argument on
 // CreateTaskSuiteRun, since every existing caller starts a run by hand
 // and has no schedule to name.
-func (s *Store) CreateScheduledTaskSuiteRun(ctx context.Context, suite TaskSuite, target RepoRef, base, scheduleID string, now time.Time) (TaskSuiteRun, error) {
+func (s *Store) CreateScheduledSuiteRun(ctx context.Context, suite TaskSuite, target RepoRef, base, scheduleID string, now time.Time) (TaskSuiteRun, error) {
 	return s.createTaskSuiteRun(ctx, suite, target, base, scheduleID, now)
 }
 

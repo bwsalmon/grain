@@ -373,9 +373,9 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
 
-    expect(await screen.findByRole("heading", { name: "Scheduled tasks" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Schedules" })).toBeInTheDocument();
     expect(screen.getByText("Nightly dependency bump")).toBeInTheDocument();
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
@@ -387,7 +387,7 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
     await user.click(await screen.findByText("Nightly dependency bump"));
     expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
 
@@ -420,7 +420,7 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
     await user.click(await screen.findByRole("button", { name: "+ New schedule" }));
     await screen.findByRole("heading", { name: "New schedule" });
 

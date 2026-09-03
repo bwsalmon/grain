@@ -8,16 +8,15 @@ package main
 // Why this exists at all, when schedules, templates, suites and
 // qualification plans are all still UI-only: those are *authored
 // content*, written once in a form built for writing them, and their
-// absence here is an open gap nobody has needed closed
-// (docs/scheduled-tasks.md says so in as many words). This is
-// *deployment configuration*, which is the category the CLI already
-// covers end to end -- `grain settings`, `grain secrets`, `grain config`
-// -- because "why did this deployment do that" gets asked from a shell
-// on the host at least as often as from a browser. A repo's own defaults
-// were the one member of that category with no spelling here at all, and
-// the asymmetry was visible: `grain settings` already *prints* them
-// ("default in: owner/name", capabilityStatusLine) with no way to act on
-// what it just showed.
+// absence here is an open gap nobody has needed closed (docs/schedules.md
+// says so in as many words). This is *deployment configuration*, which is
+// the category the CLI already covers end to end -- `grain settings`,
+// `grain secrets`, `grain config` -- because "why did this deployment do
+// that" gets asked from a shell on the host at least as often as from a
+// browser. A repo's own defaults were the one member of that category
+// with no spelling here at all, and the asymmetry was visible: `grain
+// settings` already *prints* them ("default in: owner/name",
+// capabilityStatusLine) with no way to act on what it just showed.
 //
 // -target-repos stays on `grain settings` rather than moving here. The
 // repos *pane* dropped its own copy of that field when

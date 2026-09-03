@@ -514,14 +514,13 @@ func TestActiveTaskSuiteRunsAndCompleteTaskSuiteRun(t *testing.T) {
 
 // A run a schedule fired records the schedule it came from, and
 // HasActiveRunForSchedule reads it back -- the idempotency gate
-// orchestrator.fireScheduledSuite needs, and the exact counterpart of
-// HasOpenTaskWithTag for a schedule that files a task instead.
-// A database created before a schedule could fire a suite has a
-// task_suite_run with no schedule_id column, which CREATE TABLE IF NOT
-// EXISTS never adds -- Store.Init's own migration step
-// (ensureTaskSuiteRunScheduleColumn) is what does, leaving every run
-// already on it reading as what it was: started by a human, not by a
-// schedule.
+// orchestrator.fireSuiteSchedule needs, and the exact counterpart of
+// HasOpenTaskWithTag for a schedule that files a task instead. A database
+// created before a schedule could fire a suite has a task_suite_run with
+// no schedule_id column, which CREATE TABLE IF NOT EXISTS never adds --
+// Store.Init's own migration step (ensureTaskSuiteRunScheduleColumn) is
+// what does, leaving every run already on it reading as what it was:
+// started by a human, not by a schedule.
 func TestInitMigratesAnExistingDatabaseWithNoRunScheduleColumn(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
@@ -577,7 +576,7 @@ func TestInitMigratesAnExistingDatabaseWithNoRunScheduleColumn(t *testing.T) {
 	}
 }
 
-func TestCreateScheduledTaskSuiteRunRecordsItsSchedule(t *testing.T) {
+func TestCreateScheduledSuiteRunRecordsItsSchedule(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := putSuite(t, ctx, store, twoItemSuite())
 
@@ -596,7 +595,7 @@ func TestCreateScheduledTaskSuiteRunRecordsItsSchedule(t *testing.T) {
 		t.Error("a run started by hand must not count as a schedule's own firing")
 	}
 
-	fired, err := store.CreateScheduledTaskSuiteRun(ctx, suite, widgets, "main", "sched-1", now.Add(time.Minute))
+	fired, err := store.CreateScheduledSuiteRun(ctx, suite, widgets, "main", "sched-1", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("create from a schedule: %v", err)
 	}

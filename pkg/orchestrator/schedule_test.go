@@ -15,9 +15,9 @@ import (
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 )
 
-func filedSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) model.ScheduledTask {
+func filedSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) model.Schedule {
 	t.Helper()
-	sched := model.ScheduledTask{
+	sched := model.Schedule{
 		ID:         id,
 		Title:      "Nightly dependency bump",
 		Body:       "Bump every dependency to its latest patch release.",
@@ -27,7 +27,7 @@ func filedSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.T
 		NextRunAt:  nextRunAt,
 		CreatedAt:  baseTime,
 	}
-	if err := store.PutScheduledTask(t.Context(), sched); err != nil {
+	if err := store.PutSchedule(t.Context(), sched); err != nil {
 		t.Fatalf("filing schedule: %v", err)
 	}
 	return sched
@@ -61,7 +61,7 @@ func TestReconcileScheduleFilesAnAlreadyApprovedTask(t *testing.T) {
 	sched := filedSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
 	sched.Reads = []model.RepoRef{{Owner: "acme", Name: "shared-lib"}}
 	sched.Grants = []model.Grant{{Capability: "web-search", Via: model.GrantByLabel}}
-	if err := store.PutScheduledTask(t.Context(), sched); err != nil {
+	if err := store.PutSchedule(t.Context(), sched); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,7 +99,7 @@ func TestReconcileScheduleFilesAnAlreadyApprovedTask(t *testing.T) {
 		t.Errorf("grants = %+v, want web-search", got.Grants)
 	}
 
-	updated, err := store.GetScheduledTask(ctx, sched.ID)
+	updated, err := store.GetSchedule(ctx, sched.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestReconcileScheduleSkipsOneNotYetDue(t *testing.T) {
 func TestReconcileScheduleSkipsOneThatsPaused(t *testing.T) {
 	store, _ := openStore(t)
 	sched := filedSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
-	if err := store.UpdateScheduledTask(t.Context(), sched.ID, func(s *model.ScheduledTask) error {
+	if err := store.UpdateSchedule(t.Context(), sched.ID, func(s *model.Schedule) error {
 		s.Enabled = false
 		return nil
 	}); err != nil {
@@ -161,7 +161,7 @@ func TestReconcileScheduleWaitsForThePreviousFiringToFinish(t *testing.T) {
 	// Force the schedule due again immediately, the way a very short
 	// interval would in practice, while its first firing is still open.
 	later := baseTime.Add(time.Hour)
-	if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
+	if err := store.UpdateSchedule(ctx, sched.ID, func(s *model.Schedule) error {
 		s.NextRunAt = baseTime
 		return nil
 	}); err != nil {
@@ -188,7 +188,7 @@ func TestReconcileScheduleWaitsForThePreviousFiringToFinish(t *testing.T) {
 }
 
 // TestReconcileScheduleFiresFromATemplateResolvedFresh is
-// bwsalmon/agents#516's central guarantee: fireScheduledTask reads a
+// bwsalmon/agents#516's central guarantee: fireTaskSchedule reads a
 // template-backed schedule's content off the template at firing time, not
 // off whatever the schedule's own row last cached, so a template edited
 // between two firings changes what the second one files -- and the
@@ -210,7 +210,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	templateID := tmpl.ID
-	sched := model.ScheduledTask{
+	sched := model.Schedule{
 		ID:         "sched-1",
 		TemplateID: &templateID,
 		Target:     model.RepoRef{Owner: "acme", Name: "widgets"},
@@ -219,7 +219,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 		NextRunAt:  baseTime.Add(-time.Minute),
 		CreatedAt:  baseTime,
 	}
-	if err := store.PutScheduledTask(ctx, sched); err != nil {
+	if err := store.PutSchedule(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
 
@@ -240,7 +240,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 		t.Errorf("first firing reads = %+v, want %+v", first[0].Reads, tmpl.Reads)
 	}
 
-	got, err := store.GetScheduledTask(ctx, sched.ID)
+	got, err := store.GetSchedule(ctx, sched.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	if err := store.Observe(ctx, model.Observation{TaskID: first[0].ID, ClosedAt: &later}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
+	if err := store.UpdateSchedule(ctx, sched.ID, func(s *model.Schedule) error {
 		s.NextRunAt = baseTime
 		return nil
 	}); err != nil {
@@ -286,7 +286,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 }
 
 // TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing checks
-// fireScheduledTask's own defensive path: a schedule whose TemplateID no
+// fireTaskSchedule's own defensive path: a schedule whose TemplateID no
 // longer resolves (ui.Client.DeleteTemplate tries to prevent this, but
 // nothing in the store itself enforces it) fails that one firing rather
 // than filing a task with no content, and does not advance NextRunAt --
@@ -295,7 +295,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 func TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing(t *testing.T) {
 	store, ctx := openStore(t)
 	missing := "template-does-not-exist"
-	sched := model.ScheduledTask{
+	sched := model.Schedule{
 		ID:         "sched-1",
 		TemplateID: &missing,
 		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
@@ -303,7 +303,7 @@ func TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing(t *testing.T) {
 		NextRunAt:  baseTime.Add(-time.Minute),
 		CreatedAt:  baseTime,
 	}
-	if err := store.PutScheduledTask(ctx, sched); err != nil {
+	if err := store.PutSchedule(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
 
@@ -313,7 +313,7 @@ func TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing(t *testing.T) {
 	if filed := scheduledTasksTagged(t, store, "schedule:"+sched.ID); len(filed) != 0 {
 		t.Fatalf("filed %d tasks for a schedule with a missing template, want 0", len(filed))
 	}
-	got, err := store.GetScheduledTask(ctx, sched.ID)
+	got, err := store.GetSchedule(ctx, sched.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing(t *testing.T) {
 // filedSuiteSchedule is filedSchedule's counterpart for the other thing a
 // schedule can fire: a one-item task suite, saved in the store the way
 // ui.Client.CreateSuite would save it, and a schedule pointing at it.
-func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) (model.TaskSuite, model.ScheduledTask) {
+func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) (model.TaskSuite, model.Schedule) {
 	t.Helper()
 	ctx := t.Context()
 	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
@@ -345,7 +345,7 @@ func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt t
 		t.Fatalf("put suite: %v", err)
 	}
 	suiteID := suite.ID
-	sched := model.ScheduledTask{
+	sched := model.Schedule{
 		ID:         id,
 		Title:      suite.Name,
 		SuiteID:    &suiteID,
@@ -356,7 +356,7 @@ func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt t
 		NextRunAt:  nextRunAt,
 		CreatedAt:  baseTime,
 	}
-	if err := store.PutScheduledTask(ctx, sched); err != nil {
+	if err := store.PutSchedule(ctx, sched); err != nil {
 		t.Fatalf("filing schedule: %v", err)
 	}
 	return suite, sched
@@ -422,7 +422,7 @@ func TestReconcileScheduleStartsATaskSuiteRun(t *testing.T) {
 		t.Error("want the filed task already approved: the suite does not require approval")
 	}
 
-	updated, err := store.GetScheduledTask(ctx, sched.ID)
+	updated, err := store.GetSchedule(ctx, sched.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestReconcileScheduleWaitsForThePreviousSuiteRunToFinish(t *testing.T) {
 	later := baseTime.Add(time.Hour)
 	forceDue := func() {
 		t.Helper()
-		if err := store.UpdateScheduledTask(ctx, sched.ID, func(s *model.ScheduledTask) error {
+		if err := store.UpdateSchedule(ctx, sched.ID, func(s *model.Schedule) error {
 			s.NextRunAt = baseTime
 			return nil
 		}); err != nil {
@@ -485,7 +485,7 @@ func TestReconcileScheduleWaitsForThePreviousSuiteRunToFinish(t *testing.T) {
 	}
 }
 
-// fireScheduledSuite's own defensive path, fireScheduledTask's
+// fireSuiteSchedule's own defensive path, fireTaskSchedule's
 // missing-template case one level out: a suite deleted out from under a
 // schedule (ui.Client.DeleteSuite tries to prevent it) fails that one
 // firing and leaves NextRunAt exactly where it was, rather than starting
@@ -493,7 +493,7 @@ func TestReconcileScheduleWaitsForThePreviousSuiteRunToFinish(t *testing.T) {
 func TestReconcileScheduleFailsToFireWhenItsSuiteIsMissing(t *testing.T) {
 	store, ctx := openStore(t)
 	missing := "suite-does-not-exist"
-	sched := model.ScheduledTask{
+	sched := model.Schedule{
 		ID:         "sched-1",
 		Title:      "nightly smoke",
 		SuiteID:    &missing,
@@ -504,7 +504,7 @@ func TestReconcileScheduleFailsToFireWhenItsSuiteIsMissing(t *testing.T) {
 		NextRunAt:  baseTime.Add(-time.Minute),
 		CreatedAt:  baseTime,
 	}
-	if err := store.PutScheduledTask(ctx, sched); err != nil {
+	if err := store.PutSchedule(ctx, sched); err != nil {
 		t.Fatal(err)
 	}
 
@@ -514,7 +514,7 @@ func TestReconcileScheduleFailsToFireWhenItsSuiteIsMissing(t *testing.T) {
 	if runs := runsOfSchedule(t, store, sched.ID); len(runs) != 0 {
 		t.Fatalf("started %d runs for a schedule with a missing suite, want 0", len(runs))
 	}
-	got, err := store.GetScheduledTask(ctx, sched.ID)
+	got, err := store.GetSchedule(ctx, sched.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
