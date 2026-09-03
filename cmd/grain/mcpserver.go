@@ -22,13 +22,25 @@
 // "static-pod" needs a standalone kubelet
 // (deploy/static-kubelet/README.md) and is resolved via crictl instead.
 //
+// -pr-repo/-pr-branch add pkg/mcp's pull_request_status to that roster,
+// so a run can read CI's verdict on the commits it pushes and repair a
+// red build inside its own turn budget instead of leaving it for the
+// merge queue's separate fix task. That read happens *here*, in this
+// process, which runs on the controller: the GitHub credential comes off
+// the controller's own -data-dir (the same secrets/github ladder
+// `grain daemon` loads) and never crosses into the sandbox, so
+// docs/design.md's split surface -- "Sandboxes: git transport only" --
+// is untouched. See pkg/mcp/pullrequest_tools.go's own doc comment.
+//
 // -server and -task add one further tool, open_pull_request: a run that
 // has pushed its branch can have grain open its pull request there and
 // then, and read back what the repo's own CI makes of it, rather than
 // exiting blind and leaving the pull request to the finish path. They
-// name the daemon to ask and the task to ask about -- see
-// daemonPullRequests below for why this process asks a daemon rather than
-// calling GitHub itself.
+// name the daemon to ask and the task to ask about. Unlike
+// pull_request_status above, that one is a *write*, and writes stay
+// grain's: this process asks the daemon over its REST API rather than
+// opening anything with a credential of its own. See daemonPullRequests
+// below.
 package main
 
 import (
@@ -40,9 +52,13 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 
+	"github.com/bwsalmon/grain/pkg/github"
+	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/mcp"
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -52,13 +68,15 @@ import (
 // speaks, reached the same way, since this process is on the controller
 // alongside the daemon that forked it.
 //
-// The hop exists because of what this process deliberately does not have.
-// A run's route to GitHub is grain's, never the agent's (pkg/gitproxy's
-// whole shape), and an mcpserver drives tools on the agent's behalf, so
-// handing it a GitHub token to open a pull request with would put that
-// credential exactly where the design says it must never be. The daemon
-// has the token; this asks it, by task id, and the daemon decides from
-// that task's own record which repo and which branch that means.
+// The hop exists because of what this call is, not because this process
+// cannot reach GitHub at all: pullRequestReader below does build a REST
+// client, for pull_request_status. That one only ever reads, and only
+// within a scope fixed at process start. Opening a pull request is a
+// write, and which task it is opened for, on which branch, against which
+// base, has always been grain's decision rather than an agent's -- so it
+// is made where those decisions are already made. This asks the daemon
+// by task id, and the daemon reads the repo and the branch out of that
+// task's own record; nothing in a tool call reaches GitHub as data.
 type daemonPullRequests struct {
 	client *ui.HTTPClient
 	taskID string
@@ -96,10 +114,27 @@ func mcpserver(args []string) {
 	execKey := fs.String("exec-key", "", "path, *inside -kontur-vm's container*, of the private key `kontur exec` authenticates to the guest with. Optional: left unset, `kontur exec` uses the keypair `kontur run` generates for that guest at boot, which is what a stock bwsalmon/kontur guest image authorizes (see its internal/guestkey). Set it only for a custom guest image that authorizes a key of its own instead.")
 	workspace := fs.String("workspace", "",
 		"working directory run_command/read_file/edit_file/write_file operate in on -kontur-vm (required with -kontur-vm)")
+
+	dataDir := fs.String("data-dir", "",
+		"grain's own data directory on this controller, holding secrets/github -- the credential "+
+			"pull_request_status reads GitHub with. Required with -pr-repo.")
+	prRepo := fs.String("pr-repo", "",
+		"owner/name of the repository pull_request_status reports on. Unset leaves the tool "+
+			"registered but answering that this run has no repo, which is what a task with no "+
+			"target really does have.")
+	prBranch := fs.String("pr-branch", "",
+		"branch within -pr-repo pull_request_status reports on -- this run's own branch, and the "+
+			"only one it can ever read (required with -pr-repo)")
+	githubHost := fs.String("github-host", "github.com",
+		"git host whose REST API pull_request_status reads (github.APIHost maps it to the API host)")
+	githubInsecureHTTP := fs.Bool("github-insecure-http", false,
+		"reach -github-host over plain HTTP instead of HTTPS -- for a local mock GitHub in a "+
+			"live test, never for a real deployment")
+
 	server := fs.String("server", "",
 		"base URL of the \"grain daemon\" this server's run was dispatched by, e.g. http://127.0.0.1:8420 "+
 			"-- with -task, adds the open_pull_request tool, which asks that daemon to open the run's own "+
-			"pull request (this process holds no GitHub credential of its own)")
+			"pull request rather than opening one from here")
 	taskID := fs.String("task", "",
 		"id of the task this server's run belongs to (required with -server)")
 	fs.Parse(args)
@@ -129,6 +164,9 @@ func mcpserver(args []string) {
 	// The sink exists so calls fail loudly (a real Result, not a silent
 	// no-op) rather than because there's anywhere for it to report to.
 	registry.Register(mcp.NewMockTools(&mcp.MockSink{})...)
+	// Unlike those, this one is not mocked: it really does read GitHub,
+	// from this process, on the controller. See the file's doc comment.
+	registry.Register(pullRequestTools(*dataDir, *githubHost, *githubInsecureHTTP, *prRepo, *prBranch)...)
 
 	// open_pull_request is the one tool here whose effect is real and
 	// immediate, so it is registered only when this process was actually
@@ -144,7 +182,7 @@ func mcpserver(args []string) {
 		fmt.Fprintln(os.Stderr, "grain mcpserver: -server is required with -task")
 		os.Exit(2)
 	case *server != "":
-		registry.Register(mcp.NewPullRequestTools(
+		registry.Register(mcp.NewOpenPullRequestTools(
 			daemonPullRequests{client: ui.NewHTTPClient(*server), taskID: *taskID})...)
 	}
 
@@ -158,6 +196,58 @@ func mcpserver(args []string) {
 	if err := mcp.Serve(context.Background(), registry, bufio.NewReader(os.Stdin), bufio.NewWriter(os.Stdout)); err != nil && !errors.Is(err, io.EOF) {
 		log.Fatalf("grain mcpserver: %v", err)
 	}
+}
+
+// pullRequestTools builds pull_request_status for repo/branch, reading
+// GitHub with the credential ladder under dataDir -- the very files
+// `grain daemon` loads for its own REST client (its credentialTokenSource
+// call site), opened a second time here because this is a separate
+// process with no route back into that one.
+//
+// Nothing here is fatal, and that is deliberate: every other tool this
+// process serves is how the agent touches its sandbox at all, so exiting
+// because CI happens to be unreadable would turn a missing credential
+// into a run that cannot edit a file. mcp.NewPullRequestTools registers
+// the tool with a nil reader instead, which answers any call with a
+// sentence saying there is nothing to report -- and the reason goes to
+// stderr, where the daemon's own subprocess plumbing already carries it
+// to an operator.
+func pullRequestTools(dataDir, githubHost string, insecureHTTP bool, repo, branch string) []mcp.Tool {
+	client, scope, err := pullRequestReader(dataDir, githubHost, insecureHTTP, repo, branch)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "grain mcpserver: pull_request_status is unavailable this run: %v\n", err)
+		return mcp.NewPullRequestTools(nil, mcp.PullRequestScope{})
+	}
+	return mcp.NewPullRequestTools(client, scope)
+}
+
+// pullRequestReader resolves the flags into a client and the one branch
+// it may be asked about. An unset -pr-repo is not an error but a task
+// with no repo attached (orchestrator.BuildPrompt has its own sentence
+// for that case), so it returns a nil client and no error at all --
+// there is nothing to warn an operator about.
+func pullRequestReader(dataDir, githubHost string, insecureHTTP bool, repo, branch string) (mcp.PullRequestReader, mcp.PullRequestScope, error) {
+	if repo == "" {
+		return nil, mcp.PullRequestScope{}, nil
+	}
+	if branch == "" {
+		return nil, mcp.PullRequestScope{}, fmt.Errorf("-pr-branch is required with -pr-repo")
+	}
+	if dataDir == "" {
+		return nil, mcp.PullRequestScope{}, fmt.Errorf("-data-dir is required with -pr-repo")
+	}
+	ref, err := model.ParseRepo(repo)
+	if err != nil {
+		return nil, mcp.PullRequestScope{}, fmt.Errorf("-pr-repo %q: %w", repo, err)
+	}
+	credentials, err := gitproxy.LoadCredentialSet(filepath.Join(dataDir, "secrets", "github"))
+	if err != nil {
+		return nil, mcp.PullRequestScope{}, fmt.Errorf("loading the GitHub credential ladder: %w", err)
+	}
+	transport := github.NewRealTransport(githubHost)
+	transport.UseTLS = !insecureHTTP
+	client := github.NewClient(transport, credentialTokenSource{credentials})
+	return client, mcp.PullRequestScope{Owner: ref.Owner, Repo: ref.Name, Branch: branch}, nil
 }
 
 // mustKonturSandboxTools builds the sandbox tools against konturVM's

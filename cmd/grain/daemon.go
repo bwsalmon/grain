@@ -962,6 +962,11 @@ func buildAntigravityFramework(ctx context.Context, cfg config, secretStore *sec
 			return agentCredential(ctx, secretStore, secrets.GeminiAPIKeySecret, cfg.geminiAPIKeyFile)
 		}),
 		antigravity.WithModel(cfg.geminiModel),
+		// The controller's own GitHub credential ladder, so a run can
+		// call pull_request_status and see CI's verdict on the commits
+		// it pushed. Not a per-run secret and not a sandbox one: the
+		// forked mcpserver reading it runs here, on the controller.
+		antigravity.WithGitHubAccess(cfg.dataDir, cfg.githubHost, cfg.githubInsecureHTTP),
 	}
 	if cfg.konturSandboxes {
 		// Only meaningful with -kontur-sandboxes, exactly as for
@@ -1023,6 +1028,9 @@ func buildClaudeFramework(ctx context.Context, cfg config, secretStore *secrets.
 			return agentCredential(ctx, secretStore, secrets.ClaudeOAuthTokenSecret, cfg.claudeOAuthTokenFile)
 		}),
 		claude.WithModel(cfg.claudeModel),
+		// The controller's own GitHub credential ladder -- see the
+		// identical line in buildAntigravityFramework.
+		claude.WithGitHubAccess(cfg.dataDir, cfg.githubHost, cfg.githubInsecureHTTP),
 	}
 	if cfg.konturSandboxes {
 		// Only meaningful with -kontur-sandboxes: a run dispatched
@@ -1881,7 +1889,7 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 	}
 	uiCfg := ui.Config{
 		Actor:        ui.DefaultActor(actorID(cfg.actor)),
-		Capabilities: ui.DefaultCapabilities(),
+		Capabilities: ui.OfferedCapabilities(),
 		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,

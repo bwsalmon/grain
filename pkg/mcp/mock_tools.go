@@ -8,11 +8,18 @@ import (
 
 // ProposedTask is one propose_task call, recorded rather than filed as a
 // real GitHub issue -- v2 has no GitHub client yet.
+//
+// AutoMerge is a pointer because "the agent said nothing" and "the agent
+// said false" are different answers: an unset auto_merge inherits the
+// proposing task's own setting (orchestrator.relayProposedTasks says why),
+// and an explicit false opts a proposal out of an inheritance it would
+// otherwise get.
 type ProposedTask struct {
 	ID        string
 	Title     string
 	Body      string
 	DependsOn []string
+	AutoMerge *bool
 }
 
 // ReviewComment is one add_review_comment call, recorded rather than
@@ -167,7 +174,17 @@ func proposeTaskTool(sink *MockSink) Tool {
 			"a later propose_task call in this same run should list this " +
 			"one in its own depends_on -- for example, to propose a small " +
 			"chain of tasks where the second can't start until the first " +
-			"is done.",
+			"is done. Say what the new task has to wait on in depends_on: " +
+			"the task you are working on now, when the follow-up only " +
+			"makes sense once this one's change has landed, and any " +
+			"earlier proposal in this same run it builds on. A proposal " +
+			"with no depends_on can be approved and dispatched alongside " +
+			"yours, so leaving one off is what puts two agents in the same " +
+			"code at once. A proposal that is a piece of the task you were " +
+			"given lands the way the whole of it would have, auto-merge " +
+			"included, so leave auto_merge alone for one of those; set it " +
+			"to false on a proposal that is separate work and deserves a " +
+			"review of its own.",
 		InputSchema: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
@@ -184,9 +201,24 @@ func proposeTaskTool(sink *MockSink) Tool {
 				"depends_on": map[string]any{
 					"type":  "array",
 					"items": map[string]any{"type": "string"},
-					"description": "Existing issue numbers, and/or ids given to " +
-						"earlier propose_task calls in this same run, that " +
-						"this task must wait on before it can start.",
+					"description": "Existing task ids (the task you are working on " +
+						"now included), and/or ids given to earlier " +
+						"propose_task calls in this same run, that this task " +
+						"must wait on before it can start. Each one is filed " +
+						"as a real dependency: the proposal stays blocked " +
+						"until everything it names is done, even after a " +
+						"human approves it.",
+				},
+				"auto_merge": map[string]any{
+					"type": "boolean",
+					"description": "Whether this proposal's own pull request should " +
+						"merge without human review. Defaults to whatever " +
+						"the task you are working on now does, which is what " +
+						"you want for a piece of that same task; pass false " +
+						"for separate work that deserves its own review. " +
+						"Passing true cannot grant more than your own task " +
+						"has -- if your task is not an auto-merge job, " +
+						"neither is anything you propose.",
 				},
 			},
 			"required": []string{"title", "body"},
@@ -199,6 +231,9 @@ func proposeTaskTool(sink *MockSink) Tool {
 			}
 			id, _ := argString(args, "id")
 			task := ProposedTask{ID: id, Title: title, Body: body, DependsOn: argStringSlice(args, "depends_on")}
+			if autoMerge, ok := argBool(args, "auto_merge"); ok {
+				task.AutoMerge = &autoMerge
+			}
 
 			sink.mu.Lock()
 			sink.proposedTasks = append(sink.proposedTasks, task)

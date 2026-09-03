@@ -374,6 +374,53 @@ describe("SettingsOverlay", () => {
     });
   });
 
+  // grain/task-14: which capabilities every new task is filed
+  // holding is a deployment setting, chosen on the same tab that reports
+  // whether each one is ready. Only grantable ones are offered -- a
+  // default no task could be granted by hand would fail at every filing.
+  it("picks default capabilities on the Capabilities tab and sends the whole set", async () => {
+    const capabilities = [
+      { id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true },
+      { id: "gemini-key", name: "Gemini key", description: "Mint a Gemini key", ready: true, grantable: true },
+      { id: "retired", name: "Retired", description: "No picker row", ready: true, grantable: false },
+    ];
+    api.mockResolvedValueOnce({ ...settings, capabilities }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.click(screen.getByLabelText("Default capabilities"));
+    expect(screen.queryByRole("option", { name: "Retired" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: "GCP key" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+  });
+
+  it("leaves default capabilities out of the payload when they are not touched", async () => {
+    const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
+    api
+      .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key"] })
+      .mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.type(screen.getByLabelText(/GCP project/), "acme-proj");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ gcpProject: "acme-proj" }),
+    });
+  });
+
   it("switches to the Secrets tab and shows its panel", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();

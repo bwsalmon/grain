@@ -22,9 +22,9 @@ func (f *fakeOpener) OpenPullRequest(context.Context) (PullRequestReport, error)
 // registry, with whatever arguments the model sent.
 func openPullRequest(t *testing.T, opener PullRequestOpener, args map[string]any) Result {
 	t.Helper()
-	tools := NewPullRequestTools(opener)
+	tools := NewOpenPullRequestTools(opener)
 	if len(tools) != 1 || tools[0].Name != "open_pull_request" {
-		t.Fatalf("NewPullRequestTools returned %+v, want one open_pull_request tool", tools)
+		t.Fatalf("NewOpenPullRequestTools returned %+v, want one open_pull_request tool", tools)
 	}
 	return tools[0].Handler(context.Background(), args)
 }
@@ -121,7 +121,7 @@ func TestOpenPullRequestWithNoOpenerRefuses(t *testing.T) {
 // pushes to are grain's to decide, and a schema that admitted any of them
 // would invite an agent to try.
 func TestOpenPullRequestTakesNoArguments(t *testing.T) {
-	tool := NewPullRequestTools(nil)[0]
+	tool := NewOpenPullRequestTools(nil)[0]
 	props, ok := tool.InputSchema["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("InputSchema = %+v, want a properties object", tool.InputSchema)
@@ -139,7 +139,7 @@ func TestOpenPullRequestTakesNoArguments(t *testing.T) {
 // (claude's --mcp-config fork) ever gets.
 func TestOpenPullRequestIsCallableThroughTheRegistry(t *testing.T) {
 	registry := NewRegistry()
-	registry.Register(NewPullRequestTools(&fakeOpener{report: PullRequestReport{
+	registry.Register(NewOpenPullRequestTools(&fakeOpener{report: PullRequestReport{
 		Repo: "acme/widgets", Number: 7, ChecksAvailable: true,
 	}})...)
 	client := NewInProcess(context.Background(), registry)

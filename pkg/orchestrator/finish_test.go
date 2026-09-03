@@ -3,6 +3,7 @@ package orchestrator_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -488,6 +489,221 @@ func TestProcessResultProposedTaskDoesNotInheritAutoMergeFromANonAutoMergeParent
 	}
 	if proposal.AutoMerge {
 		t.Error("AutoMerge = true, want false -- nothing here opted this proposal into the merge queue")
+	}
+}
+
+// proposalsByTitle collects every task in the store except the one that
+// proposed them, keyed by title: ListTasks' own order is the queue's, not
+// the order a run made its propose_task calls in, and a title is the only
+// thing about a proposal a test knows before it is filed.
+func proposalsByTitle(t *testing.T, ctx context.Context, store *model.Store, proposer string) map[string]model.Task {
+	t.Helper()
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]model.Task{}
+	for _, task := range tasks {
+		if task.ID != proposer {
+			out[task.Title] = task
+		}
+	}
+	return out
+}
+
+// dependsOn is every task id a proposal is blocked on, in link order.
+func dependsOn(task model.Task) []string {
+	var out []string
+	for _, l := range task.Links {
+		if l.Kind == model.LinkDependsOn {
+			out = append(out, l.Target)
+		}
+	}
+	return out
+}
+
+// TestProcessResultResolvesProposedTaskDependencies covers the etiquette
+// propose_task's own description asks an agent for: a proposal that has
+// to follow other work says so in depends_on, and lands blocked on it
+// rather than dispatchable the moment a human approves it.
+//
+// Both spellings a run has resolve here -- an existing task id (its own,
+// the usual case for a piece split out of the work in hand) and the local
+// `id` of an earlier propose_task call in the same run -- and a duplicate
+// collapses rather than filing the same link twice.
+func TestProcessResultResolvesProposedTaskDependencies(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+
+	result := toolResult(
+		agent.ToolCall{
+			Name: "propose_task",
+			Arguments: map[string]any{
+				"id":         "spec",
+				"title":      "write the spec",
+				"body":       "the shape first",
+				"depends_on": []any{"t1"},
+			},
+		},
+		// "#t1" is the v1 issue-number spelling of the same task the
+		// entry after it names, and naming it twice is one dependency.
+		agent.ToolCall{
+			Name: "propose_task",
+			Arguments: map[string]any{
+				"title":      "build it",
+				"body":       "then the thing itself",
+				"depends_on": []any{"spec", "#t1", "t1"},
+			},
+		},
+	)
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposals := proposalsByTitle(t, ctx, store, task.ID)
+	spec, ok := proposals["write the spec"]
+	if !ok {
+		t.Fatalf("the first proposal was never filed: %v", proposals)
+	}
+	build, ok := proposals["build it"]
+	if !ok {
+		t.Fatalf("the second proposal was never filed: %v", proposals)
+	}
+
+	if got := dependsOn(spec); len(got) != 1 || got[0] != task.ID {
+		t.Errorf("first proposal depends on %v, want just the task that proposed it (%s)", got, task.ID)
+	}
+	// Two, not three: "#t1" and "t1" are the same dependency. Links come
+	// back ordered by target rather than in the order the run named them
+	// (Store.hydrate), so this checks membership.
+	got := dependsOn(build)
+	if len(got) != 2 || !slices.Contains(got, spec.ID) || !slices.Contains(got, task.ID) {
+		t.Errorf("second proposal depends on %v, want the first proposal (%s) and %s, once each",
+			got, spec.ID, task.ID)
+	}
+
+	// A resolved dependency is a real block, not a note: neither
+	// proposal is dispatchable while the task that proposed them is
+	// still open, approval or no approval.
+	if !model.IsBlocked(build, map[string]bool{}) {
+		t.Error("the second proposal is not blocked by anything")
+	}
+}
+
+// An entry that names nothing grain can find is kept where a human will
+// see it rather than dropped: a proposal filed silently unblocked is one
+// an approver has no reason to look twice at.
+func TestProcessResultKeepsAnUnresolvableDependencyInTheProposalBody(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+
+	result := toolResult(agent.ToolCall{
+		Name: "propose_task",
+		Arguments: map[string]any{
+			"title":      "follow-up work",
+			"body":       "do more of this",
+			"depends_on": []any{"no-such-task"},
+		},
+	})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposal, ok := proposalsByTitle(t, ctx, store, task.ID)["follow-up work"]
+	if !ok {
+		t.Fatal("the proposed task was never filed")
+	}
+	if deps := dependsOn(proposal); len(deps) != 0 {
+		t.Errorf("depends on %v, want nothing -- a link to a task that does not exist never unblocks", deps)
+	}
+	if !strings.Contains(proposal.Body, "no-such-task") {
+		t.Errorf("body = %q, want the unresolved dependency named in it", proposal.Body)
+	}
+}
+
+// TestProcessResultProposedTaskCanDeclineInheritedAutoMerge is the other
+// half of bwsalmon/agents#345's inheritance: a run that judges a proposal
+// to be separate work rather than a piece of its own task says so with
+// auto_merge, and that proposal gets a human's review even though the job
+// that proposed it did not need one.
+func TestProcessResultProposedTaskCanDeclineInheritedAutoMerge(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.AutoMerge = true
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatalf("marking t1 auto-merge: %v", err)
+	}
+
+	result := toolResult(
+		agent.ToolCall{
+			Name: "propose_task",
+			Arguments: map[string]any{
+				"title":      "the rest of this task",
+				"body":       "a piece of the same work",
+				"auto_merge": true,
+			},
+		},
+		agent.ToolCall{
+			Name: "propose_task",
+			Arguments: map[string]any{
+				"title":      "something else entirely",
+				"body":       "separate work",
+				"auto_merge": false,
+			},
+		},
+	)
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposals := proposalsByTitle(t, ctx, store, task.ID)
+	piece, ok := proposals["the rest of this task"]
+	if !ok {
+		t.Fatalf("the first proposal was never filed: %v", proposals)
+	}
+	separate, ok := proposals["something else entirely"]
+	if !ok {
+		t.Fatalf("the second proposal was never filed: %v", proposals)
+	}
+	if !piece.AutoMerge {
+		t.Error("AutoMerge = false on a piece of an auto-merge task that asked for it")
+	}
+	if separate.AutoMerge {
+		t.Error("AutoMerge = true on a proposal that asked not to be one")
+	}
+}
+
+// auto_merge cannot raise a proposal above the job that made it: a run
+// whose own task a human left reviewable cannot hand its successor the
+// unreviewed merge it was denied.
+func TestProcessResultProposedTaskCannotGrantItselfAutoMerge(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+
+	result := toolResult(agent.ToolCall{
+		Name: "propose_task",
+		Arguments: map[string]any{
+			"title": "follow-up work", "body": "do more of this", "auto_merge": true,
+		},
+	})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposal, ok := proposalsByTitle(t, ctx, store, task.ID)["follow-up work"]
+	if !ok {
+		t.Fatal("the proposed task was never filed")
+	}
+	if proposal.AutoMerge {
+		t.Error("AutoMerge = true, want false -- a run cannot grant its proposal what its own task lacked")
 	}
 }
 

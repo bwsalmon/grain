@@ -78,7 +78,7 @@ func TestCmdSyncAppliesSettingsAgainstAnEmbeddedStore(t *testing.T) {
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("applying schema: %v", err)
 	}
-	srv := httptest.NewServer(ui.NewServer(ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.DefaultCapabilities()}, store))
+	srv := httptest.NewServer(ui.NewServer(ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.OfferedCapabilities()}, store))
 	defer srv.Close()
 
 	path := writeSyncConfig(t, dir, syncConfig{Settings: settingsRequest(pollInterval, maxConcurrent, geminiModel, claudeModel, githubHost)})

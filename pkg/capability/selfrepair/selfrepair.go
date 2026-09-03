@@ -3,7 +3,7 @@
 // grain's own controller runs on -- restart a systemd unit, poke at
 // grain's own config, call the grain CLI itself, anything a person at
 // that host's own terminal could do -- bwsalmon/agents#540's
-// "configuration mode." ui.DefaultCapabilities' own "self-repair" row
+// "configuration mode." ui.OfferedCapabilities' own "self-repair" row
 // has named this since before there was anything behind it; this is
 // that provider.
 //
@@ -33,7 +33,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/procgroup"
 )
 
-// CapabilityName is the grant name ui.DefaultCapabilities lists as
+// CapabilityName is the grant name ui.OfferedCapabilities lists as
 // "self-repair".
 const CapabilityName = "self-repair"
 
