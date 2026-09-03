@@ -221,6 +221,18 @@ func mcpPullRequestRepo(t *testing.T, upstream, owner, name, branch, subject str
 	return bare, sha
 }
 
+// actionsLog is what GitHub serves for a job's log: every line prefixed
+// with the same RFC3339 stamp. Written out here rather than seeded as
+// bare lines because the stamp coming *off* again on the way to an agent
+// is part of what these tests check (github.JobLogExcerpt).
+func actionsLog(lines ...string) string {
+	var b strings.Builder
+	for _, line := range lines {
+		b.WriteString("2026-01-02T03:04:05.1234567Z " + line + "\n")
+	}
+	return b.String()
+}
+
 func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -262,6 +274,17 @@ func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 		{Name: "unit-tests", Status: "completed", Conclusion: &failure},
 		{Name: "lint", Status: "completed", Conclusion: &success},
 		{Name: "integration", Status: "in_progress"},
+	}
+	// ...and the Actions jobs behind them, because a check name alone is
+	// where an agent's answer used to stop. Reading the failing job's own
+	// log is three more endpoints deep (a commit's runs, that run's jobs,
+	// that job's log), each of them a path only this test drives from a
+	// real subprocess -- and the passing job is here so that "the answer
+	// carries a log" cannot be satisfied by dumping every job's output.
+	sim.WorkflowJobs[sha] = []githubsim.WorkflowJob{
+		{Name: "unit-tests", Conclusion: "failure", Log: actionsLog(
+			"--- FAIL: TestFold (0.00s)", "    fold_test.go:12: got 3 folds, want 4", "FAIL")},
+		{Name: "lint", Conclusion: "success", Log: actionsLog("no issues found")},
 	}
 	wire := &authRecordingSim{inner: &syncedSim{sim: sim}}
 	host := githubHostServer(t, wire, upstream)
@@ -342,10 +365,26 @@ func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 			"ok       lint (success)",
 			"running  integration (in_progress)",
 			"1 failing, 1 not finished, 1 otherwise done.",
+			// And what the failing job printed, which is the difference
+			// between a run that can fix the build and one that has to
+			// go and guess what "unit-tests" meant.
+			"--- FAIL: TestFold (0.00s)",
+			"fold_test.go:12: got 3 folds, want 4",
+			"/actions/runs/",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("pull_request_status answer is missing %q; full answer:\n%s", want, got)
 			}
+		}
+		// The passing job's log is not carried: only what failed is worth
+		// an agent's context window.
+		if strings.Contains(got, "no issues found") {
+			t.Errorf("pull_request_status carries a passing job's log; full answer:\n%s", got)
+		}
+		// Actions stamps every line of every log; the stamp says nothing
+		// about the failure and comes off on the way here.
+		if strings.Contains(got, "2026-01-02T03:04:05") {
+			t.Errorf("pull_request_status carries Actions' per-line timestamps; full answer:\n%s", got)
 		}
 
 		// And it got there authenticated as the credential on disk: the
@@ -387,6 +426,9 @@ func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 			sha[:7],
 			"FAILING  unit-tests (failure)",
 			"CI has failed",
+			// The log travels with the wait's verdict too -- the whole
+			// reason a run calls this one instead of polling.
+			"--- FAIL: TestFold (0.00s)",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("wait_for_checks answer is missing %q; full answer:\n%s", want, got)

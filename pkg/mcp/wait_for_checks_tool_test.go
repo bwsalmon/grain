@@ -24,8 +24,15 @@ type scriptedChecks struct {
 	rounds [][]github.CheckRun
 	errs   []error
 
+	jobLogs    []github.JobLog
+	jobLogsErr error
+
 	reads int
-	repos []string
+	// logReads counts the reads of the failing jobs' logs, which is how a
+	// test pins that they are read on the failing path only rather than
+	// once per poll.
+	logReads int
+	repos    []string
 }
 
 func (s *scriptedChecks) GetBranchHead(owner, repo, branch string) (*github.BranchHead, error) {
@@ -59,6 +66,12 @@ func (s *scriptedChecks) ListCheckRuns(owner, repo, ref string) ([]github.CheckR
 
 func (s *scriptedChecks) ListWorkflowRuns(owner, repo, headSHA string) ([]github.CheckRun, error) {
 	return nil, &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible"}`)}
+}
+
+func (s *scriptedChecks) FailedJobLogs(owner, repo, headSHA string) ([]github.JobLog, error) {
+	s.repos = append(s.repos, owner+"/"+repo)
+	s.logReads++
+	return s.jobLogs, s.jobLogsErr
 }
 
 // fakeClock is a clock that only ever moves when the waiter sleeps, so a
@@ -161,6 +174,67 @@ func TestWaitForChecksReturnsAsSoonAsACheckFails(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("answer does not contain %q:\n%s", want, text)
 		}
+	}
+}
+
+// ...and it ends with what the failing job printed, not just its name.
+// A run told "FAILING tests" and nothing else spends its next turns
+// guessing at the failure; a run handed the tail of the job's own log
+// starts on the fix. The logs are read once, on the failing path -- a
+// wait that fetched them at every fifteen-second poll would spend a
+// full-length wait reading a lot of nothing.
+func TestWaitForChecksCarriesTheFailingJobsLog(t *testing.T) {
+	client := &scriptedChecks{
+		head: pushed(),
+		rounds: [][]github.CheckRun{
+			{running("tests")},
+			{running("tests")},
+			{done("tests", "failure")},
+		},
+		jobLogs: []github.JobLog{{
+			Name: "tests",
+			URL:  "https://github.com/acme/widgets/actions/runs/42/job/7",
+			Log:  "2026-01-02T03:04:05.1234567Z --- FAIL: TestThing (0.00s)\n",
+		}},
+	}
+
+	text, err := waiterFor(client, &fakeClock{}).wait(context.Background(), DefaultWaitForChecksTimeout)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if client.logReads != 1 {
+		t.Errorf("read the failing jobs' logs %d times, want once -- on the failure, not per poll",
+			client.logReads)
+	}
+	for _, want := range []string{
+		"CI has failed", "--- FAIL: TestThing",
+		"https://github.com/acme/widgets/actions/runs/42/job/7",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("answer does not contain %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "2026-01-02T03:04:05") {
+		t.Errorf("answer carries Actions' per-line timestamps:\n%s", text)
+	}
+}
+
+// A green wait reads no logs at all: there is nothing to read, and
+// finding that out costs three GitHub calls per poll.
+func TestWaitForChecksReadsNoLogsWhileNothingHasFailed(t *testing.T) {
+	client := &scriptedChecks{
+		head: pushed(),
+		rounds: [][]github.CheckRun{
+			{running("tests")},
+			{done("tests", "success")},
+		},
+	}
+	if _, err := waiterFor(client, &fakeClock{}).wait(context.Background(), DefaultWaitForChecksTimeout); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if client.logReads != 0 {
+		t.Errorf("read the failing jobs' logs %d times on a wait that never saw a failure",
+			client.logReads)
 	}
 }
 

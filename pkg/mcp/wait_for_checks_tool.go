@@ -107,9 +107,11 @@ func waitForChecksTool(client PullRequestReader, scope PullRequestScope) Tool {
 		Description: fmt.Sprintf("Block until CI has an actual verdict on the commit at the tip "+
 			"of your branch, then report it -- instead of calling "+
 			"pull_request_status over and over and spending turns waiting. "+
-			"It returns as soon as any check fails (so you can start fixing "+
-			"without waiting for the rest), or once every check has finished "+
-			"with none failing, or when it times out. Push first: it reports "+
+			"It returns as soon as any check fails -- with the end of each "+
+			"failing job's own log, so you can start fixing without waiting "+
+			"for the rest and without reproducing the failure first -- or "+
+			"once every check has finished with none failing, or when it "+
+			"times out. Push first: it reports "+
 			"on your latest pushed commit and does not watch for new ones. "+
 			"Optional timeout_seconds bounds the wait (default %d, maximum "+
 			"%d); a timeout is reported, not an error, along with what each "+
@@ -275,7 +277,13 @@ func (w checkWaiter) wait(ctx context.Context, timeout time.Duration) (string, e
 			tally := tallyChecks(checks)
 			switch {
 			case tally.failing > 0:
-				return w.report(sha, w.now().Sub(started), tally, waitVerdictFailed), nil
+				// The logs are read here and nowhere else in the loop.
+				// Until something has failed there is no log to fetch, and
+				// a wait that went looking every fifteen seconds would
+				// spend a full-length wait reading a lot of nothing
+				// (failing_job_logs.go).
+				return w.report(sha, w.now().Sub(started), tally, waitVerdictFailed) +
+					failingJobLogs(w.client, w.scope, head.SHA), nil
 			case len(checks) > 0 && tally.pending == 0:
 				return w.report(sha, w.now().Sub(started), tally, waitVerdictPassed), nil
 			case !everSeen && w.now().Sub(started) >= w.grace:

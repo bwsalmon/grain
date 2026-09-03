@@ -29,6 +29,12 @@ type fakePullRequests struct {
 	workflows    []github.CheckRun
 	workflowsErr error
 
+	jobLogs    []github.JobLog
+	jobLogsErr error
+	// logReads counts the calls to FailedJobLogs, since "did not read the
+	// logs at all" is as much a property worth pinning as what they said.
+	logReads int
+
 	// Every (owner, repo) pair any method was called with, as
 	// "owner/repo", plus every ref a CI read named.
 	repos []string
@@ -63,6 +69,13 @@ func (f *fakePullRequests) ListWorkflowRuns(owner, repo, headSHA string) ([]gith
 	f.note(owner, repo)
 	f.refs = append(f.refs, headSHA)
 	return f.workflows, f.workflowsErr
+}
+
+func (f *fakePullRequests) FailedJobLogs(owner, repo, headSHA string) ([]github.JobLog, error) {
+	f.note(owner, repo)
+	f.refs = append(f.refs, headSHA)
+	f.logReads++
+	return f.jobLogs, f.jobLogsErr
 }
 
 func conclusion(s string) *string { return &s }
@@ -131,6 +144,117 @@ func TestPullRequestStatusNamesFailingChecks(t *testing.T) {
 	// The commit body must not follow the subject into the answer.
 	if strings.Contains(res.Text, "longer body") {
 		t.Errorf("answer carries the whole commit message, not just its subject:\n%s", res.Text)
+	}
+}
+
+// ...and what that failing job printed comes with the name. A check run
+// says only that a job called "go" did not pass, which is enough to know
+// the build is red and not enough to fix it, so the run would otherwise
+// spend its next turns guessing at the failure and trying to reproduce it
+// in a sandbox that is not the runner -- the same gap fileFixTask already
+// closes for the fix task the merge queue files.
+func TestPullRequestStatusQuotesTheFailingJobsLog(t *testing.T) {
+	client := &fakePullRequests{
+		head:   &github.BranchHead{SHA: "0123456789abcdef", Message: "wire it up"},
+		checks: []github.CheckRun{{Name: "go", Status: "completed", Conclusion: conclusion("failure")}},
+		jobLogs: []github.JobLog{{
+			Name: "go",
+			URL:  "https://github.com/acme/widgets/actions/runs/42/job/7",
+			Log: "2026-01-02T03:04:05.1234567Z --- FAIL: TestThing (0.00s)\n" +
+				"2026-01-02T03:04:05.1234567Z     a_test.go:12: got 3, want 4\n",
+			Truncated: true,
+		}},
+	}
+
+	res := call(t, client, testScope)
+	if res.IsError {
+		t.Fatalf("IsError = true, want a plain answer: %s", res.Text)
+	}
+	for _, want := range []string{
+		"FAILING", "--- FAIL: TestThing", "a_test.go:12: got 3, want 4",
+		"https://github.com/acme/widgets/actions/runs/42/job/7",
+		"````", "the tail of the log",
+	} {
+		if !strings.Contains(res.Text, want) {
+			t.Errorf("answer does not carry %q:\n%s", want, res.Text)
+		}
+	}
+	// Actions stamps every line with the same timestamp, which says
+	// nothing about the failure and costs a quarter of each line.
+	if strings.Contains(res.Text, "2026-01-02T03:04:05") {
+		t.Errorf("answer carries Actions' per-line timestamps:\n%s", res.Text)
+	}
+	// The logs are read against the commit the checks were read against,
+	// never widened to the branch.
+	for _, ref := range client.refs {
+		if ref != testScope.Branch && ref != "0123456789abcdef" {
+			t.Errorf("a read named %q, want the branch's tip commit", ref)
+		}
+	}
+}
+
+// Nothing failed, so nothing is read: the logs cost three GitHub calls
+// (github.FailedJobLogs walks runs, then jobs, then a log) and a green
+// commit has none of them to find.
+func TestPullRequestStatusReadsNoLogsForAGreenBuild(t *testing.T) {
+	client := &fakePullRequests{
+		head: &github.BranchHead{SHA: "0123456789abcdef", Message: "wire it up"},
+		checks: []github.CheckRun{
+			{Name: "go", Status: "completed", Conclusion: conclusion("success")},
+			{Name: "docs", Status: "in_progress"},
+		},
+	}
+
+	res := call(t, client, testScope)
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	if client.logReads != 0 {
+		t.Errorf("read the failing jobs' logs %d times for a commit with no failing job", client.logReads)
+	}
+}
+
+// A credential without Actions read degrades to the answer this tool gave
+// before the logs existed -- the checks, with the failing ones named --
+// rather than turning a report of a red build into an error about logs.
+// The same call checkRunsForCommit's own fallback makes.
+func TestPullRequestStatusStillReportsAFailureWhenTheLogsAreUnreadable(t *testing.T) {
+	denied := &github.Error{Status: 403, Body: []byte(`{"message":"Resource not accessible by personal access token"}`)}
+	if !github.IsPermissionDenied(denied) {
+		t.Fatal("test fixture is not a permission denial; github.IsPermissionDenied changed")
+	}
+	res := call(t, &fakePullRequests{
+		head:       &github.BranchHead{SHA: "0123456789abcdef", Message: "wire it up"},
+		checks:     []github.CheckRun{{Name: "go", Status: "completed", Conclusion: conclusion("failure")}},
+		jobLogsErr: denied,
+	}, testScope)
+
+	if res.IsError {
+		t.Fatalf("IsError = true, want the red build reported anyway: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "FAILING") || !strings.Contains(res.Text, "1 failing") {
+		t.Errorf("answer stopped naming the failing check:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "may not read Actions job logs") {
+		t.Errorf("answer does not say why there is no log under the failure:\n%s", res.Text)
+	}
+}
+
+// An Actions log that is simply not there -- a third-party CI's check, or
+// a log past GitHub's retention window -- is said out loud too. A reader
+// told a job failed and shown nothing under it cannot otherwise tell "no
+// log" from "this tool forgot".
+func TestPullRequestStatusSaysWhenThereIsNoJobLogAtAll(t *testing.T) {
+	res := call(t, &fakePullRequests{
+		head:   &github.BranchHead{SHA: "0123456789abcdef", Message: "wire it up"},
+		checks: []github.CheckRun{{Name: "buildkite/tests", Status: "completed", Conclusion: conclusion("failure")}},
+	}, testScope)
+
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "no failed job with a readable log") {
+		t.Errorf("answer does not account for the missing log:\n%s", res.Text)
 	}
 }
 

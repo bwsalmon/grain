@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"errors"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -180,42 +179,6 @@ func TestHealthReasonStillExplainsFailingWithNoNamedChecks(t *testing.T) {
 	got := healthReason(model.PrFailing, github.PullRequestDetail{BaseRef: "main"}, nil)
 	if !strings.Contains(got, "checks") {
 		t.Fatalf("healthReason = %q, want it to still say the checks are failing", got)
-	}
-}
-
-// ...and what those jobs printed goes in under them. A job log is the
-// whole job, tens of thousands of lines of setup and cache restore
-// included, so what lands in a task body is its last few -- the part
-// where something broke -- with the timestamp Actions repeats on every
-// line taken off.
-func TestJobLogExcerptKeepsTheLastLinesWithoutTheirTimestamps(t *testing.T) {
-	var log strings.Builder
-	for i := 0; i < 500; i++ {
-		log.WriteString("2026-01-02T03:04:05.1234567Z line ")
-		log.WriteString(strconv.Itoa(i))
-		log.WriteString("\n")
-	}
-	got := jobLogExcerpt(log.String())
-
-	lines := strings.Split(got, "\n")
-	if len(lines) != fixLogTailLines {
-		t.Fatalf("kept %d lines, want %d", len(lines), fixLogTailLines)
-	}
-	if lines[0] != "line 420" {
-		t.Errorf("first kept line = %q, want the %dth from the end", lines[0], fixLogTailLines)
-	}
-	if lines[len(lines)-1] != "line 499" {
-		t.Errorf("last kept line = %q, want the end of the log", lines[len(lines)-1])
-	}
-}
-
-// A log shorter than the cap keeps every line it has, and a log that
-// isn't from Actions at all (a third-party CI's, one day) keeps its lines
-// exactly as they came.
-func TestJobLogExcerptLeavesAShortUnstampedLogAlone(t *testing.T) {
-	const log = "--- FAIL: TestThing (0.00s)\n    a_test.go:12: got 3, want 4\nFAIL\n"
-	if got := jobLogExcerpt(log); got != strings.TrimRight(log, "\n") {
-		t.Fatalf("jobLogExcerpt = %q, want it unchanged", got)
 	}
 }
 

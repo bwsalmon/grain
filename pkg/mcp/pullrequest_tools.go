@@ -56,7 +56,7 @@ func (s PullRequestScope) complete() bool {
 }
 
 // PullRequestReader is the read-only slice of github.Client this tool
-// needs. Narrowed to five methods rather than taking the whole interface
+// needs. Narrowed to six methods rather than taking the whole interface
 // so that what an agent can reach through here is legible at a glance:
 // there is no mutation in this set at all, and nothing that names a repo
 // the caller did not already pin in PullRequestScope.
@@ -66,6 +66,11 @@ type PullRequestReader interface {
 	GetPullRequest(owner, repo string, number int) (github.PullRequestDetail, error)
 	ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, error)
 	ListWorkflowRuns(owner, repo, headSHA string) ([]github.CheckRun, error)
+	// FailedJobLogs is what turns a named failing check into something a
+	// run can act on without leaving its sandbox -- see
+	// failing_job_logs.go. Read-only like the rest, and scoped to a
+	// commit the caller already had to name.
+	FailedJobLogs(owner, repo, headSHA string) ([]github.JobLog, error)
 }
 
 // NewPullRequestTools returns the tools a run gets for watching its own
@@ -96,7 +101,8 @@ func pullRequestStatusTool(client PullRequestReader, scope PullRequestScope) Too
 		Description: "Show what GitHub currently says about the branch you are " +
 			"pushing to: the pull request open for it, if there is one " +
 			"yet, and every CI check reported against your latest pushed " +
-			"commit, with the failing ones named. Use this to find out " +
+			"commit, with the failing ones named and the end of each " +
+			"failing job's own log quoted under it. Use this to find out " +
 			"whether the tests actually pass -- commit, `git push` your " +
 			"branch, then call this to read CI's verdict on that commit, " +
 			"and repeat until it is green. Checks are reported per commit, " +
@@ -190,6 +196,12 @@ func pullRequestStatus(client PullRequestReader, scope PullRequestScope) (string
 	}
 	b.WriteString("\n")
 	b.WriteString(renderChecks(checks, scope.Branch, shortSHA(head.SHA)))
+	// Only once something has failed: there are no logs to read on a
+	// green commit, and the three reads it costs are not worth making to
+	// find that out (failing_job_logs.go).
+	if anyFailed(checks) {
+		b.WriteString(failingJobLogs(client, scope, head.SHA))
+	}
 	return b.String(), nil
 }
 
@@ -243,6 +255,18 @@ func checkFailed(c github.CheckRun) bool {
 	switch *c.Conclusion {
 	case "failure", "timed_out", "startup_failure":
 		return true
+	}
+	return false
+}
+
+// anyFailed reports whether any of these checks is one the report will
+// call FAILING -- the one question worth asking before spending reads on
+// the failing jobs' logs.
+func anyFailed(checks []github.CheckRun) bool {
+	for _, c := range checks {
+		if checkFailed(c) {
+			return true
+		}
 	}
 	return false
 }
