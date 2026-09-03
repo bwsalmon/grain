@@ -368,7 +368,10 @@ describe("DetailOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
     act.mock.calls[0][0]();
-    expect(api).toHaveBeenCalledWith("/api/tasks/12/close", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/close", {
+      method: "POST",
+      body: JSON.stringify({ close_pull_request: false }),
+    });
     vi.unstubAllGlobals();
   });
 
@@ -380,7 +383,104 @@ describe("DetailOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Close" }));
 
     act.mock.calls[0][0]();
-    expect(api).toHaveBeenCalledWith("/api/tasks/12/close", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/close", {
+      method: "POST",
+      body: JSON.stringify({ close_pull_request: false }),
+    });
+  });
+
+  // The one choice in grain that destroys work on GitHub, so it is worth
+  // pinning all three halves of it: the box is only offered where there
+  // is an open pull request to close, it is off until somebody ticks it,
+  // and what it sends is read at the moment Close is clicked.
+  it("offers to close an open pull request alongside the task, unticked", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#42" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />
+    );
+
+    const box = screen.getByRole("checkbox", { name: /Close acme\/widgets#42 too/ });
+    expect(box).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/close", {
+      method: "POST",
+      body: JSON.stringify({ close_pull_request: false }),
+    });
+
+    await user.click(box);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    act.mock.calls[1][0]();
+    expect(api).toHaveBeenLastCalledWith("/api/tasks/12/close", {
+      method: "POST",
+      body: JSON.stringify({ close_pull_request: true }),
+    });
+  });
+
+  it("does not offer to close a pull request there is no open one to close", () => {
+    const { rerender } = render(
+      <DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />
+    );
+    expect(screen.queryByRole("checkbox", { name: /too/ })).not.toBeInTheDocument();
+
+    // One that already merged is the same: there is nothing left to
+    // close, and an option with nothing behind it invites a tick that
+    // means nothing.
+    rerender(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          pullRequest: "acme/widgets#42",
+          pullRequestEvents: [{ kind: "merged", at: "2026-08-28T12:00:00Z" }],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole("checkbox", { name: /too/ })).not.toBeInTheDocument();
+  });
+
+  // Cancelling a running task takes the same close path, so it can orphan
+  // a pull request the run had already opened -- and its confirmation has
+  // to say when confirming it will also shut one.
+  it("names the pull request in a cancel confirmation when it will be closed too", async () => {
+    const act = vi.fn();
+    const confirm = vi.fn().mockReturnValue(true);
+    vi.stubGlobal("confirm", confirm);
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "running", pullRequest: "acme/widgets#42" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />
+    );
+
+    await user.click(screen.getByRole("checkbox", { name: /Close acme\/widgets#42 too/ }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(confirm.mock.calls[0][0]).toMatch(/close acme\/widgets#42 on GitHub/);
+    act.mock.calls[0][0]();
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/close", {
+      method: "POST",
+      body: JSON.stringify({ close_pull_request: true }),
+    });
+    vi.unstubAllGlobals();
   });
 
   it("shows declared repo, base, reads and auto-merge", () => {

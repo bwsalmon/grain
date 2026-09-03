@@ -261,6 +261,58 @@ func TestMutatingRoutesRespondWithTheTask(t *testing.T) {
 	}
 }
 
+// The close route's one flag, over the wire and in all three shapes a
+// caller can send it in. The default matters more than the flag: a body
+// that does not mention it, and no body at all, both have to mean "leave
+// the pull request alone", because that is what every caller written
+// before the flag existed sends -- the CLI without it, the batch Close
+// button, a bare `curl -X POST`.
+func TestCloseRouteClosesThePullRequestOnlyWhenAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "no body at all", body: "", want: 0},
+		{name: "a body that says nothing about it", body: `{}`, want: 0},
+		{name: "asked for explicitly", body: `{"close_pull_request":false}`, want: 0},
+		{name: "asked against explicitly", body: `{"close_pull_request":true}`, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, store, ctx := testClient(t)
+			closer := &recordingCloser{}
+			client.Config.PullRequestCloser = closer
+			client.Config.PullRequestComments = &recordingComments{}
+			srv := ui.NewServerWithClient(client)
+			task, _ := linkedTask(t, client, store, ctx)
+
+			rec := do(t, srv, http.MethodPost, "/api/tasks/"+task.ID+"/close", tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+			}
+			if decoded := decode[ui.Task](t, rec); decoded.State != model.StateClosed {
+				t.Fatalf("state = %q, want closed", decoded.State)
+			}
+			if len(closer.closed) != tc.want {
+				t.Fatalf("closed on GitHub = %+v, want %d", closer.closed, tc.want)
+			}
+		})
+	}
+}
+
+// A body that is there and is nonsense is still the caller's mistake --
+// tolerating an absent body is not tolerating a broken one, or a typo in
+// the one field would silently read as false.
+func TestCloseRouteRejectsAMalformedBody(t *testing.T) {
+	srv, _ := testServer(t)
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"fix it"}`)
+	id := decode[ui.Task](t, rec).ID
+
+	if rec := do(t, srv, http.MethodPost, "/api/tasks/"+id+"/close", `{`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
 // TestRetryRouteClearsAFailedTasksStreak is handleRetry's own route test
 // (bwsalmon/agents#403's "Retry" button) -- client_test.go's
 // TestRetryClearsAFailedTasksStreak already proves Client.Retry itself

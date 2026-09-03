@@ -111,7 +111,7 @@ func TestHTTPClientUpdateSetCapabilityCommentCloseReopen(t *testing.T) {
 		t.Fatalf("comments = %+v, want the title-edit note followed by one saying hello", detail.Comments)
 	}
 
-	if err := c.Close(ctx, created.ID); err != nil {
+	if err := c.Close(ctx, created.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	closed, err := c.Task(ctx, created.ID)
@@ -150,6 +150,40 @@ func TestHTTPClientRetry(t *testing.T) {
 	// succeeds rather than erroring.
 	if err := c.Retry(ctx, created.ID); err != nil {
 		t.Fatalf("Retry: %v", err)
+	}
+}
+
+// CloseOptions survives the round trip -- the half of `grain close
+// -close-pull-request` that no direct-Client test can show, since the
+// flag has to be encoded, sent, and read back off the request body
+// before it reaches the same Client.Close everything else tests.
+func TestHTTPClientCloseCarriesTheOptionAcrossTheWire(t *testing.T) {
+	for _, want := range []bool{false, true} {
+		storeClient, store, ctx := testClient(t)
+		closer := &recordingCloser{}
+		storeClient.Config.PullRequestCloser = closer
+		storeClient.Config.PullRequestComments = &recordingComments{}
+		srv := httptest.NewServer(ui.NewServerWithClient(storeClient))
+		t.Cleanup(srv.Close)
+		task, ref := linkedTask(t, storeClient, store, ctx)
+
+		c := ui.NewHTTPClient(srv.URL)
+		if err := c.Close(ctx, task.ID, ui.CloseOptions{ClosePullRequest: want}); err != nil {
+			t.Fatalf("Close(%t): %v", want, err)
+		}
+		closed, err := c.Task(ctx, task.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if closed.State != model.StateClosed {
+			t.Fatalf("state after close = %q, want closed", closed.State)
+		}
+		if want && (len(closer.closed) != 1 || closer.closed[0] != ref) {
+			t.Fatalf("closed on GitHub = %+v, want %s", closer.closed, ref)
+		}
+		if !want && len(closer.closed) != 0 {
+			t.Fatalf("closed on GitHub = %+v, want nothing", closer.closed)
+		}
 	}
 }
 

@@ -234,6 +234,46 @@ func TestCloseIssuePatchesTheIssueClosed(t *testing.T) {
 	}
 }
 
+// The pulls endpoint, not the issues one: a pull request's state belongs
+// to PATCH .../pulls/{n}, which is also the only endpoint that would
+// refuse the call on a pull request grain has no push access to.
+func TestClosePullRequestPatchesThePullRequestClosed(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte("{}")})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	if err := client.ClosePullRequest("o", "r", 7); err != nil {
+		t.Fatal(err)
+	}
+	call := transport.Calls[0]
+	if call.Method != "PATCH" || call.Path != "/repos/o/r/pulls/7" {
+		t.Fatalf("got %+v", call)
+	}
+	var body map[string]string
+	json.Unmarshal(call.Body, &body)
+	if body["state"] != "closed" {
+		t.Fatalf("got %+v", body)
+	}
+	// Nothing else in the payload: a PATCH carrying a base or a title
+	// grain did not mean to change would rewrite the pull request while
+	// closing it.
+	if len(body) != 1 {
+		t.Fatalf("body = %+v, want only the state field", body)
+	}
+}
+
+// A refusal is the caller's to hear about. It is not fatal to the close
+// of the task that provoked it (ui.Client.noteOrphanedPullRequests folds
+// it into the note instead), but it has to arrive as an error rather than
+// as a close that quietly did nothing.
+func TestClosePullRequestReportsARefusal(t *testing.T) {
+	transport := NewFakeTransport(ApiResponse{Status: 403, Body: []byte(`{"message":"Resource not accessible"}`)})
+	client := NewClient(transport, StaticToken{strPtr("t")})
+	err := client.ClosePullRequest("o", "r", 7)
+	var ghErr *Error
+	if !errors.As(err, &ghErr) || ghErr.Status != 403 {
+		t.Fatalf("got %v, want the 403 back", err)
+	}
+}
+
 func TestReopenIssuePatchesTheIssueOpen(t *testing.T) {
 	transport := NewFakeTransport(ApiResponse{Status: 200, Body: []byte("{}")})
 	client := NewClient(transport, StaticToken{strPtr("t")})
@@ -1664,11 +1704,12 @@ func TestDryRunClientPassesReadsThroughButPrintsMutations(t *testing.T) {
 		dry.RemoveLabel("o", "r", 1, "grain-agent")
 		dry.CloseIssue("o", "r", 1)
 		dry.ReopenIssue("o", "r", 1)
+		dry.ClosePullRequest("o", "r", 2)
 		if _, err := dry.CreatePullRequest("o", "r", "grain/issue-1", "main", "x", ""); err != nil {
 			t.Fatal(err)
 		}
 	})
-	for _, want := range []string{"add label", "remove label", "close issue", "reopen issue", "open PR"} {
+	for _, want := range []string{"add label", "remove label", "close issue", "reopen issue", "close PR", "open PR"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, out)
 		}

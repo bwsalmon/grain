@@ -1606,6 +1606,29 @@ func (c *Client) AddComment(ctx context.Context, id, body string, uploads []Atta
 	})
 }
 
+// CloseOptions is what a human chose at the moment of closing, beyond
+// closing the task itself.
+//
+// An argument rather than a setting anywhere, on purpose: its one field
+// destroys work on GitHub, and the only defensible basis for that is
+// somebody saying so about this task, now. Nothing stored could mean
+// that, and a default that meant it would eventually mean it about a
+// task nobody was looking at. The zero value is therefore the whole of
+// grain's own behaviour -- every caller that is not a human close passes
+// it, and the checkbox beside the Close button is the only thing in the
+// tree that ever sets the field.
+type CloseOptions struct {
+	// ClosePullRequest asks grain to close the pull request this close
+	// would otherwise orphan, on GitHub, without merging it. The commits
+	// and the branch survive it untouched (reopening the pull request
+	// restores it whole), which is the only reason it is offered at all.
+	//
+	// Best-effort, like the note itself: a GitHub that refuses leaves the
+	// task closed and the pull request open, and says so in the note. See
+	// noteOrphanedPullRequests.
+	ClosePullRequest bool
+}
+
 // Close marks a task closed. Closed is the terminal state
 // model.StateClosed already names, and it is what "delete a task" means
 // here -- the store has no delete either, deliberately: a task that ran
@@ -1613,18 +1636,28 @@ func (c *Client) AddComment(ctx context.Context, id, body string, uploads []Atta
 //
 // A task closed with a pull request still open leaves that pull request
 // behind: grain will not merge it and will not look at it again (only a
-// completed task's fixes-link reaches Store.OpenPullRequestLinks), and
-// nothing in grain closes a pull request. That is the intended outcome,
-// and this is where the person who caused it -- and whoever finds the
-// pull request later -- is told about it. See noteOrphanedPullRequests.
-func (c *Client) Close(ctx context.Context, id string) error {
-	return c.setClosed(ctx, id, true)
+// completed task's fixes-link reaches Store.OpenPullRequestLinks). That
+// is the intended outcome, and this is where the person who caused it --
+// and whoever finds the pull request later -- is told about it.
+//
+// opts.ClosePullRequest is the other ending, and the only way grain ever
+// closes a pull request: whoever is closing the task says, in the same
+// breath, that its pull request should be closed with it. Both endings
+// are said in both places. See noteOrphanedPullRequests.
+func (c *Client) Close(ctx context.Context, id string, opts CloseOptions) error {
+	return c.setClosed(ctx, id, true, opts)
 }
 
 // Reopen clears a task's closure, returning it to whatever state its
 // observations and approval imply.
+//
+// It does not reopen a pull request a close closed. Reopening one is a
+// click on GitHub and grain has no way to tell a pull request it closed
+// from one a human closed themselves, so guessing here would be grain
+// reopening work somebody deliberately shut -- the note left by the
+// close says as much, and points at the one place that can.
 func (c *Client) Reopen(ctx context.Context, id string) error {
-	return c.setClosed(ctx, id, false)
+	return c.setClosed(ctx, id, false, CloseOptions{})
 }
 
 // Retry clears a task's own failure streak (model.Store.FailureStreak),
@@ -1649,7 +1682,7 @@ func (c *Client) Retry(ctx context.Context, id string) error {
 	})
 }
 
-func (c *Client) setClosed(ctx context.Context, id string, closed bool) error {
+func (c *Client) setClosed(ctx context.Context, id string, closed bool, opts CloseOptions) error {
 	task, err := c.Store.GetTask(ctx, id)
 	if err != nil {
 		return err
@@ -1677,5 +1710,5 @@ func (c *Client) setClosed(ctx context.Context, id string, closed bool) error {
 	// to a run still finishing, and the finish path re-reads the closure
 	// and leaves the same note itself (orchestrator's own
 	// salvagePushedBranch).
-	return c.noteOrphanedPullRequests(ctx, *task, now)
+	return c.noteOrphanedPullRequests(ctx, *task, opts, now)
 }

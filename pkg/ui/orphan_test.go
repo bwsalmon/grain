@@ -23,6 +23,20 @@ func (r *recordingComments) Comment(ctx context.Context, ref, body string) error
 	return r.err
 }
 
+// recordingCloser is ui.Config.PullRequestCloser the same way: every ref
+// it was asked to close, in order, so a test can tell "closed nothing"
+// from "closed something" -- which is the assertion most of this file
+// cares about, since closing is the one thing here that destroys work.
+type recordingCloser struct {
+	closed []string
+	err    error
+}
+
+func (r *recordingCloser) Close(ctx context.Context, ref string) error {
+	r.closed = append(r.closed, ref)
+	return r.err
+}
+
 // linkedTask is a task that has been through a run: a pull request open
 // for it, linked the way orchestrator.linkPullRequest links one, and
 // completed -- which is exactly the state a human closing a task is
@@ -75,7 +89,7 @@ func TestClosingATaskWithAnOpenPullRequestSaysSoOnBothSides(t *testing.T) {
 	c.Config.PullRequestComments = posted
 	task, ref := linkedTask(t, c, store, ctx)
 
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
@@ -117,7 +131,7 @@ func TestAFailedGitHubCommentIsReportedInTheNoteRatherThanFailingTheClose(t *tes
 	c.Config.PullRequestComments = &recordingComments{err: errors.New("403 from GitHub")}
 	task, _ := linkedTask(t, c, store, ctx)
 
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v -- a pull request comment that failed must not fail the close", err)
 	}
 	if st, err := store.State(ctx, task.ID); err != nil || st != model.StateClosed {
@@ -136,7 +150,7 @@ func TestAnUnwiredDeploymentStillNotesTheOrphanOnTheTask(t *testing.T) {
 	c, store, ctx := testClient(t)
 	task, ref := linkedTask(t, c, store, ctx)
 
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	notes := grainComments(t, store, ctx, task.ID)
@@ -158,13 +172,13 @@ func TestClosingATaskTwiceLeavesOneNoteAndOneComment(t *testing.T) {
 	c.Config.PullRequestComments = posted
 	task, _ := linkedTask(t, c, store, ctx)
 
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if err := c.Reopen(ctx, task.ID); err != nil {
 		t.Fatalf("Reopen: %v", err)
 	}
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close (again): %v", err)
 	}
 
@@ -193,7 +207,7 @@ func TestClosingATaskWhosePullRequestAlreadyMergedSaysNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if notes := grainComments(t, store, ctx, task.ID); len(notes) != 0 {
@@ -201,6 +215,192 @@ func TestClosingATaskWhosePullRequestAlreadyMergedSaysNothing(t *testing.T) {
 	}
 	if len(posted.calls) != 0 {
 		t.Fatalf("comments posted on GitHub = %+v, want none", posted.calls)
+	}
+}
+
+// The other ending: whoever closed the task asked for its pull request to
+// be closed with it, so grain closes it -- and says so, in the words for
+// that rather than the words for an orphan, in both places.
+func TestClosingATaskWithTheOptionClosesThePullRequestAndSaysSo(t *testing.T) {
+	c, store, ctx := testClient(t)
+	posted := &recordingComments{}
+	closer := &recordingCloser{}
+	c.Config.PullRequestComments = posted
+	c.Config.PullRequestCloser = closer
+	task, ref := linkedTask(t, c, store, ctx)
+
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{ClosePullRequest: true}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if len(closer.closed) != 1 || closer.closed[0] != ref {
+		t.Fatalf("closed on GitHub = %+v, want exactly %s", closer.closed, ref)
+	}
+	notes := grainComments(t, store, ctx, task.ID)
+	if len(notes) != 1 || !strings.Contains(notes[0], "grain has closed "+ref) {
+		t.Fatalf("note = %+v, want one saying grain closed %s", notes, ref)
+	}
+	if len(posted.calls) != 1 || !strings.Contains(posted.calls[0].Body, "grain has closed "+ref) {
+		t.Fatalf("posted on GitHub = %+v, want the same words on the pull request", posted.calls)
+	}
+}
+
+// The default, and the whole safety of the thing: a close that did not
+// ask for it does not reach the closer at all. Every other caller of
+// Close in the tree passes the zero CloseOptions, so this is the property
+// that says an ordinary close still cannot destroy work.
+func TestAnOrdinaryCloseNeverClosesThePullRequest(t *testing.T) {
+	c, store, ctx := testClient(t)
+	closer := &recordingCloser{}
+	c.Config.PullRequestComments = &recordingComments{}
+	c.Config.PullRequestCloser = closer
+	task, _ := linkedTask(t, c, store, ctx)
+
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if len(closer.closed) != 0 {
+		t.Fatalf("closed on GitHub = %+v, want nothing closed without being asked", closer.closed)
+	}
+	notes := grainComments(t, store, ctx, task.ID)
+	if len(notes) != 1 || !strings.Contains(notes[0], "grain has stopped watching") {
+		t.Fatalf("note = %+v, want the orphan note", notes)
+	}
+}
+
+// Reopening a task does not reach the closer either -- it takes the same
+// path with no options at all, and there is nothing about reopening a
+// task that should touch a pull request on GitHub.
+func TestReopeningATaskNeverClosesAPullRequest(t *testing.T) {
+	c, store, ctx := testClient(t)
+	closer := &recordingCloser{}
+	c.Config.PullRequestCloser = closer
+	task, _ := linkedTask(t, c, store, ctx)
+
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Reopen(ctx, task.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	if len(closer.closed) != 0 {
+		t.Fatalf("closed on GitHub = %+v, want nothing", closer.closed)
+	}
+}
+
+// A GitHub that refuses the close costs the close of the *task* nothing,
+// exactly as a failed comment does -- and what is left behind is an
+// ordinary orphaned pull request, said in the orphan's own words plus the
+// refusal, because that is precisely what it is.
+func TestARefusedPullRequestCloseStillClosesTheTaskAndSaysWhy(t *testing.T) {
+	c, store, ctx := testClient(t)
+	posted := &recordingComments{}
+	c.Config.PullRequestComments = posted
+	c.Config.PullRequestCloser = &recordingCloser{err: errors.New("403 from GitHub")}
+	task, ref := linkedTask(t, c, store, ctx)
+
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{ClosePullRequest: true}); err != nil {
+		t.Fatalf("Close: %v -- a refused pull request close must not fail the close", err)
+	}
+	if st, err := store.State(ctx, task.ID); err != nil || st != model.StateClosed {
+		t.Fatalf("state = %q (%v), want closed", st, err)
+	}
+	notes := grainComments(t, store, ctx, task.ID)
+	if len(notes) != 1 || !strings.Contains(notes[0], "grain has stopped watching "+ref) {
+		t.Fatalf("note = %+v, want the orphan note -- the pull request is still open", notes)
+	}
+	if !strings.Contains(notes[0], "GitHub refused: 403 from GitHub") {
+		t.Fatalf("note = %q, want it to say the close was asked for and refused", notes[0])
+	}
+	if len(posted.calls) != 1 || !strings.Contains(posted.calls[0].Body, "GitHub refused") {
+		t.Fatalf("posted on GitHub = %+v, want the pull request told the same thing", posted.calls)
+	}
+}
+
+// A deployment whose UI holds a commenter but no closer is the same case
+// said the same way: the ask could not be carried out, the task is
+// closed, and the note says so rather than the close failing. Config
+// keeps the two capabilities apart precisely so this is expressible.
+func TestAskingToCloseWithNoCloserWiredIsReportedInTheNote(t *testing.T) {
+	c, store, ctx := testClient(t)
+	c.Config.PullRequestComments = &recordingComments{}
+	task, ref := linkedTask(t, c, store, ctx)
+
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{ClosePullRequest: true}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	notes := grainComments(t, store, ctx, task.ID)
+	if len(notes) != 1 || !strings.Contains(notes[0], "grain has stopped watching "+ref) {
+		t.Fatalf("note = %+v, want the orphan note", notes)
+	}
+	if !strings.Contains(notes[0], "not wired to a GitHub client") {
+		t.Fatalf("note = %q, want it to say why the pull request was not closed", notes[0])
+	}
+}
+
+// Nothing is closed on a pull request that already merged, whatever the
+// box said. The task's own close is the same early return that keeps
+// grain from claiming it walked away from work it merged -- and a close
+// call on a merged pull request is the one GitHub would rightly refuse.
+func TestAskingToCloseAMergedPullRequestClosesNothing(t *testing.T) {
+	c, store, ctx := testClient(t)
+	closer := &recordingCloser{}
+	c.Config.PullRequestCloser = closer
+	c.Config.PullRequestComments = &recordingComments{}
+	task, _ := linkedTask(t, c, store, ctx)
+	mergedAt := baseTime
+	if err := store.ObserveField(ctx, task.ID, baseTime, func(o *model.Observation) {
+		o.PrMergedAt = &mergedAt
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{ClosePullRequest: true}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(closer.closed) != 0 {
+		t.Fatalf("closed on GitHub = %+v, want nothing -- that pull request merged", closer.closed)
+	}
+	if notes := grainComments(t, store, ctx, task.ID); len(notes) != 0 {
+		t.Fatalf("grain's own comments = %+v, want none", notes)
+	}
+}
+
+// Somebody who closed a task, reopened it and closed it again -- this
+// time asking for the pull request to go too -- is asking for something
+// the first close did not do. The note already on the task is no reason
+// to ignore them, and the second close has its own thing to say.
+func TestAskingToCloseAfterAnOrdinaryCloseStillClosesThePullRequest(t *testing.T) {
+	c, store, ctx := testClient(t)
+	posted := &recordingComments{}
+	closer := &recordingCloser{}
+	c.Config.PullRequestComments = posted
+	c.Config.PullRequestCloser = closer
+	task, ref := linkedTask(t, c, store, ctx)
+
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Reopen(ctx, task.ID); err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{ClosePullRequest: true}); err != nil {
+		t.Fatalf("Close (again): %v", err)
+	}
+
+	if len(closer.closed) != 1 || closer.closed[0] != ref {
+		t.Fatalf("closed on GitHub = %+v, want %s closed by the second close", closer.closed, ref)
+	}
+	notes := grainComments(t, store, ctx, task.ID)
+	if len(notes) != 2 {
+		t.Fatalf("grain's own comments = %+v, want the orphan note and the close note", notes)
+	}
+	if !strings.Contains(notes[1], "grain has closed "+ref) {
+		t.Fatalf("second note = %q, want it to say the pull request was closed", notes[1])
+	}
+	if len(posted.calls) != 2 {
+		t.Fatalf("posted on GitHub = %+v, want the pull request told both times", posted.calls)
 	}
 }
 
@@ -213,7 +413,7 @@ func TestClosingATaskWithNoPullRequestSaysNothing(t *testing.T) {
 	c.Config.PullRequestComments = posted
 	task := create(t, c, ctx)
 
-	if err := c.Close(ctx, task.ID); err != nil {
+	if err := c.Close(ctx, task.ID, ui.CloseOptions{}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	if notes := grainComments(t, store, ctx, task.ID); len(notes) != 0 {

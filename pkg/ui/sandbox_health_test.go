@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/ui"
@@ -39,7 +40,16 @@ func TestGetSandboxHealthReportsEverySandboxAndTheHost(t *testing.T) {
 		{Backend: "kontur", Name: "grain-1", Error: "unreachable"},
 	}}
 	client.Config.HostStats = func() (ui.HostPressure, error) {
-		return ui.HostPressure{LoadAverage1: 1.5, MemoryUsedMB: 512, MemoryTotalMB: 1024}, nil
+		return ui.HostPressure{
+			LoadAverage1: 1.5, MemoryUsedMB: 512, MemoryTotalMB: 1024,
+			// One figure per filesystem the daemon's state sits on, not
+			// one "disk" figure -- the store's small volume and the much
+			// larger one sandboxes were given (grain/task-148).
+			Disks: []ui.DiskUsage{
+				{Holds: []string{"store"}, Path: "/var/lib/grain", UsedMB: 4096, TotalMB: 20480},
+				{Holds: []string{"sandboxes", "docker"}, Path: "/var/lib/grain-sandbox", UsedMB: 61440, TotalMB: 102400},
+			},
+		}, nil
 	}
 
 	rec := do(t, srv, http.MethodGet, "/api/sandboxes", "")
@@ -63,6 +73,20 @@ func TestGetSandboxHealthReportsEverySandboxAndTheHost(t *testing.T) {
 	}
 	if got.Host == nil || got.Host.MemoryTotalMB != 1024 {
 		t.Fatalf("host = %v, want MemoryTotalMB 1024", got.Host)
+	}
+	if len(got.Host.Disks) != 2 {
+		t.Fatalf("host.Disks = %v, want one entry per filesystem", got.Host.Disks)
+	}
+	// The sandbox volume, which is the one a runaway build fills and the
+	// one this pane showed no figure for at all before grain/task-148.
+	sandboxVolume := got.Host.Disks[1]
+	if sandboxVolume.TotalMB != 102400 || sandboxVolume.UsedMB != 61440 {
+		t.Errorf("host.Disks[1] usage = %d/%d MB, want 61440/102400", sandboxVolume.UsedMB, sandboxVolume.TotalMB)
+	}
+	// Two names on one row: the daemon found the sandbox root and
+	// docker's data root to be the same filesystem and said so once.
+	if strings.Join(sandboxVolume.Holds, ",") != "sandboxes,docker" {
+		t.Errorf("host.Disks[1].Holds = %v, want everything that shares that filesystem", sandboxVolume.Holds)
 	}
 }
 
