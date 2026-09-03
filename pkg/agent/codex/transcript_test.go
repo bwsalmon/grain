@@ -59,6 +59,38 @@ func TestParseTranscriptReadsBothEventVocabularies(t *testing.T) {
 	}
 }
 
+// The shipped CLI names an item's kind in the item's own "type" field,
+// where codex's documented schema calls it "item_type" (rawItem's own
+// doc comment). Both spellings have to read the same, since which one a
+// deployment gets is decided by the binary in its image: the lines here
+// are the "type" spelling, taken from a real `codex exec --json`
+// capture.
+func TestParseTranscriptReadsTheItemKindUnderEitherFieldName(t *testing.T) {
+	got, err := parseTranscript(strings.Join([]string{
+		`{"type":"thread.started","thread_id":"01a066db-4912-79b0-8254-ff2d2927a870"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"reading the repo"}}`,
+		`{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"grain-sandbox",` +
+			`"tool":"ask_question","arguments":{"question":"which one?"}}}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"grain-sandbox",` +
+			`"tool":"ask_question","status":"completed","result":"Recorded"}}`,
+		`{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"asked"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1}}`,
+	}, "\n"))
+	if err != nil {
+		t.Fatalf("parseTranscript: %v", err)
+	}
+	if got.FinalText != "asked" {
+		t.Errorf("FinalText = %q", got.FinalText)
+	}
+	if len(got.ToolCalls) != 1 || got.ToolCalls[0].Name != "ask_question" || got.ToolCalls[0].Text != "Recorded" {
+		t.Fatalf("ToolCalls = %+v, want the call recorded under its bare name", got.ToolCalls)
+	}
+	if !strings.Contains(got.Transcript, "reading the repo") {
+		t.Errorf("Transcript = %q, want the reasoning item in it", got.Transcript)
+	}
+}
+
 // A capture with no terminal event at all is a run whose output was
 // truncated -- codex died, or the file was read mid-stream -- and
 // parseTranscript says so rather than reporting a run that ended with no
@@ -87,13 +119,61 @@ func TestParseTranscriptReturnsWhatAFailedTurnDid(t *testing.T) {
 	}
 }
 
-// A bare "error" event is the other way a run ends badly, and it is
-// terminal too -- reading it as "still running" would leave every such
-// run reported as a truncated stream instead of as what codex said.
-func TestParseTranscriptTreatsAnErrorEventAsTerminal(t *testing.T) {
-	_, err := parseTranscript(`{"type":"error","message":"model not found"}`)
-	if err == nil || !strings.Contains(err.Error(), "model not found") {
-		t.Fatalf("err = %v, want the error event's own text", err)
+// A bare "error" event is not the end of a run. codex emits one per
+// attempt while it retries a dropped connection, and a run that
+// reconnects goes on to finish normally -- reading the first as
+// terminal would report a successful run as a failure. The lines below
+// are a real capture, trimmed: `codex exec --json` against an
+// unreachable endpoint, which retries five times and only then fails
+// the turn.
+func TestParseTranscriptDoesNotFailARunThatRecoveredFromAnError(t *testing.T) {
+	got, err := parseTranscript(strings.Join([]string{
+		`{"type":"thread.started","thread_id":"01a066db-4912-79b0-8254-ff2d2927a870"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"error","message":"Reconnecting... 1/5 (unexpected status 503 Service Unavailable)"}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"back, and done"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1}}`,
+	}, "\n"))
+	if err != nil {
+		t.Fatalf("parseTranscript: %v -- a retried connection is not a failed run", err)
+	}
+	if got.FinalText != "back, and done" {
+		t.Errorf("FinalText = %q", got.FinalText)
+	}
+	// It still belongs in the narrative: an operator reading a slow run
+	// should be able to see what it was busy recovering from.
+	if !strings.Contains(got.Transcript, "Reconnecting... 1/5") {
+		t.Errorf("Transcript = %q, want the error it recovered from", got.Transcript)
+	}
+}
+
+// ...and when the retries do run out, codex ends the turn with the same
+// message, which is the one that fails the run.
+func TestParseTranscriptFailsOnTheTerminalTurnFailure(t *testing.T) {
+	_, err := parseTranscript(strings.Join([]string{
+		`{"type":"error","message":"Reconnecting... 5/5 (unexpected status 401 Unauthorized)"}`,
+		`{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Missing bearer or basic authentication in header"}}`,
+	}, "\n"))
+	if err == nil || !strings.Contains(err.Error(), "401 Unauthorized") {
+		t.Fatalf("err = %v, want codex's own account of the failure", err)
+	}
+}
+
+// An error *item* is codex reporting something about itself -- here the
+// optional code-mode host the deployment image deliberately does not
+// carry (Dockerfile), which every run reports on startup. It is not a
+// failure, and a parser that read it as one would fail every run.
+func TestParseTranscriptDoesNotFailOnAnErrorItem(t *testing.T) {
+	got, err := parseTranscript(strings.Join([]string{
+		`{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Code Mode is unavailable because code-mode host is disabled."}}`,
+		`{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"done"}}`,
+		`{"type":"turn.completed"}`,
+	}, "\n"))
+	if err != nil {
+		t.Fatalf("parseTranscript: %v -- an error item is not a failed run", err)
+	}
+	if !strings.Contains(got.Transcript, "Code Mode is unavailable") {
+		t.Errorf("Transcript = %q, want the item reported in the narrative", got.Transcript)
 	}
 }
 

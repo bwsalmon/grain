@@ -386,6 +386,19 @@ const configFileName = "config.toml"
 // Everything a run is meant to change is in the sandbox, and the only
 // route there is the MCP server above.
 //
+// features.code_mode_host = false is the third line, and it is about
+// the record rather than about permissions. codex's code mode has the
+// model reach its MCP tools from code it writes and runs, rather than
+// as tool calls of its own -- and mcp_tool_call events are exactly what
+// transcript.go builds Result.ToolCalls from, which is what
+// orchestrator.ProcessResult reads to find that a run asked a question
+// or left a closing comment (agent.ToolCall.Name's own doc comment).
+// The deployment image does not carry the separate host binary that
+// mode needs, so it is already off; saying so here makes it a decision
+// rather than a property of how the image was built, and codex reports
+// it as "disabled" rather than "not installed" in the run's own first
+// event.
+//
 // TOML rather than JSON is codex's own choice of format. The values
 // written are all strings and lists of strings, whose TOML basic-string
 // and array spellings are exactly JSON's, so encoding/json is what
@@ -404,6 +417,8 @@ func configTOML(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	b.WriteString("# Written by grain for one run; see pkg/agent/codex.\n")
 	b.WriteString("approval_policy = \"never\"\n")
 	b.WriteString("sandbox_mode = \"read-only\"\n\n")
+	b.WriteString("[features]\n")
+	b.WriteString("code_mode_host = false\n\n")
 	fmt.Fprintf(&b, "[mcp_servers.%s]\n", mcpServerName)
 	fmt.Fprintf(&b, "command = %s\n", command)
 	fmt.Fprintf(&b, "args = %s\n", args)
@@ -448,6 +463,13 @@ func tomlStringArray(items []string) (string, error) {
 // claude's --strict-mcp-config has there: the only MCP server this run
 // can see is the one written here, because there is no other
 // configuration in the config directory it was given to find one in.
+//
+// A temp directory is where it lands, so codex opens every run with a
+// warning on stderr that it will not create its PATH aliases under one.
+// That is a convenience it declines rather than a failure -- it says
+// "proceeding" and does -- and the alternative, a config directory
+// somewhere permanent, would be the shared registration this exists to
+// avoid.
 func writeConfig(grainBinaryPath string, mcpArgs []string) (home string, cleanup func(), err error) {
 	config, err := configTOML(grainBinaryPath, mcpArgs)
 	if err != nil {
@@ -575,12 +597,12 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 
 	stdout, runErr := f.run.Run(runCtx, args, cfg.Prompt, env, cfg.SandboxRoot, io.MultiWriter(sinks...))
 	result, parseErr := parseTranscript(stdout)
-	// Read once, from the stream's own terminal text plus whatever the
-	// subprocess itself reported, because a quota refusal can arrive
-	// either way: codex usually reports it as a failed turn (parseErr,
-	// below) but a hard enough refusal kills the process first (runErr).
-	// See usagelimit.go.
-	limit := usageLimitFailure(parseEvents(stdout).resultText, runErr)
+	// Read once, from the stream's own account of the failure plus
+	// whatever the subprocess itself reported, because a quota refusal
+	// can arrive either way: codex usually reports it as a failed turn
+	// (parseErr, below) but a hard enough refusal kills the process
+	// first (runErr). See usagelimit.go.
+	limit := usageLimitFailure(parseEvents(stdout).failureText(), runErr)
 	switch {
 	case capWatch.tripped():
 		// The cap cancelled the subprocess, so runErr is that

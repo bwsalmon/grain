@@ -21,8 +21,8 @@
 #      published to GHCR by ../.github/workflows/build-artifacts.yml
 #      on every commit -- instead of building a binary here
 #      (bwsalmon/agents#645). That image carries grain *and* every binary
-#      it shells out to: git, curl, the docker CLI, konturctl, and both
-#      agent CLIs -- claude and agy (Dockerfile) -- plus a copy of the
+#      it shells out to: git, curl, the docker CLI, konturctl, and every
+#      agent CLI -- claude, agy and codex (Dockerfile) -- plus a copy of the
 #      source it was built from. So it is also where the handful of
 #      steps here that want more than a shell go looking, rather than at
 #      this host: see "What this host has to have" below
@@ -261,6 +261,21 @@ GRAIN_CLAUDE_PATH="${GRAIN_CLAUDE_PATH:-}"
 # GRAIN_GEMINI_MODEL above.
 GRAIN_CLAUDE_MODEL="${GRAIN_CLAUDE_MODEL:-}"
 
+# The OpenAI API key agent/codex authenticates as, for a deployment whose
+# agent-framework setting is (or may be set to) "codex" -- the third of
+# the same seed-once credentials, into the same secrets directory, and
+# optional for the same reason: it can be pasted into the UI instead
+# (Settings -> Agent frameworks).
+GRAIN_OPENAI_API_KEY="${GRAIN_OPENAI_API_KEY:-}"
+# Path to a codex CLI on *this host* to run instead of the one baked into
+# the image -- GRAIN_CLAUDE_PATH/GRAIN_AGY_PATH's counterpart for the
+# third agent framework, mounted in and passed as -codex-path the same
+# way.
+GRAIN_CODEX_PATH="${GRAIN_CODEX_PATH:-}"
+# Override the daemon's default Codex model -- the exact counterpart of
+# GRAIN_GEMINI_MODEL/GRAIN_CLAUDE_MODEL above.
+GRAIN_CODEX_MODEL="${GRAIN_CODEX_MODEL:-}"
+
 GRAIN_GCP_PROJECT="${GRAIN_GCP_PROJECT:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="${GRAIN_GCP_SERVICE_ACCOUNT_EMAIL:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="${GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE:-}"
@@ -404,6 +419,9 @@ Recognized variables:
                              -agent-framework), overridable per task, so a
                              deployment that might use either wants both
                              credentials
+  GRAIN_OPENAI_API_KEY      OpenAI API key to seed, once -- the same
+                             counterpart again, for the "codex" agent
+                             framework, and optional for the same reasons
   GRAIN_IMAGE               image repository the deployment runs, with no tag
                              (default ghcr.io/bwsalmon/grain/grain -- what CI
                              publishes on every commit)
@@ -424,12 +442,17 @@ Recognized variables:
                              is bind-mounted into the container at the same
                              path
   GRAIN_AGY_PATH            path on THIS HOST to an Antigravity CLI (agy) to run
-                             instead of the image's own, for the other agent
+                             instead of the image's own, for the second agent
                              framework. Bind-mounted the same way (default:
                              empty, use the image's)
+  GRAIN_CODEX_PATH          path on THIS HOST to a codex CLI to run instead of
+                             the image's own, for the third. Bind-mounted the
+                             same way (default: empty, use the image's)
   GRAIN_GEMINI_MODEL        override the daemon's default Gemini model. Seeded once
   GRAIN_CLAUDE_MODEL        override the daemon's default Claude model. Seeded once,
                              the exact counterpart of GRAIN_GEMINI_MODEL above
+  GRAIN_CODEX_MODEL         override the daemon's default Codex model. Seeded
+                             once, the same counterpart again
   GRAIN_MAX_AGENT_TURNS     cap on model/tool round trips per run. Empty leaves
                              the framework's own default (20), which a real task
                              can exhaust: reading a few files, writing one, running
@@ -1359,6 +1382,7 @@ setup_data_dir() {
   # database before mint_gemini_operating_key can authenticate with it.
   seed_secret "$GRAIN_DATA_DIR/secrets/gemini-api-key" "$GRAIN_GEMINI_API_KEY"
   seed_secret "$GRAIN_DATA_DIR/secrets/claude-oauth-token" "$GRAIN_CLAUDE_CODE_OAUTH_TOKEN"
+  seed_secret "$GRAIN_DATA_DIR/secrets/openai-api-key" "$GRAIN_OPENAI_API_KEY"
 
   seed_gcp_minter_key
 
@@ -1592,18 +1616,18 @@ format_target_repo_if_empty() {
 
 # --- 8. the systemd unit ---------------------------------------------------
 
-# Both agent frameworks run a CLI as a subprocess -- agent/antigravity
-# execs `agy`, agent/claude execs `claude` -- and the deployment image
-# carries both (Dockerfile). This checks that what is about to be
-# deployed actually does, rather than letting grain-daemon.service come
-# up and fail at its first dispatch with "executable file not found in
-# $PATH".
+# Every agent framework runs a CLI as a subprocess -- agent/antigravity
+# execs `agy`, agent/claude execs `claude`, agent/codex execs `codex` --
+# and the deployment image carries all three (Dockerfile). This checks
+# that what is about to be deployed actually does, rather than letting
+# grain-daemon.service come up and fail at its first dispatch with
+# "executable file not found in $PATH".
 #
 # Asked of the image, not of this host: that is where they live now. The
-# exception is an operator-named copy (GRAIN_CLAUDE_PATH/GRAIN_AGY_PATH),
-# which is a host path by definition -- docker_run_args mounts it in, and
-# a path that names nothing executable out here is worth saying out loud
-# here rather than discovering at dispatch.
+# exception is an operator-named copy (GRAIN_CLAUDE_PATH/GRAIN_AGY_PATH/
+# GRAIN_CODEX_PATH), which is a host path by definition -- docker_run_args
+# mounts it in, and a path that names nothing executable out here is
+# worth saying out loud here rather than discovering at dispatch.
 #
 # Never fatal, and reported rather than enforced: which framework a run
 # uses is a live UI choice, a deployment may legitimately only ever use
@@ -1640,10 +1664,11 @@ report_agent_cli() {
 
 verify_agent_cli() {
   local name path override
-  for name in agy claude; do
+  for name in agy claude codex; do
     case "$name" in
       agy) override="$GRAIN_AGY_PATH" ;;
       claude) override="$GRAIN_CLAUDE_PATH" ;;
+      codex) override="$GRAIN_CODEX_PATH" ;;
     esac
     if [ -n "$override" ]; then
       if [ -x "$override" ]; then
@@ -1658,8 +1683,8 @@ verify_agent_cli() {
     [ -n "$path" ] && continue
     log "WARNING: $GRAIN_IMAGE_REF carries no \"$name\" binary. The agent framework that runs"
     log "         it as a subprocess cannot dispatch until it does -- deploy an image built"
-    log "         with it (Dockerfile installs both agent CLIs), or set the matching"
-    log "         GRAIN_AGY_PATH/GRAIN_CLAUDE_PATH to a copy on this host."
+    log "         with it (Dockerfile installs every agent CLI), or set the matching"
+    log "         GRAIN_AGY_PATH/GRAIN_CLAUDE_PATH/GRAIN_CODEX_PATH to a copy on this host."
   done
 }
 
@@ -1676,6 +1701,7 @@ write_systemd_units() {
     -poll-interval "$GRAIN_POLL_INTERVAL"
     -gemini-api-key-file "$GRAIN_DATA_DIR/secrets/gemini-api-key"
     -claude-oauth-token-file "$GRAIN_DATA_DIR/secrets/claude-oauth-token"
+    -openai-api-key-file "$GRAIN_DATA_DIR/secrets/openai-api-key"
     -github-host "$GRAIN_GITHUB_HOST"
     -ui-addr "$GRAIN_UI_ADDR"
   )
@@ -1721,6 +1747,8 @@ write_systemd_units() {
   [ -n "$GRAIN_GEMINI_MODEL" ] && daemon_args+=(-gemini-model "$GRAIN_GEMINI_MODEL")
   [ -n "$GRAIN_CLAUDE_PATH" ] && daemon_args+=(-claude-path "$GRAIN_CLAUDE_PATH")
   [ -n "$GRAIN_CLAUDE_MODEL" ] && daemon_args+=(-claude-model "$GRAIN_CLAUDE_MODEL")
+  [ -n "$GRAIN_CODEX_PATH" ] && daemon_args+=(-codex-path "$GRAIN_CODEX_PATH")
+  [ -n "$GRAIN_CODEX_MODEL" ] && daemon_args+=(-codex-model "$GRAIN_CODEX_MODEL")
   [ -n "$GRAIN_MAX_AGENT_TURNS" ] && daemon_args+=(-max-agent-turns "$GRAIN_MAX_AGENT_TURNS")
   [ "$GRAIN_GITHUB_INSECURE_HTTP" = "1" ] && daemon_args+=(-github-insecure-http)
   [ -n "$GRAIN_GCP_PROJECT" ] && daemon_args+=(-gcp-project "$GRAIN_GCP_PROJECT")
@@ -1898,7 +1926,7 @@ UNIT
 #                        to be mounted beside it are gone: the guest
 #                        travels inside the sandbox image and its overlay
 #                        is created in the VM's own container.
-#   GRAIN_CLAUDE_PATH/GRAIN_AGY_PATH
+#   GRAIN_CLAUDE_PATH/GRAIN_AGY_PATH/GRAIN_CODEX_PATH
 #                        an operator's own agent CLI, mounted (with the
 #                        directory around it, since a CLI is rarely one
 #                        lone file) at the path they named, because a
@@ -1958,6 +1986,7 @@ docker_run_args() {
 
   [ -n "$GRAIN_CLAUDE_PATH" ] && DOCKER_ARGS+=(--volume "$(dirname "$GRAIN_CLAUDE_PATH"):$(dirname "$GRAIN_CLAUDE_PATH"):ro")
   [ -n "$GRAIN_AGY_PATH" ] && DOCKER_ARGS+=(--volume "$(dirname "$GRAIN_AGY_PATH"):$(dirname "$GRAIN_AGY_PATH"):ro")
+  [ -n "$GRAIN_CODEX_PATH" ] && DOCKER_ARGS+=(--volume "$(dirname "$GRAIN_CODEX_PATH"):$(dirname "$GRAIN_CODEX_PATH"):ro")
 
   # Deliberately unquoted: this is a list of arguments an operator wrote,
   # not one argument.
@@ -1991,10 +2020,12 @@ enable_services() {
   # fix it in.
   systemctl restart grain-daemon.service
   if [ ! -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] \
-     && [ ! -s "$GRAIN_DATA_DIR/secrets/claude-oauth-token" ]; then
+     && [ ! -s "$GRAIN_DATA_DIR/secrets/claude-oauth-token" ] \
+     && [ ! -s "$GRAIN_DATA_DIR/secrets/openai-api-key" ]; then
     log "grain-daemon.service is running, but no agent credential is configured -- no task can"
     log "  be dispatched until one is. Set it in the UI (Settings -> Agent frameworks), or set"
-    log "  GRAIN_GEMINI_API_KEY / GRAIN_CLAUDE_CODE_OAUTH_TOKEN and re-run this script."
+    log "  GRAIN_GEMINI_API_KEY / GRAIN_CLAUDE_CODE_OAUTH_TOKEN / GRAIN_OPENAI_API_KEY and"
+    log "  re-run this script."
     log "  A deployment whose minter holds roles/serviceusage.apiKeysAdmin can mint the Gemini"
     log "  one instead: set GRAIN_GCP_PROJECT and GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE and re-run."
   fi
@@ -2015,21 +2046,22 @@ enable_services() {
 # Presence only, never values -- the same restriction `grain secrets
 # list` holds to.
 report_readiness() {
-  local github="MISSING" gemini="MISSING" claude="MISSING" minter="MISSING" daemon ready=1
+  local github="MISSING" gemini="MISSING" claude="MISSING" openai="MISSING" minter="MISSING" daemon ready=1
   # The binaries, not the tokens: they are independent, and a deployment
   # with a token set and no CLI is exactly the state that fails every run
-  # of that framework with "executable file not found in $PATH". Both are
+  # of that framework with "executable file not found in $PATH". All are
   # reported, because which framework a run uses is a live per-task
-  # choice -- a deployment is only really ready when both can run.
+  # choice -- a deployment is only really ready when every one can run.
   #
   # Asked of the *image*, not of this host: that is where they live now
   # (Dockerfile), so `command -v` out here would report a host that
   # has nothing to do with whether a dispatch can run. The exception is
   # an operator-named copy, which is a host path by definition --
   # docker_run_args mounts it in.
-  local claude_cli agy_cli
+  local claude_cli agy_cli codex_cli
   claude_cli="$(report_agent_cli claude "$GRAIN_CLAUDE_PATH" GRAIN_CLAUDE_PATH)"
   agy_cli="$(report_agent_cli agy "$GRAIN_AGY_PATH" GRAIN_AGY_PATH)"
+  codex_cli="$(report_agent_cli codex "$GRAIN_CODEX_PATH" GRAIN_CODEX_PATH)"
 
   if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
      && [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ]; then
@@ -2037,6 +2069,7 @@ report_readiness() {
   fi
   [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] && gemini="present"
   [ -s "$GRAIN_DATA_DIR/secrets/claude-oauth-token" ] && claude="present"
+  [ -s "$GRAIN_DATA_DIR/secrets/openai-api-key" ] && openai="present"
   # A key set through the UI lands in the secrets database, not in either
   # file above, so presence has to be asked of both places -- otherwise a
   # deployment configured entirely from the UI reports every credential
@@ -2046,6 +2079,9 @@ report_readiness() {
   fi
   if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null | grep -q '^claude-oauth-token:'; then
     claude="present"
+  fi
+  if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null | grep -q '^openai-api-key:'; then
+    openai="present"
   fi
   if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" list 2>/dev/null \
      | grep -q '^gcp-key-minter:'; then
@@ -2060,8 +2096,10 @@ report_readiness() {
   echo "    GitHub credential: $github"
   echo "    Gemini key:        $gemini"
   echo "    Claude token:      $claude"
+  echo "    OpenAI key:        $openai"
   echo "    claude CLI:        $claude_cli"
   echo "    agy CLI:           $agy_cli"
+  echo "    codex CLI:         $codex_cli"
   echo "    GCP minter key:    $minter"
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: unrestricted -- any repo a task names is allowed>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
@@ -2078,11 +2116,12 @@ report_readiness() {
     echo "    !! With no GitHub credential the git proxy cannot clone. A dispatched run"
     echo "       finds an empty sandbox and ends without pushing or asking anything."
   fi
-  if [ "$gemini" = "MISSING" ] && [ "$claude" = "MISSING" ]; then
+  if [ "$gemini" = "MISSING" ] && [ "$claude" = "MISSING" ] && [ "$openai" = "MISSING" ]; then
     ready=0
-    echo "    !! With neither agent credential set, the daemon runs and serves ${GRAIN_UI_ADDR},"
+    echo "    !! With no agent credential set at all, the daemon runs and serves ${GRAIN_UI_ADDR},"
     echo "       but every dispatched run fails at setup. Set one in the UI (Settings ->"
-    echo "       Agent frameworks) or re-run with GRAIN_GEMINI_API_KEY/GRAIN_CLAUDE_CODE_OAUTH_TOKEN."
+    echo "       Agent frameworks) or re-run with GRAIN_GEMINI_API_KEY / "
+    echo "       GRAIN_CLAUDE_CODE_OAUTH_TOKEN / GRAIN_OPENAI_API_KEY."
   fi
   # Not a readiness failure on its own: a deployment that only ever uses
   # one framework neither needs nor misses the other. Still worth a line
@@ -2101,6 +2140,13 @@ report_readiness() {
       echo "       one, and it is the default -- so a deployment in this state dispatches"
       echo "       nothing unless every task overrides the framework. Deploy an image built"
       echo "       with it, or point GRAIN_AGY_PATH at a copy here."
+      ;;
+  esac
+  case "$codex_cli" in
+    MISSING*)
+      echo "    -- no codex CLI: the \"codex\" agent framework cannot run until there is one"
+      echo "       (Settings -> Agent framework, and the per-task override, still offer it)."
+      echo "       Deploy an image built with it, or point GRAIN_CODEX_PATH at a copy here."
       ;;
   esac
   if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then

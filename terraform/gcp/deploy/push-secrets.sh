@@ -56,6 +56,10 @@
 #                                      and takes precedence over whatever is pushed here.
 #                                      Push one to have a deployment come up already able to
 #                                      dispatch, without anyone opening the UI first.
+#   GRAIN_OPENAI_API_KEY               the OpenAI API key agent/codex authenticates as,
+#                                      for a deployment whose agent framework is (or may
+#                                      be set to) "codex" -- the same counterpart again,
+#                                      optional on the same terms
 #   GRAIN_IMAGE_PULL_TOKEN             the password half of a `docker login` against the
 #                                      registry grain_image lives in, for a deployment
 #                                      running a private image (a GitHub PAT with
@@ -95,6 +99,7 @@ push_secret "grain-github-app-installation-id" "${GRAIN_GITHUB_APP_INSTALLATION_
 push_secret "grain-github-app-private-key" "${GRAIN_GITHUB_APP_PRIVATE_KEY:-}"
 push_secret "grain-gemini-api-key" "${GRAIN_GEMINI_API_KEY:-}"
 push_secret "grain-claude-oauth-token" "${GRAIN_CLAUDE_CODE_OAUTH_TOKEN:-}"
+push_secret "grain-openai-api-key" "${GRAIN_OPENAI_API_KEY:-}"
 # Only for a deployment whose grain_image lives in a registry that needs
 # credentials -- ghcr.io/bwsalmon/grain's own package is public and pulls
 # anonymously, so this is empty (and skipped) in the ordinary case. The

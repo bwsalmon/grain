@@ -16,8 +16,9 @@ import (
 //
 //   - the thread/item form, tagged by a dotted top-level "type"
 //     ("thread.started", "turn.started", "item.started",
-//     "item.completed", "turn.completed", "turn.failed", "error"), whose
-//     payload is the "item" object. This is the current one.
+//     "item.completed", "turn.completed", "turn.failed") whose payload
+//     is the "item" object, plus a bare "error" event. This is the
+//     current one.
 //   - the older form, where every line is {"id":...,"msg":{"type":...}}
 //     and the payload is that nested "msg".
 //
@@ -38,15 +39,23 @@ type rawEvent struct {
 }
 
 // rawItem is one thread item -- a unit of what the agent did, reported
-// once when it starts and again when it completes. ItemType names which
-// kind it is; some builds spell that field "type" inside the item
-// instead, which itemType folds together.
+// once when it starts and again when it completes. Which kind it is
+// arrives in one of two fields depending on the build: the CLI this was
+// written against (codex-cli 0.153) spells it "type" inside the item,
+// while "item_type" is the name in codex's own documented thread-item
+// schema and in earlier builds. itemType folds the two together rather
+// than betting on either.
 type rawItem struct {
 	ID       string `json:"id"`
 	ItemType string `json:"item_type"`
 	Type     string `json:"type"`
-	// Text is an agent_message's or reasoning item's own words.
-	Text string `json:"text"`
+	// Text is an agent_message's or reasoning item's own words, and
+	// Message an error item's -- codex reports a component it could not
+	// start (a missing optional helper, say) as an item of its own
+	// rather than as a failure of the run, so this belongs in the
+	// narrative and nowhere else.
+	Text    string `json:"text"`
+	Message string `json:"message"`
 	// Server, Tool, Arguments, Result and Status belong to an
 	// mcp_tool_call: which server the tool came from, its name, what it
 	// was called with, what it returned, and whether that succeeded.
@@ -107,6 +116,7 @@ const (
 	itemReasoning    = "reasoning"
 	itemMCPToolCall  = "mcp_tool_call"
 	itemCommandExec  = "command_execution"
+	itemError        = "error"
 
 	statusFailed = "failed"
 )
@@ -171,17 +181,37 @@ type parsedEvents struct {
 	// repeating it in a terminal event the way claude's "result" does.
 	lastAgentMessage string
 	sawResult        bool
+	// errorText is the most recent bare "error" event's message. Those
+	// are not terminal -- codex reports each failed attempt of a
+	// reconnect that then succeeds as one -- so it is kept apart from
+	// resultText, which only a terminal failure fills in, and read only
+	// as the fallback failureText below.
+	errorText string
 	// turns counts completed assistant messages -- what Run's own turn
 	// cap is measured in, codex having no --max-turns flag of its own to
 	// pass one down to (see Framework.Run).
 	turns     int
 	resultErr error
-	// resultText is what codex itself said about a failure, verbatim,
-	// kept apart from resultErr's rendered sentence so usagelimit.go can
-	// read the provider's own words rather than text this file wrote.
-	// Empty for a capture that reported no failure.
+	// resultText is what codex itself said about a terminal failure,
+	// verbatim, kept apart from resultErr's rendered sentence so
+	// usagelimit.go can read the provider's own words rather than text
+	// this file wrote. Empty for a capture that reported no failure.
 	resultText string
 	transcript strings.Builder
+}
+
+// failureText is what codex said about why this run went wrong,
+// preferring the terminal event's own account and falling back to the
+// last bare error event -- which is all there is when the process was
+// killed before it could report a terminal one. usagelimit.go reads
+// this: a quota refusal arrives either way, and reading only the first
+// would let a limit that killed the process mid-run be diagnosed as an
+// ordinary crash.
+func (p *parsedEvents) failureText() string {
+	if p.resultText != "" {
+		return p.resultText
+	}
+	return p.errorText
 }
 
 func parseEvents(stdout string) *parsedEvents {
@@ -207,9 +237,18 @@ func parseEvents(stdout string) *parsedEvents {
 		case "turn.completed":
 			p.sawResult = true
 			p.result.FinalText = p.lastAgentMessage
-		case "turn.failed", "error":
+		case "turn.failed":
 			p.sawResult = true
 			p.fail(eventFailureText(&ev))
+		case "error":
+			// Deliberately not terminal. codex emits one of these for
+			// every attempt of a transport reconnect ("Reconnecting...
+			// 2/5"), and a run that recovers goes on to complete
+			// normally -- reading the first as the end of the run would
+			// report a successful run as a failure. What ends a run is
+			// "turn.failed", which repeats the last of these as its own
+			// message when the retries run out.
+			p.noteError(eventFailureText(&ev))
 		}
 	}
 	return p
@@ -224,10 +263,20 @@ func eventFailureText(ev *rawEvent) string {
 	return ev.Message
 }
 
+// noteError records a non-terminal error event: in the narrative, where
+// an operator reading a run that recovered can still see what it
+// recovered from, and as the fallback failureText reads.
+func (p *parsedEvents) noteError(text string) {
+	if text == "" {
+		return
+	}
+	p.errorText = text
+	fmt.Fprintf(&p.transcript, "! %s\n\n", text)
+}
+
 // fail records a terminal failure once. First one wins: a run that
-// reported an "error" event and then a "turn.failed" is one failure
-// described twice, and the first description is the one with the
-// provider's own words in it.
+// reported two of them described one ending twice, and the first
+// description is the one with the provider's own words in it.
 func (p *parsedEvents) fail(text string) {
 	if p.resultErr != nil {
 		return
@@ -258,6 +307,16 @@ func (p *parsedEvents) applyItem(item *rawItem, completed bool) {
 		}
 	case itemMCPToolCall:
 		p.applyToolCall(item, completed)
+	case itemError:
+		// An error *item* is codex reporting something about itself --
+		// an optional component it could not start, most often -- not
+		// the run failing. It belongs in the narrative and nowhere
+		// else: promoting it would fail runs that went on to work.
+		if completed {
+			if text := item.errorMessage(); text != "" {
+				fmt.Fprintf(&p.transcript, "! %s\n\n", text)
+			}
+		}
 	case itemCommandExec:
 		// codex's own shell, not one of grain's tools: it belongs in the
 		// narrative an operator reads and never in ToolCalls, which
@@ -380,12 +439,21 @@ func (p *parsedEvents) applyMsgToolCall(msg *rawMsg) {
 }
 
 // itemType is the item's kind, from whichever of the two fields carries
-// it: "item_type" in the current build, "type" in earlier ones.
+// it -- see rawItem's own doc comment on why there are two.
 func (i *rawItem) itemType() string {
 	if i.ItemType != "" {
 		return i.ItemType
 	}
 	return i.Type
+}
+
+// errorMessage is an error item's own text, from whichever of the two
+// fields this build puts it in.
+func (i *rawItem) errorMessage() string {
+	if i.Message != "" {
+		return i.Message
+	}
+	return i.Text
 }
 
 // toolResult reads what a completed MCP tool call returned, and whether

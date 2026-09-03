@@ -187,6 +187,12 @@ func TestRunDeniesCodexsOwnToolsAnythingWorthHaving(t *testing.T) {
 	if !strings.Contains(r.configAtRun, `approval_policy = "never"`) {
 		t.Errorf("config = %q, want approvals never asked for", r.configAtRun)
 	}
+	// Code mode would have the model reach grain's tools from code it
+	// writes rather than as tool calls -- and the tool calls are the
+	// record orchestrator reads a run's outcome from.
+	if !strings.Contains(r.configAtRun, "code_mode_host = false") {
+		t.Errorf("config = %q, want codex's code mode turned off explicitly", r.configAtRun)
+	}
 }
 
 // TestRunRunsInTheSandboxDirectory: a host-rooted run starts codex in

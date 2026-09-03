@@ -300,18 +300,20 @@ plan this module is applied from:
   (`pkg/agent/gemini`). Distinct from the gemini-key *capability*
   (`pkg/capability/geminikey`), which mints its own short-lived keys per
   task. Optional to supply: see "The daemon's own Gemini key" below.
-- **The Claude Code OAuth token** -- the same thing for the other agent
-  framework (`pkg/agent/claude`), pushed as
-  `GRAIN_CLAUDE_CODE_OAUTH_TOKEN`. Also optional, and for a reason that
-  now applies to the Gemini key too: either credential can be pasted
-  into the UI instead (Settings -> Agent frameworks), which stores it in
-  the host's own secrets database and takes precedence over whatever
-  metadata carries. The daemon starts and serves the UI with neither set;
-  only a *dispatch* needs one, and a run whose framework has none fails
-  saying exactly that. Push one to have a deployment come up already able
-  to dispatch, without anyone opening the UI first. Which framework a run
+- **The Claude Code OAuth token** and **the OpenAI API key** -- the same
+  thing for the other two agent frameworks (`pkg/agent/claude`,
+  `pkg/agent/codex`), pushed as `GRAIN_CLAUDE_CODE_OAUTH_TOKEN` and
+  `GRAIN_OPENAI_API_KEY`. Also optional, and for a reason that now
+  applies to the Gemini key too: any of them can be pasted into the UI
+  instead (Settings -> Agent frameworks), which stores it in the host's
+  own secrets database and takes precedence over whatever metadata
+  carries. The daemon starts and serves the UI with none set; only a
+  *dispatch* needs one, and a run whose framework has none fails saying
+  exactly that. Push one to have a deployment come up already able to
+  dispatch, without anyone opening the UI first. Which framework a run
   is driven by is a store-backed setting, overridable per task, so a
-  deployment that might use either wants both.
+  deployment that might use more than one wants each of their
+  credentials.
 - **The minter's own key** -- what lets `pkg/capability/gcpkey` mint and
   revoke the agent account's per-task keys.
 

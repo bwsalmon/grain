@@ -182,7 +182,7 @@ redact() {
       if ($0 ~ /END[A-Z ]*PRIVATE KEY-----/) inkey = 0
       next
     }
-    /"(grain-github-token|grain-github-app-id|grain-github-app-installation-id|grain-github-app-private-key|grain-gemini-api-key|grain-claude-oauth-token|grain-gcp-minter-key)"/ && / = "/ {
+    /"(grain-github-token|grain-github-app-id|grain-github-app-installation-id|grain-github-app-private-key|grain-gemini-api-key|grain-claude-oauth-token|grain-openai-api-key|grain-gcp-minter-key)"/ && / = "/ {
       sub(/ = ".*/, " = (redacted by terraform-apply.sh)")
     }
     /BEGIN[A-Z ]*PRIVATE KEY-----/ {
