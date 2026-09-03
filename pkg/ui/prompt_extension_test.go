@@ -141,9 +141,15 @@ func TestRepoPromptExtensionGetAndPut(t *testing.T) {
 			got.PromptExtension, saved.PromptExtension)
 	}
 
-	rec = do(t, srv, http.MethodPut, "/api/repos/widgets/prompt-extension", `{"promptExtension":"x"}`)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("a repo with no owner was accepted: %s", rec.Body)
+	// Cleared through the same route, which is how a repo stops adding
+	// anything of its own -- and the point at which it may have no row
+	// here at all (model.RepoConfig.Empty).
+	rec = do(t, srv, http.MethodPut, "/api/repos/acme/widgets/prompt-extension", `{"promptExtension":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	if got := decode[ui.RepoDefaults](t, rec); got.PromptExtension != "" {
+		t.Fatalf("promptExtension = %q after clearing it, want empty", got.PromptExtension)
 	}
 }
 
