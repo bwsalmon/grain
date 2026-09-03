@@ -156,8 +156,10 @@ func runCommandTool(root string) Tool {
 				return Result{Text: "command is required", IsError: true}
 			}
 
+			bound := resolveRunCommandBound(args)
+			started := time.Now()
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, runCommandTimeout(args))
+			ctx, cancel = context.WithTimeout(ctx, bound.d)
 			defer cancel()
 
 			cmd := exec.CommandContext(ctx, "bash", "-c", command)
@@ -184,7 +186,21 @@ func runCommandTool(root string) Tool {
 					stderr.WriteString(err.Error())
 				}
 			}
-			text := fmt.Sprintf("exit=%d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout.String(), stderr.String())
+			// A command the deadline killed comes back as exit=-1 (an
+			// *exec.ExitError for a process killed by a signal has no
+			// exit status of its own), which is also what "could not
+			// start at all" looks like -- so the deadline has to say
+			// so itself. ctx here is the derived one, but its Err can
+			// still be a *parent* deadline (the run's own wall clock)
+			// that fired first, which is not this bound and would name
+			// the wrong number; the elapsed check tells the two apart,
+			// since a parent that fired first fired before bound.d
+			// was up.
+			notice := ""
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) && time.Since(started) >= bound.d {
+				notice = bound.timedOutNotice()
+			}
+			text := formatRunCommandResult(exitCode, stdout.String(), stderr.String(), notice)
 			return Result{Text: text, IsError: exitCode != 0}
 		},
 	}
@@ -206,7 +222,11 @@ func linesFromContent(content string) []string {
 
 // numberedRange renders lines[offset:offset+limit] (args' "offset"/"limit",
 // clamped into range) in the same cat -n-style numbering read_file's model-
-// facing output always uses.
+// facing output always uses, capped at maxToolResultBytes: a read_file
+// call with no "limit" against a 250 KB file used to spend a large part
+// of a run's context in one turn. The numbering is what makes the cut
+// recoverable -- the line numbers either side of the elision notice are
+// exactly the "offset" and "limit" needed to read the missing part.
 func numberedRange(lines []string, args map[string]any) string {
 	start := 0
 	if v, ok := argFloat(args, "offset"); ok {
@@ -233,7 +253,7 @@ func numberedRange(lines []string, args map[string]any) string {
 		}
 		fmt.Fprintf(&b, "%6d\t%s", i+1, lines[i])
 	}
-	return b.String()
+	return elideMiddle(b.String(), maxToolResultBytes, elisionAdviceFileLines)
 }
 
 func readFileTool(root string) Tool {

@@ -2,10 +2,52 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
+	"time"
 )
+
+// runCommandKillGrace is how long the guest-side `timeout` waits between
+// the SIGTERM it sends at the bound and the SIGKILL that follows
+// (`--kill-after`). Without it the "bound" is not one: measured on a real
+// grain guest, `timeout 2 ./ignores-sigterm.sh` against a command
+// trapping TERM waits for that command to finish of its own accord --
+// sixty seconds, for a sixty-second sleep -- and only then reports 124,
+// so a run_command whose command ignores SIGTERM held the tool call open
+// for as long as it liked with nothing to stop it.
+//
+// Five seconds is room for a well-behaved process to flush and exit on
+// the signal it was sent, and short enough that a badly-behaved one
+// cannot spend a meaningful part of a run's budget refusing to.
+//
+// This is *not* accompanied by `--foreground`, which the fix for this was
+// first written as. `--foreground` means what its own documentation says:
+// "children of COMMAND will not be timed out". Plain `timeout` runs the
+// command in its own process group and signals that whole group, so it
+// already reaches everything the command forked -- confirmed on a real
+// guest, where `timeout 2 bash -c './gc.sh & sleep 10'` leaves no
+// surviving gc.sh -- and it is procgroup.Prepare's guarantee for the
+// local transport arriving by a different route. Adding `--foreground`
+// would have removed the only process-group discipline this path has.
+const runCommandKillGrace = 5 * time.Second
+
+// sshRunCommandGrace is how long past the guest-side bound this side
+// waits for the guest to answer at all before abandoning the call. It
+// covers the SIGTERM-to-SIGKILL escalation (runCommandKillGrace) plus a
+// slow `docker exec`/ssh teardown, and it exists for what the guest-side
+// bound structurally cannot cover: the command being bounded says nothing
+// about the *call* returning.
+//
+// The one shape suspected of hitting it -- a command that backgrounds
+// something inheriting the channel's stdout, which is enough to hang an
+// OpenSSH client waiting for EOF -- turns out not to, measured on a real
+// guest: `./bgtest.sh &` returns in about two milliseconds, because the
+// Go ssh client "kontur exec" uses returns on the exit-status message
+// rather than waiting for the streams to close. So this is a backstop for
+// a transport that has stopped answering, not the everyday case.
+const sshRunCommandGrace = 30 * time.Second
 
 // remoteRunner is the interface NewSSHSandboxTools' handlers need out of
 // their transport -- kept separate from the concrete type that supplies it
@@ -57,12 +99,51 @@ func sshRunCommandTool(runner remoteRunner, workspace string) Tool {
 			// omitted one still gets runCommandTimeout's own default
 			// rather than running with no server-side bound at all
 			// (bwsalmon/agents#575).
+			bound := resolveRunCommandBound(args)
 			shell := fmt.Sprintf("cd %s && %s", shellQuote(workspace), command)
-			seconds := int(runCommandTimeout(args).Seconds())
-			shell = fmt.Sprintf("timeout %d bash -c %s", seconds, shellQuote(shell))
+			// The trailing `exit $?` is not decoration. bash replaces
+			// itself with the last simple command in a -c string, so
+			// without it the process the transport is watching *is*
+			// `timeout` -- and since `timeout` signals the process group
+			// it made itself the leader of, the SIGKILL escalation here
+			// kills the very process whose status is the answer. Death
+			// by signal is not an exit status either os/exec or an SSH
+			// exit-status message can carry (it arrives as -1), so the
+			// 137 that says the bound ended this would be lost exactly
+			// when it matters. Leaving a shell alive to report brings it
+			// back as a status.
+			shell = fmt.Sprintf("timeout --kill-after=%ds %d bash -c %s; exit $?",
+				int(runCommandKillGrace.Seconds()), bound.seconds(), shellQuote(shell))
+
+			// ...and bounded again from this side, well after the guest's
+			// own bound should have ended it. The remote `timeout` bounds
+			// the command, not the call: nothing here can make the guest
+			// answer, so without this a wedged transport (an ssh channel
+			// that never closes, a guest that stops responding) holds the
+			// tool call open until the run's own wall clock, and a run
+			// only advances a turn when its current call returns.
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, bound.d+sshRunCommandGrace)
+			defer cancel()
+			started := time.Now()
 
 			stdout, stderr, exitCode := runner.Run(ctx, []string{"bash", "-c", shell}, "")
-			text := fmt.Sprintf("exit=%d\nstdout:\n%s\nstderr:\n%s", exitCode, stdout, stderr)
+
+			// `timeout`'s own reserved statuses, which are how the guest
+			// reports that the bound, not the command, ended this: 124
+			// for the command stopping on the SIGTERM it was sent, 137
+			// (128+SIGKILL) for it having to be killed --kill-after
+			// later. Both used to arrive as a bare number.
+			notice := ""
+			switch {
+			case errors.Is(ctx.Err(), context.DeadlineExceeded) && time.Since(started) >= bound.d:
+				notice = bound.transportStalledNotice()
+			case exitCode == 124:
+				notice = bound.timedOutNotice()
+			case exitCode == 137:
+				notice = bound.killedNotice()
+			}
+			text := formatRunCommandResult(exitCode, stdout, stderr, notice)
 			return Result{Text: text, IsError: exitCode != 0}
 		},
 	}
