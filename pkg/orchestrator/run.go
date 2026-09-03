@@ -275,7 +275,7 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 // in the prompt would say a layer was missing.
 func resolvePromptExtension(ctx context.Context, store *model.Store, deployment string, task model.Task) (string, error) {
 	var repo string
-	if task.Target != nil && store != nil {
+	if task.Target != nil {
 		rc, err := store.GetRepoConfig(ctx, *task.Target)
 		if err != nil {
 			return "", fmt.Errorf("orchestrator: reading %s's prompt extension: %w", task.Target, err)
@@ -288,19 +288,27 @@ func resolvePromptExtension(ctx context.Context, store *model.Store, deployment 
 }
 
 // promptExtensionSection is how that text is handed to the agent: named
-// as the operator's, so a run can tell an instruction somebody chose for
-// this deployment apart from the task it was filed under and from the
-// facts grain states about the branch and the repo. "" for no extension
-// at all, which is every deployment that has not written one and so the
-// overwhelmingly common case -- an empty heading with nothing under it
-// would be a paragraph of prompt saying there is nothing to say.
+// as standing instructions, so a run can tell something somebody chose
+// for work here in general apart from the task it was filed under and
+// from the facts grain states about the branch and the repo.
+//
+// The heading says nothing about which of the three layers wrote it.
+// Whoever configured the deployment, the repo, or this one task all mean
+// the same thing by it -- "this is how work is done here" -- and a
+// heading that named the layer would be a fact about grain's own
+// settings model, which is no use to the run reading it.
+//
+// "" for no extension at all, which is every deployment that has not
+// written one and so the overwhelmingly common case -- an empty heading
+// with nothing under it would be a paragraph of prompt saying there is
+// nothing to say.
 func promptExtensionSection(text string) string {
 	if text == "" {
 		return ""
 	}
-	return "Standing instructions from whoever operates this deployment. They are not " +
-		"part of the task above, and they do not replace anything grain has told you " +
-		"about the branch, the repo or the checks -- follow them alongside all of it:\n\n" + text
+	return "Standing instructions for work on this deployment. They are not part of the " +
+		"task above, and they do not replace anything grain has told you about the " +
+		"branch, the repo or the checks -- follow them alongside all of it:\n\n" + text
 }
 
 // baseDescription names the branch a run's own branch has to keep

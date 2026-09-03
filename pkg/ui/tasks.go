@@ -84,8 +84,8 @@ type Task struct {
 	// sent.
 	PromptExtension string   `json:"promptExtension,omitempty"`
 	Capabilities    []string `json:"capabilities"`
-	PullRequest    string   `json:"pullRequest,omitempty"`
-	GeneratedFrom  string   `json:"generatedFrom,omitempty"`
+	PullRequest     string   `json:"pullRequest,omitempty"`
+	GeneratedFrom   string   `json:"generatedFrom,omitempty"`
 	// Stacked is true for a task the merge queue filed automatically to
 	// repair another task's own pull request (model.ReasonFix) -- built
 	// on that task's own branch and merged straight back into it once

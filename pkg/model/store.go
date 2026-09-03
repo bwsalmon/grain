@@ -717,7 +717,7 @@ func (s *Store) ensureTaskAgentFrameworkColumn(ctx context.Context) error {
 // (Task.PromptExtension's own doc comment, and prompt_extension.go's,
 // have the reasoning -- grain/task-114) to a database created before this
 // column existed, the same probe-then-ALTER approach every other
-// ensure*Column migration here uses. It defaults to '',
+// ensure*Column migration here uses. It defaults to the empty string,
 // Task.PromptExtension's own "no override, use what the deployment and
 // the repo say" zero value, so every task already in such a database is
 // dispatched with exactly the instructions it would have had before a
@@ -736,8 +736,8 @@ func (s *Store) ensureTaskPromptExtensionColumn(ctx context.Context) error {
 // (model.Config.PromptExtension's own doc comment has the reasoning) to a
 // database created before grain/task-114, the same probe-then-ALTER
 // approach ensureConfigEnvironmentNameColumn already uses. It defaults to
-// '', which adds nothing to any prompt -- exactly what an upgraded
-// deployment was doing until somebody writes one.
+// the empty string, which adds nothing to any prompt -- exactly what an
+// upgraded deployment was doing until somebody writes one.
 func (s *Store) ensureConfigPromptExtensionColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `prompt_extension` FROM `grain_config` WHERE 1 = 0")
 	if err == nil {
