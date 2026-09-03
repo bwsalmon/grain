@@ -58,11 +58,14 @@ func task(id string, approved bool, links ...model.Link) model.Task {
 
 // fixTask builds a task the merge queue would file to repair a stuck
 // queue head (Origin.Reason == ReasonFix) -- see orchestrator/sync.go's
-// fileFixTask. Dispatch order is the only thing distinguishing it from
-// an ordinary task here, so nothing else about it needs to differ.
+// fileFixTask, including the place in the backlog it files one at: the
+// very head, ahead of the zero OrderKey every task() here carries. That
+// position is now the whole of why it dispatches first, so a fix task
+// built without it would prove nothing.
 func fixTask(id string) model.Task {
 	tk := task(id, true)
 	tk.Origin.Reason = model.ReasonFix
+	tk.OrderKey = -1
 	return tk
 }
 
@@ -293,6 +296,11 @@ func TestCycleSkipsBlockedTasksUntilTheirDependencyCloses(t *testing.T) {
 // (task ID) -- otherwise the repair sits behind unrelated tasks while
 // the branch it targets keeps moving, and has to be refiled once it
 // finally runs.
+//
+// It wins that slot by sitting at the head of the backlog, not by any
+// rule of Store.Ready's own: the priority is a position now, which is
+// what makes it visible in a task list and movable by a human who
+// disagrees with it.
 func TestCycleDispatchesFixTasksBeforeOrdinaryReadyTasks(t *testing.T) {
 	store, ctx := open(t)
 	putTasks(t, store, ctx, task("a-new-work", true), fixTask("z-fix"))

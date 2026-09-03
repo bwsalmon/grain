@@ -140,9 +140,9 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	branch1, branch2 := model.BranchName("t1"), model.BranchName("t2")
 	clock := baseTime
 
-	// Step 1: both push and open pull requests -- task1 first, so it is
-	// the earlier-created (and thus head) entry once both are queue
-	// members.
+	// Step 1: both push and open pull requests -- task1 first, and it
+	// sits ahead of task2 in the backlog, which is where the queue reads
+	// its head from once both are members.
 	deps.Framework = scriptedFramework(configPushScript(w.remote(owner, repoName), branch1, "setting: from-task1"))
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
 		t.Fatalf("RunCycle (t1 push): %v", err)

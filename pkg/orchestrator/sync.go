@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -538,35 +539,85 @@ func isQueueMember(e queueEntry) bool {
 	return e.obs == nil || e.obs.MergeQueueBlockedAt == nil
 }
 
-// queueHeads returns, for every target repo with at least one queued
-// task, the ID of the one task in front: the earliest submitted (by
-// Task.CreatedAt, ties broken by ID so the choice is deterministic) among
-// entries for which isQueueMember is true. Only a repo's head task is
-// ever merged or auto-fixed on a given cycle -- everything behind it
-// waits, which is the whole property that makes this a queue rather than
-// "merge every clean PR in whatever order GitHub happens to return them
-// in": a fix filed for the second task while the first is still being
-// repaired would very likely need refiling the moment the first merges
-// and changes what the second is based against.
-func queueHeads(entries []queueEntry) map[string]string {
-	heads := map[string]string{}
-	earliest := map[string]time.Time{}
+// queueOrder is every entry isQueueMember accepts, across all repos at
+// once, in the merge queue's own order: the backlog's, ascending
+// Task.OrderKey with the task ID as the tiebreak, which is the order
+// Store.ListTasks shows a human and Store.Ready dispatches in.
+//
+// The queue used to have an order of its own -- earliest submitted, by
+// Task.CreatedAt -- computed here, inside one cycle, and written down
+// nowhere. Reading position off the backlog instead means there is one
+// ordering rather than two, and it is the one already on screen:
+// showQueueAtFrontOfBacklog keeps these entries at the front of that
+// backlog, in this order, so what a list shows and what merges next
+// cannot drift apart, and a human who disagrees with the order can drag a
+// row rather than discover there was nothing to drag. For a deployment
+// that has never reordered anything this is the same answer CreatedAt
+// gave: Store.OrderKeyForNewTask files each new task behind the last.
+func queueOrder(entries []queueEntry) []queueEntry {
+	members := make([]queueEntry, 0, len(entries))
 	for _, e := range entries {
-		if !isQueueMember(e) {
-			continue
+		if isQueueMember(e) {
+			members = append(members, e)
 		}
+	}
+	sort.SliceStable(members, func(i, j int) bool {
+		if members[i].task.OrderKey != members[j].task.OrderKey {
+			return members[i].task.OrderKey < members[j].task.OrderKey
+		}
+		return members[i].task.ID < members[j].task.ID
+	})
+	return members
+}
+
+// queueHeads returns, for every target repo with at least one queued
+// task, the ID of the one task in front: the first of that repo's
+// entries in queueOrder. Only a repo's head task is ever merged or
+// auto-fixed on a given cycle -- everything behind it waits, which is the
+// whole property that makes this a queue rather than "merge every clean
+// PR in whatever order GitHub happens to return them in": a fix filed for
+// the second task while the first is still being repaired would very
+// likely need refiling the moment the first merges and changes what the
+// second is based against.
+func queueHeads(members []queueEntry) map[string]string {
+	heads := map[string]string{}
+	for _, e := range members {
 		repo := e.ref.Repo.String()
-		created := time.Time{}
-		if e.task.CreatedAt != nil {
-			created = *e.task.CreatedAt
-		}
-		cur, ok := heads[repo]
-		if !ok || created.Before(earliest[repo]) || (created.Equal(earliest[repo]) && e.task.ID < cur) {
+		if _, ok := heads[repo]; !ok {
 			heads[repo] = e.task.ID
-			earliest[repo] = created
 		}
 	}
 	return heads
+}
+
+// showQueueAtFrontOfBacklog moves every task waiting on the merge queue to
+// the front of the backlog, in the order the queue will act on them
+// (queueOrder), so grain's internal ordering is something a person can
+// read off the task list rather than something only a cycle knows.
+//
+// Reconciled every cycle rather than written once when a task joins the
+// queue: membership is a derived fact (isQueueMember, over auto-merge,
+// fix-task and blocked-at state that all move on their own), so the only
+// way for the front of the backlog to keep agreeing with it is to
+// recompute both together. Store.MoveToFrontOfBacklog writes nothing when
+// the order already holds, which is almost every cycle.
+//
+// Failing is not fatal to the sync it runs inside: what is lost is the
+// backlog showing the right order for one cycle, and every merge decision
+// here is made from queueOrder directly rather than from what was
+// written.
+func showQueueAtFrontOfBacklog(ctx context.Context, store *model.Store, members []queueEntry) error {
+	if len(members) == 0 {
+		return nil
+	}
+	ids := make([]string, len(members))
+	for i, e := range members {
+		ids[i] = e.task.ID
+	}
+	if err := store.MoveToFrontOfBacklog(ctx, ids); err != nil {
+		return fmt.Errorf("orchestrator: moving the merge queue to the front of the backlog: %w", err)
+	}
+	return nil
 }
 
 // SyncPullRequests refreshes every completed task's tracked pull request,
@@ -574,11 +625,12 @@ func queueHeads(entries []queueEntry) map[string]string {
 // tasks whose PR finished -- the other half of core.py's _close_finished_prs
 // this package owns, plus the merge queue bwsalmon/agents#283 asked for in
 // place of core.py's own _suggest_fix (a suggestion a human had to
-// approve before the agent set would attempt it). See queueHeads and
-// syncEntry for the queue itself; this function only gathers the state
-// every entry's decision needs before any of them act, so a decision
-// about task N never depends on an in-progress change queueHeads has not
-// seen yet.
+// approve before the agent set would attempt it). See queueOrder,
+// queueHeads and syncEntry for the queue itself, and
+// showQueueAtFrontOfBacklog for where it puts itself so a person can see
+// it; this function only gathers the state every entry's decision needs
+// before any of them act, so a decision about task N never depends on an
+// in-progress change queueHeads has not seen yet.
 func SyncPullRequests(ctx context.Context, store *model.Store, client github.Client, now time.Time) error {
 	links, err := store.OpenPullRequestLinks(ctx)
 	if err != nil {
@@ -623,13 +675,20 @@ func SyncPullRequests(ctx context.Context, store *model.Store, client github.Cli
 		entries = append(entries, queueEntry{task: *task, obs: obs, ref: ref})
 	}
 
+	// The queue, in the order it will act: computed once against the whole
+	// set, and put where a person can see it before anything acts on it.
+	members := queueOrder(entries)
+	heads := queueHeads(members)
+	if err := showQueueAtFrontOfBacklog(ctx, store, members); err != nil {
+		errs = append(errs, err)
+	}
+
 	// Acting on one entry is isolated, because head-of-queue was already
 	// decided above against the complete set: an entry that fails here
 	// cannot make another entry merge that would not have merged anyway
 	// (syncEntry merges an ordinary queue member only when it is its
 	// repo's head), so the worst a failure costs the others is a cycle of
 	// latency -- which is what returning early used to cost all of them.
-	heads := queueHeads(entries)
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
@@ -896,15 +955,15 @@ func fixTaskLink(task model.Task) (string, bool) {
 // side.
 //
 // Six hours is chosen against what a fix task honestly needs: it has to
-// wait its turn to be dispatched (briefly -- Store.Ready sorts ReasonFix
-// tasks ahead of everything else), run an agent (capped at
-// defaultMaxRunRuntime, two hours), open a pull request and get its own
-// CI through. That is comfortably inside six hours even when every stage
-// takes longer than usual, and the cost of erring long is one that is
-// paid once per stuck head rather than per cycle. Erring short is worse
-// here than it is for CI: giving up throws away an automatic fix that
-// might have been minutes from landing, and the queue never files a
-// second one.
+// wait its turn to be dispatched (briefly -- fileFixTask files it at the
+// very head of the backlog, which is the order Store.Ready dispatches
+// in), run an agent (capped at defaultMaxRunRuntime, two hours), open a
+// pull request and get its own CI through. That is comfortably inside
+// six hours even when every stage takes longer than usual, and the cost
+// of erring long is one that is paid once per stuck head rather than per
+// cycle. Erring short is worse here than it is for CI: giving up throws
+// away an automatic fix that might have been minutes from landing, and
+// the queue never files a second one.
 //
 // Measured from the fix task's own CreatedAt, which fileFixTask stamps in
 // the same cycle it writes LinkFixTask, rather than from an in-memory
@@ -1024,6 +1083,17 @@ func fileFixTask(ctx context.Context, store *model.Store,
 	if err != nil {
 		return fmt.Errorf("orchestrator: allocating an id for a fix task for %s: %w", task.ID, err)
 	}
+	// At the very head of the backlog: ahead of the queue this repairs,
+	// which showQueueAtFrontOfBacklog has already put at the front of it,
+	// and so ahead of everything else. That is bwsalmon/agents#389's "a
+	// queue head's repair must not wait behind unrelated new work" said as
+	// a position rather than as a sort rule inside Store.Ready, which is
+	// where it used to live and where nobody could see it -- the backlog
+	// now shows the repair first because it really is dispatched first.
+	orderKey, err := store.OrderKeyForNewTask(ctx, true)
+	if err != nil {
+		return fmt.Errorf("orchestrator: placing a fix task for %s at the head of the backlog: %w", task.ID, err)
+	}
 	title := fixTaskTitle(task, ref)
 	body := fmt.Sprintf(
 		"Task %s opened %s (%s), but %s.\n\n"+
@@ -1050,6 +1120,7 @@ func fileFixTask(ctx context.Context, store *model.Store,
 		AutoMerge: true,
 		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
 		CreatedAt: &now,
+		OrderKey:  orderKey,
 	}
 	if err := store.PutTask(ctx, fixTask); err != nil {
 		return fmt.Errorf("orchestrator: filing fix task %s: %w", fixTask.ID, err)

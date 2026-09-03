@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -385,6 +386,12 @@ func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseFixTaskNeverFinishes(t *testing
 	}
 }
 
+// TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries pins the
+// property that makes this a queue at all: only the task in front of its
+// repo's queue is repaired or merged on a cycle. Which one that is comes
+// off the backlog (queueOrder) -- t1 sits ahead of t2 there, and was also
+// filed first, which is the same answer for any deployment that has not
+// reordered anything.
 func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
@@ -396,6 +403,7 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 	head := filedTask(t, ctx, store, "t1", repo)
 	head.AutoMerge = true
 	head.CreatedAt = &earlier
+	head.OrderKey = 100
 	if err := store.PutTask(ctx, head); err != nil {
 		t.Fatal(err)
 	}
@@ -417,6 +425,7 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 	second := filedTask(t, ctx, store, "t2", repo)
 	second.AutoMerge = true
 	second.CreatedAt = &later
+	second.OrderKey = 200
 	if err := store.PutTask(ctx, second); err != nil {
 		t.Fatal(err)
 	}
@@ -942,6 +951,120 @@ func TestSyncPullRequestsTimesStalledChecksBehindTheQueueHeadToo(t *testing.T) {
 	}
 	if obs == nil || obs.MergeQueueBlockedAt == nil {
 		t.Fatal("the second task waited out a second deadline of its own after being promoted")
+	}
+}
+
+// backlogIDs is the backlog as a person reading a task list sees it:
+// every task in Store.ListTasks' own order, which is also the order
+// Store.Ready dispatches in.
+func backlogIDs(t *testing.T, ctx context.Context, store *model.Store) []string {
+	t.Helper()
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	ids := make([]string, len(tasks))
+	for i, tk := range tasks {
+		ids[i] = tk.ID
+	}
+	return ids
+}
+
+// placeInBacklog moves an already-filed task to an explicit position, so
+// a test can state the backlog it starts from rather than rely on
+// whatever OrderKey its helpers left behind.
+func placeInBacklog(t *testing.T, ctx context.Context, store *model.Store, task model.Task, key float64) model.Task {
+	t.Helper()
+	task.OrderKey = key
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	return task
+}
+
+// TestSyncPullRequestsMovesTheQueueToTheFrontOfTheBacklog is the merge
+// queue's own ordering made visible. The tasks whose pull requests are
+// waiting to land go to the front of the backlog in the order the queue
+// will act on them, and the fix task filed for the head of that queue
+// goes to the very head -- so a task list answers "what is grain about to
+// finish, and in what order" without anyone opening a task, and answers
+// it with the same order Store.Ready dispatches from.
+func TestSyncPullRequestsMovesTheQueueToTheFrontOfTheBacklog(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	// An ordinary task nobody has run yet, sitting ahead of both queue
+	// members to begin with, so the move is visible as a move.
+	ordinary := placeInBacklog(t, ctx, store, filedTask(t, ctx, store, "t0", repo), 100)
+	head, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	head = placeInBacklog(t, ctx, store, head, 200)
+	second, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
+	second = placeInBacklog(t, ctx, store, second, 300)
+
+	// Both pull requests are conflicted: the head gets an automatic fix
+	// filed for it and neither of them merges, so the whole queue is
+	// still there to be looked at afterwards.
+	setMergeable(sim, false)
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixID, ok := fixTaskLinkOf(got)
+	if !ok {
+		t.Fatalf("expected a fix task filed for the queue head, links = %+v", got.Links)
+	}
+
+	want := []string{fixID, head.ID, second.ID, ordinary.ID}
+	if backlog := backlogIDs(t, ctx, store); !reflect.DeepEqual(backlog, want) {
+		t.Fatalf("backlog = %v, want %v -- the fix at the very head, then the queue, then ordinary work", backlog, want)
+	}
+}
+
+// TestSyncPullRequestsTakesItsQueueHeadFromTheBacklogOrder is the other
+// direction of the same fact: because the queue's order is the backlog's,
+// a human who drags one waiting pull request above another really has
+// changed which one merges first. Nothing about the tasks themselves
+// differs here -- t1 was filed first and is still the older of the two --
+// so a queue ordered by anything but position would go on repairing t1.
+func TestSyncPullRequestsTakesItsQueueHeadFromTheBacklogOrder(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	first, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	first = placeInBacklog(t, ctx, store, first, 100)
+	second, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
+	second = placeInBacklog(t, ctx, store, second, 200)
+
+	// The drag: t2 dropped at the head of the list, above t1.
+	if err := store.Reorder(ctx, []string{second.ID}, nil, strPtr(first.ID)); err != nil {
+		t.Fatal(err)
+	}
+	setMergeable(sim, false)
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests: %v", err)
+	}
+
+	gotSecond, err := store.GetTask(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fixTaskLinkOf(gotSecond); !ok {
+		t.Fatal("expected the fix filed for the task dragged to the front of the backlog")
+	}
+	gotFirst, err := store.GetTask(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fixTaskLinkOf(gotFirst); ok {
+		t.Fatal("did not expect a fix for the task now behind it in the backlog")
 	}
 }
 
