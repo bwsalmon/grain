@@ -355,6 +355,25 @@ otherwise hand back a directory that no longer builds. This is the one
 finding here with real surface area — a new field, a settings form, a UI
 row — which is why it is ninth rather than third.
 
+**Done** (grain/task-154). `RepoConfig.SetupCommand` is run by
+`prepareCheckout` through the same `run_command` tool the clone goes
+through, so it works on either sandbox backend, and by
+`restoreCheckout` on the `recreate_sandbox` path, whose answer names it
+among what was restored — or warns, with the exit status and the tail,
+when it failed there. The prompt gets `setupSection`: the command, its
+exit status, the tail of its output, and the sentence that separates a
+broken checkout from a broken change. A failed setup is deliberately not
+a failed dispatch (grain cannot know whether a broken `make deps` is
+fatal to the task in hand, and the run can find out in one command); a
+setup still running at `setupCommandTimeout` — ten minutes, `mcp`'s own
+ceiling for a sandbox tool call — is, since it has told nobody anything
+and would otherwise burn the run's whole budget inside a tool call the
+agent never sees. The surface area landed with it: the column and its
+migration, `GET`/`PUT /api/repos/{owner}/{name}/setup-command` beside
+the two routes already there, a box on the repo page, `grain repo
+setup-command`, and `reposWithSetupCommand` on `GET /api/config` so a
+repo whose only configuration is the command is still reachable.
+
 ## 10. Minor, and worth doing while nearby
 
 - **`run_command` has no `workdir` argument.** Every call in a
@@ -445,7 +464,7 @@ Filed as separate proposals, each depending on this document:
    grain/task-151.
 4. Tell a redispatched run what its previous attempts did (finding 8).
 5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13).
-6. A per-repo setup command (finding 9).
+6. A per-repo setup command (finding 9) — **done**, grain/task-154.
 
 Findings 6 and 10 are small enough to fold into whichever of those
 touches the same file first.
