@@ -366,7 +366,11 @@ type PullRequestDetail struct {
 	// /commits/{sha}/status stayed empty the whole run -- and a check
 	// still running or finished red read "unstable" throughout, never
 	// "clean". So trusting it would not have auto-merged a PR with red
-	// CI, which was the question that kept it out of the gate.
+	// CI, which was the question that kept it out of the gate. The other
+	// half of that reading came later on the same pull request, once the
+	// red check was actually repaired: with all six checks completed and
+	// green it read "clean". So where checks exist, "clean" and
+	// "unstable" do separate a passing run from a broken one.
 	//
 	// It still cannot replace defaultCheckRegistrationWindow, which was
 	// the reason to want it. On a pull request no workflow watches --
