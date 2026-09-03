@@ -18,21 +18,21 @@ func TestHealthFromClosedStateReadsClosedRegardlessOfChecks(t *testing.T) {
 	failure := "failure"
 	got := healthFrom(github.PullRequestDetail{State: "closed"}, []github.CheckRun{
 		{Status: "completed", Conclusion: &failure},
-	}, true)
+	}, true, true)
 	if got != model.PrClosed {
 		t.Fatalf("got %q, want closed", got)
 	}
 }
 
 func TestHealthFromClosedAndMergedReadsMerged(t *testing.T) {
-	got := healthFrom(github.PullRequestDetail{State: "closed", Merged: true}, nil, true)
+	got := healthFrom(github.PullRequestDetail{State: "closed", Merged: true}, nil, true, true)
 	if got != model.PrMerged {
 		t.Fatalf("got %q, want merged", got)
 	}
 }
 
 func TestHealthFromUnknownMergeabilityWithNoFailingChecksIsUnknown(t *testing.T) {
-	got := healthFrom(github.PullRequestDetail{State: "open"}, nil, true)
+	got := healthFrom(github.PullRequestDetail{State: "open"}, nil, true, true)
 	if got != model.PrUnknown {
 		t.Fatalf("got %q, want unknown", got)
 	}
@@ -40,7 +40,7 @@ func TestHealthFromUnknownMergeabilityWithNoFailingChecksIsUnknown(t *testing.T)
 
 func TestHealthFromNotMergeableIsConflicted(t *testing.T) {
 	no := false
-	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, nil, true)
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, nil, true, true)
 	if got != model.PrConflicted {
 		t.Fatalf("got %q, want conflicted", got)
 	}
@@ -51,7 +51,7 @@ func TestHealthFromAFailedCompletedCheckIsFailing(t *testing.T) {
 	failure := "failure"
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "build", Status: "completed", Conclusion: &failure},
-	}, true)
+	}, true, true)
 	if got != model.PrFailing {
 		t.Fatalf("got %q, want failing", got)
 	}
@@ -67,7 +67,7 @@ func TestHealthFromAnInProgressCheckIsPending(t *testing.T) {
 	yes := true
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "build", Status: "in_progress"},
-	}, true)
+	}, true, true)
 	if got != model.PrPending {
 		t.Fatalf("got %q, want pending (an unfinished check must never read as clean)", got)
 	}
@@ -81,7 +81,7 @@ func TestHealthFromAQueuedCheckIsPendingEvenAlongsideAPassingOne(t *testing.T) {
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "lint", Status: "completed", Conclusion: strPtr("success")},
 		{Name: "tests", Status: "queued"},
-	}, true)
+	}, true, true)
 	if got != model.PrPending {
 		t.Fatalf("got %q, want pending: one green check says nothing about the one still queued", got)
 	}
@@ -96,7 +96,7 @@ func TestHealthFromAFailedCheckAlongsideARunningOneIsStillPending(t *testing.T) 
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "lint", Status: "completed", Conclusion: strPtr("failure")},
 		{Name: "tests", Status: "in_progress"},
-	}, true)
+	}, true, true)
 	if got != model.PrPending {
 		t.Fatalf("got %q, want pending until every check has reported", got)
 	}
@@ -109,7 +109,7 @@ func TestHealthFromConflictedBeatsPending(t *testing.T) {
 	no := false
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, []github.CheckRun{
 		{Name: "tests", Status: "in_progress"},
-	}, true)
+	}, true, true)
 	if got != model.PrConflicted {
 		t.Fatalf("got %q, want conflicted", got)
 	}
@@ -125,7 +125,7 @@ func TestHealthFromATimedOutOrUnstartableCheckIsFailing(t *testing.T) {
 			yes := true
 			got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 				{Name: "tests", Status: "completed", Conclusion: strPtr(conclusion)},
-			}, true)
+			}, true, true)
 			if got != model.PrFailing {
 				t.Fatalf("got %q, want failing", got)
 			}
@@ -143,7 +143,7 @@ func TestHealthFromTheNonFailureConclusionsStayClean(t *testing.T) {
 			yes := true
 			got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 				{Name: "tests", Status: "completed", Conclusion: strPtr(conclusion)},
-			}, true)
+			}, true, true)
 			if got != model.PrClean {
 				t.Fatalf("got %q, want clean", got)
 			}
@@ -186,13 +186,286 @@ func TestHealthFromMergeableWithNoFailingChecksIsClean(t *testing.T) {
 	yes := true
 	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
 		{Name: "build", Status: "completed", Conclusion: strPtr("success")},
-	}, true)
+	}, true, true)
 	if got != model.PrClean {
 		t.Fatalf("got %q, want clean", got)
 	}
 }
 
 func strPtr(s string) *string { return &s }
+
+// --- an empty check list -----------------------------------------------
+
+// The race this closes. A pull request opened the instant its branch
+// landed is read before GitHub has created the workflow run's check runs,
+// so the Checks API answers with nothing at all -- and nothing at all is
+// also exactly what a repo with no CI answers. Believing it straight away
+// merges the change before CI has said a word about it, which is the same
+// failure an unfinished check already covers, one step earlier.
+func TestHealthFromAnEmptyCheckListIsPendingUntilItSettles(t *testing.T) {
+	yes := true
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, nil, true, false)
+	if got != model.PrPending {
+		t.Fatalf("got %q, want pending: no checks reported *yet* is not the same as no checks", got)
+	}
+}
+
+// And the other side of it, which is why this cannot simply block on an
+// empty list forever: a repo with no CI configured is a real, supported
+// deployment, and its pull requests must still merge. Once the head
+// commit has sat there long enough for CI to have shown up, the empty
+// list means what it says.
+func TestHealthFromASettledEmptyCheckListIsClean(t *testing.T) {
+	yes := true
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, nil, true, true)
+	if got != model.PrClean {
+		t.Fatalf("got %q, want clean: a repo with no CI at all must still be mergeable", got)
+	}
+}
+
+// checksSettled is only ever consulted about an empty list. A check that
+// has reported answers for itself, and letting an unelapsed window hold a
+// finished green check back would delay every merge by it.
+func TestHealthFromIgnoresTheSettleWindowOnceAnyCheckExists(t *testing.T) {
+	yes := true
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, []github.CheckRun{
+		{Name: "build", Status: "completed", Conclusion: strPtr("success")},
+	}, true, false)
+	if got != model.PrClean {
+		t.Fatalf("got %q, want clean: a reported check needs no window to wait out", got)
+	}
+}
+
+func TestEmptyChecksSettledWaitsOutTheWindow(t *testing.T) {
+	defer SetCheckRegistrationWindow(2 * time.Minute)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	if emptyChecksSettled(ref, "sha1", start) {
+		t.Fatal("the first read of an empty check list settled it immediately")
+	}
+	if emptyChecksSettled(ref, "sha1", start.Add(90*time.Second)) {
+		t.Error("settled inside the window")
+	}
+	if !emptyChecksSettled(ref, "sha1", start.Add(2*time.Minute)) {
+		t.Error("still unsettled once the window had elapsed -- a CI-less repo would never merge")
+	}
+}
+
+// A push to a branch that already has a pull request open -- a fix task
+// merging into it, a human pushing by hand -- empties the check list
+// again and starts CI again. Inheriting the previous commit's settled
+// verdict would merge the new commit against the old one's silence.
+func TestEmptyChecksSettledRestartsTheWindowOnANewHeadCommit(t *testing.T) {
+	defer SetCheckRegistrationWindow(2 * time.Minute)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	emptyChecksSettled(ref, "sha1", start)
+	if !emptyChecksSettled(ref, "sha1", start.Add(3*time.Minute)) {
+		t.Fatal("the first commit never settled")
+	}
+	if emptyChecksSettled(ref, "sha2", start.Add(3*time.Minute)) {
+		t.Error("a freshly pushed commit inherited the previous commit's settled verdict")
+	}
+	if !emptyChecksSettled(ref, "sha2", start.Add(5*time.Minute)) {
+		t.Error("the new commit's own window never elapsed")
+	}
+}
+
+// Forgetting a closed pull request is only housekeeping -- it is what
+// keeps the sighting map from growing for the life of the process -- but
+// it has to forget the whole sighting rather than half of it. Starting
+// the window again is the safe direction, and the one this pins.
+func TestForgetEmptyChecksStartsTheWindowAgain(t *testing.T) {
+	defer SetCheckRegistrationWindow(2 * time.Minute)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	emptyChecksSettled(ref, "sha1", start)
+	forgetEmptyChecks(ref)
+	if emptyChecksSettled(ref, "sha1", start.Add(3*time.Minute)) {
+		t.Error("a forgotten pull request kept its old sighting")
+	}
+}
+
+// GitHub fills the head sha in asynchronously, like Mergeable. A read
+// without one has not told us which commit the empty list belongs to, so
+// there is no commit whose CI can be concluded absent.
+func TestEmptyChecksSettledNeverSettlesWithoutAHeadSHA(t *testing.T) {
+	defer SetCheckRegistrationWindow(2 * time.Minute)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	if emptyChecksSettled(ref, "", start) {
+		t.Error("settled a pull request GitHub had not named a head commit for")
+	}
+	if emptyChecksSettled(ref, "", start.Add(time.Hour)) {
+		t.Error("waiting does not turn a missing head commit into a settled one")
+	}
+}
+
+// Zero means off, all the way off: the tests in tests/e2e and cmd/grain
+// drive a simulated GitHub with no CI in it at all, and every one of them
+// would otherwise wait out a window in real wall-clock time for a check
+// run that is never coming.
+func TestSetCheckRegistrationWindowZeroSettlesImmediately(t *testing.T) {
+	defer SetCheckRegistrationWindow(0)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	if !emptyChecksSettled(ref, "sha1", start) {
+		t.Error("a disabled window still made the first read wait")
+	}
+	if !emptyChecksSettled(ref, "", start) {
+		t.Error("a disabled window still withheld a pull request with no head sha")
+	}
+}
+
+// The restore function is what every caller of this uses to put the
+// deployment's own window back, so it has to actually restore rather than
+// reset to the default.
+func TestSetCheckRegistrationWindowRestores(t *testing.T) {
+	restoreOuter := SetCheckRegistrationWindow(5 * time.Minute)
+	defer restoreOuter()
+
+	restoreInner := SetCheckRegistrationWindow(0)
+	restoreInner()
+
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	if emptyChecksSettled(ref, "sha1", start) {
+		t.Fatal("the window came back off rather than back to five minutes")
+	}
+	if emptyChecksSettled(ref, "sha1", start.Add(3*time.Minute)) {
+		t.Error("settled after three minutes -- the restored window is shorter than five")
+	}
+	if !emptyChecksSettled(ref, "sha1", start.Add(5*time.Minute)) {
+		t.Error("still unsettled after five minutes -- the restored window is longer than five")
+	}
+}
+
+// --- the deadline on PENDING -------------------------------------------
+
+// The clock the merge queue gives up on: PENDING is right for CI that
+// finishes and unbounded for CI that does not, so an unfinished check is
+// waited on for the deadline and no longer.
+func TestChecksStalledWaitsOutTheDeadline(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	if stalled, _ := checksStalled(ref, "sha1", start); stalled {
+		t.Fatal("the first pending read was stalled immediately -- every pull request would escalate")
+	}
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(119*time.Minute)); stalled {
+		t.Error("stalled inside the deadline, on CI that is merely slow")
+	}
+	stalled, deadline := checksStalled(ref, "sha1", start.Add(2*time.Hour))
+	if !stalled {
+		t.Error("never stalled -- an unfinished check would hold its queue head forever")
+	}
+	if deadline != 2*time.Hour {
+		t.Errorf("deadline = %s, want the one in effect: it is what the comment tells the task", deadline)
+	}
+}
+
+// A push restarts CI, so it restarts the clock: the new commit's checks
+// have not been unfinished for the old commit's however-long.
+func TestChecksStalledRestartsTheClockOnANewHeadCommit(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	if stalled, _ := checksStalled(ref, "sha2", start.Add(3*time.Hour)); stalled {
+		t.Error("a freshly pushed commit inherited the previous commit's elapsed deadline")
+	}
+	if stalled, _ := checksStalled(ref, "sha2", start.Add(5*time.Hour)); !stalled {
+		t.Error("the new commit's own deadline never elapsed")
+	}
+}
+
+// Forgetting is what makes the clock measure one unbroken run of pending
+// reads rather than the span between two of them: syncEntry drops the
+// sighting on every cycle that reads anything else, so a check re-run
+// hours later is timed from the re-run.
+func TestForgetPendingChecksStartsTheClockAgain(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	forgetPendingChecks(ref)
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(3*time.Hour)); stalled {
+		t.Error("a re-run was timed from the commit's first ever pending read")
+	}
+}
+
+// Unlike the registration window, a missing head sha is timed rather than
+// excused. There the sha is the thing being reasoned about; here the pull
+// request is stuck whatever GitHub is calling its head, and a sha that
+// never arrives is one more way for PENDING to last forever.
+func TestChecksStalledTimesAPullRequestWithNoHeadSHA(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	if stalled, _ := checksStalled(ref, "", start); stalled {
+		t.Fatal("stalled on the first read")
+	}
+	if stalled, _ := checksStalled(ref, "", start.Add(2*time.Hour)); !stalled {
+		t.Error("a pull request with no head sha waited forever")
+	}
+}
+
+// Zero is off, and off here means the opposite direction to off on the
+// registration window: never give up, which is what this package did
+// before the deadline existed.
+func TestSetCheckStallDeadlineZeroNeverGivesUp(t *testing.T) {
+	defer SetCheckStallDeadline(0)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(30*24*time.Hour)); stalled {
+		t.Error("a disabled deadline still gave up, a month later")
+	}
+}
+
+// The two clocks are separate, and setting one must not disturb the
+// other: tests/e2e and cmd/grain switch the registration window off for
+// every one of their runs.
+func TestSetCheckRegistrationWindowLeavesTheStallDeadlineAlone(t *testing.T) {
+	defer SetCheckStallDeadline(2 * time.Hour)()
+	defer SetCheckRegistrationWindow(0)()
+	ref := testPullRequestRef()
+	start := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+
+	checksStalled(ref, "sha1", start)
+	if stalled, _ := checksStalled(ref, "sha1", start.Add(2*time.Hour)); !stalled {
+		t.Error("switching the registration window off switched the stall deadline off too")
+	}
+}
+
+// The deadline goes into a comment a person reads, and Duration's own
+// String spells two hours "2h0m0s".
+func TestHumanDuration(t *testing.T) {
+	for _, tc := range []struct {
+		in   time.Duration
+		want string
+	}{
+		{2 * time.Hour, "2h"},
+		{90 * time.Minute, "1h30m"},
+		{45 * time.Minute, "45m"},
+		{30 * time.Second, "30s"},
+		{2*time.Hour + 30*time.Second, "2h0m30s"},
+	} {
+		if got := humanDuration(tc.in); got != tc.want {
+			t.Errorf("humanDuration(%s) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
 
 // --- closing a PR whose head branch is already gone --------------------
 
@@ -283,7 +556,7 @@ func (c *deletedBranchClient) ListCheckRuns(owner, repo, ref string) ([]github.C
 // red.
 func TestHealthFromUnknownChecksIsNeverClean(t *testing.T) {
 	yes := true
-	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, nil, false)
+	got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &yes}, nil, false, true)
 	if got == model.PrClean {
 		t.Fatal("unreadable check runs read as clean: a PR with failing CI would be auto-merged")
 	}
@@ -296,11 +569,11 @@ func TestHealthFromUnknownChecksIsNeverClean(t *testing.T) {
 // without checks: neither needs the Checks API, and a deployment that
 // cannot reach it must still close out merged PRs and notice conflicts.
 func TestHealthFromClosedAndConflictedSurviveUnknownChecks(t *testing.T) {
-	if got := healthFrom(github.PullRequestDetail{State: "closed"}, nil, false); got != model.PrClosed {
+	if got := healthFrom(github.PullRequestDetail{State: "closed"}, nil, false, true); got != model.PrClosed {
 		t.Errorf("closed PR with unreadable checks = %q, want closed", got)
 	}
 	no := false
-	if got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, nil, false); got != model.PrConflicted {
+	if got := healthFrom(github.PullRequestDetail{State: "open", Mergeable: &no}, nil, false, true); got != model.PrConflicted {
 		t.Errorf("conflicted PR with unreadable checks = %q, want conflicted", got)
 	}
 }

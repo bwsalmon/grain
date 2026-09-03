@@ -52,6 +52,24 @@ import (
 
 var baseTime = time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 
+// TestMain turns off the check-registration window for this whole suite
+// -- the wait that keeps an empty check list from reading as clean until
+// CI has had time to register one, see
+// orchestrator.SetCheckRegistrationWindow.
+//
+// Every repo in this package is a bare repo in a temp directory with no
+// CI anywhere near it, and these tests drive real cycles against a real
+// wall clock rather than a seeded one. Leaving the window on would make
+// each auto-merge here sit out two real minutes waiting for a check run
+// that does not exist. The window's own behaviour is covered where the
+// clock can be handed in, in pkg/orchestrator.
+func TestMain(m *testing.M) {
+	restore := orchestrator.SetCheckRegistrationWindow(0)
+	code := m.Run()
+	restore()
+	os.Exit(code)
+}
+
 func human(id string) model.Principal { return model.Principal{Kind: model.PrincipalHuman, ID: id} }
 
 // world is everything one test needs standing in for the outside world: a

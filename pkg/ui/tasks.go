@@ -27,12 +27,21 @@ import (
 // whose propose_task call filed this one, provenance only, empty for a
 // task nobody proposed.
 type Task struct {
-	ID          string      `json:"id"`
-	Title       string      `json:"title"`
-	Description string      `json:"description"`
-	Author      string      `json:"author"`
-	State       model.State `json:"state"`
-	Repo        string      `json:"repo,omitempty"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Author      string `json:"author"`
+	// AuthorKind is that author's model.PrincipalKind -- "human",
+	// "agent" or "automation", Comment.AuthorKind's own vocabulary for
+	// the same question about a comment. Author alone cannot answer it:
+	// an ID is a GitHub login for a person, a run ID for an agent and a
+	// deployment name for automation, and nothing in the string says
+	// which. The frontend needs the distinction to keep a task nobody
+	// filed by hand from steering a human's own defaults -- see
+	// state.js's lastBaseForRepo.
+	AuthorKind string      `json:"authorKind,omitempty"`
+	State      model.State `json:"state"`
+	Repo       string      `json:"repo,omitempty"`
 	// Reads is every repo this task's run may read but never push to --
 	// model.Task.Reads, rendered as owner/name strings the same way Repo
 	// renders its single Target.
@@ -98,9 +107,10 @@ type Task struct {
 	Blocked   bool     `json:"blocked"`
 	BlockedBy []string `json:"blockedBy,omitempty"`
 	// MergeQueueBlockedAt mirrors model.Observation's own field: non-nil
-	// once the merge queue has tried and failed to fix this task's pull
-	// request automatically, so it needs a human rather than another
-	// automatic attempt. Alongside PullRequest and AutoMerge, this is
+	// once the merge queue has stopped driving this task's pull request
+	// -- an automatic fix that did not take, or checks that never
+	// finished -- so it needs a human rather than another automatic
+	// attempt. Alongside PullRequest and AutoMerge, this is
 	// what lets the frontend tell a completed task that is merely
 	// waiting on a human's Submit click apart from one already on the
 	// merge queue, or one the queue has given up on -- the distinction
@@ -237,6 +247,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		Title:               t.Title,
 		Description:         t.Body,
 		Author:              t.Origin.Attribution.Actor.ID,
+		AuthorKind:          string(t.Origin.Attribution.Actor.Kind),
 		State:               state,
 		Base:                t.Base,
 		AutoMerge:           t.AutoMerge,

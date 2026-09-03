@@ -321,6 +321,26 @@ describe("DetailOverlay", () => {
     });
   });
 
+  // A capability the picker stopped listing since the task was granted
+  // it ("scratch-repo", renamed to github-sandbox in
+  // bwsalmon/agents#612) still needs a row of its own, or the chip for
+  // it has nothing to untick and the grant -- which fails every run of
+  // the task holding it -- can never be removed.
+  it("offers a row for a granted capability the picker no longer lists", async () => {
+    const act = vi.fn((mutate) => mutate());
+    const user = userEvent.setup();
+    const task = { ...baseTask, capabilities: ["scratch-repo"] };
+    render(<DetailOverlay task={task} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "scratch-repo" }));
+
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/capabilities", {
+      method: "POST",
+      body: JSON.stringify({ id: "scratch-repo", attach: false }),
+    });
+  });
+
   it("shows no timeline entries when the task has no history", () => {
     const { container } = render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.getByText("Timeline")).toBeInTheDocument();
@@ -660,6 +680,41 @@ describe("DetailOverlay", () => {
 
     await user.click(screen.getByText("10"));
     expect(onOpenTask).toHaveBeenCalledWith("10");
+  });
+
+  it("labels a dependency chip with the depended-on task's title, and the whole task on hover", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, dependsOn: ["9"], blockedBy: ["9"] }}
+        tasks={[{ id: "9", title: "Add dark mode", state: "running" }]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const chip = screen.getByText("9 Add dark mode (open)");
+    await user.hover(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("9 Add dark mode — Running (blocking this task)");
+  });
+
+  it("falls back to the id for a dependency the task list does not carry", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, dependsOn: ["9"] }}
+        tasks={[{ id: "20", title: "Add dark mode", state: "queued" }]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    await user.hover(screen.getByText("9"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("9");
   });
 
   it("adds a dependency picked from the task picker", async () => {
