@@ -53,6 +53,23 @@ const (
 // a commit -- and a push -- on every cycle, burying the changes that
 // matter in noise.
 func Export(ctx context.Context, db *sql.DB, dir string) error {
+	return ExportTier(ctx, db, dir, TierState, TierChurn)
+}
+
+// ExportTier writes out only the tables in the named tiers, leaving every
+// other file in dir exactly as it was -- byte for byte, so git sees no
+// change in them at all.
+//
+// That is what lets the daemon write settings out every 30 seconds and
+// grain's own churn out on a much slower clock (tier.go). Both halves
+// keep Export's byte-stability property, which is the one the whole
+// arrangement rests on: an unchanged database produces identical files,
+// so a sync with nothing to say still commits nothing.
+func ExportTier(ctx context.Context, db *sql.DB, dir string, tiers ...Tier) error {
+	include := map[Tier]bool{}
+	for _, t := range tiers {
+		include[t] = true
+	}
 	tables, err := tableNames(ctx, db)
 	if err != nil {
 		return err
@@ -63,6 +80,9 @@ func Export(ctx context.Context, db *sql.DB, dir string) error {
 	}
 	written := map[string]bool{}
 	for _, t := range tables {
+		if !include[TierOf(t)] {
+			continue
+		}
 		data, err := exportTable(ctx, db, t)
 		if err != nil {
 			return err
@@ -74,13 +94,17 @@ func Export(ctx context.Context, db *sql.DB, dir string) error {
 		}
 	}
 	// A table this build no longer has must not leave its old rows behind
-	// to be imported by the next one.
+	// to be imported by the next one. Only within the tiers being written:
+	// a file this call deliberately did not touch is not a stale one.
 	entries, err := os.ReadDir(tablesDir)
 	if err != nil {
 		return fmt.Errorf("staterepo: reading %s: %w", tablesDir, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() || written[e.Name()] || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if !include[TierOf(strings.TrimSuffix(e.Name(), ".json"))] {
 			continue
 		}
 		if err := os.Remove(filepath.Join(tablesDir, e.Name())); err != nil {
@@ -214,9 +238,36 @@ func encodeValue(v any) any {
 // internally inconsistent (a task_link naming a task that is not in the
 // file) is rejected whole at COMMIT rather than applied halfway.
 func Import(ctx context.Context, db *sql.DB, dir string) error {
-	tables, err := tableNames(ctx, db)
+	return ImportTier(ctx, db, dir, TierState, TierChurn)
+}
+
+// ImportTier is Import restricted to the named tiers: the tables outside
+// them are neither cleared nor rewritten, and keep whatever the database
+// already had.
+//
+// One caller wants this, and it is the reason it exists. When a merged
+// pull request arrives against the repository, the merge is about
+// settings -- nobody sends a pull request editing task_run -- and the
+// database is ahead of the repository on grain's own churn by up to a
+// churn interval (tier.go). Importing all of it would roll that hour
+// back; importing only the state tier keeps both halves authoritative
+// about the thing they are actually authoritative about. Load does that;
+// a fresh clone, which is the case where the repository is the only copy
+// there is, still imports the lot.
+func ImportTier(ctx context.Context, db *sql.DB, dir string, tiers ...Tier) error {
+	include := map[Tier]bool{}
+	for _, t := range tiers {
+		include[t] = true
+	}
+	all, err := tableNames(ctx, db)
 	if err != nil {
 		return err
+	}
+	var tables []string
+	for _, t := range all {
+		if include[TierOf(t)] {
+			tables = append(tables, t)
+		}
 	}
 	return importInto(ctx, db, dir, tables)
 }

@@ -231,7 +231,27 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if marker != "" && marker == head {
 		return nil
 	}
-	if err := Import(ctx, db, r.Dir()); err != nil {
+	// Which tables the import replaces depends on which of the two cases
+	// this is, and the distinction is the marker.
+	//
+	// No marker at all is a working tree this host has never loaded --
+	// a clone onto a new machine, the restore case -- and there the
+	// repository is the only copy of anything, so all of it is imported.
+	//
+	// A marker that disagrees with HEAD is a repository that moved under a
+	// host that already had a database: a pull request was merged. That
+	// merge is about state -- nobody opens a pull request editing
+	// task_run -- and this host's database is ahead of the repository on
+	// churn by up to a churn interval, because that is exactly what
+	// exporting churn on a slower clock means. Importing all of it would
+	// throw that away every time a settings change landed, so only the
+	// state tier is replaced and the database stays authoritative about
+	// what grain itself did. The next churn export writes it back out.
+	tiers := []Tier{TierState, TierChurn}
+	if marker != "" {
+		tiers = []Tier{TierState}
+	}
+	if err := ImportTier(ctx, db, r.Dir(), tiers...); err != nil {
 		return err
 	}
 	return r.setLoadedHead(ctx, head)
@@ -256,14 +276,17 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 		"else. See README.md."); err != nil {
 		return err
 	}
+	if err := r.recordChurnExport(ctx, r.now()); err != nil {
+		return err
+	}
 	if err := r.recordLoadedHead(ctx); err != nil {
 		return err
 	}
 	return r.Push(ctx)
 }
 
-// ErrRemoteAhead is returned by Sync when the remote holds commits this
-// deployment has not taken up -- a merged pull request against grain's
+// ErrRemoteAhead is returned by Sync and SyncAll when the remote holds
+// commits this deployment has not taken up -- a merged pull request against grain's
 // own settings, which is the mechanism this whole package exists to
 // allow.
 //
@@ -284,15 +307,38 @@ var ErrRemoteAhead = errors.New("the state repository has changes this deploymen
 // Sync writes the database out and commits and pushes anything that
 // changed, reporting whether there was anything to commit.
 //
+// Everything a person or an agent reads goes out on every call. grain's
+// own churn -- runs, leases, observations, read marks (tier.go) -- goes
+// out only when Config.ChurnInterval has elapsed since it last did, and
+// that is the whole of what keeps this repository from growing with the
+// clock instead of with the data: a busy deployment with no settings
+// changes commits a couple of dozen times a day rather than 2,880 times,
+// and each of those commits carries an hour of run history rather than
+// thirty seconds of it.
+//
 // The commit message is deliberately plain and identical every time.
 // What changed is in the diff, which is the whole reason the dump is
 // text; a message that tried to summarise it would be a second, worse
 // answer that could disagree with the first.
 func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
+	return sync(ctx, r, db, version, false)
+}
+
+// SyncAll is Sync with the churn tier written out whether or not it is
+// due: what a human means by `grain state sync` or the pane's own Sync
+// button, and what a clean shutdown owes the repository on its way out.
+// Asking for a sync explicitly is asking for all of it.
+func SyncAll(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
+	return sync(ctx, r, db, version, true)
+}
+
+func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool) (bool, error) {
 	// Asked before anything is written, so that a merged change is never
 	// committed over -- see ErrRemoteAhead. An unreachable remote answers
 	// "not ahead" and the push below reports the network in its own
-	// words.
+	// words. It guards both entry points: asking for a sync explicitly
+	// (SyncAll) is no more a reason to commit over a merge than the
+	// timer's own tick is.
 	if ahead, err := r.RemoteAhead(ctx); err == nil && ahead {
 		return false, ErrRemoteAhead
 	}
@@ -304,14 +350,29 @@ func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
 	if err := writeReadme(r.Dir()); err != nil {
 		return false, err
 	}
-	if err := Export(ctx, db, r.Dir()); err != nil {
+	now := r.now()
+	churn := forceChurn || r.churnDue(ctx, now)
+	tiers := []Tier{TierState}
+	if churn {
+		tiers = append(tiers, TierChurn)
+	}
+	if err := ExportTier(ctx, db, r.Dir(), tiers...); err != nil {
 		return false, err
 	}
 	if err := WriteSchemaVersion(r.Dir(), version); err != nil {
 		return false, err
 	}
+	// Recorded whether or not the export produced a commit: what the
+	// interval bounds is how often grain re-reads and re-renders every
+	// transcript it has ever stored, which is the expensive half even
+	// when the answer turns out to be byte-identical to last time.
+	if churn {
+		if err := r.recordChurnExport(ctx, now); err != nil {
+			return false, err
+		}
+	}
 	changed, err := r.Commit(ctx, "Update grain state\n\n"+
-		"Written by grain from its own database at "+time.Now().UTC().Format(time.RFC3339)+".")
+		"Written by grain from its own database at "+now.UTC().Format(time.RFC3339)+".")
 	if err != nil {
 		return false, err
 	}
@@ -326,7 +387,11 @@ func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
 	if err := r.recordLoadedHead(ctx); err != nil {
 		return true, err
 	}
-	return true, r.Push(ctx)
+	if err := r.Push(ctx); err != nil {
+		return true, err
+	}
+	r.maintain(ctx)
+	return true, nil
 }
 
 func writeReadme(dir string) error {
@@ -341,6 +406,17 @@ grain runs against an embedded SQLite database, and exports every table
 here after each change: ` + "`" + TablesDir + `/<table>.json` + "`" + `, one file per table,
 rows sorted by primary key and columns in the table's declared order so
 that an unchanged database always produces byte-identical files.
+
+Two clocks, not one. Everything a person or an agent reads or changes is
+written out within seconds of changing. grain's own running record of
+what it did -- ` + "`" + TablesDir + `/task_run.json` + "`" + `, ` + "`" + `task_observation.json` + "`" + `,
+` + "`" + `lease.json` + "`" + ` and ` + "`" + `task_read.json` + "`" + ` -- is written out roughly hourly
+instead: those rows change on nearly every reconcile cycle, nobody sends
+a pull request against them, and committing them every thirty seconds
+would rewrite the largest files here 2,880 times a day forever. They are
+still exported, so a clone of this repository is still a full restore --
+it is just up to an hour behind on runs, and never behind on anything
+anybody wrote.
 
 ## What is here
 

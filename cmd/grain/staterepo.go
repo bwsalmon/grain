@@ -314,12 +314,18 @@ const stateSyncInterval = 30 * time.Second
 // cancelled, then does it once more on the way out so a clean shutdown
 // leaves nothing unwritten.
 //
+// The last one is a syncAll rather than a sync: an ordinary tick leaves
+// grain's own churn for the churn interval to pick up
+// (staterepo.DefaultChurnInterval), and "leaves nothing unwritten" has
+// to mean nothing, including the runs that finished in the last few
+// minutes.
+//
 // A failure is logged and the loop continues. A remote that is
 // unreachable, or a credential that has expired, must not stop grain
 // from running: the database is still the live state, and the next tick
 // will push everything that accumulated in the meantime -- and will try
 // the pull again.
-func stateSyncLoop(ctx context.Context, sync func(context.Context) (bool, error)) {
+func stateSyncLoop(ctx context.Context, sync, syncAll func(context.Context) (bool, error)) {
 	ticker := time.NewTicker(stateSyncInterval)
 	defer ticker.Stop()
 	// The last thing logged, so a condition that persists -- an expired
@@ -334,7 +340,7 @@ func stateSyncLoop(ctx context.Context, sync func(context.Context) (bool, error)
 			// sync is the one that must not be skipped.
 			final, cancel := context.WithTimeout(context.WithoutCancel(ctx), stateSyncInterval)
 			defer cancel()
-			if _, err := sync(final); err != nil {
+			if _, err := syncAll(final); err != nil {
 				log.Printf("grain: final state sync failed: %v", err)
 			}
 			return

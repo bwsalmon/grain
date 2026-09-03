@@ -93,7 +93,7 @@ func runState(args []string) error {
 	}
 	switch cmd, cmdArgs := rest[0], rest[1:]; cmd {
 	case "status":
-		return stateStatus(ctx, *dataDir)
+		return stateStatus(ctx, *dataDir, os.Stdout)
 	case "local":
 		return stateLocal(ctx, *dataDir)
 	case "adopt":
@@ -108,7 +108,7 @@ func runState(args []string) error {
 	}
 }
 
-func stateStatus(ctx context.Context, dataDir string) error {
+func stateStatus(ctx context.Context, dataDir string, out io.Writer) error {
 	settings, err := staterepo.LoadSettings(dataDir)
 	if err != nil {
 		return err
@@ -129,23 +129,30 @@ func stateStatus(ctx context.Context, dataDir string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("repository: %s\n", where)
-	fmt.Printf("branch:     %s\n", repo.Branch())
-	fmt.Printf("working tree: %s\n", repo.Dir())
-	fmt.Printf("head:       %s\n", head)
-	fmt.Printf("schema:     %d in the repository, %d in this build\n", version, model.SchemaVersion)
-	fmt.Printf("secrets:    %s (key: %s)\n",
-		secretsConfig(dataDir).File, secretsConfig(dataDir).KeyFile)
+	fmt.Fprintf(out, "repository: %s\n", where)
+	fmt.Fprintf(out, "branch:     %s\n", repo.Branch())
+	fmt.Fprintf(out, "working tree: %s\n", repo.Dir())
+	fmt.Fprintf(out, "head:       %s\n", head)
+	fmt.Fprintf(out, "schema:     %d in the repository, %d in this build\n", version, model.SchemaVersion)
+	fmt.Fprintf(out, "secrets:    %s\n", secretsConfig(dataDir).File)
 	// Whether this host can actually open that file, which is a separate
 	// question from whether it is there: a data directory restored from
 	// another installation arrives sealed to that installation's key, and
 	// an operator should learn that here rather than from the first run
 	// that cannot resolve a credential.
-	store := secrets.Open(secretsConfig(dataDir))
-	if err := store.Check(); err != nil {
-		fmt.Printf("            unreadable: %v\n", err)
-		if want, err := store.FileRecipient(); err == nil && want != "" {
-			fmt.Printf("            encrypted to %s -- install that key with `grain state key import`\n", want)
+	//
+	// Only asked when there is a file to open, because secrets.Open mints
+	// a key for a data directory that has neither -- and a command that
+	// reports on a key must not be the thing that creates one. An install
+	// with nothing stored yet has nothing to fail to read anyway; where
+	// its key stands is reportSecretsKey's answer, below.
+	if _, statErr := os.Stat(secretsConfig(dataDir).File); statErr == nil {
+		store := secrets.Open(secretsConfig(dataDir))
+		if err := store.Check(); err != nil {
+			fmt.Fprintf(out, "            unreadable: %v\n", err)
+			if want, err := store.FileRecipient(); err == nil && want != "" {
+				fmt.Fprintf(out, "            encrypted to %s -- install that key with `grain state key import`\n", want)
+			}
 		}
 	}
 	// Whether a task can be dispatched at this repository, which is not
@@ -156,21 +163,61 @@ func stateStatus(ctx context.Context, dataDir string) error {
 	held, err := repo.HasSecrets(ctx)
 	switch {
 	case err != nil:
-		fmt.Printf("dispatch:   unknown -- could not read this repository's history (%v), "+
+		fmt.Fprintf(out, "dispatch:   unknown -- could not read this repository's history (%v), "+
 			"so the git proxy refuses it to every sandbox\n", err)
 	case settings.Remote == "":
-		fmt.Printf("dispatch:   not applicable -- a local-only repository is not reachable " +
+		fmt.Fprintf(out, "dispatch:   not applicable -- a local-only repository is not reachable "+
 			"through the git proxy at all\n")
 	case held:
-		fmt.Printf("dispatch:   refused -- %s appears in this repository, so the git proxy "+
+		fmt.Fprintf(out, "dispatch:   refused -- %s appears in this repository, so the git proxy "+
 			"refuses it to every sandbox. Removing it does not undo that: a clone reads "+
 			"history. Adopt a repository that has never held one to file settings tasks "+
 			"against it\n", staterepo.SecretsFile)
 	default:
-		fmt.Printf("dispatch:   allowed -- a task may be filed against this repository " +
+		fmt.Fprintf(out, "dispatch:   allowed -- a task may be filed against this repository "+
 			"(`grain create -repo <owner>/<name> ...`)\n")
 	}
+	reportSecretsKey(dataDir, out)
 	return nil
+}
+
+// reportSecretsKey says where the private key is, whether it is there,
+// and -- every time, not only when something is wrong -- that it is the
+// operator's to back up.
+//
+// It is reported here because this is the command that describes what
+// survives a rebuilt host, and the key is the one part of that which
+// nothing else can stand in for: the rest of this output can be cloned
+// back from a remote, and the encrypted file beside this key travels
+// nowhere at all (secretsConfig -- it is deliberately out of the
+// repository a sandbox may clone). A host restored onto a fresh data
+// directory therefore needs both halves handed back, and a key nobody
+// copied anywhere is a key one disk away from taking every secret with
+// it. pkg/secrets refuses a secrets file whose key is missing rather
+// than papering over it, so the moment to notice is now, while the key
+// still exists to be copied somewhere.
+//
+// Read straight off disk rather than through secrets.Open, which would
+// *mint* a key on a data directory that has none -- a reporting command
+// must not create the thing it reports on.
+func reportSecretsKey(dataDir string, out io.Writer) {
+	path := secretsConfig(dataDir).KeyFile
+	key, err := secrets.ReadKeyFile(path)
+	switch {
+	case errors.Is(err, secrets.ErrNoKey):
+		fmt.Fprintf(out, "secrets key: %s (none yet -- grain mints one the first time it opens the store)\n", path)
+		return
+	case err != nil:
+		fmt.Fprintf(out, "secrets key: %s (unreadable: %v)\n", path, err)
+		return
+	}
+	fmt.Fprintf(out, "secrets key: %s\n", path)
+	fmt.Fprintf(out, "            public key %s\n", key.Public())
+	fmt.Fprintf(out, "            back this file up. It is the one thing here a redeploy cannot\n")
+	fmt.Fprintf(out, "            rebuild: a host that mints a fresh key cannot read a secrets\n")
+	fmt.Fprintf(out, "            file restored beside it. Seed it back with GRAIN_SECRETS_KEY\n")
+	fmt.Fprintf(out, "            (scripts/setup.sh) on a deploy, or install one you are holding\n")
+	fmt.Fprintf(out, "            with `grain state key import`.\n")
 }
 
 // stateLocal is the bootstrap's third answer: run with no external
@@ -313,7 +360,10 @@ func stateSync(ctx context.Context, dataDir string) error {
 		return err
 	}
 	defer db.Close()
-	changed, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion)
+	// SyncAll, not Sync: a human typing this is asking for the whole
+	// database to be written out now, not for the state tier alone with
+	// grain's own churn left to its slower clock (pkg/staterepo/tier.go).
+	changed, err := staterepo.SyncAll(ctx, repo, db, model.SchemaVersion)
 	if err != nil {
 		return err
 	}

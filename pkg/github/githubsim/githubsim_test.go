@@ -78,7 +78,11 @@ func pushAnotherCommit(t *testing.T, bare, branch string) {
 	run(t, dir, "git", "clone", "-q", "--branch", branch, bare, wd)
 	run(t, wd, "git", "config", "user.email", "agent@example.com")
 	run(t, wd, "git", "config", "user.name", "agent")
-	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "a later push")
+	// Named after the branch for pushBranch's reason above, which reaches
+	// this helper too: distinct tips are what keep two of these commits
+	// apart, and a merge the sim has just performed leaves the base
+	// branch and the branch it merged sharing one tip.
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "a later push to "+branch)
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 
