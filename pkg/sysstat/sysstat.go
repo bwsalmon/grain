@@ -1,7 +1,8 @@
 // Package sysstat reads this machine's own CPU-load and memory pressure
 // straight out of /proc, the same two numbers `uptime` and `free` report
 // without shelling out to either, plus a named filesystem's own usage
-// (DiskUsage, one statfs call, the numbers `df` reports)
+// (DiskUsage, one statfs call, the numbers `df` reports, and
+// FilesystemID, which says when two such paths are really one disk)
 // -- cmd/grain/daemon.go's own
 // ui.Config.HostStats (bwsalmon/agents#536's "sandbox health" pane: a
 // sandbox that looks stuck is often really the host it runs on being
@@ -21,12 +22,13 @@ import (
 // Snapshot is one point-in-time reading Read returns.
 //
 // Disk usage is deliberately not among these: /proc has no equivalent to
-// statfs, and there is no one filesystem "this machine" means -- the one
-// worth watching is whichever disk the caller's own state sits on (for
-// grain, the daemon's -data-dir, which holds the store and every sandbox
-// VM's disk overlay). DiskUsage takes that path and is asked separately,
-// so a machine with no readable one still gets the figures here
-// (grain/task-41).
+// statfs, and there is no one filesystem "this machine" means -- the ones
+// worth watching are whichever disks the caller's own state sits on (for
+// grain, the daemon's -data-dir, its -sandbox-dir and docker's data root,
+// which are one filesystem on a laptop and three on a deployment sized
+// the way terraform/gcp is). DiskUsage takes a path and is asked
+// separately, once per filesystem, so a machine with no readable one
+// still gets the figures here (grain/task-41, grain/task-148).
 type Snapshot struct {
 	// LoadAverage1/5/15 are /proc/loadavg's own first three fields: the
 	// number of runnable-or-uninterruptible processes, averaged over the
