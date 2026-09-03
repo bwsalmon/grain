@@ -358,6 +358,10 @@ type configResponse struct {
 	// does. NewTaskOverlay.jsx seeds its "Queue immediately" and
 	// "Auto-merge once checks pass" checkboxes from these the moment it
 	// first renders, before Settings has ever been opened this session.
+	//
+	// A deployment with no stored config yet reports model.DefaultConfig's
+	// own values -- both on -- rather than the zero value beside them, the
+	// same reading of "no row yet" AgentFramework below takes.
 	ApprovedByDefault  bool `json:"approvedByDefault"`
 	AutoMergeByDefault bool `json:"autoMergeByDefault"`
 	// ReconcilerDown mirrors Config.ReconcilerDown's own doc comment:
@@ -392,6 +396,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		TargetRepos:   s.tasks.targetRepos(),
 	}
 	resp.AgentFramework = model.AgentFrameworkAntigravity
+	// Same reading of "no row yet" the AgentFramework line above takes:
+	// what a form should start as on a deployment that has never stored a
+	// config is the built-in default, not the zero value beside it.
+	def := model.DefaultConfig()
+	resp.ApprovedByDefault, resp.AutoMergeByDefault = def.ApprovedByDefault, def.AutoMergeByDefault
 	if cfg != nil {
 		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
 		resp.ApprovedByDefault = cfg.ApprovedByDefault

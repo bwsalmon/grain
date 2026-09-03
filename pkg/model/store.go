@@ -108,6 +108,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigTaskDefaultsColumns(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigTaskDefaultsOn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	if err := s.ensureScheduledTaskTemplateColumn(ctx); err != nil {
 		return fmt.Errorf("migrating scheduled_task: %w", err)
 	}
@@ -499,10 +502,10 @@ func (s *Store) ensureConfigAgentFrameworkColumn(ctx context.Context) error {
 // own doc comments have the reasoning -- bwsalmon/agents#612) to a
 // database created before these columns existed, the same probe-then-ALTER
 // approach ensureConfigSandboxShapeColumns already uses for a pair of
-// columns at once. Both default to 0, matching Config's own zero value, so
-// an upgraded deployment's "Queue immediately"/"Auto-merge once checks
-// pass" checkboxes keep starting unchecked exactly as they always have,
-// until an operator opts into a different starting state through Settings.
+// columns at once. Both default to 1, matching model.DefaultConfig, so an
+// upgraded deployment lands on the same "Queue immediately"/"Auto-merge
+// once checks pass" starting state a fresh one does rather than on the
+// zero value of a column it has never seen.
 func (s *Store) ensureConfigTaskDefaultsColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT `approved_by_default`, `auto_merge_by_default` FROM `grain_config` WHERE 1 = 0")
@@ -510,11 +513,52 @@ func (s *Store) ensureConfigTaskDefaultsColumns(ctx context.Context) error {
 		return rows.Close()
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"ALTER TABLE `grain_config` ADD COLUMN `approved_by_default` INTEGER NOT NULL DEFAULT 0"); err != nil {
+		"ALTER TABLE `grain_config` ADD COLUMN `approved_by_default` INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		"ALTER TABLE `grain_config` ADD COLUMN `auto_merge_by_default` INTEGER NOT NULL DEFAULT 0")
+		"ALTER TABLE `grain_config` ADD COLUMN `auto_merge_by_default` INTEGER NOT NULL DEFAULT 1")
+	return err
+}
+
+// ensureConfigTaskDefaultsOn turns both task defaults on for the one row
+// of a database that already carries these columns from when their
+// default was off, and records that it has done so.
+//
+// Changing model.DefaultConfig alone would not reach such a database:
+// grain_config's single row is written wholesale by PutConfig with every
+// column bound, so the 0 it stores was seeded by a build whose default
+// was off, and it reads back afterwards indistinguishably from an
+// operator having chosen off. Between those two readings, "seeded" is the
+// only one any deployment can actually have: these two settings are days
+// old (bwsalmon/agents#612), off was never anything a deployment opted
+// into so much as what it got, and a deployment that had deliberately
+// turned them off is not one asking for them to default on. Left alone,
+// the new default would apply to fresh databases and to nobody currently
+// running.
+//
+// It must not run twice, though -- an operator who turns either setting
+// off after this lands has made exactly the deliberate choice the
+// paragraph above says nobody had made yet, and a backfill re-running at
+// the next restart would quietly overwrite it. The presence of
+// task_defaults_on_backfilled is what records that, added in the same
+// step as the UPDATE: probe-then-ALTER as usual, except that what the
+// probe answers is "has this migration run" rather than "does this
+// setting have a column". Its value is never read (schema.go's own note
+// on the column: PutConfig doesn't bind it, so REPLACE re-defaults it on
+// every settings save).
+func (s *Store) ensureConfigTaskDefaultsOn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `task_defaults_on_backfilled` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `task_defaults_on_backfilled` INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		"UPDATE `grain_config` SET `approved_by_default` = 1, `auto_merge_by_default` = 1")
 	return err
 }
 

@@ -319,9 +319,9 @@ export default function SettingsOverlay({ onClose, showError }) {
                 <>
                   Queue new tasks immediately by default
                   <span className="hint">
-                    off (default): a new task's own "Queue immediately" checkbox starts unchecked, filing it as a
-                    proposal needing approval. on: it starts checked instead, filing a task ready to dispatch at
-                    once.
+                    on (default): a new task's own "Queue immediately" checkbox starts checked, filing a task ready
+                    to dispatch at once. off: it starts unchecked instead, filing it as a proposal needing
+                    approval.
                   </span>
                 </>
               )}
@@ -333,8 +333,8 @@ export default function SettingsOverlay({ onClose, showError }) {
                 <>
                   Auto-merge new tasks by default
                   <span className="hint">
-                    off (default): a new task's own "Auto-merge once checks pass" checkbox starts unchecked. on: it
-                    starts checked instead.
+                    on (default): a new task's own "Auto-merge once checks pass" checkbox starts checked. off: it
+                    starts unchecked instead.
                   </span>
                 </>
               )}

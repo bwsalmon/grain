@@ -129,12 +129,17 @@ func TestUpdateSettingsRoundTripsShowClosedByDefault(t *testing.T) {
 }
 
 // TestUpdateSettingsRoundTripsTaskDefaults is bwsalmon/agents#612's own
-// pair of global defaults: unset, both read back false (matching grain's
-// original "start unchecked" shape for NewTaskOverlay.jsx's own "Queue
-// immediately" and "Auto-merge once checks pass" checkboxes), and setting
-// either sticks through a GetSettings read the same way
+// pair of global defaults: unset, both read back true
+// (model.DefaultConfig -- NewTaskOverlay.jsx's own "Queue immediately"
+// and "Auto-merge once checks pass" checkboxes start checked), and
+// turning either off sticks through a GetSettings read the same way
 // TestUpdateSettingsRoundTripsShowClosedByDefault already covers for
 // ShowClosedByDefault.
+//
+// The first save is what makes the "unset" half worth pinning: it goes
+// through the same PutConfig every other save does, binding both columns,
+// so a first save that never mentions these two has to write the default
+// rather than the Go zero value beside it.
 func TestUpdateSettingsRoundTripsTaskDefaults(t *testing.T) {
 	c, _, ctx := testClient(t)
 	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
@@ -145,14 +150,14 @@ func TestUpdateSettingsRoundTripsTaskDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.ApprovedByDefault {
-		t.Fatalf("ApprovedByDefault = true with nothing set, want false")
+	if !read.ApprovedByDefault {
+		t.Fatalf("ApprovedByDefault = false with nothing set, want true")
 	}
-	if read.AutoMergeByDefault {
-		t.Fatalf("AutoMergeByDefault = true with nothing set, want false")
+	if !read.AutoMergeByDefault {
+		t.Fatalf("AutoMergeByDefault = false with nothing set, want true")
 	}
 
-	approved, autoMerge := true, true
+	approved, autoMerge := false, false
 	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
 		ApprovedByDefault:  &approved,
 		AutoMergeByDefault: &autoMerge,
@@ -163,11 +168,35 @@ func TestUpdateSettingsRoundTripsTaskDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if read.ApprovedByDefault {
+		t.Fatalf("ApprovedByDefault = true after UpdateSettings, want false")
+	}
+	if read.AutoMergeByDefault {
+		t.Fatalf("AutoMergeByDefault = true after UpdateSettings, want false")
+	}
+}
+
+// TestGetSettingsReportsTaskDefaultsBeforeAnythingIsSaved is the same
+// pair read on a deployment with no grain_config row at all -- the state
+// an operator opening Settings on a fresh install sees. Configured is
+// false there, but the two checkboxes still have to describe what filing
+// a task would actually do, which is model.DefaultConfig's "on" rather
+// than the zero value of a Settings nobody has written yet.
+func TestGetSettingsReportsTaskDefaultsBeforeAnythingIsSaved(t *testing.T) {
+	c, _, ctx := testClient(t)
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Configured {
+		t.Fatalf("Configured = true with nothing saved, want false")
+	}
 	if !read.ApprovedByDefault {
-		t.Fatalf("ApprovedByDefault = false after UpdateSettings, want true")
+		t.Fatalf("ApprovedByDefault = false with nothing saved, want true")
 	}
 	if !read.AutoMergeByDefault {
-		t.Fatalf("AutoMergeByDefault = false after UpdateSettings, want true")
+		t.Fatalf("AutoMergeByDefault = false with nothing saved, want true")
 	}
 }
 

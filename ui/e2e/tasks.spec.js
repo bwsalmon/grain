@@ -38,8 +38,11 @@ test("files a new task through the New task overlay", async ({ page }) => {
   // "No repo" has to be checked before Create task will even enable
   // (bwsalmon/agents#614).
   await page.getByLabel(/No repo/).check();
-  // "Queue immediately" is left unchecked, so this files as a proposal
-  // rather than a queued task -- the next test approves one of those.
+  // "Queue immediately" starts checked, from the deployment default that
+  // is on unless an operator turns it off (bwsalmon/agents#612), so it is
+  // unchecked here to file a proposal rather than a queued task -- the
+  // next test approves one of those.
+  await page.getByLabel(/Queue immediately/).uncheck();
   await page.getByRole("button", { name: "Create task" }).click();
 
   await expect(page.getByRole("heading", { name: "New task" })).toHaveCount(0);
@@ -55,6 +58,9 @@ test("approves a proposed task from its detail view", async ({ page }) => {
   await page.getByRole("button", { name: "+ New task" }).click();
   await page.getByLabel("Title").fill(title);
   await page.getByLabel(/No repo/).check();
+  // Unchecked for the same reason as the test above: there is nothing to
+  // approve unless this files as a proposal.
+  await page.getByLabel(/Queue immediately/).uncheck();
   await page.getByRole("button", { name: "Create task" }).click();
 
   await page.locator(".task-row", { hasText: title }).click();

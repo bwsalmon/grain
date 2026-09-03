@@ -246,6 +246,39 @@ func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
 	}
 }
 
+// TestLoadConfigSeedsTheTaskDefaultsOn covers the two settings the seed
+// above has no flag for: ApprovedByDefault and AutoMergeByDefault default
+// on (model.DefaultConfig), and the row loadConfig writes binds every
+// column, so seeding from flags that say nothing about either has to
+// store what a deployment that has never chosen them runs rather than the
+// Go zero value of the field.
+func TestLoadConfigSeedsTheTaskDefaultsOn(t *testing.T) {
+	store, db, err := openStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("openStore: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	flagCfg := config{
+		maxConcurrent: 2, pollInterval: time.Minute,
+		agentFramework: model.AgentFrameworkAntigravity,
+		geminiModel:    "gemini-2.5-pro", githubHost: "github.com",
+	}
+	if _, err := loadConfig(ctx, store, flagCfg); err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+
+	stored, err := store.GetConfig(ctx)
+	if err != nil || stored == nil {
+		t.Fatalf("GetConfig after seeding: (%+v, %v)", stored, err)
+	}
+	if !stored.ApprovedByDefault || !stored.AutoMergeByDefault {
+		t.Fatalf("seeded ApprovedByDefault/AutoMergeByDefault = %v/%v, want true/true",
+			stored.ApprovedByDefault, stored.AutoMergeByDefault)
+	}
+}
+
 // TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists is the restart
 // case: a UI or a CLI wrote a config through the store, and the next
 // start must run with that rather than whatever the flags on this

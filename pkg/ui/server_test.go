@@ -443,6 +443,44 @@ func TestConfigEndpointReportsShowClosedByDefault(t *testing.T) {
 	}
 }
 
+// TestConfigEndpointReportsTaskDefaults is the same round trip for
+// bwsalmon/agents#612's pair, which differs from showClosedByDefault
+// above in what "nothing configured" reports: both default on
+// (model.DefaultConfig), so a deployment with no stored row yet has to
+// say so rather than report the zero value of the field, and an operator
+// turning one off through Settings is reflected immediately.
+func TestConfigEndpointReportsTaskDefaults(t *testing.T) {
+	srv, client := testServer(t)
+
+	type taskDefaults struct {
+		ApprovedByDefault  bool `json:"approvedByDefault"`
+		AutoMergeByDefault bool `json:"autoMergeByDefault"`
+	}
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	cfg := decode[taskDefaults](t, rec)
+	if !cfg.ApprovedByDefault || !cfg.AutoMergeByDefault {
+		t.Fatalf("approvedByDefault/autoMergeByDefault = %v/%v with nothing configured, want true/true",
+			cfg.ApprovedByDefault, cfg.AutoMergeByDefault)
+	}
+
+	if _, err := client.UpdateSettings(context.Background(), firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	if _, err := client.UpdateSettings(context.Background(), ui.UpdateSettingsRequest{ApprovedByDefault: &off}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/config", "")
+	cfg = decode[taskDefaults](t, rec)
+	if cfg.ApprovedByDefault {
+		t.Fatalf("approvedByDefault = true after UpdateSettings turned it off, want false")
+	}
+	if !cfg.AutoMergeByDefault {
+		t.Fatalf("autoMergeByDefault = false after a save that never mentioned it, want true")
+	}
+}
+
 func TestSubmitUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodPost, "/api/tasks/404/submit", ""); rec.Code != http.StatusNotFound {
