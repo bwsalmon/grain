@@ -271,6 +271,49 @@ func IsMergeConflict(err error) bool {
 	return errors.As(err, &e) && e.Status == 409
 }
 
+// IsNoCommitsBetween reports whether err is GitHub refusing to open a
+// pull request because its head carries nothing its base does not
+// already have -- the 422 whose body says "No commits between <base> and
+// <head>".
+//
+// It is the sibling of the vanished-base 422 that
+// orchestrator.pullRequestBase already handles, and it is just as
+// permanent: a branch that adds nothing to its base is refused on every
+// attempt, so a caller that reads this as a transient failure retries a
+// call that can never succeed. Telling the two apart is what lets the
+// finish path say what actually happened instead of repeating the
+// refusal.
+//
+// Message-sniffing, like IsPermissionDenied and unlike IsMergeConflict:
+// 422 is the pulls endpoint's answer to every invalid field it has --
+// a base that is not a branch, a head that is not there, a pull request
+// that already exists -- so the status alone says nothing about which.
+// GitHub reports this one as a per-field entry in `errors`, so that is
+// what is read; an unparseable body, or one with no such entry, stays an
+// ordinary error, which is the safe direction (a missed case costs one
+// wasted retry, a false positive would end a task that had nothing wrong
+// with it).
+func IsNoCommitsBetween(err error) bool {
+	var e *Error
+	if !errors.As(err, &e) || e.Status != 422 {
+		return false
+	}
+	var body struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(e.Body, &body); err != nil {
+		return false
+	}
+	for _, item := range body.Errors {
+		if strings.HasPrefix(item.Message, "No commits between") {
+			return true
+		}
+	}
+	return false
+}
+
 // MergeResult is what MergeBranch did. Merged is false, with a nil error,
 // for GitHub's own 204: the base branch already contained the head, so
 // nothing was written and there is no commit to name.

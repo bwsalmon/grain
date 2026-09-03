@@ -717,6 +717,25 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 					}},
 				}), nil
 			}
+			// The sibling refusal, just as permanent and just as
+			// unhandled until now: real GitHub declines a head that
+			// carries nothing its base does not already have -- a branch
+			// whose run reverted its own work, committed only what the
+			// base had, or never committed at all. A sim that opened a
+			// pull request for such a branch is why nothing here ever saw
+			// the loop that produced (orchestrator.noteEmptyBranch has
+			// the account of it). The message is GitHub's own, and it is
+			// the whole of what distinguishes this 422 from the one above
+			// -- github.IsNoCommitsBetween reads exactly this text.
+			if s.containsBranch(payload.Base, payload.Head) {
+				return jsonResponse(422, map[string]any{
+					"message": "Validation Failed",
+					"errors": []map[string]any{{
+						"resource": "PullRequest", "code": "custom",
+						"message": fmt.Sprintf("No commits between %s and %s", payload.Base, payload.Head),
+					}},
+				}), nil
+			}
 			number := 9000 + len(s.PullRequests)
 			pr := PullRequest{
 				Number: number, Title: payload.Title, Body: payload.Body,

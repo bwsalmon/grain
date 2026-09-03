@@ -60,6 +60,13 @@ type PullRequestStatus struct {
 // to a completed task, so a pull request opened here is not synced or
 // merged by anything until that has happened.)
 //
+// A branch that is there but empty is answered in the same spirit and
+// for the same reason, a little further down: "commit something first"
+// rather than GitHub's 422 about a head with no commits over its base.
+// The finish path ends a task over that condition; this one deliberately
+// does not touch the task at all, since the run asking is still running
+// and committing something is a thing it can still do.
+//
 // Two checks come first, both mirroring the finish path's own. The
 // branch, through the same branchExistsSettled, so an agent that calls
 // this before pushing gets "push it first" back rather than GitHub's own
@@ -99,6 +106,16 @@ func OpenPullRequestForTask(ctx context.Context, store *model.Store, client gith
 	// open_pull_request tool, and the only thing the timestamp reaches is
 	// a comment noteBaseRetarget may write about a vanished base.
 	pr, err := EnsurePullRequest(ctx, store, client, task, time.Now().UTC())
+	if _, empty := emptyBranch(err); empty {
+		// The same condition the finish path ends a task over, answered
+		// differently because of when this is: the run is still live and
+		// still has turns, so this is a thing it can fix itself. Nothing
+		// is written to the task and nothing is parked -- that decision
+		// belongs to the finish, once the branch is final and this
+		// agent's chance to commit something has actually passed.
+		return PullRequestStatus{}, fmt.Errorf(
+			"orchestrator: %w -- commit your work and push it before asking for a pull request", err)
+	}
 	if err != nil {
 		return PullRequestStatus{}, fmt.Errorf("orchestrator: opening a pull request for %s: %w", task.ID, err)
 	}

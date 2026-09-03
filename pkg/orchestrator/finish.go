@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -145,6 +146,19 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	}
 
 	handled, err := salvagePushedBranch(ctx, store, client, task, now)
+	if empty, ok := emptyBranch(err); ok {
+		// The task has already been told, and parked (noteEmptyBranch).
+		// What is left is this run's own row, and it must not say
+		// "finish-failed": that word means "try again", which is what
+		// this ending exists to stop. no_action is what actually
+		// happened -- a run that left nothing anyone can act on -- and
+		// returning nil is what keeps noteFinishFailure from writing
+		// over it on the way out.
+		if serr := store.SetRunOutcome(ctx, runID, "no_action", emptyBranchDetail(empty)); serr != nil {
+			return fmt.Errorf("orchestrator: recording %s's outcome: %w", task.ID, serr)
+		}
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -280,6 +294,20 @@ func salvagePushedBranch(ctx context.Context, store *model.Store, client github.
 		return true, noteOrphanedPullRequests(ctx, store, client, task.ID, now)
 	}
 	if err := finishWithPullRequest(ctx, store, client, task, now); err != nil {
+		// A branch with nothing on it is the one failure here that is not
+		// worth reporting as a failure: it is answered, on the task, by
+		// noteEmptyBranch. The error is still handed back afterwards, so
+		// each caller can record what it means for the *run* -- see
+		// ProcessResult, RunCycle and recoverRun, which want three
+		// different outcomes on the row and the same thing on the task.
+		if empty, ok := emptyBranch(err); ok {
+			if noteErr := noteEmptyBranch(ctx, store, task, empty, now); noteErr != nil {
+				// Deliberately not wrapping err: the task was *not*
+				// told, so this is an ordinary failure to report and
+				// retry, not the settled ending below.
+				return true, noteErr
+			}
+		}
 		return true, err
 	}
 	return true, noteOrphanedIfClosed(ctx, store, client, task.ID, now)
@@ -759,6 +787,15 @@ func observeField(ctx context.Context, store *model.Store, taskID string, now ti
 // noteBaseRetarget writes down that it did, on the task itself -- see
 // both of their doc comments for why the work is opened rather than
 // refused, and why the retarget is never silent.
+//
+// The other 422 GitHub answers forever -- a head that carries no commits
+// its base does not already have -- comes back as a *noCommitsError
+// rather than as GitHub's own words, both when the compare above saw it
+// coming and when only the refusal did. Nothing is retargeted and nothing
+// is opened, because there is nothing to open: what to do about it is the
+// caller's, and the two callers answer differently (salvagePushedBranch
+// ends the task, OpenPullRequestForTask tells the run to commit
+// something).
 func EnsurePullRequest(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, now time.Time) (github.PullRequest, error) {
 
@@ -780,12 +817,65 @@ func EnsurePullRequest(ctx context.Context, store *model.Store, client github.Cl
 		}
 	}
 
+	// One compare, read twice: for what the branch proposes, and for
+	// whether it proposes anything at all. GitHub refuses a pull request
+	// whose head adds nothing to its base -- see noCommitsError -- and
+	// asking here is what turns that refusal into something this
+	// package can explain rather than something it repeats. A compare
+	// that could not be read (known false) is not an empty branch: the
+	// pull request is attempted anyway, and the 422 below is the second
+	// line of defence.
+	commits, known := branchCommits(client, *task.Target, base, branch)
+	if known && len(commits) == 0 {
+		return github.PullRequest{}, &noCommitsError{Repo: *task.Target, Branch: branch, Base: base}
+	}
+
 	title := task.Title
 	if title == "" {
 		title = "grain: " + task.ID
 	}
-	body := pullRequestBody(describeBranch(client, *task.Target, base, branch), task.ID)
-	return client.CreatePullRequest(task.Target.Owner, task.Target.Name, branch, base, title, body)
+	body := pullRequestBody(describeCommits(commits), task.ID)
+	pr, err := client.CreatePullRequest(task.Target.Owner, task.Target.Name, branch, base, title, body)
+	if err != nil && github.IsNoCommitsBetween(err) {
+		// The same condition, learnt from GitHub instead of from the
+		// compare: the read above failed, or the branch moved between the
+		// two calls (a run's last push landing after this cycle looked).
+		// Either way the answer is the one below, not a bare 422 nobody
+		// downstream can act on.
+		return github.PullRequest{}, &noCommitsError{Repo: *task.Target, Branch: branch, Base: base}
+	}
+	return pr, err
+}
+
+// noCommitsError is a pushed branch that carries no commits its base does
+// not already have. GitHub answers that with a 422 every time, so it is
+// the vanished base's sibling: permanent, unaffected by retrying, and --
+// until it was recognised here -- invisible except as a run detail
+// quoting GitHub's own words.
+//
+// A typed error rather than a sentinel because the branch and the base
+// are what the task has to be told (noteEmptyBranch): "no commits between
+// main and grain/task-158" is a fact about two branches, and neither is
+// in reach of the callers that have to act on it.
+type noCommitsError struct {
+	Repo   model.RepoRef
+	Branch string
+	Base   string
+}
+
+func (e *noCommitsError) Error() string {
+	return fmt.Sprintf("%s on %s carries no commits %q does not already have, "+
+		"so GitHub will not open a pull request for it", e.Branch, e.Repo, e.Base)
+}
+
+// emptyBranch reports whether err is that, anywhere in its chain -- the
+// one question every caller of the finish path asks about an error it
+// gets back, since this is the single failure that will not come out
+// differently next time.
+func emptyBranch(err error) (*noCommitsError, bool) {
+	var e *noCommitsError
+	ok := errors.As(err, &e)
+	return e, ok
 }
 
 // pullRequestBase is the branch task's pull request opens against: its
@@ -911,4 +1001,86 @@ func noteBaseRetarget(ctx context.Context, store *model.Store, task model.Task,
 		return fmt.Errorf("orchestrator: recording %s's retargeted base: %w", task.ID, err)
 	}
 	return nil
+}
+
+// noteEmptyBranch is what a task gets instead of a pull request when the
+// branch its run pushed carries no commits its base does not already
+// have: an explanation in its own conversation, and a stop.
+//
+// The stop is the judgement call, and it is a different one from the
+// vanished base's. There, work existed and only its target was wrong, so
+// pullRequestBase retargets and the pull request opens. Here there is no
+// work: nothing to salvage, nothing to retarget, nothing for a reviewer
+// to look at. Left alone, the task stayed un-completed and dispatch
+// offered it again after its backoff, and every attempt continued the
+// same empty branch and was refused in exactly the same way -- five full
+// agent runs (model.MaxConsecutiveFailures) burnt on a call that cannot
+// succeed, ending in a task that reads 'failed' with GitHub's own 422 as
+// the only account of why.
+//
+// So it stops after one, by parking the task on this comment
+// (Observation.PendingQuestionCommentID -- the same field ask_question's
+// own handling sets, and selfrepair.Confirm's). Parking rather than
+// closing, because which of the three ways a branch ends up empty this
+// was -- a run that reverted its own work, one that committed only what
+// the base already had, one that pushed without committing at all -- is
+// not something grain can tell, and only one of them means the task
+// itself is finished. Parking costs nothing and is undone by one reply:
+// any comment on the task clears the pending question (ui.Client's own
+// Reply) and it is queued again, with this explanation in the thread the
+// next run reads back. Closing would have thrown a live task away on
+// grain's own guess; another four attempts would have thrown money at a
+// refusal nobody was watching.
+//
+// A closing comment from the run itself does not change the answer,
+// though it is relayed first and sits above this one in the thread. A run
+// that signs off while the branch it pushed carries nothing has made two
+// claims that do not agree, and a person reading both is the point of
+// parking; completing the task on the strength of the sign-off alone
+// would file "done" against a remote where nothing landed.
+//
+// Attributed to grain itself rather than on behalf of the agent, for
+// noteBaseRetarget's reason: the run said none of this, grain worked it
+// out.
+func noteEmptyBranch(ctx context.Context, store *model.Store, task model.Task,
+	empty *noCommitsError, now time.Time) error {
+
+	log.Printf("orchestrator: task %s pushed %s to %s with no commits over %q; "+
+		"no pull request can be opened for it, so the task is parked rather than retried",
+		task.ID, empty.Branch, empty.Repo, empty.Base)
+
+	body := fmt.Sprintf(
+		"This task's run pushed `%s` to %s, but that branch carries no commits `%s` "+
+			"does not already have -- GitHub refuses to open a pull request for it "+
+			"(\"No commits between %s and %s\"), and refuses it the same way every time.\n\n"+
+			"There is nothing here to open, retarget or merge. A branch ends up like this "+
+			"when the run reverted its own work, committed only changes `%s` already had, or "+
+			"pushed without committing anything at all. Another attempt would continue this "+
+			"same branch, so grain has stopped rather than repeating the refusal.\n\n"+
+			"Reply on this task to have it dispatched again -- saying what should be "+
+			"different is worth more than \"try again\", since the next run reads this "+
+			"conversation -- or close it if the change turned out not to be needed.",
+		empty.Branch, empty.Repo, empty.Base, empty.Base, empty.Branch, empty.Base,
+	)
+	commentID, err := store.AddComment(ctx, model.Comment{
+		TaskID:    task.ID,
+		Author:    model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
+		Body:      body,
+		CreatedAt: now,
+	})
+	if err != nil {
+		return fmt.Errorf("orchestrator: recording that %s's branch is empty: %w", task.ID, err)
+	}
+	return observeField(ctx, store, task.ID, now, func(o *model.Observation) {
+		o.PendingQuestionCommentID = &commentID
+	})
+}
+
+// emptyBranchDetail is the same finding on the run's own row, where
+// `grain get` shows it: short, and about this run rather than about the
+// task, since the task has the comment above.
+func emptyBranchDetail(empty *noCommitsError) string {
+	return fmt.Sprintf("the run pushed %s, but it carries no commits %q does not already have, "+
+		"so there was no pull request to open; the task is parked on grain's own comment about it",
+		empty.Branch, empty.Base)
 }
