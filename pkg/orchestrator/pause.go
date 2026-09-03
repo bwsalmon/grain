@@ -195,6 +195,37 @@ func (p *Pause) Blocked(now time.Time) (until time.Time, reason string, blocked 
 	return p.until, p.reason, true
 }
 
+// Lift clears a pause before its window has run out, and reports whether
+// there was one to clear. It is the operator's own override: someone who
+// has just topped a plan up, or switched the deployment to the other
+// agent framework, is holding information this process cannot have --
+// the credential behind the refusal is not the credential the next run
+// would spend -- and has no reason to sit out the remainder of a window
+// that no longer applies (grain/task-132, over the daemon's own
+// DELETE /api/pause).
+//
+// It stops dispatch being gated and nothing more. Runs Begin cancelled
+// stay cancelled -- they are over, and their attempts are recorded as
+// model.PausedOutcome, which no streak counts -- so what a lift buys is
+// the next tick dispatching rather than skipping. If the limit is in
+// fact still in force, the run that follows meets it again and pauses
+// again, which is the same self-correcting shape as a pause that expires
+// on its own into a window that has not really reset.
+func (p *Pause) Lift() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.until.IsZero() {
+		return false
+	}
+	log.Printf("orchestrator: the agent usage-limit pause set until %s was lifted by hand; dispatch resumes",
+		p.until.Format(time.RFC3339))
+	p.until, p.reason = time.Time{}, ""
+	return true
+}
+
 // Until is what Blocked reports without the expiry it performs -- for a
 // caller that wants to show the current pause rather than act on it, and
 // for a test asserting on what Begin recorded. A zero time means nothing

@@ -427,7 +427,7 @@ func daemon(args []string) {
 		dataDir: *dataDir, sandboxDir: *sandboxDir, dockerRootDir: *dockerRootDir,
 		maxWorkers: *maxWorkers, maxMergers: *maxMergers,
 		pollInterval: *pollInterval,
-		uiAddr: *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
+		uiAddr:       *uiAddr, uiOpen: *uiOpen, actor: *actor, defaultTargetRepo: *defaultTargetRepo,
 		targetRepos:      targetReposList,
 		agentFramework:   *agentFramework,
 		geminiAPIKeyFile: *geminiAPIKeyFile, geminiModel: *geminiModel, maxAgentTurns: *maxAgentTurns,
@@ -868,6 +868,12 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// Nothing else ever told a sandbox where its repo lives.
 			GitRemoteBase: proxyURL,
 			GrantTools:    grantTools(sourceDir(cfg.upgradeSrcDir)),
+			// The same checkout grantTools above builds its in-process
+			// source tools over, told to the run itself this time: it
+			// travels to the forked "grain mcpserver" a subprocess
+			// Framework starts, which is where a self-debug run's tools
+			// are actually served from (agent.RunConfig.GrainSourceDir).
+			GrainSourceDir: sourceDir(cfg.upgradeSrcDir),
 			// The same registry startUIServer above already handed the
 			// UI, so a run that registers itself here is one
 			// POST /api/tasks/{id}/sandbox/recreate can actually find.
@@ -875,11 +881,11 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// One gate for the whole deployment: the first run to meet
 			// the agent's own usage limit cancels the rest and stops
 			// this loop dispatching until the provider's window resets
-			// (orchestrator.Pause). Built here rather than package-level
-			// because, unlike sandboxRecreations above, nothing outside
-			// the reconcile loop reaches it -- the UI/API server has no
-			// request that touches it.
-			Pause: &orchestrator.Pause{},
+			// (orchestrator.Pause). The same object startUIServer above
+			// already handed the UI, so the banner an operator sees --
+			// and the lift button on it -- is about the gate this loop
+			// actually consults (agentPause's own doc comment).
+			Pause: agentPause,
 		},
 		MintSandboxToken:   tokens.EnsureToken,
 		RevokeSandboxToken: tokens.Revoke,
@@ -1356,6 +1362,22 @@ var cycleTimes = orchestrator.NewCycleTimes(orchestrator.DefaultCycleHistory)
 // finds no live run, which is exactly true of a deployment that has
 // dispatched nothing.
 var sandboxRecreations = orchestrator.NewSandboxRecreations()
+
+// agentPause is the deployment-wide gate an agent's own usage limit
+// closes: while it is shut, the reconcile loop dispatches nothing and
+// every run in flight has been cancelled, because each of them would
+// spend the same exhausted credential (orchestrator.Pause).
+//
+// Package-level for the reason cycleTimes and sandboxRecreations above
+// are: the UI/API server starts before runDaemon builds its Deps, and
+// both halves need to name the same gate -- the loop to consult and
+// close it, the server to report it on GET /api/config and
+// GET /api/pause and to lift it on DELETE /api/pause. It needs no gate
+// of its own like livePullRequests: the zero value is a usable, unpaused
+// Pause, and a UI reading it before the reconcile loop exists reports
+// nothing paused, which is exactly true of a deployment that has
+// dispatched nothing.
+var agentPause = &orchestrator.Pause{}
 
 // pullRequestOpener is ui.Config.PullRequests over
 // orchestrator.OpenPullRequestForTask: the one place this deployment's
@@ -2423,6 +2445,16 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// is allocated at process start and runDaemon writes into that
 		// same ring once it gets there (cycleTimes' own doc comment).
 		Cycles: cycleTimesAdapter{cycleTimes},
+		// The dispatch gate an agent's usage limit closes, for the
+		// banner that says why a queue of ready tasks has nothing
+		// running and for the operator who wants it open again
+		// (ui.Config.AgentPause's own doc comment). No adapter: unlike
+		// Sandboxes above there is no shape to convert, and
+		// *orchestrator.Pause satisfies ui.AgentPause as it stands. No
+		// gate either, for the reason Cycles above needs none --
+		// agentPause is allocated at process start, and reading it
+		// before runDaemon gets there reports nothing paused.
+		AgentPause: agentPause,
 	}
 	if cfg.defaultTargetRepo != "" {
 		repo, err := model.ParseRepo(cfg.defaultTargetRepo)

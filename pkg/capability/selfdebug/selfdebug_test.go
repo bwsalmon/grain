@@ -98,3 +98,21 @@ func TestListGrainSourceRejectsEscapingPaths(t *testing.T) {
 		t.Fatalf("expected an error for an escaping path, got: %s", res.Text)
 	}
 }
+
+// Both tools still register when a deployment has no source checkout to
+// point them at, and each refuses rather than reading anything: an empty
+// root would otherwise resolve to the daemon's own working directory,
+// and list_grain_source would happily list it.
+func TestSourceToolsRefuseWithoutASourceDir(t *testing.T) {
+	tools := SourceTools("")
+	if len(tools) != 2 {
+		t.Fatalf("SourceTools(\"\") returned %d tools, want both of them", len(tools))
+	}
+	for _, name := range []string{"read_grain_source", "list_grain_source"} {
+		res := callTool(t, tools, name, map[string]any{"file_path": "main.go"})
+		if !res.IsError || !strings.Contains(res.Text, "no checkout of grain's own source") {
+			t.Errorf("%s answered %q (isError=%v), want the no-source-checkout explanation",
+				name, res.Text, res.IsError)
+		}
+	}
+}

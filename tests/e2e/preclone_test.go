@@ -100,7 +100,7 @@ func TestDispatchPreClonesTheRepoSoTheAgentNeverHasTo(t *testing.T) {
 
 	// The prompt has to agree with what was prepared, or the agent is
 	// being told to clone something that is already there.
-	if prompt := orchestrator.BuildPrompt(*full, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime); !strings.Contains(prompt, "./"+orchestrator.CheckoutDir) {
+	if prompt := orchestrator.BuildPrompt(*full, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}); !strings.Contains(prompt, "./"+orchestrator.CheckoutDir) {
 		t.Fatalf("prompt never mentions the prepared checkout: %q", prompt)
 	}
 }

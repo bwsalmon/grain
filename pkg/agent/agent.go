@@ -79,7 +79,30 @@ type RunConfig struct {
 	// itself.
 	Repo   string
 	Branch string
-	Tools  []mcp.Tool
+	// SelfDebug reports that this run's task holds the self-debug grant
+	// (pkg/capability/selfdebug), and is what turns on the read-only
+	// tools that grant is for: reading grain's own source, and reading
+	// grain's other tasks -- their prompts, their session transcripts and
+	// the errors their attempts recorded. A Framework passes it on as its
+	// forked "mcpserver" subprocess's own -self-debug.
+	//
+	// It is a field here, rather than the grant being read out of Tools,
+	// because Tools has no consumer left (see above): a Framework that
+	// forks a CLI cannot look at an in-process tool set, so what it needs
+	// is the *fact* of the grant, in a form that survives the fork.
+	//
+	// False -- every ordinary task -- passes nothing, and the run's tool
+	// roster is exactly what it was.
+	SelfDebug bool
+	// GrainSourceDir is the checkout of grain's own source read_grain_source
+	// may read, passed on as the forked "mcpserver"'s own -grain-src-dir.
+	// It is a deployment-wide fact (cmd/grain's sourceDir: the copy baked
+	// into the image, or -upgrade-src-dir's checkout) that reaches a
+	// Framework through the run rather than through construction, so that
+	// only a run which is actually allowed to read it is ever told where
+	// it is: orchestrator.RunDispatch sets it only alongside SelfDebug.
+	GrainSourceDir string
+	Tools          []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
 	// before Run gives up and returns an error, guarding against a run
 	// that never stops asking for tools. Zero means the framework's own
@@ -143,6 +166,32 @@ func RunDeadlineArgs(ctx context.Context) []string {
 		return nil
 	}
 	return []string{"-run-deadline", deadline.UTC().Format(time.RFC3339)}
+}
+
+// SelfDebugArgs is the "-self-debug [-grain-src-dir <dir>]" set a
+// Framework passes its forked "grain mcpserver" subprocess for a run
+// whose task holds the self-debug grant, and nothing at all for one that
+// does not (cmd/grain/mcpserver.go's flags of the same names).
+//
+// It lives here, next to RunDeadlineArgs, for the same reason that one
+// does: every Framework forks the same subcommand, so the translation
+// from "what this run is allowed to do" to "what that process is told"
+// is one function rather than one per framework, each free to drift.
+//
+// The source directory is omitted rather than passed empty when a
+// deployment has none. Both are the same to mcpserver -- the source
+// tools say they have nothing to read either way -- but an empty flag
+// value in a process's own arguments reads like a bug, and this way the
+// arguments say plainly which of the two halves this run really got.
+func SelfDebugArgs(cfg RunConfig) []string {
+	if !cfg.SelfDebug {
+		return nil
+	}
+	args := []string{"-self-debug"}
+	if cfg.GrainSourceDir != "" {
+		args = append(args, "-grain-src-dir", cfg.GrainSourceDir)
+	}
+	return args
 }
 
 // ToolCall records one function call an agent made and what it got back,

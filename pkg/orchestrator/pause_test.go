@@ -173,4 +173,61 @@ func TestNilPauseIsUsable(t *testing.T) {
 	if until, _ := p.Until(); !until.IsZero() {
 		t.Errorf("Until on a nil Pause = %s", until)
 	}
+	if p.Lift() {
+		t.Error("Lift on a nil Pause reported it had lifted something")
+	}
+}
+
+// The operator's override: someone who has topped a plan up, or moved
+// the deployment onto another framework, opens the gate rather than
+// waiting out a window that no longer applies (DELETE /api/pause,
+// grain/task-132).
+func TestLiftOpensTheGateBeforeTheWindowResets(t *testing.T) {
+	now := baseNow()
+	p := &Pause{}
+
+	if p.Lift() {
+		t.Error("Lift on a fresh Pause reported it had lifted something")
+	}
+
+	p.Begin(now, &agent.UsageLimitError{Framework: "claude", ResetAt: now.Add(5 * time.Hour)})
+	if !p.Lift() {
+		t.Fatal("Lift did not report lifting a pause that was in force")
+	}
+	if _, _, blocked := p.Blocked(now); blocked {
+		t.Error("dispatch is still held after a lift")
+	}
+	if until, reason := p.Until(); !until.IsZero() || reason != "" {
+		t.Errorf("Until after a lift = %s, %q; want nothing paused", until, reason)
+	}
+
+	// A lift is not a promise the limit is over. If it is not, the next
+	// run meets the same refusal and shuts the gate again -- the same
+	// self-correcting shape as a window that expired without resetting.
+	p.Begin(now, &agent.UsageLimitError{Framework: "claude", ResetAt: now.Add(5 * time.Hour)})
+	if _, _, blocked := p.Blocked(now); !blocked {
+		t.Error("a limit met again after a lift did not pause dispatch")
+	}
+}
+
+// A lift ends the gate, not the runs the pause already cancelled: those
+// are over and recorded as model.PausedOutcome. What it buys is the next
+// tick dispatching, which is what a run registering after one proves --
+// register cancels on the spot only while a pause is in force.
+func TestLiftLetsTheNextRunStart(t *testing.T) {
+	now := baseNow()
+	p := &Pause{}
+	p.Begin(now, &agent.UsageLimitError{ResetAt: now.Add(time.Hour)})
+	p.Lift()
+
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	stop := p.register("7-2", now, cancel)
+	defer stop()
+
+	select {
+	case <-ctx.Done():
+		t.Errorf("a run dispatched after a lift was cancelled: %v", context.Cause(ctx))
+	default:
+	}
 }

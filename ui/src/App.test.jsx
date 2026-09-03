@@ -190,6 +190,79 @@ describe("App", () => {
     expect(await screen.findByText(/reconcile loop has stopped/i)).toBeInTheDocument();
   });
 
+  // grain/task-132: an operator opening grain during a provider's
+  // usage-limit window used to see a queue of ready tasks and nothing
+  // running, with no explanation on screen at all.
+  it("shows a banner while the agent's usage limit has dispatch paused", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    const agentPause = {
+      paused: true,
+      until: "2026-09-03T17:00:00Z",
+      reason: "claude: usage limit reached; resets at 2026-09-03T17:00:00Z",
+      secondsRemaining: 7200,
+    };
+    api.mockImplementation((path, opts) =>
+      (path === "/api/config" ? Promise.resolve({ ...config, agentPause }) : realImpl(path, opts)));
+
+    render(<App />);
+
+    expect(await screen.findByText(/agent usage limit reached/i)).toBeInTheDocument();
+    expect(screen.getByText(/about 2h 0m/)).toBeInTheDocument();
+  });
+
+  it("shows no pause banner on a deployment that is dispatching", async () => {
+    setupApi();
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    expect(screen.queryByText(/agent usage limit reached/i)).not.toBeInTheDocument();
+  });
+
+  // Both banners are pinned to the same strip, and a dead reconcile loop
+  // is the larger fact: being told why a deployment that dispatches
+  // nothing at all is not dispatching helps nobody.
+  it("shows only the reconciler-down banner when both are true", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      (path === "/api/config"
+        ? Promise.resolve({ ...config, reconcilerDown: true, agentPause: { paused: true, until: "2026-09-03T17:00:00Z", secondsRemaining: 7200 } })
+        : realImpl(path, opts)));
+
+    render(<App />);
+
+    expect(await screen.findByText(/reconcile loop has stopped/i)).toBeInTheDocument();
+    expect(screen.queryByText(/agent usage limit reached/i)).not.toBeInTheDocument();
+  });
+
+  // The banner's own "Resume now" -- an operator who has just topped a
+  // plan up has no reason to wait out a window that no longer applies.
+  it("lifts the pause and re-reads the config when Resume now is clicked", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    let paused = true;
+    api.mockImplementation((path, opts) => {
+      if (path === "/api/config") {
+        return Promise.resolve(paused
+          ? { ...config, agentPause: { paused: true, until: "2026-09-03T17:00:00Z", secondsRemaining: 7200 } }
+          : config);
+      }
+      if (path === "/api/pause" && opts?.method === "DELETE") {
+        paused = false;
+        return Promise.resolve({ enabled: true, lifted: true, pause: { paused: false } });
+      }
+      return realImpl(path, opts);
+    });
+
+    render(<App />);
+    await screen.findByText(/agent usage limit reached/i);
+    fireEvent.click(screen.getByRole("button", { name: /resume now/i }));
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/pause", { method: "DELETE" }));
+    await waitFor(() => expect(screen.queryByText(/agent usage limit reached/i)).not.toBeInTheDocument());
+  });
+
   // grain/task-69: the deployment's name in the tab strip, which is the
   // one piece of chrome the app cannot draw into. Name first, because a
   // narrow tab truncates its title from the end.

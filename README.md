@@ -1374,7 +1374,9 @@ no Runner" stays true of the package itself even though a deployment can
 now wire one in from outside it. `selfdebug.SourceTools` is read-only --
 `read_grain_source`/`list_grain_source`, confined to whatever directory
 a deployment's `-upgrade-src-dir` already names, needing no confirmation
-of any kind, since nothing it exposes can change anything.
+of any kind, since nothing it exposes can change anything -- and the same
+grant now also carries `pkg/mcp`'s four task tools, for reading grain's
+*other* tasks (see below).
 `selfrepair.HostCommandTools`' `run_host_command` is the opposite: it
 runs a shell command directly against the same host `grain daemon`
 itself runs on -- no sandbox, no adapter, the real machine -- so every
@@ -1394,7 +1396,32 @@ Every framework that remains (`agent/antigravity`, `agent/claude`,
 ignores `RunConfig.Tools` entirely, because there is no in-process
 registry to hand a forked process. `Config.GrantTools` still assembles these tools and
 `RunDispatch` still passes them, but no `Framework` consumes them, so
-`selfrepair`/`selfdebug`'s host tools reach no running agent today.
+`selfrepair`'s host tool reaches no running agent today.
+
+`self-debug` is the half that no longer depends on any of that, because
+everything it offers is read-only and so needs no route back into a live
+run's own conversation. `grain mcpserver` takes `-self-debug` (and
+`-grain-src-dir`), and a `Framework` passes both to the subprocess it
+forks exactly when `agent.RunConfig.SelfDebug` says this task holds the
+grant — `RunDispatch` reads that off the task's own `Grants`, and
+`agent.SelfDebugArgs` is the one translation from "what this run may do"
+to "what that process is told", shared by all three frameworks the way
+`RunDeadlineArgs` already is. What the flag turns on is two halves of one
+question. `selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`
+answer what grain is *built* to do. `mcp.NewTaskTools`'
+`list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
+`read_grain_task_transcript` answer what this deployment actually *did*:
+another task's record, every attempt it has had with the error each one
+recorded, the prompt its agent was really handed, and its session
+transcript — a still-running attempt's included, since the daemon serves
+one from `Config.LiveTranscripts`. Those reads take the same hop
+`open_pull_request` takes for its write: `cmd/grain/mcpserver.go`'s
+`daemonTasks` asks the daemon over its REST API, so that process still
+holds no store handle and `docs/design.md`'s split surface is untouched.
+Both halves refuse politely rather than disappearing when a deployment
+has no source checkout, or an `mcpserver` no daemon to ask, so a run's
+tool roster is a property of the vocabulary rather than of one
+deployment's configuration.
 Closing that gap means giving the `mcpserver` subcommand a route back to
 the store, which is a design question rather than a missing flag: the
 isolation that makes the subprocess frameworks safe is exactly that it
@@ -1559,6 +1586,78 @@ name (`--model gemini-3.1-pro requires --effort`) and a suffixed name
 passed alongside `--effort`. `antigravity.DefaultModel` is one of the
 catalog names, and a deployment overriding it in Settings or with
 `-gemini-model` should name one too.
+
+### Proving a live run actually gets the tools
+
+Where that private `HOME` puts the MCP config is a fact about agy's
+on-disk layout, and it is the one thing about this package no test in
+this repository can check for itself. `agent/antigravity` wrote the
+config to `~/.gemini/settings.json` for a while -- the file Gemini CLI
+kept the same `mcpServers` map in -- and agy, which reads
+`~/.gemini/config/mcp_config.json` and nothing else, silently loaded no
+MCP servers at all. Every test covering that wiring stayed green
+throughout, because every one of them drives a scripted runner or a stub
+CLI: a stub reads whichever file the test told it to read, so the tests
+agreed with the code about a name they had both got wrong. What that
+costs in production is not an error, which is the difficulty -- agy
+starts, answers, and has no way to touch the sandbox.
+
+Fixing it settled the name against the real binary, without a credential:
+on agy 1.1.25, `agy mcp add` writes `~/.gemini/config/mcp_config.json`,
+`agy mcp list` reads it back, and the identical `mcpServers` map placed
+in `~/.gemini/settings.json` lists no servers at all. That is static
+analysis of the binary, and it stops one step short of the end of the
+chain: it says which file agy reads, not that a real run holding a real
+credential comes up holding grain's tools.
+
+`tests/e2e/live_test.go` is where that last step is taken. It is the only
+test that execs the real `agy`, and it now asserts the two things a
+scripted run cannot show, separately and in this order:
+
+- **the roster.** agy's opening `init` event names the tools it actually
+  loaded, so the test keeps the run's raw `stream-json`
+  (`RunConfig.TranscriptPath`) and reads that event back: the roster must
+  carry `mcp__grain-sandbox__*` names, `run_command` among them. This is
+  checked before the run's own error is, deliberately -- a run given no
+  tools fails later on anyway, and every one of those later failures
+  reads like a model that would not do as it was asked rather than like
+  one that was never handed a way to.
+- **a call that landed.** At least one `run_command` call has to have
+  returned without error, and the assertions already there -- the pushed
+  branch, the line in `NOTES.md` -- are what say it reached this run's
+  own sandbox rather than merely existing on a roster.
+
+**CI cannot run this, by design.** `tests.yml` holds no credential at
+all: it triggers on `pull_request`, which runs code from an unreviewed
+branch, and is only safe to trigger that way for as long as there is
+nothing in it worth stealing. Giving that job a `GEMINI_API_KEY` to make
+this one test run would hand every PR branch the deployment's own model
+credential. So the test stays gated and stays skipped there, and this is
+a check a **maintainer runs by hand**:
+
+```
+GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
+  go test ./tests/e2e/ -run TestLiveIssueCompletesEndToEnd -v
+```
+
+with `agy` on `$PATH` and a Go toolchain to build `cmd/grain` with (agy
+reaches the sandbox by forking grain's own `mcpserver` subcommand, so a
+live run needs the binary as well as the key). `GRAIN_LIVE_AGENT_TEST` is
+there because a skip and a pass are the same `ok` in `go test`'s summary:
+with it set, an unset key or a missing `agy` fails the run instead of
+skipping it, so nobody comes away believing the roster was checked when
+nothing checked it. The `-v` output logs the whole advertised roster,
+which is the line to read.
+
+**Last exercised: not yet, as of 2026-09-03.** The assertions above and
+this note landed together, written and reviewed without ever being run
+against a live agy: the sandbox they were written in had no
+`GEMINI_API_KEY`, no `agy`, and no route to the network either credential
+or binary would have come from. So the claim that a live run comes up
+holding grain's tools still rests on the binary analysis above and on an
+assertion nothing has yet executed. Whoever first runs the command above
+against a real key should replace this paragraph with the agy version
+they ran, the date, and what the roster came back as.
 
 ## Letting a run watch its own CI
 
@@ -1832,6 +1931,63 @@ snaps to line boundaries so that numbering stays whole.
 summary and far short of an unbounded `git log -p`. The result-size
 telemetry in `docs/agent-ergonomics.md`'s finding 11 is what should
 eventually set it from what runs actually ask for, rather than taste.
+
+## Telling attempt N what attempt N−1 did
+
+A redispatch got the task, the conversation, its attachments and a
+checkout continuing the previous attempt's branch (`prepareCheckout`,
+which is the right thing to hand it), and nothing at all about the
+attempt that made those commits. So attempt 2 opened on a branch it had
+not written, with no account of what any of it was for, or of why the
+attempt that wrote it stopped — and grain had all of it the whole time.
+Every `task_run` row carries `outcome` and `detail`, and since `outcomeOf`
+that detail describes a run that succeeded as well as one that failed.
+The cheapest thing that costs is re-doing a diagnosis grain already paid
+for. The dearest is re-attempting exactly the thing that ran out of wall
+clock, which is the one ending a branch cannot reveal.
+
+`BuildPrompt` now takes an `orchestrator.History`: the attempts before
+this one, the commits they left on the branch, and the conversation. The
+first comes from `store.Runs` with this run's own row filtered out —
+`dispatch.Cycle` writes that row before `RunDispatch` ever sees the
+dispatch, so a prompt that listed it would be telling a run about itself,
+with an empty outcome because it has not happened yet. The second comes
+from `checkoutCommits`, a `git log <base>..HEAD` run through the same
+sandbox `run_command` tool `prepareCheckout` clones with — the only place
+in a dispatch that has a repository rather than a string — with each line
+marked so it can be picked back out of the tool's own `exit=`/`stdout:`
+framing, exactly as `baseGoneMarker` already is.
+
+It reads as a list: per attempt its number, outcome and `detail`, then
+the branch's commits newest first. Bounded on purpose — three attempts,
+240 bytes of one-line detail each, ten commits, and a pointer at `git
+log` for the rest, which `RunDispatch` can say without a second read
+because it asks `checkoutCommits` for one commit more than the list holds.
+This is orientation, not a transcript store: the transcript stays in
+`task_run.transcript` and the UI's pane over it, being prose,
+per-framework and unbounded.
+
+Where it sits is part of the fix. Both history sections go together,
+immediately after the sentences saying where the checkout is and which
+branch is in it — the facts they explain — and ahead of the
+commit-message, CI and budget paragraphs, which is why
+`commentThreadSection` moved out of `prepareCapabilities` and into
+`BuildPrompt` alongside it. The conversation and the attempt history are
+the same kind of fact, something a run would otherwise pay to
+rediscover, and a run told to read the thread before doing anything else
+should not have to find it three paragraphs past the one telling it how
+to push.
+
+Neither read can fail a dispatch for nothing. The store read is fatal for
+the same reason the conversation and attachment reads either side of it
+are: a store that cannot answer it cannot record how this run ends
+either. The git read is best effort and silent — a missing base (it falls
+back to `origin/HEAD`, the survivable case `baseCheck` already carries on
+through), a branch with nothing on it, a sandbox with no checkout at all
+— because the commits are on the branch for the agent to read either way,
+and orientation that could fail a run would be a worse trade than the
+re-diagnosis it saves. On a first attempt it is not read at all: there is
+nothing on that branch its base does not already have.
 
 ## Reaching a sandbox guest without a route into it
 
@@ -4494,6 +4650,51 @@ restarted inside a paused window dispatches one run, meets the same
 limit, and pauses again: one wasted attempt, against a durable row that
 would have to be reconciled with a credential that may by then have been
 changed by the very operator doing the restarting.
+
+### Saying so, and lifting it by hand
+
+None of that was visible from the UI. An operator opening grain in the
+middle of a five-hour window saw a queue of ready tasks and nothing
+running, and the only places that said why were the daemon's journal and
+the detail of the attempts the pause had ended — which you have to know
+to open, on a task you have to know to pick.
+
+So the gate is wired to the UI as `ui.Config.AgentPause`, the way
+`Config.Cycles` is wired to the metrics report: an interface named in
+`pkg/ui`, satisfied by `*orchestrator.Pause` itself, handed over by
+`cmd/grain/daemon.go` — which now allocates the one `Pause` at process
+start, package-level beside `cycleTimes`, so the UI/API server and the
+reconcile loop that comes up after it are talking about the same gate.
+`GET /api/config` carries it as `agentPause` and a standing banner says
+what the provider said, when dispatch resumes, and how long that is from
+now; `GET /api/pause` is the same reading on its own for anything else
+polling.
+
+Every read goes through `Pause.Until`, never `Pause.Blocked`: `Blocked`
+is what *clears* an expired pause, as the reconcile loop's own read, and
+a browser poll must not be able to open the gate out from under the loop
+that owns it. A window whose instant has passed simply reads as not
+paused.
+
+It is deliberately not a section of `GET /api/metrics`. That report is
+computed over rows for a window that has ended; a pause is a gauge of
+what this process is doing right now, with nothing in any table behind
+it. The `cycles` section is in that report because it is an *input* to
+the same `metrics.Compute` call the rest of it comes from — a pause is
+not, and filing it there would mean learning to look for "why is nothing
+dispatching?" in a latency report.
+
+`DELETE /api/pause` — the banner's own "Resume now" — lifts a pause
+early. An operator who has just topped a plan up, or moved the deployment
+onto another agent framework, is holding information this process cannot
+have: the credential behind the refusal is not the credential the next
+run would spend, and there is no reason to sit out the rest of a window
+that no longer applies. A lift opens the gate and nothing more — the runs
+the pause cancelled are over, recorded as `model.PausedOutcome`, which no
+streak counts — so what it buys is the next tick dispatching rather than
+skipping. If the limit is in fact still in force, that run meets it and
+pauses again, which is the same self-correcting shape as a window that
+expires without having really reset.
 
 ## Every sandbox is built at a size grain chose
 
