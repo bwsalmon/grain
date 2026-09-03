@@ -60,6 +60,29 @@ func TestCapabilityStatusLine(t *testing.T) {
 			status:  ui.CapabilityStatus{ID: "gemini-key", Ready: true, Grantable: true},
 			wantNot: []string{"default"},
 		},
+		{
+			// grain/task-24: the per-repo layer names the repos rather
+			// than repeating a bare "default", so a line never reads as
+			// a deployment-wide default that only some tasks get.
+			name: "a capability defaulted only on some repos names them",
+			status: ui.CapabilityStatus{
+				ID: "gcp-key", Ready: true, Grantable: true,
+				DefaultRepos: []string{"acme/gadgets", "acme/widgets"},
+			},
+			want:    []string{"gcp-key", "default in: acme/gadgets, acme/widgets"},
+			wantNot: []string{"default -- every new task is filed with this"},
+		},
+		{
+			// Both layers, on one capability: a repo can restate one the
+			// deployment already gives, and dropping the deployment-wide
+			// entry would leave that repo's own standing.
+			name: "a capability defaulted deployment-wide and on a repo says both",
+			status: ui.CapabilityStatus{
+				ID: "gcp-key", Ready: true, Grantable: true,
+				Default: true, DefaultRepos: []string{"acme/widgets"},
+			},
+			want: []string{"default -- every new task is filed with this", "default in: acme/widgets"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := capabilityStatusLine(tc.status)

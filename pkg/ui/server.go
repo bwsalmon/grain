@@ -64,6 +64,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/repos", s.handleAddTargetRepo)
 	s.mux.HandleFunc("DELETE /api/repos/{owner}/{name}", s.handleRemoveTargetRepo)
 
+	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/capabilities", s.handleGetRepoCapabilities)
+	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/capabilities", s.handleSetRepoCapabilities)
+
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases", s.handleListReleases)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases", s.handleCreateRelease)
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases/{release}", s.handleGetRelease)

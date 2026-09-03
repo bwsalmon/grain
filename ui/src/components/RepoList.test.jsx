@@ -291,4 +291,82 @@ describe("RepoList", () => {
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "invalid branch name" }));
     expect(screen.getByPlaceholderText("feature/foo")).toHaveValue("bad name");
   });
+
+  // grain/task-24: a repo's own default capability set is edited here,
+  // next to the repo it belongs to, rather than on the deployment-wide
+  // Settings pane -- and the form says what a task filed against this
+  // repo would actually start with, which is the union of both layers.
+  it("opens a row's Capabilities form and loads that repo's own defaults", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: ["gemini-key"],
+      effectiveDefaultCapabilities: ["gemini-key", "gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
+    const onOpenRepo = vi.fn();
+    const user = userEvent.setup();
+    renderList({ config, onOpenRepo });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities");
+    expect(await screen.findByText(/A task filed against acme\/gadgets starts with:/)).toHaveTextContent(
+      "Gemini key, GCP key",
+    );
+    expect(onOpenRepo).not.toHaveBeenCalled();
+  });
+
+  it("saves a repo's default capabilities and refreshes the config the new-task form seeds from", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: [],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: [],
+    });
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: ["gcp-key"],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: ["gcp-key"],
+    });
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }] };
+    const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderList({ config, onRefreshConfig });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    await user.click(await screen.findByLabelText("Default capabilities"));
+    await user.click(await screen.findByRole("option", { name: "GCP key" }));
+    await user.keyboard("{Escape}");
+    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
+
+    expect(api).toHaveBeenCalledWith("/api/repos/acme/gadgets/capabilities", {
+      method: "PUT", body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+    expect(onRefreshConfig).toHaveBeenCalled();
+  });
+
+  it("reports the error when saving a repo's default capabilities fails", async () => {
+    api.mockResolvedValueOnce({
+      repo: "acme/gadgets",
+      defaultCapabilities: [],
+      deploymentDefaultCapabilities: [],
+      effectiveDefaultCapabilities: [],
+    });
+    api.mockRejectedValueOnce(new Error("unknown capability nope"));
+    const config = { capabilities: [{ id: "gcp-key", name: "GCP key" }] };
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    renderList({ config, showError });
+
+    const row = screen.getByText("acme/gadgets").closest("li");
+    await user.click(within(row).getByRole("button", { name: "Capabilities" }));
+    await screen.findByLabelText("Default capabilities");
+    await user.click(within(row).getByRole("button", { name: "Save capabilities" }));
+
+    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "unknown capability nope" }));
+  });
 });

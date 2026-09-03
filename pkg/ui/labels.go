@@ -32,9 +32,11 @@ import (
 // Capability is one attachable capability a human toggles on a task --
 // the CAPABILITY-tier rows of v1's labels.py _STYLES table that were
 // genuinely human-driven. A deployment can start every new task with
-// some of these already ticked (model.Config.DefaultCapabilities), which
-// changes what the picker opens as, not what it can do: every row here
-// is still something a human turns on and off per task.
+// some of these already ticked (model.Config.DefaultCapabilities), and a
+// repo can add more of its own for the tasks that target it
+// (model.RepoConfig.DefaultCapabilities). Either changes what the picker
+// opens as, not what it can do: every row here is still something a
+// human turns on and off per task.
 //
 // Label is gone from this type. It named the GitHub label that used to
 // carry the grant; a grant is a model.Grant row now, and ID is what it
@@ -75,9 +77,11 @@ type Capability struct {
 // which v1 minted for every sandbox unconditionally
 // (grain/automation/gcp_keys.py) -- is model.Config.DefaultCapabilities,
 // a per-deployment subset of these ids that (*Client).CreateTask seeds
-// every new task's Grants from. A row here is what makes an id eligible
-// for that set (UpdateSettings validates against this listing), so this
-// stays the one gate every grant passes through.
+// every new task's Grants from, plus model.RepoConfig.
+// DefaultCapabilities, the same thing per repo. A row here is what makes
+// an id eligible for either set (UpdateSettings and
+// SetRepoDefaultCapabilities both validate against this listing), so
+// this stays the one gate every grant passes through.
 //
 // Seeding at creation rather than granting at dispatch is what settles
 // the failure mode v1 needed a local `except` for. v1 minted per

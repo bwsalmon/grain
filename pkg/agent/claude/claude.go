@@ -148,6 +148,9 @@ type Framework struct {
 	konturSSHUser   string
 	konturExecKey   string
 	konturWorkspace string
+	githubDataDir   string
+	githubHost      string
+	githubInsecure  bool
 }
 
 // Option configures a Framework at construction time.
@@ -205,6 +208,25 @@ func WithKonturSSH(sshUser, execKey, workspace string) Option {
 	}
 }
 
+// WithGitHubAccess is what lets a run read CI for its own branch: the
+// forked "mcpserver" subprocess is given -data-dir, -github-host and
+// -github-insecure-http so it can build a GitHub REST client from this
+// controller's own secrets/github ladder and answer pull_request_status
+// (see cmd/grain/mcpserver.go, and pkg/mcp/pullrequest_tools.go for why
+// this does not put GitHub inside the sandbox).
+//
+// dataDir is the deployment-wide half; which repo and branch that
+// process may then ask about comes per-run off agent.RunConfig, never
+// from here. A Framework built without this option passes none of the
+// three, and the tool answers that it has nothing to report -- so a
+// deployment with no GitHub credential still runs, it just cannot see
+// its own CI.
+func WithGitHubAccess(dataDir, host string, insecureHTTP bool) Option {
+	return func(f *Framework) {
+		f.githubDataDir, f.githubHost, f.githubInsecure = dataDir, host, insecureHTTP
+	}
+}
+
 // New builds a Framework that runs the real claude binary at claudePath
 // (typically just "claude", resolved against $PATH) and points every
 // run's --mcp-config at grainBinaryPath -- the same grain binary this
@@ -222,18 +244,28 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 	return f
 }
 
-// allowedTools names the exact tools NewSandboxTools and NewMockTools
-// register, mcp__-prefixed the way claude reports them once loaded from
-// --mcp-config -- computed from those constructors directly rather than
-// hand-copied, so this can never drift from what the "mcpserver"
-// subcommand actually advertises the way v1's hand-maintained
-// _ALLOWED_TOOLS constant could (dispatch.py).
+// allowedTools names the exact tools NewSandboxTools, NewMockTools and
+// NewPullRequestTools register, mcp__-prefixed the way claude reports
+// them once loaded from --mcp-config -- computed from those constructors
+// directly rather than hand-copied, so this can never drift from what
+// the "mcpserver" subcommand actually advertises the way v1's
+// hand-maintained _ALLOWED_TOOLS constant could (dispatch.py).
+//
+// pull_request_status is named unconditionally, not only for a run that
+// passed pullRequestArgs. --strict-mcp-config admits a tool only if it
+// is on this list *and* the server advertises it, and mcpserver
+// registers it either way (with a nil reader when unconfigured), so
+// listing it always is what keeps this list a property of the tool
+// vocabulary rather than of one run's configuration.
 func allowedTools() []string {
 	var names []string
 	for _, t := range mcp.NewSandboxTools("") {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	for _, t := range mcp.NewMockTools(&mcp.MockSink{}) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
+	for _, t := range mcp.NewPullRequestTools(nil, mcp.PullRequestScope{}) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	return names
@@ -263,15 +295,19 @@ func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 // are -- RunDispatch never sets both at once in practice (a sandbox is
 // either host-rooted or kontur-named, never both), but a Framework this
 // simple is not the place to enforce that.
+//
+// pullRequestArgs is appended to either, since which repo's CI a run may
+// read is independent of which backend its sandbox runs on.
 func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
+	var args []string
 	switch {
 	case cfg.SandboxRoot != "":
-		return []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}, nil
+		args = []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}
 	case cfg.KonturVM != "":
 		if f.konturSSHUser == "" || f.konturWorkspace == "" {
 			return nil, fmt.Errorf("claude: RunConfig.KonturVM is set but this Framework has no kontur SSH config (see WithKonturSSH)")
 		}
-		args := []string{
+		args = []string{
 			"mcpserver", "-kontur-vm", cfg.KonturVM,
 			"-ssh-user", f.konturSSHUser, "-workspace", f.konturWorkspace,
 		}
@@ -283,10 +319,31 @@ func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 		if f.konturExecKey != "" {
 			args = append(args, "-exec-key", f.konturExecKey)
 		}
-		return args, nil
 	default:
 		return nil, fmt.Errorf("claude: RunConfig.SandboxRoot or .KonturVM is required")
 	}
+	return append(args, f.pullRequestArgs(cfg)...), nil
+}
+
+// pullRequestArgs is the "-data-dir/-pr-repo/-pr-branch" triple that
+// turns on the forked mcpserver's pull_request_status, or nothing at all
+// when either half is missing -- a Framework built without
+// WithGitHubAccess, or a run whose task has no repo attached. Passing
+// half of it would be worse than passing none: mcpserver would warn on
+// stderr about a misconfiguration that is really just a task with no
+// target.
+func (f *Framework) pullRequestArgs(cfg agent.RunConfig) []string {
+	if f.githubDataDir == "" || cfg.Repo == "" || cfg.Branch == "" {
+		return nil
+	}
+	args := []string{"-data-dir", f.githubDataDir, "-pr-repo", cfg.Repo, "-pr-branch", cfg.Branch}
+	if f.githubHost != "" {
+		args = append(args, "-github-host", f.githubHost)
+	}
+	if f.githubInsecure {
+		args = append(args, "-github-insecure-http")
+	}
+	return args
 }
 
 // Run implements agent.Framework: it writes an --mcp-config file pointing

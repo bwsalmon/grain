@@ -13,6 +13,13 @@ import { Alert, Box, Chip, Stack, Typography } from "@mui/material";
 // Capabilities tab (this reports that choice back as cap.default);
 // fixing a missing secret means visiting the Secrets tab instead, which
 // each capability's own hint below points at.
+//
+// cap.defaultRepos is the second layer of the same choice, made
+// somewhere else again -- on the repos page, one repo at a time
+// (model.RepoConfig.DefaultCapabilities). It is reported here beside
+// cap.default rather than folded into it: with two layers, a single
+// "Default" chip would describe a deployment-wide default that only some
+// tasks actually get.
 export default function CapabilitiesPanel({ capabilities }) {
   const list = capabilities || [];
   return (
@@ -21,7 +28,8 @@ export default function CapabilitiesPanel({ capabilities }) {
         Every capability grain ships a provider for, and whether this deployment is currently
         configured for it to work. Secrets live on the Secrets tab. A capability marked "not
         grantable" is one no task can ask for at all, however this deployment is configured; one
-        marked "default" is attached to every new task as it is filed.
+        marked "default" is attached to every new task as it is filed, and one marked "default in"
+        only to tasks filed against the repos named (set on the repos page, per repo).
       </Typography>
       {list.length === 0 && <Alert severity="info">No capabilities known.</Alert>}
       <Stack spacing={1.5}>
@@ -43,6 +51,18 @@ export default function CapabilitiesPanel({ capabilities }) {
                   every task is filed holding is visible in the same
                   line as the fact that it is. */}
               {cap.default && <Chip size="small" label="Default" color="info" variant="outlined" />}
+              {/* Shown alongside "Default", not instead of it: a repo can
+                  restate one the deployment already gives, and dropping
+                  it deployment-wide leaves the repo's own entry standing. */}
+              {(cap.defaultRepos || []).length > 0 && (
+                <Chip
+                  size="small"
+                  label={`Default in ${cap.defaultRepos.length} repo${cap.defaultRepos.length === 1 ? "" : "s"}`}
+                  color="info"
+                  variant="outlined"
+                  title={cap.defaultRepos.join(", ")}
+                />
+              )}
             </Stack>
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
               {cap.description}
@@ -62,6 +82,13 @@ export default function CapabilitiesPanel({ capabilities }) {
               <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
                 Every new task is filed holding this, and it is not ready: each of those tasks will fail to
                 dispatch until the gap below is closed, or this capability is dropped from the defaults above.
+              </Typography>
+            )}
+            {(cap.defaultRepos || []).length > 0 && (
+              <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
+                Defaulted on: {cap.defaultRepos.join(", ")} -- every task filed against one of those repos
+                starts holding this{cap.ready === false ? ", and will fail to dispatch until the gap below is closed" : ""}.
+                Change it on the repos page, under that repo&apos;s Capabilities.
               </Typography>
             )}
             {(cap.missingConfig || []).length > 0 && (

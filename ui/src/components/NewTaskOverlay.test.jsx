@@ -208,6 +208,71 @@ describe("NewTaskOverlay", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("12 Fix the login bug");
   });
 
+  // grain/task-24: a repo can default capabilities of its own on top of
+  // the deployment's, so picking a repo re-seeds the picker with the
+  // union -- the same answer CreateTask would resolve server-side for a
+  // task filed against it.
+  it("adds the picked repo's own default capabilities to the deployment's", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      defaultCapabilities: ["gemini-key"],
+      repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Needs a key");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  // Switching away from a repo that adds one drops it again: leaving the
+  // previous repo's extras ticked would file the task with capabilities
+  // the repo it actually targets never asked for.
+  it("re-seeds the picker when the repo changes", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      defaultCapabilities: ["gemini-key"],
+      repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Elsewhere");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/gadgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key"]);
+  });
+
+  // Once the picker has been touched the ticks are the human's own: a
+  // re-seed that put back a capability they had just unticked would file
+  // a task with something they had already said no to.
+  it("leaves a hand-edited capability picker alone when the repo changes", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      defaultCapabilities: ["gemini-key"],
+      repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "My own choice");
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "Gemini key" }));
+    await user.keyboard("{Escape}");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual([]);
+  });
+
   it("offers a repo dropdown built from targetRepos and existing tasks' repos, instead of a bare text field", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [{ id: "1", title: "Old task", repo: "acme/other" }];

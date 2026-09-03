@@ -41,7 +41,12 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
                 into that VM's own container -- see "Reaching a sandbox
-                guest without a route into it" below
+                guest without a route into it" below.
+                NewPullRequestTools adds pull_request_status: the one
+                tool here that really reads GitHub, from the controller,
+                so a run can see CI's verdict on the commits it pushed
+                and repair a red build inside its own turn budget -- see
+                "Letting a run watch its own CI" below
 pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
                 run's VM, the container names kontur derives from a VM
                 name, and the one `docker inspect` that tells a VM whose
@@ -1345,6 +1350,44 @@ otherwise keeps its existing `-gemini-api-key-file`, which `agy`
 authenticates with as `GEMINI_API_KEY` in the subprocess environment
 (never in argv).
 
+## Letting a run watch its own CI
+
+A run could always push more than once — the git proxy authorizes every
+push to the task's own target (`gitproxy/authorize.go`), and
+`ConfigureGitCredentials` leaves a working identity and credential helper
+behind — but it had no way to find out what CI made of a push. The
+checks were read minutes later by a different process
+(`SyncPullRequests`), and a red build became a whole separate fix task
+(`fileFixTask`), dispatched into a cold sandbox, to repair something the
+run that broke it was still sitting there able to repair.
+
+`pkg/mcp`'s `pull_request_status` closes that loop. It reports the branch
+tip, the pull request open for it if there is one, and every check run
+against the pushed commit with the failing ones named — enough for a run
+to push, look, fix and push again inside one dispatch.
+
+It does not reopen docs/design.md's split surface ("Sandboxes: git
+transport only. No REST, no GraphQL"). The tool is served by the
+`grain mcpserver` process, which runs on the *controller*, and reads
+GitHub with the controller's own `secrets/github` ladder — exactly the
+shape the `ask_question` escape hatch already had, and acceptable for the
+same reason: what crosses into the sandbox is a rendered answer, never a
+credential and never a general-purpose API call. The scope is fixed at
+process start from flags `cmd/grain/mcpserver.go` receives
+(`-pr-repo`/`-pr-branch`, written by each framework's `mcpServerArgs`
+from `agent.RunConfig`), and no tool argument can move it: a run reads CI
+for its own branch or nothing. The tool is registered whatever those
+flags said, so a task with no repo attached gets its own explanation
+rather than an "unknown tool" that reads like a broken grain.
+
+Two things had to be said out loud rather than left implicit. `BuildPrompt`
+now names the push/check/repair loop, because nothing about a tool
+description tells a run that it may push a second time and the sentences
+around it read like one final act. And an unfinished check is reported as
+carrying no verdict, never as passing — the same call `healthFrom` makes
+at the merge gate, made again here so a run that pushes and sees three
+queued jobs does not declare itself done.
+
 ## Reaching a sandbox guest without a route into it
 
 A slot's VM guest is reached by exec'ing into that VM's own container:
@@ -1766,6 +1809,83 @@ Per-repo defaults are the next step and resolve in the same place
 set a new task starts with, which is a different thing from
 docs/data-model.md's folder `offers`, those being floors a task cannot
 drop rather than a seed it can.
+
+### The same set, per repo
+
+The ask task-14 came from also said "we will also want this to be
+possible on individual repos in the future," and this is that: a repo can
+name capabilities of its own that a task filed against it starts holding,
+on top of whatever the deployment already defaults.
+
+**Where it is stored is a new `repo_config` table**, keyed `(owner,
+name)` the same way `qualification_config` already is, holding
+`model.RepoConfig` — one field today, `DefaultCapabilities`, with the
+same comma-separated storage `grain_config.default_capabilities` uses.
+A new table rather than a column somewhere: `base`, `preamble` and
+`max_concurrent` are docs/data-model.md's own next three per-repo
+settings, and this is the row they would join. A repo has a row only
+while it has something of its own to say — `PutRepoConfig` deletes rather
+than writing one that says nothing, so "has a row" and "adds something"
+stay one fact and nothing has to filter empty rows back out.
+
+**It is deliberately not the folder `offers` tree**, which the same
+document describes and which stays available for what it is for. An
+offer is a *floor*: unioned in when a task's grants are resolved, not
+droppable by the task. Everything here is a *seed*: written onto the task
+at creation, visible on it, and untickable on the form that files it.
+Mixing the two silently is the failure worth avoiding in both directions
+— a human unticking a capability and getting it anyway, or an operator
+setting what they think is a floor and watching tasks file without it —
+so they compose at different moments and neither feeds the other.
+
+**The two layers union, deployment-wide first, and a repo can only
+widen.** `(*ui.Client).defaultCapabilities` is still the one place a new
+task's starting set resolves; it now takes the target repo
+`CreateTask` has already parsed, defaults and `NoRepo` included. A
+`NoRepo` task has nothing to key the second layer on and gets the
+deployment's set alone; a task that named no repo is filed against
+`Config.DefaultTarget` and gets *that* repo's defaults, because the layer
+is keyed on the repo the task ends up targeting rather than on whether
+the request spelled it out.
+
+Whether a repo can *subtract* — "everything except `gcp-key` here" — is
+the same "except here" question docs/data-model.md defers for ceilings,
+and it gets the same answer: not yet, and the first person who needs it
+is the signal. Until then the deployment-wide set is for what genuinely
+belongs everywhere, a repo lists what it needs, and whoever files a task
+can untick any of it on the form.
+
+**What Settings reports had to gain a second axis.**
+`CapabilityStatus.Default` used to mean "this deployment defaults this",
+and with two layers a single flag would describe a deployment-wide
+default that only some tasks actually get. So `Default` keeps exactly its
+old meaning — every task, wherever it points — and
+`CapabilityStatus.DefaultRepos` names the repos that default it on their
+own. The Capabilities tab shows both, `grain settings` prints both, and a
+repo that restates something the deployment already gives appears in
+both, since dropping the deployment-wide entry leaves the repo's own
+standing.
+
+Editing lives where the thing being edited does: the deployment-wide set
+on Settings' Capabilities tab, a repo's own on the repos page next to
+that repo (`GET`/`PUT /api/repos/{owner}/{name}/capabilities`). The
+new-task form resolves the union itself, from `GET /api/config`'s
+`repoDefaultCapabilities`, so changing the repo picker re-ticks the boxes
+for the repo now targeted — unless the picker has been touched by hand,
+after which the ticks are the human's and a re-seed that put back
+something they had just unticked would file a task with what they had
+already said no to.
+
+**Schedules, templates and suites still are not seeded**, and this is the
+second time that has been decided rather than merely deferred. Each
+carries a grant set somebody authored once, in a form of its own, and
+those forms edit an existing set as often as they create one. Seeding
+their pickers would write today's defaults into a stored set that then
+never tracks them again: the next save of an unrelated field would
+silently widen a set somebody wrote down, which is the thing task-14
+avoided by seeding at task creation and reading nothing at dispatch. A
+schedule that wants `gcp-key` says so, once, where every task it files
+can be traced back to it.
 
 ## Write-only secrets access when colocated
 

@@ -2312,6 +2312,22 @@ cycle is a credential that cannot read checks, which is one fact about
 the deployment rather than something wrong with each of the pull
 requests it would otherwise comment on one at a time.
 
+A `CONFLICTED` or `FAILING` head waits on the same clock for a different
+thing, and needs its own bound for the same reason. Once the queue has
+filed a fix task for it, it does nothing further until that task closes —
+and its own health stays `CONFLICTED`/`FAILING` throughout, so the
+`PENDING` deadline never applies to it, while the fix task's own pull
+request is not a queue member and is never timed either. A fix that never
+finishes (its checks wedged, an agent run that never comes back) would
+therefore hold the head, and everything behind it, forever. So the wait
+has a deadline too (`defaultFixTaskDeadline`, six hours, measured from
+when the fix task was filed): past it the queue says so on the task,
+naming the fix it was waiting for, and moves on the same way. Six hours
+rather than two, because a fix has to be dispatched, run an agent
+(capped at two hours itself) and get its own CI through before it can
+land, and giving up early throws away a repair that might have worked —
+the queue never files a second one.
+
 `PENDING` also covers the state before there is a check to read. GitHub
 creates a workflow run's check runs asynchronously, *after* it has
 processed the push, while the pull request exists from the moment the
