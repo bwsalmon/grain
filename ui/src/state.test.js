@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityName, completionPhase, knownRepos, lastBaseForRepo, repoRows } from "./state.js";
+import { capabilityName, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, repoRows, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task that is not completed", () => {
@@ -93,6 +93,30 @@ describe("lastBaseForRepo", () => {
     expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/1");
   });
 
+  // A schedule, a suite pass, the merge queue and an agent's own
+  // propose_task all pick a base for their own reasons -- none of it is
+  // the human's choice of where the next hand-filed task starts.
+  it("skips a task an agent or automation filed and falls back to an older one", () => {
+    const tasks = [
+      { repo: "acme/widgets", base: "release/1", createdAt: "2026-08-01T00:00:00Z", authorKind: "human" },
+      { repo: "acme/widgets", base: "suite/run-7", createdAt: "2026-08-02T00:00:00Z", authorKind: "automation" },
+      { repo: "acme/widgets", base: "grain/task-3", createdAt: "2026-08-03T00:00:00Z", authorKind: "agent" },
+    ];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/1");
+  });
+
+  it("returns empty when every task on record for the repo was filed by an agent or automation", () => {
+    const tasks = [
+      { repo: "acme/widgets", base: "suite/run-7", createdAt: "2026-08-02T00:00:00Z", authorKind: "automation" },
+    ];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("");
+  });
+
+  it("still suggests a task carrying no authorKind at all", () => {
+    const tasks = [{ repo: "acme/widgets", base: "release/1", createdAt: "2026-08-01T00:00:00Z" }];
+    expect(lastBaseForRepo(tasks, "acme/widgets")).toBe("release/1");
+  });
+
   it("returns empty when no repo is given", () => {
     expect(lastBaseForRepo([{ repo: "acme/widgets", base: "release/1" }], "")).toBe("");
   });
@@ -131,5 +155,42 @@ describe("repoRows", () => {
 
   it("returns an empty list when nothing is configured or targeted yet", () => {
     expect(repoRows(null, [])).toEqual([]);
+  });
+});
+
+describe("unionCapabilities", () => {
+  it("appends the second layer to the first, deduped and in order", () => {
+    expect(unionCapabilities(["gemini-key"], ["gcp-key", "gemini-key"])).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  it("treats a missing layer as nothing to add", () => {
+    expect(unionCapabilities(undefined, undefined)).toEqual([]);
+    expect(unionCapabilities(["gcp-key"], null)).toEqual(["gcp-key"]);
+  });
+});
+
+describe("defaultCapabilitiesFor", () => {
+  const config = {
+    defaultCapabilities: ["gemini-key"],
+    repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+  };
+
+  it("adds the repo's own defaults to the deployment's", () => {
+    expect(defaultCapabilitiesFor(config, "acme/widgets")).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  it("gives a repo with none of its own the deployment's alone", () => {
+    expect(defaultCapabilitiesFor(config, "acme/gadgets")).toEqual(["gemini-key"]);
+  });
+
+  // No repo picked, or a deliberately repo-less task: there is no second
+  // layer to key on, the same answer CreateTask gives a task whose
+  // Target is nil.
+  it("gives a task with no repo the deployment's alone", () => {
+    expect(defaultCapabilitiesFor(config, "")).toEqual(["gemini-key"]);
+  });
+
+  it("survives a config that has never been loaded", () => {
+    expect(defaultCapabilitiesFor(null, "acme/widgets")).toEqual([]);
   });
 });

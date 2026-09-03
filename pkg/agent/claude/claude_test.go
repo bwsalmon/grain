@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/mcp"
 )
 
 // fakeRunner scripts a single canned stream-json transcript and records
@@ -271,6 +273,90 @@ func TestRunWritesMCPConfigPointingAtTheKonturVM(t *testing.T) {
 	}
 }
 
+// The forked mcpserver has to be told which repo and branch it may read
+// CI for, or pull_request_status has nothing to answer with. The repo
+// and branch come off RunConfig (orchestrator.RunDispatch sets them from
+// the task) and the data directory off the Framework, and both halves
+// have to arrive for either to be passed.
+func TestRunPassesTheRunsOwnRepoAndBranchToTheMCPServer(t *testing.T) {
+	mcpArgs := func(t *testing.T, f *Framework, cfg agent.RunConfig, fake *fakeRunner) []string {
+		t.Helper()
+		if _, err := f.Run(context.Background(), cfg); err != nil {
+			t.Fatal(err)
+		}
+		var parsed struct {
+			MCPServers map[string]struct {
+				Args []string `json:"args"`
+			} `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(fake.gotMCPConfig, &parsed); err != nil {
+			t.Fatalf("mcp-config was not valid JSON: %v (%s)", err, fake.gotMCPConfig)
+		}
+		return parsed.MCPServers["grain-sandbox"].Args
+	}
+
+	t.Run("configured", func(t *testing.T) {
+		fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+		f := newFramework(fake, "/path/to/grain", WithGitHubAccess("/data", "github.example", true))
+		args := mcpArgs(t, f, agent.RunConfig{
+			Prompt: "x", SandboxRoot: t.TempDir(),
+			Repo: "acme/widgets", Branch: "grain/task-9",
+		}, fake)
+
+		for _, want := range [][2]string{
+			{"-data-dir", "/data"},
+			{"-pr-repo", "acme/widgets"},
+			{"-pr-branch", "grain/task-9"},
+			{"-github-host", "github.example"},
+		} {
+			if !argsHave(args, want[0], want[1]) {
+				t.Errorf("args = %v, want %s %s", args, want[0], want[1])
+			}
+		}
+		if !slices.Contains(args, "-github-insecure-http") {
+			t.Errorf("args = %v, want -github-insecure-http passed through", args)
+		}
+	})
+
+	// A task with no repo attached is a real case, and half the flags
+	// would make mcpserver warn about a misconfiguration that is not one.
+	t.Run("no repo on the run", func(t *testing.T) {
+		fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+		f := newFramework(fake, "/path/to/grain", WithGitHubAccess("/data", "github.com", false))
+		args := mcpArgs(t, f, agent.RunConfig{Prompt: "x", SandboxRoot: t.TempDir()}, fake)
+		for _, unwanted := range []string{"-data-dir", "-pr-repo", "-pr-branch", "-github-host"} {
+			if slices.Contains(args, unwanted) {
+				t.Errorf("args = %v, want no %s for a run with no repo", args, unwanted)
+			}
+		}
+	})
+
+	// And a deployment that never called WithGitHubAccess has no
+	// credential to read GitHub with, so naming the repo would only
+	// produce a warning per run.
+	t.Run("no github access on the framework", func(t *testing.T) {
+		fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+		f := newFramework(fake, "/path/to/grain")
+		args := mcpArgs(t, f, agent.RunConfig{
+			Prompt: "x", SandboxRoot: t.TempDir(),
+			Repo: "acme/widgets", Branch: "grain/task-9",
+		}, fake)
+		if slices.Contains(args, "-pr-repo") {
+			t.Errorf("args = %v, want no -pr-repo without WithGitHubAccess", args)
+		}
+	})
+}
+
+// argsHave reports whether args carries name followed by value.
+func argsHave(args []string, name, value string) bool {
+	for i, a := range args {
+		if a == name && i+1 < len(args) && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRunPrefersSandboxRootOverKonturVMWhenBothAreSet(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
 	root := t.TempDir()
@@ -377,10 +463,15 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	}
 }
 
-func TestAllowedToolsNamesAllEightGrainSandboxTools(t *testing.T) {
+func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	names := allowedTools()
-	if len(names) != 8 {
-		t.Fatalf("allowedTools() = %v, want 8 entries", names)
+	// Four sandbox tools, four escape hatches, pull_request_status.
+	if len(names) != 9 {
+		t.Fatalf("allowedTools() = %v, want 9 entries", names)
+	}
+	if !slices.Contains(names, mcp.QualifiedToolName("pull_request_status")) {
+		t.Errorf("allowedTools() = %v, want pull_request_status admitted -- "+
+			"--strict-mcp-config refuses any tool this list omits", names)
 	}
 	for _, n := range names {
 		if !strings.HasPrefix(n, "mcp__grain-sandbox__") {

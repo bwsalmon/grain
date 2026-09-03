@@ -41,7 +41,12 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
                 into that VM's own container -- see "Reaching a sandbox
-                guest without a route into it" below
+                guest without a route into it" below.
+                NewPullRequestTools adds pull_request_status: the one
+                tool here that really reads GitHub, from the controller,
+                so a run can see CI's verdict on the commits it pushed
+                and repair a red build inside its own turn budget -- see
+                "Letting a run watch its own CI" below
 pkg/kontur/     drives the `konturctl` binary: create/list/delete for a
                 run's VM, the container names kontur derives from a VM
                 name, and the one `docker inspect` that tells a VM whose
@@ -920,11 +925,34 @@ dropped. `add_review_comment` calls from a run are recorded (`agent.
 Result.ToolCalls` carries them, the same seam `ProcessResult` reads
 `ask_question`/`comment_on_issue`/`propose_task` off of) but never turned
 into a real `CreateReview` call for the same reason: nothing yet dispatches
-with review intent for one to attach to. `propose_task`'s `depends_on`
-also files today without resolving a same-run local `id` to the real issue
-number GitHub assigned it — each proposal lands as its own issue, with
-`depends_on` printed into nothing yet, since resolving it needs holding a
-whole batch open and rewriting cross-references after every one is filed.
+with review intent for one to attach to. `propose_task`'s `depends_on` is
+resolved now: `relayProposedTasks` files each entry as a real
+`model.LinkDependsOn`, against an existing task id (the proposing task's
+own included, which is what a piece split out of the work in hand names)
+or the local `id` of an *earlier* `propose_task` call in the same run —
+earlier, not any, since a batch resolved in call order cannot contain a
+cycle, and a `depends-on` cycle is two tasks neither of which is ever
+dispatchable again. An entry naming neither is kept in the proposal's own
+body for a human instead of filed as a link: `task_blocked` inner-joins
+`task` on the target and so ignores a dangling one, while `model.IsBlocked`
+counts it as open forever, and a proposal blocked by something that does
+not exist has nothing that could ever unblock it.
+
+Resolving it is half of it; an agent has to be told to write one at all,
+and told the two facts it needs to. `propose_task`'s description now asks
+for `depends_on` in so many words — a proposal that names nothing is
+unblocked the moment a human approves it and can be dispatched beside the
+work it was meant to follow — and `BuildPrompt` names the running task's
+own id, which an agent otherwise could only reverse out of its branch
+name. The same schema carries `auto_merge`: a proposal inherits the
+proposing task's setting as before (bwsalmon/agents#345), an explicit
+`false` opts a proposal out of that inheritance for work an agent judges
+deserves its own review, and an explicit `true` is still capped at what
+the proposing task itself holds (`proposedAutoMerge`) — a run that could
+mark its own proposals auto-merge would be granting itself the unreviewed
+merge a human withheld. `BuildPrompt` mentions `auto_merge` only to a task
+that is itself an auto-merge job, since there is nothing another task
+could do with it.
 
 Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
@@ -950,7 +978,17 @@ sync landing in the gap between the push and that sees nothing — and
 nothing is also what a repo with no CI configured answers, forever, with
 no way to tell the two apart from the Checks API. The window is the only
 thing that can, and a deployment with genuinely no CI pays it once per
-head commit. A conflicted or failing head gets a fix task filed straight
+head commit. Nor does it wait for CI that is never coming: a head that
+has read `PENDING` for longer than `defaultCheckStallDeadline` (two
+hours, timed per head commit over one unbroken run of pending reads) is
+given up on — a comment naming the checks that never finished,
+`Observation.MergeQueueBlockedAt` set, the queue moved on — since a
+workflow waiting on an approval nobody gives, or a provider that posted
+"queued" and went away, would otherwise hold its repo's whole queue for
+the life of the deployment with nothing said to anyone. No fix task is
+filed for that one: nothing has failed, and a check that never finishes
+is usually waiting on something outside the pull request, so there may
+be nothing in it to repair. A conflicted or failing head gets a fix task filed straight
 into the store already approved (`Task.Approval` set by
 `PrincipalAutomation`, `LinkFixTask` recording which one) rather than
 `core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`
@@ -1157,7 +1195,7 @@ make. It proves the pieces already built compose correctly; it does not
 close the gap above, since nothing there is wired to run on its own yet.
 
 `self-debug` and `self-repair` (bwsalmon/agents#540, "configuration
-mode") went from `ui.DefaultCapabilities` names with nothing behind them
+mode") went from `ui.OfferedCapabilities` names with nothing behind them
 to real `model.CapabilityProvider`s -- `pkg/capability/selfdebug` and
 `pkg/capability/selfrepair` -- but what each one grants is not material
 in a sandbox or text in a prompt, `model.CapabilityProvider`'s only two
@@ -1311,6 +1349,44 @@ upgrading across this change needs `agy` installed on the controller and
 otherwise keeps its existing `-gemini-api-key-file`, which `agy`
 authenticates with as `GEMINI_API_KEY` in the subprocess environment
 (never in argv).
+
+## Letting a run watch its own CI
+
+A run could always push more than once — the git proxy authorizes every
+push to the task's own target (`gitproxy/authorize.go`), and
+`ConfigureGitCredentials` leaves a working identity and credential helper
+behind — but it had no way to find out what CI made of a push. The
+checks were read minutes later by a different process
+(`SyncPullRequests`), and a red build became a whole separate fix task
+(`fileFixTask`), dispatched into a cold sandbox, to repair something the
+run that broke it was still sitting there able to repair.
+
+`pkg/mcp`'s `pull_request_status` closes that loop. It reports the branch
+tip, the pull request open for it if there is one, and every check run
+against the pushed commit with the failing ones named — enough for a run
+to push, look, fix and push again inside one dispatch.
+
+It does not reopen docs/design.md's split surface ("Sandboxes: git
+transport only. No REST, no GraphQL"). The tool is served by the
+`grain mcpserver` process, which runs on the *controller*, and reads
+GitHub with the controller's own `secrets/github` ladder — exactly the
+shape the `ask_question` escape hatch already had, and acceptable for the
+same reason: what crosses into the sandbox is a rendered answer, never a
+credential and never a general-purpose API call. The scope is fixed at
+process start from flags `cmd/grain/mcpserver.go` receives
+(`-pr-repo`/`-pr-branch`, written by each framework's `mcpServerArgs`
+from `agent.RunConfig`), and no tool argument can move it: a run reads CI
+for its own branch or nothing. The tool is registered whatever those
+flags said, so a task with no repo attached gets its own explanation
+rather than an "unknown tool" that reads like a broken grain.
+
+Two things had to be said out loud rather than left implicit. `BuildPrompt`
+now names the push/check/repair loop, because nothing about a tool
+description tells a run that it may push a second time and the sentences
+around it read like one final act. And an unfinished check is reported as
+carrying no verdict, never as passing — the same call `healthFrom` makes
+at the merge gate, made again here so a run that pushes and sees three
+queued jobs does not declare itself done.
 
 ## Reaching a sandbox guest without a route into it
 
@@ -1641,7 +1717,8 @@ the whole question, and the half it left out is the one that is harder to
 see.
 
 Which capabilities a task can be granted at all is decided somewhere
-else entirely: `ui.DefaultCapabilities` (`pkg/ui/labels.go`) is the
+else entirely: `ui.OfferedCapabilities` (`pkg/ui/labels.go`, named
+`DefaultCapabilities` when this was written) is the
 picker's listing, and `grantsFor`/`SetCapability` reject any id it has no
 row for as "unknown capability" before a `model.Grant` is ever written.
 The set of capabilities `cmd/grain/daemon.go`'s `capabilityProviders`
@@ -1673,6 +1750,142 @@ the picker, or be granted to every dispatch the way v1 minted one
 unconditionally per sandbox (`gcp_keys.py`: "every sandbox, every
 dispatch... rather than a task label"), is a design question this leaves
 open; what changes here is that a deployment in that state now says so.
+
+### A default set of capabilities, seeded onto the task
+
+Both. `gcp-key` and `github-sandbox` got picker rows first, and
+`model.Config.DefaultCapabilities` is the other half: a deployment-wide
+set of capability ids, chosen on the Settings pane's Capabilities tab,
+that every new task is filed already holding. A deployment that wants a
+service-account key in every sandbox — v1's shape — ticks `gcp-key` once
+and stops thinking about it.
+
+What it is *not* is v1's per-dispatch mint restored. The set is read at
+creation, by `ui.CreateTask`, and written onto the task as ordinary
+`model.Grant`s (`GrantByDefault`, provenance only — nothing reads `Via`
+to decide what a grant does). It is never consulted again at dispatch.
+That one choice answers the whole question the picker rows left open:
+
+- **The default is modifiable, which is what was actually asked for.**
+  The new-task form opens with those boxes already ticked (`GET
+  /api/config`'s `defaultCapabilities`) and sends the resulting list, so
+  unticking one files the task without it. Afterwards it detaches from
+  the task like any other grant. A deployment-level set read at dispatch
+  could be neither seen on the task nor taken off one.
+- **A failed mint stays a failed dispatch, and needs no degrade tier.**
+  `prepareCapabilities` treats a refused resolve or a failed materialize
+  as no dispatch at all, and that stays true for a defaulted grant.
+  v1 needed its local `except` because nothing held the request: the
+  mint happened per dispatch, for every sandbox, with nowhere to record
+  that it had failed, so swallowing the error was the only way a broken
+  minter did not stop the deployment. Here the grant is on one task, the
+  failure is that task's, and the fix — repair the capability, detach it
+  from the task, or drop it from the default set — is reachable from the
+  failure. Running an agent while quietly withholding a capability its
+  task is recorded as holding would trade a loud stop for a run that
+  does the wrong work.
+- **`Grantable` keeps its meaning.** A capability must have a picker row
+  to be defaulted at all (`UpdateSettings` validates the set against
+  `OfferedCapabilities`, which is what `DefaultCapabilities` was renamed
+  to, since the two names now mean different things). That row is also
+  what lets a human drop it from one task. `CapabilityStatus.Default` is
+  reported next to `Ready`/`Grantable` rather than folded into either:
+  the Capabilities tab and `grain settings` both flag a defaulted
+  capability that is not ready, because that is a deployment-wide
+  problem — every task filed will fail on it — rather than a per-task
+  one.
+
+The cost, stated plainly: turning an entry off does not disarm the tasks
+already filed with it, since they hold their own grants. That is the
+same property that makes a default modifiable in the first place.
+
+A stored id this build no longer offers (a renamed capability, the way
+`scratch-repo` became `github-sandbox`) is skipped at creation rather
+than failing it — `UpdateSettings` refuses an unknown id on the way in,
+so a stale entry can only come from an upgrade, and a settings row left
+behind must not become a deployment where no task can be filed at all.
+Per-repo defaults are the next step and resolve in the same place
+(`(*ui.Client).defaultCapabilities`); they compose as more ids in the
+set a new task starts with, which is a different thing from
+docs/data-model.md's folder `offers`, those being floors a task cannot
+drop rather than a seed it can.
+
+### The same set, per repo
+
+The ask task-14 came from also said "we will also want this to be
+possible on individual repos in the future," and this is that: a repo can
+name capabilities of its own that a task filed against it starts holding,
+on top of whatever the deployment already defaults.
+
+**Where it is stored is a new `repo_config` table**, keyed `(owner,
+name)` the same way `qualification_config` already is, holding
+`model.RepoConfig` — one field today, `DefaultCapabilities`, with the
+same comma-separated storage `grain_config.default_capabilities` uses.
+A new table rather than a column somewhere: `base`, `preamble` and
+`max_concurrent` are docs/data-model.md's own next three per-repo
+settings, and this is the row they would join. A repo has a row only
+while it has something of its own to say — `PutRepoConfig` deletes rather
+than writing one that says nothing, so "has a row" and "adds something"
+stay one fact and nothing has to filter empty rows back out.
+
+**It is deliberately not the folder `offers` tree**, which the same
+document describes and which stays available for what it is for. An
+offer is a *floor*: unioned in when a task's grants are resolved, not
+droppable by the task. Everything here is a *seed*: written onto the task
+at creation, visible on it, and untickable on the form that files it.
+Mixing the two silently is the failure worth avoiding in both directions
+— a human unticking a capability and getting it anyway, or an operator
+setting what they think is a floor and watching tasks file without it —
+so they compose at different moments and neither feeds the other.
+
+**The two layers union, deployment-wide first, and a repo can only
+widen.** `(*ui.Client).defaultCapabilities` is still the one place a new
+task's starting set resolves; it now takes the target repo
+`CreateTask` has already parsed, defaults and `NoRepo` included. A
+`NoRepo` task has nothing to key the second layer on and gets the
+deployment's set alone; a task that named no repo is filed against
+`Config.DefaultTarget` and gets *that* repo's defaults, because the layer
+is keyed on the repo the task ends up targeting rather than on whether
+the request spelled it out.
+
+Whether a repo can *subtract* — "everything except `gcp-key` here" — is
+the same "except here" question docs/data-model.md defers for ceilings,
+and it gets the same answer: not yet, and the first person who needs it
+is the signal. Until then the deployment-wide set is for what genuinely
+belongs everywhere, a repo lists what it needs, and whoever files a task
+can untick any of it on the form.
+
+**What Settings reports had to gain a second axis.**
+`CapabilityStatus.Default` used to mean "this deployment defaults this",
+and with two layers a single flag would describe a deployment-wide
+default that only some tasks actually get. So `Default` keeps exactly its
+old meaning — every task, wherever it points — and
+`CapabilityStatus.DefaultRepos` names the repos that default it on their
+own. The Capabilities tab shows both, `grain settings` prints both, and a
+repo that restates something the deployment already gives appears in
+both, since dropping the deployment-wide entry leaves the repo's own
+standing.
+
+Editing lives where the thing being edited does: the deployment-wide set
+on Settings' Capabilities tab, a repo's own on the repos page next to
+that repo (`GET`/`PUT /api/repos/{owner}/{name}/capabilities`). The
+new-task form resolves the union itself, from `GET /api/config`'s
+`repoDefaultCapabilities`, so changing the repo picker re-ticks the boxes
+for the repo now targeted — unless the picker has been touched by hand,
+after which the ticks are the human's and a re-seed that put back
+something they had just unticked would file a task with what they had
+already said no to.
+
+**Schedules, templates and suites still are not seeded**, and this is the
+second time that has been decided rather than merely deferred. Each
+carries a grant set somebody authored once, in a form of its own, and
+those forms edit an existing set as often as they create one. Seeding
+their pickers would write today's defaults into a stored set that then
+never tracks them again: the next save of an unrelated field would
+silently widen a set somebody wrote down, which is the thing task-14
+avoided by seeding at task creation and reading nothing at dispatch. A
+schedule that wants `gcp-key` says so, once, where every task it files
+can be traced back to it.
 
 ## Write-only secrets access when colocated
 

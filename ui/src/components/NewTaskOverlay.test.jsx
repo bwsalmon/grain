@@ -155,6 +155,47 @@ describe("NewTaskOverlay", () => {
     expect(payload.capabilities).toEqual(["web-search"]);
   });
 
+  // grain/task-14: the deployment's own default capabilities arrive
+  // on GET /api/config and open the form already ticked, so filing a
+  // task on a deployment that defaults gcp-key gets one without anyone
+  // remembering to ask -- and the payload names them explicitly rather
+  // than relying on the server to fill them in, which is what makes
+  // unticking one work.
+  it("seeds the capability picker from the deployment's defaults", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      defaultCapabilities: ["gcp-key"],
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Needs a key");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.capabilities).toEqual(["gcp-key"]);
+  });
+
+  it("files a task without a defaulted capability once it is unticked", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      defaultCapabilities: ["gcp-key"],
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "No key needed");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "GCP key" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.capabilities).toEqual([]);
+  });
+
   it("shows a picked dependency's whole task on hover", async () => {
     const tasks = [{ id: "12", title: "Fix the login bug" }];
     const user = userEvent.setup();
@@ -165,6 +206,71 @@ describe("NewTaskOverlay", () => {
 
     await user.hover(screen.getByText("12 Fix the login bug"));
     expect(await screen.findByRole("tooltip")).toHaveTextContent("12 Fix the login bug");
+  });
+
+  // grain/task-24: a repo can default capabilities of its own on top of
+  // the deployment's, so picking a repo re-seeds the picker with the
+  // union -- the same answer CreateTask would resolve server-side for a
+  // task filed against it.
+  it("adds the picked repo's own default capabilities to the deployment's", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      defaultCapabilities: ["gemini-key"],
+      repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Needs a key");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key", "gcp-key"]);
+  });
+
+  // Switching away from a repo that adds one drops it again: leaving the
+  // previous repo's extras ticked would file the task with capabilities
+  // the repo it actually targets never asked for.
+  it("re-seeds the picker when the repo changes", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      defaultCapabilities: ["gemini-key"],
+      repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Elsewhere");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/gadgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key"]);
+  });
+
+  // Once the picker has been touched the ticks are the human's own: a
+  // re-seed that put back a capability they had just unticked would file
+  // a task with something they had already said no to.
+  it("leaves a hand-edited capability picker alone when the repo changes", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      defaultCapabilities: ["gemini-key"],
+      repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "My own choice");
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "Gemini key" }));
+    await user.keyboard("{Escape}");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual([]);
   });
 
   it("offers a repo dropdown built from targetRepos and existing tasks' repos, instead of a bare text field", async () => {
@@ -239,6 +345,48 @@ describe("NewTaskOverlay", () => {
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
     expect(payload.base).toBe("");
+  });
+
+  // A system-generated task -- a schedule firing, a suite pass, a
+  // stacked fix, an agent's own propose_task -- picks a base for its own
+  // reasons, and that choice is not a suggestion for the human filing
+  // the next one.
+  it("does not prefill Base branch from a task an agent or automation filed", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets"] };
+    const tasks = [
+      { id: "1", title: "Filed by hand", repo: "acme/widgets", base: "release/2.0", authorKind: "human", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "A suite pass", repo: "acme/widgets", base: "suite/run-7", authorKind: "automation", createdAt: "2026-06-01T00:00:00Z" },
+      { id: "3", title: "An agent's proposal", repo: "acme/widgets", base: "grain/task-3", authorKind: "agent", createdAt: "2026-07-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.base).toBe("release/2.0");
+  });
+
+  // The counterpart to the "no history" case below: a repo whose only
+  // tasks are system-generated has nothing to prefill from either, so
+  // picking it is the no-history case rather than the "most recent task
+  // used the default branch" one, and must not clear the field.
+  it("treats a repo whose only tasks are system-generated as having no history", async () => {
+    const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/robots"] };
+    const tasks = [
+      { id: "1", title: "Filed by hand", repo: "acme/widgets", base: "release/2.0", authorKind: "human", createdAt: "2026-01-01T00:00:00Z" },
+      { id: "2", title: "A schedule fired", repo: "acme/robots", base: "nightly", authorKind: "automation", createdAt: "2026-06-01T00:00:00Z" },
+    ];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
+    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/robots");
+    expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
   });
 
   it("leaves a manually-typed Base branch alone when the picked repo has no task history", async () => {

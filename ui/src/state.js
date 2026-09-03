@@ -33,7 +33,7 @@ export function completionPhase(t) {
     return {
       label: "Merge blocked",
       color: "error",
-      title: "The merge queue tried to land this automatically and gave up -- push a fix by hand, or close it.",
+      title: "The merge queue gave up on landing this automatically -- its own comment says why. Sort it out by hand, or close it.",
     };
   }
   if (!t.autoMerge) {
@@ -45,6 +45,54 @@ export function completionPhase(t) {
 export function capabilityName(config, id) {
   const c = (config?.capabilities || []).find((c) => c.id === id);
   return c ? c.name : id;
+}
+
+// unionCapabilities composes the two layers of default capabilities the
+// way ui.(*Client).defaultCapabilities does server-side: base (the
+// deployment's own set) with extra (one repo's) appended, deduped,
+// deployment-first.
+//
+// Union is the whole composition rule, and the only one -- a repo adds
+// to what the deployment defaults and can never subtract from it
+// (model.RepoConfig.DefaultCapabilities has why "everything except
+// gcp-key here" is deferred rather than spelled some other way). It is a
+// function of its own so the new-task form (which resolves a repo out of
+// the config it already has) and the repos page (which resolves the same
+// union from unsaved ticks, to say what Save is about to do) cannot
+// drift into two different answers.
+export function unionCapabilities(base, extra) {
+  const ids = [...(base || [])];
+  for (const id of extra || []) {
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+// defaultCapabilitiesFor is the set of capability ids a task filed
+// against repo would start out holding -- the frontend's own reading of
+// what ui.(*Client).defaultCapabilities resolves server-side, from the
+// two layers GET /api/config reports: config.defaultCapabilities (the
+// deployment's, chosen on Settings > Capabilities) and
+// config.repoDefaultCapabilities[repo] (that repo's own, chosen on the
+// repos page).
+//
+// Union, deployment first, deduped: a repo adds to what the deployment
+// defaults and can never subtract from it (model.RepoConfig.
+// DefaultCapabilities has why "everything except gcp-key here" is
+// deferred rather than spelled some other way here). A falsy repo -- no
+// repo picked yet, or a deliberately repo-less task -- has no second
+// layer to add, which is the same answer CreateTask gives a task whose
+// Target is nil.
+//
+// This is only ever a form's starting state. What a task is filed with is
+// what the request names (ui.CreateTaskRequest.Capabilities); computing
+// the same union here is what lets the boxes be ticked, and unticked,
+// before the task exists.
+export function defaultCapabilitiesFor(config, repo) {
+  return unionCapabilities(
+    config?.defaultCapabilities,
+    repo ? config?.repoDefaultCapabilities?.[repo] : null,
+  );
 }
 
 // repoRows unions config.targetRepos with every repo a task's write
@@ -106,6 +154,32 @@ export function knownRepos(config, tasks) {
 // branch forever, and every task filed from it is dead on arrival.
 export const STALE_BASE_STATES = ["failed", "closed"];
 
+// suggestsBase reports whether a task is evidence of where a repo's work
+// currently lives -- the filter behind both lastBaseForRepo below and
+// NewTaskOverlay's own "does this repo have any history to prefill
+// from?" check, which have to agree on what counts or the overlay
+// prefills from a task lastBaseForRepo already looked past.
+//
+// Two kinds of task are no evidence. One is a task in a
+// STALE_BASE_STATES state (above). The other is a task nobody filed by
+// hand: a schedule firing, a suite pass, the merge queue stacking a fix,
+// an agent's own propose_task. Those pick a base for their own reasons
+// -- a suite run stacks every task in a pass against one throwaway
+// branch, a stacked fix targets the branch of the pull request it
+// repairs -- and none of it says anything about where the human filing
+// the next task means to start. Letting them set the suggestion means a
+// scheduled job that ran overnight silently redirects tomorrow morning's
+// hand-filed task onto a branch nobody chose.
+//
+// authorKind is model.PrincipalKind on the wire (Task.AuthorKind).
+// Missing is treated as human: a task from a store or a caller that
+// never recorded one is unknown provenance, not known-automated, and
+// dropping it would quietly discard history rather than protect it.
+export function suggestsBase(task) {
+  if (STALE_BASE_STATES.includes(task.state)) return false;
+  return !task.authorKind || task.authorKind === "human";
+}
+
 // lastBaseForRepo is the branch NewTaskOverlay prefills "Base branch"
 // with once a repo is picked (bwsalmon/agents#641): whatever base the
 // most recently created task targeting that repo used, so a repo whose
@@ -119,14 +193,14 @@ export const STALE_BASE_STATES = ["failed", "closed"];
 // It is a suggestion, not a check: nothing here can know whether a
 // branch still exists on GitHub -- that is a fact only GitHub holds, and
 // this package deliberately never asks it. What it can do is not repeat
-// a base that has already failed, which is what STALE_BASE_STATES above
-// is for.
+// a base that has already failed, or one no human chose in the first
+// place, which is what suggestsBase above is for.
 export function lastBaseForRepo(tasks, repo) {
   if (!repo) return "";
   let latest = null;
   for (const t of tasks || []) {
     if (t.repo !== repo) continue;
-    if (STALE_BASE_STATES.includes(t.state)) continue;
+    if (!suggestsBase(t)) continue;
     if (!latest || new Date(t.createdAt || 0) > new Date(latest.createdAt || 0)) latest = t;
   }
   return latest ? latest.base || "" : "";

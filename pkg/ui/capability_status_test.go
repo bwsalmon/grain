@@ -3,7 +3,7 @@ package ui_test
 // bwsalmon/agents#611: Settings' new "Capabilities" tab needs to answer
 // "is this capability actually usable right now, and if not, what's
 // missing" for every capability grain ships a provider for -- not just
-// the ones DefaultCapabilities offers a human to attach to a task. These
+// the ones OfferedCapabilities offers a human to attach to a task. These
 // tests cover GetSettings' new Capabilities field end to end: ready
 // without any secrets store colocated (self-debug/self-repair/
 // bootstrap-playbooks, which need none), gated on GCP config
@@ -181,10 +181,10 @@ func TestCapabilitiesReportNothingMissingWithNoSecretsStoreColocated(t *testing.
 // can have a capability fully configured -- Ready, nothing missing --
 // and still have no way to attach it to a task, which is exactly what a
 // gcp-key registered by cmd/grain/daemon.go's capabilityProviders but
-// absent from DefaultCapabilities looks like from here.
+// absent from OfferedCapabilities looks like from here.
 //
 // The picker listing is set explicitly rather than taken from
-// DefaultCapabilities so this covers the reporting, not whatever that
+// OfferedCapabilities so this covers the reporting, not whatever that
 // list happens to hold today.
 func TestCapabilityStatusReportsWhetherATaskCanBeGrantedIt(t *testing.T) {
 	c, _, ctx := testClient(t)

@@ -335,7 +335,7 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 		if strings.TrimSpace(req.Title) == "" {
 			return Schedule{}, validationErrorf("title is required")
 		}
-		grants, err := c.grantsFor(req.Capabilities)
+		grants, err := c.grantsFor(req.Capabilities, model.GrantByLabel)
 		if err != nil {
 			return Schedule{}, err
 		}
@@ -524,7 +524,7 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 		}
 		if req.Capabilities != nil {
 			var err error
-			grants, err = c.grantsFor(*req.Capabilities)
+			grants, err = c.grantsFor(*req.Capabilities, model.GrantByLabel)
 			if err != nil {
 				return Schedule{}, err
 			}

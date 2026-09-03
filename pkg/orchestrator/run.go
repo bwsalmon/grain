@@ -104,11 +104,24 @@ func watchForTaskClosed(runCtx, queryCtx context.Context, store *model.Store, ta
 // with no target) and gets its own sentence explaining why, rather than
 // silently reading like a clone that simply failed.
 //
+// The one thing here that is advice rather than fact is
+// proposalSection's follow-on task etiquette, and it is here for the same
+// reason the rest is: the facts it stands on (this run's task id, whether
+// that task auto-merges) are grain's own, and an agent told neither
+// cannot fill in a proposal's depends_on or decide its auto_merge at all.
+//
 // task.Reads is mentioned but not enforced here: the git proxy already
 // allows a fetch against any of them and refuses a push to any but
 // task.Target (gitproxy/authorize.go), so this line is purely
 // informational -- it tells the agent those repos exist and are safe to
 // clone, rather than granting anything itself.
+//
+// The last paragraph, for a task that has a target at all, is the
+// push/check/repair loop pkg/mcp's pull_request_status exists for. It is
+// informational in the same way: nothing here grants a second push, the
+// proxy already allowed every push to task.Target -- what it grants is
+// the knowledge that the loop is available, which no tool description
+// on its own can convey (see the comment at that paragraph).
 func BuildPrompt(task model.Task, checkoutDir string) string {
 	branch := model.BranchName(task.ID)
 	var prompt string
@@ -135,6 +148,26 @@ func BuildPrompt(task model.Task, checkoutDir string) string {
 			checkoutDir, branch, branch,
 		)
 	}
+	// Said out loud because neither half is discoverable from the tools
+	// alone. Nothing stops a run pushing repeatedly -- the branch is its
+	// own and the proxy authorizes every push to it (gitproxy/authorize.go)
+	// -- but the sentences above read as one final act, and a run that
+	// treats them that way has no reason to ever call pull_request_status,
+	// whose whole value is being called again after the next push. Leaving
+	// that loop implicit is what left a red build to the merge queue's
+	// separate fix task (sync.go's fileFixTask) even when the run that
+	// caused it was still running.
+	if task.Target != nil {
+		prompt += fmt.Sprintf(
+			"\n\nPush as often as you like: %q is your branch, and each push reruns CI "+
+				"against the new commit. After a push, call `pull_request_status` to "+
+				"see what GitHub's checks made of it -- that is how you find out "+
+				"whether tests you cannot run in the sandbox actually pass. If any "+
+				"check fails, fix it, push again and check again, rather than "+
+				"finishing on a red build.",
+			branch,
+		)
+	}
 	if len(task.Reads) > 0 {
 		names := make([]string, len(task.Reads))
 		for i, r := range task.Reads {
@@ -146,7 +179,45 @@ func BuildPrompt(task model.Task, checkoutDir string) string {
 			strings.Join(names, ", "),
 		)
 	}
+	prompt += proposalSection(task)
 	return prompt
+}
+
+// proposalSection is the follow-on task etiquette every dispatch is told,
+// and the two facts an agent cannot work out for itself that it needs to
+// follow it: which task it is running as, and whether that task is an
+// auto-merge job.
+//
+// Both are grain's own facts, the same reason BuildPrompt names the
+// branch rather than letting an agent pick one. Without the task id, an
+// agent splitting a piece out of the work it is doing has nothing to put
+// in that proposal's depends_on -- it would have to reverse the id out of
+// the branch name -- and relayProposedTasks resolves depends_on against
+// real task ids, so a proposal that names nothing is filed unblocked and
+// can be approved and dispatched beside the task it was meant to follow.
+// Without knowing its own task auto-merges, an agent has no way to tell
+// whether propose_task's auto_merge is even open to it: proposedAutoMerge
+// caps a proposal at the proposing task's own setting, so the sentence is
+// omitted, rather than negated, for a task that is not one -- there is
+// nothing an agent could usefully do with "you may not ask for this".
+func proposalSection(task model.Task) string {
+	s := fmt.Sprintf(
+		"\n\nYou are running as task %s. Anything you split out with propose_task "+
+			"should say what it has to wait on in depends_on: task %s itself, when "+
+			"the follow-up only makes sense once this task's own change has landed, "+
+			"and the id you gave an earlier proposal in this same run that it builds "+
+			"on. A proposal that names nothing is unblocked the moment a human "+
+			"approves it, and can be dispatched beside work it was supposed to "+
+			"follow.",
+		task.ID, task.ID,
+	)
+	if task.AutoMerge {
+		s += " This task is an auto-merge job: its pull request merges on its own " +
+			"once its checks pass, with no human review. A proposal that is a piece " +
+			"of this same task inherits that -- pass auto_merge: false on one that " +
+			"is separate work and deserves a human's own review."
+	}
+	return s
 }
 
 // commentThreadSection renders task's conversation into a prompt section,
@@ -377,8 +448,18 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			watchForTaskClosed(runCtx, ctx, store, task.ID, cfg.cancelPollInterval(), cancelRun)
 		}()
 
+		// Repo/Branch are the same pair BuildPrompt names in the prompt,
+		// passed structurally as well so a Framework can scope its
+		// forked mcpserver's pull_request_status to exactly this run's
+		// branch. Empty for a task with no target, which
+		// agent.RunConfig.Repo's own doc comment covers.
+		var repo string
+		if task.Target != nil {
+			repo = task.Target.String()
+		}
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
+			Repo: repo, Branch: model.BranchName(task.ID),
 			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
@@ -512,6 +593,21 @@ func outcomeOf(result *agent.Result) (outcome, detail string) {
 // agent whose capability request was refused must not run at all, since
 // the task it would work almost always depends on it. Ported from
 // pkg/orchestrate's own prepare (bwsalmon/agents#254).
+//
+// That rule holds for every grant, including one a task was filed with
+// because the deployment attaches it to everything, or because the repo
+// it targets adds it (model.Config.DefaultCapabilities,
+// model.RepoConfig.DefaultCapabilities, model.GrantByDefault). There is no
+// "degrade rather than fail" tier here, and it is not an oversight: v1
+// needed one because it minted a GCP key per dispatch for every sandbox,
+// with no task holding the request and nowhere to record that it had
+// failed, so swallowing the error was the only way a broken minter did
+// not stop the deployment. A default here is instead seeded onto the
+// task at creation, so a failed mint fails one task, says so on it, and
+// is fixed either by fixing the capability or by detaching it -- from
+// that task, or from the default set, whichever the operator meant.
+// Silently running an agent without a capability its task is recorded as
+// holding would trade that for a run that quietly does the wrong work.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
 	attachments []model.Attachment, checkoutDir string) (materialized []model.Materialized, prompt string, err error) {

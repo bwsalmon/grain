@@ -161,7 +161,7 @@ func runCLIStore(t *testing.T, bin, storeDir string, args ...string) string {
 	t.Helper()
 	var out string
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
-		cfg := ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.DefaultCapabilities()}
+		cfg := ui.Config{Actor: ui.DefaultActor("operator"), Capabilities: ui.OfferedCapabilities()}
 		srv := httptest.NewServer(ui.NewServer(cfg, store))
 		defer srv.Close()
 		out = runCLI(t, bin, append([]string{"-server", srv.URL}, args...)...)

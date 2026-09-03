@@ -153,6 +153,9 @@ type Framework struct {
 	konturSSHUser   string
 	konturExecKey   string
 	konturWorkspace string
+	githubDataDir   string
+	githubHost      string
+	githubInsecure  bool
 }
 
 // Option configures a Framework at construction time.
@@ -212,6 +215,18 @@ func WithKonturSSH(sshUser, execKey, workspace string) Option {
 	}
 }
 
+// WithGitHubAccess is agent/claude's option of the same name: it gives
+// the forked "mcpserver" subprocess the -data-dir/-github-host/
+// -github-insecure-http it needs to answer pull_request_status from this
+// controller's own secrets/github ladder. See that package's own doc
+// comment, and pkg/mcp/pullrequest_tools.go for why reading CI here does
+// not put GitHub inside the sandbox.
+func WithGitHubAccess(dataDir, host string, insecureHTTP bool) Option {
+	return func(f *Framework) {
+		f.githubDataDir, f.githubHost, f.githubInsecure = dataDir, host, insecureHTTP
+	}
+}
+
 // New builds a Framework that runs the real agy binary at agyPath
 // (typically just "agy", resolved against $PATH) and points every run's
 // MCP settings at grainBinaryPath -- the same grain binary this process
@@ -229,18 +244,27 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 	return f
 }
 
-// allowedTools names the exact tools NewSandboxTools and NewMockTools
-// register, mcp__-prefixed the way agy reports them once loaded from its
-// settings -- computed from those constructors directly rather than
-// hand-copied, so this can never drift from what the "mcpserver"
-// subcommand actually advertises the way v1's hand-maintained
-// _ALLOWED_TOOLS constant could (dispatch.py).
+// allowedTools names the exact tools NewSandboxTools, NewMockTools and
+// NewPullRequestTools register, mcp__-prefixed the way agy reports them
+// once loaded from its settings -- computed from those constructors
+// directly rather than hand-copied, so this can never drift from what
+// the "mcpserver" subcommand actually advertises the way v1's
+// hand-maintained _ALLOWED_TOOLS constant could (dispatch.py).
+//
+// pull_request_status is named unconditionally rather than only for a
+// run that passed pullRequestArgs, for the reason agent/claude's own
+// allowedTools gives: this list is a property of the tool vocabulary,
+// not of one run's configuration, and mcpserver registers that tool
+// either way.
 func allowedTools() []string {
 	var names []string
 	for _, t := range mcp.NewSandboxTools("") {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	for _, t := range mcp.NewMockTools(&mcp.MockSink{}) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
+	for _, t := range mcp.NewPullRequestTools(nil, mcp.PullRequestScope{}) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	return names
@@ -254,15 +278,19 @@ func allowedTools() []string {
 // are -- RunDispatch never sets both at once in practice (a sandbox is
 // either host-rooted or kontur-named, never both), but a Framework this
 // simple is not the place to enforce that.
+//
+// pullRequestArgs is appended to either, since which repo's CI a run may
+// read is independent of which backend its sandbox runs on.
 func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
+	var args []string
 	switch {
 	case cfg.SandboxRoot != "":
-		return []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}, nil
+		args = []string{"mcpserver", "-sandbox-root", cfg.SandboxRoot}
 	case cfg.KonturVM != "":
 		if f.konturSSHUser == "" || f.konturWorkspace == "" {
 			return nil, fmt.Errorf("antigravity: RunConfig.KonturVM is set but this Framework has no kontur SSH config (see WithKonturSSH)")
 		}
-		args := []string{
+		args = []string{
 			"mcpserver", "-kontur-vm", cfg.KonturVM,
 			"-ssh-user", f.konturSSHUser, "-workspace", f.konturWorkspace,
 		}
@@ -274,10 +302,31 @@ func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 		if f.konturExecKey != "" {
 			args = append(args, "-exec-key", f.konturExecKey)
 		}
-		return args, nil
 	default:
 		return nil, fmt.Errorf("antigravity: RunConfig.SandboxRoot or .KonturVM is required")
 	}
+	return append(args, f.pullRequestArgs(cfg)...), nil
+}
+
+// pullRequestArgs is the "-data-dir/-pr-repo/-pr-branch" triple that
+// turns on the forked mcpserver's pull_request_status, or nothing at all
+// when either half is missing -- a Framework built without
+// WithGitHubAccess, or a run whose task has no repo attached. Passing
+// half of it would be worse than passing none: mcpserver would warn on
+// stderr about a misconfiguration that is really just a task with no
+// target.
+func (f *Framework) pullRequestArgs(cfg agent.RunConfig) []string {
+	if f.githubDataDir == "" || cfg.Repo == "" || cfg.Branch == "" {
+		return nil
+	}
+	args := []string{"-data-dir", f.githubDataDir, "-pr-repo", cfg.Repo, "-pr-branch", cfg.Branch}
+	if f.githubHost != "" {
+		args = append(args, "-github-host", f.githubHost)
+	}
+	if f.githubInsecure {
+		args = append(args, "-github-insecure-http")
+	}
+	return args
 }
 
 // mcpSettingsJSON is the content of the settings file agy reads its MCP

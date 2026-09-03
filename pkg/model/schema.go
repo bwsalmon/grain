@@ -447,6 +447,16 @@ var Tables = []string{
 	// either setting off. Its value is never read by anything -- PutConfig
 	// does not name it, and REPLACE re-defaults it on every settings save,
 	// so the value carries no information to read.
+	//
+	// default_capabilities is Config.DefaultCapabilities' own column --
+	// the capability ids a new task is filed holding -- stored the same
+	// comma-separated way target_repos is (store.go's joinCSV/splitCSV; a
+	// capability id can no more contain a comma than an owner/name repo
+	// can), DEFAULT '' both here and in
+	// Store.ensureConfigDefaultCapabilitiesColumn for an already-created
+	// grain_config. Empty, the default, means a new task starts with only
+	// the capabilities whoever files it asked for -- exactly what every
+	// deployment did before this column existed.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -467,6 +477,7 @@ var Tables = []string{
   ` + "`auto_merge_by_default`" + `        INTEGER NOT NULL DEFAULT 1,
   ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
   ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
+  ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -559,6 +570,29 @@ var Tables = []string{
 	// What the repo page's own branch list needs: every branch ever
 	// requested for one repo, newest first.
 	`CREATE INDEX IF NOT EXISTS ` + "`branch_repo`" + ` ON ` + "`branch`" + ` (` + "`owner`" + `, ` + "`repo`" + `, ` + "`id`" + `)`,
+
+	// A repo's own configuration -- model.RepoConfig, the per-repo layer
+	// of what grain_config already says for the whole deployment
+	// (grain/task-24). One row per repo, the same (owner, name) key
+	// qualification_config below uses, and a row exists only while the
+	// repo has something of its own to say: PutRepoConfig deletes rather
+	// than writing a row that says nothing.
+	//
+	// default_capabilities is stored the comma-separated way
+	// grain_config.default_capabilities and target_repos already are
+	// (store.go's joinCSV/splitCSV), for the same reason -- a capability
+	// id is a bare word with no room for a comma in it. No DEFAULT and no
+	// migration: this table is new rather than a column added to one that
+	// already exists, so Init's own CREATE TABLE IF NOT EXISTS creates it
+	// on an existing database the same as on a fresh one, and a
+	// deployment that upgrades across it starts with no repo saying
+	// anything -- exactly what every deployment did before it existed.
+	`CREATE TABLE IF NOT EXISTS ` + "`repo_config`" + ` (
+  ` + "`owner`" + `                TEXT NOT NULL,
+  ` + "`name`" + `                 TEXT NOT NULL,
+  ` + "`default_capabilities`" + ` TEXT NOT NULL,
+  PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
+)`,
 
 	// A repo's qualification setup -- bwsalmon/agents#518's two switches:
 	// require_approval gates every task a run instantiates behind a

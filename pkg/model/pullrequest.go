@@ -63,6 +63,15 @@ func ParsePullRequestRef(s string) (PullRequestRef, error) {
 // finished, or have not started, is exactly the PR the merge queue must
 // wait on rather than merge.
 //
+// "Given time" is bounded, because some checks never finish: a workflow
+// waiting on an approval nobody gives, a runner that never picks the job
+// up, a provider that reported "queued" and went away. A queue head that
+// has read PENDING for longer than orchestrator's own
+// defaultCheckStallDeadline is given up on -- said so on the task, and
+// passed over so the tasks behind it can move -- rather than held
+// forever. It still merges if its checks ever do finish clean; what it
+// loses is the queue position, not the merge.
+//
 // PrMerged is orchestrator.healthFrom's answer for a closed PR GitHub's
 // own Merged field says merged, as opposed to PrClosed for one that
 // closed without merging -- the distinction bwsalmon/agents#493's task

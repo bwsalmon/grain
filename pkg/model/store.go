@@ -141,6 +141,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskSuiteRunScheduleColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_suite_run: %w", err)
 	}
+	if err := s.ensureConfigDefaultCapabilitiesColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -614,6 +617,25 @@ func (s *Store) ensureConfigClaudeModelColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `claude_model` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureConfigDefaultCapabilitiesColumn adds grain_config.
+// default_capabilities (model.Config.DefaultCapabilities' own doc
+// comment has the reasoning) to a database created before this column
+// existed, the same probe-then-ALTER approach
+// ensureConfigClaudeModelColumn above uses. It defaults to the empty
+// string, which splitCSV reads back as no defaults at all: a deployment
+// upgraded across this migration keeps filing tasks with exactly the
+// capabilities whoever filed them asked for, until an operator chooses a
+// default set through Settings.
+func (s *Store) ensureConfigDefaultCapabilitiesColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `default_capabilities` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `default_capabilities` TEXT NOT NULL DEFAULT ''")
 	return err
 }
 
@@ -2181,20 +2203,23 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 const configColumns = "`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`show_closed_by_default`,`agent_framework`," +
-	"`approved_by_default`,`auto_merge_by_default`,`claude_model`"
+	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
 	var pollMS int64
 	var targetRepos string
+	var defaultCapabilities string
 	if err := scan(&pollMS, &c.MaxConcurrent, &c.GeminiModel, &c.MaxAgentTurns,
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.ShowClosedByDefault,
-		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel); err != nil {
+		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
+		&defaultCapabilities); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
 	c.TargetRepos = splitCSV(targetRepos)
+	c.DefaultCapabilities = splitCSV(defaultCapabilities)
 	// A row written before agent/antigravity replaced the home-grown
 	// Gemini runtime still says "gemini"; folding that in here rather
 	// than migrating the row is what ensureConfigAgentFrameworkColumn's
@@ -2210,11 +2235,12 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxConcurrent, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.ShowClosedByDefault,
-			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel)
+			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,
+			joinCSV(c.DefaultCapabilities))
 		return err
 	})
 }
@@ -2223,6 +2249,10 @@ func (s *Store) PutConfig(ctx context.Context, c Config) error {
 // never contain a comma) through the same comma-separated shape the
 // daemon's own -target-repos flag already parses, so a value written by
 // one reads back identically through the other.
+//
+// Config.DefaultCapabilities is stored the same way, for the same reason:
+// a capability id is a bare word (ui.OfferedCapabilities' own rows), with
+// no more room for a comma in it than a repo name has.
 func joinCSV(items []string) string { return strings.Join(items, ",") }
 
 func splitCSV(s string) []string {
