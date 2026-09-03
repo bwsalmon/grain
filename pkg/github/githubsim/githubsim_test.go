@@ -53,7 +53,18 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.email", "agent@example.com")
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "checkout", "-q", "-b", branch)
-	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit")
+	// Named after the branch, so two branches pushed off the same base in
+	// one test never share a commit sha. An empty commit is hashed out of
+	// its base, its author, its message and a timestamp git only resolves
+	// to the second, so a fixed message made both of them the same object.
+	// That was harmless while nothing here resolved a branch to a sha;
+	// Sim now resolves a branch name and a commit sha to one commit
+	// through BareRepo and keys Sim.CheckRuns by what it resolved, so a
+	// test seeding check runs for one branch would be seeding them for
+	// every other branch it had pushed in the same second.
+	// pkg/orchestrator's own pushBranch carries this line for the same
+	// reason.
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit on "+branch)
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 
@@ -69,6 +80,24 @@ func pushAnotherCommit(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "a later push")
 	run(t, wd, "git", "push", "-q", "origin", branch)
+}
+
+// The helper's own contract, checked rather than trusted: every test
+// below that seeds Sim.CheckRuns for one branch depends on no other
+// branch it pushed answering to the same sha, and back-to-back pushes are
+// exactly the case a fixed commit message collapses into one object.
+func TestPushBranchGivesEachBranchItsOwnSHA(t *testing.T) {
+	sim, _ := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/task-1")
+	pushBranch(t, sim.BareRepo, "grain/task-2")
+
+	first, second := sim.branchSHA("grain/task-1"), sim.branchSHA("grain/task-2")
+	if first == "" || second == "" {
+		t.Fatalf("both branches should be on the remote: %q, %q", first, second)
+	}
+	if first == second {
+		t.Fatalf("two branches share a commit sha (%s): whichever one a test seeds check runs for, it seeds them for both", first)
+	}
 }
 
 func run(t *testing.T, dir string, name string, args ...string) {
