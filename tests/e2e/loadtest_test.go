@@ -42,6 +42,20 @@
 // dispatch.Cycle, RunDispatch, capability materialize/revoke and
 // FinishRun code a push would.
 //
+// What this file reports about the tick is not this file's own
+// measurement. RunCycle times itself -- orchestrator.CycleTimes, the
+// ring a deployment serves as GET /api/metrics' "cycles" section -- so
+// the harness passes one of those into the Deps it ticks and reports
+// from it, rather than wrapping each call in a stopwatch of its own:
+// one measurement, exercised here and served there, instead of two that
+// could quietly drift apart. It is also more than a stopwatch of its
+// own could ever see. A tick that has grown under a large store is the
+// failure this file is best placed to catch, and only the cycle's own
+// numbers say *which part* of it grew -- how far in the dispatch
+// decision was reached (CycleTiming.DispatchWait, the tick's own share
+// of a queued task's wait) and where the rest of the tick went,
+// reconciler by reconciler. reportCycles, below, is what reads them.
+//
 // Skipped unless GRAIN_LOAD_TEST is set, the same convention
 // random_test.go's TestRandomizedClusterLong already established in this
 // exact package for "a test worth running by hand on a sized host, never
@@ -63,6 +77,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,13 +191,17 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 	var tickerRNGMu sync.Mutex
 	var taskSeq atomic.Int64
 
+	// Every tick RunCycle runs below measures itself into this ring, the
+	// way cmd/grain's own reconcile loop does -- see reportCycles.
+	cycles := orchestrator.NewCycleTimes(loadCycleHistory)
 	deps := orchestrator.Deps{
 		Store: store, Client: gh, Sandboxes: sandboxes,
 		Framework: func(context.Context, string) (agent.Framework, error) {
 			return antigravity.NewForTest(newLoadGenerator(&tickerRNGMu, tickerRNG, metrics)), nil
 		},
-		Config:        orchestrator.Config{Capabilities: registry},
+		Config:     orchestrator.Config{Capabilities: registry},
 		MaxWorkers: cfg.slots,
+		CycleTimes: cycles,
 	}
 
 	// Seed a backlog before the sustained phase starts, so every slot has
@@ -243,6 +262,7 @@ func TestLoadSustainedConcurrency(t *testing.T) {
 	reportConcurrency(t, metrics)
 	reportCapability(t, ctx, capability)
 	reportMetrics(t, metrics)
+	reportCycles(t, cycles, metrics.tickCount())
 }
 
 // storeIsQuiet reports whether nothing is ready and no slot is occupied
@@ -261,9 +281,35 @@ func storeIsQuiet(t *testing.T, ctx context.Context, store *model.Store) bool {
 	return len(ready) == 0 && occupied == 0
 }
 
+// loadTickBudget is how long one RunCycle call gets before this harness
+// gives up on it. A tick that blows it comes back as a context deadline
+// -- an error runOneTick does not tolerate -- so it is already the hard
+// ceiling on a tick here, which is what makes it the natural thing for
+// reportCycles' own, tighter dispatch budget to be a fraction of rather
+// than a number picked on its own.
+const loadTickBudget = 15 * time.Second
+
+// loadDispatchBudget is how much of a tick may go by, at p95, before
+// RunCycle reaches the dispatch decision. A dispatch wait above it means
+// a queued task here is waiting on the tick itself rather than on a busy
+// deployment -- the two causes of a queue wait pkg/metrics' own Cycles
+// section exists to tell apart, seen from the side that can fail a test
+// about it. A third of the tick budget, so it trips well before the
+// deadline above does and says something sharper when it dies.
+const loadDispatchBudget = loadTickBudget / 3
+
+// loadCycleHistory is how many ticks the CycleTimes ring keeps. A
+// deployment's own DefaultCycleHistory (720) is six hours of a 30s
+// -poll-interval; this harness ticks back to back, so 720 would be the
+// last few seconds of a run lasting minutes, and the shape across the
+// whole run is the point. Sized instead for a default run to fit whole,
+// at a few megabytes; a longer one truncates the oldest cycles, exactly
+// as a deployment's ring does, and reportCycles says so when it has.
+const loadCycleHistory = 20000
+
 func runOneTick(t *testing.T, ctx context.Context, store *model.Store, deps orchestrator.Deps, metrics *loadMetrics) {
 	t.Helper()
-	tickCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	tickCtx, cancel := context.WithTimeout(ctx, loadTickBudget)
 	defer cancel()
 	start := time.Now()
 	if err := orchestrator.RunCycle(tickCtx, deps, start.UTC()); err != nil {
@@ -282,7 +328,10 @@ func runOneTick(t *testing.T, ctx context.Context, store *model.Store, deps orch
 		}
 		t.Logf("RunCycle (tolerated -- close/cancel race): %v", err)
 	}
-	metrics.recordTick(time.Since(start))
+	// How long that took is deps.CycleTimes' to say, not this loop's --
+	// all this counts is that a tick happened, which is what lets
+	// reportCycles check the ring saw every one of them.
+	metrics.tickRan()
 	ready, err := store.Ready(ctx)
 	if err != nil {
 		t.Fatalf("Ready: %v", err)
@@ -584,10 +633,109 @@ func reportMetrics(t *testing.T, metrics *loadMetrics) {
 		s.readyWait.N, s.readyWait.Min, s.readyWait.P50, s.readyWait.P95, s.readyWait.Max)
 	t.Logf("sqlite writes: n=%d errors=%d min=%v p50=%v p95=%v max=%v",
 		s.writeOps, s.writeErrs, s.write.Min, s.write.P50, s.write.P95, s.write.Max)
-	t.Logf("RunCycle tick duration: n=%d min=%v p50=%v p95=%v max=%v",
-		s.tick.N, s.tick.Min, s.tick.P50, s.tick.P95, s.tick.Max)
 
 	if s.writeOps > 0 && s.writeErrs*20 > s.writeOps { // more than 5% failed outright
 		t.Errorf("sqlite contention: %d/%d concurrent store write(s) failed even after Store.write's own retry loop", s.writeErrs, s.writeOps)
+	}
+}
+
+// reportCycles reports what this run's ticks measured about themselves,
+// and is the one place this file looks at the tick at all -- the numbers
+// come out of the CycleTimes ring RunCycle wrote them into, which is the
+// same ring, filled by the same code, that a deployment serves as GET
+// /api/metrics' "cycles" section (see this file's own doc comment).
+//
+// ticks is how many times the loops above called RunCycle, and is not a
+// second measurement of anything: it is the cross-check that the ring
+// really saw every pass this harness drove, so a Deps that stopped
+// carrying a CycleTimes -- or a cycle quietly declining to record itself
+// -- fails here rather than silently reporting a tick nobody measured.
+func reportCycles(t *testing.T, cycles *orchestrator.CycleTimes, ticks int) {
+	t.Helper()
+	history, observed := cycles.History()
+	if observed == 0 {
+		t.Errorf("cycles: nothing measured across %d tick(s) -- RunCycle is not writing into the ring this harness handed its Deps", ticks)
+		return
+	}
+	if observed != ticks {
+		t.Errorf("cycles: %d tick(s) driven, %d measured -- a cycle declines to record itself only when its context is already done, so either this is not the ring RunCycle was handed or a tick spent its whole %v budget getting back",
+			ticks, observed, loadTickBudget)
+	}
+	if len(history) < observed {
+		t.Logf("cycles: reporting the most recent %d of %d tick(s) -- the rest have aged out of a %d-cycle ring",
+			len(history), observed, loadCycleHistory)
+	}
+
+	// Per reconciler, in the order the cycle ran them, which is the order
+	// that explains them: they run in sequence, so one that has grown is
+	// time every decision behind it did not get to spend.
+	reconcilers := orchestrator.Reconcilers()
+	order := make([]string, 0, len(reconcilers))
+	for _, r := range reconcilers {
+		order = append(order, r.Name)
+	}
+	waits := map[string][]time.Duration{}
+	durations := map[string][]time.Duration{}
+	failures := map[string]int{}
+
+	var tickDur, dispatchWait []time.Duration
+	incomplete := 0
+	var firstIncomplete []string
+	for _, c := range history {
+		tickDur = append(tickDur, c.Duration)
+		dispatchWait = append(dispatchWait, c.DispatchWait)
+		var ran []string
+		for _, r := range c.Reconcilers {
+			ran = append(ran, r.Name)
+			waits[r.Name] = append(waits[r.Name], r.Wait)
+			durations[r.Name] = append(durations[r.Name], r.Duration)
+			if r.Failed {
+				failures[r.Name]++
+			}
+		}
+		if !slices.Equal(ran, order) {
+			if incomplete == 0 {
+				firstIncomplete = ran
+			}
+			incomplete++
+		}
+	}
+
+	tick := statsOf(tickDur)
+	dispatch := statsOf(dispatchWait)
+	t.Logf("RunCycle tick duration: n=%d min=%v p50=%v p95=%v max=%v",
+		tick.N, tick.Min, tick.P50, tick.P95, tick.Max)
+	t.Logf("RunCycle dispatch wait: n=%d min=%v p50=%v p95=%v max=%v (how far into a tick the dispatch decision was reached)",
+		dispatch.N, dispatch.Min, dispatch.P50, dispatch.P95, dispatch.Max)
+	for _, name := range order {
+		d, w := statsOf(durations[name]), statsOf(waits[name])
+		t.Logf("  %-14s duration p50=%v p95=%v max=%v; started p50=%v p95=%v into the tick; failed %d/%d cycle(s)",
+			name, d.P50, d.P95, d.Max, w.P50, w.P95, failures[name], d.N)
+	}
+	// A tick growing under a store that is filling up, which is the
+	// failure this harness is best placed to catch: the same p50 over the
+	// first half of the cycles still in the ring and over the second.
+	// Logged rather than asserted on -- a tick that grows somewhat as
+	// tasks accumulate is the expected shape, and any threshold on
+	// "somewhat" would be a number invented here rather than one this
+	// harness knows -- but it is the line to read first when the dispatch
+	// budget below does trip.
+	if half := len(tickDur) / 2; half > 0 {
+		early, late := statsOf(tickDur[:half]), statsOf(tickDur[half:])
+		t.Logf("tick growth: p50 %v over the first %d cycle(s) -> %v over the last %d",
+			early.P50, half, late.P50, len(tickDur)-half)
+	}
+
+	// A cycle that did not run every reconciler is a cycle cut short, and
+	// one that never reached "dispatch" decided nothing at all while
+	// tasks sat ready -- the starvation this file exists to catch, seen
+	// from inside the tick rather than from the queue.
+	if incomplete > 0 {
+		t.Errorf("cycles: %d/%d tick(s) did not run every reconciler -- first one ran [%s], where the cycle runs [%s]",
+			incomplete, len(history), strings.Join(firstIncomplete, ","), strings.Join(order, ","))
+	}
+	if dispatch.P95 > loadDispatchBudget {
+		t.Errorf("scheduling: p95 dispatch wait %v exceeds %v -- that much of a tick went by before RunCycle reached the dispatch decision, so a queued task is waiting on the tick itself, not on a full deployment (the per-reconciler lines above say which part of the tick grew)",
+			dispatch.P95, loadDispatchBudget)
 	}
 }

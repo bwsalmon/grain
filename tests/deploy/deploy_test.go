@@ -726,3 +726,83 @@ func TestEverySecretMetadataKeyIsBothIgnoredAndRedacted(t *testing.T) {
 		}
 	}
 }
+
+// The sandbox guest image's toolchain, which three files have to agree
+// on and none of them can see the others.
+//
+// A dispatched task -- most sharply a merge-queue fix task, which exists
+// only to make a red build green -- can only check its own work if the
+// guest carries the Go the module asks for and the Node CI runs, with
+// caches warm enough to build offline. Getting either version from
+// somewhere other than the file that already pins it is how a guest ends
+// up failing a task's `go build` for a reason that has nothing to do
+// with the task.
+func TestTheSandboxGuestBuildsWithTheToolchainsTheRepositoryPins(t *testing.T) {
+	build := read(t, "scripts", "kontur", "build-guest.sh")
+	setup := read(t, "scripts", "kontur", "guest-setup.sh")
+
+	// Go: one version, read out of go.mod, with the same expression the
+	// Makefile already reads it with for Dockerfile.build.
+	const readsGoMod = `sed -n 's/^go[[:space:]]\{1,\}//p'`
+	contains(t, read(t, "Makefile"), readsGoMod+" go.mod")
+	contains(t, build, readsGoMod+" ../../go.mod")
+	// ...and nothing in the guest script writes a second copy of it down.
+	if regexp.MustCompile(`GO_VERSION=["']?[0-9]`).MatchString(stripComments(setup)) {
+		t.Error("guest-setup.sh pins a Go version of its own; build-guest.sh reads it out of go.mod")
+	}
+
+	// Node: the guest needs a full version (it fetches a tarball), the
+	// workflow pins a major, and the two have to be the same major -- an
+	// agent reproducing a red `npm test` on a different major is
+	// reproducing a different thing.
+	guestNode := regexp.MustCompile(`NODE_VERSION="(\d+)\.[^"]*"`).FindStringSubmatch(setup)
+	if guestNode == nil {
+		t.Fatal("guest-setup.sh pins no NODE_VERSION")
+	}
+	ciNode := regexp.MustCompile(`node-version: (\d+)`).FindStringSubmatch(testsWorkflow(t))
+	if ciNode == nil {
+		t.Fatal("tests.yml pins no node-version")
+	}
+	if guestNode[1] != ciNode[1] {
+		t.Errorf("the guest carries Node %s but CI runs the suite on Node %s", guestNode[1], ciNode[1])
+	}
+}
+
+// The caches are what make those toolchains usable, and they are warmed
+// from the same four manifests CI installs from: a sandbox has no route
+// to proxy.golang.org or registry.npmjs.org, so anything the image did
+// not resolve at build time cannot be resolved at dispatch time either.
+func TestTheSandboxGuestWarmsItsCachesFromTheLockedManifests(t *testing.T) {
+	build := read(t, "scripts", "kontur", "build-guest.sh")
+	// The one command that decides what the guest's caches know about.
+	packed := between(t, build, `manifests="$(tar`, "\n")
+	for _, manifest := range []string{"go.mod", "go.sum", "ui/package.json", "ui/package-lock.json"} {
+		contains(t, packed, manifest)
+	}
+	setup := stripComments(read(t, "scripts", "kontur", "guest-setup.sh"))
+	contains(t, setup, "go mod download")
+	contains(t, setup, "npm ci")
+
+	// Playwright's browsers are the one thing deliberately left out, and
+	// leaving them out is not free: @playwright/test's install script
+	// fetches them, so `npm ci` in ui/ only works on this guest because
+	// npm is wrapped to skip that download.
+	absent(t, setup, "playwright install")
+	contains(t, setup, "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD")
+}
+
+func TestTheGuestBuildScriptsAreSyntacticallyValid(t *testing.T) {
+	for _, script := range []string{"build-guest.sh", "guest-setup.sh"} {
+		path := filepath.Join(repoRoot(t), "scripts", "kontur", script)
+		// guest-setup.sh is /bin/sh (it runs in kontur's own guest stage,
+		// which is not guaranteed a bash), so it is checked by the shell
+		// it declares rather than by bash.
+		shell := "bash"
+		if script == "guest-setup.sh" {
+			shell = "sh"
+		}
+		if out, err := exec.Command(shell, "-n", path).CombinedOutput(); err != nil {
+			t.Errorf("%s -n scripts/kontur/%s: %v\n%s", shell, script, err, out)
+		}
+	}
+}

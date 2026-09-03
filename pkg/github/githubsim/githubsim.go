@@ -62,6 +62,13 @@ var (
 	pullCommentsRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/comments$`)
 	pullReviewsRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/reviews$`)
 	checkRunsRe    = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/commits/([^/]+)/check-runs$`)
+	// The three Actions endpoints github.RESTClient.FailedJobLogs walks
+	// from a commit to a log: the commit's runs, one run's jobs, one
+	// job's log. actionsRunsRe is also what ListWorkflowRuns reads when a
+	// credential cannot reach the Checks API.
+	actionsRunsRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/actions/runs$`)
+	runJobsRe     = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/actions/runs/(\d+)/jobs$`)
+	jobLogsRe     = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/actions/jobs/(\d+)/logs$`)
 	// gitRefsRe/gitRefRe: the git-database endpoints CreateBranch and
 	// UpdateBranch call -- release management's own (bwsalmon/agents#398).
 	gitRefsRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/git/refs$`)
@@ -135,6 +142,24 @@ type Call struct {
 	Path   string
 }
 
+// WorkflowJob is one GitHub Actions job of one commit's run, and what it
+// printed -- the thing the merge queue reads to put a failing build's own
+// output into the fix task it files (orchestrator.failingJobLogs).
+//
+// There is no Status field: a seeded job is one that has run, so Sim
+// answers "completed" for all of them. An empty Conclusion reads as
+// "success", so a test seeding a job it wants ignored need only leave it
+// blank.
+type WorkflowJob struct {
+	Name       string
+	Conclusion string
+	// Log is what the logs endpoint serves for this job. Empty means
+	// GitHub has none to serve -- answered 410, the way a real one
+	// answers for a log past its retention window, which is a case
+	// FailedJobLogs has to skip rather than fail on.
+	Log string
+}
+
 // Sim is a github.Transport backed by an in-memory set of issues and pull
 // requests, plus a real bare git repo for the one endpoint
 // (BranchExists/branch lookups) that would be dishonest as a canned
@@ -162,6 +187,18 @@ type Sim struct {
 	// by resolve to one commit here the same way they do on GitHub (see
 	// checkRunsFor).
 	CheckRuns map[string][]github.CheckRun
+	// WorkflowJobs is the CI behind those check runs: the GitHub Actions
+	// jobs, and their logs, that github.RESTClient.FailedJobLogs reaches
+	// through a commit's workflow runs. Keyed like CheckRuns, except that
+	// a branch name works even though the endpoints are called with a sha
+	// -- see workflowJobsFor, which resolves one to the other against the
+	// bare repo, since a test seeding these has no way to know a sha it
+	// never wrote down.
+	//
+	// Seeded, not derived: a Sim that invented a job per seeded check run
+	// would decide for the test what CI looked like, and the point of
+	// these is a test saying what one particular job printed.
+	WorkflowJobs map[string][]WorkflowJob
 	// ReviewComments is every inline review comment on a PR, keyed by PR
 	// number -- what ListReviewComments reads back. Seeded directly by a
 	// test standing in for a human reviewer's own comments, since
@@ -177,6 +214,14 @@ type Sim struct {
 	nextCommentID int
 	nextIssue     int
 	nextReviewID  int
+
+	// runKeys is the commits (or branch names -- see WorkflowJobs) Sim
+	// has answered a workflow-run id for, in the order it first did.
+	// Real GitHub's run ids are its own; here the index in this slice is
+	// the id, so that the runs endpoint and the jobs endpoint after it
+	// agree about which commit is being asked about without Sim having to
+	// keep a second map to invert.
+	runKeys []string
 
 	// mu serialises Request, which is every mutation this double makes:
 	// the orchestrator dispatches concurrently -- a goroutine per run,
@@ -206,6 +251,7 @@ func New(owner, repo, bareRepo, defaultBranch string) *Sim {
 		Issues:         map[int]*Issue{},
 		Comments:       map[int][]github.Comment{},
 		CheckRuns:      map[string][]github.CheckRun{},
+		WorkflowJobs:   map[string][]WorkflowJob{},
 		ReviewComments: map[int][]github.ReviewComment{},
 		nextCommentID:  1000,
 		nextIssue:      8000,
@@ -389,6 +435,40 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 				ref = m[3]
 			}
 			return jsonResponse(200, checkRunsJSON(s.checkRunsFor(ref))), nil
+		}
+		if m := actionsRunsRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			key := qs.Get("head_sha")
+			jobs := s.workflowJobsFor(key)
+			return jsonResponse(200, workflowRunsJSON(s.runIDFor(key), jobs)), nil
+		}
+		if m := runJobsRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			runID := mustAtoi(m[3])
+			key, ok := s.runKeyFor(runID)
+			if !ok {
+				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
+			}
+			return jsonResponse(200, jobsJSON(m[1], m[2], runID, s.workflowJobsFor(key))), nil
+		}
+		if m := jobLogsRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			id := mustAtoi(m[3])
+			runID, index := id/1000, id%1000
+			key, ok := s.runKeyFor(runID)
+			if !ok {
+				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
+			}
+			jobs := s.workflowJobsFor(key)
+			if index >= len(jobs) || jobs[index].Log == "" {
+				// 410, not 404: this is the shape of a real log past its
+				// retention window, and the one FailedJobLogs has to skip
+				// rather than fail on.
+				return github.ApiResponse{Status: 410, Body: []byte("{}")}, nil
+			}
+			// Plain text, like the real endpoint's own answer after the
+			// redirect github's storage serves it from.
+			return github.ApiResponse{Status: 200, Body: []byte(jobs[index].Log)}, nil
 		}
 		if m := issueRe.FindStringSubmatch(p); m != nil {
 			number := mustAtoi(m[3])
@@ -770,6 +850,110 @@ func reviewCommentsJSON(comments []github.ReviewComment) []map[string]any {
 		}
 	}
 	return out
+}
+
+// workflowJobsFor is the jobs seeded for a commit, found by the sha the
+// Actions endpoints are called with or by the name of a branch whose tip
+// is that sha.
+//
+// The second half is what makes these seedable at all: a pull request's
+// head sha comes out of the bare repo (pullRequestDetailJSON reads it
+// with branchSHA), so a test that seeded CheckRuns under a branch name
+// has no sha to seed these under. Resolving the key rather than the
+// request keeps one seeding convention for both maps.
+func (s *Sim) workflowJobsFor(sha string) []WorkflowJob {
+	if sha == "" {
+		return nil
+	}
+	if jobs, ok := s.WorkflowJobs[sha]; ok {
+		return jobs
+	}
+	for key, jobs := range s.WorkflowJobs {
+		if s.branchSHA(key) == sha {
+			return jobs
+		}
+	}
+	return nil
+}
+
+// runIDBase keeps Sim's fake workflow-run ids clear of the small integers
+// everything else here counts from, so a run id in a failing test's
+// output is recognisable as one.
+const runIDBase = 9000
+
+// runIDFor is the workflow run id Sim answers for a commit -- stable
+// across calls, so the jobs endpoint can be asked about a run the runs
+// endpoint named earlier.
+func (s *Sim) runIDFor(key string) int {
+	for i, k := range s.runKeys {
+		if k == key {
+			return runIDBase + i
+		}
+	}
+	s.runKeys = append(s.runKeys, key)
+	return runIDBase + len(s.runKeys) - 1
+}
+
+// runKeyFor inverts runIDFor.
+func (s *Sim) runKeyFor(runID int) (string, bool) {
+	i := runID - runIDBase
+	if i < 0 || i >= len(s.runKeys) {
+		return "", false
+	}
+	return s.runKeys[i], true
+}
+
+// jobID numbers a job within its run, so one integer identifies both --
+// the logs endpoint is given nothing else to find a job by.
+func jobID(runID, index int) int { return runID*1000 + index }
+
+// jobConclusion is GitHub's own field, with Sim's default for a job a
+// test seeded without one.
+func jobConclusion(job WorkflowJob) string {
+	if job.Conclusion == "" {
+		return "success"
+	}
+	return job.Conclusion
+}
+
+// workflowRunsJSON is the shape both github.RESTClient.ListWorkflowRuns
+// and its FailedJobLogs decode: one run per commit here, since Sim models
+// a commit's CI as a flat set of jobs rather than as several workflows.
+// Its conclusion follows its jobs -- a run whose jobs all passed is not a
+// failed run, and FailedJobLogs never asks it for jobs.
+func workflowRunsJSON(runID int, jobs []WorkflowJob) map[string]any {
+	if len(jobs) == 0 {
+		return map[string]any{"total_count": 0, "workflow_runs": []map[string]any{}}
+	}
+	conclusion := "success"
+	for _, job := range jobs {
+		switch jobConclusion(job) {
+		case "failure", "timed_out", "startup_failure":
+			conclusion = "failure"
+		}
+	}
+	return map[string]any{
+		"total_count": 1,
+		"workflow_runs": []map[string]any{{
+			"id": runID, "name": "tests", "status": "completed", "conclusion": conclusion,
+		}},
+	}
+}
+
+// jobsJSON is the shape github.RESTClient.FailedJobLogs decodes for one
+// run's jobs.
+func jobsJSON(owner, repo string, runID int, jobs []WorkflowJob) map[string]any {
+	items := make([]map[string]any, len(jobs))
+	for i, job := range jobs {
+		id := jobID(runID, i)
+		items[i] = map[string]any{
+			"id": id, "name": job.Name, "status": "completed",
+			"conclusion": jobConclusion(job),
+			"html_url": fmt.Sprintf("https://github.example/%s/%s/actions/runs/%d/job/%d",
+				owner, repo, runID, id),
+		}
+	}
+	return map[string]any{"total_count": len(items), "jobs": items}
 }
 
 // checkRunsJSON is the shape github.RESTClient.ListCheckRuns decodes --

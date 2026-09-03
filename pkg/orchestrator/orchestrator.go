@@ -262,13 +262,15 @@ type Config struct {
 	// instead of switching this off.
 	MaxRunRuntime time.Duration
 
-	// Now reads the current time, and exists for the one timestamp
-	// RunDispatch cannot take from its caller: when a run finished.
-	// Every other moment this package records is the `at` RunCycle hands
-	// down -- the moment the cycle began -- and a run's finish is the one
-	// that is genuinely later than that, by however long the agent
-	// worked. Stamping finished_at with `at` too made every run ever
-	// recorded read back as zero seconds long.
+	// Now reads the current time, and exists for the timestamps
+	// RunDispatch cannot take from its caller: when a run's agent got its
+	// first turn, and when the run finished. Every other moment this
+	// package records is the `at` RunCycle hands down -- the moment the
+	// cycle began -- and those two are genuinely later than that, by
+	// however long setup and then the agent took. Stamping finished_at
+	// with `at` too made every run ever recorded read back as zero
+	// seconds long; the agent's own start is the line pkg/metrics splits
+	// that duration at (Store.SetRunAgentStarted).
 	//
 	// nil is the wall clock, which is what a real deployment wants. A
 	// test driving this package off a fake clock sets it so a run's

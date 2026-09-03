@@ -2,11 +2,15 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/dispatch"
 	"github.com/bwsalmon/grain/pkg/github"
+	"github.com/bwsalmon/grain/pkg/github/githubsim"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 )
@@ -114,6 +118,297 @@ func TestOpenPullRequestForTaskIsAdoptedByTheFinishPath(t *testing.T) {
 	}
 	if st != model.StateCompleted {
 		t.Fatalf("state = %q, want completed once the run itself finished", st)
+	}
+}
+
+// openedMidRun is the half of a run these tests cannot script through a
+// framework stub: the open_pull_request tool call itself, which pkg/mcp
+// serves by calling exactly this while the run is still live.
+func openedMidRun(t *testing.T, ctx context.Context, store *model.Store,
+	client github.Client, task model.Task) github.PullRequest {
+
+	t.Helper()
+	status, err := orchestrator.OpenPullRequestForTask(ctx, store, client, task)
+	if err != nil {
+		t.Fatalf("OpenPullRequestForTask: %v", err)
+	}
+	return status.PullRequest
+}
+
+// prByHead is the sim's record of one branch's pull request -- what
+// actually happened to it on "GitHub", as opposed to what the store
+// thinks.
+func prByHead(t *testing.T, sim *githubsim.Sim, head string) githubsim.PullRequest {
+	t.Helper()
+	for _, pr := range sim.PullRequests {
+		if pr.Head == head {
+			return pr
+		}
+	}
+	t.Fatalf("no pull request for head %s in %+v", head, sim.PullRequests)
+	return githubsim.PullRequest{}
+}
+
+// A task closed while its run was still going, after that run had already
+// opened its own pull request, is salvagePushedBranch's close re-check
+// meeting a pull request that already exists. Pinning what that leaves
+// behind, because the answer is not the one that func's comment used to
+// give ("the branch is left pushed but unopened"): the pull request is
+// open, it stays open and unmerged, and grain never looks at it again.
+//
+// That is the same answer tests/e2e's TestClosingATaskWithAnOpenPull
+// RequestDropsItFromTheMergeQueueForGood already pins for a task closed
+// one moment later, once the finish path had opened the pull request --
+// open_pull_request moved when that moment can arrive, not what a close
+// then means. See salvagePushedBranch's own doc comment.
+func TestClosingATaskLeavesThePullRequestItsRunAlreadyOpenedAlone(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	branch := model.BranchName(task.ID)
+	pushBranch(t, sim.BareRepo, branch)
+
+	pr := openedMidRun(t, ctx, store, client, task)
+
+	// The close lands while the run is still live -- after the tool call,
+	// before the finish. This is the whole race.
+	closedAt := baseTime
+	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, ClosedAt: &closedAt}); err != nil {
+		t.Fatalf("closing task: %v", err)
+	}
+
+	result := toolResult(agent.ToolCall{Name: "open_pull_request"})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	// Nothing was opened a second time, and nothing was linked twice: the
+	// finish path found the close and stopped before EnsurePullRequest.
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v, want the one the run itself opened and no other", sim.PullRequests)
+	}
+	ref := model.PullRequestRef{Repo: repo, Number: pr.Number}.String()
+	if n := linksTo(t, ctx, store, task.ID, ref); n != 1 {
+		t.Fatalf("links to %s = %d, want 1", ref, n)
+	}
+
+	// The decision, stated: the pull request is left open. Nothing in
+	// grain closes a pull request, and the work on the branch is real
+	// whatever the human decided about the task -- so it is left where a
+	// human can see it, merge it by hand, or close it by hand.
+	if got := prByHead(t, sim, branch); got.State != "open" || got.Merged {
+		t.Fatalf("pull request = %+v, want it left open and unmerged", got)
+	}
+
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed: the close outranks the run that was still finishing", st)
+	}
+
+	// The other half of the decision, and the reason it is safe: a closed
+	// task is not 'completed', so its link never reaches SyncPullRequests
+	// at all. Grain will not merge this pull request on any later cycle.
+	links, err := store.OpenPullRequestLinks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("OpenPullRequestLinks = %+v, want none: a closed task's pull request is never synced again", links)
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests: %v", err)
+	}
+	if got := prByHead(t, sim, branch); got.State != "open" || got.Merged {
+		t.Fatalf("pull request after a sync = %+v, want it still open and unmerged", got)
+	}
+}
+
+// The other two salvagePushedBranch callers, on the same "the run already
+// opened its own pull request" setup that
+// TestOpenPullRequestForTaskIsAdoptedByTheFinishPath covers for the clean
+// finish. First: a run whose framework returned an error (ran out of
+// turns, crashed) -- cycle.go's own salvage call, which reaches
+// finishWithPullRequest with a pull request already open for the head.
+func TestRunCycleAdoptsThePullRequestAFailedRunAlreadyOpened(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	branch := model.BranchName(task.ID)
+	pushBranch(t, sim.BareRepo, branch)
+
+	// Pushed, opened its own pull request to watch CI, then spent the
+	// rest of its turn budget and was cut off -- agent.Framework's own
+	// contract, which hands back what the run managed to do first. The
+	// tool call is served inline rather than through openedMidRun,
+	// because this closure runs on reconcileDispatch's own goroutine and
+	// a t.Fatal from there would not stop this test.
+	var opened github.PullRequest
+	var openErr error
+	ranOutOfTurns := openingFramework{agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
+		status, err := orchestrator.OpenPullRequestForTask(ctx, store, client, task)
+		opened, openErr = status.PullRequest, err
+		return &agent.Result{ToolCalls: []agent.ToolCall{
+			{Name: "run_command", Text: "pushed"},
+			{Name: "open_pull_request", Text: "opened"},
+		}}, errors.New("gemini: exceeded max turns (2) without a final answer")
+	})}
+
+	deps := orchestrator.Deps{
+		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  orchestrator.StaticFramework(ranOutOfTurns),
+		MaxWorkers: 1,
+	}
+	err := orchestrator.RunCycle(ctx, deps, baseTime)
+	if openErr != nil {
+		t.Fatalf("the run's own open_pull_request call failed: %v", openErr)
+	}
+	if err == nil {
+		t.Fatal("expected RunCycle to report the framework's failure")
+	}
+	if !strings.Contains(err.Error(), "exceeded max turns") {
+		t.Errorf("error = %v, want the framework's own diagnosis preserved", err)
+	}
+
+	assertAdoptedNotReopened(t, ctx, store, sim, task, repo, opened, branch)
+
+	// The task ends the way a failed run that nonetheless pushed ends:
+	// completed, because the branch is real and now has a pull request
+	// (cycle.go's own "only the ending failed"), while the run itself
+	// keeps its failure and its reason.
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateCompleted {
+		t.Fatalf("state = %q, want completed: the branch was salvaged even though the run failed", st)
+	}
+	runs, err := store.Runs(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %+v, want one", runs)
+	}
+	if runs[0].Outcome != "failed" {
+		t.Errorf("outcome = %q, want failed: adopting the pull request does not make the run a success", runs[0].Outcome)
+	}
+}
+
+// Second: a run whose process died between the tool call and the finish,
+// recovered at the next daemon startup. recoverRun reaches the same
+// salvage with the same pull request already open -- the crash cost the
+// result, not the pull request.
+func TestRecoverOrphanedRunsAdoptsThePullRequestTheRunAlreadyOpened(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	branch := model.BranchName(task.ID)
+	pushBranch(t, sim.BareRepo, branch)
+
+	d := dispatch.Dispatch{TaskID: task.ID, RunID: "t1-1", Attempt: 1}
+	startRun(t, ctx, store, d, baseTime)
+	opened := openedMidRun(t, ctx, store, client, task)
+
+	if err := orchestrator.RecoverOrphanedRuns(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
+		t.Fatalf("RecoverOrphanedRuns: %v", err)
+	}
+
+	assertAdoptedNotReopened(t, ctx, store, sim, task, repo, opened, branch)
+
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateCompleted {
+		t.Fatalf("state = %q, want completed: the branch and its pull request outlived the process", st)
+	}
+	runs, err := store.Runs(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Outcome != "orphaned" {
+		t.Fatalf("runs = %+v, want the one run finished as orphaned", runs)
+	}
+}
+
+// assertAdoptedNotReopened is what "the finish path adopted it" means on
+// every salvage path: one pull request on GitHub, and one link in the
+// store, both the ones the run itself made.
+func assertAdoptedNotReopened(t *testing.T, ctx context.Context, store *model.Store, sim *githubsim.Sim,
+	task model.Task, repo model.RepoRef, opened github.PullRequest, branch string) {
+
+	t.Helper()
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("pull requests = %+v, want only the one the run opened for itself", sim.PullRequests)
+	}
+	if got := prByHead(t, sim, branch); got.Number != opened.Number {
+		t.Fatalf("pull request = %+v, want the one the run opened (#%d)", got, opened.Number)
+	}
+	ref := model.PullRequestRef{Repo: repo, Number: opened.Number}.String()
+	if n := linksTo(t, ctx, store, task.ID, ref); n != 1 {
+		t.Fatalf("links to %s = %d, want exactly 1: the finish path must not link what the run already linked", ref, n)
+	}
+}
+
+// The safety property OpenPullRequestForTask's doc comment claims, stated
+// against the thing it is protecting against rather than against the
+// mechanism: a pull request opened by a run that is still going is not a
+// merge queue member, so nothing merges a branch the agent may still be
+// pushing to. TestOpenPullRequestForTaskOpensOneWithoutEndingTheTask
+// asserts the task is not 'completed', which is *how* that holds; this
+// drives a real SyncPullRequests over it with everything else about it
+// begging to be merged -- auto-merge on, GitHub reporting it clean, and
+// the task sitting at the very front of the backlog, where a queue member
+// would be its repo's head.
+func TestSyncPullRequestsDoesNotMergeAPullRequestWhoseRunIsStillGoing(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	running := filedTask(t, ctx, store, "t1", repo)
+	running.AutoMerge = true
+	running.CreatedAt = &baseTime
+	running.OrderKey = 100
+	if err := store.PutTask(ctx, running); err != nil {
+		t.Fatal(err)
+	}
+	branch := model.BranchName(running.ID)
+	pushBranch(t, sim.BareRepo, branch)
+	startRun(t, ctx, store, dispatch.Dispatch{TaskID: running.ID, RunID: "t1-1", Attempt: 1}, baseTime)
+	opened := openedMidRun(t, ctx, store, client, running)
+
+	// A control in the same repo, behind it in the backlog, whose run is
+	// over: it merges on this very cycle. Without it, "nothing merged"
+	// would be just as consistent with a setup that could never merge
+	// anything.
+	finished, finishedBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
+	placeInBacklog(t, ctx, store, finished, 200)
+	setMergeable(sim, true)
+
+	if st, err := store.State(ctx, running.ID); err != nil || st != model.StateRunning {
+		t.Fatalf("state before the sync = %q (%v), want running", st, err)
+	}
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests: %v", err)
+	}
+
+	if got := prByHead(t, sim, branch); got.Merged || got.State != "open" {
+		t.Fatalf("pull request #%d = %+v, want it untouched: its run is still live and may still be pushing",
+			opened.Number, got)
+	}
+	if got := prByHead(t, sim, finishedBranch); !got.Merged {
+		t.Fatalf("the control pull request = %+v, want merged -- otherwise this cycle merged nothing at all "+
+			"and proves nothing about the running task", got)
+	}
+	if st, err := store.State(ctx, running.ID); err != nil || st != model.StateRunning {
+		t.Fatalf("state after the sync = %q (%v), want still running", st, err)
 	}
 }
 
