@@ -115,6 +115,80 @@ func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T
 	}
 }
 
+// A fix task joins the backlog at its head, ahead of the work already
+// waiting there: it is not new work taking its turn but the repair of a
+// change already finished and stuck in the merge queue, and it is the
+// one task nobody can drag anywhere else -- the frontend gives it no
+// handle at all, pinning it to the head of the list to match. Ready
+// (bwsalmon/agents#389) already dispatches a fix first whatever its
+// OrderKey; this is the same answer in the order everything else reads
+// the backlog in, where the zero value used to leave it wherever zero
+// happened to fall among the keys already assigned.
+func TestSyncPullRequestsFilesTheFixAtTheHeadOfTheBacklog(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.AutoMerge = true
+	task.CreatedAt = &baseTime
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
+	pr, err := orchestrator.EnsurePullRequest(client, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Links = append(task.Links, model.Link{
+		Kind: model.LinkFixes, Target: model.PullRequestRef{Repo: repo, Number: pr.Number}.String(),
+	})
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &baseTime}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ordinary work already queued behind it, placed the way
+	// ui.Client.CreateTask places a task somebody files by hand.
+	waiting := filedTask(t, ctx, store, "t2", repo)
+	orderKey, err := store.OrderKeyForNewTask(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting.OrderKey = orderKey
+	if err := store.PutTask(ctx, waiting); err != nil {
+		t.Fatal(err)
+	}
+
+	no := false
+	for i := range sim.PullRequests {
+		sim.PullRequests[i].Mergeable = &no
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests: %v", err)
+	}
+
+	// ListTasks is backlog order, ascending OrderKey: the fix comes
+	// first, ahead of both the task it repairs and the queued work.
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected the two filed tasks and one fix, got %d", len(tasks))
+	}
+	head := tasks[0]
+	if head.Origin.Reason != model.ReasonFix {
+		t.Fatalf("head of the backlog = %s (reason %q), want the fix task", head.ID, head.Origin.Reason)
+	}
+	for _, other := range tasks[1:] {
+		if head.OrderKey >= other.OrderKey {
+			t.Fatalf("fix task order key %v is not ahead of %s's %v", head.OrderKey, other.ID, other.OrderKey)
+		}
+	}
+}
+
 func TestSyncPullRequestsDoesNotFileASecondFixWhileOneIsInFlight(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")

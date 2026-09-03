@@ -221,10 +221,12 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   cursor: pointer;
 }
 .task-row:hover { background: var(--surface-hover); }
-/* A stacked task (bwsalmon/agents#378) nests under the task that
-   generated it rather than getting a row of its own -- indented and
-   set off from the parent's own row, so it reads as a continuation of
-   the same change rather than a separate task. */
+/* Tasks folded out under a row that owns them -- the repo pane's own
+   per-repo list (bwsalmon/agents#474) -- indented and set off from that
+   row, so they read as belonging to it rather than as list entries of
+   their own. (A stacked task used to nest this way under the task it
+   fixes; it is a pinned row at the head of the list now, see
+   TaskList.jsx's partitionPinned.) */
 .task-sublist {
   list-style: none;
   margin: 0;
@@ -234,11 +236,14 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 .task-select { flex: 0 0 auto; }
 /* Drag-and-drop backlog reordering (bwsalmon/agents#476). The handle is
    the drag affordance; the row itself stays draggable so grabbing
-   anywhere on it still works, the handle just signals that it can be.
-   A nested stacked task's row carries one too: it sits inside its
-   parent's draggable row, so grabbing it drags the stack it belongs to,
-   and its column would otherwise sit empty beside every neighbour's. */
+   anywhere on it still works, the handle just signals that it can be. */
 .task-drag-handle { flex: none; color: var(--text-tertiary); cursor: grab; }
+/* A row inside a reorderable list with no handle of its own -- a stacked
+   task, pinned at the head of the list instead of ordered by hand --
+   holds the handle's column open, so its contents line up with the
+   draggable rows below rather than sitting a handle's width to their
+   left. The width is a small MUI icon's. */
+.task-drag-spacer { flex: none; width: 1.25rem; }
 .task-row-dragging { opacity: 0.4; }
 /* .task-drop-target marks whichever <li> (a task row, or the trailing
    .task-drop-end sentinel for "drop at the very end of the list") the
@@ -414,10 +419,9 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Tasks folded out under a repo row (bwsalmon/agents#474) get the same
-   nested indent as a stacked task under its parent in TaskList itself
-   (the shared .task-sublist .task-row rule above), set off from the
-   repo row by a divider of its own. */
+/* Tasks folded out under a repo row (bwsalmon/agents#474) take the
+   nested indent of the shared .task-sublist .task-row rule above, set
+   off from the repo row by a divider of its own. */
 .repo-list .task-sublist { border-top: 1px solid var(--border); }
 
 .repo-scope-bar { padding: 1rem 1.75rem 0; }
@@ -519,6 +523,14 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
    about how a task came to be or how it runs, not a repo/capability
    chip describing what it targets. */
 .chip-interactive {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+/* A merge-queue fix (bwsalmon/agents#378) gets the same treatment again:
+   it is grain saying who filed this task and why it is sitting at the
+   head of the list, not a chip describing what it targets. */
+.chip-stacked {
   background: var(--accent-subtle);
   color: var(--accent);
 }

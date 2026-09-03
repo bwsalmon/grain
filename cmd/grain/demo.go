@@ -213,9 +213,15 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	// The fix task itself, filed straight into the store already
 	// approved the same way orchestrator.fileFixTask files a real one --
 	// see model.LinkFixTask's doc comment -- so `grain demo` shows the
-	// nested-under-its-parent card bwsalmon/agents#378 asked for without
-	// needing a real merge queue cycle to produce one.
+	// merge-queue fix bwsalmon/agents#378 asked for, pinned at the head
+	// of the task list, without needing a real merge queue cycle to
+	// produce one. Its order key comes from the same call the real path
+	// makes, so it sits where a real one would: at the head.
 	fixID, err := store.NewTaskID(ctx)
+	if err != nil {
+		return fmt.Errorf("seeding a stacked fix task: %w", err)
+	}
+	fixOrderKey, err := store.OrderKeyForNewTask(ctx, true)
 	if err != nil {
 		return fmt.Errorf("seeding a stacked fix task: %w", err)
 	}
@@ -237,6 +243,7 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		AutoMerge: true,
 		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: stacked.ID}},
 		CreatedAt: &fixCreatedAt,
+		OrderKey:  fixOrderKey,
 	}
 	if err := store.PutTask(ctx, fixTask); err != nil {
 		return fmt.Errorf("seeding a stacked fix task: %w", err)

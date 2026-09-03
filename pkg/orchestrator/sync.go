@@ -743,6 +743,22 @@ func fileFixTask(ctx context.Context, store *model.Store,
 	if err != nil {
 		return fmt.Errorf("orchestrator: allocating an id for a fix task for %s: %w", task.ID, err)
 	}
+	// At the head of the backlog, not the tail. Store.Ready already
+	// dispatches a fix task ahead of everything else regardless of this
+	// (bwsalmon/agents#389, its own ReasonFix carve-out), but its
+	// *position* was whatever OrderKey's zero value happened to fall
+	// among the keys already assigned -- so a list in backlog order,
+	// which is the order everything else is read in, showed it somewhere
+	// nobody chose. atFront true is the placement ui.Client.CreateTask
+	// gives an interactive task, and says the same thing dispatch already
+	// does: something is waiting on this one. It is also the one position
+	// it can be given, since nobody drags a task grain files for itself
+	// -- the frontend pins it to the head of the task list, with no drag
+	// handle at all, to match (TaskList.jsx's partitionPinned).
+	orderKey, err := store.OrderKeyForNewTask(ctx, true)
+	if err != nil {
+		return fmt.Errorf("orchestrator: placing a fix task for %s in the backlog: %w", task.ID, err)
+	}
 	title := fmt.Sprintf("\U0001F916 grain: fix %s", ref)
 	body := fmt.Sprintf(
 		"Task %s opened %s (%s), but %s.\n\n"+
@@ -769,6 +785,7 @@ func fileFixTask(ctx context.Context, store *model.Store,
 		AutoMerge: true,
 		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
 		CreatedAt: &now,
+		OrderKey:  orderKey,
 	}
 	if err := store.PutTask(ctx, fixTask); err != nil {
 		return fmt.Errorf("orchestrator: filing fix task %s: %w", fixTask.ID, err)

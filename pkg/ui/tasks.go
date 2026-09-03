@@ -80,11 +80,13 @@ type Task struct {
 	// Stacked is true for a task the merge queue filed automatically to
 	// repair another task's own pull request (model.ReasonFix) -- built
 	// on that task's own branch and merged straight back into it once
-	// green. Paired with GeneratedFrom, it is what tells the frontend
-	// to nest a task under the one that generated it (bwsalmon/agents#378)
-	// rather than list it as a separate task: unlike an ordinary
-	// propose_task child, a stacked task is not new work, just a
-	// continuation of the same change.
+	// green. Unlike an ordinary propose_task child, a stacked task is
+	// not new work, just a continuation of the same change, and nobody
+	// filed or ordered it: it is how the frontend knows to pin the task
+	// to the head of its list and give it no drag handle at all
+	// (bwsalmon/agents#378), matching where orchestrator.fileFixTask
+	// puts it in the backlog and where Store.Ready dispatches it from.
+	// Paired with GeneratedFrom, it also names the task being repaired.
 	Stacked bool `json:"stacked,omitempty"`
 	// Scheduled is true for a task a schedule filed automatically
 	// (model.ReasonSchedule) -- a UI badge, the same treatment Stacked

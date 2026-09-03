@@ -22,32 +22,26 @@ const SORTS = {
 };
 
 // A stacked task -- the merge queue's own automatic fix for another
-// task's pull request (bwsalmon/agents#378) -- is not new work of its
-// own, so it is nested under the task named by generatedFrom instead of
-// listed as a separate row, as long as that task also passes the
-// current filter. One that doesn't (its parent fell out of the filtered
-// view, or the parent it names is gone) falls back to a plain row of
-// its own, so it is never silently dropped from the list.
-function groupByStack(tasks, matches) {
-  const topLevel = [];
-  const orphans = [];
+// task's pull request (bwsalmon/agents#378) -- is the one kind of task
+// nobody files and nobody orders: grain writes it itself to unstick a
+// change already in flight, and orchestrator.fileFixTask files it at
+// the head of the backlog so it dispatches ahead of the work waiting
+// there. It gets no drag handle for the same reason -- there is no
+// position to drag it to that the merge queue would honour -- and what
+// a row nobody can move needs instead is a place that never moves.
+// partitionPinned is that place: every stacked task sits at the head of
+// the list, above the tasks a human ordered, whichever sort the toolbar
+// is showing. Otherwise it is an ordinary row, lined up with the rest
+// (TaskRow's own reserveDragSpace) rather than indented under the task
+// it repairs, which is where it used to hang.
+function partitionPinned(tasks, matches) {
+  const pinned = [];
+  const orderable = [];
   for (const t of tasks) {
     if (!matches(t)) continue;
-    if (t.stacked && t.generatedFrom) orphans.push(t);
-    else topLevel.push(t);
+    (t.stacked ? pinned : orderable).push(t);
   }
-  const topLevelIds = new Set(topLevel.map((t) => t.id));
-  const children = new Map();
-  for (const c of orphans) {
-    if (!topLevelIds.has(c.generatedFrom)) {
-      topLevel.push(c);
-      continue;
-    }
-    const list = children.get(c.generatedFrom) || [];
-    list.push(c);
-    children.set(c.generatedFrom, list);
-  }
-  return { topLevel, children };
+  return { pinned, orderable };
 }
 
 export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll, onReorder }) {
@@ -85,8 +79,8 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   const cmp = SORTS[sortBy].cmp;
   const sortedTasks = cmp ? [...tasks].sort(cmp) : tasks;
 
-  const { topLevel, children } = groupByStack(sortedTasks, matches);
-  const visibleIds = topLevel.flatMap((t) => [t.id, ...(children.get(t.id) || []).map((c) => c.id)]);
+  const { pinned, orderable } = partitionPinned(sortedTasks, matches);
+  const visibleIds = [...pinned, ...orderable].map((t) => t.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
 
   const title = FILTER_TITLES[stateFilter] || STATE_LABELS[stateFilter] || stateFilter;
@@ -101,11 +95,13 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   const [overId, setOverId] = useState(null);
 
   // dropOn resolves a drop at targetId (or at the very end, when
-  // targetId is null) to the two backlog neighbours -- among the tasks
-  // currently visible under this filter -- the drop landed between, and
-  // hands them to onReorder as afterId/beforeId. The store places the
-  // dragged tasks between whatever those two names resolve to in the
-  // *full*, unfiltered backlog, which is what makes a drag inside a
+  // targetId is null) to the two backlog neighbours -- among the
+  // orderable tasks currently visible under this filter -- the drop
+  // landed between, and hands them to onReorder as afterId/beforeId.
+  // The pinned rows above the list are not among them: they hold no
+  // backlog position of their own for anything to land beside. The store
+  // places the dragged tasks between whatever those two names resolve to
+  // in the *full*, unfiltered backlog, which is what makes a drag inside a
   // filtered view still land correctly relative to tasks the filter is
   // hiding: dropping at the very top of a filtered view has no
   // preceding job, so it goes just before the following one instead --
@@ -113,7 +109,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   const dropOn = (targetId) => {
     if (!dragIds) return;
     const dragging = new Set(dragIds);
-    const visible = topLevel.map((t) => t.id).filter((id) => !dragging.has(id));
+    const visible = orderable.map((t) => t.id).filter((id) => !dragging.has(id));
     const idx = targetId === null ? visible.length : visible.indexOf(targetId);
     onReorder(dragIds, idx > 0 ? visible[idx - 1] : null, idx < visible.length ? visible[idx] : null);
     setDragIds(null);
@@ -122,7 +118,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 
   const startDrag = (t) => {
     const ids = selected.has(t.id) && selected.size > 1 ? selected : new Set([t.id]);
-    setDragIds(topLevel.filter((x) => ids.has(x.id)).map((x) => x.id));
+    setDragIds(orderable.filter((x) => ids.has(x.id)).map((x) => x.id));
   };
 
   return (
@@ -161,7 +157,19 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
         </div>
       )}
       <ul className="task-list">
-        {topLevel.map((t) => (
+        {/* The pinned rows come first, always, and are neither draggable
+            nor drop targets -- there is nothing to land between up here.
+            reserveDragSpace holds the drag handle's column open all the
+            same, so a pinned row's checkbox, badge and title line up
+            with every draggable row below it instead of sitting a
+            handle's width to their left. */}
+        {pinned.map((t) => (
+          <li key={t.id}>
+            <TaskRow t={t} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
+              reserveDragSpace={reorderEnabled} />
+          </li>
+        ))}
+        {orderable.map((t) => (
           <li
             key={t.id}
             className={overId === t.id && dragIds && !dragIds.includes(t.id) ? "task-drop-target" : undefined}
@@ -177,25 +185,6 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
           >
             <TaskRow t={t} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
               draggable={reorderEnabled} dragging={dragIds?.includes(t.id) ?? false} />
-            {children.has(t.id) && (
-              <ul className="task-sublist">
-                {children.get(t.id).map((c) => (
-                  <li key={c.id}>
-                    {/* A stacked task has no backlog position of its own,
-                        but it is not stuck either: it sits inside the
-                        parent's draggable <li>, so grabbing it already
-                        starts that parent's drag and moves the whole
-                        stack. It gets a handle saying so, rather than a
-                        blank column that reads as a row you cannot move,
-                        and fades with the parent while that drag is in
-                        flight since it travels with it. */}
-                    <TaskRow t={c} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
-                      draggable={reorderEnabled} dragTitle={`Drag to reorder with ${t.id}`}
-                      dragging={dragIds?.includes(t.id) ?? false} />
-                  </li>
-                ))}
-              </ul>
-            )}
           </li>
         ))}
         {reorderEnabled && dragIds && (
@@ -206,7 +195,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
           />
         )}
       </ul>
-      {topLevel.length === 0 && (
+      {visibleIds.length === 0 && (
         <ListEmpty>
           {q
             ? "No tasks match your search."
@@ -227,22 +216,26 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // pane, again) just omits onToggleSelect/draggable and gets a plain row
 // with no checkbox or drag handle rather than a dead one.
 //
-// dragTitle names what grabbing the handle actually moves, for the row
-// whose answer is not "this task": a nested stacked task drags the
-// parent it is stacked on, since that is the row holding the backlog
-// position the whole stack travels by.
-export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, dragTitle }) {
+// reserveDragSpace is for the third case: a row that sits *inside* a
+// reorderable list and still has no handle -- a stacked task, pinned at
+// the head of the list rather than ordered by hand. Dropping the handle
+// outright would slide such a row's contents a handle's width to the
+// left of every draggable row under it; it keeps the handle's column,
+// empty, so the two line up.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, reserveDragSpace }) {
   const phase = completionPhase(t);
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
-      {draggable && (
+      {draggable ? (
         <DragIndicatorIcon
           className="task-drag-handle"
           fontSize="small"
-          titleAccess={dragTitle || "Drag to reorder"}
+          titleAccess="Drag to reorder"
           onClick={(e) => e.stopPropagation()}
         />
-      )}
+      ) : reserveDragSpace ? (
+        <span className="task-drag-spacer" aria-hidden="true" />
+      ) : null}
       {onToggleSelect && (
         <Checkbox
           size="small"
@@ -263,6 +256,20 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       <span className="task-title">{t.title}</span>
       <span className="chips">
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
+        {/* A stacked task no longer hangs under the task it repairs, so
+            the chip is what carries that provenance into the list: it
+            says the merge queue filed this row, and which task's pull
+            request it is fixing. */}
+        {t.stacked && (
+          <Chip
+            size="small"
+            className="chip-stacked"
+            title={t.generatedFrom
+              ? `filed automatically by the merge queue, to fix ${t.generatedFrom}'s pull request`
+              : "filed automatically by the merge queue"}
+            label="merge fix"
+          />
+        )}
         {t.configuration ? (
           <Chip size="small" className="chip-interactive" title="grain's own configuration agent" label="configuration" />
         ) : t.interactive ? (
