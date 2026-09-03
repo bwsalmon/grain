@@ -49,13 +49,22 @@ cd "$(dirname "$0")"
 # construction: there is no second version to keep in step, and a resync
 # moves both because they are the same files.
 #
-# The two build args are the ones kontur's CI publishes its "debian12"
+# The three build args are the ones kontur's CI publishes its "debian12"
 # variant with. A distro kernel, because docker and kind inside the guest
 # need overlayfs, cgroup v2, bridge netfilter and veth, which a kernel
-# built for cloud-hypervisor's own CI does not promise; and no console
+# built for cloud-hypervisor's own CI does not promise; no console
 # wrapper, because it runs every SSH session under a pty, which rewrites
 # newlines and merges stderr into stdout -- corrupting every file grain's
-# sandbox tools read back.
+# sandbox tools read back; and disk headroom, without which
+# guest-setup.sh below cannot install anything at all.
+#
+# That last one is the consequence of provisioning a booted guest rather
+# than a rootfs mid-build. kontur sizes the filesystem to what it packs
+# plus 20%, which was sized *after* this toolchain landed when
+# guest-setup.sh ran inside the image build. It runs after packing now,
+# so the 434MB it installs has to fit in headroom asked for up front:
+# without it the guest boots perfectly and apt fails with "You don't
+# have enough free space in /var/cache/apt/archives/".
 #
 # KONTUR_GUEST_BASE overrides it with an image of your own, published or
 # local, and skips the build.
@@ -85,6 +94,7 @@ if [ -z "$KONTUR_GUEST_BASE" ]; then
   DOCKER_BUILDKIT=1 docker build \
     --build-arg GUEST_KERNEL_PACKAGE=linux-image-amd64 \
     --build-arg GUEST_CONSOLE_WRAP=0 \
+    --build-arg GUEST_DISK_EXTRA_MB=2048 \
     -t "$KONTUR_GUEST_BASE" \
     ../../third_party/kontur
 fi
