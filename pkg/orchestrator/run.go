@@ -267,12 +267,12 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 // target reads no row at all and gets the deployment's own text, which
 // is the only layer that could apply to it.
 //
-// A store read that fails fails the dispatch, the same as the run's
-// conversation and attachments (RunDispatch reads both the same way, a
-// few lines above this one is called): these are all one broken store,
-// and running an agent with instructions the operator wrote but grain
-// could not read is worse than not running it -- silently, since nothing
-// in the prompt would say a layer was missing.
+// A store read that fails fails the dispatch, the same as the two reads
+// RunDispatch makes just before calling this -- the task's conversation
+// and its attachments. All three are the same broken store, and running
+// an agent with instructions somebody wrote but grain could not read is
+// worse than not running it, silently so: nothing in the prompt would
+// say a layer was missing.
 func resolvePromptExtension(ctx context.Context, store *model.Store, deployment string, task model.Task) (string, error) {
 	var repo string
 	if task.Target != nil {
@@ -942,7 +942,7 @@ func erroredCallSuffix(result *agent.Result) string {
 // BuildPrompt, which is where both are explained: nothing here reads
 // either, this being the one path that assembles a dispatch's prompt.
 //
-// promptExtension is the operator's own standing instructions for this
+// promptExtension is the standing instructions for this
 // run, already resolved across the three layers that can carry them
 // (resolvePromptExtension). It goes last, after the capability sections
 // and everything else: it is the one part of this prompt a human wrote
