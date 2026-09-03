@@ -26,7 +26,7 @@ func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T
 	}
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
 
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestSyncPullRequestsDoesNotFileASecondFixWhileOneIsInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestSyncPullRequestsEscalatesWhenTheFixTaskFinishesButThePrIsStillBroken(t 
 		t.Fatal(err)
 	}
 	pushBranch(t, sim.BareRepo, model.BranchName(task.ID))
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	pushBranch(t, sim.BareRepo, model.BranchName(head.ID))
-	headPR, err := orchestrator.EnsurePullRequest(client, head)
+	headPR, err := orchestrator.EnsurePullRequest(ctx, store, client, head, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +431,7 @@ func TestSyncPullRequestsOnlyActsOnTheQueueHeadNotLaterEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	pushBranch(t, sim.BareRepo, model.BranchName(second.ID))
-	secondPR, err := orchestrator.EnsurePullRequest(client, second)
+	secondPR, err := orchestrator.EnsurePullRequest(ctx, store, client, second, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +489,7 @@ func queuedTaskWithPullRequest(t *testing.T, ctx context.Context, store *model.S
 	}
 	branch := model.BranchName(task.ID)
 	pushBranch(t, sim.BareRepo, branch)
-	pr, err := orchestrator.EnsurePullRequest(client, task)
+	pr, err := orchestrator.EnsurePullRequest(ctx, store, client, task, baseTime)
 	if err != nil {
 		t.Fatal(err)
 	}

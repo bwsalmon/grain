@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 
@@ -92,43 +93,93 @@ func prepareCheckout(ctx context.Context, tools []mcp.Tool, remoteBase string, t
 	// next attempt continues, and re-rooting it on the base is exactly
 	// what would throw the first attempt's commits away.
 	//
-	// Its existence is checked first, and named when it fails. A base
-	// that is simply gone is the ordinary end of a branch's life -- it
-	// merged, and GitHub deleted it -- and a task can easily outlive one:
-	// New task prefills Base from the repo's last task
-	// (bwsalmon/agents#641), so a branch that merges between one task
-	// being filed and the next being dispatched leaves a task pointed at
-	// nothing. What git says about that on its own is "error: pathspec
-	// 'x' did not match any file(s) known to git", which names neither
-	// the base nor the repo it was looked for in, and reads like a
-	// corrupt checkout rather than a branch that no longer exists.
-	base := ""
+	// Its existence, though, is checked either way -- see baseCheck.
+	rootOnBase := ""
 	if task.Base != "" {
-		base = fmt.Sprintf(`if ! git rev-parse --verify --quiet 'refs/remotes/origin/%[1]s' >/dev/null; then
-    echo "base branch '%[1]s' does not exist on %[2]s -- it may have been merged and deleted; retarget this task at a branch that exists" >&2
-    exit 1
-  fi
-  git checkout --quiet '%[1]s'
-  `, task.Base, task.Target)
+		rootOnBase = fmt.Sprintf("git checkout --quiet '%s'\n  ", task.Base)
 	}
 	script := fmt.Sprintf(`set -e
 rm -rf '%[1]s'
 git clone --quiet '%[2]s' '%[1]s'
 cd '%[1]s'
-if git rev-parse --verify --quiet 'refs/remotes/origin/%[3]s' >/dev/null; then
+%[4]sif git rev-parse --verify --quiet 'refs/remotes/origin/%[3]s' >/dev/null; then
   git checkout --quiet -b '%[3]s' 'origin/%[3]s'
 else
-  %[4]sgit checkout --quiet -b '%[3]s'
-fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, base)
+  %[5]sgit checkout --quiet -b '%[3]s'
+fi`, CheckoutDir, CloneURL(remoteBase, *task.Target), branch, baseCheck(task, branch), rootOnBase)
 
 	run, ok := runCommandTool(tools)
 	if !ok {
 		return "", fmt.Errorf("orchestrator: slot's sandbox exposes no run_command tool to clone %s with", task.Target)
 	}
-	if result := run(ctx, map[string]any{"command": script}); result.IsError {
+	result := run(ctx, map[string]any{"command": script})
+	if result.IsError {
 		return "", fmt.Errorf("orchestrator: cloning %s into %s: %s", task.Target, CheckoutDir, strings.TrimSpace(result.Text))
 	}
+	// The survivable half of baseCheck: the run is going ahead on a branch
+	// that already exists, and the only record of what this found is
+	// whatever it printed, which nothing else reads. Said in the daemon's
+	// own journal so that the first place the missing base turns up is the
+	// start of the attempt rather than the pull request refused at the end
+	// of it. Only grain's own lines, never git's chatter: the marker is a
+	// prefix this package composed a few lines up.
+	for _, line := range strings.Split(result.Text, "\n") {
+		if said, ok := strings.CutPrefix(strings.TrimSpace(line), baseGoneMarker); ok {
+			log.Printf("orchestrator: task %s: %s", task.ID, strings.TrimSpace(said))
+		}
+	}
 	return CheckoutDir, nil
+}
+
+// baseGoneMarker prefixes what baseCheck prints when a task's base is not
+// on the remote, so prepareCheckout can pick its own words back out of a
+// command's output and log them (there is nowhere else for the surviving
+// case's diagnosis to go) without also logging git's.
+const baseGoneMarker = "grain:"
+
+// baseCheck is the shell that runs before either checkout arm and reports
+// a base branch that is not on the remote.
+//
+// It is checked on both arms, not only the one that uses it. A base that
+// is simply gone is the ordinary end of a branch's life -- it merged, and
+// GitHub deleted it -- and a task can easily outlive one: New task
+// prefills Base from the repo's last task (bwsalmon/agents#641), so a
+// branch that merges between one task being filed and the next being
+// dispatched leaves a task pointed at nothing. Checking only the arm that
+// checks the base out meant that from the second attempt onward -- once
+// the run's own branch was on the remote -- nothing looked at the base
+// again until GitHub refused the pull request at the very end, with a 422
+// nobody saw.
+//
+// What it does about it differs by arm, and that is the point:
+//
+//   - No branch on the remote yet: fatal. The base is what a fresh branch
+//     would be rooted on, no work exists to lose, and a human retargeting
+//     the task is cheap here and never gets cheaper. git's own answer
+//     ("error: pathspec 'x' did not match any file(s) known to git")
+//     names neither the base nor the repo it was looked for in and reads
+//     like a corrupt checkout, so the message says which branch and
+//     where.
+//   - The branch is already there: not fatal. The base is not used on
+//     this arm at all -- the branch's own history is what is continued --
+//     and failing here would strand commits that are already pushed:
+//     RunDispatch never reaches the agent, so runOne never salvages the
+//     branch, and the task that was one refused pull request away from
+//     finishing gets nothing at all instead. It says what it found and
+//     carries on; EnsurePullRequest retargets at the default branch when
+//     the run ends, and says so on the task.
+func baseCheck(task model.Task, branch string) string {
+	if task.Base == "" {
+		return ""
+	}
+	return fmt.Sprintf(`if ! git rev-parse --verify --quiet 'refs/remotes/origin/%[1]s' >/dev/null; then
+  echo "%[4]s base branch '%[1]s' does not exist on %[2]s -- it may have been merged and deleted; retarget this task at a branch that exists" >&2
+  if ! git rev-parse --verify --quiet 'refs/remotes/origin/%[3]s' >/dev/null; then
+    exit 1
+  fi
+  echo "%[4]s continuing '%[3]s', which is already on the remote; this task's pull request will open against the repository's default branch instead" >&2
+fi
+`, task.Base, task.Target, branch, baseGoneMarker)
 }
 
 // runCommandTool picks the run_command handler out of the tools a slot's
