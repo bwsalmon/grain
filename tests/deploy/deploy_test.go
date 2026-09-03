@@ -558,6 +558,43 @@ func TestTheSandboxContainerIsPulledAndNeverBuilt(t *testing.T) {
 	contains(t, code, "-disk-mode=overlay")
 }
 
+// Every sandbox guest gets a nameserver it can actually reach, and a
+// deployment can name a different one.
+//
+// The guest used to resolve through whatever /etc/resolv.conf the machine
+// that built the guest image happened to have, which the kontur base
+// inherited from debootstrap -- routinely an address that exists only in
+// that host's own network namespace and is unroutable from a VM on a tap.
+// Sandboxes came up with completely open IP egress and no working DNS at
+// all, and nothing noticed for a long time because the addresses a run
+// depends on (the git proxy, the UI) are literal IPs: the failure showed
+// up as `apt`/`npm`/`gcloud` timing out, which reads as a blocked
+// network. The resolver is konturctl's own setting now, defaulting to a
+// public one; this asserts grain leaves that default alone unless the
+// deployment named something, rather than hard-coding a resolver of its
+// own.
+func TestASandboxGuestGetsAResolverAndADeploymentCanChooseIt(t *testing.T) {
+	code := setupCode(t)
+	contains(t, code, "GRAIN_KONTUR_DNS=\"${GRAIN_KONTUR_DNS:-}\"")
+	contains(t, code, "-kontur-create-arg -dns -kontur-create-arg \"$GRAIN_KONTUR_DNS\"")
+
+	// Passed only when set: an empty -dns means "leave the guest's own
+	// /etc/resolv.conf alone" to konturctl, which is the opposite of
+	// what an unset deployment setting is asking for.
+	if !strings.Contains(code, "if [ -n \"$GRAIN_KONTUR_DNS\" ]; then") {
+		t.Error("setup.sh passes -dns unconditionally: an unset GRAIN_KONTUR_DNS would reach konturctl as the empty string, which means \"no nameserver at all\" rather than \"your default\"")
+	}
+
+	// The setting is only usable if it is documented where an operator
+	// reads the list of them.
+	contains(t, setupText(t), "GRAIN_KONTUR_DNS           nameserver")
+
+	// And the default it falls through to is the vendored kontur's,
+	// which has to be a resolver reachable from inside a guest rather
+	// than this host's own.
+	contains(t, read(t, "third_party", "kontur", "internal", "netshim", "config.go"), "DefaultDNS = \"8.8.8.8\"")
+}
+
 // setup.sh runs on a host with docker and systemd, and nothing else.
 //
 // It used to want git and jq as well, and installed both itself on any

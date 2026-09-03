@@ -6,10 +6,11 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 `main` and reaches here by a resync, not by being applied to this copy
 (see "Local patches" below).
 
-**This copy is no longer byte-for-byte upstream.** It carries exactly one
-local patch -- flat mode's default-route discovery, which every sandbox's
-egress depends on -- so a resync has to re-apply it until it lands
-upstream. "Local patches" at the bottom is the whole account.
+**This copy is no longer byte-for-byte upstream.** It carries two local
+patches -- flat mode's default-route discovery, which every sandbox's
+egress depends on, and a guest resolver, which every sandbox's DNS
+depends on -- so a resync has to re-apply both until they land upstream.
+"Local patches" at the bottom is the whole account.
 
 This snapshot is kontur's `main` at
 `dc9230b44c7a582b25d6e73992c6495ef0b532d3` (2026-09-03), the merge of
@@ -255,8 +256,51 @@ safety- or correctness-critical should be confirmed against a live
 
 ## Local patches
 
-One, and it belongs upstream: **flat mode's default-route discovery**, in
-`internal/netshim/flat.go` (`DiscoverIdentity`, `defaultGateway`,
+Two, and both belong upstream.
+
+### A guest with a nameserver it can reach
+
+`deploy/guest-image/overlay-common/usr/local/libexec/kontur-configure-dns`
+and its two service units, the `GUEST_DNS` build arg and the
+`NETSHIM_DNS`/`-dns` plumbing behind it (`internal/netshim/config.go`,
+`flat.go`, `internal/staticpod`, `internal/dockervm`, `internal/cli`),
+plus their tests and the two READMEs.
+
+*What breaks without it.* Every guest resolved through whatever
+`/etc/resolv.conf` the machine that built the image happened to have --
+`debootstrap` copies the build host's in, and a build host's resolver is
+routinely an address that only exists in its own network namespace (on
+the Azure VMs GitHub's runners are, the host-only wireserver
+`168.63.129.16`; on a docker build, `127.0.0.11`). From a guest on a tap
+it is simply unroutable, so a sandbox came up with completely open IP
+egress and no DNS at all, and every name lookup hung until it timed out.
+Nothing kontur or grain does noticed: `kontur exec` reaches a guest by
+address, the git proxy and the UI are literal IPs, and the failure
+surfaced only inside a dispatched task, as `apt`/`npm`/`gcloud`/`curl`
+timing out -- which reads as a blocked network rather than as a missing
+resolver. It also meant the image was not reproducible: whichever machine
+built it contributed its own unreachable resolver to every sandbox booted
+from it.
+
+*How it was confirmed.* On a live grain sandbox guest (grain/task-195,
+grain/task-200): `getent hosts github.com` returned nothing and
+`curl https://github.com` timed out, while `8.8.8.8:53` and public `:443`
+addresses connected immediately;
+`sudo sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'` restored
+resolution on the spot, after which HTTPS to GitHub and to the Google
+APIs both worked. `pkg/orchestrator`'s real-VM suite
+(`assertGuestResolvesNames`) now asserts both halves against a guest built
+from this tree.
+
+*Getting rid of it.* Nothing here is grain-specific -- the resolver is a
+setting with a public default, which is what any kontur guest wants -- so
+this should land on `bwsalmon/kontur`'s `main` and come back by a resync.
+Re-apply it on any resync that predates that, and check
+`internal/netshim/config.go` and `deploy/guest-image/` after every one.
+
+### Flat mode's default-route discovery
+
+In `internal/netshim/flat.go` (`DiscoverIdentity`, `defaultGateway`,
 `isDefaultDst`) plus its coverage in `flat_test.go`.
 
 *What breaks without it.* A flat-mode guest takes over the identity the
@@ -288,8 +332,8 @@ passes on the new one.
 
 *Getting rid of it.* This is upstream's bug, not something specific to
 how grain drives kontur, so it should land on `bwsalmon/kontur`'s `main`
-and come back here by a resync -- at which point this section goes back
-to saying "None". The patch is deliberately shaped to make that easy: two
+and come back here by a resync -- at which point this section loses an
+entry. The patch is deliberately shaped to make that easy: two
 small unexported helpers, one doc comment and their tests, no
 grain-specific behaviour.
 Until then, re-apply it on any resync that predates the upstream fix, and
