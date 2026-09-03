@@ -224,16 +224,26 @@ apt-get install -y --no-install-recommends google-cloud-cli terraform
 # fix. What `make test` needs is exactly this: the Go the module asks
 # for, the Node CI pins, and every dependency of both already on disk.
 #
-# The caches are the load-bearing half, not an optimization. A dispatched
-# sandbox has no route off the host except the git proxy -- no DNS, no
-# proxy.golang.org, no registry.npmjs.org -- so a toolchain with a cold
-# cache cannot build anything at all. They are warmed from this repo's
-# own go.mod/go.sum and ui/package-lock.json, carried in as
+# The caches were written when they were the load-bearing half rather
+# than an optimization: a dispatched sandbox reached nothing but the git
+# proxy, so a toolchain with a cold cache could not build anything at
+# all. That was a bug, not the design -- flat mode handed the guest an
+# "ip=" parameter with an empty gateway field, so it booted with no
+# default route, and docs/design.md's "Sandbox egress is open by default"
+# had quietly stopped being true. The fix is in the runtime image rather
+# than in this one (third_party/kontur/VENDORED.md, "Local patches"):
+# nothing here changed, and a guest booted by a kontur image carrying
+# that fix has real egress again, so a cold cache is survivable.
+#
+# They stay, on their own merits: an image that already holds every
+# dependency does not re-fetch the same module graph on every dispatch,
+# and it keeps working under an egress policy that narrows again
+# (docs/design.md's egress_policy(allowlist)). They are warmed from this
+# repo's own go.mod/go.sum and ui/package-lock.json, carried in as
 # GRAIN_DEP_MANIFESTS, so what lands here is what the tree at build time
-# actually resolves to rather than whatever is newest. A branch that adds
-# a dependency the published image predates still cannot fetch it; that
-# costs that one branch its `go test`, where a cold cache costs every
-# branch its `go test`.
+# actually resolves to rather than whatever is newest; a branch that adds
+# a dependency the published image predates fetches that one dependency
+# rather than the whole graph.
 #
 # Deliberately *not* here: Playwright's browsers. `npx playwright install`
 # is a ~300MB download of Chromium/Firefox/WebKit per image, and the job
@@ -281,10 +291,12 @@ ln -sf /usr/local/lib/nodejs/bin/npx /usr/local/bin/npx
 # @playwright/test's own install script downloads three browsers unless
 # PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD is set, and ui/'s devDependencies
 # include it -- so a plain `npm ci` in ui/ (which is what `make frontend`
-# runs, and so what `make test` runs) would try to fetch ~300MB from a
-# guest with no route to fetch it over, and fail the install outright.
-# Not for want of a cache: npm's cache holds packages, and those
-# browsers are not a package.
+# runs, and so what `make test` runs) would fetch ~300MB of browsers on
+# every install, for a suite (`make test-e2e`) a sandbox does not run.
+# Not something a cache spares it: npm's cache holds packages, and those
+# browsers are not a package. It used to fail the install outright rather
+# than merely cost time, back when the guest could not reach that CDN at
+# all -- see "The Go and Node toolchains" above for why it now can.
 #
 # The default is set with ${VAR-1} rather than ${VAR:-1} so that setting
 # the variable to the empty string is a way back to the normal
@@ -293,11 +305,11 @@ ln -sf /usr/local/lib/nodejs/bin/npx /usr/local/bin/npx
 cat > /usr/local/bin/npm <<'EOF'
 #!/bin/sh
 # grain's sandbox guest (scripts/kontur/guest-setup.sh) wraps npm to
-# default PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD on: this guest has no route to
-# the CDN Playwright's install script downloads browsers from, and
-# without this every `npm ci` in ui/ fails on that download rather than
-# installing from npm's own warm cache. Run `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= npm ...`
-# on a guest that does have a network to get the browsers anyway.
+# default PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD on: `make test-e2e` is not a
+# suite a sandbox runs, and without this every `npm ci` in ui/ spends
+# ~300MB fetching browsers for it instead of installing from npm's own
+# warm cache. Run `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= npm ...` to get the
+# browsers anyway.
 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="${PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD-1}"
 exec /usr/local/lib/nodejs/bin/npm "$@"
 EOF
@@ -604,10 +616,9 @@ Added on top of kontur's own guest image:
   per-task GCP key at dispatch time (nothing here bakes the key itself)
 - the Go toolchain go.mod asks for and the Node major CI pins, plus a
   module cache and an npm cache already holding every dependency
-  go.sum/ui/package-lock.json name -- so `make test` runs on a guest
-  with no route to proxy.golang.org or registry.npmjs.org. A branch
-  that adds a dependency this image predates is the one case that still
-  needs a network.
+  go.sum/ui/package-lock.json name -- so `make test` runs without
+  re-fetching the whole module graph, and still runs at all if this
+  guest's egress is ever narrowed again.
 
 Not baked in, on purpose:
 - any credential -- git config/credentials are set per-dispatch

@@ -37,6 +37,12 @@
 # names, in order, and reports the first one that fails, with the raw
 # evidence underneath, so the next step is a fact rather than a guess.
 #
+# The last hop goes the other way: whether the guest can reach anything
+# *out*. That one is here because it is the only failure in this file
+# that hides behind a healthy VM -- a guest with no default route passes
+# every check above it and still leaves its run with no network (see
+# "Hop 7" below, and third_party/kontur/VENDORED.md's "Local patches").
+#
 # Everything here is read-only: it inspects state, containers, the netns
 # and the guest's console log, and opens TCP connections (and, for the
 # final check, execs into the VM's own container the same way grain does).
@@ -387,12 +393,48 @@ diagnose() {
     key_env=(-e "KONTUR_EXEC_KEY=$SSH_KEY")
   fi
   local out
+  local guest_reachable=0
   if out="$(docker exec -e "KONTUR_EXEC_USER=$SSH_USER" "${key_env[@]}" \
       "$vm_c" kontur exec -- whoami 2>&1)"; then
     ok "docker exec $vm_c kontur exec -- whoami succeeds ($out) -- this VM is fully reachable the way grain reaches it"
+    guest_reachable=1
   else
     bad "docker exec $vm_c kontur exec -- whoami failed"
     sed 's/^/           /' <<<"$out"
+  fi
+
+  # ---- Hop 7: the guest's route *out* -----------------------------------
+  # Every hop above is about reaching the guest. This one is the opposite
+  # direction, and it is the one that fails silently: a guest with no
+  # default route boots, answers sshd, and passes every check above, while
+  # a run inside it cannot reach anything but its own subnet -- no package
+  # registry, no GitHub, no apt mirror. (The git proxy still works, since
+  # it lives on the gateway address itself, which is directly connected --
+  # which is exactly why a dispatch looks healthy.)
+  #
+  # In flat mode the guest inherits the namespace's own default route, via
+  # the gateway field of the ip= parameter netshim derives (its
+  # DiscoverIdentity/FlatGuestConfig); in NAT mode konturctl fills that
+  # field in from the bridge CIDR. Either way the guest ends up with a
+  # default route or it has no egress at all, so that is what this reads.
+  if [ "$guest_reachable" = "1" ]; then
+    local guest_route netns_gw
+    guest_route="$(docker exec -e "KONTUR_EXEC_USER=$SSH_USER" "${key_env[@]}" \
+      "$vm_c" kontur exec -- ip -4 route show default 2>/dev/null | tr -d '\r')"
+    netns_gw="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$netns_c" 2>/dev/null)"
+    if [ -z "$guest_route" ]; then
+      bad "the guest has no default route -- it can reach its own subnet and nothing else"
+      info "its ip= boot parameter carries an empty gateway field; check it with:"
+      info "  docker logs $vm_c 2>&1 | grep -o 'ip=[^ ]*'"
+      info "a flat-mode gateway comes from netshim's DiscoverIdentity reading this"
+      info "namespace's own default route (${netns_gw:-none reported by docker})."
+    else
+      ok "the guest has a default route: $guest_route"
+      if [ "$net_mode" = "flat" ] && [ -n "$netns_gw" ] && ! printf '%s' "$guest_route" | grep -q "via $netns_gw"; then
+        warn "it does not name $netns_gw, the gateway docker gave this VM's namespace --"
+        warn "expected in flat mode, where the guest takes that namespace's identity over"
+      fi
+    fi
   fi
 
   # ---- Guest console: the evidence for every hop-4 failure --------------

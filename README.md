@@ -1531,6 +1531,60 @@ docker, `/dev/kvm` or the guest-image build prerequisites are missing --
 so it never runs on a hosted runner, and does run wherever kontur's
 prerequisites genuinely exist.
 
+## And the route out of one
+
+The other direction had been broken for as long as flat mode has been the
+default, and nothing said so. `docs/design.md`'s "Sandbox egress is open
+by default" was simply not true of any VM this repo booted: a sandbox
+guest could reach its own subnet -- the git proxy on the docker bridge
+gateway, which is why dispatch worked at all -- and nothing beyond it. No
+`proxy.golang.org`, no `registry.npmjs.org`, no GitHub, no apt mirror.
+Enough of the guest image is built around that (`scripts/kontur`'s warm
+module and npm caches, the `npm` wrapper that skips Playwright's
+browsers) that the missing network read as a design constraint rather
+than as a fault.
+
+It was a fault, in one line of `third_party/kontur`. A flat-mode guest
+takes over the identity the container runtime assigned its namespace, and
+`netshim.DiscoverIdentity` reads that identity back off the external
+interface: address, MAC, MTU -- and the namespace's default route, which
+reaches the guest as the gateway field of the `ip=` kernel parameter
+`FlatGuestConfig` derives. It looked for that route by testing
+`r.Dst == nil`, which a route read back off the kernel never satisfies:
+the kernel omits `RTA_DST` when the prefix length is zero, and
+`vishvananda/netlink` fills the absence back in the way iproute2 does,
+synthesizing `0.0.0.0/0`. So the gateway was always nil, the parameter
+always read `ip=<addr>:::<mask>::eth0:off`, and klibc's `ipconfig`
+configured an address with no default route behind it.
+
+Every other part of the takeover fails loudly -- a guest with the wrong
+address or MAC never becomes reachable, and its dispatch fails on that --
+which is exactly why this one survived: it fails silently. The VM boots,
+`kontur exec` reaches it over the control link, every tool call succeeds,
+and only the network is gone. Confirmed on a live sandbox guest, whose
+`/proc/cmdline` carried the empty gateway field and whose routing table
+stopped at its own `/16`; re-running the guest's own `ipconfig` with the
+gateway filled in installed the default route, after which DNS and HTTPS
+both worked from inside the guest.
+
+The fix is `netshim`'s, and it is a local patch to the vendored copy
+rather than the resync this repo prefers -- see
+`third_party/kontur/VENDORED.md`'s "Local patches" for that trade and for
+how it goes away. What is grain's own is the assertion that stops it
+recurring: `assertGuestHasEgress`, in
+`TestKonturSandboxesAgainstARealDockerBackedVM`, compares the guest's own
+default route against the gateway docker reports for that VM's network
+namespace -- so the claim under test is "the guest took over the
+namespace's route out", not "the runner happened to use 172.17.0.1". It
+runs in the `real-vm` job, on every pull request and every push to
+`main`.
+
+NAT mode never had this: there `konturctl` fills the gateway in itself,
+from the bridge CIDR it already knows. Neither mode gives the guest a
+resolver of its own -- `ip=`'s DNS fields go unused, and what a guest
+resolves with is whatever `/etc/resolv.conf` its image was built with,
+which is worth revisiting separately.
+
 ## The UI
 
 `pkg/ui`, served by `cmd/grain`'s "daemon" subcommand (bwsalmon/agents#237,

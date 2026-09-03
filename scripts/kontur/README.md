@@ -378,18 +378,24 @@ which is the whole thing the queue exists to avoid. So the image carries:
   -- needs 20.19 or newer. `tests/deploy` asserts the two files keep
   naming the same major.
 - **A warm module cache and a warm npm cache**, holding what `go.sum` and
-  `ui/package-lock.json` resolve to at build time. This is the
-  load-bearing half rather than an optimization: a dispatched sandbox has
-  no route off the host except the git proxy, so a toolchain that arrives
-  with a cold cache cannot build anything at all. `build-guest.sh`
+  `ui/package-lock.json` resolve to at build time. `build-guest.sh`
   carries the four manifests in (gzipped and base64'd -- see its own
   comment on why) and `guest-setup.sh` warms both caches into
   `/home/debian`'s own defaults, so nothing has to point either tool at
   them and both stay writable by the account that uses them.
 
-What still needs a network, and cannot be fixed here: a branch that adds
-a dependency the published image predates. That costs *that* branch its
-`go test`; a cold cache would cost every branch its `go test`.
+These caches were written as the load-bearing half rather than an
+optimization, on the premise that a dispatched sandbox reached nothing
+but the git proxy and a cold cache therefore could not build anything at
+all. That premise was a bug: flat mode derived the guest's `ip=`
+parameter with an empty gateway field, so every sandbox booted without a
+default route and lost the open egress `docs/design.md` says it has. The
+fix is in the runtime image, not this one
+(`third_party/kontur/VENDORED.md`, "Local patches") -- nothing in this
+directory changed. With it, a cold cache is survivable, and the caches
+earn their place the ordinary way: not re-fetching the same module graph
+on every dispatch, and still working if a deployment narrows egress again
+(`egress_policy(allowlist)`).
 
 **Playwright's browsers are deliberately not here.** `npx playwright
 install` is a ~300MB download per image, and the suite it feeds
@@ -397,10 +403,11 @@ install` is a ~300MB download per image, and the suite it feeds
 keep tripping over. But `@playwright/test` is in `ui/`'s
 devDependencies, and its install script fetches those browsers -- so a
 plain `npm ci` in `ui/`, which is what `make frontend` and therefore
-`make test` runs, would fail on a download this guest cannot make. The
-image wraps `npm` to default `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` on for
-exactly that, with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= npm ...` as the way
-back for a guest that does have a network.
+`make test` runs, would spend that download on a suite this guest does
+not run (and, before egress worked at all, would fail outright on it).
+The image wraps `npm` to default `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` on
+for exactly that, with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= npm ...` as the
+way back to fetching them.
 
 The cost is disk: the toolchains and their caches add roughly a gigabyte
 to `disk.img`, which is sized from the rootfs (`guest-image`'s
