@@ -952,6 +952,31 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks
 	}
 }
 
+// fixTaskTitle names a fix after the task it repairs -- "Resolve: Add
+// pagination to the tasks API" -- where it used to be named after the
+// pull request that went red ("🤖 grain: fix acme/widgets#104").
+// The queue files one of these per broken head, and a list of them named
+// by pull request number says only which numbers are broken, not what any
+// of them is about; the source task's title is what a human scanning the
+// queue already recognises. It is the fix's own pull request title too,
+// since EnsurePullRequest takes Title verbatim, so it is read in the
+// place a reviewer sees it as well. Nothing is lost by dropping the ref:
+// the pull request, its URL and why it is broken all open the body, and
+// LinkProposedBy is the machine-readable form of "after the source task".
+//
+// Fix tasks do not nest -- syncEntry files one only for a head that is
+// not itself a fix -- so this cannot compound into "Resolve: Resolve:
+// ...". The ref stays as the fallback for the one thing a title cannot
+// cover: a task filed without one, which would otherwise leave a fix
+// called just "Resolve:".
+func fixTaskTitle(task model.Task, ref model.PullRequestRef) string {
+	title := strings.TrimSpace(task.Title)
+	if title == "" {
+		title = ref.String()
+	}
+	return "Resolve: " + title
+}
+
 // fileFixTask is bwsalmon/agents#283's replacement for core.py's
 // _suggest_fix: where that filed a new issue labelled needs_approval_label
 // and left it for a human to apply trigger_label (or comment /lgtm)
@@ -990,7 +1015,7 @@ func fileFixTask(ctx context.Context, store *model.Store,
 	if err != nil {
 		return fmt.Errorf("orchestrator: allocating an id for a fix task for %s: %w", task.ID, err)
 	}
-	title := fmt.Sprintf("\U0001F916 grain: fix %s", ref)
+	title := fixTaskTitle(task, ref)
 	body := fmt.Sprintf(
 		"Task %s opened %s (%s), but %s.\n\n"+
 			"This is an automatic fix, filed by the merge queue: it works from "+
