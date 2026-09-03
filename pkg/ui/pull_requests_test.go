@@ -51,7 +51,7 @@ func pullRequestClient(t *testing.T, openers ui.PullRequests) (*ui.Client, conte
 	client := ui.NewClient(ui.Config{
 		Actor:         ui.DefaultActor("alice"),
 		DefaultTarget: &repo,
-		Capabilities:  ui.DefaultCapabilities(),
+		Capabilities:  ui.OfferedCapabilities(),
 		PullRequests:  openers,
 	}, store)
 	client.Now = func() time.Time { return time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC) }

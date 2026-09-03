@@ -41,34 +41,37 @@ type PullRequestReport struct {
 // this server's run belongs to, and reports its current checks.
 //
 // It is an interface here, and a narrow one, because this package must
-// not know how that actually happens: an mcpserver process holds no
-// GitHub credential (pkg/gitproxy's whole shape is that grain reaches
-// GitHub, never the agent), so the real implementation -- cmd/grain/
-// mcpserver.go's own -- asks the running daemon over its REST API and
-// lets the daemon decide, from the task's own record, which repo and
-// which branch that means. Nothing an agent can put in a tool call
-// changes any of it: this call takes no arguments at all.
+// not know how that actually happens. pull_request_status, next door in
+// pullrequest_tools.go, reads GitHub from the mcpserver process itself --
+// a read, inside a scope fixed at process start. Opening one is a write,
+// and which branch is opened against which base has always been grain's
+// decision, so the real implementation -- cmd/grain/mcpserver.go's own --
+// asks the running daemon over its REST API and lets the daemon read the
+// repo and the branch out of the task's own record. Nothing an agent can
+// put in a tool call changes any of it: this call takes no arguments at
+// all.
 type PullRequestOpener interface {
 	OpenPullRequest(ctx context.Context) (PullRequestReport, error)
 }
 
 // NewOpenPullRequestTools returns the one tool a run gets when its
-// dispatch can open its own pull request: open_pull_request. It is
-// separate from NewPullRequestTools next door, which registers the
-// read-only pull_request_status: the two answer different questions
-// (what CI says about a branch, versus open the pull request now and
-// tell me), reach GitHub by different routes, and are registered on
-// different conditions.
+// dispatch can open its own pull request: open_pull_request.
 //
 // Unlike NewMockTools' four escape hatches, this one is not deferred
 // until the run ends and then applied by the controller -- it happens
 // while the agent waits, because the entire point is what comes back.
 // grain has always opened a pull request for a run's branch, but only
-// after the run had already exited, which meant the agent never saw its
-// own CI: a change that compiles locally and fails the repo's own build
-// was a fact nobody learned until a human read the pull request. A run
-// that opens it early can read the checks, fix what they say, push again,
-// and call this tool again to see the next round.
+// after the run had already exited, which meant the agent never saw what
+// the pull request's own checks said: a change that compiles locally and
+// fails the repo's own build was a fact nobody learned until a human read
+// the pull request. A run that opens it early can read the checks, fix
+// what they say, push again, and call this tool again to see the next
+// round.
+//
+// pull_request_status (NewPullRequestTools) answers the neighbouring
+// question -- what CI says about a pushed branch -- without opening
+// anything, and a run that only wants to watch its own build wants that
+// one. This is for a run that has decided the work is done.
 //
 // opener nil returns the tool anyway, refusing every call: that is what
 // lets a caller enumerate the tool names this package registers (each
@@ -84,9 +87,11 @@ func openPullRequestTool(opener PullRequestOpener) Tool {
 		Name: "open_pull_request",
 		Description: "Open the pull request for the branch you were told to push, " +
 			"without ending your turn -- and report the state of its CI checks. " +
-			"Use it once you have pushed a change you believe is finished: it is " +
-			"the only way to see what the repo's own checks make of your branch " +
-			"while you still have turns left to fix them. This is the same pull " +
+			"Use it once you have pushed a change you believe is finished, so " +
+			"you can see what the repo's own checks make of the pull request " +
+			"while you still have turns left to fix them. (To read CI for your " +
+			"branch without opening anything, use pull_request_status instead.) " +
+			"This is the same pull " +
 			"request grain opens for you when your run ends, so calling it does " +
 			"not commit you to anything and not calling it loses you nothing but " +
 			"the checks. Call it again after pushing more commits, or after " +
