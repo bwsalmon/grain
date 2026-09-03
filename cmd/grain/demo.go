@@ -224,7 +224,7 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	fixTask := model.Task{
 		ID:     fixID,
 		Intent: model.IntentImplement,
-		Title:  "\U0001F916 grain: fix acme/widgets#104",
+		Title:  "Resolve: Add pagination to the tasks API",
 		Body:   "Task " + stacked.ID + " opened acme/widgets#104, but it has conflicts with `main`.",
 		Origin: model.Origin{
 			Attribution: model.Attribution{Actor: queue},
