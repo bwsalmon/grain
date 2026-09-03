@@ -133,6 +133,17 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 RunCycle runs the two halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
                 pipeline" below.
+pkg/metrics/    what the deployment actually delivers: tasks completed per
+                day (throughput) and where a task's wall-clock time goes
+                (latency), computed from rows that already exist -- filed,
+                approved, dispatched, agent-started, finished, completed --
+                with nothing stored, nothing counted on a hot path and no
+                way for a number to disagree with the task it describes.
+                It holds no state and opens no database: pkg/model reads
+                the rows (Store.TaskTimings/RunTimings), this decides what
+                they mean, pkg/ui serves it as GET /api/metrics and
+                `grain metrics` prints it. See "Measuring throughput and
+                latency" below
 tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
@@ -2737,3 +2748,110 @@ smaller idea than a pool of assignments, and does not bring slots back.
 The sandbox-health pane changed meaning with everything else: it reports
 live sandboxes, so an idle deployment shows nothing rather than a table
 of idle slots.
+
+## Measuring throughput and latency
+
+The previous section ends with "worth measuring before reaching for
+either," and grain could not. Every moment needed to answer *how much is
+this deployment getting done, and where does a task's day actually go?*
+has been in the store since tasks became rows — filed, approved,
+dispatched, finished, completed, closed — and nothing ever read them
+together. `pkg/metrics` does, `GET /api/metrics` serves it, and `grain
+metrics` prints it:
+
+```console
+$ grain metrics -window 7d
+window: 2026-08-27T00:00:00Z -> 2026-09-03T00:00:00Z (168h0m0s)
+
+throughput
+  tasks filed                  42  (6.0/day)
+  tasks completed              38  (5.4/day)
+  tasks closed                  3
+  attempts started             61
+  attempts finished            60  (8.6/day)
+  attempt outcomes         succeeded=45 failed=14 cancelled=1
+  attempts per completion    1.58
+
+capacity
+  mean concurrent runs       0.42 of 3  (14% of the limit)
+  live now                      2
+
+latency (stages that ended inside the window)
+  stage                                        n        p50        p90        max
+  filed -> approved                           12      4m12s     1h2m0s    3h10m0s
+  approved -> attempt started                 38        31s      2m10s       9m0s
+  attempt started -> agent's first turn       57      3m20s      6m41s      11m2s
+  agent's first turn -> attempt finished      57      9m11s     21m30s      48m0s
+  one whole attempt                           60     12m48s     26m10s      52m0s
+  attempt finished -> next attempt started     8       2m0s       4m0s       6m0s
+  first attempt started -> completed          38      9m10s      22m0s      48m0s
+  filed -> completed                          38      12m0s      50m0s    3h10m0s
+
+backlog (right now, not over the window)
+  awaiting_reply=1  proposed=1  queued=4  running=2
+  oldest queued: task 51, waiting 2h14m0s
+```
+
+**Nothing is stored, and nothing is counted on a hot path.** A report is
+derived from the rows every time it is asked for, the same way
+`task_state` is a view rather than a column
+(`docs/data-model.md`: "anything derivable is derived, never stored").
+There is no counter to increment, nothing to reset, and no way for a
+metric to drift from the task it describes — retry a task, close it,
+edit it, and every report from then on says what the record now says.
+The cost is a full scan of `task` and `task_run` per report, which is
+what a single-operator deployment can afford and what a much larger one
+would have to revisit.
+
+**One moment had to start being recorded: `task_run.agent_started_at`.**
+A run's `started_at` is stamped by dispatch, before any sandbox exists
+(`Store.SetRunSandbox`), so `finished_at - started_at` is a VM boot, a
+clone, a capability mint *and* the agent's own work, fused into one
+number that cannot answer the question the previous section asks.
+`RunDispatch` now records the moment it hands the run to
+`agent.Framework.Run`, which splits that in two: **attempt started ->
+agent's first turn** is the setup a golden image or a warm spare would
+cut, and **agent's first turn -> attempt finished** is what the agent
+framework spent, which grain does not control. Writing it can never cost
+a run — a failure there is logged and the dispatch proceeds — and it is a
+nullable column added by an ordinary `ensure*Column` migration, so an
+existing store keeps working and its older runs simply report no split.
+
+**A window bounds measurements, not rows.** A sample belongs to a window
+when the moment it *ended* falls inside it, so a task filed last month
+and completed this morning contributes its whole lead time. That makes
+the report answer "what did this deployment deliver during these dates"
+rather than "what happened entirely within them," which nothing ever
+asks.
+
+**A missing moment is skipped, never guessed**, which is why every stage
+carries its own `n` and two stages of one report legitimately disagree
+about how many samples they have. A run that failed in setup never
+reached an agent, so it has no setup or agent sample — but it was still
+an attempt, and still took time, so it is in `one whole attempt`. A task
+a human filed directly was approved in the instant it was filed, so it is
+left out of `filed -> approved` rather than counted as a zero that would
+drag the percentile of the proposals that really did wait.
+
+**The stages do not sum to the lead time,** and are not meant to. A task
+can sit in `awaiting_reply` for a day, back off between attempts, or wait
+on a dependency, and none of those is a stage anything records the start
+of. Each stage is measured on its own; the lead time is what somebody who
+filed a task actually waited, and the rest are answers to why it is what
+it is.
+
+**Throughput alone cannot say whether a deployment is fast enough,** so
+the report carries the two gauges it has to be read against: the backlog
+(by `task_state`'s own vocabulary, since "not finished" covers queued,
+blocked, awaiting a reply and failed, which are four different problems —
+and counting only the unfinished states, since every task ever completed
+is a census rather than a queue), and occupancy as a fraction of
+`max_concurrent`. Idle capacity next to a
+deep queue is a scheduling problem; saturated capacity next to a deep
+queue is a capacity one. They are the first two numbers any optimization
+here should have to move.
+
+What this does not have yet is a pane in the UI — the report is API and
+CLI only for now — and no history of its own: because nothing is stored,
+a report can only ever be computed from rows that still exist, so a task
+deleted from the store takes its own past contribution with it.

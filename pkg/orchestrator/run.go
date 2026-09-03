@@ -501,6 +501,22 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if task.Target != nil {
 			repo = task.Target.String()
 		}
+
+		// Setup is over and the agent's own time starts here -- the one
+		// moment inside a run nothing else records, and the line
+		// pkg/metrics splits SandboxSetup from AgentWork at. Everything
+		// above (a sandbox built, a repo cloned, capabilities minted and
+		// placed) is on the near side of it; everything framework.Run
+		// does is on the far side.
+		//
+		// A failure to record it is logged and no more. The measurement
+		// is worth taking on every run, and worth nothing at all if
+		// taking it can cost one: a task must not fail because a
+		// bookkeeping write did (Store.SetRunAgentStarted).
+		if err := store.SetRunAgentStarted(ctx, d.RunID, cfg.now()); err != nil {
+			log.Printf("orchestrator: run %s: recording when its agent started: %v", d.RunID, err)
+		}
+
 		result, runErr = framework.Run(agentCtx, agent.RunConfig{
 			Prompt: prompt, Tools: tools, SandboxRoot: sandboxRoot, KonturVM: konturVM,
 			Repo: repo, Branch: model.BranchName(task.ID),

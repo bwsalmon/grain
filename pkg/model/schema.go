@@ -152,17 +152,37 @@ var Tables = []string{
 	// after-the-fact shape SetRunOutcome already uses -- and stays NULL
 	// for a run still in flight, or one whose framework never populated
 	// agent.Result.Transcript at all.
+	//
+	// agent_started_at is the one moment inside a run that nothing else
+	// records: when its agent actually got its first turn. started_at is
+	// stamped by dispatch, before any sandbox exists (Store.SetRunSandbox's
+	// own doc comment), so finished_at - started_at is setup *and* agent
+	// work together -- a VM boot, a checkout and a capability mint on one
+	// side, whatever the agent then did on the other. Splitting the two is
+	// the whole point: README's own "What this costs" says a VM boot moved
+	// onto the critical path of every task and is "worth measuring before
+	// reaching for" a golden image or a warm spare, and this column is what
+	// makes that a query (pkg/metrics' SetupLatency vs AgentLatency).
+	//
+	// Written once, by SetRunAgentStarted, immediately before
+	// orchestrator.RunDispatch hands the run to agent.Framework.Run -- the
+	// same after-the-fact shape SetRunOutcome and SetRunTranscript already
+	// use. It stays NULL for a run still in setup, and for one that never
+	// reached its agent at all (outcome "setup-failed", a checkout that
+	// would not clone), which is exactly the distinction a reader wants:
+	// no agent latency to report, because no agent ran.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_run`" + ` (
-  ` + "`id`" + `          TEXT     NOT NULL,
-  ` + "`task_id`" + `     TEXT     NOT NULL,
-  ` + "`sandbox`" + `     TEXT     NOT NULL,
-  ` + "`unit`" + `        TEXT     NULL,
-  ` + "`attempt`" + `     INTEGER  NOT NULL,
-  ` + "`started_at`" + `  DATETIME NOT NULL,
-  ` + "`finished_at`" + ` DATETIME NULL,
-  ` + "`outcome`" + `     TEXT     NULL,
-  ` + "`detail`" + `      TEXT     NULL,
-  ` + "`transcript`" + `  TEXT     NULL,
+  ` + "`id`" + `               TEXT     NOT NULL,
+  ` + "`task_id`" + `          TEXT     NOT NULL,
+  ` + "`sandbox`" + `          TEXT     NOT NULL,
+  ` + "`unit`" + `             TEXT     NULL,
+  ` + "`attempt`" + `          INTEGER  NOT NULL,
+  ` + "`started_at`" + `       DATETIME NOT NULL,
+  ` + "`agent_started_at`" + ` DATETIME NULL,
+  ` + "`finished_at`" + `      DATETIME NULL,
+  ` + "`outcome`" + `          TEXT     NULL,
+  ` + "`detail`" + `           TEXT     NULL,
+  ` + "`transcript`" + `       TEXT     NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
