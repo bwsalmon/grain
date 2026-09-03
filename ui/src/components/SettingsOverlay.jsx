@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import AgentKeysSection from "./AgentKeysSection.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
@@ -37,6 +37,26 @@ const TABS = [
   { id: "secrets", label: "Secrets" },
   { id: "upgrade", label: "Upgrade" },
 ];
+
+// Saving a setting here changes what the deployment does straight away:
+// the daemon re-reads its stored configuration once per reconcile tick
+// and applies whatever changed (cmd/grain/daemon.go's liveConfig). The
+// handful that genuinely cannot be swapped under a live deployment come
+// back from the API as settings.restartRequired, and the ones changed but
+// not yet running as settings.pendingRestart -- both keyed by the same
+// JSON field name the form's own inputs are named after, so annotating a
+// field is a lookup rather than a second list to keep in step.
+//
+// SETTING_LABELS only supplies human wording for the banner that names
+// them; a key with no entry falls back to the key itself, which is the
+// right failure mode for a UI running against a newer daemon that has
+// added a restart-only setting this build has never heard of.
+const SETTING_LABELS = {
+  githubHost: "GitHub host",
+  githubInsecureHttp: "Speak plain HTTP to GitHub host",
+};
+
+const settingLabel = (key) => SETTING_LABELS[key] || key;
 
 export default function SettingsOverlay({ onClose, showError }) {
   const [tab, setTab] = useState("general");
@@ -182,9 +202,62 @@ export default function SettingsOverlay({ onClose, showError }) {
 
   if (settings === null) return null;
 
+  const restartRequired = new Set(settings.restartRequired || []);
+  const pendingRestart = new Set(settings.pendingRestart || []);
+
+  // restartHint annotates one field: "this one needs a restart" always,
+  // and "you have already changed it, and it isn't running yet" once the
+  // stored value and the running daemon's have actually diverged. base is
+  // whatever helper text the field had of its own, kept in front so the
+  // annotation reads as an addition rather than a replacement.
+  const restartHint = (field, base) => {
+    if (!restartRequired.has(field)) return base;
+    if (pendingRestart.has(field)) {
+      return (
+        <>
+          {base ? `${base} ` : ""}
+          <Box component="span" sx={{ color: "warning.main" }}>
+            Changed, but not applied &mdash; the daemon is still running with its previous value. Restart it to
+            apply.
+          </Box>
+        </>
+      );
+    }
+    return `${base ? `${base} ` : ""}Takes effect when the daemon restarts, unlike every other setting here.`;
+  };
+
+  // The same annotation as a badge on the control itself, so the field
+  // carries it whether or not anyone reads the helper text: "needs
+  // restart" from the moment the pane opens, turning into a warning-
+  // coloured "restart to apply" once the stored value has actually moved
+  // away from what the daemon is running.
+  const restartChip = (field) => {
+    if (!restartRequired.has(field)) return null;
+    const changed = pendingRestart.has(field);
+    return (
+      <Chip
+        size="small"
+        variant={changed ? "filled" : "outlined"}
+        color={changed ? "warning" : "default"}
+        label={changed ? "restart to apply" : "needs restart"}
+        sx={{ ml: 1 }}
+      />
+    );
+  };
+
+  // The same fact at the top of the pane, so it is visible from whichever
+  // tab is open rather than only from the one the field lives on.
+  const pending = (settings.pendingRestart || []).map(settingLabel);
+
   return (
     <Overlay onClose={onClose}>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Settings</Typography>
+      {pending.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Saved, but not applied yet: {pending.join(", ")}. Everything else here takes effect within a poll
+          interval; these only take effect when the daemon restarts.
+        </Alert>
+      )}
       {!settings.configured && (
         <Alert severity="info" sx={{ mb: 2 }}>
           Not configured yet -- nothing has been saved for this deployment. Poll interval and max concurrent
@@ -302,10 +375,27 @@ export default function SettingsOverlay({ onClose, showError }) {
       )}
       {tab === "github" && (
         <form onSubmit={submitGithub}>
-          <TextField name="githubHost" label="GitHub host" defaultValue={settings.githubHost || ""} autoComplete="off" fullWidth margin="normal" />
+          <TextField
+            name="githubHost"
+            label="GitHub host"
+            helperText={restartHint("githubHost", "")}
+            defaultValue={settings.githubHost || ""}
+            autoComplete="off"
+            fullWidth
+            margin="normal"
+            InputProps={{ endAdornment: restartChip("githubHost") }}
+          />
           <FormControlLabel
             control={<Checkbox name="githubInsecureHttp" defaultChecked={!!settings.githubInsecureHttp} />}
-            label={<>Speak plain HTTP to GitHub host <span className="hint">mock servers only</span></>}
+            label={(
+              <>
+                Speak plain HTTP to GitHub host <span className="hint">mock servers only</span>
+                {restartChip("githubInsecureHttp")}
+                {restartRequired.has("githubInsecureHttp") && (
+                  <span className="hint">{restartHint("githubInsecureHttp", "")}</span>
+                )}
+              </>
+            )}
             sx={{ display: "flex", mt: 1 }}
           />
 

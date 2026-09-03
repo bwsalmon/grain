@@ -210,20 +210,27 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // cancelled context means the daemon is shutting down rather than that
 // one reconciler has a problem the others might not.
 //
-// deps.MaxConcurrent is refreshed from deps.Store's own grain_config row
-// (if any) before any reconciler runs, so a change made through the
-// store -- `grain settings`, or the UI's Settings page -- takes effect on
-// this cycle rather than needing the daemon restarted the way the rest
-// of model.Config still does (cmd/grain's loadConfig, which only reads
-// grain_config at startup). A store with no row yet -- deps.Store is nil
-// in tests that build Deps by hand, or GetConfig itself returns nil --
-// leaves deps.MaxConcurrent exactly as the caller set it.
+// deps.MaxConcurrent and deps.Config.MaxAgentTurns are refreshed from
+// deps.Store's own grain_config row (if any) before any reconciler runs,
+// so a change made through the store -- `grain settings`, or the UI's
+// Settings page -- takes effect on this cycle rather than at the next
+// restart. They are the two settings this package itself is the consumer
+// of; the rest of model.Config is re-applied by whoever owns the piece
+// it configures (cmd/grain/daemon.go's liveConfig, once per tick, for
+// everything a running daemon can adopt at all). deps is taken by value,
+// so this only ever affects the cycle it is refreshing and the dispatch
+// goroutines that cycle starts -- never a caller's own Deps.
+//
+// A store with no row yet -- deps.Store is nil in tests that build Deps
+// by hand, or GetConfig itself returns nil -- leaves both exactly as the
+// caller set them.
 func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 	if deps.Store != nil {
 		if mc, err := deps.Store.GetConfig(ctx); err != nil {
-			log.Printf("orchestrator: reading stored max-concurrent: %v", err)
+			log.Printf("orchestrator: reading stored configuration: %v", err)
 		} else if mc != nil {
 			deps.MaxConcurrent = mc.MaxConcurrent
+			deps.Config.MaxAgentTurns = mc.MaxAgentTurns
 		}
 	}
 	var errs []error

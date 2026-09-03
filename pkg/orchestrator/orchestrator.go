@@ -85,6 +85,22 @@ type Shape struct {
 // what a task with neither override set produces.
 func (s Shape) IsZero() bool { return s.CPUs == 0 && s.MemoryMB == 0 }
 
+// orDefault fills each dimension this shape leaves at zero from def --
+// how a run that asked for no size of its own (or asked in only one
+// dimension) lands on the deployment-wide default its sandbox backend is
+// currently carrying (KonturSandboxes.SetDefaultShape). Per dimension,
+// not all-or-nothing: a task that names only CPUs still gets the
+// deployment's memory default.
+func (s Shape) orDefault(def Shape) Shape {
+	if s.CPUs == 0 {
+		s.CPUs = def.CPUs
+	}
+	if s.MemoryMB == 0 {
+		s.MemoryMB = def.MemoryMB
+	}
+	return s
+}
+
 // Sandbox is one run's own sandbox: a local directory, or a
 // bwsalmon/kontur-managed VM. It lives exactly as long as the run does.
 type Sandbox interface {
@@ -178,6 +194,12 @@ type Config struct {
 	// agent framework's own default in place, which for both frameworks
 	// is no cap at all (agent/claude's defaultMaxTurns has why). What
 	// actually bounds a runaway run is MaxRunRuntime below.
+	//
+	// Whatever a caller sets here is only the starting value on a
+	// deployment with a store: RunCycle re-reads model.Config.
+	// MaxAgentTurns out of grain_config every cycle, alongside
+	// Deps.MaxConcurrent, so a change made in Settings reaches the next
+	// run dispatched rather than the next restart.
 	MaxAgentTurns int
 	// GitRemoteBase is the base URL of this deployment's git proxy
 	// (cmd/grain/daemon.go's startGitProxy), which RunDispatch turns into

@@ -193,6 +193,23 @@ type Config struct {
 	// ReconcilerDown always reports false, the same nil-means-
 	// unavailable-feature default AutoMergeDegraded above gives.
 	ReconcilerDown func() bool
+	// RunningConfig, when set, reports the store-backed configuration the
+	// daemon this UI runs inside actually has in effect right now -- what
+	// it read at startup, plus every later change it was able to apply
+	// without being restarted (cmd/grain/daemon.go's liveConfig). Settings
+	// compares it against what is stored to answer which of the
+	// restart-only settings have been saved but are not running yet
+	// (Settings.PendingRestart), so a change that will sit unapplied
+	// until someone restarts the daemon says so at the moment it is made
+	// rather than looking, like every other setting on the pane, as
+	// though it had taken effect.
+	//
+	// nil (`grain demo`'s throwaway UI, or any UI not colocated with a
+	// daemon whose configuration it could speak for) means PendingRestart
+	// is always empty -- the same nil-means-unavailable contract
+	// ReconcilerDown and AutoMergeDegraded above give, and the honest
+	// answer where there is no running configuration to compare with.
+	RunningConfig func() model.Config
 }
 
 // LiveTranscript is implemented by whatever can read back a still-running

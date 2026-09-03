@@ -52,9 +52,10 @@ func (c *Client) targetRepos() []string {
 // setTargetRepos updates Config.TargetRepos in place -- called once
 // UpdateSettings has already written the same value to the store, so a
 // GET /api/config or a CreateTask racing the update in the same process
-// sees it immediately rather than only after a restart picks the stored
-// value back up (cmd/grain/daemon.go's loadConfig, the only other place
-// Config.TargetRepos is ever set, explicitly does not reload mid-run).
+// sees it immediately rather than a request later. cmd/grain/daemon.go
+// sets Config.TargetRepos once, from what loadConfig resolved at
+// startup; every change after that arrives here, since UpdateSettings is
+// the only way one is ever made.
 func (c *Client) setTargetRepos(repos []string) {
 	c.targetReposMu.Lock()
 	defer c.targetReposMu.Unlock()
@@ -247,19 +248,20 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 }
 
 // newestFirst reads model.Config.NewestFirst fresh from the store on
-// every call, deliberately unlike the deployment-wide settings Config
-// (this package's own type) mirrors from it: those need a daemon restart
-// to pick up a change (cmd/grain daemon's own loadConfig doc comment),
-// which is the wrong trade for a setting a UI toggles and expects the
-// very next task list (or task creation) to honour, rather than only the
-// next full restart of the deployment. A fresh deployment with no
-// grain_config row yet (nil) reads as false -- model.Config's own zero
-// value, and the backlog order grain has always defaulted to.
+// every call: a setting a UI toggles is expected to be honoured by the
+// very next task list (or task creation), not by the next restart, and
+// this package is the one that consumes it, so this is where re-reading
+// it belongs. A fresh deployment with no grain_config row yet (nil)
+// reads as false -- model.Config's own zero value, and the backlog order
+// grain has always defaulted to.
 //
-// MaxConcurrent gets the same "no restart" treatment for the same
-// reason, but earns it elsewhere: orchestrator.RunCycle re-reads it from
-// the store every cycle (that func's own doc comment), since it is
-// RunCycle, not this package, that actually needs the current value.
+// Every other setting earns the same "no restart" treatment wherever its
+// own consumer is: orchestrator.RunCycle re-reads MaxConcurrent and
+// MaxAgentTurns every cycle, cmd/grain's dispatchConfig re-reads the
+// agent framework and its model per dispatch, and its liveConfig
+// re-applies the rest once per reconcile tick (that type's own doc
+// comment, including the two settings that genuinely cannot be applied
+// live and are reported to this pane as needing a restart).
 func (c *Client) newestFirst(ctx context.Context) (bool, error) {
 	cfg, err := c.Store.GetConfig(ctx)
 	if err != nil {

@@ -22,8 +22,8 @@ type AddRepoRequest struct {
 // deployment that has never saved settings at all still gets
 // UpdateSettings' own "poll interval etc. are required the first time"
 // refusal instead of silently seeding a Config no daemon could start
-// against (a zero PollInterval panics time.NewTicker at the next
-// restart -- see UpdateSettings' own doc comment).
+// against (a zero PollInterval panics time.NewTicker the next time a
+// daemon starts against it -- see UpdateSettings' own doc comment).
 func (c *Client) AddTargetRepo(ctx context.Context, repo string) (Settings, error) {
 	parsed, err := model.ParseRepo(repo)
 	if err != nil {

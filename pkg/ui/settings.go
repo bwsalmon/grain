@@ -12,11 +12,18 @@ import (
 
 // Settings is the JSON shape of a deployment's store-backed
 // configuration (model.Config, bwsalmon/agents#320) -- the knobs
-// cmd/grain's "daemon" subcommand reads out of grain_config at startup
-// instead of only from its own flags (daemon.go's loadConfig). This
-// package is what lets a UI or a CLI actually be the thing that changes
-// them, the same "the store is the record" shape pkg/ui already gives
-// tasks.
+// cmd/grain's "daemon" subcommand reads out of grain_config instead of
+// only from its own flags (daemon.go's loadConfig). This package is what
+// lets a UI or a CLI actually be the thing that changes them, the same
+// "the store is the record" shape pkg/ui already gives tasks.
+//
+// Changing one takes effect on the running deployment, without a
+// restart, for everything but the two settings RestartRequired names:
+// the daemon re-reads this row once per reconcile tick and applies what
+// changed (cmd/grain/daemon.go's liveConfig). RestartRequired and
+// PendingRestart below are how the exceptions say so, at the field, and
+// how a change to one that is saved but not yet running is reported as
+// exactly that rather than silently looking applied.
 //
 // Configured is false when nothing has written a row yet -- before any
 // daemon has ever started against this store -- so a caller can tell
@@ -130,6 +137,108 @@ type Settings struct {
 	// other check built on it takes.
 	GeminiAPIKeySet     bool `json:"geminiApiKeySet"`
 	ClaudeOAuthTokenSet bool `json:"claudeOAuthTokenSet"`
+	// RestartRequired names every setting on this pane that a running
+	// daemon cannot adopt on its own, by the JSON field it is called
+	// above -- restartOnlySettings' own list. Constant, reported even on
+	// a deployment that has never saved settings at all, since the point
+	// of it is to annotate a field *before* anyone changes it: a pane
+	// that only said so afterwards would be telling an operator about a
+	// restart they have already earned.
+	//
+	// Everything not named here takes effect without a restart, which is
+	// grain's default and the reason this list is worth reporting at all
+	// (cmd/grain/daemon.go's liveConfig has the full accounting of what
+	// applies each of the rest, and when).
+	RestartRequired []string `json:"restartRequired"`
+	// PendingRestart is the subset of RestartRequired whose stored value
+	// differs from what the daemon is actually running with -- saved, but
+	// not in effect until someone restarts it. Always empty on a UI with
+	// no Config.RunningConfig to compare against (that field's own doc
+	// comment), which is the same answer as "nothing is pending" because
+	// there is nothing actionable to tell those two apart on.
+	//
+	// Deliberately not omitempty: the frontend merges an update response
+	// over the settings it already has, so this has to be present-and-
+	// null when a change is undone rather than absent and leaving a stale
+	// warning on screen.
+	PendingRestart []string `json:"pendingRestart"`
+}
+
+// restartOnlySetting is one setting a running daemon cannot pick up on
+// its own, and how to tell whether a stored value for it differs from
+// the one actually in effect.
+type restartOnlySetting struct {
+	// Key is the Settings JSON field this names, which is also the key
+	// the frontend annotates its own input with.
+	Key string
+	// Differs answers whether stored and running disagree about this one
+	// setting. A func per setting rather than one reflect-based
+	// comparison of the whole model.Config: the point is to name the
+	// two fields that cannot be applied live, and a comparison that
+	// derived that list from the type would silently start reporting
+	// every field anyone adds later.
+	Differs func(stored, running model.Config) bool
+}
+
+// restartOnlySettings is every setting the Settings pane offers that a
+// running daemon genuinely cannot adopt without being restarted.
+//
+// Both entries are the GitHub host override: it is baked into the git
+// proxy's forwarder,
+// the GitHub REST transport, and the github-sandbox capability provider
+// when the daemon starts, each of which reads it unsynchronised from
+// whatever request is already in flight -- so swapping one under a live
+// deployment would be a data race rather than a setting change. They are
+// also, not coincidentally, the two settings a real deployment never
+// touches: an override that exists to point a local test at a mock
+// GitHub (cmd/grain/daemon.go's -github-host/-github-insecure-http).
+//
+// Everything else on the pane is applied while the daemon runs -- see
+// cmd/grain/daemon.go's liveConfig for which piece picks up which
+// setting, and when. Adding a setting to this list is what makes the UI
+// annotate it, so this and that are the two ends of one contract:
+// nothing may be applied live and listed here, and nothing may be listed
+// nowhere and left needing a restart in silence.
+var restartOnlySettings = []restartOnlySetting{
+	{
+		Key:     "githubHost",
+		Differs: func(stored, running model.Config) bool { return stored.GitHubHost != running.GitHubHost },
+	},
+	{
+		Key: "githubInsecureHttp",
+		Differs: func(stored, running model.Config) bool {
+			return stored.GitHubInsecureHTTP != running.GitHubInsecureHTTP
+		},
+	},
+}
+
+// restartRequiredKeys is restartOnlySettings' own key list -- Settings.
+// RestartRequired, built fresh each time so a caller cannot alias the
+// package's own slice.
+func restartRequiredKeys() []string {
+	keys := make([]string, 0, len(restartOnlySettings))
+	for _, s := range restartOnlySettings {
+		keys = append(keys, s.Key)
+	}
+	return keys
+}
+
+// pendingRestart is Settings.PendingRestart's own computation: every
+// restart-only setting whose stored value is not the one this
+// deployment's daemon is running with. nil -- no comparison available,
+// or nothing differing -- reads back as "nothing pending" either way.
+func (c *Client) pendingRestart(stored model.Config) []string {
+	if c.Config.RunningConfig == nil {
+		return nil
+	}
+	running := c.Config.RunningConfig()
+	var pending []string
+	for _, s := range restartOnlySettings {
+		if s.Differs(stored, running) {
+			pending = append(pending, s.Key)
+		}
+	}
+	return pending
 }
 
 func (c *Client) settingsFrom(cfg model.Config) Settings {
@@ -161,6 +270,8 @@ func (c *Client) settingsFrom(cfg model.Config) Settings {
 		AgentKeysEnabled:              c.Config.Secrets != nil,
 		GeminiAPIKeySet:               geminiKeySet,
 		ClaudeOAuthTokenSet:           claudeTokenSet,
+		RestartRequired:               restartRequiredKeys(),
+		PendingRestart:                c.pendingRestart(cfg),
 	}
 }
 
@@ -208,6 +319,12 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			AgentKeysEnabled:       c.Config.Secrets != nil,
 			GeminiAPIKeySet:        geminiKeySet,
 			ClaudeOAuthTokenSet:    claudeTokenSet,
+			// Reported before anything has been saved for the same
+			// reason it is reported at all: the annotation belongs on
+			// the field from the first time it is looked at. Nothing can
+			// be pending yet -- there is no stored value to have
+			// diverged from what is running.
+			RestartRequired: restartRequiredKeys(),
 		}, nil
 	}
 	return c.settingsFrom(*cfg), nil

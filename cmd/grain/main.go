@@ -573,9 +573,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)")
-	githubHost := fs.String("github-host", "", "GitHub API host")
+	githubHost := fs.String("github-host", "", "GitHub API host (the one setting here that needs a daemon restart to take effect)")
 	var githubInsecureHTTP bool
-	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS")
+	fs.BoolVar(&githubInsecureHTTP, "github-insecure-http", false, "speak plain HTTP to -github-host instead of HTTPS (needs a daemon restart to take effect)")
 	gcpProject := fs.String("gcp-project", "", "GCP project the gcp-key/gemini-key capabilities mint into")
 	gcpServiceAccountEmail := fs.String("gcp-agent-service-account", "", "the narrow agent service account gcp-key mints keys for")
 	targetRepos := fs.String("target-repos", "", "comma-separated owner/name list a task's repo may name -- empty allows any")
@@ -743,6 +743,16 @@ func (p *printer) settings(s ui.Settings) {
 		fmt.Printf("target repos:   %s\n", strings.Join(s.TargetRepos, ", "))
 	} else {
 		fmt.Println("target repos:   unrestricted")
+	}
+	// Every other setting above is already in effect: the daemon
+	// re-reads this row each reconcile tick (cmd/grain/daemon.go's
+	// liveConfig). These are the ones that are not, so saying so here is
+	// the CLI's half of what the Settings pane annotates the field with
+	// -- otherwise `grain settings -github-host=...` prints the new value
+	// back and reads as though it had done something.
+	if len(s.PendingRestart) > 0 {
+		fmt.Printf("\nsaved, but not running yet -- restart the daemon to apply: %s\n",
+			strings.Join(s.PendingRestart, ", "))
 	}
 }
 

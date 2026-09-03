@@ -178,7 +178,7 @@ func TestDefaultAgentFrameworkFollowsTheStoredSetting(t *testing.T) {
 
 	// Nothing stored yet: the flag's own value, which is what seeded the
 	// row every other deployment already has.
-	if got := defaultAgentFramework(ctx, store, cfg); got != model.AgentFrameworkAntigravity {
+	if got := dispatchConfig(ctx, store, cfg).defaultAgentFramework(); got != model.AgentFrameworkAntigravity {
 		t.Fatalf("defaultAgentFramework = %q with an empty store, want antigravity", got)
 	}
 
@@ -191,7 +191,7 @@ func TestDefaultAgentFrameworkFollowsTheStoredSetting(t *testing.T) {
 	// Re-read, not cached at startup: switching the default in Settings
 	// has to reach the next dispatch, since that is the whole promise the
 	// pane makes.
-	if got := defaultAgentFramework(ctx, store, cfg); got != model.AgentFrameworkClaude {
+	if got := dispatchConfig(ctx, store, cfg).defaultAgentFramework(); got != model.AgentFrameworkClaude {
 		t.Fatalf("defaultAgentFramework = %q after the store said claude, want claude", got)
 	}
 }
