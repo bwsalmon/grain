@@ -67,7 +67,7 @@ const SETTING_LABELS = {
 
 const settingLabel = (key) => SETTING_LABELS[key] || key;
 
-export default function SettingsOverlay({ onClose, showError }) {
+export default function SettingsOverlay({ onClose, onSaved, showError }) {
   const [tab, setTab] = useState("general");
   const [settings, setSettings] = useState(null);
   // defaultCapabilities is the one field on this pane that is not a
@@ -144,6 +144,23 @@ export default function SettingsOverlay({ onClose, showError }) {
       setSettings((prev) => ({ ...prev, ...updated }));
       if ("defaultCapabilities" in updated) setDefaultCapabilities(updated.defaultCapabilities || []);
       onClose();
+      // Then the app's own copy of /api/config, which App fetches once at
+      // mount and otherwise only when something known to change it says
+      // so (App's refreshConfig). Half this pane changes it: the target
+      // repo allowlist is what the repos page lists and what the two
+      // "unrestricted" notices on it are keyed on, the default capability
+      // set and the two task defaults are what the new-task form starts
+      // out ticking, and the deployment-wide prompt extension is what
+      // that form shows beside its own per-task override. Without this,
+      // every one of them kept answering with what the page was told at
+      // load until it was reloaded -- a setting saved and visibly not
+      // taken.
+      //
+      // After onClose, and inside the same try: the save itself has
+      // already landed, so a /api/config that fails here is a failure to
+      // re-read rather than to write, and it is reported the same way
+      // every other read on this pane is.
+      await onSaved?.();
     } catch (err) {
       // Same banner task creation's own validation errors surface
       // through.
