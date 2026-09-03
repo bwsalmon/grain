@@ -368,6 +368,18 @@ const mcpToolTimeoutSlack = 2 * time.Minute
 // operator who set one deliberately outranks this default, and env
 // entries here are appended after os.Environ() (execRunner.Run), so
 // setting it unconditionally would silently override theirs.
+//
+// The run's own wall clock does not lower this number, now that
+// wait_for_checks clamps a wait to what is left of the run: that only
+// ever shortens a particular call, and a run with an hour and a half
+// still ahead of it can legitimately ask for the full hour. This is set
+// once, at process start, with the whole run in front of it, so it has
+// to cover the longest wait the tool will ever run. What the clamp does
+// change is which clock is expected to end the call: a wait can no
+// longer outlive the run it belongs to, so grain's side always reports
+// first, and this cap is left where it is for the case it was really
+// for -- an MCP server that has wedged, rather than a wait that is
+// simply long.
 func mcpToolTimeout() []string {
 	if _, set := os.LookupEnv(mcpToolTimeoutVar); set {
 		return nil

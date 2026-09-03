@@ -233,6 +233,15 @@ type Config struct {
 	// apart is a confusing 500 "no credential configured" from the git
 	// proxy on the next push (bwsalmon/agents#427).
 	Credentials *gitproxy.CredentialSet
+	// StateRepo is set only when this UI runs inside the daemon that owns
+	// the state repository its store is exported to (pkg/staterepo) --
+	// nil means it does not, and the bootstrap pane and its API routes
+	// report themselves unavailable rather than erroring on every call,
+	// the same nil-means-unavailable contract Secrets, Reboot and
+	// Credentials above already give. See staterepo.go for what the pane
+	// is allowed to do, which is choose where state lives and nothing
+	// else.
+	StateRepo StateRepoManager
 	// Upgrader is set only when this deployment was told where its own
 	// git checkout and build/install/restart mechanics live
 	// (bwsalmon/agents#396, cmd/grain/daemon.go's -upgrade-src-dir) --

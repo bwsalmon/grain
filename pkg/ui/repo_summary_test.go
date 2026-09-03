@@ -39,12 +39,18 @@ func TestRepoSummariesUnionsAllThreeSources(t *testing.T) {
 		// (grain/task-114), which must put up a row for the same reason
 		// a stored default set does.
 		[]string{"acme/widgets", "acme/prompt-only"},
+		// And its third: a repo whose only configuration is the setup
+		// command grain runs in every checkout it makes there
+		// (grain/task-154), which is as invisible from everywhere else as
+		// the two above.
+		[]string{"acme/widgets", "acme/setup-only"},
 	)
 
 	want := []RepoSummary{
 		{Repo: "acme/allowed-only", Configured: true},
 		{Repo: "acme/configured-only", DefaultCapabilities: []string{"self-debug"}},
 		{Repo: "acme/prompt-only", PromptExtension: true},
+		{Repo: "acme/setup-only", SetupCommand: true},
 		{Repo: "acme/task-only", Tasks: 1, States: map[model.State]int{model.StateRunning: 1}},
 		{
 			Repo:                "acme/widgets",
@@ -54,6 +60,7 @@ func TestRepoSummariesUnionsAllThreeSources(t *testing.T) {
 			States:              map[model.State]int{model.StateQueued: 2, model.StateCompleted: 1},
 			DefaultCapabilities: []string{"gcp-key"},
 			PromptExtension:     true,
+			SetupCommand:        true,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -67,7 +74,7 @@ func TestRepoSummariesUnionsAllThreeSources(t *testing.T) {
 func TestRepoSummariesIgnoresReadOnlyRepos(t *testing.T) {
 	got := repoSummaries(nil, []Task{
 		{Repo: "acme/widgets", State: model.StateQueued, Reads: []string{"acme/docs"}},
-	}, nil, nil)
+	}, nil, nil, nil)
 	if len(got) != 1 || got[0].Repo != "acme/widgets" {
 		t.Fatalf("repoSummaries() = %+v, want just the write target", got)
 	}
@@ -77,7 +84,7 @@ func TestRepoSummariesIgnoresReadOnlyRepos(t *testing.T) {
 // every row it has is unconfigured -- which is what stops `grain repo
 // list` claiming a repo was left off a list that does not exist.
 func TestRepoSummariesLeavesEveryRowUnconfiguredWhenUnrestricted(t *testing.T) {
-	got := repoSummaries(nil, []Task{{Repo: "acme/widgets", State: model.StateQueued}}, nil, nil)
+	got := repoSummaries(nil, []Task{{Repo: "acme/widgets", State: model.StateQueued}}, nil, nil, nil)
 	if len(got) != 1 || got[0].Configured {
 		t.Fatalf("repoSummaries() = %+v, want one row that is not configured", got)
 	}

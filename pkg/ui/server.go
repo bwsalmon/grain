@@ -72,6 +72,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/capabilities", s.handleSetRepoCapabilities)
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/prompt-extension", s.handleGetRepoPromptExtension)
 	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/prompt-extension", s.handleSetRepoPromptExtension)
+	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/setup-command", s.handleGetRepoSetupCommand)
+	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/setup-command", s.handleSetRepoSetupCommand)
 
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases", s.handleListReleases)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases", s.handleCreateRelease)
@@ -111,10 +113,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/agent-keys/{framework}", s.handleSetAgentKey)
 	s.mux.HandleFunc("DELETE /api/agent-keys/{framework}", s.handleDeleteAgentKey)
 
+	s.mux.HandleFunc("GET /api/github-tokens", s.handleListGitHubTokens)
+	s.mux.HandleFunc("PUT /api/github-tokens/{name}", s.handleSetGitHubToken)
+	s.mux.HandleFunc("DELETE /api/github-tokens/{name}", s.handleDeleteGitHubToken)
+
 	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
 	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}", s.handleDeleteSecret)
+
+	s.mux.HandleFunc("GET /api/state-repo", s.handleGetStateRepo)
+	s.mux.HandleFunc("POST /api/state-repo", s.handleSetStateRepo)
+	s.mux.HandleFunc("POST /api/state-repo/sync", s.handleSyncStateRepo)
 
 	s.mux.HandleFunc("POST /api/host/reboot", s.handleRebootHost)
 	s.mux.HandleFunc("GET /api/host/top", s.handleGetHostTop)

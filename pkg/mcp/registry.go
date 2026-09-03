@@ -142,7 +142,11 @@ func (r *Registry) handleCall(ctx context.Context, id json.RawMessage, params js
 	if args == nil {
 		args = map[string]any{}
 	}
-	result := t.Handler(ctx, args)
+	// The handler runs under a ctx carrying the announced deadline, so a
+	// tool that blocks can bound itself by what is left of the run rather
+	// than being cancelled part-way through a wait it chose blind (see
+	// withRunDeadline, and wait_for_checks' own budget).
+	result := t.Handler(r.withRunDeadline(ctx), args)
 	// The deadline notice goes on every answer, a failed one included:
 	// the run is just as close to being cancelled when its command
 	// exited 1, and that is exactly the turn where it might otherwise

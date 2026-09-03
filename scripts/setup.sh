@@ -1367,6 +1367,13 @@ setup_data_dir() {
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/home"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
   install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/secrets/github"
+  # The state repository (pkg/staterepo): the working tree grain exports
+  # its database into, and where the encrypted secrets file lives. Made
+  # here, owned by $GRAIN_USER, because the CLI steps below write into it
+  # as root -- and a git working tree with root-owned files in it is one
+  # the daemon's own git refuses to touch at all ("dubious ownership"),
+  # not merely one it cannot write.
+  install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$GRAIN_DATA_DIR/state-repo"
   # grain-daemon.service's own -data-dir/store, embedded SQLite -- the
   # one process that ever opens it now (this file's own header on
   # bwsalmon/agents#363), so no separate store container or directory
@@ -1380,6 +1387,15 @@ setup_data_dir() {
   # adds another <name>.token/.app.json by hand; this script only ever
   # seeds the one default, as either kind (never both for the same name:
   # CredentialSet.load prefers .app.json when present).
+  #
+  # These files are the whole mechanism, and the only one: unlike the
+  # agent credentials below, a GitHub credential is never read out of the
+  # secrets database (grain/task-137 settled that deliberately -- see
+  # pkg/gitproxy/credentials.go's own doc comment). What did change is
+  # who else can write one: Settings -> GitHub in the UI adds and removes
+  # a <name>.token here, so an extra named token no longer needs shell
+  # access to this host. It still needs the daemon restarted afterwards,
+  # the same as everything else in this directory.
   if [ ! -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
      && { [ -n "$GRAIN_GITHUB_TOKEN" ] || [ -n "$GRAIN_GITHUB_APP_ID" ]; }; then
     printf '{"*":"%s"}\n' "$GRAIN_GITHUB_CREDENTIAL_NAME" > "$GRAIN_DATA_DIR/secrets/github/credentials.json"
@@ -1475,7 +1491,7 @@ seed_gcp_minter_key() {
   /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" set \
     -value-file "$staged" gcp-key-minter "$key"
   rm -f "$staged"
-  chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
+  chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets" "$GRAIN_DATA_DIR/state-repo"
 }
 
 # minter_secret_key names the key *inside* the gcp-key-minter secret that
@@ -1543,7 +1559,7 @@ mint_gemini_operating_key() {
   # the key file it writes has to end up owned by GRAIN_USER either way.
   if /usr/local/bin/grain secrets -data-dir "$GRAIN_DATA_DIR" \
      mint-gemini-key -project "$GRAIN_GCP_PROJECT"; then
-    chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets"
+    chown -R "$GRAIN_USER:$GRAIN_USER" "$GRAIN_DATA_DIR/secrets" "$GRAIN_DATA_DIR/state-repo"
   else
     log "  could not mint a Gemini API key -- the daemon still runs, but a gemini-framework"
     log "  run cannot dispatch until one exists. Paste one into the UI (Settings -> Agent"
@@ -1606,12 +1622,40 @@ reformat_store_if_schema_changed() {
     return
   fi
 
+  local stamp
+  stamp="$(date +%Y%m%d%H%M%S)"
   if [ -d "$store_dir" ]; then
-    local backup="${store_dir}.schema${old_version}-$(date +%Y%m%d%H%M%S)"
+    local backup="${store_dir}.schema${old_version}-${stamp}"
     log "Schema changed ($old_version -> $new_version) -- moving $store_dir aside to $backup so grain starts a fresh store"
     mv "$store_dir" "$backup"
   else
     log "Schema changed ($old_version -> $new_version) -- no existing store to move aside"
+  fi
+
+  # The state repository holds the same rows as the store, exported
+  # (pkg/staterepo), so a schema this build cannot read in the store is
+  # one it cannot import out of the repository either -- staterepo.Load
+  # refuses an older dump outright rather than guessing at a migration.
+  # Moving the working tree aside alongside the store is what lets the
+  # daemon come up and re-seed it from the fresh database; nothing is
+  # lost that a remote does not still have, and a local-only deployment
+  # keeps the old tree right here under its timestamped name.
+  #
+  # The secrets file lives in that tree and is *not* regenerable, so it
+  # is carried across rather than archived with it: the key it is
+  # encrypted to has not changed, and an operator who kept their key
+  # keeps their credentials across a reformat.
+  local repo_dir="$GRAIN_DATA_DIR/state-repo"
+  if [ -d "$repo_dir" ]; then
+    local repo_backup="${repo_dir}.schema${old_version}-${stamp}"
+    log "Schema changed -- moving $repo_dir aside to $repo_backup; grain re-seeds it on its next start"
+    mv "$repo_dir" "$repo_backup"
+    if [ -s "$repo_backup/secrets.enc" ]; then
+      install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$repo_dir"
+      cp -p "$repo_backup/secrets.enc" "$repo_dir/secrets.enc"
+      chown "$GRAIN_USER:$GRAIN_USER" "$repo_dir/secrets.enc"
+      log "  carried this deployment's encrypted secrets across to the fresh repository"
+    fi
   fi
   printf '%s\n' "$new_version" > "$marker"
 }
@@ -2124,8 +2168,13 @@ report_readiness() {
   agy_cli="$(report_agent_cli agy "$GRAIN_AGY_PATH" GRAIN_AGY_PATH)"
   codex_cli="$(report_agent_cli codex "$GRAIN_CODEX_PATH" GRAIN_CODEX_PATH)"
 
+  # Either file shape counts, the same way CredentialSet.load reads
+  # either: seed_github_app_credential above writes the .app.json one, so
+  # asking only about .token reported a perfectly working App-backed
+  # deployment as having no GitHub credential at all.
   if [ -s "$GRAIN_DATA_DIR/secrets/github/credentials.json" ] \
-     && [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ]; then
+     && { [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" ] \
+          || [ -s "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.app.json" ]; }; then
     github="present as '${GRAIN_GITHUB_CREDENTIAL_NAME}'"
   fi
   [ -s "$GRAIN_DATA_DIR/secrets/gemini-api-key" ] && gemini="present"

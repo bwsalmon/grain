@@ -132,6 +132,16 @@ type RepoDefaults struct {
 	// field's own doc comment), which is why this is "absent a task that
 	// overrides it" rather than the last word.
 	EffectivePromptExtension string `json:"effectivePromptExtension"`
+	// SetupCommand is the shell grain runs in this repo's fresh checkout
+	// before a run's first turn -- model.RepoConfig.SetupCommand, exactly
+	// as stored, and the only thing a PUT to this repo's setup-command
+	// route writes.
+	//
+	// It has no deployment-wide layer to report beside it, unlike the two
+	// pairs above, and deliberately: "how this repo is set up" is a fact
+	// about one repo's toolchain, and a deployment-wide command run in
+	// every checkout would be a command most repos have no answer to.
+	SetupCommand string `json:"setupCommand"`
 }
 
 // SetRepoCapabilitiesRequest is PUT /api/repos/{owner}/{name}/
@@ -162,6 +172,14 @@ type SetRepoPromptExtensionRequest struct {
 	PromptExtension string `json:"promptExtension"`
 }
 
+// SetRepoSetupCommandRequest is PUT /api/repos/{owner}/{name}/
+// setup-command's body: the whole of this repo's setup command, replaced
+// rather than added to, a plain string for the reason
+// SetRepoPromptExtensionRequest's is plain.
+type SetRepoSetupCommandRequest struct {
+	SetupCommand string `json:"setupCommand"`
+}
+
 // RepoDefaults reads repo's own defaults, alongside the deployment-wide
 // set they compose with and the effective set that composition produces.
 // A repo with nothing stored is not an error: it reports an empty own
@@ -183,6 +201,7 @@ func (c *Client) repoDefaults(ctx context.Context, repo model.RepoRef) (RepoDefa
 	if stored != nil {
 		out.DefaultCapabilities = stored.DefaultCapabilities
 		out.PromptExtension = stored.PromptExtension
+		out.SetupCommand = stored.SetupCommand
 	}
 	cfg, err := c.Store.GetConfig(ctx)
 	if err != nil {
@@ -275,6 +294,34 @@ func (c *Client) SetRepoPromptExtension(ctx context.Context, repo, text string) 
 	return c.putRepoConfig(ctx, parsed, func(rc *model.RepoConfig) { rc.PromptExtension = trimmed })
 }
 
+// SetRepoSetupCommand replaces the shell grain runs in this repo's fresh
+// checkout before a run's first turn -- `make deps`, an `npm ci`, a
+// virtualenv (model.RepoConfig.SetupCommand, grain/task-154).
+//
+// Trimmed like the two setters above, and empty is how a repo goes back
+// to needing no setup at all -- at which point it may stop having a row
+// here, since a repo config that says nothing is deleted rather than
+// stored (model.RepoConfig.Empty).
+//
+// Nothing here validates the shell, and there is nothing useful it could
+// validate: it is an arbitrary command for an arbitrary toolchain, and
+// the only thing that can tell whether it works is running it in a
+// checkout. What a bad one costs is bounded and visible -- every run
+// against this repo is told its exit status and the tail of its output
+// (orchestrator.setupSection), and one that never finishes is cut off at
+// orchestrator's own bound and fails the dispatch rather than the run.
+//
+// It does not check repo against Config.TargetRepos, for the reason the
+// two setters above do not.
+func (c *Client) SetRepoSetupCommand(ctx context.Context, repo, command string) (RepoDefaults, error) {
+	parsed, err := model.ParseRepo(repo)
+	if err != nil {
+		return RepoDefaults{}, validationErrorf("repo: %v", err)
+	}
+	trimmed := strings.TrimSpace(command)
+	return c.putRepoConfig(ctx, parsed, func(rc *model.RepoConfig) { rc.SetupCommand = trimmed })
+}
+
 // putRepoConfig applies one edit to repo's stored configuration and
 // writes the whole row back, read-modify-write.
 //
@@ -347,6 +394,11 @@ type RepoSummary struct {
 	// (configResponse.ReposWithPromptExtension). `grain repo
 	// prompt-extension <owner/name>` is what prints the text.
 	PromptExtension bool `json:"promptExtension,omitempty"`
+	// SetupCommand is whether this repo has a setup command of its own
+	// (model.RepoConfig.SetupCommand) -- whether, not what, for the
+	// reason PromptExtension above is a bool. `grain repo setup-command
+	// <owner/name>` is what prints it.
+	SetupCommand bool `json:"setupCommand,omitempty"`
 }
 
 // RepoStateOrder is the order a repo's per-state counts are meant to be
@@ -368,23 +420,27 @@ var RepoStateOrder = []model.State{
 // allowlist, the tasks that target it, and the defaults it carries.
 //
 // That third source is where this deviates from state.js's repoRows,
-// deliberately. Neither SetRepoDefaultCapabilities nor
-// SetRepoPromptExtension requires a repo to be
+// deliberately. None of SetRepoDefaultCapabilities,
+// SetRepoPromptExtension or SetRepoSetupCommand requires a repo to be
 // allow-listed (their own doc comments: a repo can be configured before
 // it is allowed, and stays configured after it is removed), so a repo
-// can hold either kind of configuration while matching neither of the
-// other two sources.
-// Dropping it would mean `grain repo capabilities` or `grain repo
-// prompt-extension` could write something
+// can hold any of those kinds of configuration while matching neither of
+// the other two sources.
+// Dropping it would mean `grain repo capabilities`, `grain repo
+// prompt-extension` or `grain repo setup-command` could write something
 // that `grain repo list` then never admits exists -- and a list whose
 // whole job includes reporting per-repo configuration must not be the
 // one place it is invisible.
 func repoSummaries(targetRepos []string, tasks []Task, repoDefaults map[string][]string,
-	reposWithPromptExtension []string) []RepoSummary {
+	reposWithPromptExtension, reposWithSetupCommand []string) []RepoSummary {
 
 	withPrompt := make(map[string]bool, len(reposWithPromptExtension))
 	for _, repo := range reposWithPromptExtension {
 		withPrompt[repo] = true
+	}
+	withSetup := make(map[string]bool, len(reposWithSetupCommand))
+	for _, repo := range reposWithSetupCommand {
+		withSetup[repo] = true
 	}
 	byRepo := make(map[string]*RepoSummary)
 	row := func(repo string) *RepoSummary {
@@ -395,6 +451,7 @@ func repoSummaries(targetRepos []string, tasks []Task, repoDefaults map[string][
 			Repo:                repo,
 			DefaultCapabilities: repoDefaults[repo],
 			PromptExtension:     withPrompt[repo],
+			SetupCommand:        withSetup[repo],
 		}
 		byRepo[repo] = r
 		return r
@@ -406,6 +463,9 @@ func repoSummaries(targetRepos []string, tasks []Task, repoDefaults map[string][
 		row(repo)
 	}
 	for _, repo := range reposWithPromptExtension {
+		row(repo)
+	}
+	for _, repo := range reposWithSetupCommand {
 		row(repo)
 	}
 	for _, t := range tasks {
@@ -471,6 +531,27 @@ func (s *Server) handleSetRepoPromptExtension(w http.ResponseWriter, r *http.Req
 	}
 	defaults, err := s.tasks.SetRepoPromptExtension(r.Context(),
 		r.PathValue("owner")+"/"+r.PathValue("name"), req.PromptExtension)
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, defaults)
+}
+
+// handleGetRepoSetupCommand answers with the same whole-defaults
+// document its two siblings do -- one document behind all three routes,
+// RepoDefaults' own doc comment has why.
+func (s *Server) handleGetRepoSetupCommand(w http.ResponseWriter, r *http.Request) {
+	s.handleGetRepoCapabilities(w, r)
+}
+
+func (s *Server) handleSetRepoSetupCommand(w http.ResponseWriter, r *http.Request) {
+	var req SetRepoSetupCommandRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	defaults, err := s.tasks.SetRepoSetupCommand(r.Context(),
+		r.PathValue("owner")+"/"+r.PathValue("name"), req.SetupCommand)
 	if err != nil {
 		writeClientError(w, err)
 		return
