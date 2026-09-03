@@ -153,6 +153,31 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 	}
 }
 
+// The push/check/repair loop pull_request_status exists for is only
+// usable if the prompt says it is there: nothing about the tool's own
+// description tells a run that it may push more than once, and the
+// sentences before it read like one final act.
+func TestBuildPromptDescribesThePushAndCheckCILoop(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir)
+	for _, want := range []string{"pull_request_status", "Push as often as you like", "check fails"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+
+	// A task with no repo has no branch to push and no CI to watch, so
+	// the paragraph must not appear at all -- the same reason the
+	// pushing/branching sentences do not.
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "")
+	if strings.Contains(bare, "pull_request_status") {
+		t.Errorf("prompt offers a CI tool to a task with no repo: %q", bare)
+	}
+}
+
 // A task filed with CreateTaskRequest.NoRepo (bwsalmon/agents#614) has a
 // nil Target -- prepareCheckout already skips cloning outright for one
 // (checkout.go), so this is the other half: the prompt has to say so in
@@ -169,13 +194,19 @@ func TestBuildPromptExplainsThereIsNoRepo(t *testing.T) {
 	}
 }
 
+// Matched against the Reads section's own opening words rather than the
+// bare substring "read", which this used to look for: every other
+// sentence BuildPrompt writes is free to use the word for something
+// else, and the first one that did (the pull_request_status paragraph:
+// "see what GitHub's checks made of it") would have failed this test
+// while the Reads section was correctly absent.
 func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
 	task := model.Task{
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
 	prompt := orchestrator.BuildPrompt(task, "")
-	if strings.Contains(prompt, "read") {
+	if strings.Contains(prompt, "You may also read") {
 		t.Fatalf("prompt mentions reading a repo with no Reads set: %q", prompt)
 	}
 }
