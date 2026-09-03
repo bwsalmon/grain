@@ -129,7 +129,9 @@ func commentOnIssueTool(sink *MockSink) Tool {
 			"request is opened for them regardless of whether you also " +
 			"call this -- calling it does not by itself prevent a pull " +
 			"request from opening. After calling this, do not take any " +
-			"further actions unless you still intend to push commits.",
+			"further actions unless you still intend to push commits or " +
+			"to end your turn with ask_question -- a comment and a " +
+			"question are both relayed, in that order.",
 		InputSchema: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,

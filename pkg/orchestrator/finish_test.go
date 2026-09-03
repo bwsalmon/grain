@@ -161,6 +161,65 @@ func TestProcessResultRelaysAQuestionAndParksTheTask(t *testing.T) {
 	}
 }
 
+// TestProcessResultRelaysBothACommentAndAQuestion covers a run that
+// called comment_on_issue and then ask_question. ProcessResult used to
+// return on the question before it ever looked for a comment, so the
+// comment was dropped with no trace anywhere: agent.Result is not
+// persisted, and this path never reaches the "nothing to act on" logging
+// that would at least have named the call. Both are the run's own words
+// and both belong in the conversation -- the comment first, and the
+// question is still the one the task parks on.
+func TestProcessResultRelaysBothACommentAndAQuestion(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+
+	result := toolResult(
+		agent.ToolCall{
+			Name: "comment_on_issue", Arguments: map[string]any{"comment": "both tools record fine"},
+		},
+		agent.ToolCall{
+			Name: "ask_question", Arguments: map[string]any{"question": "which config file?"},
+		},
+	)
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	got := commentBodies(t, ctx, store, task.ID)
+	want := []string{"both tools record fine", "which config file?"}
+	if len(got) != len(want) {
+		t.Fatalf("conversation = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("conversation = %q, want %q", got, want)
+		}
+	}
+
+	// The question is what the task waits on, not the comment that
+	// preceded it, and asking parks the task rather than completing it.
+	st, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateAwaitingReply {
+		t.Fatalf("state = %q, want awaiting_reply", st)
+	}
+	comments, err := store.Comments(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obs, err := store.GetObservation(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.PendingQuestionCommentID == nil || *obs.PendingQuestionCommentID != comments[1].ID {
+		t.Fatalf("pending question = %+v, want the question's id %d", obs.PendingQuestionCommentID, comments[1].ID)
+	}
+}
+
 func TestProcessResultRelaysAClosingCommentWithNoPush(t *testing.T) {
 	store, ctx := openStore(t)
 	_, client := newSim(t, "acme", "widgets", "main")

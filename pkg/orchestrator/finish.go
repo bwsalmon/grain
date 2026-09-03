@@ -72,18 +72,33 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 //
 // Order matters. A question ends the run's turn by contract (mcp's own
 // ask_question doc comment: "after calling this, do not take any further
-// actions") so it is checked, and returned on, before anything else --
-// answering it is the whole reason the run stopped, and no PR exists yet
-// for an ask_question turn to have opened regardless. Proposed tasks are
-// relayed independent of how the run otherwise ended, since v1's own
-// propose_task can accompany other work rather than replacing it.
+// actions") so it is what the task ends up parked on, and is returned on
+// before anything else -- answering it is the whole reason the run
+// stopped, and no PR exists yet for an ask_question turn to have opened
+// regardless. Proposed tasks are relayed independent of how the run
+// otherwise ended, since v1's own propose_task can accompany other work
+// rather than replacing it.
+//
+// A comment_on_issue call is relayed on that path too, before the
+// question, rather than being skipped by the early return. The two tools
+// do different jobs -- one says what the run found, the other says what
+// it is stuck on -- and a run that calls both is saying both. Returning
+// on the question alone dropped the comment silently and irrecoverably:
+// agent.Result is never persisted, so the words existed nowhere else, and
+// this path does not reach the "nothing to act on" log line that would at
+// least have recorded that a comment_on_issue call happened. Relaying it
+// costs one extra row and puts it in front of the human who is already
+// being asked to read the question, and in front of the redispatched run
+// that reads the whole thread back (run.go's commentThreadSection).
+// Parking is still keyed to the question: PendingQuestionCommentID names
+// that comment, not this one.
 //
 // add_review_comment is not relayed here at all: doing so needs a PR
 // already in hand to attach a draft review to, which only a /review-intent
 // dispatch (not yet built -- see directives.go) would have. A run that
-// calls it today gets ProcessResult's ordinary "nothing to act on" ending;
-// nothing is lost, since ask_question/comment_on_issue/propose_task's own
-// contracts already say a run should call one of the four, not several.
+// calls it today gets ProcessResult's ordinary "nothing to act on"
+// ending, which at least names the call in the run's own outcome detail
+// (noActionDetail) rather than losing it in silence.
 //
 // runID is d.RunID, the very run result came from -- needed only for the
 // "nothing to act on" ending below, to correct that run's own outcome
@@ -97,7 +112,17 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		return err
 	}
 
+	comment, hasComment := firstToolCallArg(result, "comment_on_issue", "comment")
+	hasComment = hasComment && comment != ""
+
 	if question, ok := firstToolCallArg(result, "ask_question", "question"); ok && question != "" {
+		// The comment first, so the conversation reads in the order the
+		// run said it: what it found, and then what it is stuck on.
+		if hasComment {
+			if _, err := relayComment(ctx, store, task, comment, now); err != nil {
+				return fmt.Errorf("orchestrator: posting comment for %s: %w", task.ID, err)
+			}
+		}
 		commentID, err := relayComment(ctx, store, task, question, now)
 		if err != nil {
 			return fmt.Errorf("orchestrator: posting question for %s: %w", task.ID, err)
@@ -115,7 +140,7 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		return nil
 	}
 
-	if comment, ok := firstToolCallArg(result, "comment_on_issue", "comment"); ok && comment != "" {
+	if hasComment {
 		if _, err := relayComment(ctx, store, task, comment, now); err != nil {
 			return fmt.Errorf("orchestrator: posting closing comment for %s: %w", task.ID, err)
 		}
