@@ -11,22 +11,41 @@ export const STATE_LABELS = {
   // doc comment. "Retry" (DetailOverlay's own Actions) is the only way
   // out.
   failed: "Failed",
-  completed: "Completed",
+  // A run ending is not the work landing. model.StateOf holds a task
+  // here from the moment its run finishes until its pull request is
+  // merged or closed -- that is the one thing that sets Observation.
+  // ClosedAt for a completed task (orchestrator.recordPullRequestEvents)
+  // and so the only way out of this state -- which makes "waiting on the
+  // merge queue", not "done", what it actually describes. "Completed"
+  // read as done-and-landed, the one thing it never means.
+  //
+  // It is the ordinary reading and not the only one: a completed task
+  // nobody has submitted, and one the queue has tried and given up on,
+  // are not on the queue at all, and completionPhase below is the chip
+  // that says so beside the badge. A completed task with no pull request
+  // to land (an investigation whose run needed no code change) is the
+  // one case nothing corrects -- there is no phase to report, and it is
+  // rare enough not to be worth a second state of its own.
+  completed: "Queued for merge",
   closed: "Closed",
 };
 
-// completionPhase names what a completed task is waiting on next --
-// nothing yet, a human's Submit click, the merge queue, or (once the
-// queue has tried and failed to land it automatically) a human again --
-// the distinction bwsalmon/agents#494 asked for. model.State itself
-// stops at "completed" for a task's entire post-run life (model.StateOf
-// never reads a PR's own health), so this is a second axis rendered
-// beside the state badge rather than folded into it, the same treatment
-// Blocked already gets.
+// completionPhase names what a completed task is waiting on next when
+// that is not what its state badge already says -- a human's Submit
+// click, or (once the queue has tried and failed to land it
+// automatically) a human again -- the distinction bwsalmon/agents#494
+// asked for. model.State itself stops at "completed" for a task's entire
+// post-run life (model.StateOf never reads a PR's own health), so this
+// is a second axis rendered beside the state badge rather than folded
+// into it, the same treatment Blocked already gets.
 //
-// Returns null for anything not "completed", or completed with no pull
+// Returns null for anything not "completed"; for completed with no pull
 // request yet (a task whose run needed no code change has nothing left
-// to wait on).
+// to wait on); and for the ordinary case of a pull request sitting on
+// the merge queue, which is exactly what STATE_LABELS.completed says on
+// the badge this chip renders beside -- a chip repeating it word for
+// word would be the same fact twice rather than the correction to it
+// the other two are.
 export function completionPhase(t) {
   if (t.state !== "completed" || !t.pullRequest) return null;
   if (t.mergeQueueBlockedAt) {
@@ -37,9 +56,9 @@ export function completionPhase(t) {
     };
   }
   if (!t.autoMerge) {
-    return { label: "Awaiting submit", color: "warning", title: "Submit to put this on the merge queue." };
+    return { label: "Awaiting submit", color: "warning", title: "Not on the merge queue yet -- Submit to put it there." };
   }
-  return { label: "Queued to merge", color: "info", title: "On the merge queue -- merges automatically once its checks pass." };
+  return null;
 }
 
 export function capabilityName(config, id) {

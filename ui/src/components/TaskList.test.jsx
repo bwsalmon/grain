@@ -50,15 +50,18 @@ describe("TaskList", () => {
     expect(screen.getByText("Ship the other thing")).toBeInTheDocument();
   });
 
-  it("shows a completion-phase chip for a completed task with an open pull request", () => {
+  it("shows a completion-phase chip for a completed task not on the merge queue", () => {
     renderList({
       tasks: [
         { id: 3, title: "Awaiting submit task", state: "completed", pullRequest: "acme/widgets#1", autoMerge: false, capabilities: [], blocked: false },
-        { id: 4, title: "Queued to merge task", state: "completed", pullRequest: "acme/widgets#2", autoMerge: true, capabilities: [], blocked: false },
+        { id: 4, title: "Queued for merge task", state: "completed", pullRequest: "acme/widgets#2", autoMerge: true, capabilities: [], blocked: false },
       ],
     });
     expect(screen.getByText("Awaiting submit")).toBeInTheDocument();
-    expect(screen.getByText("Queued to merge")).toBeInTheDocument();
+    // The row for 4 says it with its state dot's own title, which is
+    // STATE_LABELS.completed -- no chip repeating it.
+    expect(screen.queryByText("Queued to merge")).not.toBeInTheDocument();
+    expect(screen.getAllByTitle("Queued for merge").length).toBeGreaterThan(0);
   });
 
   it("shows an empty message when nothing matches the filter", () => {
