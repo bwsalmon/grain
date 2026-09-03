@@ -907,9 +907,9 @@ func validateAgentFramework(framework string) error {
 // override" here rather than a literal request for a zero-vCPU or
 // zero-memory VM.
 //
-// Disk has no Validate bound to mirror (konturctl has no disk-size
-// default of its own -- a VM's disk is as large as the guest image
-// behind it), so the only value rejected there is a negative one.
+// Disk has no Validate bound to mirror (konturctl checks a disk size
+// against the guest image it reads through to rather than against a
+// floor of its own), so the only value rejected there is a negative one.
 func validateSandboxShape(cpus, memoryMB, diskGB int) error {
 	if cpus != 0 && cpus < 1 {
 		return validationErrorf("sandboxCpus must be 0 (no override) or at least 1")

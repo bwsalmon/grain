@@ -69,7 +69,9 @@ type Sandboxes interface {
 // Shape is how big a sandbox a run asked for -- model.Task's own
 // SandboxCPUs/SandboxMemoryMB/SandboxDiskGB (bwsalmon/agents#534,
 // grain/task-41), or the zero value for a run content with the
-// deployment default.
+// deployment default (and, where that names nothing either, with
+// grain's own DefaultShape: a dimension no one asked for still reaches
+// kontur as a number).
 //
 // It is passed to Acquire rather than applied afterwards because a
 // sandbox is now built per run: the one moment its size is decided is

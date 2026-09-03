@@ -776,6 +776,12 @@ func dockerInspect(t *testing.T, container, format string) string {
 // booted with, which is both certainly above kontur's floor and small
 // enough that growing the filesystem onto it costs a runner nothing.
 //
+// "Unsized" means "asked for no size of its own" rather than "as large
+// as the guest image": every create carries grain's own default disk now
+// (kontur.DefaultDiskGB), so the first sandbox is that size and this one
+// is a GiB past it. Reading the number off that guest rather than
+// naming it keeps this test true either way.
+//
 // runCommand belongs to that first, unsized sandbox.
 func assertSandboxDiskSizeApplies(t *testing.T, k *orchestrator.KonturSandboxes, stateDir string, runCommand *mcp.Tool) {
 	t.Helper()

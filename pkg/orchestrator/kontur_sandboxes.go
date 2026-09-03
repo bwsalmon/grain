@@ -117,9 +117,9 @@ type KonturConfig struct {
 	// "-cpus"/"-memory-mb"/"-disk-size-mb", last, so they win out over
 	// anything CreateArgs also happens to set; a run that did request a
 	// shape overrides them per dimension (Shape.orDefault). Zero, the
-	// default for all three, omits the corresponding flag entirely and
-	// leaves bwsalmon/kontur's own `konturctl vm create` default in
-	// place.
+	// default for all three, means this deployment named no size of its
+	// own and falls through to grain's own DefaultShape -- every create
+	// passes all three flags either way (createArgs).
 	//
 	// They are only the *starting* value: the shape actually applied to
 	// each create lives on KonturSandboxes itself, where
@@ -168,6 +168,22 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 // so the conversion lives at the one place they meet (createArgs).
 const mibPerGiB = 1024
 
+// DefaultShape is the size a sandbox VM is built at when nothing else
+// named one -- grain's own kontur.DefaultCPUs/DefaultMemoryMB/
+// DefaultDiskGB, filled in per dimension by createArgs after a run's own
+// request and the deployment-wide default have both had their say.
+//
+// It exists so that `konturctl vm create` is never asked to pick a size:
+// an unset dimension used to mean "leave the flag off", which handed the
+// answer to whichever kontur is vendored (2 vCPU/2048 MiB) and, for
+// disk, to however large the guest image a deployment built happens to
+// be. Both are real numbers a run lives inside, and neither was chosen
+// for the job an agent's sandbox does, so grain names all three itself
+// and always passes them.
+func DefaultShape() Shape {
+	return Shape{CPUs: kontur.DefaultCPUs, MemoryMB: kontur.DefaultMemoryMB, DiskGB: kontur.DefaultDiskGB}
+}
+
 // createArgs returns the full argument list Acquire passes to
 // kontur.Create for a sandbox's VM beyond a name and -state-dir:
 // -backend docker first, the only backend this package supports (its
@@ -186,21 +202,19 @@ const mibPerGiB = 1024
 // own requested size (model.Task's SandboxCPUs/SandboxMemoryMB/
 // SandboxDiskGB) already resolved per dimension against the deployment
 // default (Shape.orDefault, in create, against whatever default the
-// sandboxes currently carry). This is where a per-task override takes
-// effect now:
+// sandboxes currently carry), and resolved once more here against
+// grain's own DefaultShape, so that a dimension nobody named still
+// reaches kontur as a number rather than as a missing flag. This is
+// where a per-task override takes effect now:
 // a sandbox is built for one run, so the moment it is created is the one
 // moment its size is decided. It used to be applied afterwards, by a
 // `konturctl vm update` against a slot's already-created VM, and undone
 // by the recreate that followed the run -- both of which existed only
 // because the VM outlived the task.
 func (c KonturConfig) createArgs(shape Shape) []string {
+	shape = shape.orDefault(DefaultShape())
 	args := append([]string{"-backend", kontur.BackendDocker, "-net", c.netMode()}, c.CreateArgs...)
-	if shape.CPUs != 0 {
-		args = append(args, "-cpus", strconv.Itoa(shape.CPUs))
-	}
-	if shape.MemoryMB != 0 {
-		args = append(args, "-memory-mb", strconv.Itoa(shape.MemoryMB))
-	}
+	args = append(args, "-cpus", strconv.Itoa(shape.CPUs), "-memory-mb", strconv.Itoa(shape.MemoryMB))
 	// -disk-size-mb sizes the writable qcow2 overlay the VM's own
 	// container creates for it (bwsalmon/kontur's config.PrepareOverlay),
 	// which is otherwise made exactly as large as the guest image it is
@@ -214,12 +228,14 @@ func (c KonturConfig) createArgs(shape Shape) []string {
 	// (-disk-mode=overlay, also kontur's own default), and which a create
 	// rejects outright rather than ignoring if it is not.
 	//
-	// An unset disk size omits the flag rather than passing a 0, the same
-	// way -cpus and -memory-mb above do: a deployment that has never
-	// chosen one gets kontur's own answer, the guest image's own size.
-	if shape.DiskGB != 0 {
-		args = append(args, "-disk-size-mb", strconv.Itoa(shape.DiskGB*mibPerGiB))
-	}
+	// It is passed on every create, the same way -cpus and -memory-mb
+	// above are: a deployment that has never chosen a disk size gets
+	// grain's own DefaultShape rather than the guest image's own size,
+	// which is a few hundred megabytes of slack a build-heavy run spends
+	// (scripts/kontur/build-guest.sh packs disk.img to the rootfs plus
+	// 20%). kontur grows an overlay to the size asked for and refuses to
+	// shrink one, so a VM never comes up smaller than this.
+	args = append(args, "-disk-size-mb", strconv.Itoa(shape.DiskGB*mibPerGiB))
 	// Flat mode takes its address from the container runtime, and
 	// konturctl rejects "-ip" outright under it rather than ignoring it.
 	// IP/Port are dropped here rather than treated as a misconfiguration
@@ -283,9 +299,9 @@ func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
 // has changed).
 //
 // A zero dimension means "no deployment default", exactly as it does at
-// construction: the corresponding flag is left off the create entirely
-// and bwsalmon/kontur's own default stands. Sandboxes already built are
-// untouched -- a VM's size is decided when it is created.
+// construction: the create falls through to grain's own DefaultShape for
+// that dimension rather than leaving the flag off. Sandboxes already
+// built are untouched -- a VM's size is decided when it is created.
 func (k *KonturSandboxes) SetDefaultShape(shape Shape) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
