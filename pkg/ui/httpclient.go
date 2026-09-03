@@ -222,6 +222,39 @@ func (c *HTTPClient) RecreateSandbox(ctx context.Context, id string) (SandboxRec
 	return recreation, nil
 }
 
+// TaskPrompt is Client.TaskPrompt over the wire: the prompt id's most
+// recent attempt was actually handed, and which attempt that was.
+//
+// Its caller, like the two above, is `grain mcpserver` -- serving the
+// read_grain_task_prompt tool a self-debug run gets (pkg/mcp's
+// task_tools.go). A task with no recorded prompt is an empty
+// TaskPrompt and no error, exactly as the route itself answers: the task
+// exists, nothing has been dispatched for it yet.
+func (c *HTTPClient) TaskPrompt(ctx context.Context, id string) (TaskPrompt, error) {
+	var prompt TaskPrompt
+	if err := c.do(ctx, http.MethodGet, "/api/tasks/"+id+"/prompt", nil, &prompt); err != nil {
+		return TaskPrompt{}, err
+	}
+	return prompt, nil
+}
+
+// AttemptTranscript is Client.AttemptTranscript over the wire: one
+// attempt's whole recorded story, including a still-running attempt's
+// transcript-in-progress where the daemon has one to serve.
+//
+// Its caller is `grain mcpserver`, serving read_grain_task_transcript
+// (pkg/mcp's task_tools.go). An attempt that never existed is a
+// NotFoundError, the same as asking the route directly; an attempt that
+// simply recorded nothing is "" with no error.
+func (c *HTTPClient) AttemptTranscript(ctx context.Context, id string, number int) (string, error) {
+	var resp attemptTranscriptResponse
+	path := fmt.Sprintf("/api/tasks/%s/attempts/%d/transcript", id, number)
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return "", err
+	}
+	return resp.Transcript, nil
+}
+
 // Config reads the deployment's fixed configuration -- who the daemon
 // attributes every task and comment written through this API to, its
 // default target repo, and the capabilities it offers. Unlike the

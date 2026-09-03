@@ -868,6 +868,12 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// Nothing else ever told a sandbox where its repo lives.
 			GitRemoteBase: proxyURL,
 			GrantTools:    grantTools(sourceDir(cfg.upgradeSrcDir)),
+			// The same checkout grantTools above builds its in-process
+			// source tools over, told to the run itself this time: it
+			// travels to the forked "grain mcpserver" a subprocess
+			// Framework starts, which is where a self-debug run's tools
+			// are actually served from (agent.RunConfig.GrainSourceDir).
+			GrainSourceDir: sourceDir(cfg.upgradeSrcDir),
 			// The same registry startUIServer above already handed the
 			// UI, so a run that registers itself here is one
 			// POST /api/tasks/{id}/sandbox/recreate can actually find.

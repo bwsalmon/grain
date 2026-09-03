@@ -60,9 +60,25 @@ func (p *Provider) Spec() model.CapabilitySpec {
 // reimplemented here, not imported, since mcp exports no path helper of
 // its own and this package has no other reason to depend on it beyond
 // the Tool/Result shapes.
+//
+// srcDir "" returns both tools anyway, refusing every call with a
+// sentence saying why -- a deployment that has no checkout of grain's
+// own source to point at, and every caller that only wants the names
+// (each agent framework's own allowedTools). Refusing is not a detail:
+// an empty root would otherwise resolve to the process's own working
+// directory, and these tools would quietly serve whatever happens to be
+// there instead of grain's source.
 func SourceTools(srcDir string) []mcp.Tool {
 	return []mcp.Tool{readSourceTool(srcDir), listSourceTool(srcDir)}
 }
+
+// noSourceDir is what both tools answer when they were given no
+// checkout to read -- a sentence about this deployment rather than a
+// path error, which would read as a bad argument rather than as a fact
+// about how grain itself was installed.
+const noSourceDir = "This deployment has no checkout of grain's own source for this run to read " +
+	"(no -upgrade-src-dir, and no copy baked into the image it runs from). Nothing you can do from " +
+	"here will change it; say so if it matters to what you were asked to do."
 
 // resolveSourcePath maps a tool-supplied path onto one inside srcDir,
 // rejecting anything -- absolute or relative-with-.. -- that would land
@@ -104,6 +120,9 @@ func readSourceTool(srcDir string) mcp.Tool {
 			"to look at grain's own code while debugging or explaining its behavior.",
 		InputSchema: readSourceInputSchema,
 		Handler: func(_ context.Context, args map[string]any) mcp.Result {
+			if srcDir == "" {
+				return mcp.Result{Text: noSourceDir, IsError: true}
+			}
 			fp, _ := args["file_path"].(string)
 			full, err := resolveSourcePath(srcDir, fp)
 			if err != nil {
@@ -136,6 +155,9 @@ func listSourceTool(srcDir string) mcp.Tool {
 			"this to find your way around grain's own code while debugging or explaining its behavior.",
 		InputSchema: listSourceInputSchema,
 		Handler: func(_ context.Context, args map[string]any) mcp.Result {
+			if srcDir == "" {
+				return mcp.Result{Text: noSourceDir, IsError: true}
+			}
 			dp, _ := args["dir_path"].(string)
 			full, err := resolveSourcePath(srcDir, dp)
 			if err != nil {

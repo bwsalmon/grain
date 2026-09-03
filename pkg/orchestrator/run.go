@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/pkg/dispatch"
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
@@ -731,6 +732,29 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			repo = task.Target.String()
 		}
 
+		// Whether this run's task holds the self-debug grant, and where
+		// grain's own source is if it does -- the pair that turns on the
+		// read-only tools that grant is for in the forked mcpserver a
+		// subprocess Framework runs (agent.RunConfig.SelfDebug,
+		// agent.SelfDebugArgs).
+		//
+		// Read off the task's raw Grants, exactly as runOne reads them
+		// for Config.GrantTools, and for the same reason: self-debug is
+		// a model.ProvisionGrant capability whose Resolve always
+		// honours, so there is no "granted but refused" case a resolved
+		// GrantResolution would catch and this would miss.
+		//
+		// Not gated on Interactive, which GrantTools is: that gate is
+		// about selfrepair's tools needing a human watching the chat to
+		// answer a confirmation, and nothing here asks anyone anything.
+		// A task granted self-debug is a task somebody wants to be able
+		// to debug grain, attended or not.
+		selfDebug := hasGrant(task, selfdebug.CapabilityName)
+		grainSourceDir := ""
+		if selfDebug {
+			grainSourceDir = cfg.GrainSourceDir
+		}
+
 		// Setup is over and the agent's own time starts here -- the one
 		// moment inside a run nothing else records, and the line
 		// pkg/metrics splits SandboxSetup from AgentWork at. Everything
@@ -765,7 +789,8 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			// TaskID is what lets a Framework's own forked mcpserver ask
 			// the daemon to act for this run rather than only on its
 			// sandbox -- open_pull_request, today (see RunConfig.TaskID).
-			TaskID:   task.ID,
+			TaskID:    task.ID,
+			SelfDebug: selfDebug, GrainSourceDir: grainSourceDir,
 			MaxTurns: cfg.MaxAgentTurns, TranscriptPath: transcriptPath,
 			Addenda: addendaPoller(store, task.ID, comments),
 		})
@@ -1113,6 +1138,20 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 // prompt untouched when there is no section to add -- so "no prompt
 // extension" is a prompt with nothing appended rather than one ending in
 // two blank lines.
+// hasGrant reports whether task carries a grant for capability, by name
+// alone: model.Grant.Via records how the grant was come by, never what it
+// lets a task do, so a self-debug grant a human ticked and one a repo's
+// defaults attached are the same grant here (model.GrantsSubsetOf draws
+// the same line for the same reason).
+func hasGrant(task model.Task, capability string) bool {
+	for _, g := range task.Grants {
+		if g.Capability == capability {
+			return true
+		}
+	}
+	return false
+}
+
 func appendSection(prompt, section string) string {
 	if section == "" {
 		return prompt
