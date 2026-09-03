@@ -14,16 +14,16 @@ import (
 // names a template, not a task or a schedule.
 type templateNotFoundError struct{ ID string }
 
-func (e *templateNotFoundError) Error() string { return "no task template " + e.ID }
+func (e *templateNotFoundError) Error() string { return "no template " + e.ID }
 
-// Template is a task template's JSON shape (bwsalmon/agents#516) --
+// Template is a template's JSON shape (bwsalmon/agents#516) --
 // Schedule's own content fields (Title/Description/AutoMerge/Reads/
 // Capabilities), the subset a schedule's ScheduleOverlay.jsx already
 // collects, minus everything about firing on a cadence and minus Repo/
 // Base: a template is never itself something that fires, only something
 // a schedule (or a future caller) fires from, and which repo and branch
 // a firing targets is a property of that caller, not of the template
-// (model.TaskTemplate's own doc comment on why).
+// (model.Template's own doc comment on why).
 type Template struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
@@ -35,7 +35,7 @@ type Template struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
-func templateFrom(t model.TaskTemplate) Template {
+func templateFrom(t model.Template) Template {
 	out := Template{
 		ID:           t.ID,
 		Name:         t.Name,
@@ -56,7 +56,7 @@ func templateFrom(t model.TaskTemplate) Template {
 
 // ListTemplates returns every template, newest first.
 func (c *Client) ListTemplates(ctx context.Context) ([]Template, error) {
-	list, err := c.Store.ListTaskTemplates(ctx)
+	list, err := c.Store.ListTemplates(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +67,11 @@ func (c *Client) ListTemplates(ctx context.Context) ([]Template, error) {
 	return out, nil
 }
 
-// CreateTemplateRequest is a new template's fields -- CreateScheduleRequest's
-// own content subset, minus Repo/Base (a template carries no target of
-// its own, model.TaskTemplate's own doc comment on why) and minus
-// Recurrence/Enabled for the same reason Template itself leaves them out.
+// CreateTemplateRequest is a new template's fields --
+// CreateScheduleRequest's own content subset, minus Repo/Base (a
+// template carries no target of its own, model.Template's own doc
+// comment on why) and minus Recurrence/Enabled for the same reason
+// Template itself leaves them out.
 type CreateTemplateRequest struct {
 	Name         string   `json:"name"`
 	Title        string   `json:"title"`
@@ -97,11 +98,11 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 		return Template{}, err
 	}
 
-	id, err := c.Store.NewTaskTemplateID(ctx)
+	id, err := c.Store.NewTemplateID(ctx)
 	if err != nil {
 		return Template{}, err
 	}
-	tmpl := model.TaskTemplate{
+	tmpl := model.Template{
 		ID:        id,
 		Name:      req.Name,
 		Title:     req.Title,
@@ -111,7 +112,7 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 		Grants:    grants,
 		CreatedAt: c.now(),
 	}
-	if err := c.Store.PutTaskTemplate(ctx, tmpl); err != nil {
+	if err := c.Store.PutTemplate(ctx, tmpl); err != nil {
 		return Template{}, err
 	}
 	return templateFrom(tmpl), nil
@@ -157,7 +158,7 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 		}
 	}
 
-	existing, err := c.Store.GetTaskTemplate(ctx, id)
+	existing, err := c.Store.GetTemplate(ctx, id)
 	if err != nil {
 		return Template{}, err
 	}
@@ -165,7 +166,7 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 		return Template{}, &templateNotFoundError{ID: id}
 	}
 
-	if err := c.Store.UpdateTaskTemplate(ctx, id, func(t *model.TaskTemplate) error {
+	if err := c.Store.UpdateTemplate(ctx, id, func(t *model.Template) error {
 		if req.Name != nil {
 			t.Name = *req.Name
 		}
@@ -189,29 +190,29 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 		return Template{}, err
 	}
 
-	updated, err := c.Store.GetTaskTemplate(ctx, id)
+	updated, err := c.Store.GetTemplate(ctx, id)
 	if err != nil {
 		return Template{}, err
 	}
 	return templateFrom(*updated), nil
 }
 
-// DeleteTemplate removes a template outright -- DeleteSchedule's own "no
-// history worth keeping" reasoning applies again here, except a template
-// additionally refuses to delete out from under a schedule that still
-// fires from it, a qualification plan (bwsalmon/agents#518) that still
-// schedules from it, or a task suite (bwsalmon/agents#642) that still
-// runs it: unlike editing a template (which every schedule, plan or suite
-// pointing at it is meant to pick up), deleting one out from under any of
-// them would silently strand its next firing -- a schedule's with no
-// content to file, a plan's with no template for CreateQualificationRun
-// to resolve, a suite's with no template for
-// CreateTaskSuiteRun/FireNextPass to resolve -- worse than the plain,
-// retried error each would otherwise have to surface days or weeks later.
-// A human wanting to delete it anyway repoints or deletes those
+// DeleteTemplate removes a template outright -- DeleteSchedule's own
+// "no history worth keeping" reasoning applies again here, except a
+// template additionally refuses to delete out from under a schedule
+// that still fires from it, a qualification plan (bwsalmon/agents#518)
+// that still schedules from it, or a suite (bwsalmon/agents#642) that
+// still runs it: unlike editing a template (which every schedule, plan
+// or suite pointing at it is meant to pick up), deleting one out from
+// under any of them would silently strand its next firing -- a
+// schedule's with no content to file, a plan's with no template for
+// CreateQualificationRun to resolve, a suite's with no template for
+// CreateSuiteRun/FireNextPass to resolve -- worse than the plain,
+// retried error each would otherwise have to surface days or weeks
+// later. A human wanting to delete it anyway repoints or deletes those
 // schedules, plans and suites first.
 func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
-	existing, err := c.Store.GetTaskTemplate(ctx, id)
+	existing, err := c.Store.GetTemplate(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -234,15 +235,15 @@ func (c *Client) DeleteTemplate(ctx context.Context, id string) error {
 		return validationErrorf(
 			"template is used by %d repo's qualification plan; remove it from those first", len(usedBy))
 	}
-	suites, err := c.Store.TaskSuitesUsingTemplate(ctx, id)
+	suites, err := c.Store.SuitesUsingTemplate(ctx, id)
 	if err != nil {
 		return err
 	}
 	if len(suites) > 0 {
 		return validationErrorf(
-			"template is used by %d task suite(s); remove it from those first", len(suites))
+			"template is used by %d suite(s); remove it from those first", len(suites))
 	}
-	return c.Store.DeleteTaskTemplate(ctx, id)
+	return c.Store.DeleteTemplate(ctx, id)
 }
 
 // --- handlers ------------------------------------------------------------

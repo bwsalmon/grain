@@ -10,18 +10,18 @@ import (
 	"github.com/bwsalmon/grain/pkg/model"
 )
 
-// suiteNotFoundError marks a suite ID with no task suite behind it --
+// suiteNotFoundError marks a suite ID with no suite behind it --
 // scheduleNotFoundError's own reasoning, so the message a caller sees
 // names a suite, not a task or a schedule.
 type suiteNotFoundError struct{ ID string }
 
-func (e *suiteNotFoundError) Error() string { return "no task suite " + e.ID }
+func (e *suiteNotFoundError) Error() string { return "no suite " + e.ID }
 
 // suiteRunNotFoundError is the same, for a run id.
 type suiteRunNotFoundError struct{ ID int64 }
 
 func (e *suiteRunNotFoundError) Error() string {
-	return "no task suite run " + strconv.FormatInt(e.ID, 10)
+	return "no suite run " + strconv.FormatInt(e.ID, 10)
 }
 
 // SuiteItem is one template a suite runs, over the wire -- TemplateName
@@ -32,19 +32,19 @@ type SuiteItem struct {
 	TemplateName string `json:"templateName,omitempty"`
 }
 
-// Suite is a task suite's JSON shape (bwsalmon/agents#642) -- a saved
-// combination of task templates plus how to run them, created once and
-// run against any repo and branch any number of times.
+// Suite is a suite's JSON shape (bwsalmon/agents#642) -- a saved
+// combination of templates plus how to run them, created once and run
+// against any repo and branch any number of times.
 type Suite struct {
 	ID    string      `json:"id"`
 	Name  string      `json:"name"`
 	Items []SuiteItem `json:"items"`
-	// Mode is "count" or "until_clean" -- model.TaskSuiteMode's own
+	// Mode is "count" or "until_clean" -- model.SuiteMode's own
 	// vocabulary, unchanged, since it is already the plain English a UI
 	// wants to show and to send back.
 	Mode string `json:"mode"`
 	// Count is meaningful for Mode "count" only; MaxPasses for
-	// "until_clean" only -- which is which is model.TaskSuite.Validate's
+	// "until_clean" only -- which is which is model.Suite.Validate's
 	// own job, not this type's.
 	Count           int       `json:"count,omitempty"`
 	MaxPasses       int       `json:"maxPasses,omitempty"`
@@ -53,7 +53,7 @@ type Suite struct {
 	CreatedAt       time.Time `json:"createdAt"`
 }
 
-func suiteItemsFrom(items []model.TaskSuiteItem, names map[string]string) []SuiteItem {
+func suiteItemsFrom(items []model.SuiteItem, names map[string]string) []SuiteItem {
 	out := make([]SuiteItem, 0, len(items))
 	for _, it := range items {
 		out = append(out, SuiteItem{TemplateID: it.TemplateID, TemplateName: names[it.TemplateID]})
@@ -61,7 +61,7 @@ func suiteItemsFrom(items []model.TaskSuiteItem, names map[string]string) []Suit
 	return out
 }
 
-func suiteFrom(s model.TaskSuite, names map[string]string) Suite {
+func suiteFrom(s model.Suite, names map[string]string) Suite {
 	return Suite{
 		ID:              s.ID,
 		Name:            s.Name,
@@ -84,14 +84,14 @@ func (c *Client) templateNamesFor(ctx context.Context, ids []string) (map[string
 		if _, ok := names[id]; ok || id == "" {
 			continue
 		}
-		if t, err := c.Store.GetTaskTemplate(ctx, id); err == nil && t != nil {
+		if t, err := c.Store.GetTemplate(ctx, id); err == nil && t != nil {
 			names[id] = t.Name
 		}
 	}
 	return names, nil
 }
 
-func templateIDsOf(items []model.TaskSuiteItem) []string {
+func templateIDsOf(items []model.SuiteItem) []string {
 	ids := make([]string, len(items))
 	for i, it := range items {
 		ids[i] = it.TemplateID
@@ -99,9 +99,9 @@ func templateIDsOf(items []model.TaskSuiteItem) []string {
 	return ids
 }
 
-// ListSuites returns every task suite, newest first.
+// ListSuites returns every suite, newest first.
 func (c *Client) ListSuites(ctx context.Context) ([]Suite, error) {
-	list, err := c.Store.ListTaskSuites(ctx)
+	list, err := c.Store.ListSuites(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -122,48 +122,48 @@ func (c *Client) ListSuites(ctx context.Context) ([]Suite, error) {
 
 // parseSuiteMode validates mode and the count/maxPasses pair that goes
 // with it -- CreateSuite's and UpdateSuite's shared check, so a bad
-// suite is refused here rather than left for model.TaskSuite.Validate to
+// suite is refused here rather than left for model.Suite.Validate to
 // discover with a less specific message.
-func parseSuiteMode(mode string, count, maxPasses int) (model.TaskSuiteMode, error) {
-	switch model.TaskSuiteMode(mode) {
-	case model.TaskSuiteCount:
+func parseSuiteMode(mode string, count, maxPasses int) (model.SuiteMode, error) {
+	switch model.SuiteMode(mode) {
+	case model.SuiteCount:
 		if count < 1 {
 			return "", validationErrorf("count must be at least 1")
 		}
-		return model.TaskSuiteCount, nil
-	case model.TaskSuiteUntilClean:
+		return model.SuiteCount, nil
+	case model.SuiteUntilClean:
 		if maxPasses < 1 {
 			return "", validationErrorf("maxPasses must be at least 1")
 		}
-		return model.TaskSuiteUntilClean, nil
+		return model.SuiteUntilClean, nil
 	default:
 		return "", validationErrorf(`mode must be "count" or "until_clean", got %q`, mode)
 	}
 }
 
-func parseSuiteItems(templateIDs []string) ([]model.TaskSuiteItem, error) {
+func parseSuiteItems(templateIDs []string) ([]model.SuiteItem, error) {
 	if len(templateIDs) == 0 {
-		return nil, validationErrorf("a task suite needs at least one task template")
+		return nil, validationErrorf("a suite needs at least one template")
 	}
-	items := make([]model.TaskSuiteItem, 0, len(templateIDs))
+	items := make([]model.SuiteItem, 0, len(templateIDs))
 	for _, id := range templateIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
-			return nil, validationErrorf("a task suite item needs a template")
+			return nil, validationErrorf("a suite item needs a template")
 		}
-		items = append(items, model.TaskSuiteItem{TemplateID: id})
+		items = append(items, model.SuiteItem{TemplateID: id})
 	}
 	return items, nil
 }
 
 // checkSuiteTemplatesExist reports an error naming the first templateId
-// in items that GetTaskTemplate cannot find -- CreateSuite's and
+// in items that GetTemplate cannot find -- CreateSuite's and
 // UpdateSuite's own early check, so a suite pointed at a typo'd or
 // already-deleted template is refused at save time rather than left for
-// CreateTaskSuiteRun/FireNextPass to fail on days or a pass later.
-func (c *Client) checkSuiteTemplatesExist(ctx context.Context, items []model.TaskSuiteItem) error {
+// CreateSuiteRun/FireNextPass to fail on days or a pass later.
+func (c *Client) checkSuiteTemplatesExist(ctx context.Context, items []model.SuiteItem) error {
 	for _, it := range items {
-		t, err := c.Store.GetTaskTemplate(ctx, it.TemplateID)
+		t, err := c.Store.GetTemplate(ctx, it.TemplateID)
 		if err != nil {
 			return err
 		}
@@ -188,7 +188,7 @@ type CreateSuiteRequest struct {
 	AutoMerge       *bool    `json:"autoMerge"`
 }
 
-// CreateSuite files a new task suite template straight into the store.
+// CreateSuite files a new suite template straight into the store.
 func (c *Client) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suite, error) {
 	if strings.TrimSpace(req.Name) == "" {
 		return Suite{}, validationErrorf("name is required")
@@ -209,11 +209,11 @@ func (c *Client) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suite
 		autoMerge = *req.AutoMerge
 	}
 
-	id, err := c.Store.NewTaskSuiteID(ctx)
+	id, err := c.Store.NewSuiteID(ctx)
 	if err != nil {
 		return Suite{}, err
 	}
-	suite := model.TaskSuite{
+	suite := model.Suite{
 		ID:              id,
 		Name:            req.Name,
 		Items:           items,
@@ -227,7 +227,7 @@ func (c *Client) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suite
 	if err := suite.Validate(); err != nil {
 		return Suite{}, &ValidationError{err: err}
 	}
-	if err := c.Store.PutTaskSuite(ctx, suite); err != nil {
+	if err := c.Store.PutSuite(ctx, suite); err != nil {
 		return Suite{}, err
 	}
 	names, err := c.templateNamesFor(ctx, templateIDsOf(suite.Items))
@@ -239,8 +239,8 @@ func (c *Client) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suite
 
 // UpdateSuiteRequest is a suite's editable fields -- nil means "leave
 // this one alone", UpdateScheduleRequest's own convention. Editing a
-// suite never changes a run already in flight (model.TaskSuiteRun's own
-// doc comment: everything a run needs is snapshotted at creation).
+// suite never changes a run already in flight (model.SuiteRun's own doc
+// comment: everything a run needs is snapshotted at creation).
 type UpdateSuiteRequest struct {
 	Name            *string   `json:"name,omitempty"`
 	TemplateIDs     *[]string `json:"templateIds,omitempty"`
@@ -253,7 +253,7 @@ type UpdateSuiteRequest struct {
 
 // UpdateSuite edits a suite's fields in place.
 func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequest) (Suite, error) {
-	existing, err := c.Store.GetTaskSuite(ctx, id)
+	existing, err := c.Store.GetSuite(ctx, id)
 	if err != nil {
 		return Suite{}, err
 	}
@@ -261,7 +261,7 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 		return Suite{}, &suiteNotFoundError{ID: id}
 	}
 
-	var items []model.TaskSuiteItem
+	var items []model.SuiteItem
 	if req.TemplateIDs != nil {
 		items, err = parseSuiteItems(*req.TemplateIDs)
 		if err != nil {
@@ -277,11 +277,12 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 
 	// Validated against the merged copy before anything is written, not
 	// inside the store's own read-modify-write closure: mutate may run
-	// more than once against a freshly re-read row (Store.UpdateTaskSuite's
-	// own retry shape), and model.TaskSuite.Validate's error is a plain
-	// error, not this package's ValidationError -- easier to check once,
-	// here, where the type writeClientError needs to see it as is still
-	// in scope, than to have the store's own s.write wrap it in transit.
+	// more than once against a freshly re-read row (Store.UpdateSuite's
+	// own retry shape), and model.Suite.Validate's error is a plain
+	// error, not this package's ValidationError -- easier to check
+	// once, here, where the type writeClientError needs to see it as is
+	// still in scope, than to have the store's own s.write wrap it in
+	// transit.
 	merged := *existing
 	if req.Name != nil {
 		merged.Name = *req.Name
@@ -290,7 +291,7 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 		merged.Items = items
 	}
 	if req.Mode != nil {
-		merged.Mode = model.TaskSuiteMode(*req.Mode)
+		merged.Mode = model.SuiteMode(*req.Mode)
 	}
 	if req.Count != nil {
 		merged.Count = *req.Count
@@ -308,14 +309,14 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 		return Suite{}, &ValidationError{err: err}
 	}
 
-	if err := c.Store.UpdateTaskSuite(ctx, id, func(s *model.TaskSuite) error {
+	if err := c.Store.UpdateSuite(ctx, id, func(s *model.Suite) error {
 		*s = merged
 		return nil
 	}); err != nil {
 		return Suite{}, err
 	}
 
-	updated, err := c.Store.GetTaskSuite(ctx, id)
+	updated, err := c.Store.GetSuite(ctx, id)
 	if err != nil {
 		return Suite{}, err
 	}
@@ -326,9 +327,9 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 	return suiteFrom(*updated, names), nil
 }
 
-// DeleteSuite removes a suite outright -- DeleteTaskSuite's own doc
-// comment gives the reasoning: a run already started from it keeps its
-// own snapshot and is untouched.
+// DeleteSuite removes a suite outright -- DeleteSuite's own doc comment
+// gives the reasoning: a run already started from it keeps its own
+// snapshot and is untouched.
 //
 // A schedule that still runs this suite on a cadence is the one thing
 // that refuses the delete, DeleteTemplate's own guard for the same
@@ -336,7 +337,7 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 // schedule with nothing to fire, surfacing only as a failed firing
 // whenever it next came due.
 func (c *Client) DeleteSuite(ctx context.Context, id string) error {
-	existing, err := c.Store.GetTaskSuite(ctx, id)
+	existing, err := c.Store.GetSuite(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -349,9 +350,9 @@ func (c *Client) DeleteSuite(ctx context.Context, id string) error {
 	}
 	if len(inUse) > 0 {
 		return validationErrorf(
-			"task suite is used by %d schedule(s); repoint or delete those first", len(inUse))
+			"suite is used by %d schedule(s); repoint or delete those first", len(inUse))
 	}
-	return c.Store.DeleteTaskSuite(ctx, id)
+	return c.Store.DeleteSuite(ctx, id)
 }
 
 // --- runs --------------------------------------------------------------
@@ -370,8 +371,8 @@ type SuiteRunTask struct {
 }
 
 // SuiteRun is one run of a suite against a repo and branch, over the
-// wire -- what a "see the status of outstanding task suite runs" view
-// needs (bwsalmon/agents#642).
+// wire -- what a "see the status of outstanding suite runs" view needs
+// (bwsalmon/agents#642).
 type SuiteRun struct {
 	ID        int64  `json:"id"`
 	SuiteID   string `json:"suiteId"`
@@ -388,7 +389,7 @@ type SuiteRun struct {
 	RequireApproval bool   `json:"requireApproval"`
 	AutoMerge       bool   `json:"autoMerge"`
 	// Status is one of "active", "succeeded", "failed" --
-	// model.TaskSuiteRunStatus's own vocabulary.
+	// model.SuiteRunStatus's own vocabulary.
 	Status      string         `json:"status"`
 	Error       string         `json:"error,omitempty"`
 	Pass        int            `json:"pass"`
@@ -397,7 +398,7 @@ type SuiteRun struct {
 	Tasks       []SuiteRunTask `json:"tasks"`
 }
 
-func suiteRunFrom(r model.TaskSuiteRun) SuiteRun {
+func suiteRunFrom(r model.SuiteRun) SuiteRun {
 	out := SuiteRun{
 		ID:              r.ID,
 		SuiteID:         r.SuiteID,
@@ -426,9 +427,9 @@ func suiteRunFrom(r model.TaskSuiteRun) SuiteRun {
 	return out
 }
 
-// ListSuiteRuns returns every task suite run, newest first.
+// ListSuiteRuns returns every suite run, newest first.
 func (c *Client) ListSuiteRuns(ctx context.Context) ([]SuiteRun, error) {
-	list, err := c.Store.ListTaskSuiteRuns(ctx)
+	list, err := c.Store.ListSuiteRuns(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +442,7 @@ func (c *Client) ListSuiteRuns(ctx context.Context) ([]SuiteRun, error) {
 
 // GetSuiteRun returns one run, or an error if there is none with that id.
 func (c *Client) GetSuiteRun(ctx context.Context, id int64) (SuiteRun, error) {
-	run, err := c.Store.GetTaskSuiteRun(ctx, id)
+	run, err := c.Store.GetSuiteRun(ctx, id)
 	if err != nil {
 		return SuiteRun{}, err
 	}
@@ -470,20 +471,20 @@ func (c *Client) CreateSuiteRun(ctx context.Context, req CreateSuiteRunRequest) 
 		return SuiteRun{}, validationErrorf("repo is required")
 	}
 	if strings.TrimSpace(req.Base) == "" {
-		return SuiteRun{}, validationErrorf("base is required: a task suite run has no default branch to fall back to")
+		return SuiteRun{}, validationErrorf("base is required: a suite run has no default branch to fall back to")
 	}
 	target, err := model.ParseRepo(req.Repo)
 	if err != nil {
 		return SuiteRun{}, &ValidationError{err: err}
 	}
-	suite, err := c.Store.GetTaskSuite(ctx, req.SuiteID)
+	suite, err := c.Store.GetSuite(ctx, req.SuiteID)
 	if err != nil {
 		return SuiteRun{}, err
 	}
 	if suite == nil {
 		return SuiteRun{}, &suiteNotFoundError{ID: req.SuiteID}
 	}
-	run, err := c.Store.CreateTaskSuiteRun(ctx, *suite, target, req.Base, c.now())
+	run, err := c.Store.CreateSuiteRun(ctx, *suite, target, req.Base, c.now())
 	if err != nil {
 		return SuiteRun{}, err
 	}

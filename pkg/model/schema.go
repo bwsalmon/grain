@@ -325,12 +325,13 @@ var Tables = []string{
 	//
 	// template_id and suite_id are what a firing actually is: both NULL
 	// for a schedule carrying its own inline task content, template_id
-	// for one firing a task_template's content instead, suite_id for one
-	// starting a task_suite run instead of filing a task at all
+	// for one firing a template's content instead, suite_id for one
+	// starting a suite run instead of filing a task at all
 	// (model.Schedule's own doc comment on why the two are mutually
 	// exclusive). A database created before either existed gets the
-	// column from ensureScheduleTemplateColumn/ensureScheduleSuiteColumn
-	// rather than from this DDL.
+	// column from
+	// ensureScheduleTemplateColumn/ensureScheduleSuiteColumn rather
+	// than from this DDL.
 	`CREATE TABLE IF NOT EXISTS ` + "`schedule`" + ` (
   ` + "`id`" + `                    TEXT     NOT NULL,
   ` + "`title`" + `                 TEXT     NOT NULL,
@@ -386,15 +387,15 @@ var Tables = []string{
 
 	// One row per template (bwsalmon/agents#516) -- task_sequence's own
 	// "identity allocated here, not borrowed" reasoning applies again:
-	// name/title/body/auto_merge are exactly the reusable-content fields
-	// a schedule already carried inline, now given a row of their own so
-	// more than one schedule (schedule.template_id) can point at the same
-	// one instead of repeating it. Deliberately no
-	// target_owner/target_name/base here (model.TaskTemplate's own doc
+	// name/title/body/auto_merge are exactly the reusable-content
+	// fields a schedule already carried inline, now given a row of
+	// their own so more than one schedule (schedule.template_id) can
+	// point at the same one instead of repeating it. Deliberately no
+	// target_owner/target_name/base here (model.Template's own doc
 	// comment on why): which repo and branch a firing targets is a
 	// property of the caller using this template, not of the template
 	// itself.
-	`CREATE TABLE IF NOT EXISTS ` + "`task_template`" + ` (
+	`CREATE TABLE IF NOT EXISTS ` + "`template`" + ` (
   ` + "`id`" + `           TEXT     NOT NULL,
   ` + "`name`" + `         TEXT     NOT NULL,
   ` + "`title`" + `        TEXT     NOT NULL,
@@ -406,27 +407,27 @@ var Tables = []string{
 
 	// schedule_sequence's own doc comment gives the reasoning for a
 	// dedicated allocator rather than a counter column.
-	`CREATE TABLE IF NOT EXISTS ` + "`task_template_sequence`" + ` (
+	`CREATE TABLE IF NOT EXISTS ` + "`template_sequence`" + ` (
   ` + "`number`" + `    INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`issued_at`" + ` DATETIME NOT NULL
 )`,
 
 	// schedule_read's own doc comment gives the reasoning for a table
 	// rather than a JSON column, ported onto a template's own id.
-	`CREATE TABLE IF NOT EXISTS ` + "`task_template_read`" + ` (
-  ` + "`task_template_id`" + ` TEXT NOT NULL,
-  ` + "`owner`" + `            TEXT NOT NULL,
-  ` + "`name`" + `             TEXT NOT NULL,
-  PRIMARY KEY (` + "`task_template_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
+	`CREATE TABLE IF NOT EXISTS ` + "`template_read`" + ` (
+  ` + "`template_id`" + ` TEXT NOT NULL,
+  ` + "`owner`" + `       TEXT NOT NULL,
+  ` + "`name`" + `        TEXT NOT NULL,
+  PRIMARY KEY (` + "`template_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
 )`,
 
 	// schedule_grant's own shape, for a template's own capabilities.
-	`CREATE TABLE IF NOT EXISTS ` + "`task_template_grant`" + ` (
-  ` + "`task_template_id`" + ` TEXT NOT NULL,
-  ` + "`capability`" + `       TEXT NOT NULL,
-  ` + "`via`" + `              TEXT NOT NULL,
-  ` + "`folder`" + `           TEXT NULL,
-  PRIMARY KEY (` + "`task_template_id`" + `, ` + "`capability`" + `)
+	`CREATE TABLE IF NOT EXISTS ` + "`template_grant`" + ` (
+  ` + "`template_id`" + ` TEXT NOT NULL,
+  ` + "`capability`" + `  TEXT NOT NULL,
+  ` + "`via`" + `         TEXT NOT NULL,
+  ` + "`folder`" + `      TEXT NULL,
+  PRIMARY KEY (` + "`template_id`" + `, ` + "`capability`" + `)
 )`,
 
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_schema`" + ` (
@@ -706,16 +707,16 @@ var Tables = []string{
   PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
 )`,
 
-	// One entry in a repo's qualification plan -- a task_template
-	// (bwsalmon/agents#516) this plan schedules, referenced by id rather
-	// than copied: content lives on the template, and
-	// CreateQualificationRun resolves it fresh every time a candidate is
-	// qualified, the same "not a stale copy" discipline fireTaskSchedule
-	// already holds a schedule's own TemplateID to. repeat_count is
-	// model.QualificationItem's own Repeat; order_key is display order
-	// only -- unlike task.order_key it decides nothing about dispatch,
-	// since an item's actual scheduling order comes from the dependency
-	// graph below, not from this column.
+	// One entry in a repo's qualification plan -- a template
+	// (bwsalmon/agents#516) this plan schedules, referenced by id
+	// rather than copied: content lives on the template, and
+	// CreateQualificationRun resolves it fresh every time a candidate
+	// is qualified, the same "not a stale copy" discipline
+	// fireTaskSchedule already holds a schedule's own TemplateID to.
+	// repeat_count is model.QualificationItem's own Repeat; order_key
+	// is display order only -- unlike task.order_key it decides nothing
+	// about dispatch, since an item's actual scheduling order comes
+	// from the dependency graph below, not from this column.
 	`CREATE TABLE IF NOT EXISTS ` + "`qualification_item`" + ` (
   ` + "`owner`" + `        TEXT    NOT NULL,
   ` + "`name`" + `         TEXT    NOT NULL,
@@ -773,16 +774,15 @@ var Tables = []string{
 	`CREATE INDEX IF NOT EXISTS ` + "`qualification_task_run`" + ` ON ` + "`qualification_task`" + ` (` + "`run_id`" + `)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`qualification_task_task`" + ` ON ` + "`qualification_task`" + ` (` + "`task_id`" + `)`,
 
-	// A task suite template (bwsalmon/agents#642) -- a saved combination
-	// of task templates plus how to run them. INTEGER-free TEXT id, the
-	// same "own sequence, own prefix" shape task_template and schedule
-	// already use (task_suite_sequence below), since a suite is created
-	// directly rather than cut like a release or a candidate.
-	// mode/count/max_passes are model.TaskSuite's own
-	// TaskSuiteMode/Count/MaxPasses -- which pair is meaningful depends
-	// on mode, model.TaskSuite.Validate's own job to check, not the
-	// schema's.
-	`CREATE TABLE IF NOT EXISTS ` + "`task_suite`" + ` (
+	// One suite (bwsalmon/agents#642) -- a saved combination of
+	// templates plus how to run them. INTEGER-free TEXT id, the same
+	// "own sequence, own prefix" shape template and schedule already
+	// use (suite_sequence below), since a suite is created directly
+	// rather than cut like a release or a candidate.
+	// mode/count/max_passes are model.Suite's own
+	// SuiteMode/Count/MaxPasses -- which pair is meaningful depends on
+	// mode, model.Suite.Validate's own job to check, not the schema's.
+	`CREATE TABLE IF NOT EXISTS ` + "`suite`" + ` (
   ` + "`id`" + `                TEXT     NOT NULL,
   ` + "`name`" + `              TEXT     NOT NULL,
   ` + "`mode`" + `              TEXT     NOT NULL,
@@ -794,7 +794,7 @@ var Tables = []string{
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
-	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_sequence`" + ` (
+	`CREATE TABLE IF NOT EXISTS ` + "`suite_sequence`" + ` (
   ` + "`id`" + `         INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`issued_at`" + `  DATETIME NOT NULL
 )`,
@@ -806,25 +806,25 @@ var Tables = []string{
 	// nothing here stops the same template from appearing twice in one
 	// suite on purpose (e.g. running it once against each of two
 	// unrelated concerns a single pass covers).
-	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_item`" + ` (
+	`CREATE TABLE IF NOT EXISTS ` + "`suite_item`" + ` (
   ` + "`id`" + `           INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`suite_id`" + `     TEXT    NOT NULL,
   ` + "`template_id`" + `  TEXT    NOT NULL,
   ` + "`order_key`" + `    REAL    NOT NULL
 )`,
 
-	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_item_suite`" + ` ON ` + "`task_suite_item`" + ` (` + "`suite_id`" + `, ` + "`order_key`" + `)`,
+	`CREATE INDEX IF NOT EXISTS ` + "`suite_item_suite`" + ` ON ` + "`suite_item`" + ` (` + "`suite_id`" + `, ` + "`order_key`" + `)`,
 
 	// One run of a suite against a repo and branch. Every field a run's
 	// own behaviour depends on is copied from the suite at creation
-	// (model.TaskSuiteRun's own doc comment on why), so this table
-	// carries its own mode/count/max_passes/require_approval/auto_merge
-	// rather than joining back to task_suite for them -- a suite edited
-	// after a run starts must not change how that run already in flight
-	// behaves. suite_id and suite_name are kept anyway, for display and
-	// for CreateTaskSuiteRun's own idempotency (a suite deleted after a
-	// run starts leaves the run's own history intact). INTEGER PRIMARY
-	// KEY AUTOINCREMENT for the same reason release/candidate/
+	// (model.SuiteRun's own doc comment on why), so this table carries
+	// its own mode/count/max_passes/require_approval/auto_merge rather
+	// than joining back to suite for them -- a suite edited after a run
+	// starts must not change how that run already in flight behaves.
+	// suite_id and suite_name are kept anyway, for display and for
+	// CreateSuiteRun's own idempotency (a suite deleted after a run
+	// starts leaves the run's own history intact). INTEGER PRIMARY KEY
+	// AUTOINCREMENT for the same reason release/candidate/
 	// qualification_run all use it: starting a run has to stay correct
 	// with more than one writer.
 	//
@@ -832,11 +832,11 @@ var Tables = []string{
 	// the schedule that fired it otherwise -- Store.
 	// HasActiveRunForSchedule reads it back as the "a previous firing
 	// that has not finished suppresses the next one" check a schedule
-	// firing a suite needs, exactly what task_tag's own firing tag is for
-	// a schedule filing a task. A database created before schedules could
-	// fire a suite gets this column from ensureTaskSuiteRunScheduleColumn
-	// rather than from this DDL.
-	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run`" + ` (
+	// firing a suite needs, exactly what task_tag's own firing tag is
+	// for a schedule filing a task. A database created before schedules
+	// could fire a suite gets this column from
+	// ensureSuiteRunScheduleColumn rather than from this DDL.
+	`CREATE TABLE IF NOT EXISTS ` + "`suite_run`" + ` (
   ` + "`id`" + `                INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`suite_id`" + `          TEXT     NOT NULL,
   ` + "`suite_name`" + `        TEXT     NOT NULL,
@@ -855,30 +855,30 @@ var Tables = []string{
   ` + "`completed_at`" + `      DATETIME NULL
 )`,
 
-	// What ListTaskSuiteRuns (newest first) and the reconciler's own
-	// ActiveTaskSuiteRuns (status only) both need.
-	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_run_status`" + ` ON ` + "`task_suite_run`" + ` (` + "`status`" + `)`,
+	// What ListSuiteRuns (newest first) and the reconciler's own
+	// ActiveSuiteRuns (status only) both need.
+	`CREATE INDEX IF NOT EXISTS ` + "`suite_run_status`" + ` ON ` + "`suite_run`" + ` (` + "`status`" + `)`,
 
 	// A run's own snapshot of its suite's items at the moment it was
-	// created -- CreateTaskSuiteRun's copy, read back by FireNextPass
-	// every time it files another pass, so a suite edited after a run
-	// starts cannot change which templates that run's later passes fire
-	// (model.TaskSuiteRun.Items's own doc comment).
-	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run_item`" + ` (
+	// created -- CreateSuiteRun's copy, read back by FireNextPass every
+	// time it files another pass, so a suite edited after a run starts
+	// cannot change which templates that run's later passes fire
+	// (model.SuiteRun.Items's own doc comment).
+	`CREATE TABLE IF NOT EXISTS ` + "`suite_run_item`" + ` (
   ` + "`id`" + `           INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`run_id`" + `       INTEGER NOT NULL,
   ` + "`template_id`" + `  TEXT    NOT NULL,
   ` + "`order_key`" + `    REAL    NOT NULL
 )`,
 
-	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_run_item_run`" + ` ON ` + "`task_suite_run_item`" + ` (` + "`run_id`" + `, ` + "`order_key`" + `)`,
+	`CREATE INDEX IF NOT EXISTS ` + "`suite_run_item_run`" + ` ON ` + "`suite_run_item`" + ` (` + "`run_id`" + `, ` + "`order_key`" + `)`,
 
 	// One task instance a run's pass instantiated. template_name is a
 	// snapshot of the resolved template's own Name at the moment this
 	// instance was created, qualification_task's own reasoning for the
 	// same column. task_id is unique: a task belongs to at most one
 	// suite run, ever.
-	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run_task`" + ` (
+	`CREATE TABLE IF NOT EXISTS ` + "`suite_run_task`" + ` (
   ` + "`id`" + `             INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`run_id`" + `        INTEGER NOT NULL,
   ` + "`task_id`" + `       TEXT    NOT NULL,
@@ -887,8 +887,8 @@ var Tables = []string{
   ` + "`pass_number`" + `   INTEGER NOT NULL
 )`,
 
-	`CREATE INDEX IF NOT EXISTS ` + "`task_suite_run_task_run`" + ` ON ` + "`task_suite_run_task`" + ` (` + "`run_id`" + `)`,
-	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`task_suite_run_task_task`" + ` ON ` + "`task_suite_run_task`" + ` (` + "`task_id`" + `)`,
+	`CREATE INDEX IF NOT EXISTS ` + "`suite_run_task_run`" + ` ON ` + "`suite_run_task`" + ` (` + "`run_id`" + `)`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS ` + "`suite_run_task_task`" + ` ON ` + "`suite_run_task`" + ` (` + "`task_id`" + `)`,
 }
 
 // Views is the derivations, each a (name, DDL) pair so Init can drop and

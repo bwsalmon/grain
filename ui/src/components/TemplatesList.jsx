@@ -42,7 +42,7 @@ export default function TemplatesList({ templates, config, openTemplateId, onOpe
   return (
     <main>
       <ListHeader
-        title="Task templates"
+        title="Templates"
         count={visible.length}
         action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New template</Button>}
       />
@@ -60,7 +60,7 @@ export default function TemplatesList({ templates, config, openTemplateId, onOpe
           </li>
         ))}
       </ul>
-      {templates.length === 0 && <ListEmpty>No task templates.</ListEmpty>}
+      {templates.length === 0 && <ListEmpty>No templates.</ListEmpty>}
       {templates.length > 0 && visible.length === 0 && <ListEmpty>No templates match your search.</ListEmpty>}
 
       {showNew && (

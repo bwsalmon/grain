@@ -264,7 +264,7 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       <span className="task-title">{t.title}</span>
       <span className="chips">
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
-        {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a task suite run" label="suite" />}
+        {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a suite run" label="suite" />}
         {t.stacked && !nested && (
           <Chip
             size="small"

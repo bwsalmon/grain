@@ -189,16 +189,17 @@ func TestReconcileScheduleWaitsForThePreviousFiringToFinish(t *testing.T) {
 
 // TestReconcileScheduleFiresFromATemplateResolvedFresh is
 // bwsalmon/agents#516's central guarantee: fireTaskSchedule reads a
-// template-backed schedule's content off the template at firing time, not
-// off whatever the schedule's own row last cached, so a template edited
-// between two firings changes what the second one files -- and the
-// schedule's own display cache (Title/Body/...) is kept in sync with it
-// too. The schedule's own Target is never touched: a template carries no
-// target of its own (model.TaskTemplate's own doc comment on why), so it
-// is the schedule's own standing repo that every firing targets.
+// template-backed schedule's content off the template at firing time,
+// not off whatever the schedule's own row last cached, so a template
+// edited between two firings changes what the second one files -- and
+// the schedule's own display cache (Title/Body/...) is kept in sync
+// with it too. The schedule's own Target is never touched: a template
+// carries no target of its own (model.Template's own doc comment on
+// why), so it is the schedule's own standing repo that every firing
+// targets.
 func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	store, ctx := openStore(t)
-	tmpl := model.TaskTemplate{
+	tmpl := model.Template{
 		ID:     "template-1",
 		Name:   "Dependency bump",
 		Title:  "Bump dependencies",
@@ -206,7 +207,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 		Reads:  []model.RepoRef{{Owner: "acme", Name: "shared-lib"}},
 		Grants: []model.Grant{{Capability: "web-search", Via: model.GrantByLabel}},
 	}
-	if err := store.PutTaskTemplate(ctx, tmpl); err != nil {
+	if err := store.PutTemplate(ctx, tmpl); err != nil {
 		t.Fatal(err)
 	}
 	templateID := tmpl.ID
@@ -251,7 +252,7 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	// Edit the template, close out the first firing, and force the
 	// schedule due again -- the second firing should reflect the edit,
 	// not the schedule's own now-stale cache.
-	if err := store.UpdateTaskTemplate(ctx, templateID, func(t *model.TaskTemplate) error {
+	if err := store.UpdateTemplate(ctx, templateID, func(t *model.Template) error {
 		t.Title = "Bump dependencies (patch only)"
 		return nil
 	}); err != nil {
@@ -322,26 +323,26 @@ func TestReconcileScheduleFailsToFireWhenItsTemplateIsMissing(t *testing.T) {
 	}
 }
 
-// --- schedules that run a task suite -------------------------------------
+// --- schedules that run a suite -------------------------------------
 
-// filedSuiteSchedule is filedSchedule's counterpart for the other thing a
-// schedule can fire: a one-item task suite, saved in the store the way
+// filedSuiteSchedule is filedSchedule's counterpart for the other thing
+// a schedule can fire: a one-item suite, saved in the store the way
 // ui.Client.CreateSuite would save it, and a schedule pointing at it.
-func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) (model.TaskSuite, model.Schedule) {
+func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt time.Time) (model.Suite, model.Schedule) {
 	t.Helper()
 	ctx := t.Context()
-	if err := store.PutTaskTemplate(ctx, suiteSmokeTemplate()); err != nil {
+	if err := store.PutTemplate(ctx, suiteSmokeTemplate()); err != nil {
 		t.Fatalf("put template: %v", err)
 	}
-	suite := model.TaskSuite{
+	suite := model.Suite{
 		ID: "suite-1", Name: "nightly smoke",
-		Items:     []model.TaskSuiteItem{{TemplateID: suiteSmokeTemplate().ID}},
-		Mode:      model.TaskSuiteCount,
+		Items:     []model.SuiteItem{{TemplateID: suiteSmokeTemplate().ID}},
+		Mode:      model.SuiteCount,
 		Count:     2,
 		AutoMerge: true,
 		CreatedAt: baseTime,
 	}
-	if err := store.PutTaskSuite(ctx, suite); err != nil {
+	if err := store.PutSuite(ctx, suite); err != nil {
 		t.Fatalf("put suite: %v", err)
 	}
 	suiteID := suite.ID
@@ -362,13 +363,13 @@ func filedSuiteSchedule(t *testing.T, store *model.Store, id string, nextRunAt t
 	return suite, sched
 }
 
-func runsOfSchedule(t *testing.T, store *model.Store, scheduleID string) []model.TaskSuiteRun {
+func runsOfSchedule(t *testing.T, store *model.Store, scheduleID string) []model.SuiteRun {
 	t.Helper()
-	all, err := store.ListTaskSuiteRuns(t.Context())
+	all, err := store.ListSuiteRuns(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out []model.TaskSuiteRun
+	var out []model.SuiteRun
 	for _, r := range all {
 		if r.ScheduleID == scheduleID {
 			out = append(out, r)
@@ -382,7 +383,7 @@ func runsOfSchedule(t *testing.T, store *model.Store, scheduleID string) []model
 // repo and branch, with the suite's own items and settings -- and
 // advances its own timing afterwards, the same as a schedule that files a
 // task.
-func TestReconcileScheduleStartsATaskSuiteRun(t *testing.T) {
+func TestReconcileScheduleStartsASuiteRun(t *testing.T) {
 	store, ctx := openStore(t)
 	suite, sched := filedSuiteSchedule(t, store, "sched-1", baseTime.Add(-time.Minute))
 
@@ -401,7 +402,7 @@ func TestReconcileScheduleStartsATaskSuiteRun(t *testing.T) {
 	if run.Target != sched.Target || run.Base != sched.Base {
 		t.Errorf("run targets %+v@%s, want the schedule's own %+v@%s", run.Target, run.Base, sched.Target, sched.Base)
 	}
-	if run.Status != model.TaskSuiteRunActive {
+	if run.Status != model.SuiteRunActive {
 		t.Errorf("status = %q, want active", run.Status)
 	}
 	if len(run.PassTasks(1)) != 1 {
@@ -473,7 +474,7 @@ func TestReconcileScheduleWaitsForThePreviousSuiteRunToFinish(t *testing.T) {
 	}
 
 	// Once that run stops, the next cycle is free to start another.
-	if err := store.CompleteTaskSuiteRun(ctx, first[0].ID, model.TaskSuiteRunSucceeded, "", later); err != nil {
+	if err := store.CompleteSuiteRun(ctx, first[0].ID, model.SuiteRunSucceeded, "", later); err != nil {
 		t.Fatal(err)
 	}
 	forceDue()

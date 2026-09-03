@@ -114,7 +114,7 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
 // those two always render, template selected or not.
 //
 // "Fires" (fires/suiteId) is the same idea one step out: a schedule can
-// run a whole task suite on its cadence instead of filing one task, in
+// run a whole suite on its cadence instead of filing one task, in
 // which case the suite decides everything a template would have and
 // more, so every content field here gives way to a single suite picker.
 // It is offered on a new schedule only -- what a schedule fires is fixed
@@ -148,7 +148,7 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
     // suiteId as "this schedule files a task" and complain about a
     // missing title instead of about the picker actually left empty.
     if (firesSuite && suiteId === "") {
-      showError(new Error("choose a task suite for this schedule to run"));
+      showError(new Error("choose a suite for this schedule to run"));
       return;
     }
 
@@ -230,16 +230,16 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
               onChange={(e) => setFires(e.target.value)}
             >
               <MenuItem value="task">A task</MenuItem>
-              <MenuItem value="suite">A task suite</MenuItem>
+              <MenuItem value="suite">A suite</MenuItem>
             </Select>
           </FormControl>
         )}
         {firesSuite ? (
           <FormControl fullWidth margin="normal" size="small">
-            <InputLabel id="schedule-suite-label">Task suite</InputLabel>
+            <InputLabel id="schedule-suite-label">Suite</InputLabel>
             <Select
               labelId="schedule-suite-label"
-              label="Task suite"
+              label="Suite"
               value={suiteId}
               onChange={(e) => setSuiteId(e.target.value)}
             >

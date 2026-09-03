@@ -14,7 +14,7 @@ import (
 
 func putTestTemplate(t *testing.T, store *model.Store, ctx context.Context, id string) {
 	t.Helper()
-	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+	if err := store.PutTemplate(ctx, model.Template{
 		ID: id, Name: "Smoke test", Title: "Smoke test", Body: "run it",
 	}); err != nil {
 		t.Fatalf("put template %s: %v", id, err)
