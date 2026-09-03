@@ -36,9 +36,11 @@
 // has pushed its branch can have grain open its pull request there and
 // then, and read back what the repo's own CI makes of it, rather than
 // exiting blind and leaving the pull request to the finish path. They
-// name the daemon to ask and the task to ask about -- see
-// daemonPullRequests below for why this process asks a daemon rather than
-// calling GitHub itself.
+// name the daemon to ask and the task to ask about. Unlike
+// pull_request_status above, that one is a *write*, and writes stay
+// grain's: this process asks the daemon over its REST API rather than
+// opening anything with a credential of its own. See daemonPullRequests
+// below.
 package main
 
 import (
@@ -66,13 +68,15 @@ import (
 // speaks, reached the same way, since this process is on the controller
 // alongside the daemon that forked it.
 //
-// The hop exists because of what this process deliberately does not have.
-// A run's route to GitHub is grain's, never the agent's (pkg/gitproxy's
-// whole shape), and an mcpserver drives tools on the agent's behalf, so
-// handing it a GitHub token to open a pull request with would put that
-// credential exactly where the design says it must never be. The daemon
-// has the token; this asks it, by task id, and the daemon decides from
-// that task's own record which repo and which branch that means.
+// The hop exists because of what this call is, not because this process
+// cannot reach GitHub at all: pullRequestReader below does build a REST
+// client, for pull_request_status. That one only ever reads, and only
+// within a scope fixed at process start. Opening a pull request is a
+// write, and which task it is opened for, on which branch, against which
+// base, has always been grain's decision rather than an agent's -- so it
+// is made where those decisions are already made. This asks the daemon
+// by task id, and the daemon reads the repo and the branch out of that
+// task's own record; nothing in a tool call reaches GitHub as data.
 type daemonPullRequests struct {
 	client *ui.HTTPClient
 	taskID string
@@ -130,7 +134,7 @@ func mcpserver(args []string) {
 	server := fs.String("server", "",
 		"base URL of the \"grain daemon\" this server's run was dispatched by, e.g. http://127.0.0.1:8420 "+
 			"-- with -task, adds the open_pull_request tool, which asks that daemon to open the run's own "+
-			"pull request (this process holds no GitHub credential of its own)")
+			"pull request rather than opening one from here")
 	taskID := fs.String("task", "",
 		"id of the task this server's run belongs to (required with -server)")
 	fs.Parse(args)

@@ -348,6 +348,15 @@ func TestRunPassesTheRunsOwnRepoAndBranchToTheMCPServer(t *testing.T) {
 }
 
 // argsHave reports whether args carries name followed by value.
+func argsHave(args []string, name, value string) bool {
+	for i, a := range args {
+		if a == name && i+1 < len(args) && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestRunPrefersSandboxRootOverKonturVMWhenBothAreSet(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
 	root := t.TempDir()
@@ -454,32 +463,29 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	}
 }
 
-// Ten: the four sandbox tools, the four escape hatches,
-// pull_request_status and open_pull_request -- the last of which is named
-// here for every run even though only a run whose mcpserver was given a
-// daemon to ask actually gets it, since --allowedTools filters what the
-// server advertises rather than adding to it (allowedTools' own comment).
+// Ten now: the four sandbox tools, the four escape hatches,
+// pull_request_status and open_pull_request. Both of the last two are
+// named here for every run even though only a run whose mcpserver was
+// given the flags for them actually gets them, since --allowedTools
+// filters what the server advertises rather than adding to it
+// (allowedTools' own comment).
 func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	names := allowedTools()
 	if len(names) != 10 {
 		t.Fatalf("allowedTools() = %v, want 10 entries", names)
 	}
-	if !slices.Contains(names, mcp.QualifiedToolName("pull_request_status")) {
-		t.Errorf("allowedTools() = %v, want pull_request_status admitted -- "+
-			"--strict-mcp-config refuses any tool this list omits", names)
-	}
-	found := false
 	for _, n := range names {
 		if !strings.HasPrefix(n, "mcp__grain-sandbox__") {
 			t.Errorf("tool name %q missing mcp__grain-sandbox__ prefix", n)
 		}
-		if n == "mcp__grain-sandbox__open_pull_request" {
-			found = true
-		}
 	}
-	if !found {
-		t.Errorf("allowedTools() = %v, want open_pull_request admitted -- "+
-			"--strict-mcp-config refuses any tool this list does not name", names)
+	// --strict-mcp-config refuses any tool this list omits, so a tool the
+	// server may advertise and this list may not name is a run that dies
+	// on its first call to it.
+	for _, tool := range []string{"pull_request_status", "open_pull_request"} {
+		if !slices.Contains(names, mcp.QualifiedToolName(tool)) {
+			t.Errorf("allowedTools() = %v, want %s admitted", names, tool)
+		}
 	}
 }
 
@@ -523,7 +529,7 @@ func TestRunOmitsTheGrainServerWhenEitherHalfIsMissing(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := mcpConfigArgs(t, fake.gotMCPConfig)
-			if argsHave(args, "-server", "") || argsHave(args, "-task", "") {
+			if slices.Contains(args, "-server") || slices.Contains(args, "-task") {
 				t.Errorf("mcpserver args = %v, want neither -server nor -task", args)
 			}
 		})
@@ -547,17 +553,6 @@ func mcpConfigArgs(t *testing.T, configJSON []byte) []string {
 		t.Fatalf("mcp-config missing grain-sandbox server: %+v", cfg)
 	}
 	return server.Args
-}
-
-// argsHave reports whether args carries name followed by value -- value
-// "" matches any value, i.e. "is this flag present at all".
-func argsHave(args []string, name, value string) bool {
-	for i, a := range args {
-		if a == name && i+1 < len(args) && (value == "" || args[i+1] == value) {
-			return true
-		}
-	}
-	return false
 }
 
 func TestRunPassesTheDefaultModelWhenNoneIsGiven(t *testing.T) {
