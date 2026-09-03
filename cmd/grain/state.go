@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -76,7 +77,7 @@ func runState(args []string) error {
 	ctx := context.Background()
 	switch cmd, cmdArgs := rest[0], rest[1:]; cmd {
 	case "status":
-		return stateStatus(ctx, *dataDir)
+		return stateStatus(ctx, *dataDir, os.Stdout)
 	case "local":
 		return stateLocal(ctx, *dataDir)
 	case "adopt":
@@ -91,7 +92,7 @@ func runState(args []string) error {
 	}
 }
 
-func stateStatus(ctx context.Context, dataDir string) error {
+func stateStatus(ctx context.Context, dataDir string, out io.Writer) error {
 	settings, err := staterepo.LoadSettings(dataDir)
 	if err != nil {
 		return err
@@ -112,14 +113,49 @@ func stateStatus(ctx context.Context, dataDir string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("repository: %s\n", where)
-	fmt.Printf("branch:     %s\n", repo.Branch())
-	fmt.Printf("working tree: %s\n", repo.Dir())
-	fmt.Printf("head:       %s\n", head)
-	fmt.Printf("schema:     %d in the repository, %d in this build\n", version, model.SchemaVersion)
-	fmt.Printf("secrets:    %s (key: %s)\n",
-		secretsConfig(dataDir).File, secretsConfig(dataDir).KeyFile)
+	fmt.Fprintf(out, "repository: %s\n", where)
+	fmt.Fprintf(out, "branch:     %s\n", repo.Branch())
+	fmt.Fprintf(out, "working tree: %s\n", repo.Dir())
+	fmt.Fprintf(out, "head:       %s\n", head)
+	fmt.Fprintf(out, "schema:     %d in the repository, %d in this build\n", version, model.SchemaVersion)
+	fmt.Fprintf(out, "secrets:    %s\n", secretsConfig(dataDir).File)
+	reportSecretsKey(dataDir, out)
 	return nil
+}
+
+// reportSecretsKey says where the private key is, whether it is there,
+// and -- every time, not only when something is wrong -- that it is the
+// operator's to back up.
+//
+// It is reported here because this is the command that describes what
+// survives a rebuilt host, and the key is the one part of that which no
+// repository holds: everything else in this output can be cloned back
+// from a remote, and the file that decrypts the secrets in it cannot.
+// A redeploy that mints a fresh key instead comes up unable to read its
+// own repository's secrets file, which pkg/secrets refuses outright
+// rather than papering over -- so the moment to notice is now, while the
+// key still exists to be copied somewhere.
+//
+// Read straight off disk rather than through secrets.Open, which would
+// *mint* a key on a data directory that has none -- a reporting command
+// must not create the thing it reports on.
+func reportSecretsKey(dataDir string, out io.Writer) {
+	path := secretsConfig(dataDir).KeyFile
+	key, err := secrets.ReadKeyFile(path)
+	switch {
+	case errors.Is(err, secrets.ErrNoKey):
+		fmt.Fprintf(out, "secrets key: %s (none yet -- grain mints one the first time it opens the store)\n", path)
+		return
+	case err != nil:
+		fmt.Fprintf(out, "secrets key: %s (unreadable: %v)\n", path, err)
+		return
+	}
+	fmt.Fprintf(out, "secrets key: %s\n", path)
+	fmt.Fprintf(out, "            public key %s\n", key.Public())
+	fmt.Fprintf(out, "            back this file up. It is the one thing here a redeploy cannot\n")
+	fmt.Fprintf(out, "            rebuild: a host that mints a fresh key cannot read the secrets\n")
+	fmt.Fprintf(out, "            its own repository still holds. Seed it back with GRAIN_SECRETS_KEY\n")
+	fmt.Fprintf(out, "            (scripts/setup.sh), or copy it into place before starting grain.\n")
 }
 
 // stateLocal is the bootstrap's third answer: run with no external

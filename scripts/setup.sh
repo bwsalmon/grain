@@ -285,6 +285,40 @@ GRAIN_GCP_PROJECT="${GRAIN_GCP_PROJECT:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_EMAIL="${GRAIN_GCP_SERVICE_ACCOUNT_EMAIL:-}"
 GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE="${GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE:-}"
 
+# --- the state repository (pkg/staterepo) -------------------------------
+#
+# The git repository this deployment's database lives in, written out as
+# text: the daemon imports it at startup and exports back into it on a
+# timer, so it -- not the SQLite file -- is what an operator backs up and
+# what an agent proposes a settings change against.
+#
+# Named here so a deployment comes up already pointed at its repository.
+# The alternative is the UI's bootstrap pane, which is fine for a laptop
+# and wrong for a fleet: a host that has to be visited before it knows
+# where its own state lives is a host whose state is wherever the last
+# person to open a browser said it was. Left empty (the default) nothing
+# is written and whatever the host already decided -- the bootstrap
+# pane's answer, or the local-only repository a fresh install gets --
+# stands.
+GRAIN_STATE_REPO_URL="${GRAIN_STATE_REPO_URL:-}"
+GRAIN_STATE_REPO_BRANCH="${GRAIN_STATE_REPO_BRANCH:-main}"
+
+# The private half of this deployment's secrets key (pkg/secrets): the
+# one file that cannot be rebuilt from anything.
+#
+# Everything else under $GRAIN_DATA_DIR either comes back from the state
+# repository or is reissued by the deploy that seeded it. This does
+# neither. The encrypted secrets file lives *in* the repository, so a
+# rebuilt host clones it back and then cannot read a line of it, because
+# it minted itself a fresh key on first start -- which pkg/secrets
+# reports as the unrecoverable state it is rather than starting over
+# silently. Seeding it here is what makes a redeploy a redeploy.
+#
+# Seeded once, on the same never-overwrite contract as every credential
+# below (seed_secret): a key already on this host always wins, since it
+# is the key the secrets file on this host was encrypted to.
+GRAIN_SECRETS_KEY="${GRAIN_SECRETS_KEY:-}"
+
 GRAIN_TARGET_REPO="${GRAIN_TARGET_REPO:-}"
 GRAIN_TARGET_BRANCH="${GRAIN_TARGET_BRANCH:-main}"
 GRAIN_TARGET_REPOS="${GRAIN_TARGET_REPOS:-}"
@@ -475,6 +509,28 @@ Recognized variables:
                                       supplies this key also rotates it in GCP, so a
                                       host that kept its first copy ends up
                                       authenticating with a key GCP has deleted
+
+  GRAIN_STATE_REPO_URL      git URL of the repository this deployment's database
+                             lives in (pkg/staterepo), written to
+                             <data-dir>/state-repo.json so the daemon comes up
+                             pointed at it instead of waiting for someone to
+                             open the UI's bootstrap pane. Empty (the default)
+                             leaves whatever this host already decided --
+                             including the local-only repository a fresh install
+                             gets -- exactly as it is. Pointing an existing
+                             deployment at a *different* repository moves its
+                             working tree aside first, timestamped, the same way
+                             `grain state adopt` does
+  GRAIN_STATE_REPO_BRANCH   branch state lives on there (default: main)
+  GRAIN_SECRETS_KEY         this deployment's secrets private key
+                             (`grain state key path` names the file it is
+                             written to). Seeded once, like the credentials
+                             above -- and the one value here a redeploy really
+                             must carry: the encrypted secrets file lives in the
+                             state repository, so a rebuilt host clones it back
+                             and, with a freshly minted key of its own, cannot
+                             read any of it. Back the file up when this script
+                             reports it (see "Readiness" at the end of a run)
 
   GRAIN_TARGET_REPO         owner/name: the UI's default target for a task with
                              no repo of its own, and the repo this script pushes
@@ -1316,6 +1372,118 @@ seed_github_app_credential() {
   chown "$GRAIN_USER:$GRAIN_USER" "$path"
 }
 
+# state_repo_field prints one field of <data-dir>/state-repo.json, or
+# nothing when the file does not exist or does not carry it.
+#
+# Read with sed rather than jq because this script's whole dependency
+# list is docker and systemd (see its header), and jq is deploy.sh's
+# dependency rather than this one's. That is honest here specifically:
+# pkg/staterepo writes this file itself, with encoding/json's
+# MarshalIndent, so it is one field per line with no surprises -- and the
+# only cost of misreading it is that configure_state_repo below rewrites
+# a file it did not have to.
+state_repo_field() {
+  local file="$GRAIN_DATA_DIR/state-repo.json"
+  [ -s "$file" ] || return 0
+  sed -n "s/^[[:space:]]*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*\$/\1/p" "$file" | head -n1
+}
+
+# archive_state_repo moves the state repository's working tree aside
+# under a name saying why, and carries the encrypted secrets file into
+# the fresh one.
+#
+# Moved, never deleted: a working tree is a clone of one repository's
+# history and cannot become a clone of another by changing a URL, but it
+# may be the only copy of commits a remote never got, so the recovery
+# path has to stay open. `grain state adopt` makes the same trade for the
+# same reason.
+#
+# The secrets file is the exception, and travels: it is the one thing in
+# there that is not regenerable from the database, the key it is
+# encrypted to has not changed, and an operator who kept their key keeps
+# their credentials across this.
+archive_state_repo() {
+  local suffix="$1" repo_dir="$GRAIN_DATA_DIR/state-repo"
+  [ -d "$repo_dir" ] || return 0
+  local backup="${repo_dir}.${suffix}"
+  mv "$repo_dir" "$backup"
+  log "  moved the previous working tree to $backup -- nothing here is deleted"
+  install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$repo_dir"
+  if [ -s "$backup/secrets.enc" ]; then
+    cp -p "$backup/secrets.enc" "$repo_dir/secrets.enc"
+    chown "$GRAIN_USER:$GRAIN_USER" "$repo_dir/secrets.enc"
+    log "  carried this deployment's encrypted secrets across to the fresh tree"
+  fi
+}
+
+# configure_state_repo points this deployment at the repository its state
+# lives in, and makes sure the working tree for it actually exists.
+#
+# <data-dir>/state-repo.json is the one piece of grain's configuration
+# that cannot live in the state repository, because it is what says where
+# that repository is (pkg/staterepo's Settings). The UI's bootstrap pane
+# writes it too; this is the other way in, for a deployment that is
+# applied rather than visited.
+#
+# It converges rather than seeding once -- GRAIN_STATE_REPO_URL set is
+# Terraform's answer, and a fleet host that ignored it after the first
+# run would drift -- but only when a value is actually given. Left empty,
+# nothing here writes anything, so a hand-installed deployment and a
+# local-only laptop keep whatever they chose, and a tokenFile placed by
+# `grain state adopt -token-file` survives a re-run that changes the
+# branch.
+configure_state_repo() {
+  local file="$GRAIN_DATA_DIR/state-repo.json"
+  if [ -n "$GRAIN_STATE_REPO_URL" ]; then
+    local current_remote current_branch token_file
+    current_remote="$(state_repo_field remote)"
+    current_branch="$(state_repo_field branch)"
+    token_file="$(state_repo_field tokenFile)"
+    if [ "$current_remote" != "$GRAIN_STATE_REPO_URL" ] || [ "$current_branch" != "$GRAIN_STATE_REPO_BRANCH" ]; then
+      if [ -n "$current_remote" ] && [ "$current_remote" != "$GRAIN_STATE_REPO_URL" ]; then
+        log "State repository changed: $current_remote -> $GRAIN_STATE_REPO_URL"
+        archive_state_repo "replaced-$(date +%Y%m%d%H%M%S)"
+      fi
+      log "Pointing this deployment's state at $GRAIN_STATE_REPO_URL ($GRAIN_STATE_REPO_BRANCH)"
+      ( umask 077
+        {
+          printf '{\n'
+          printf '  "remote": "%s",\n' "$(json_escape "$GRAIN_STATE_REPO_URL")"
+          if [ -n "$token_file" ]; then
+            printf '  "branch": "%s",\n' "$(json_escape "$GRAIN_STATE_REPO_BRANCH")"
+            printf '  "tokenFile": "%s"\n' "$(json_escape "$token_file")"
+          else
+            printf '  "branch": "%s"\n' "$(json_escape "$GRAIN_STATE_REPO_BRANCH")"
+          fi
+          printf '}\n'
+        } > "$file" )
+      chown "$GRAIN_USER:$GRAIN_USER" "$file"
+    fi
+  fi
+
+  # Opened here rather than left to grain-daemon.service's first start,
+  # because the steps after this one write *into* the working tree:
+  # seed_gcp_minter_key runs `grain secrets set`, and the file that
+  # lands in belongs to the repository. Cloning afterwards would either
+  # fail (git will not clone into a directory with files in it) or
+  # replace what was just written with the remote's own copy -- and the
+  # minter key push-secrets.sh rotated on this very deploy would be the
+  # thing lost.
+  #
+  # `status` is what opens it: it clones a repository this host has not
+  # seen before, or `git init`s a local-only one, and then prints where
+  # state lives -- which is worth having in a deploy log either way.
+  #
+  # Never fatal. A remote that is unreachable, or a credential that does
+  # not cover it, must not cost the deployment its service: the daemon
+  # retries on every start and the UI's bootstrap pane is still there.
+  if ! /usr/local/bin/grain state -data-dir "$GRAIN_DATA_DIR" status; then
+    log "  could not open the state repository yet -- grain-daemon.service will retry on"
+    log "  start, and the UI's bootstrap pane can point it somewhere else. Check that"
+    log "  the GitHub credential above covers ${GRAIN_STATE_REPO_URL:-the repository these settings name}."
+  fi
+}
+
 # setup_sandbox_dir lays out GRAIN_SANDBOX_DIR, orchestrator.HostSandboxes'
 # own baseDir (-sandbox-dir, cmd/grain/daemon.go) -- deliberately its own
 # function, separate from setup_data_dir below, since the whole point
@@ -1403,6 +1571,25 @@ setup_data_dir() {
   fi
   seed_secret "$GRAIN_DATA_DIR/secrets/github/${GRAIN_GITHUB_CREDENTIAL_NAME}.token" "$GRAIN_GITHUB_TOKEN"
   seed_github_app_credential
+
+  # Before anything below runs `grain secrets`: that opens the store, and
+  # opening a store with no key mints one (pkg/secrets.Open). A host
+  # rebuilt with GRAIN_SECRETS_KEY set would then be holding a key it
+  # generated a moment before this line, rather than the one its own
+  # state repository's secrets file is encrypted to -- and pkg/secrets
+  # would rightly refuse to read that file for the rest of the
+  # deployment's life.
+  seed_secret "$GRAIN_DATA_DIR/secrets/secrets.key" "$GRAIN_SECRETS_KEY"
+
+  # And before it too, for the other half of the same ordering: the
+  # encrypted secrets file lives *inside* the state repository's working
+  # tree, so the tree has to be the deployment's real one -- cloned from
+  # the remote, with the secrets file the remote holds -- before
+  # seed_gcp_minter_key writes this deploy's freshly rotated minter key
+  # into it. Written into a tree that is later replaced by a clone, that
+  # rotation is simply lost, and push-secrets.sh has already begun
+  # invalidating the key the daemon is still using.
+  configure_state_repo
 
   # Order matters below: the minter key has to be in the secrets
   # database before mint_gemini_operating_key can authenticate with it.
@@ -1645,17 +1832,9 @@ reformat_store_if_schema_changed() {
   # is carried across rather than archived with it: the key it is
   # encrypted to has not changed, and an operator who kept their key
   # keeps their credentials across a reformat.
-  local repo_dir="$GRAIN_DATA_DIR/state-repo"
-  if [ -d "$repo_dir" ]; then
-    local repo_backup="${repo_dir}.schema${old_version}-${stamp}"
-    log "Schema changed -- moving $repo_dir aside to $repo_backup; grain re-seeds it on its next start"
-    mv "$repo_dir" "$repo_backup"
-    if [ -s "$repo_backup/secrets.enc" ]; then
-      install -d -m0700 -o "$GRAIN_USER" -g "$GRAIN_USER" "$repo_dir"
-      cp -p "$repo_backup/secrets.enc" "$repo_dir/secrets.enc"
-      chown "$GRAIN_USER:$GRAIN_USER" "$repo_dir/secrets.enc"
-      log "  carried this deployment's encrypted secrets across to the fresh repository"
-    fi
+  if [ -d "$GRAIN_DATA_DIR/state-repo" ]; then
+    log "Schema changed -- moving the state repository aside as well; grain re-seeds it on its next start"
+    archive_state_repo "schema${old_version}-${stamp}"
   fi
   printf '%s\n' "$new_version" > "$marker"
 }
@@ -2199,6 +2378,19 @@ report_readiness() {
   fi
   daemon="$(systemctl is-active grain-daemon.service 2>/dev/null || echo unknown)"
 
+  # The secrets key, and where this deployment's state lives at all.
+  #
+  # Presence is asked of the file rather than of `grain state key show`,
+  # which would *mint* a key on a host that has none (pkg/secrets.Open) --
+  # a readiness report must not create what it is reporting on. The
+  # public half is only asked for once the private half is known to be
+  # there, which makes that call a read.
+  local secrets_key="not yet" state_repo
+  if [ -s "$GRAIN_DATA_DIR/secrets/secrets.key" ]; then
+    secrets_key="present ($(/usr/local/bin/grain state -data-dir "$GRAIN_DATA_DIR" key show 2>/dev/null || echo 'public key unreadable'))"
+  fi
+  state_repo="$(state_repo_field remote)"
+
   echo
   log "Readiness:"
   echo "    daemon:            $daemon"
@@ -2211,6 +2403,8 @@ report_readiness() {
   echo "    agy CLI:           $agy_cli"
   echo "    codex CLI:         $codex_cli"
   echo "    GCP minter key:    $minter"
+  echo "    state repository:  ${state_repo:-<local only: a git repository on this host, pushed nowhere>}"
+  echo "    secrets key:       $secrets_key"
   echo "    target repos:      ${GRAIN_TARGET_REPOS:-<none: unrestricted -- any repo a task names is allowed>}"
   echo "    default repo:      ${GRAIN_TARGET_REPO:-<none: a task with no repo parks>}"
   echo "    max workers:       ${GRAIN_MAX_WORKERS:-<default>}"
@@ -2259,6 +2453,23 @@ report_readiness() {
       echo "       Deploy an image built with it, or point GRAIN_CODEX_PATH at a copy here."
       ;;
   esac
+  # Never a readiness failure either way: a host with a key is working,
+  # and a host without one yet gets one the moment the daemon starts.
+  # Printed regardless, because this is where an operator is already
+  # looking and the moment to copy that file somewhere is while it still
+  # exists -- the deployment that needs it is the *next* one, and by then
+  # a lost key is not recoverable from anything.
+  if [ "$secrets_key" = "not yet" ]; then
+    echo "    -- no secrets key on this host yet: grain-daemon.service mints one on its"
+    echo "       first start. Back up $GRAIN_DATA_DIR/secrets/secrets.key once it exists"
+    echo "       (\`grain state status\` prints it), and seed it on a rebuilt host with"
+    echo "       GRAIN_SECRETS_KEY -- nothing else can decrypt this deployment's secrets."
+  else
+    echo "    -- back up $GRAIN_DATA_DIR/secrets/secrets.key: the one file here a redeploy"
+    echo "       cannot rebuild. The encrypted secrets travel in the state repository; a"
+    echo "       rebuilt host mints a fresh key and then cannot read a line of them."
+    echo "       Seed it back with GRAIN_SECRETS_KEY (see this script's own -h)."
+  fi
   if [ "$minter" = "MISSING" ] && [ -n "$GRAIN_GCP_PROJECT" ]; then
     ready=0
     echo "    !! With no minter credential the gcp-key and gemini-key capabilities cannot"
@@ -2284,6 +2495,7 @@ print_summary() {
   echo "    UI:      http://${GRAIN_UI_ADDR} -- reach it with: ssh -L 8080:localhost:${GRAIN_UI_ADDR##*:} <this-host>, then open http://localhost:8080"
   echo "    Store:   embedded SQLite under ${GRAIN_DATA_DIR}/store, owned by grain-daemon.service alone"
   echo "    Secrets: ${GRAIN_DATA_DIR}/secrets"
+  echo "    State:   ${GRAIN_DATA_DIR}/state-repo -- the same rows as text, in git (grain state status)"
   echo "    CLI:     grain list  (a new shell picks up GRAIN_SERVER from /etc/profile.d/grain.sh;"
   echo "             in this one: export GRAIN_SERVER=http://127.0.0.1:${GRAIN_UI_ADDR##*:})"
   echo "    Image:   ${GRAIN_IMAGE_REF} (recorded in ${IMAGE_REF_FILE}; \`docker images\` for what is local)"
