@@ -153,8 +153,13 @@ func pullRequestStatus(client PullRequestReader, scope PullRequestScope) (string
 		if err != nil {
 			return "", fmt.Errorf("reading pull request #%d: %w", pr.Number, err)
 		}
+		// The link comes off the same lookup the number does. Both that
+		// lookup and the detail read carry html_url, so taking one field
+		// from each read the same line rather than both from the one
+		// already in hand is what left the URL blank wherever a caller
+		// supplies only the first -- which is every test fake here.
 		fmt.Fprintf(&b, "Pull request #%d (%s) is %s%s.\n",
-			pr.Number, detail.HTMLURL, detail.State, mergeableClause(detail))
+			pr.Number, pr.HTMLURL, detail.State, mergeableClause(detail))
 	}
 
 	checks, err := checkRunsForCommit(client, scope, head.SHA)

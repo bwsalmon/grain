@@ -783,7 +783,9 @@ func TestListWorkflowRunsRaisesOnANon200(t *testing.T) {
 
 // mergeable_state comes free on a response grain already makes, under a
 // permission it already holds. Parsed and carried, but see
-// PullRequestDetail.MergeableState: not yet trusted by the merge gate.
+// PullRequestDetail.MergeableState: measured against live pull requests
+// and deliberately not trusted by the merge gate, since its "clean" is
+// also what an empty check list reads.
 func TestGetPullRequestReadsMergeableState(t *testing.T) {
 	body := prJSON(5, "feature-branch", "main")
 	body["mergeable_state"] = "unstable"

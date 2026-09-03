@@ -353,19 +353,64 @@ type PullRequestDetail struct {
 	// permission beyond the Pull requests read this response already
 	// costs, unlike either CI read.
 	//
-	// Deliberately NOT wired into the merge gate: "clean" is documented
-	// only loosely, and whether it accounts for check runs or merely for
-	// the older commit statuses decides whether trusting it would
-	// auto-merge a PR with red CI. Confirm that against a live PR with a
-	// deliberately failing check before any caller reads it as passing.
+	// Deliberately NOT wired into the merge gate -- now for a measured
+	// reason rather than an open question. Confirmed against live pull
+	// requests: bwsalmon/grain#544, a branch carrying one check that goes
+	// red in seconds beside one that runs for five minutes, polled every
+	// five seconds from the moment it opened until every check had
+	// finished, and bwsalmon/agents#655 for the empty case below.
 	//
-	// It stays unread even for the narrower question of whether a check
-	// list that came back empty is going to fill in ("blocked"/"unstable"
-	// against "clean"), which would need no such trust, because the same
-	// confirmation is what says whether it can answer that either --
-	// orchestrator.healthFrom waits that one out on a clock instead
-	// (defaultCheckRegistrationWindow). Confirming the above is what
-	// would let this replace the wait.
+	// It does account for check runs, not merely for the older commit
+	// statuses. Every reading was taken on commits carrying *zero*
+	// commit statuses -- Actions creates check runs and nothing else, and
+	// /commits/{sha}/status stayed empty the whole run -- and a check
+	// still running or finished red read "unstable" throughout, never
+	// "clean". So trusting it would not have auto-merged a PR with red
+	// CI, which was the question that kept it out of the gate. The other
+	// half of that reading came later on the same pull request, once the
+	// red check was actually repaired: with all six checks completed and
+	// green it read "clean". So where checks exist, "clean" and
+	// "unstable" do separate a passing run from a broken one.
+	//
+	// It still cannot replace defaultCheckRegistrationWindow, which was
+	// the reason to want it. On a pull request no workflow watches --
+	// agents#655, whose diff touches no path that repo's only
+	// pull_request workflow is filtered to -- mergeable_state is "clean"
+	// with zero check runs and zero statuses, and stayed "clean" for
+	// thirty consecutive reads over two and a half minutes. That is
+	// byte-identical to a repo whose CI has merely not registered yet,
+	// because it is computed from the same empty list: GitHub is no
+	// better placed to tell those apart than the Checks API is. The
+	// clock in orchestrator.healthFrom stays.
+	//
+	// That window was caught open rather than argued from. Polling
+	// grain#544 once a second across a push, on this repository, whose
+	// every push runs CI: two seconds after the new head appeared the PR
+	// read "unknown" with no checks; two seconds after that it read
+	// "clean" with *zero* check runs; two seconds after that the first
+	// check registered and it went back to "unstable". A merge gate
+	// reading "clean" as passing would have had a four-second window,
+	// per push, to merge a pull request whose tests had not been created
+	// yet -- which is the exact failure defaultCheckRegistrationWindow
+	// exists to prevent, not a reason to retire it.
+	//
+	// Nor does "unstable" separate pending from failing -- a check still
+	// running and a check finished red both read "unstable" -- so it
+	// could not stand in for the PrPending/PrFailing distinction either.
+	//
+	// Two further readings from the same run, for whoever reaches for
+	// this next. It is "unknown", with Mergeable nil, for a second or two
+	// after every push while GitHub recomputes, and "unknown" again once
+	// the PR is closed or merged -- so it can never serve the
+	// merged/closed distinction Merged draws. A conflicted PR reads
+	// "dirty" (observed on grain#545), agreeing with Mergeable false.
+	//
+	// One caveat the run could not cover: grain's own repository requires
+	// no status check, which is why a red check reads "unstable" there.
+	// Where checks are required the same failure reads "blocked", and so
+	// does a PR waiting on a required review -- so "blocked" carries more
+	// than CI, and a caller reading these values across arbitrary target
+	// repos cannot treat one repo's vocabulary as every repo's.
 	MergeableState string
 }
 
