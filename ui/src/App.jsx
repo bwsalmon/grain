@@ -152,12 +152,12 @@ export default function App() {
     setDetail(null);
   }, []);
 
-  // openTaskFromDebug is the one link out of the Debug overlay: the
+  // openTaskFromDebug is the one link out of the Debug pane: the
   // metrics panel names the oldest queued task, and clicking it should
-  // land on that task. It closes the debug overlay on the way -- both
-  // are dialogs, and DebugOverlay is mounted after DetailOverlay here,
-  // so leaving it open would put the task the click asked for behind
-  // the pane it was clicked in.
+  // land on that task. It closes the debug pane on the way -- both fill
+  // the same area beside the sidebar, and DebugOverlay is mounted after
+  // DetailOverlay here, so leaving it open would put the task the click
+  // asked for behind the pane it was clicked in.
   const openTaskFromDebug = useCallback((id) => {
     setShowDebug(false);
     openTask(id);
@@ -385,6 +385,8 @@ export default function App() {
             suites={suites}
             stateFilter={stateFilter}
             onSetFilter={setStateFilter}
+            showSettings={showSettings}
+            showDebug={showDebug}
             onOpenSettings={() => setShowSettings(true)}
             onOpenDebug={() => setShowDebug(true)}
             onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}

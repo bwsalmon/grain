@@ -4,10 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import Overlay from "./Overlay.jsx";
 
 // The three widths Overlay draws, and which one each of its callers is
-// entitled to: a centered box for an action (New task, Run a suite,
-// Settings), a wider one for an action that shows a lot (an attempt's
-// transcript), and the full pane beside the sidebar for anything you
-// *open* -- a task, a schedule, a template, a suite (grain/task-94).
+// entitled to: a centered box for an action (New task, Run a suite), a
+// wider one for an action that shows a lot (an attempt's transcript),
+// and the full pane beside the sidebar for anything you *open* -- a
+// task, a schedule, a template, a suite (grain/task-94), plus Settings
+// and Debugging, which are destinations rather than actions
+// (grain/task-115).
 describe("Overlay", () => {
   it("draws a centered dialog by default", () => {
     render(<Overlay onClose={() => {}}>body</Overlay>);
@@ -35,6 +37,23 @@ describe("Overlay", () => {
     const body = document.querySelector(".overlay-pane");
     expect(body).toBeInTheDocument();
     expect(body).toContainElement(screen.getByText("body"));
+  });
+
+  // A pane's header is chrome that has to sit outside the part that
+  // scrolls (Settings' and Debugging's tab strips, grain/task-115) --
+  // inside .overlay-pane it would scroll away with everything else.
+  it("pins a pane's header above the scrolling body", () => {
+    render(<Overlay onClose={() => {}} pane header={<h2>Settings</h2>}><p>body</p></Overlay>);
+
+    const head = document.querySelector(".overlay-pane-header");
+    expect(head).toContainElement(screen.getByRole("heading", { name: "Settings" }));
+    expect(document.querySelector(".overlay-pane")).not.toContainElement(head);
+  });
+
+  it("draws no header element for a pane that passes none", () => {
+    render(<Overlay onClose={() => {}} pane><p>body</p></Overlay>);
+
+    expect(document.querySelector(".overlay-pane-header")).toBeNull();
   });
 
   it("closes from the close button in either shape", async () => {

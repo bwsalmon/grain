@@ -619,10 +619,26 @@ fieldset legend {
   padding: 1.5rem 1.75rem;
 }
 
+/* The fixed chrome a pane can pin above that scrolling body (Overlay's
+   own `header`): Settings' and Debugging's title and tab strip, which
+   would otherwise scroll away the moment a tab's own content ran past
+   the bottom of a full-height pane (grain/task-115). Sized to its
+   content, so .overlay-pane above still takes the rest of the paper.
+   The right padding is what keeps a long tab strip clear of the close
+   button floating in that corner. */
+.overlay-pane-header {
+  flex: none;
+  padding: 1.25rem 3rem 0 1.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.overlay-pane-header h2 { margin: 0 0 0.5rem; }
+
 /* A form is a single column of fields however wide the pane is: full
    width would stretch a one-word "Name" input across the screen. Both
    caps here are left-aligned rather than centred, so what an item you
-   opened shows starts exactly where the list you opened it from did. */
+   opened shows starts exactly where the list you opened it from did.
+   Settings' tab bodies wear it too (grain/task-115) -- each is a column
+   of configuration, whether or not the tab happens to be one <form>. */
 .pane-form { max-width: 44rem; }
 
 /* Wider than a form -- two columns of a task use the room -- but still
@@ -636,6 +652,7 @@ fieldset legend {
 .detail-side { width: 260px; flex: none; position: sticky; top: 0; }
 @media (max-width: 720px) {
   .overlay-pane { padding: 1.25rem 1rem; }
+  .overlay-pane-header { padding: 1rem 3rem 0 1rem; }
   .detail-layout { flex-direction: column; }
   .detail-side { width: 100%; position: static; }
 }

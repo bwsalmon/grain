@@ -1784,7 +1784,29 @@ length wide, is no more readable than the porthole was: a form stops at
 left-aligned rather than centered, so the content of an item you open
 starts exactly where the list you opened it from started. Dialogs that
 are an *action* rather than a thing you opened — New task, Run a suite,
-Settings, Debugging, an attempt's transcript — stay centered boxes.
+an attempt's transcript — stay centered boxes.
+
+**Settings and Debugging are panes too (grain/task-115).** Those two were
+the largest things still drawn as centered boxes, and neither is really
+an action: Settings is six tabs of deployment configuration, Debugging is
+four panels of live diagnostics, and both are destinations with a URL of
+their own (`/settings`, `/debug`) that an operator navigates around
+rather than a form to fill in and dismiss. The shapes were fighting the
+content — a log tail and a sandbox-health table sharing the widest box
+`Overlay.jsx` draws, a settings form scrolling its own tab strip off the
+top the moment a tab ran long — so both take `pane` now, with the sidebar
+still showing beside them. `Overlay.jsx` grows one thing for it, a
+`header` slot: chrome pinned above the part that scrolls, so the title
+and the tab strip stay put while the open tab's content moves under them.
+Panes that open a *thing* (a task, a schedule) pass none and scroll their
+whole body as before. Settings caps its tab bodies at the same
+`.pane-form` width its forms already used — a "Poll interval" box an arm's
+length wide is the porthole's opposite failure, not its fix — while
+Debugging deliberately caps nothing, since the tables and log lines in
+there are what wanted the room in the first place. The sidebar marks
+whichever of the two is open the way it already marks the current view:
+the rail is on screen the whole time now, so it should say what is
+covering the rest of it.
 
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
