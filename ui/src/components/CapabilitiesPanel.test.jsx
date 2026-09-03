@@ -68,6 +68,43 @@ describe("CapabilitiesPanel", () => {
     expect(screen.queryByText(/No task can be granted this/)).not.toBeInTheDocument();
   });
 
+  // grain/task-14: a capability every new task is filed holding is
+  // reported as such here, and one that is defaulted while not ready is
+  // the deployment-wide problem this pane exists to surface -- every
+  // task filed will fail to dispatch on it, not just the ones somebody
+  // ticked it on.
+  it("marks a defaulted capability, and warns when a defaulted one is not ready", () => {
+    render(
+      <CapabilitiesPanel
+        capabilities={[
+          {
+            id: "gcp-key",
+            name: "GCP key",
+            description: "Mint a key",
+            ready: false,
+            grantable: true,
+            default: true,
+            missingConfig: ["GCP project"],
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText("Default")).toBeInTheDocument();
+    expect(screen.getByText(/Every new task is filed holding this/)).toBeInTheDocument();
+  });
+
+  it("says nothing about defaults for a capability that is not one", () => {
+    render(
+      <CapabilitiesPanel
+        capabilities={[
+          { id: "gemini-key", name: "Gemini key", description: "Mint a key", ready: false, grantable: true },
+        ]}
+      />,
+    );
+    expect(screen.queryByText("Default")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Every new task is filed holding this/)).not.toBeInTheDocument();
+  });
+
   it("falls back to the id when no display name is given", () => {
     render(<CapabilitiesPanel capabilities={[{ id: "some-new-capability", description: "", ready: true }]} />);
     expect(screen.getByText("some-new-capability")).toBeInTheDocument();

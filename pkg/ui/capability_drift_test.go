@@ -1,6 +1,6 @@
 package ui
 
-// The picker listing (DefaultCapabilities, labels.go) and the set of
+// The picker listing (OfferedCapabilities, labels.go) and the set of
 // capabilities grain actually ships providers for (capabilityCatalog,
 // capability_status.go) are two hand-maintained tables with nothing in
 // the type system tying them together, and they drifted apart in both
@@ -22,7 +22,7 @@ import (
 // capabilityIDs is the picker listing's ids, in table order.
 func capabilityIDs() []string {
 	var ids []string
-	for _, c := range DefaultCapabilities() {
+	for _, c := range OfferedCapabilities() {
 		ids = append(ids, c.ID)
 	}
 	return ids
@@ -37,18 +37,18 @@ func catalogIDs() []string {
 	return ids
 }
 
-func TestDefaultCapabilitiesOffersEveryShippedCapability(t *testing.T) {
+func TestOfferedCapabilitiesCoversEveryShippedCapability(t *testing.T) {
 	offered, shipped := capabilityIDs(), catalogIDs()
 	for _, id := range shipped {
 		if !slices.Contains(offered, id) {
-			t.Errorf("capability %q has a provider but no DefaultCapabilities row: "+
+			t.Errorf("capability %q has a provider but no OfferedCapabilities row: "+
 				"grantsFor and SetCapability reject it as an unknown capability, so no task can ever be granted it "+
 				"and its provider is never resolved, never materialized, and places nothing in any sandbox", id)
 		}
 	}
 	for _, id := range offered {
 		if !slices.Contains(shipped, id) {
-			t.Errorf("capability %q is offered by DefaultCapabilities but grain ships no provider for it: "+
+			t.Errorf("capability %q is offered by OfferedCapabilities but grain ships no provider for it: "+
 				"a task granted it is refused by model.ResolveGrants (\"no provider is registered\"), "+
 				"which prepareCapabilities turns into a failed dispatch", id)
 		}
@@ -59,8 +59,8 @@ func TestDefaultCapabilitiesOffersEveryShippedCapability(t *testing.T) {
 // capabilities twice (capability_status.go's own note on why the
 // duplication is accepted). Two views disagreeing about what a
 // capability is called is the cheap half of the same drift.
-func TestDefaultCapabilitiesNamesMatchSettingsDisplayNames(t *testing.T) {
-	for _, c := range DefaultCapabilities() {
+func TestOfferedCapabilitiesNamesMatchSettingsDisplayNames(t *testing.T) {
+	for _, c := range OfferedCapabilities() {
 		if c.Description == "" {
 			t.Errorf("capability %q has no description for the picker to show", c.ID)
 		}

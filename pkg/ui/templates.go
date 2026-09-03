@@ -88,7 +88,7 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 	if strings.TrimSpace(req.Title) == "" {
 		return Template{}, validationErrorf("title is required")
 	}
-	grants, err := c.grantsFor(req.Capabilities)
+	grants, err := c.grantsFor(req.Capabilities, model.GrantByLabel)
 	if err != nil {
 		return Template{}, err
 	}
@@ -143,7 +143,7 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 	var grants []model.Grant
 	if req.Capabilities != nil {
 		var err error
-		grants, err = c.grantsFor(*req.Capabilities)
+		grants, err = c.grantsFor(*req.Capabilities, model.GrantByLabel)
 		if err != nil {
 			return Template{}, err
 		}

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
+import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
@@ -41,7 +41,16 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
   const [dependsOn, setDependsOn] = useState([]);
-  const [capabilities, setCapabilities] = useState([]);
+  // capabilities starts as whatever this deployment attaches to every
+  // new task (GET /api/config's defaultCapabilities, model.Config's own
+  // field of the same name) -- ticked, in the picker below, so it is
+  // visible before the task is filed and can be unticked here rather
+  // than detached afterwards. The payload always names the resulting
+  // list, so what is ticked when Create is clicked is exactly what the
+  // task is filed with; the server only falls back to its own defaults
+  // for a caller that names no list at all (ui.CreateTaskRequest.
+  // Capabilities).
+  const [capabilities, setCapabilities] = useState(() => config?.defaultCapabilities || []);
   // attachments is File objects, not yet read -- AttachmentPicker's own
   // doc comment on why that read is deferred to submit.
   const [attachments, setAttachments] = useState([]);
@@ -113,7 +122,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       setNoRepo(false);
       setBase(lastBaseForRepo(tasks, defaultRepo || ""));
       setDependsOn([]);
-      setCapabilities([]);
+      setCapabilities(config?.defaultCapabilities || []);
       setAttachments([]);
       setInteractive(false);
       onClose();
@@ -222,6 +231,12 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               </MenuItem>
             ))}
           </Select>
+          {(config?.defaultCapabilities || []).length > 0 && (
+            <FormHelperText>
+              Pre-ticked ones are this deployment&apos;s defaults (Settings &gt; Capabilities) -- untick any this
+              task should not have.
+            </FormHelperText>
+          )}
         </FormControl>
         <fieldset>
           <legend>Depends on <span className="hint">optional</span></legend>

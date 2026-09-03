@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControlLabel, Radio, RadioGroup, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Radio, RadioGroup, Select, Stack, Tab, Tabs, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import AgentKeysSection from "./AgentKeysSection.jsx";
 import CapabilitiesPanel from "./CapabilitiesPanel.jsx";
@@ -61,12 +61,21 @@ const settingLabel = (key) => SETTING_LABELS[key] || key;
 export default function SettingsOverlay({ onClose, showError }) {
   const [tab, setTab] = useState("general");
   const [settings, setSettings] = useState(null);
+  // defaultCapabilities is the one field on this pane that is not a
+  // plain form input: it is a multi-select of capability ids (the set
+  // every new task is filed holding, model.Config.DefaultCapabilities),
+  // so it needs state of its own rather than being read off the form at
+  // submit. Seeded from the loaded settings and from every response that
+  // carries the field back, so saving another tab does not strand it.
+  const [defaultCapabilities, setDefaultCapabilities] = useState([]);
   const { mode: themeMode, setMode: setThemeMode } = useThemeMode();
 
   useEffect(() => {
     (async () => {
       try {
-        setSettings(await api("/api/settings"));
+        const loaded = await api("/api/settings");
+        setSettings(loaded);
+        setDefaultCapabilities(loaded.defaultCapabilities || []);
       } catch (err) {
         showError(err);
       }
@@ -93,6 +102,7 @@ export default function SettingsOverlay({ onClose, showError }) {
     try {
       const updated = await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
       setSettings((prev) => ({ ...prev, ...updated }));
+      if ("defaultCapabilities" in updated) setDefaultCapabilities(updated.defaultCapabilities || []);
     } catch (err) {
       // Same banner task creation's own validation errors surface
       // through.
@@ -196,6 +206,17 @@ export default function SettingsOverlay({ onClose, showError }) {
 
     const gcpServiceAccountEmail = form.elements.gcpServiceAccountEmail.value.trim();
     if (gcpServiceAccountEmail !== (settings.gcpServiceAccountEmail || "")) payload.gcpServiceAccountEmail = gcpServiceAccountEmail;
+
+    // Compared as a set, not by identity: an operator who ticked one box
+    // and unticked another has changed it, and one who reordered nothing
+    // has not. A present list replaces the whole set server-side
+    // (ui.UpdateSettingsRequest.DefaultCapabilities), empty included, so
+    // sending it only when it differs keeps this tab from rewriting a
+    // set another client changed underneath it.
+    const stored = settings.defaultCapabilities || [];
+    const same = stored.length === defaultCapabilities.length
+      && stored.every((id) => defaultCapabilities.includes(id));
+    if (!same) payload.defaultCapabilities = defaultCapabilities;
 
     return save(payload);
   };
@@ -440,6 +461,42 @@ export default function SettingsOverlay({ onClose, showError }) {
             <Typography variant="subtitle2">GCP</Typography>
             <TextField name="gcpProject" label="GCP project" helperText="optional -- enables the gcp-key/gemini-key capabilities" defaultValue={settings.gcpProject || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="gcpServiceAccountEmail" label="GCP service account email" helperText="optional" defaultValue={settings.gcpServiceAccountEmail || ""} autoComplete="off" fullWidth margin="normal" />
+
+            <Typography variant="subtitle2" sx={{ mt: 2 }}>New tasks</Typography>
+            {/* Only grantable capabilities are offered: the set is
+                validated against the same picker listing a task's own
+                capabilities are, and one no task could be granted by hand
+                would be a default that failed at every filing. */}
+            <FormControl fullWidth margin="normal" size="small">
+              <InputLabel id="settings-default-capabilities-label">Default capabilities</InputLabel>
+              <Select
+                labelId="settings-default-capabilities-label"
+                label="Default capabilities"
+                multiple
+                value={defaultCapabilities}
+                onChange={(e) => setDefaultCapabilities(e.target.value)}
+                renderValue={(selected) => (
+                  <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                    {selected.map((id) => {
+                      const cap = (settings.capabilities || []).find((c) => c.id === id);
+                      return <Chip key={id} size="small" label={cap ? cap.name || cap.id : id} />;
+                    })}
+                  </Box>
+                )}
+              >
+                {(settings.capabilities || []).filter((c) => c.grantable !== false).map((c) => (
+                  <MenuItem key={c.id} value={c.id} title={c.description}>
+                    <Checkbox checked={defaultCapabilities.includes(c.id)} size="small" />
+                    <ListItemText primary={c.name || c.id} />
+                  </MenuItem>
+                ))}
+              </Select>
+              <FormHelperText>
+                attached to every new task as it is filed -- whoever files one can untick any of these on the
+                new-task form, and any of them can be detached from a task afterwards. Tasks already filed
+                keep what they were filed with.
+              </FormHelperText>
+            </FormControl>
 
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2, mb: 2 }}>
               <Button type="submit" variant="contained">Save</Button>

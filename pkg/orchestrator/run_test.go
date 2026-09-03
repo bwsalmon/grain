@@ -148,8 +148,17 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 			t.Fatalf("prompt does not mention %q: %q", want, prompt)
 		}
 	}
-	if bare := orchestrator.BuildPrompt(task, ""); strings.Contains(bare, orchestrator.CheckoutDir) {
-		t.Fatalf("prompt mentions a checkout that was never prepared: %q", bare)
+	// Against the checkout sentence's own phrasing rather than against
+	// CheckoutDir alone: that constant is "work", an ordinary English word
+	// the rest of the prompt is entitled to use (proposalSection does), so
+	// a bare substring search for it fails on prose that mentions no
+	// checkout at all. "./work" and "rather than cloning" are what only
+	// that sentence says, which is what this is checking is absent.
+	bare := orchestrator.BuildPrompt(task, "")
+	for _, unwanted := range []string{"./" + orchestrator.CheckoutDir, "rather than cloning"} {
+		if strings.Contains(bare, unwanted) {
+			t.Fatalf("prompt mentions %q, a checkout that was never prepared: %q", unwanted, bare)
+		}
 	}
 }
 
@@ -191,6 +200,33 @@ func TestBuildPromptExplainsThereIsNoRepo(t *testing.T) {
 	}
 	if strings.Contains(prompt, "Push your change") || strings.Contains(prompt, "<nil>") {
 		t.Fatalf("prompt still talks about pushing/branching, or leaked a nil format: %q", prompt)
+	}
+}
+
+// An agent can only follow propose_task's own etiquette if it knows two
+// things about itself grain never otherwise tells it: which task it is
+// (what a proposal's depends_on names) and whether that task auto-merges
+// (what caps a proposal's auto_merge -- orchestrator.proposedAutoMerge).
+func TestBuildPromptTellsAnAgentWhatItsProposalsCanSay(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, "")
+	for _, want := range []string{"task t1", "depends_on"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+	// Nothing to say about auto_merge to a task that cannot pass it on.
+	if strings.Contains(prompt, "auto_merge") {
+		t.Errorf("prompt offers auto_merge to a task that is not an auto-merge job: %q", prompt)
+	}
+
+	task.AutoMerge = true
+	prompt = orchestrator.BuildPrompt(task, "")
+	if !strings.Contains(prompt, "auto_merge") {
+		t.Errorf("prompt does not tell an auto-merge job it can pass that on: %q", prompt)
 	}
 }
 
