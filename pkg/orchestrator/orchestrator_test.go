@@ -100,19 +100,17 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "config", "user.email", "agent@example.com")
 	run(t, wd, "git", "config", "user.name", "agent")
 	run(t, wd, "git", "checkout", "-q", "-b", branch)
-	// The message names the branch so that two branches pushed by one
-	// test are two different commits. Everything else about these commits
-	// is fixed -- same parent, same (empty) tree, same author and
-	// committer -- so the only thing left to tell two of them apart is the
-	// commit timestamp, and on a machine quick enough to push both inside
-	// one second there is nothing: git hands back one sha for both
-	// branches. Sim.checkRunsFor resolves a sha to whichever branch sits
-	// on it, so under that collision a check seeded against one branch is
-	// answered for the other one's pull request too, and a test that holds
-	// one queue head's checks unfinished silently holds the whole queue.
-	// That is a real second's-worth of luck deciding whether the suite
-	// passes; naming the branch removes the coincidence rather than
-	// waiting on it.
+	// Named after the branch, so two branches pushed off the same base in
+	// the same test never share a commit sha. They used to: both are an
+	// empty commit with the same message, the same author and -- inside
+	// one second, which is all git's timestamps resolve -- the same
+	// timestamp, so git hashed them to the same object. That was harmless
+	// until the merge queue started reading checks by head sha rather
+	// than by branch, at which point one branch's check runs
+	// (Sim.CheckRuns, keyed by sha) were served for the other branch's
+	// pull request too, and a test holding one pull request's CI queued
+	// silently held every other pull request in the same sim queued with
+	// it.
 	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "agent commit on "+branch)
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
