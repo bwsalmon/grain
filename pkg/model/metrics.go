@@ -42,13 +42,25 @@ type TaskTiming struct {
 // two -- setup before, agent work after -- and is nil for a run still in
 // setup and for one that never reached its agent at all (see schema.go on
 // task_run.agent_started_at).
+//
+// RunID is the row's own id, carried because it is what the per-run tool
+// census (RunToolUses, RunCheckWaits) is keyed by: those rows have no
+// moment of their own, so a report windows them against the run they
+// belong to, joining the two in memory rather than in SQL.
 type RunTiming struct {
+	RunID          string
 	TaskID         string
 	Attempt        int
 	StartedAt      time.Time
 	AgentStartedAt *time.Time
 	FinishedAt     *time.Time
 	Outcome        string
+	// Detail is the short reason recorded beside the outcome. It is read
+	// here for one purpose: EndingOf, which is what tells a run cancelled
+	// by the wall-clock cap from one cancelled because a human closed its
+	// task, and a run that exhausted its turn budget from any other
+	// failure. Both pairs share an outcome string and differ only here.
+	Detail string
 }
 
 // TaskTimings is every task's timeline, oldest id first.
@@ -96,18 +108,18 @@ func (s *Store) TaskTimings(ctx context.Context) ([]TaskTiming, error) {
 func (s *Store) RunTimings(ctx context.Context) ([]RunTiming, error) {
 	var out []RunTiming
 	err := each(ctx, s.db,
-		"SELECT `task_id`,`attempt`,`started_at`,`agent_started_at`,`finished_at`,`outcome` "+
-			"FROM `task_run` ORDER BY `task_id`, `attempt`", nil,
+		"SELECT `id`,`task_id`,`attempt`,`started_at`,`agent_started_at`,`finished_at`,"+
+			"`outcome`,`detail` FROM `task_run` ORDER BY `task_id`, `attempt`", nil,
 		func(rows *sql.Rows) error {
 			var r RunTiming
 			var agentStarted, finished sql.NullTime
-			var outcome sql.NullString
-			if err := rows.Scan(&r.TaskID, &r.Attempt, &r.StartedAt,
-				&agentStarted, &finished, &outcome); err != nil {
+			var outcome, detail sql.NullString
+			if err := rows.Scan(&r.RunID, &r.TaskID, &r.Attempt, &r.StartedAt,
+				&agentStarted, &finished, &outcome, &detail); err != nil {
 				return err
 			}
 			r.AgentStartedAt, r.FinishedAt = timePtr(agentStarted), timePtr(finished)
-			r.Outcome = outcome.String
+			r.Outcome, r.Detail = outcome.String, detail.String
 			out = append(out, r)
 			return nil
 		})

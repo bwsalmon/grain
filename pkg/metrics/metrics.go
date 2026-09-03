@@ -121,6 +121,14 @@ type Input struct {
 	// against another process, a test) supplies none and gets an empty
 	// Cycles rather than a wrong one.
 	Cycles CycleHistory
+	// ToolUses and CheckWaits are what each run recorded about its own
+	// tool use (Store.RunToolUses, Store.RunCheckWaits) -- the whole
+	// tables, like Tasks and Runs, and windowed here against the run each
+	// row belongs to. Optional in the same way States is: a caller that
+	// supplies neither gets an empty Tools and Checks rather than a wrong
+	// one, and every other number is unaffected.
+	ToolUses   []model.RunToolUse
+	CheckWaits []model.RunCheckWait
 }
 
 // CycleHistory is a daemon's own record of its recent RunCycle ticks --
@@ -260,6 +268,18 @@ type Runs struct {
 	// whatever a later ending calls itself. A run finished with no
 	// outcome recorded counts under "unrecorded".
 	Outcomes map[string]int
+	// Endings counts the same runs by how they actually ended
+	// (model.RunEnding), which is what Outcomes above cannot say. Two of
+	// its words each cover two endings with different fixes: "cancelled"
+	// is both a human closing the task and the run hitting the
+	// wall-clock cap, and "failed" is both a framework that broke and a
+	// run that exhausted MaxAgentTurns. Each of those is its own series
+	// here -- alongside no_action, a run that had tools, used them and
+	// produced nothing, which is the purest measure of the agent-facing
+	// surface failing and was previously one key in a map beside
+	// "succeeded"; and alongside the runs a provider's usage limit
+	// stopped, which are not a fault of the deployment's at all.
+	Endings map[model.RunEnding]int
 	// AttemptsPerCompletion is how many attempts, on average, each task
 	// completed in this window took -- every attempt it ever made, not
 	// only those inside the window, since that is what the completion
@@ -404,6 +424,13 @@ type Report struct {
 	Runs       Runs
 	Backlog    Backlog
 	Cycles     Cycles
+	// Tools and Checks are the inside of a run: what its tools cost it,
+	// and how the CI loop it was told to go round actually went. Both are
+	// empty for a caller that supplied no census (Input.ToolUses,
+	// Input.CheckWaits) and for a window whose runs all predate it -- see
+	// tools.go.
+	Tools  Tools
+	Checks Checks
 }
 
 // Compute derives a Report. It reads its input and nothing else -- no
@@ -431,6 +458,7 @@ func Compute(in Input) Report {
 		}
 	}
 	rep.Runs.Outcomes = map[string]int{}
+	rep.Runs.Endings = map[model.RunEnding]int{}
 	for _, r := range in.Runs {
 		started := r.StartedAt
 		if w.holds(&started) {
@@ -439,6 +467,7 @@ func Compute(in Input) Report {
 		if w.holds(r.FinishedAt) {
 			rep.Throughput.RunsFinished++
 			rep.Runs.Outcomes[outcomeOf(r)]++
+			rep.Runs.Endings[model.EndingOf(r.Outcome, r.Detail)]++
 			addTo(buckets, w, r.FinishedAt, func(b *Bucket) { b.RunsFinished++ })
 		}
 	}
@@ -535,6 +564,10 @@ func Compute(in Input) Report {
 	if in.States != nil {
 		rep.Backlog = backlogOf(in.Tasks, in.States, w.Until)
 	}
+
+	// --- the inside of a run ------------------------------------------
+	rep.Tools = toolsOf(w, in.Runs, in.ToolUses)
+	rep.Checks = checksOf(w, in.Runs, in.CheckWaits)
 
 	// --- the daemon's own tick ----------------------------------------
 	rep.Cycles = cyclesOf(w, in.Cycles)
