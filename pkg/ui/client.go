@@ -554,8 +554,23 @@ type CreateTaskRequest struct {
 	// "gemini" spelling is accepted and normalized to the former),
 	// validated the same way UpdateSettings validates the
 	// deployment-wide setting.
-	AgentFramework string   `json:"agentFramework"`
-	Capabilities   []string `json:"capabilities"`
+	AgentFramework string `json:"agentFramework"`
+	// Capabilities is the exact set of capability ids this task is filed
+	// holding -- but only when the caller names one. nil (the field left
+	// out, or JSON null) means the caller expressed no opinion, and the
+	// task is filed with this deployment's own default set instead
+	// (model.Config.DefaultCapabilities, recorded as model.GrantByDefault
+	// grants). An empty-but-present list is an opinion: exactly no
+	// capabilities, defaults included.
+	//
+	// A pointer for the same reason UpdateSettingsRequest's fields are
+	// one: "leave this to whatever the deployment says" and "I want none
+	// of them" are different requests, and a bare []string cannot tell an
+	// omitted field from an empty one for a caller writing Go rather than
+	// JSON. NewTaskOverlay.jsx always sends a list, seeded from GET
+	// /api/config's own defaultCapabilities, so what a human sees ticked
+	// on the form is what the task is filed with, unticking included.
+	Capabilities *[]string `json:"capabilities"`
 	// DependsOn is a set of task IDs this task cannot dispatch ahead of --
 	// model.LinkDependsOn links, filed at creation the same way
 	// Capabilities is. SetDependency is the picker's attach/detach
@@ -594,7 +609,7 @@ type CreateTaskRequest struct {
 // bootstrap.CapabilityName's own string values (bwsalmon/agents#620
 // added the third), named here rather than imported so this package
 // stays free of every capability provider it merely knows the id of, the
-// same distance DefaultCapabilities (labels.go) already keeps.
+// same distance OfferedCapabilities (labels.go) already keeps.
 var configurationCapabilities = []string{"self-debug", "self-repair", "bootstrap-playbooks"}
 
 // configurationPrompt seeds a configuration-agent task's own Body when
@@ -617,23 +632,92 @@ const configurationPrompt = "You are grain's own configuration agent, opened for
 	"wants to bootstrap one of those flows, read it fully before acting on it, and follow its own " +
 	"guidance on what to ask them for and what to run yourself. Start by asking what they need."
 
-// mergeCapabilities returns ids with each of extra appended, skipping any
-// already present -- CreateTask's own way of adding the configuration
-// agent's grants (configurationCapabilities) on top of whatever a caller
-// already asked for, without attaching either one twice.
-func mergeCapabilities(ids, extra []string) []string {
-	have := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		have[id] = true
+// mergeGrants returns grants with each of extra appended, skipping any
+// whose capability is already granted -- CreateTask's own way of adding
+// the configuration agent's grants (configurationCapabilities) on top of
+// whatever the request or this deployment's defaults already produced,
+// without granting anything twice. First one wins, so a capability a
+// human ticked keeps the Via it was ticked under rather than being
+// restated as something else.
+func mergeGrants(grants, extra []model.Grant) []model.Grant {
+	have := make(map[string]bool, len(grants))
+	for _, g := range grants {
+		have[g.Capability] = true
 	}
-	out := append([]string{}, ids...)
-	for _, id := range extra {
-		if !have[id] {
-			out = append(out, id)
-			have[id] = true
+	out := append([]model.Grant{}, grants...)
+	for _, g := range extra {
+		if !have[g.Capability] {
+			out = append(out, g)
+			have[g.Capability] = true
 		}
 	}
 	return out
+}
+
+// defaultCapabilities is the capability ids a task filed on this
+// deployment, against target, starts out holding: two layers, unioned,
+// deployment-wide first.
+//
+//   - model.Config.DefaultCapabilities, the deployment's own set
+//     (task-14), which every task gets wherever it points.
+//   - model.RepoConfig.DefaultCapabilities for target, the repo's own
+//     additions (task-24). A nil target -- a task filed with NoRepo --
+//     has no repo to key on, so it gets the deployment layer alone.
+//
+// Both are read from the store on every CreateTask rather than cached on
+// Client.Config, so an operator who changes either set changes what the
+// next task is filed with rather than what the next process is.
+//
+// Union is the whole composition rule: a repo adds, and never subtracts.
+// model.RepoConfig.DefaultCapabilities has why "everything except gcp-key
+// here" is deferred rather than spelled some other way.
+//
+// An id this build no longer offers is dropped rather than failing the
+// creation: UpdateSettings and SetRepoDefaultCapabilities each validate
+// their own set against OfferedCapabilities when it is saved, so a stored
+// id with no row can only be a capability grain has retired since, and a
+// settings row left behind by an upgrade must not become a deployment
+// where no task can be filed at all. That is the one place this differs
+// from a caller naming its own ids, which are still rejected as unknown
+// (grantsFor) -- a human who asks for a capability by name should hear
+// that it does not exist.
+//
+// Only tasks filed through CreateTask are seeded. A schedule, a template
+// and a suite each carry a grant set that was authored once, in a form
+// of its own, and the tasks they file are filed with it -- defaulting
+// them here as well would quietly widen a set somebody already wrote
+// down.
+func (c *Client) defaultCapabilities(ctx context.Context, target *model.RepoRef) ([]string, error) {
+	cfg, err := c.Store.GetConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var stored []string
+	if cfg != nil {
+		stored = cfg.DefaultCapabilities
+	}
+	if target != nil {
+		repoCfg, err := c.Store.GetRepoConfig(ctx, *target)
+		if err != nil {
+			return nil, err
+		}
+		if repoCfg != nil {
+			stored = append(append([]string{}, stored...), repoCfg.DefaultCapabilities...)
+		}
+	}
+	ids := make([]string, 0, len(stored))
+	seen := make(map[string]bool, len(stored))
+	for _, id := range stored {
+		if seen[id] {
+			continue
+		}
+		if _, ok := c.capabilityByID(id); !ok {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 // CreateTask files a task straight into the store.
@@ -650,12 +734,24 @@ func mergeCapabilities(ids, extra []string) []string {
 // assemble Interactive, Capabilities and a Description by hand the same
 // way each time: Interactive is forced true regardless of what the
 // request itself set there, configurationCapabilities is merged into
-// whatever Capabilities the request already named, and an empty Title/
-// Description defaults to "Configuration agent"/configurationPrompt.
+// whatever capabilities the task is otherwise filed with, and an empty
+// Title/Description defaults to "Configuration agent"/configurationPrompt.
+//
+// Capabilities are resolved the same way, once, for every caller: a
+// request that names its own set is filed with exactly that set, and one
+// that names none at all is filed with the default set resolved for the
+// repo it targets -- this deployment's, plus that repo's own
+// (CreateTaskRequest.Capabilities, model.Config.DefaultCapabilities,
+// model.RepoConfig.DefaultCapabilities). That resolution happens after
+// the target repo is decided just above, so a task filed with no repo at
+// all gets Config.DefaultTarget's own repo defaults rather than none.
+// Either way what comes out is a plain model.Grant on the task itself --
+// there is no second, deployment-level grant set read again at dispatch,
+// so every capability a run holds is one that can be seen and detached
+// on the task that holds it.
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
 	if req.Configuration {
 		req.Interactive = true
-		req.Capabilities = mergeCapabilities(req.Capabilities, configurationCapabilities)
 		if strings.TrimSpace(req.Title) == "" {
 			req.Title = "Configuration agent"
 		}
@@ -693,7 +789,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err := validateAgentFramework(req.AgentFramework); err != nil {
 		return Task{}, err
 	}
-	grants, err := c.grantsFor(req.Capabilities)
+	grants, err := c.creationGrants(ctx, req, target)
 	if err != nil {
 		return Task{}, err
 	}
@@ -872,14 +968,67 @@ func (c *Client) parkOffAllowlist(ctx context.Context, taskID string, target mod
 }
 
 // grantsFor turns capability ids into model.Grants, rejecting any this
-// deployment does not offer.
-func (c *Client) grantsFor(ids []string) ([]model.Grant, error) {
+// deployment does not offer. via is what each one records as its source
+// -- model.GrantByLabel for ids a caller named, model.GrantByDefault for
+// ids this deployment attaches to every new task by itself.
+func (c *Client) grantsFor(ids []string, via model.GrantSource) ([]model.Grant, error) {
 	grants := make([]model.Grant, 0, len(ids))
 	for _, id := range ids {
 		if _, ok := c.capabilityByID(id); !ok {
 			return nil, validationErrorf("unknown capability %s", id)
 		}
-		grants = append(grants, model.Grant{Capability: id, Via: model.GrantByLabel})
+		grants = append(grants, model.Grant{Capability: id, Via: via})
+	}
+	return grants, nil
+}
+
+// creationGrants is the grant set a new task is filed with: whatever the
+// request named, or -- when it named nothing at all -- the default
+// capabilities resolved for target (this deployment's, plus target's own
+// repo row), plus the configuration agent's own three if this is one of
+// those.
+//
+// target is the repo CreateTask has already resolved, defaults and all,
+// rather than req.Repo as written: a request that names no repo is filed
+// against Config.DefaultTarget, and that repo's own defaults are the ones
+// such a task should get. nil is a NoRepo task, which has no repo layer
+// to resolve at all.
+//
+// The two are told apart by CreateTaskRequest.Capabilities being nil
+// rather than empty, and they record different sources: a caller's ids
+// are model.GrantByLabel ("a human applied it"), a deployment's are
+// model.GrantByDefault. Nothing reads Via to decide what a grant does --
+// it is provenance, so that a task carrying gcp-key nobody remembers
+// asking for can be traced back to Settings or to the repo page rather
+// than to whoever filed it. One source for both layers, deliberately:
+// which of the two attached it is a question the two panes that own them
+// answer, and a task holding a grant it can drop either way has nothing
+// to do differently with the answer.
+func (c *Client) creationGrants(ctx context.Context, req CreateTaskRequest, target *model.RepoRef) ([]model.Grant, error) {
+	var grants []model.Grant
+	if req.Capabilities != nil {
+		named, err := c.grantsFor(*req.Capabilities, model.GrantByLabel)
+		if err != nil {
+			return nil, err
+		}
+		grants = named
+	} else {
+		ids, err := c.defaultCapabilities(ctx, target)
+		if err != nil {
+			return nil, err
+		}
+		defaults, err := c.grantsFor(ids, model.GrantByDefault)
+		if err != nil {
+			return nil, err
+		}
+		grants = defaults
+	}
+	if req.Configuration {
+		extra, err := c.grantsFor(configurationCapabilities, model.GrantByLabel)
+		if err != nil {
+			return nil, err
+		}
+		grants = mergeGrants(grants, extra)
 	}
 	return grants, nil
 }
@@ -1117,7 +1266,7 @@ func (c *Client) mutate(ctx context.Context, id string, apply func(*model.Task) 
 // Only attaching checks the id against this deployment's listing.
 // Detaching an id with no row is allowed, because a task can be holding
 // a grant nothing offers any more -- a renamed capability
-// (DefaultCapabilities' own "scratch-repo", now github-sandbox), or one
+// (OfferedCapabilities' own "scratch-repo", now github-sandbox), or one
 // a deployment stopped listing -- and such a grant is exactly the one an
 // operator most needs to remove: it fails the task's every dispatch at
 // model.ResolveGrants. Refusing to detach it would leave the only route

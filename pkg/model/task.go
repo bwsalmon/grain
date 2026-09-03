@@ -160,6 +160,26 @@ const (
 	GrantByDirective GrantSource = "directive" // a trusted author wrote it
 	GrantByFolder    GrantSource = "folder"    // a folder's offers granted it
 	GrantByGrain     GrantSource = "grain"     // grain applied it to itself
+	// GrantByDefault records a grant a task was filed with because it was
+	// listed as a default -- by the deployment
+	// (Config.DefaultCapabilities) or by the repo the task targets
+	// (RepoConfig.DefaultCapabilities), unioned at creation. Nobody
+	// ticked it for this task in particular; it is what filing a task
+	// here, against that repo, starts out with (ui.CreateTask).
+	//
+	// One source for both layers, deliberately: which of the two attached
+	// it is a question the two panes that own them answer, and nothing
+	// about a task changes with the answer.
+	//
+	// It is provenance only, exactly like the four above: nothing reads
+	// Via to decide what a grant lets a task do, and a default-sourced
+	// grant is in every other way an ordinary one -- it sits on the task,
+	// shows in its capability list, is detached through the same picker,
+	// and fails the same way at ResolveGrants/MaterializeGrants if the
+	// capability behind it is misconfigured. That is deliberate: a
+	// deployment-wide grant applied at dispatch instead would have no
+	// task to be visible on and no way to be taken off one.
+	GrantByDefault GrantSource = "default"
 )
 
 type Provision string
@@ -473,12 +493,14 @@ type Observation struct {
 	PendingQuestionCommentID *int64
 	BaselineCommentID        *int64
 	// MergeQueueBlockedAt is set once the merge queue has stopped driving
-	// this task, for either of the two reasons it ever does: the
-	// automatic fix it filed ran and closed and the PR is still
-	// conflicted or failing, or the PR's checks stayed unfinished for
-	// longer than the queue is willing to wait on CI that may never
-	// report (orchestrator.defaultCheckStallDeadline). The task's own
-	// thread says which -- see orchestrator.SyncPullRequests. Either way
+	// this task, for any of the three reasons it ever does: the automatic
+	// fix it filed ran and closed and the PR is still conflicted or
+	// failing, or that fix never finished at all within the time a fix is
+	// given (orchestrator.defaultFixTaskDeadline), or the PR's checks
+	// stayed unfinished for longer than the queue is willing to wait on
+	// CI that may never report
+	// (orchestrator.defaultCheckStallDeadline). The task's own thread
+	// says which -- see orchestrator.SyncPullRequests. Either way
 	// it no longer counts as any repo's queue head (so a stuck PR cannot
 	// block the ones behind it) and gets no automatic fix from here on,
 	// but it is still merged the moment it reads clean, the same as a fix

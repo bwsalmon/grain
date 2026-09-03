@@ -236,6 +236,55 @@ describe("TaskList", () => {
     expect(screen.queryAllByTitle("filed automatically by a schedule")).toHaveLength(1);
   });
 
+  // bwsalmon/agents#642: a suite run files its pass of tasks with nobody
+  // typing them in, so they get scheduled's own badge treatment.
+  it("badges a task a suite run filed, and leaves an ordinary one unbadged", () => {
+    renderList({
+      tasks: [
+        { ...tasks[0], suiteRun: true },
+        tasks[1],
+      ],
+    });
+    expect(screen.getByTitle("filed automatically by a task suite run")).toHaveTextContent("suite");
+    expect(screen.queryAllByTitle("filed automatically by a task suite run")).toHaveLength(1);
+    // The suite chip is its own thing, not the schedule one relabelled.
+    expect(screen.queryByTitle("filed automatically by a schedule")).not.toBeInTheDocument();
+  });
+
+  // bwsalmon/agents#378: a stacked task explains itself by sitting under
+  // the task it repairs, so the chip is only for the rows where that
+  // nesting is missing.
+  describe("the merge-fix chip on a stacked task", () => {
+    const parent = { id: 1, title: "Fix the thing", state: "queued", capabilities: [], blocked: false };
+    const fix = {
+      id: 2, title: "Repair the pull request", state: "queued", capabilities: [], blocked: false,
+      stacked: true, generatedFrom: 1,
+    };
+
+    it("leaves a fix nested under its own parent unchipped", () => {
+      renderList({ tasks: [parent, fix] });
+      expect(document.querySelector(".task-sublist")).toHaveTextContent("Repair the pull request");
+      expect(screen.queryByText("merge fix")).not.toBeInTheDocument();
+    });
+
+    it("chips a fix listed at top level because its parent is filtered out of the view", () => {
+      renderList({ tasks: [{ ...parent, state: "completed" }, fix], stateFilter: "queued" });
+      expect(document.querySelector(".task-sublist")).not.toBeInTheDocument();
+      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+    });
+
+    it("chips a fix whose parent is gone entirely", () => {
+      renderList({ tasks: [fix] });
+      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+    });
+
+    it("chips a fix with no generatedFrom at all, without naming a parent", () => {
+      renderList({ tasks: [{ ...fix, generatedFrom: undefined }] });
+      expect(screen.getByTitle("the merge queue's own automatic fix for another task's pull request"))
+        .toHaveTextContent("merge fix");
+    });
+  });
+
   // bwsalmon/agents#539
   it("badges an interactive task, and leaves an ordinary one unbadged", () => {
     renderList({

@@ -820,7 +820,9 @@ func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID str
 // advanceMergeQueueHead is what makes task -- the head of its repo's
 // merge queue, its PR conflicted or failing checks -- progress: file an
 // automatic fix the first time this happens, or notice the fix already
-// filed has finished and decide whether that resolved things.
+// filed has finished and decide whether that resolved things, or give up
+// on a fix that has not finished and is not going to
+// (defaultFixTaskDeadline).
 func advanceMergeQueueHead(ctx context.Context, store *model.Store,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
@@ -837,8 +839,16 @@ func advanceMergeQueueHead(ctx context.Context, store *model.Store,
 	if fixState != model.StateClosed {
 		// Still running, or its own PR is still open and being watched by
 		// this same SyncPullRequests call -- nothing to do until it
-		// finishes one way or the other.
-		return nil
+		// finishes one way or the other, unless it has been not-finishing
+		// for longer than any fix is waited on.
+		overdue, err := fixTaskOverdue(ctx, store, fixTaskID, now)
+		if err != nil {
+			return err
+		}
+		if !overdue {
+			return nil
+		}
+		return escalateUnfinishedFix(ctx, store, task, ref, fixTaskID, health, now)
 	}
 	// The fix task ran to completion (its own PR merged into ref's branch,
 	// or was closed without merging) and yet ref itself still reads
@@ -857,6 +867,69 @@ func fixTaskLink(task model.Task) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// defaultFixTaskDeadline is the third clock the merge queue runs, and the
+// one that bounds advanceMergeQueueHead's wait: how long a queue head is
+// left waiting on the fix task filed for it before the queue gives up and
+// asks a person.
+//
+// Without it the wait is unbounded, and by a route neither of the two CI
+// clocks above reaches. A head with a fix in flight reads PrConflicted or
+// PrFailing, not PrPending, so defaultCheckStallDeadline never times it;
+// and the fix task's own pull request, which may be the thing hanging, is
+// never a queue head itself (isQueueMember excludes it), so nothing times
+// that either. Anything that leaves the fix task open forever -- its own
+// checks wedged, a dispatch that fails without closing it, an agent run
+// that never comes back -- would otherwise hold its parent at the head of
+// the repo's queue indefinitely, with everything behind it waiting: the
+// same stall defaultCheckStallDeadline closes, reached from the other
+// side.
+//
+// Six hours is chosen against what a fix task honestly needs: it has to
+// wait its turn to be dispatched (briefly -- Store.Ready sorts ReasonFix
+// tasks ahead of everything else), run an agent (capped at
+// defaultMaxRunRuntime, two hours), open a pull request and get its own
+// CI through. That is comfortably inside six hours even when every stage
+// takes longer than usual, and the cost of erring long is one that is
+// paid once per stuck head rather than per cycle. Erring short is worse
+// here than it is for CI: giving up throws away an automatic fix that
+// might have been minutes from landing, and the queue never files a
+// second one.
+//
+// Measured from the fix task's own CreatedAt, which fileFixTask stamps in
+// the same cycle it writes LinkFixTask, rather than from an in-memory
+// sighting like the CI clocks: this one is naturally persisted already,
+// so a restart does not hand a stuck head another six hours.
+const defaultFixTaskDeadline = 6 * time.Hour
+
+// fixTaskOverdue reports whether the fix task filed for a queue head has
+// been unfinished for longer than defaultFixTaskDeadline. Call it only
+// for a fix task that has not reached StateClosed.
+//
+// A fix task the store has no row for counts as overdue immediately: the
+// link names something that can never reach StateClosed, so waiting on it
+// is waiting on nothing. That is unreachable today (nothing deletes
+// tasks) and is here so the unreachable case fails toward asking a person
+// rather than back into the stall this deadline exists to end. A row with
+// no CreatedAt -- also unreachable, since fileFixTask always sets one --
+// has no clock to consult and is waited on, the only direction that can
+// be wrong without giving up on a fix that was going to work.
+func fixTaskOverdue(ctx context.Context, store *model.Store, fixTaskID string, now time.Time) (bool, error) {
+	fixTask, err := store.GetTask(ctx, fixTaskID)
+	if err != nil {
+		return false, fmt.Errorf("orchestrator: reading fix task %s: %w", fixTaskID, err)
+	}
+	if fixTask == nil {
+		return true, nil
+	}
+	if fixTask.CreatedAt == nil {
+		return false, nil
+	}
+	// Compared against the deadline rather than as `now.Sub(filed) >=
+	// deadline`, so a clock that jumped backwards reads as "not overdue
+	// yet" -- the same direction the CI clocks err in.
+	return !now.Before(fixTask.CreatedAt.Add(defaultFixTaskDeadline)), nil
 }
 
 // healthReason renders why a PR is not mergeable, for a human or an
@@ -998,10 +1071,11 @@ func queueComment(ctx context.Context, store *model.Store, taskID, body string, 
 // is enough. What is given up is the queue position and the automatic
 // fix, not the merge.
 //
-// The two callers below are the two reasons the queue gives up, and they
-// say different things to the person now holding it: escalateToUser for a
-// fix that ran and did not take, escalateStalledChecks for CI that never
-// finished at all.
+// The three callers below are the three reasons the queue gives up, and
+// they say different things to the person now holding it: escalateToUser
+// for a fix that ran and did not take, escalateUnfinishedFix for one that
+// never finished running at all, escalateStalledChecks for CI that never
+// reported.
 func blockMergeQueue(ctx context.Context, store *model.Store, taskID, comment string, now time.Time) error {
 	if err := queueComment(ctx, store, taskID, comment, now); err != nil {
 		return err
@@ -1010,7 +1084,8 @@ func blockMergeQueue(ctx context.Context, store *model.Store, taskID, comment st
 }
 
 // escalateToUser gives up on task because its automatic fix ran and
-// finished and its PR is still broken.
+// finished and its PR is still broken. (A fix that has not finished at
+// all is escalateUnfinishedFix's, and says so differently.)
 //
 // This never runs a second automatic fix for the same PR. core.py's own
 // _suggest_fix reasoning ("suggesting a fix for a fix risks an unbounded
@@ -1029,7 +1104,37 @@ func escalateToUser(ctx context.Context, store *model.Store,
 	return blockMergeQueue(ctx, store, task.ID, comment, now)
 }
 
-// escalateStalledChecks gives up on task for the other reason: its checks
+// escalateUnfinishedFix gives up on task because the fix filed for it has
+// been neither finished nor abandoned for longer than
+// defaultFixTaskDeadline, so the head has been holding its queue position
+// on a repair that is not arriving.
+//
+// The fix task itself is left exactly as it is, running or queued or
+// waiting on its own checks. Nothing here can tell which of those it is
+// stuck in, and cancelling it would throw away work for no gain: if it
+// does finish and go clean, syncEntry still merges it into ref's branch
+// unconditionally (a fix task is never a queue member), and ref itself,
+// now blocked rather than abandoned, still merges the moment it reads
+// clean. What the queue gives up is the position and the waiting, not
+// either merge.
+func escalateUnfinishedFix(ctx context.Context, store *model.Store,
+	task model.Task, ref model.PullRequestRef, fixTaskID string,
+	health model.PrHealth, now time.Time) error {
+
+	comment := fmt.Sprintf(
+		"The automatic fix for %s never finished -- task %s was filed to repair it "+
+			"more than %s ago and still hasn't run to completion, and %s -- so this "+
+			"needs a person. Have a look at %s (its run, or its own checks, may be "+
+			"stuck); either way, pushing a fix by hand is enough, and %s will merge "+
+			"as soon as it reads clean. The merge queue has moved on to the next "+
+			"task in %s.",
+		ref, fixTaskID, humanDuration(defaultFixTaskDeadline), healthReasonSuffix(health),
+		fixTaskID, ref, ref.Repo,
+	)
+	return blockMergeQueue(ctx, store, task.ID, comment, now)
+}
+
+// escalateStalledChecks gives up on task for the third reason: its checks
 // have been unfinished for longer than deadline (checksStalled), so the
 // queue has been holding its own head position on a signal that is not
 // coming.

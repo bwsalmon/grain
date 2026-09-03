@@ -29,9 +29,14 @@ import (
 	"github.com/bwsalmon/grain/pkg/upgrade"
 )
 
-// Capability is one attachable, opt-in capability a human toggles on a
-// task -- the CAPABILITY-tier rows of v1's labels.py _STYLES table that
-// were genuinely human-driven.
+// Capability is one attachable capability a human toggles on a task --
+// the CAPABILITY-tier rows of v1's labels.py _STYLES table that were
+// genuinely human-driven. A deployment can start every new task with
+// some of these already ticked (model.Config.DefaultCapabilities), and a
+// repo can add more of its own for the tasks that target it
+// (model.RepoConfig.DefaultCapabilities). Either changes what the picker
+// opens as, not what it can do: every row here is still something a
+// human turns on and off per task.
 //
 // Label is gone from this type. It named the GitHub label that used to
 // carry the grant; a grant is a model.Grant row now, and ID is what it
@@ -45,14 +50,14 @@ type Capability struct {
 	Description string `json:"description"`
 }
 
-// DefaultCapabilities is every capability a human can attach to a task,
+// OfferedCapabilities is every capability a human can attach to a task,
 // and -- because grantsFor and SetCapability reject an id with no row
 // here as "unknown capability" before a model.Grant is ever written --
 // the only route by which any capability is ever granted at all. It
 // started as labels.py's _STYLES table, human-toggled rows only; it is
 // now kept in step with the set of providers grain ships instead, which
 // is what capabilityCatalog (capability_status.go) enumerates and what
-// TestDefaultCapabilitiesOffersEveryShippedCapability holds to.
+// TestOfferedCapabilitiesCoversEveryShippedCapability holds to.
 //
 // That drift is why this comment is longer than the table. gcp-key and
 // github-sandbox both had providers cmd/grain/daemon.go registered and
@@ -67,17 +72,29 @@ type Capability struct {
 // prepareCapabilities failed the dispatch outright. The row below
 // carries the provider's own id.
 //
-// These are opt-in rows rather than something every dispatch gets,
-// including gcp-key, which v1 minted for every sandbox unconditionally
-// (grain/automation/gcp_keys.py). Restoring that would mean more than a
-// grant path: v1 wrapped its mint in a local except, so a broken minter
-// degraded one dispatch, while prepareCapabilities here treats a failed
-// materialize as no dispatch at all -- an expired minter credential
-// would become a standing veto on every task in the deployment. A
-// deployment-level always-grant set is still open to whoever wants it,
-// but it needs that failure mode decided first, and it needs this list
-// to have a row for the capability either way.
-func DefaultCapabilities() []Capability {
+// The name is Offered, not Default, because this is what a picker may
+// show, not what a task starts with: the second question -- gcp-key,
+// which v1 minted for every sandbox unconditionally
+// (grain/automation/gcp_keys.py) -- is model.Config.DefaultCapabilities,
+// a per-deployment subset of these ids that (*Client).CreateTask seeds
+// every new task's Grants from, plus model.RepoConfig.
+// DefaultCapabilities, the same thing per repo. A row here is what makes
+// an id eligible for either set (UpdateSettings and
+// SetRepoDefaultCapabilities both validate against this listing), so
+// this stays the one gate every grant passes through.
+//
+// Seeding at creation rather than granting at dispatch is what settles
+// the failure mode v1 needed a local `except` for. v1 minted per
+// dispatch and swallowed the failure, so a broken minter degraded one
+// sandbox silently; prepareCapabilities (pkg/orchestrator/run.go) treats
+// a refused resolve or a failed materialize as no dispatch at all, and
+// an always-grant set read at dispatch would have turned an expired
+// minter credential into a standing veto on every task in the
+// deployment. A seeded grant needs no separate policy for that: it is an
+// ordinary grant on an ordinary task, so it fails that one task loudly
+// -- and it can be taken off the task, or out of the default set, by
+// whoever is looking at the failure.
+func OfferedCapabilities() []Capability {
 	return []Capability{
 		{ID: "gcp-key", Name: "GCP key",
 			Description: "Mint a short-lived GCP service-account key for this task and place it in its sandbox"},
