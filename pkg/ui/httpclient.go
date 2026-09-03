@@ -293,7 +293,8 @@ func (c *HTTPClient) ListRepos(ctx context.Context) ([]RepoSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	return repoSummaries(cfg.TargetRepos, tasks, cfg.RepoDefaultCapabilities, cfg.ReposWithPromptExtension), nil
+	return repoSummaries(cfg.TargetRepos, tasks, cfg.RepoDefaultCapabilities,
+		cfg.ReposWithPromptExtension, cfg.ReposWithSetupCommand), nil
 }
 
 // RepoDefaults reads repo's own default capability set, alongside the
@@ -340,6 +341,23 @@ func (c *HTTPClient) SetRepoPromptExtension(ctx context.Context, repo, text stri
 	}
 	var defaults RepoDefaults
 	if err := c.do(ctx, http.MethodPut, path, SetRepoPromptExtensionRequest{PromptExtension: text}, &defaults); err != nil {
+		return RepoDefaults{}, err
+	}
+	return defaults, nil
+}
+
+// SetRepoSetupCommand replaces the shell grain runs in this repo's fresh
+// checkout before a run's first turn -- Client.SetRepoSetupCommand over
+// the wire. An empty command is how a repo goes back to needing no setup
+// at all; everything else about the repo, its default capabilities and
+// its standing instructions included, is left exactly as it was.
+func (c *HTTPClient) SetRepoSetupCommand(ctx context.Context, repo, command string) (RepoDefaults, error) {
+	path, err := repoAPIPath(repo, "/setup-command")
+	if err != nil {
+		return RepoDefaults{}, err
+	}
+	var defaults RepoDefaults
+	if err := c.do(ctx, http.MethodPut, path, SetRepoSetupCommandRequest{SetupCommand: command}, &defaults); err != nil {
 		return RepoDefaults{}, err
 	}
 	return defaults, nil

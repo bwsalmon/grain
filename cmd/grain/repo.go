@@ -56,6 +56,8 @@ const repoUsage = `usage: grain repo <subcommand> [args]
   capabilities [-set a,b] <owner/name>  show, or replace, a repo's own default capability set
   prompt-extension [-set text] <owner/name>
                                         show, or replace, a repo's own standing instructions for a run
+  setup-command [-set command] <owner/name>
+                                        show, or replace, the shell grain runs in a fresh checkout of this repo
   add <owner/name>                      add a repo to the allowlist a task's repo may name
   remove <owner/name>                   remove a repo from that allowlist
 `
@@ -73,6 +75,8 @@ func cmdRepo(ctx context.Context, c *ui.HTTPClient, out *printer, args []string)
 		return cmdRepoCapabilities(ctx, c, out, subArgs)
 	case "prompt-extension":
 		return cmdRepoPromptExtension(ctx, c, out, subArgs)
+	case "setup-command":
+		return cmdRepoSetupCommand(ctx, c, out, subArgs)
 	case "add":
 		return cmdRepoAdd(ctx, c, out, subArgs)
 	case "remove":
@@ -205,6 +209,55 @@ func parseRepoPromptExtension(args []string) (repo string, set *string, err erro
 	return fs.Arg(0), set, nil
 }
 
+// cmdRepoSetupCommand shows the shell grain runs in a fresh checkout of
+// this repo -- before the agent's first turn, and again whenever a run
+// rebuilds its sandbox -- with no -set given, and replaces it with any,
+// including an empty one, which is how a repo goes back to needing no
+// setup at all (grain/task-154).
+func cmdRepoSetupCommand(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
+	repo, set, err := parseRepoSetupCommand(args)
+	if err != nil {
+		return err
+	}
+	if set != nil {
+		defaults, err := c.SetRepoSetupCommand(ctx, repo, *set)
+		if err != nil {
+			return err
+		}
+		out.repoSetupCommand(defaults)
+		return nil
+	}
+	defaults, err := c.RepoDefaults(ctx, repo)
+	if err != nil {
+		return err
+	}
+	out.repoSetupCommand(defaults)
+	return nil
+}
+
+// parseRepoSetupCommand makes the same nil-versus-empty distinction its
+// two siblings above make, for the same reason: -set given empty is the
+// only way to clear a repo's setup command, and must not read as a
+// request to print it.
+func parseRepoSetupCommand(args []string) (repo string, set *string, err error) {
+	fs := flag.NewFlagSet("grain repo setup-command", flag.ContinueOnError)
+	command := fs.String("set", "",
+		"shell run in a fresh checkout of this repo before an agent's first turn -- empty clears it")
+	if err := fs.Parse(args); err != nil {
+		return "", nil, err
+	}
+	if fs.NArg() == 0 {
+		return "", nil, errors.New("usage: grain repo setup-command [-set command] <owner/name>")
+	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "set" {
+			v := *command
+			set = &v
+		}
+	})
+	return fs.Arg(0), set, nil
+}
+
 func cmdRepoAdd(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain repo add", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
@@ -289,6 +342,12 @@ func repoLine(r ui.RepoSummary) string {
 	if r.PromptExtension {
 		notes = append(notes, "prompt extension")
 	}
+	// Named, not printed, for the same reason: a setup command can be
+	// several lines of shell, and "grain repo setup-command owner/name"
+	// is what prints it.
+	if r.SetupCommand {
+		notes = append(notes, "setup command")
+	}
 	return strings.TrimRight(fmt.Sprintf("%-30s %-12s %s", r.Repo, allowlisted, strings.Join(notes, "; ")), " ")
 }
 
@@ -351,6 +410,20 @@ func (p *printer) repoPromptExtension(d ui.RepoDefaults) {
 	fmt.Print(promptExtensionBlock("deployment", d.DeploymentPromptExtension))
 	fmt.Print(promptExtensionBlock("what a run here is told", d.EffectivePromptExtension))
 	fmt.Println("\n-set replaces this repo's own text only; the deployment-wide one is \"grain settings -prompt-extension\", and a repo can only add to it. A task can override both (New task -> Advanced options)")
+}
+
+// repoSetupCommand prints the setup-command half of that same
+// RepoDefaults document. One layer, not three: a setup command has no
+// deployment-wide layer to compose with (ui.RepoDefaults.SetupCommand
+// has why), so what this repo says is what a checkout of it gets.
+func (p *printer) repoSetupCommand(d ui.RepoDefaults) {
+	if p.json {
+		p.encode(d)
+		return
+	}
+	fmt.Println(d.Repo)
+	fmt.Print(promptExtensionBlock("setup command", d.SetupCommand))
+	fmt.Println("\nRun in the checkout after the clone and before the agent's first turn, and again whenever a run rebuilds its sandbox. Its exit status and the tail of its output are put in the run's prompt; a run is not failed for a setup that failed, but is told")
 }
 
 func capabilityList(ids []string) string {
