@@ -1149,7 +1149,7 @@ make. It proves the pieces already built compose correctly; it does not
 close the gap above, since nothing there is wired to run on its own yet.
 
 `self-debug` and `self-repair` (bwsalmon/agents#540, "configuration
-mode") went from `ui.DefaultCapabilities` names with nothing behind them
+mode") went from `ui.OfferedCapabilities` names with nothing behind them
 to real `model.CapabilityProvider`s -- `pkg/capability/selfdebug` and
 `pkg/capability/selfrepair` -- but what each one grants is not material
 in a sandbox or text in a prompt, `model.CapabilityProvider`'s only two
@@ -1633,7 +1633,8 @@ the whole question, and the half it left out is the one that is harder to
 see.
 
 Which capabilities a task can be granted at all is decided somewhere
-else entirely: `ui.DefaultCapabilities` (`pkg/ui/labels.go`) is the
+else entirely: `ui.OfferedCapabilities` (`pkg/ui/labels.go`, named
+`DefaultCapabilities` when this was written) is the
 picker's listing, and `grantsFor`/`SetCapability` reject any id it has no
 row for as "unknown capability" before a `model.Grant` is ever written.
 The set of capabilities `cmd/grain/daemon.go`'s `capabilityProviders`
@@ -1665,6 +1666,65 @@ the picker, or be granted to every dispatch the way v1 minted one
 unconditionally per sandbox (`gcp_keys.py`: "every sandbox, every
 dispatch... rather than a task label"), is a design question this leaves
 open; what changes here is that a deployment in that state now says so.
+
+### A default set of capabilities, seeded onto the task
+
+Both. `gcp-key` and `github-sandbox` got picker rows first, and
+`model.Config.DefaultCapabilities` is the other half: a deployment-wide
+set of capability ids, chosen on the Settings pane's Capabilities tab,
+that every new task is filed already holding. A deployment that wants a
+service-account key in every sandbox — v1's shape — ticks `gcp-key` once
+and stops thinking about it.
+
+What it is *not* is v1's per-dispatch mint restored. The set is read at
+creation, by `ui.CreateTask`, and written onto the task as ordinary
+`model.Grant`s (`GrantByDefault`, provenance only — nothing reads `Via`
+to decide what a grant does). It is never consulted again at dispatch.
+That one choice answers the whole question the picker rows left open:
+
+- **The default is modifiable, which is what was actually asked for.**
+  The new-task form opens with those boxes already ticked (`GET
+  /api/config`'s `defaultCapabilities`) and sends the resulting list, so
+  unticking one files the task without it. Afterwards it detaches from
+  the task like any other grant. A deployment-level set read at dispatch
+  could be neither seen on the task nor taken off one.
+- **A failed mint stays a failed dispatch, and needs no degrade tier.**
+  `prepareCapabilities` treats a refused resolve or a failed materialize
+  as no dispatch at all, and that stays true for a defaulted grant.
+  v1 needed its local `except` because nothing held the request: the
+  mint happened per dispatch, for every sandbox, with nowhere to record
+  that it had failed, so swallowing the error was the only way a broken
+  minter did not stop the deployment. Here the grant is on one task, the
+  failure is that task's, and the fix — repair the capability, detach it
+  from the task, or drop it from the default set — is reachable from the
+  failure. Running an agent while quietly withholding a capability its
+  task is recorded as holding would trade a loud stop for a run that
+  does the wrong work.
+- **`Grantable` keeps its meaning.** A capability must have a picker row
+  to be defaulted at all (`UpdateSettings` validates the set against
+  `OfferedCapabilities`, which is what `DefaultCapabilities` was renamed
+  to, since the two names now mean different things). That row is also
+  what lets a human drop it from one task. `CapabilityStatus.Default` is
+  reported next to `Ready`/`Grantable` rather than folded into either:
+  the Capabilities tab and `grain settings` both flag a defaulted
+  capability that is not ready, because that is a deployment-wide
+  problem — every task filed will fail on it — rather than a per-task
+  one.
+
+The cost, stated plainly: turning an entry off does not disarm the tasks
+already filed with it, since they hold their own grants. That is the
+same property that makes a default modifiable in the first place.
+
+A stored id this build no longer offers (a renamed capability, the way
+`scratch-repo` became `github-sandbox`) is skipped at creation rather
+than failing it — `UpdateSettings` refuses an unknown id on the way in,
+so a stale entry can only come from an upgrade, and a settings row left
+behind must not become a deployment where no task can be filed at all.
+Per-repo defaults are the next step and resolve in the same place
+(`(*ui.Client).defaultCapabilities`); they compose as more ids in the
+set a new task starts with, which is a different thing from
+docs/data-model.md's folder `offers`, those being floors a task cannot
+drop rather than a seed it can.
 
 ## Write-only secrets access when colocated
 

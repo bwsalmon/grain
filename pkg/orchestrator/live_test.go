@@ -101,7 +101,7 @@ func fileTask(t *testing.T, ctx context.Context, store *model.Store, repo model.
 	client := ui.NewClient(ui.Config{
 		Actor:         ui.DefaultActor("alice"),
 		DefaultTarget: &repo,
-		Capabilities:  ui.DefaultCapabilities(),
+		Capabilities:  ui.OfferedCapabilities(),
 	}, store)
 	client.Now = func() time.Time { return baseTime }
 

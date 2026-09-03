@@ -195,6 +195,39 @@ type Config struct {
 	// ApprovedByDefault -- CreateTaskRequest.AutoMerge, not this, is what
 	// a filed task actually gets.
 	AutoMergeByDefault bool
+	// DefaultCapabilities is the set of capability ids a new task is
+	// filed holding, by id -- the deployment-wide answer to "what should
+	// every task here start out able to do", and the reason gcp-key need
+	// not be ticked by hand on every task that wants a service-account
+	// key in its sandbox (grain/task-14, following task-10's picker
+	// rows).
+	//
+	// It seeds a task's own Grants at creation (ui.CreateTask, which
+	// records each as GrantByDefault) rather than being read again at
+	// dispatch. That is the whole difference between this and v1's
+	// unconditional per-dispatch mint: a seeded grant is on the task,
+	// visible in its capability list, and detachable through the same
+	// picker as any other, so whoever files a task can drop one they do
+	// not want and an operator can take one off a task that is failing on
+	// it. The cost of that choice is that turning an entry off here does
+	// not disarm the tasks already holding it -- they keep the grant they
+	// were filed with, which is the same thing that makes it modifiable
+	// in the first place.
+	//
+	// Distinct, too, from docs/data-model.md's "Attaching capabilities to
+	// repos and folders" -- those offers are floors, unioned in at
+	// resolution and not droppable by the task. This is a seed. When
+	// per-repo defaults arrive (the same doc's offers tree, or a repo row
+	// of this same shape), they compose with this one the same way: as
+	// more ids in the set a new task starts with, resolved in
+	// ui.(*Client).defaultCapabilities.
+	//
+	// An id here that this build's picker does not offer is skipped at
+	// creation rather than failing it -- ui.UpdateSettings validates the
+	// set on the way in, so that can only be a build that has since
+	// retired a capability, and a stale settings row must not become a
+	// deployment that can file no tasks at all.
+	DefaultCapabilities []string
 }
 
 // DefaultConfig is the configuration a deployment that has never chosen

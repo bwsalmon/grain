@@ -218,8 +218,8 @@ func TestHTTPClientConfigReadsActorAndDefaultTarget(t *testing.T) {
 	if cfg.DefaultTarget == nil || cfg.DefaultTarget.String() != "acme/widgets" {
 		t.Fatalf("default target = %v, want acme/widgets", cfg.DefaultTarget)
 	}
-	if len(cfg.Capabilities) != len(ui.DefaultCapabilities()) {
-		t.Fatalf("capabilities = %d, want %d", len(cfg.Capabilities), len(ui.DefaultCapabilities()))
+	if len(cfg.Capabilities) != len(ui.OfferedCapabilities()) {
+		t.Fatalf("capabilities = %d, want %d", len(cfg.Capabilities), len(ui.OfferedCapabilities()))
 	}
 }
 

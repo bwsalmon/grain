@@ -46,6 +46,20 @@ func TestCapabilityStatusLine(t *testing.T) {
 			want:    []string{"gcp-key", "ready", "NOT GRANTABLE"},
 			wantNot: []string{"needs:", "missing secrets:"},
 		},
+		{
+			// A capability every new task is filed holding
+			// (model.Config.DefaultCapabilities) says so, and says it
+			// before whatever is missing: an unready default is a
+			// deployment-wide problem rather than a per-task one.
+			name:   "a defaulted capability that is not ready says both",
+			status: ui.CapabilityStatus{ID: "gcp-key", Grantable: true, Default: true, MissingConfig: []string{"GCP project"}},
+			want:   []string{"gcp-key", "not ready", "default -- every new task is filed with this", "needs: GCP project"},
+		},
+		{
+			name:    "a capability that is not defaulted says nothing about defaults",
+			status:  ui.CapabilityStatus{ID: "gemini-key", Ready: true, Grantable: true},
+			wantNot: []string{"default"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := capabilityStatusLine(tc.status)

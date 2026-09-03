@@ -155,6 +155,47 @@ describe("NewTaskOverlay", () => {
     expect(payload.capabilities).toEqual(["web-search"]);
   });
 
+  // grain/task-14: the deployment's own default capabilities arrive
+  // on GET /api/config and open the form already ticked, so filing a
+  // task on a deployment that defaults gcp-key gets one without anyone
+  // remembering to ask -- and the payload names them explicitly rather
+  // than relying on the server to fill them in, which is what makes
+  // unticking one work.
+  it("seeds the capability picker from the deployment's defaults", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      defaultCapabilities: ["gcp-key"],
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Needs a key");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.capabilities).toEqual(["gcp-key"]);
+  });
+
+  it("files a task without a defaulted capability once it is unticked", async () => {
+    const config = {
+      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      defaultCapabilities: ["gcp-key"],
+    };
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "No key needed");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByLabelText("Capabilities"));
+    await user.click(await screen.findByRole("option", { name: "GCP key" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.capabilities).toEqual([]);
+  });
+
   it("offers a repo dropdown built from targetRepos and existing tasks' repos, instead of a bare text field", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [{ id: "1", title: "Old task", repo: "acme/other" }];
