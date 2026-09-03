@@ -90,10 +90,12 @@ func TestPullRequestStatusNamesFailingChecks(t *testing.T) {
 	client := &fakePullRequests{
 		head: &github.BranchHead{SHA: "0123456789abcdef", Message: "wire it up\n\nlonger body"},
 		pr:   &github.PullRequest{Number: 42, HTMLURL: "https://example.test/pull/42"},
-		// The link the answer prints comes off the detail read rather
-		// than the search result, so the detail is what has to carry it
-		// -- GitHub returns html_url on both, and a fixture that gave it
-		// on only one made the assertion below unsatisfiable.
+		// The number and the link are printed off the same lookup, `pr`,
+		// so one blank field cannot silently drop half the reference.
+		// This fixture carries html_url on both reads because GitHub
+		// does, which means it cannot tell the two sources apart --
+		// TestPullRequestStatusTakesTheLinkOffTheLookupThatNamedTheNumber
+		// is the one that can.
 		detail: github.PullRequestDetail{Number: 42, HTMLURL: "https://example.test/pull/42", State: "open", BaseRef: "main", Mergeable: boolPtr(true)},
 		checks: []github.CheckRun{
 			{Name: "lint", Status: "completed", Conclusion: conclusion("success")},
@@ -117,6 +119,36 @@ func TestPullRequestStatusNamesFailingChecks(t *testing.T) {
 	// The commit body must not follow the subject into the answer.
 	if strings.Contains(res.Text, "longer body") {
 		t.Errorf("answer carries the whole commit message, not just its subject:\n%s", res.Text)
+	}
+}
+
+// The link is printed off the lookup that named the number, not off the
+// detail read. Every other fixture here mirrors GitHub, which returns
+// html_url on both, so none of them can tell the two apart -- and neither
+// can the end-to-end test, since githubsim serves the field on its list
+// and detail responses alike. This one gives it to the search result
+// only, which is the exact shape a live run found rendering "Pull
+// request #42 () is open": an empty pair of parentheses where the link
+// belongs. It is what goes red if the field moves back to `detail`.
+//
+// The converse -- html_url on the detail read and none on the search
+// result -- is deliberately not pinned; pullRequestStatus's own comment
+// records why the answer does not fall back for it.
+func TestPullRequestStatusTakesTheLinkOffTheLookupThatNamedTheNumber(t *testing.T) {
+	res := call(t, &fakePullRequests{
+		head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+		pr:     &github.PullRequest{Number: 42, HTMLURL: "https://example.test/pull/42"},
+		detail: github.PullRequestDetail{Number: 42, State: "open", BaseRef: "main", Mergeable: boolPtr(true)},
+	}, testScope)
+
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "Pull request #42 (https://example.test/pull/42) is open") {
+		t.Errorf("answer does not print the link the lookup carried:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, "#42 ()") {
+		t.Errorf("answer renders empty parentheses where the link belongs:\n%s", res.Text)
 	}
 }
 
