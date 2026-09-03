@@ -156,6 +156,23 @@ type Config struct {
 	SandboxCPUs int
 	// SandboxMemoryMB is SandboxCPUs' memory counterpart, in MiB.
 	SandboxMemoryMB int
+	// SandboxDiskGB is the third dimension of that same shape, in GiB:
+	// how large a root disk `konturctl vm create` gives the VM, passed as
+	// `-disk-size-gb`. Zero means the same thing the other two mean --
+	// pass no flag, and take whatever a VM would get anyway, which for
+	// disk is the size of the guest image the overlay is backed by
+	// (scripts/kontur/README.md: kontur's own `guest-image` stage sizes
+	// disk.img to the rootfs plus 20% headroom, so there is no fixed
+	// number to name as its default the way there is for CPUs and
+	// memory).
+	//
+	// Unlike CPUs and memory, this one needs something of the guest as
+	// well as of the hypervisor: a bigger virtual disk is empty space
+	// past the end of the filesystem packed into the image until
+	// something grows that filesystem onto it, which
+	// scripts/kontur/guest-setup.sh's grain-growfs unit does on each
+	// boot.
+	SandboxDiskGB int
 	// ShowClosedByDefault is the deployment-wide default for whether a
 	// task list starts out showing closed tasks (bwsalmon/agents#537):
 	// false, the default, matches "hide closed tasks by default" --

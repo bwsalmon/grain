@@ -55,6 +55,20 @@ func pushBranch(t *testing.T, bare, branch string) {
 	run(t, wd, "git", "push", "-q", "origin", branch)
 }
 
+// pushAnotherCommit lands one more commit on a branch that already
+// exists -- pushBranch above creates one, this one moves it, which is
+// what a push arriving while grain is mid-cycle does.
+func pushAnotherCommit(t *testing.T, bare, branch string) {
+	t.Helper()
+	dir := t.TempDir()
+	wd := filepath.Join(dir, "work")
+	run(t, dir, "git", "clone", "-q", "--branch", branch, bare, wd)
+	run(t, wd, "git", "config", "user.email", "agent@example.com")
+	run(t, wd, "git", "config", "user.name", "agent")
+	run(t, wd, "git", "commit", "-q", "--allow-empty", "-m", "a later push")
+	run(t, wd, "git", "push", "-q", "origin", branch)
+}
+
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)

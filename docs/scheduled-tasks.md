@@ -547,3 +547,24 @@ the refused kind change, and the delete-while-in-use guard), and
 `SchedulesList.test.jsx`.
 
 Still open, unchanged: no CLI for schedules or suites.
+
+## Update: the task list badges every task nobody filed by hand
+
+`Task.SuiteRun` (`ReasonSuite`) had the backend half of the "Scheduled"
+badge above and none of the frontend, so a whole pass of suite-filed
+tasks sat in the backlog reading as work somebody typed in. `TaskRow`
+now renders a `suite` chip beside `scheduled`, same tinted fill and
+same title tooltip.
+
+A stacked task -- the merge queue's own automatic fix, `ReasonFix` --
+gets a `merge fix` chip on the same rule, but only when it is *not*
+nested under the task it repairs: nesting is already the explanation,
+and repeating it on every child row would be noise. `TaskRow` takes a
+`nested` prop for that, set by `TaskList.jsx` on the rows it puts in a
+`.task-sublist` and left off everywhere a task is listed flat -- the
+repo pane, and `groupByStack`'s own fallback for a fix whose parent is
+filtered out of the current view or gone. Its tooltip names the parent
+when there is one to name.
+
+Tests: `TaskList.test.jsx` (the suite chip, and the merge-fix chip
+present in each un-nested case but absent under a parent).

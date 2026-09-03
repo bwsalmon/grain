@@ -67,7 +67,7 @@ describe("DetailOverlay", () => {
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(
       <DetailOverlay
-        task={{ ...baseTask, sandboxCpus: 4, sandboxMemoryMb: 8192 }}
+        task={{ ...baseTask, sandboxCpus: 4, sandboxMemoryMb: 8192, sandboxDiskGb: 40 }}
         tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
       />
     );
@@ -75,10 +75,13 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("Sandbox memory (MiB)")).toBeInTheDocument();
     expect(screen.getByText("8192")).toBeInTheDocument();
+    expect(screen.getByText("Sandbox disk (GiB)")).toBeInTheDocument();
+    expect(screen.getByText("40")).toBeInTheDocument();
 
     rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.queryByText("Sandbox vCPUs")).not.toBeInTheDocument();
     expect(screen.queryByText("Sandbox memory (MiB)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sandbox disk (GiB)")).not.toBeInTheDocument();
   });
 
   // bwsalmon/agents#539: an interactive task's Timeline reads as a chat.

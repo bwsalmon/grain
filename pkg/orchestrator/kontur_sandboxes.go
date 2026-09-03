@@ -109,15 +109,17 @@ type KonturConfig struct {
 	// ignores both fields entirely.
 	IP   string
 	Port int
-	// DefaultCPUs and DefaultMemoryMB (bwsalmon/agents#534) seed the
-	// deployment-wide default VM shape (model.Config.SandboxCPUs/
-	// SandboxMemoryMB) a run that requested no shape of its own falls
+	// DefaultCPUs, DefaultMemoryMB and DefaultDiskGB
+	// (bwsalmon/agents#534, grain/task-41) seed the deployment-wide
+	// default VM shape (model.Config.SandboxCPUs/SandboxMemoryMB/
+	// SandboxDiskGB) a run that requested no shape of its own falls
 	// back to -- appended to createArgs' own result as
-	// "-cpus"/"-memory-mb", last, so they win out over anything
-	// CreateArgs also happens to set; a run that did request a shape
-	// overrides them per dimension (Shape.orDefault). Zero, the default
-	// for both, omits the corresponding flag entirely and leaves
-	// bwsalmon/kontur's own `konturctl vm create` default in place.
+	// "-cpus"/"-memory-mb"/"-disk-size-gb", last, so they win out over
+	// anything CreateArgs also happens to set; a run that did request a
+	// shape overrides them per dimension (Shape.orDefault). Zero, the
+	// default for all three, omits the corresponding flag entirely and
+	// leaves bwsalmon/kontur's own `konturctl vm create` default in
+	// place.
 	//
 	// They are only the *starting* value: the shape actually applied to
 	// each create lives on KonturSandboxes itself, where
@@ -126,6 +128,7 @@ type KonturConfig struct {
 	// next restart.
 	DefaultCPUs     int
 	DefaultMemoryMB int
+	DefaultDiskGB   int
 }
 
 // netMode returns c.NetMode, treating an empty value as the default,
@@ -173,10 +176,11 @@ func (c KonturConfig) readyPollInterval() time.Duration {
 // is otherwise identical across every create call.
 //
 // shape is the size this VM is actually to be created at -- the run's
-// own requested size (model.Task's SandboxCPUs/SandboxMemoryMB) already
-// resolved per dimension against the deployment default
-// (Shape.orDefault, in create, against whatever default the sandboxes
-// currently carry). This is where a per-task override takes effect now:
+// own requested size (model.Task's SandboxCPUs/SandboxMemoryMB/
+// SandboxDiskGB) already resolved per dimension against the deployment
+// default (Shape.orDefault, in create, against whatever default the
+// sandboxes currently carry). This is where a per-task override takes
+// effect now:
 // a sandbox is built for one run, so the moment it is created is the one
 // moment its size is decided. It used to be applied afterwards, by a
 // `konturctl vm update` against a slot's already-created VM, and undone
@@ -189,6 +193,25 @@ func (c KonturConfig) createArgs(shape Shape) []string {
 	}
 	if shape.MemoryMB != 0 {
 		args = append(args, "-memory-mb", strconv.Itoa(shape.MemoryMB))
+	}
+	// -disk-size-gb sizes the writable qcow2 overlay konturctl creates
+	// for this VM (bwsalmon/kontur's staticpod.PrepareWritableDisk),
+	// which is otherwise made exactly as large as the guest image it is
+	// backed by.
+	//
+	// It needs a konturctl that takes the flag, which the snapshot under
+	// third_party/kontur does not yet: staticpod.VMSpec has no disk-size
+	// field, and writeQcow2Overlay -- which already takes the virtual
+	// size as an argument -- is called with the source image's size
+	// unconditionally. That flag belongs on bwsalmon/kontur's own main
+	// and reaches here by a resync, never as a local patch
+	// (third_party/kontur/VENDORED.md). Which is exactly why an unset
+	// disk size omits the flag rather than passing a 0: a deployment
+	// that has never chosen one passes the argument list it always did,
+	// and only a deployment that deliberately sets a size depends on the
+	// flag existing.
+	if shape.DiskGB != 0 {
+		args = append(args, "-disk-size-gb", strconv.Itoa(shape.DiskGB))
 	}
 	// Flat mode takes its address from the container runtime, and
 	// konturctl rejects "-ip" outright under it rather than ignoring it.
@@ -240,16 +263,17 @@ func NewKonturSandboxes(cfg KonturConfig) *KonturSandboxes {
 	return &KonturSandboxes{
 		cfg:      cfg,
 		live:     map[string]*konturSandbox{},
-		defaults: Shape{CPUs: cfg.DefaultCPUs, MemoryMB: cfg.DefaultMemoryMB},
+		defaults: Shape{CPUs: cfg.DefaultCPUs, MemoryMB: cfg.DefaultMemoryMB, DiskGB: cfg.DefaultDiskGB},
 	}
 }
 
 // SetDefaultShape replaces the deployment-wide default VM shape every
 // later Acquire resolves a run's own request against -- what
-// model.Config.SandboxCPUs/SandboxMemoryMB mean once they have been
-// changed in Settings, applied to the next sandbox built rather than
-// only to the next process (cmd/grain/daemon.go's liveConfig, which
-// calls this once per reconcile tick when either has changed).
+// model.Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB mean once they
+// have been changed in Settings, applied to the next sandbox built
+// rather than only to the next process (cmd/grain/daemon.go's
+// liveConfig, which calls this once per reconcile tick when any of them
+// has changed).
 //
 // A zero dimension means "no deployment default", exactly as it does at
 // construction: the corresponding flag is left off the create entirely
