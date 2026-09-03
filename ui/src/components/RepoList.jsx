@@ -9,11 +9,13 @@ import { TaskRow } from "./TaskList.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
 
 // RepoList is the repo page: one row per known repo -- every
-// config.targetRepos entry, plus any repo tasks target that isn't one --
-// each showing how many tasks sit in every state so a repo with
-// something stuck (awaiting_reply, or a pile of blocked work) stands out
-// before anyone opens it. Clicking a row is the entry point into the
-// repo-centric task list -- onOpenRepo scopes App's own task view to it.
+// config.targetRepos entry, plus any repo tasks target that isn't one,
+// plus any repo carrying default capabilities of its own (repoRows has
+// why all three) -- each showing how many tasks sit in every state so a
+// repo with something stuck (awaiting_reply, or a pile of blocked work)
+// stands out before anyone opens it. Clicking a row is the entry point
+// into the repo-centric task list -- onOpenRepo scopes App's own task
+// view to it.
 //
 // The chevron (bwsalmon/agents#474) is a second way into the same
 // tasks: it folds them out right here, for a quick look that doesn't
@@ -223,6 +225,13 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
       <ul className="repo-list">
         {visible.map((r) => {
           const isOpen = expanded.has(r.repo);
+          // A row with no tasks, off the allowlist, is on this page only
+          // because the repo carries default capabilities of its own
+          // (repoRows' third source). It has no counts to show and no
+          // Remove to offer, so without saying so it would read as an
+          // empty row nobody asked for -- and the Capabilities button
+          // beside it is the only way to reach the set that put it here.
+          const defaultsOnly = r.defaults && !r.configured && r.total === 0;
           return (
             <li key={r.repo}>
               <div className="repo-list-row" onClick={() => onOpenRepo(r.repo)}>
@@ -244,6 +253,14 @@ export default function RepoList({ tasks, config, onOpenRepo, onOpenReleases, on
                     <Chip key={s} size="small" className={`badge badge-${s}`} label={`${STATE_LABELS[s]} ${r.counts[s]}`} />
                   ))}
                   {r.blocked > 0 && <Chip size="small" color="error" label={`Blocked ${r.blocked}`} />}
+                  {defaultsOnly && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label="Defaults only"
+                      title="No tasks, and not on this deployment's target repos -- listed here because it has default capabilities of its own, which Capabilities edits."
+                    />
+                  )}
                 </span>
                 <Typography variant="caption" color="text.secondary" whiteSpace="nowrap">
                   {r.total} task{r.total === 1 ? "" : "s"}
