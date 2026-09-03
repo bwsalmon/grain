@@ -225,6 +225,18 @@ describe("repoRows", () => {
     ]);
   });
 
+  // The same argument for the other kind of per-repo configuration: a
+  // repo whose only presence here is standing instructions of its own
+  // (ui.configResponse.ReposWithPromptExtension, grain/task-114), which
+  // reach every run against it and can only be read or edited here.
+  it("gives a repo that only carries a prompt extension a row of its own", () => {
+    const config = { targetRepos: [], reposWithPromptExtension: ["acme/orphan"] };
+    const rows = repoRows(config, []);
+    expect(rows).toEqual([
+      { repo: "acme/orphan", total: 0, counts: {}, blocked: 0, configured: false, defaults: true },
+    ]);
+  });
+
   it("does not duplicate a repo that carries defaults and is also allow-listed or targeted", () => {
     const config = {
       targetRepos: ["acme/widgets"],

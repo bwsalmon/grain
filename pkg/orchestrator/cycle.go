@@ -232,7 +232,8 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // cancelled context means the daemon is shutting down rather than that
 // one reconciler has a problem the others might not.
 //
-// deps.MaxWorkers, deps.MaxMergers and deps.Config.MaxAgentTurns are
+// deps.MaxWorkers, deps.MaxMergers, deps.Config.MaxAgentTurns and
+// deps.Config.PromptExtension are
 // refreshed from deps.Store's own grain_config row (if any) before any
 // reconciler runs, so a change made through the store -- `grain
 // settings`, or the UI's Settings page -- takes effect on this cycle
@@ -245,8 +246,8 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // goroutines that cycle starts -- never a caller's own Deps.
 //
 // A store with no row yet -- deps.Store is nil in tests that build Deps
-// by hand, or GetConfig itself returns nil -- leaves both exactly as the
-// caller set them.
+// by hand, or GetConfig itself returns nil -- leaves every one of them
+// exactly as the caller set it.
 //
 // A cycle times itself when deps.CycleTimes is set: the whole tick, each
 // reconciler's own share of it, and how far in the dispatch decision was
@@ -285,6 +286,7 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 		} else if mc != nil {
 			deps.MaxWorkers, deps.MaxMergers = mc.MaxWorkers, mc.MaxMergers
 			deps.Config.MaxAgentTurns = mc.MaxAgentTurns
+			deps.Config.PromptExtension = mc.PromptExtension
 		}
 	}
 	var errs []error

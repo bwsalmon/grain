@@ -260,6 +260,11 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   white-space: nowrap;
 }
 .chips { display: flex; gap: 0.35rem; flex-wrap: nowrap; flex: none; }
+/* The per-row "show the full prompt" button (grain/task-91). Muted like
+   the drag handle beside it: it is an affordance on a row whose own
+   click target is the task, not something to draw the eye away from the
+   title. */
+.task-prompt-button { flex: none; color: var(--text-tertiary); }
 .badge {
   display: inline-flex;
   align-items: center;
@@ -411,13 +416,18 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* Tasks folded out under a repo row (bwsalmon/agents#474) get the same
-   nested indent as a stacked task under its parent in TaskList itself
-   (the shared .task-sublist .task-row rule above), set off from the
-   repo row by a divider of its own. */
-.repo-list .task-sublist { border-top: 1px solid var(--border); }
-
-.repo-scope-bar { padding: 1rem 1.75rem 0; }
+/* One repo's own page (RepoPage, grain/task-111): everything about the
+   repo sits in a block above the repo's task list, which is TaskList
+   itself and brings its own .content-header -- so the divider below
+   this block is what separates "this repo" from "this repo's tasks",
+   the same line .content-header would have drawn anyway. */
+.repo-page-header {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 0.9rem 1.75rem 1.4rem;
+  border-bottom: 1px solid var(--border);
+}
 
 .empty { color: var(--text-tertiary); padding: 1.5rem 1.75rem; }
 .hidden { display: none !important; }
@@ -754,7 +764,12 @@ fieldset legend {
 .declared { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.1rem; }
 .declared-row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.82rem; }
 .declared-key { color: var(--text-tertiary); }
-.declared-value { color: var(--text-secondary); text-align: right; word-break: break-word; }
+/* pre-wrap because one of these values is prose rather than a word: a
+   task's own prompt extension override (grain/task-114) can be several
+   lines, and collapsing them would run its sentences together. Every
+   other value here is a single token, which pre-wrap leaves exactly as
+   it was. */
+.declared-value { color: var(--text-secondary); text-align: right; word-break: break-word; white-space: pre-wrap; }
 
 .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0 0 1.1rem; }
 .detail-side .actions { flex-direction: column; }

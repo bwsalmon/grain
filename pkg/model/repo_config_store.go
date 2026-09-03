@@ -13,17 +13,21 @@ import (
 // ui.(*Client).defaultCapabilities takes: a repo with no row adds
 // nothing to what the deployment already defaults.
 func (s *Store) GetRepoConfig(ctx context.Context, repo RepoRef) (*RepoConfig, error) {
-	var defaultCapabilities string
+	var defaultCapabilities, promptExtension string
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `default_capabilities` FROM `repo_config` WHERE `owner` = ? AND `name` = ?",
-		repo.Owner, repo.Name).Scan(&defaultCapabilities)
+		"SELECT `default_capabilities`,`prompt_extension` FROM `repo_config` WHERE `owner` = ? AND `name` = ?",
+		repo.Owner, repo.Name).Scan(&defaultCapabilities, &promptExtension)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("reading repo config for %s: %w", repo, err)
 	}
-	return &RepoConfig{Repo: repo, DefaultCapabilities: splitCSV(defaultCapabilities)}, nil
+	return &RepoConfig{
+		Repo:                repo,
+		DefaultCapabilities: splitCSV(defaultCapabilities),
+		PromptExtension:     promptExtension,
+	}, nil
 }
 
 // ListRepoConfigs returns every repo that has a configuration of its
@@ -36,12 +40,12 @@ func (s *Store) GetRepoConfig(ctx context.Context, repo RepoRef) (*RepoConfig, e
 func (s *Store) ListRepoConfigs(ctx context.Context) ([]RepoConfig, error) {
 	var out []RepoConfig
 	err := each(ctx, s.db,
-		"SELECT `owner`,`name`,`default_capabilities` FROM `repo_config` ORDER BY `owner`,`name`",
+		"SELECT `owner`,`name`,`default_capabilities`,`prompt_extension` FROM `repo_config` ORDER BY `owner`,`name`",
 		nil,
 		func(rows *sql.Rows) error {
 			var c RepoConfig
 			var defaultCapabilities string
-			if err := rows.Scan(&c.Repo.Owner, &c.Repo.Name, &defaultCapabilities); err != nil {
+			if err := rows.Scan(&c.Repo.Owner, &c.Repo.Name, &defaultCapabilities, &c.PromptExtension); err != nil {
 				return err
 			}
 			c.DefaultCapabilities = splitCSV(defaultCapabilities)
@@ -71,8 +75,8 @@ func (s *Store) PutRepoConfig(ctx context.Context, c RepoConfig) error {
 			return err
 		}
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `repo_config` (`owner`,`name`,`default_capabilities`) VALUES (?,?,?)",
-			c.Repo.Owner, c.Repo.Name, joinCSV(c.DefaultCapabilities))
+			"REPLACE INTO `repo_config` (`owner`,`name`,`default_capabilities`,`prompt_extension`) VALUES (?,?,?,?)",
+			c.Repo.Owner, c.Repo.Name, joinCSV(c.DefaultCapabilities), c.PromptExtension)
 		return err
 	})
 }

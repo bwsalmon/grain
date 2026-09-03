@@ -63,12 +63,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/pull-request", s.handleOpenPullRequest)
 	s.mux.HandleFunc("POST /api/tasks/{id}/sandbox/recreate", s.handleRecreateSandbox)
 	s.mux.HandleFunc("GET /api/tasks/{id}/attempts/{number}/transcript", s.handleGetAttemptTranscript)
+	s.mux.HandleFunc("GET /api/tasks/{id}/prompt", s.handleGetTaskPrompt)
 
 	s.mux.HandleFunc("POST /api/repos", s.handleAddTargetRepo)
 	s.mux.HandleFunc("DELETE /api/repos/{owner}/{name}", s.handleRemoveTargetRepo)
 
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/capabilities", s.handleGetRepoCapabilities)
 	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/capabilities", s.handleSetRepoCapabilities)
+	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/prompt-extension", s.handleGetRepoPromptExtension)
+	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/prompt-extension", s.handleSetRepoPromptExtension)
 
 	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases", s.handleListReleases)
 	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases", s.handleCreateRelease)

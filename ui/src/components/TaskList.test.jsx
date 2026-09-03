@@ -2,6 +2,11 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import TaskList from "./TaskList.jsx";
+import api from "../api.js";
+
+// TaskList itself never calls the API; its rows' own prompt button does
+// (PromptOverlay, below), and this keeps that one fetch out of jsdom.
+vi.mock("../api.js", () => ({ default: vi.fn() }));
 
 const tasks = [
   { id: 1, title: "Fix the thing", state: "queued", capabilities: [], blocked: false },
@@ -409,6 +414,30 @@ describe("TaskList", () => {
       fireEvent.dragStart(rowFor("Alpha"));
       fireEvent.drop(rowFor("Bravo"));
       expect(onReorder).not.toHaveBeenCalled();
+    });
+  });
+
+  // grain/task-91: every row carries its own way to see what the agent
+  // was actually told, which is neither the title nor the description
+  // the row shows.
+  describe("the prompt button", () => {
+    it("opens the prompt for that row's own task, without opening the task", async () => {
+      api.mockResolvedValueOnce({ prompt: "Ship the other thing\n\nWork in acme/widgets.", attempt: 1 });
+      const onOpenTask = vi.fn();
+      const user = userEvent.setup();
+      renderList({ onOpenTask });
+
+      await user.click(screen.getByRole("button", { name: "Show the prompt for 2" }));
+
+      expect(await screen.findByText(/Work in acme\/widgets\./)).toBeInTheDocument();
+      expect(api).toHaveBeenLastCalledWith("/api/tasks/2/prompt");
+      expect(onOpenTask).not.toHaveBeenCalled();
+    });
+
+    it("gives every task its own button", () => {
+      renderList();
+      expect(screen.getByRole("button", { name: "Show the prompt for 1" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Show the prompt for 2" })).toBeInTheDocument();
     });
   });
 });
