@@ -1123,6 +1123,10 @@ func (c *Client) mutate(ctx context.Context, id string, apply func(*model.Task) 
 // model.ResolveGrants. Refusing to detach it would leave the only route
 // out through the store. Detaching can only ever shrink the grant set,
 // so nothing the validation protects is reachable this way.
+//
+// DetailOverlay.jsx's CapabilityToggles is the other half of that route:
+// it gives such a grant a picker row of its own purely so it can be
+// unticked, since only rows can be toggled off.
 func (c *Client) SetCapability(ctx context.Context, id, capabilityID string, attach bool) error {
 	if _, ok := c.capabilityByID(capabilityID); attach && !ok {
 		return validationErrorf("unknown capability %s", capabilityID)
