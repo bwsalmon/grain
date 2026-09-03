@@ -1,13 +1,19 @@
 # Bringing a stale queue head up to date before filing a fix for it
 
-**Status: a proposal, not implemented.** Nothing on this branch changes
-behaviour; this document exists because the decisions below are the
-awkward part and they are worth settling on paper, in the repo, before
-anyone writes the code. Where it names a function or a field that does
-not exist yet, that is a thing to add; where it names one that does, the
-citation has been checked against `pkg/orchestrator/sync.go`,
-`pkg/github/github.go` and `pkg/model/` as they stand at the commit this
-doc lands on.
+**Status: implemented, as described.** This document was written as a
+proposal, before the code, because the decisions below are the awkward
+part and were worth settling on paper first; it is kept as the reasoning
+behind what shipped rather than rewritten into a description of it. Every
+function and field it names now exists -- `github.MergeBranch`,
+`github.IsMergeConflict`, `Observation.MergeQueueRefreshedAt`,
+`orchestrator.refreshStaleHead` and its outcome type -- and the tests it
+asks for at the bottom are written.
+
+The one thing it asks for that code cannot supply is still outstanding:
+**the `204`/`409` split has been confirmed against `githubsim` (which
+answers both by running real `git` against a real bare repository) and
+against GitHub's documentation, not yet against a live repository.** See
+decision 2 for why that check is worth making anyway.
 
 ## The pattern this is about
 

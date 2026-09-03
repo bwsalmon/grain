@@ -1045,7 +1045,36 @@ workflow waiting on an approval nobody gives, or a provider that posted
 the life of the deployment with nothing said to anyone. No fix task is
 filed for that one: nothing has failed, and a check that never finishes
 is usually waiting on something outside the pull request, so there may
-be nothing in it to repair. A conflicted or failing head gets a fix task filed straight
+be nothing in it to repair. A conflicted or failing head is not taken at
+its word, either. Before anything is filed for it, `refreshStaleHead`
+asks GitHub to merge the pull request's own base branch into its head
+branch (`POST /repos/{owner}/{repo}/merges`, `Client.MergeBranch`) —
+because the common shape of a broken head is not a broken change but a
+stale one: its checks last ran against a `main` that has since moved, so
+either GitHub can no longer compute a merge ref and every
+`on: pull_request` job dies at checkout (which reads as *failing*, not as
+a conflict), or the verdict that did report is about a tree nobody would
+ever merge. The queue does not try to tell those apart before acting —
+`mergeable_state` reports `blocked` rather than `behind` for exactly this
+case, and a check run names no base — it asks for the merge and lets the
+answer classify: `201` means it was behind and is not now, so CI re-runs,
+the head holds its queue position while it does, and the *next* cycle
+decides on a fresh verdict; `204` means the branch already contained its
+base, so the failure is genuine and the fix task is filed as it always
+was; `409` means it genuinely conflicts, which is the case a fix task is
+really for, filed immediately and now naming the conflict the queue
+watched GitHub refuse rather than one inferred from a `Mergeable` flag.
+That is one API call in place of a full agent run for what has been the
+majority of this deployment's automatic fixes — every one of them
+resolved by a plain `git merge origin/main` an agent booted a sandbox to
+type. It happens once per pull request
+(`Observation.MergeQueueRefreshedAt`, persisted for the same reason the
+CI clocks are not: losing it would cost a repeated write to GitHub rather
+than another window of waiting), only for the queue head, and never for a
+fix task's own stacked branch or one the queue has given up on. It is a
+merge, never a rebase: nothing force-pushes a branch an agent may still
+hold a clone of, or moves the base out from under an in-flight stacked
+fix. A conflicted or failing head that survives all that gets a fix task filed straight
 into the store already approved (`Task.Approval` set by
 `PrincipalAutomation`, `LinkFixTask` recording which one) rather than
 `core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`

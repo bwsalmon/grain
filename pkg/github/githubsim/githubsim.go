@@ -12,8 +12,9 @@
 // Sim implements every endpoint github.Client's real implementation
 // (github.RESTClient) calls: list/get/create issues, close/reopen/update
 // an issue, add/remove a label, default branch, branch existence,
-// create/find/get/merge a pull request, the plain comment thread, inline
-// review comments and draft reviews, and check runs -- the whole surface
+// create/find/get/merge a pull request, merging one branch into another,
+// the plain comment thread, inline review comments and draft reviews, and
+// check runs -- the whole surface
 // github.go's Client interface names, so a live end-to-end test never
 // has to fall back to github.FakeTransport partway through for an
 // endpoint Sim doesn't yet answer. Wired in as a github.Transport,
@@ -73,6 +74,10 @@ var (
 	// UpdateBranch call -- release management's own (bwsalmon/agents#398).
 	gitRefsRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/git/refs$`)
 	gitRefRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/git/refs/heads/(.+)$`)
+	// mergesRe: the branch-into-branch merge the merge queue makes to
+	// bring a stale head up to date with its base
+	// (github.RESTClient.MergeBranch, orchestrator.refreshStaleHead).
+	mergesRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/merges$`)
 )
 
 // Issue is one seeded or created fake issue -- Sim's own bookkeeping, not
@@ -345,6 +350,59 @@ func (s *Sim) mergeIntoBase(pr PullRequest) error {
 	return nil
 }
 
+// containsBranch reports whether base's own history already contains
+// head's tip -- the question real GitHub's merges endpoint answers 204
+// for, asked here the honest way (`git merge-base --is-ancestor` against
+// the bare repo) rather than from bookkeeping, since "was this branch
+// actually behind" is precisely what a caller of that endpoint is
+// relying on it for.
+func (s *Sim) containsBranch(base, head string) bool {
+	return exec.Command("git", "--git-dir", s.BareRepo, "merge-base", "--is-ancestor",
+		"refs/heads/"+head, "refs/heads/"+base).Run() == nil
+}
+
+// mergeBranches merges head into base for real, against BareRepo, the
+// same way mergeIntoBase performs a pull request's own merge -- real
+// GitHub's POST /merges writes a merge commit onto base, so a Sim that
+// only said it had would let the merge queue believe it refreshed a
+// branch that never moved, which is the whole thing the caller then waits
+// a cycle for fresh CI on.
+//
+// The second return is a conflict rather than an error: once both
+// branches are known to exist (the caller 404s first) and base is known
+// not to contain head already, a conflict is the only way this merge can
+// fail, and it is an answer -- real GitHub's own 409 -- not a fault. That
+// is the case a test most wants to be real, since it is the one the merge
+// queue cannot repair by itself.
+func (s *Sim) mergeBranches(base, head, message string) (sha string, conflicted bool, err error) {
+	dir, err := os.MkdirTemp("", "githubsim-merges-*")
+	if err != nil {
+		return "", false, err
+	}
+	defer os.RemoveAll(dir)
+	wd := filepath.Join(dir, "work")
+	if err := runGit(dir, "git", "clone", "-q", s.BareRepo, wd); err != nil {
+		return "", false, err
+	}
+	for _, args := range [][]string{
+		{"git", "config", "user.email", "github@example.com"},
+		{"git", "config", "user.name", "github (simulated merge)"},
+		{"git", "fetch", "-q", "origin", head},
+		{"git", "checkout", "-q", base},
+	} {
+		if err := runGit(wd, args[0], args[1:]...); err != nil {
+			return "", false, err
+		}
+	}
+	if err := runGit(wd, "git", "merge", "--no-ff", "origin/"+head, "-m", message); err != nil {
+		return "", true, nil
+	}
+	if err := runGit(wd, "git", "push", "-q", "origin", base); err != nil {
+		return "", false, err
+	}
+	return s.branchSHA(base), false, nil
+}
+
 // runGit runs a git command in dir, folding its combined output into the
 // returned error so a merge conflict or missing branch -- the only ways
 // this can fail -- is diagnosable from the *github.Error mergeIntoBase's
@@ -609,6 +667,38 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 			s.nextReviewID++
 			s.Reviews = append(s.Reviews, Review{Number: number, Body: payload.Body, Comments: comments})
 			return jsonResponse(200, map[string]any{"id": s.nextReviewID}), nil
+		}
+		if m := mergesRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			var payload struct {
+				Base          string `json:"base"`
+				Head          string `json:"head"`
+				CommitMessage string `json:"commit_message"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			// A branch that is not in this repository is real GitHub's own
+			// 404 here -- what a fork pull request's head reads as, and
+			// what the caller has to treat as "cannot refresh this one".
+			if !s.branchExists(payload.Base) || !s.branchExists(payload.Head) {
+				return github.ApiResponse{Status: 404, Body: []byte(`{"message":"Not Found"}`)}, nil
+			}
+			if s.containsBranch(payload.Base, payload.Head) {
+				return github.ApiResponse{Status: 204, Body: nil}, nil
+			}
+			message := payload.CommitMessage
+			if message == "" {
+				message = fmt.Sprintf("Merge %s into %s", payload.Head, payload.Base)
+			}
+			sha, conflicted, err := s.mergeBranches(payload.Base, payload.Head, message)
+			if err != nil {
+				return github.ApiResponse{Status: 500, Body: []byte(err.Error())}, nil
+			}
+			if conflicted {
+				return github.ApiResponse{Status: 409, Body: []byte(`{"message":"Merge conflict"}`)}, nil
+			}
+			return jsonResponse(201, map[string]any{"sha": sha}), nil
 		}
 		if m := gitRefsRe.FindStringSubmatch(p); m != nil {
 			s.mustOwn(m[1], m[2])

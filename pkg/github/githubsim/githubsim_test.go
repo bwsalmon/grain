@@ -1,6 +1,8 @@
 package githubsim
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -262,6 +264,99 @@ func TestSimUpdateBranchMovesARealRef(t *testing.T) {
 
 	if err := client.UpdateBranch("acme", "widgets", "no-such-branch", mainHead.SHA, true); err == nil {
 		t.Fatal("expected an error moving a branch that doesn't exist")
+	}
+}
+
+// pushFileToBranch lands one commit writing path on an existing branch,
+// which is how a Sim test gives two branches something to genuinely
+// conflict over -- pushBranch's own empty commits never can.
+func pushFileToBranch(t *testing.T, bare, branch, path, content string) {
+	t.Helper()
+	dir := t.TempDir()
+	wd := filepath.Join(dir, "work")
+	run(t, dir, "git", "clone", "-q", "--branch", branch, bare, wd)
+	run(t, wd, "git", "config", "user.email", "agent@example.com")
+	run(t, wd, "git", "config", "user.name", "agent")
+	if err := os.WriteFile(filepath.Join(wd, path), []byte(content+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, wd, "git", "add", path)
+	run(t, wd, "git", "commit", "-q", "-m", "a change to "+path)
+	run(t, wd, "git", "push", "-q", "origin", branch)
+}
+
+// The merges endpoint the merge queue brings a stale pull request branch
+// up to date with (orchestrator.refreshStaleHead). Its three answers are
+// what the queue switches on, so Sim answers all three with real git
+// rather than bookkeeping: a merge that says it landed has really moved
+// the branch, an up-to-date branch is one git says is up to date, and a
+// conflict is a merge git really refused.
+func TestSimMergeBranchMergesForReal(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/task-1")
+	pushAnotherCommit(t, sim.BareRepo, "main")
+
+	// Behind: main has moved since the branch was cut, so the merge lands
+	// and the branch really contains main afterwards.
+	got, err := client.MergeBranch("acme", "widgets", "grain/task-1", "main", "catch up")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Merged || got.SHA == "" {
+		t.Fatalf("got %+v, want a merge commit", got)
+	}
+	head, err := client.GetBranchHead("acme", "widgets", "grain/task-1")
+	if err != nil || head == nil || head.SHA != got.SHA {
+		t.Fatalf("branch head = %+v, want the merge commit %q the endpoint reported", head, got.SHA)
+	}
+	if !strings.Contains(head.Message, "catch up") {
+		t.Errorf("merge commit message = %q, want the caller's own", head.Message)
+	}
+
+	// Up to date: the very same call again, now that the branch contains
+	// main, writes nothing at all.
+	again, err := client.MergeBranch("acme", "widgets", "grain/task-1", "main", "catch up")
+	if err != nil {
+		t.Fatalf("an up-to-date branch is an answer, not a failure: %v", err)
+	}
+	if again.Merged {
+		t.Fatalf("got %+v, want nothing merged into a branch that is already up to date", again)
+	}
+	after, err := client.GetBranchHead("acme", "widgets", "grain/task-1")
+	if err != nil || after == nil || after.SHA != head.SHA {
+		t.Fatalf("branch head = %+v, want it left at %q", after, head.SHA)
+	}
+}
+
+func TestSimMergeBranchRefusesARealConflict(t *testing.T) {
+	sim, client := newSim(t, "main")
+	pushBranch(t, sim.BareRepo, "grain/task-1")
+	pushFileToBranch(t, sim.BareRepo, "grain/task-1", "CONFIG.md", "setting: from-the-task")
+	pushFileToBranch(t, sim.BareRepo, "main", "CONFIG.md", "setting: from-main")
+
+	before, err := client.GetBranchHead("acme", "widgets", "grain/task-1")
+	if err != nil || before == nil {
+		t.Fatalf("before=%+v err=%v", before, err)
+	}
+	_, err = client.MergeBranch("acme", "widgets", "grain/task-1", "main", "catch up")
+	if !github.IsMergeConflict(err) {
+		t.Fatalf("got %v, want a conflict", err)
+	}
+	after, err := client.GetBranchHead("acme", "widgets", "grain/task-1")
+	if err != nil || after == nil || after.SHA != before.SHA {
+		t.Fatalf("branch head = %+v, want it untouched at %q by a merge that conflicted", after, before.SHA)
+	}
+}
+
+// A branch in another repository -- a fork pull request's head -- is a
+// 404 here, the same as one that is simply gone, and the caller's cue to
+// leave that pull request alone rather than to resolve anything.
+func TestSimMergeBranchAnswers404ForAMissingBranch(t *testing.T) {
+	_, client := newSim(t, "main")
+	_, err := client.MergeBranch("acme", "widgets", "no-such-branch", "main", "")
+	var ghErr *github.Error
+	if !errors.As(err, &ghErr) || ghErr.Status != 404 {
+		t.Fatalf("got %v, want a 404", err)
 	}
 }
 
