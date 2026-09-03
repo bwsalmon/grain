@@ -122,13 +122,28 @@ pkg/capability/gcpkey/  the gcp-key capability: a real MINT
                 Reap, a standalone safety net that deletes anything GCP
                 itself reports as older than 24h regardless of whether a
                 Lease survived to say so
-pkg/secrets/    a model.CredentialResolver backed by its own embedded
-                SQLite database (<dir>/secrets.db), kept deliberately
-                separate from the task/config store's own database file
-                (bwsalmon/agents#366: "put secrets in a separate db,
-                config and tasks in a common db") -- the production
-                implementation CapabilityContext.Credentials had none of
-                until now
+pkg/secrets/    a model.CredentialResolver backed by one encrypted file
+                inside the state repository (staterepo, below), sealed to
+                a public key whose private half lives outside that
+                repository under <data-dir>/secrets and is the operator's
+                to manage. The separation bwsalmon/agents#366 asked for
+                ("put secrets in a separate db, config and tasks in a
+                common db") is stronger this way, not weaker: cloning the
+                repository gets everything grain knows and nothing it can
+                authenticate as. X25519 + HKDF-SHA256 + AES-256-GCM out of
+                the standard library, no dependency added to encrypt one
+                file
+pkg/staterepo/  grain's database as a git repository: every table
+                exported to tables/<name>.json, rows sorted by primary key
+                and columns in declared order, so an unchanged database
+                produces byte-identical files and a settings change is a
+                diff an agent can propose. Import is the other direction
+                and is a wholesale replacement -- that is how a merged
+                pull request, including one that deletes a row, becomes
+                the running configuration. The remote is optional by
+                construction: no Remote is `git init` under the data
+                directory, which is what a local install with no GitHub
+                account gets
 pkg/gitproxy/   a port of grain/proxy: the only path from a sandbox to
                 GitHub. Authorizes by asking model.Store what the calling
                 sandbox's live task may touch (its Target and Reads)
@@ -1726,12 +1741,20 @@ a build that already has to be fixed and the sooner the run is told the
 more of its budget is left to fix it in. Every check completing with
 none failing ends it too, and that is the one green light in there.
 
-Three clocks bound it, none of them an agent's to invent:
+Four clocks bound it, none of them an agent's to invent:
 
 - `timeout_seconds`, the only argument, defaulting to 15 minutes and
   clamped to 30s..60m. A timeout is *reported* — with what each check was
   doing when it ran out, and the reminder that an unfinished check has
   not passed — rather than raised as an error.
+- the run's own deadline, when grain told this server about one (see
+  "Telling a run how long it has"). A wait is worth running only if the
+  run outlives it, so each one is cut to what is left minus two minutes
+  to act on the answer, and the report says when that is what bounded it
+  — *"I waited up to 8m0s: the 10m0s this run has left before grain
+  cancels it, less 2m0s to act on the answer — not the 15m0s asked
+  for"*. Below the shortest wait there is, it does not wait at all and
+  says so.
 - a 3-minute grace on an entirely empty check list. GitHub reports no
   checks both when CI has not registered them yet and when the repo has
   no CI at all, and blocking the full timeout to tell those apart would
@@ -1830,6 +1853,25 @@ sandbox…` — with the same advice, escalating in the last five minutes
 from "finish this piece and push it" to "there is no time for another
 edit-and-test cycle". It rides on failed results too: that is the likelier
 moment for a run to start a long repair it will never get to push.
+
+**And in `wait_for_checks`' own arithmetic**, which is the one tool that
+can do better than report the deadline. It decides how long to block
+before it answers, and a run eight minutes from the wall that asked for
+a fifteen-minute wait used to spend the whole of its remaining life
+inside that single call: cancelled mid-wait, never shown the verdict it
+blocked for, never given the turn it would have used to react — and the
+wait itself was what ate the time the fix would have been pushed in. So
+the registry hands the deadline to the handler on its ctx as well as
+appending it to the answer, and the wait is clamped to what is left less
+two minutes to act on the result, with the clamp stated on the report
+(*"not the 15m0s asked for"*) since a clamp a run cannot see reads as CI
+being slow. A timed-out clamped wait is told its own clock ran out
+rather than to retry with a bigger `timeout_seconds`, and a call with
+less than the shortest wait's worth of run left answers immediately with
+*"there is no time to wait on CI"* and what to do with the turn instead.
+`claude`'s `MCP_TOOL_TIMEOUT` is unchanged by this: it is set once, with
+the whole run ahead of it, and still has to cover the longest wait a run
+with time to spare may ask for.
 
 The deadline reaches that server the way the branch already does. Each
 `Framework.Run` receives the very context `RunDispatch` derived with the
@@ -2363,6 +2405,107 @@ aged out. That is a real feature; polling is fifteen lines with nothing
 to get wrong, and for one operator watching a handful of tasks on the
 same machine the two are indistinguishable.
 
+## The store is a git repository again
+
+grain's settings -- templates, suites, per-repo configuration, prompt
+extensions, schedules -- are exactly the kind of thing a task is forever
+asking to change, and until now the only way to change one was a human
+editing it through the UI. A row in a SQLite file is not something an
+agent can propose a diff to, so the mechanism grain already has for
+changing anything else (a branch, a pull request, a review, a merge) was
+the one mechanism that could not reach grain's own configuration.
+
+So the database is a git repository now: `pkg/staterepo`, a working tree
+under `<data-dir>/state-repo` holding every table as
+`tables/<name>.json`. The store itself is unchanged -- it is still the
+embedded SQLite database `pkg/model/sqlite` opens, and every query in
+`pkg/model` is untouched. What changed is that the database is a
+materialisation of the repository rather than the thing itself.
+
+Rows are sorted by primary key and columns emitted in the table's own
+declared order, so exporting an unchanged database twice produces
+byte-identical files. That is not tidiness. The daemon exports on a
+timer, and a dump whose row order wandered would commit and push on
+every cycle forever, burying the changes that matter.
+
+### One writer, so no merges
+
+The traffic is one-directional at runtime, and that is what keeps it
+simple. The repository is imported into the database once, at startup,
+and exported back out on a timer after that. grain is the only writer of
+these files while it runs -- the UI and the CLI reach the daemon over
+REST rather than opening the store, which is what makes that claim true
+-- so a sync is a commit and a push and never a resolve, and a pull is
+fast-forward only. Divergence means something this model does not
+describe, and failing loudly beats resolving a conflict in a database
+dump by guesswork.
+
+A change an agent makes arrives the other way: a pull request against
+the state repository, reviewed and merged like any other, which the next
+start pulls and imports. The import is a wholesale replacement of every
+row -- which is exactly what makes a merged deletion delete something --
+and that is why it happens at startup rather than on every tick: it is
+not an operation to run underneath live runs holding ids.
+
+Schema changes are destructive here, deliberately. A dump this build
+cannot read is no more importable than a database it cannot open, so
+`staterepo.Load` refuses an older or newer stamp outright rather than
+guessing at a migration, and `scripts/setup.sh` moves the working tree
+aside alongside the store on a schema bump so the daemon re-seeds it.
+The encrypted secrets file is carried across rather than archived with
+it: it is the one thing in there that cannot be regenerated.
+
+### The remote is optional, by construction
+
+A `Config` with no `Remote` is a plain `git init` in the data directory:
+commits that go nowhere. A local install therefore needs no GitHub
+account, no credential and no answer from the operator at all -- it is
+not a degraded mode, it is the default one -- and `SetRemote` attaches a
+real remote later without reformatting anything, so "I ran it locally
+first" is not a decision anyone has to unmake.
+
+Pushing an https remote authenticates through the same GitHub credential
+ladder everything else here uses, resolved per push rather than cached
+(an installation token lasts an hour). The token goes into a temporary
+askpass script rather than argv or the remote URL: argv is world-readable
+through `ps`, and a URL with a token in it would persist in
+`.git/config`, inside the very repository being pushed.
+
+### Secrets go in it, encrypted
+
+Secrets live in the same repository -- one thing to clone, one thing to
+back up -- as `secrets.enc`, the only file in there that is ciphertext.
+It is sealed to a public key whose private half grain reads from one file
+under `<data-dir>/secrets` and copies nowhere else, so cloning the
+repository gets everything grain knows and nothing it can authenticate
+as. The scheme is X25519 to an ephemeral key pair, HKDF-SHA256 for the
+message key and AES-256-GCM over the plaintext, built out of the standard
+library: adding a dependency to encrypt one file grain alone ever reads
+is a larger commitment than composing three primitives that ship with
+the compiler. Neither values nor secret names appear in the ciphertext.
+
+Agents cannot read it, and nothing about this changed that: a run still
+gets a secret only through the secret input a human asked for.
+
+A fresh install mints its own key, which is what lets a local-only grain
+start with no input from anybody. A key that goes missing while an
+encrypted file remains is reported as the unrecoverable state it is,
+never replaced with a new one -- minting silently there would leave an
+undecryptable file behind and look like it had worked.
+
+### The bootstrap
+
+Three answers, offered in the UI's Settings pane (its State tab) and by
+`grain state` from a terminal: local only, an existing repository whose
+contents replace this installation's database, or an empty repository
+grain seeds from what it has. The last two are one operation, because
+adopting cannot tell them apart up front and does not need to.
+
+Adopting is destructive in one direction on purpose -- the repository is
+the source of truth, and adopting one means taking its answer -- so the
+previous working tree is moved aside with a timestamped name rather than
+deleted, and the pane says as much before you press the button.
+
 ## Deployment configuration lives in the store too
 
 bwsalmon/agents#320 asked the same "the store is the record" question
@@ -2675,6 +2818,25 @@ the task verbatim, so an operator reads a sentence naming the secret to
 set, where a failed materialize reads as `materializing capabilities:
 geminikey: resolving credential ...` — grain describing its own
 internals.
+
+There is a fourth gap no configuration pane can see, and it is the one
+"Debugging `gcp-key` again" below is about: `gemini-key` mints through
+the *same* standing minter credential `gcp-key` does
+(`cmd/grain/daemon.go` hands `geminikey.New`
+`gcpkey.DefaultMinterCredential`), so a minter key deleted or rotated
+away in GCP breaks every Gemini mint in exactly the same way, as
+`invalid_grant` / "Invalid JWT Signature" from Google's token endpoint.
+That failure arrives before any request reaches
+`apikeys.googleapis.com`, carrying no `googleapi.Error` at all, so
+`advise` — which classifies a 403 the API answered with — never sees it.
+`geminikey` has its own `isCredentialRefused` and
+`explainRefusedCredential` now, deliberately word-for-word with
+`gcpkey`'s past the name of the API nothing reached, so an operator who
+has read one of those sentences recognises the other. The mint, the
+revoke, the hourly reap and `MintOperatingKey` all go through it — that
+last one runs during a deploy (`scripts/setup.sh`'s
+`mint_gemini_operating_key`), where the reader of the failure is a line
+in a deploy log with no task and no Settings pane to look at.
 
 ### Debugging `gcp-key`: a diagnosis that was confidently wrong
 
@@ -3006,6 +3168,57 @@ be a paragraph per repo on a response every open tab polls). That is what
 puts up a row for a repo whose only configuration is standing
 instructions, so text that reaches every run against it is not text with
 nowhere to read it.
+
+### Setting a repo up before the first turn
+
+Standing instructions are the wrong shape for one thing a repo often
+needs to say: *run this before you do anything*. `make deps`, an `npm
+ci`, a virtualenv, a generated file the tests will not build without —
+written as prose in the prompt extension, that is an instruction every
+run has to spend a turn obeying, and a run that obeys it second has
+already read the wrong failure out of a tree that does not build. So
+`model.RepoConfig.SetupCommand` (grain/task-154) is a command grain runs
+rather than an instruction grain relays.
+
+**It runs where the checkout is made.** `orchestrator.prepareCheckout`
+runs it after the clone and before the agent's first turn, through the
+same `run_command` tool the clone itself goes through — which is what
+makes it work on either sandbox backend, a local directory or a kontur
+VM, with no second route into the sandbox to keep in step with the first.
+`recreate_sandbox` runs it again on the way back (`restoreCheckout`): a
+rebuild takes the `node_modules` and the virtualenv with it, and handing
+a run back a checkout in exactly the state this field exists to prevent
+is worse the second time, because the run was told at turn 1 that setup
+was done for it.
+
+**What it did goes in the prompt**, which is the whole point of running
+it here rather than hiding it: the command, its exit status, and the tail
+of what it printed, plus — for a failure — the sentence that separates a
+broken checkout from a broken change ("a build or test failing for that
+reason is this, not your change"). A run told nothing debugs the repo's
+toolchain from a failure it has no context for, or "fixes" the code until
+the broken tree stops complaining.
+
+**A setup that fails is the run's problem; a setup that never finishes is
+grain's.** Non-zero exit does not fail the dispatch — grain cannot know
+whether a broken `make deps` is fatal to the task in hand, and the run
+can find out in one command, or may be the very task filed to fix it. But
+a command still running at `setupCommandTimeout` (ten minutes, which is
+`mcp`'s own ceiling for any sandbox tool call) has told nobody anything
+and would otherwise spend the run's whole wall-clock budget inside a
+single tool call the agent never sees, ending with the sandbox destroyed
+and nothing to show. That one fails the dispatch, which leaves a human a
+run whose detail names the timeout.
+
+It is edited where the other two per-repo settings are — that repo's own
+page, `GET`/`PUT /api/repos/{owner}/{name}/setup-command` answering with
+the same whole-defaults document, `grain repo setup-command [-set
+command] <owner/name>` from a shell — and `GET /api/config` names the
+repos that have one (`reposWithSetupCommand`, names only) for the same
+reason it names the ones with standing instructions. Nothing validates
+the shell: it is an arbitrary command for an arbitrary toolchain, and the
+only thing that can say whether it works is running it in a checkout,
+which every run then reports on.
 
 ## Write-only secrets access when colocated
 

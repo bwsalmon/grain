@@ -237,6 +237,12 @@ func isKeyCreationDisabled(detail string) bool {
 // and the signature description is matched too because it is the
 // spelling a deleted or rotated key produces, which is the common case
 // by a wide margin.
+//
+// geminikey has its own copy, restated rather than shared for the same
+// reason isServiceDisabled below is: gemini-key mints through this very
+// credential (cmd/grain/daemon.go passes DefaultMinterCredential to
+// geminikey.New), so the same dead key breaks it in the same way, and
+// the two packages depend on each other for nothing.
 func isCredentialRefused(err error) bool {
 	if err == nil {
 		return false

@@ -40,9 +40,10 @@ import (
 const secretsUsage = `usage: grain secrets -data-dir DIR <command> [args]
 
 -data-dir must name the same root a colocated ` + "`grain daemon`" + ` was
-started with -- secrets live at <data-dir>/secrets, the same path daemon.go
-itself resolves. This edits files on disk, not a running daemon, so it only
-works when run on the same host as the server (bwsalmon/agents#357).
+started with -- the encrypted secrets file lives in that deployment's state
+repository and its key at <data-dir>/secrets, the same paths daemon.go itself
+resolves. This edits files on disk, not a running daemon, so it only works
+when run on the same host as the server (bwsalmon/agents#357).
 
 Commands:
   list                          list every secret and the keys it holds (never values)
@@ -76,7 +77,7 @@ func runSecrets(args []string) error {
 		return errors.New("a command is required")
 	}
 
-	store := secrets.New(filepath.Join(*dataDir, "secrets"))
+	store := secrets.Open(secretsConfig(*dataDir))
 	cmd, cmdArgs := rest[0], rest[1:]
 	switch cmd {
 	case "list":

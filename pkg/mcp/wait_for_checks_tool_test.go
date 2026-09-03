@@ -482,15 +482,15 @@ func TestWaitForChecksClampsTheTimeoutAndSaysSo(t *testing.T) {
 			DefaultWaitForChecksTimeout, "was not a number"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, note := waitForChecksTimeout(tc.args)
-			if got != tc.want {
-				t.Errorf("waitForChecksTimeout = %v, want %v", got, tc.want)
+			got := waitForChecksTimeout(tc.args)
+			if got.timeout != tc.want {
+				t.Errorf("waitForChecksTimeout = %v, want %v", got.timeout, tc.want)
 			}
-			if tc.note == "" && note != "" {
-				t.Errorf("note = %q, want none", note)
+			if tc.note == "" && got.note != "" {
+				t.Errorf("note = %q, want none", got.note)
 			}
-			if tc.note != "" && !strings.Contains(note, tc.note) {
-				t.Errorf("note = %q, want it to mention %q", note, tc.note)
+			if tc.note != "" && !strings.Contains(got.note, tc.note) {
+				t.Errorf("note = %q, want it to mention %q", got.note, tc.note)
 			}
 		})
 	}
@@ -503,5 +503,140 @@ func TestWaitForChecksDescriptionSaysToPushFirst(t *testing.T) {
 	tool := namedTool(t, NewWaitForChecksTools(nil, PullRequestScope{}), "wait_for_checks")
 	if !strings.Contains(tool.Description, "Push first") {
 		t.Errorf("description does not tell the agent to push first:\n%s", tool.Description)
+	}
+}
+
+// runWithLeft is a ctx for a run the given distance from the wall,
+// carrying its deadline the way a real call gets it: put there by the
+// registry that was told about it, rather than by a value made up here.
+func runWithLeft(left time.Duration) context.Context {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	registry := NewRegistry()
+	registry.AnnounceDeadline(now.Add(left), func() time.Time { return now })
+	return registry.withRunDeadline(context.Background())
+}
+
+// The wait is bounded by the run as well as by the argument: a run with
+// ten minutes left that asks for fifteen would otherwise spend the whole
+// of its remaining life inside this one call, be cancelled mid-wait, and
+// never see the verdict it blocked for.
+func TestWaitForChecksClampsTheWaitToWhatTheRunHasLeft(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ctx     context.Context
+		args    map[string]any
+		want    time.Duration
+		clamped bool
+		tooLate bool
+		note    string
+	}{
+		// "nobody told this server about a deadline" is not "no time
+		// left": those runs wait exactly as they always did.
+		"no deadline announced": {
+			ctx: context.Background(), want: DefaultWaitForChecksTimeout},
+		"time to spare": {
+			ctx: runWithLeft(90 * time.Minute), want: DefaultWaitForChecksTimeout},
+		"less of the run left than the wait asked for": {
+			ctx: runWithLeft(10 * time.Minute), want: 8 * time.Minute, clamped: true,
+			note: "not the 15m0s asked for"},
+		"a wait that already fits is left alone": {
+			ctx:  runWithLeft(10 * time.Minute),
+			args: map[string]any{"timeout_seconds": 60.0}, want: time.Minute},
+		"exactly enough for the shortest wait there is": {
+			ctx:  runWithLeft(waitForChecksDeadlineSlack + minWaitForChecksTimeout),
+			want: minWaitForChecksTimeout, clamped: true},
+		"not even that": {
+			ctx:     runWithLeft(waitForChecksDeadlineSlack + minWaitForChecksTimeout - time.Second),
+			tooLate: true},
+		"past the deadline already": {
+			ctx: runWithLeft(-time.Minute), tooLate: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := waitForChecksBudget(tc.ctx, tc.args)
+			if got.tooLate != tc.tooLate {
+				t.Fatalf("tooLate = %v, want %v", got.tooLate, tc.tooLate)
+			}
+			if got.tooLate {
+				return
+			}
+			if got.timeout != tc.want {
+				t.Errorf("timeout = %v, want %v", got.timeout, tc.want)
+			}
+			if got.deadlineClamped != tc.clamped {
+				t.Errorf("deadlineClamped = %v, want %v", got.deadlineClamped, tc.clamped)
+			}
+			// A clamp the run cannot see is a clamp it reads as CI being
+			// slow, and answers by asking for a longer wait it has even
+			// less room for.
+			switch {
+			case tc.clamped && !strings.Contains(got.note, "before grain cancels it"):
+				t.Errorf("note = %q, want it to say the run's own clock is what bounded the wait",
+					got.note)
+			case !tc.clamped && got.note != "":
+				t.Errorf("note = %q, want none for a wait that was not clamped", got.note)
+			}
+			if tc.note != "" && !strings.Contains(got.note, tc.note) {
+				t.Errorf("note = %q, want it to mention %q", got.note, tc.note)
+			}
+		})
+	}
+}
+
+// With less than a minimum wait's worth of run left there is nothing
+// worth waiting for: the call answers on the spot, saying so and saying
+// what to do with the turn instead, rather than spending it watching a
+// build whose verdict this run will never read.
+func TestWaitForChecksDoesNotWaitWhenTheRunIsAlmostOver(t *testing.T) {
+	client := &scriptedChecks{head: pushed(), rounds: [][]github.CheckRun{{running("tests")}}}
+	tool := namedTool(t, NewWaitForChecksTools(client, testScope), "wait_for_checks")
+
+	res := tool.Handler(runWithLeft(2*time.Minute), map[string]any{})
+	if res.IsError {
+		t.Errorf("IsError = true, want an answer: there being no time is a fact about the "+
+			"run, not a failed call:\n%s", res.Text)
+	}
+	if client.reads != 0 {
+		t.Errorf("read GitHub %d times for a wait it did not run", client.reads)
+	}
+	for _, want := range []string{"no time to wait on CI", "2m is left", "git push origin grain/task-9"} {
+		if !strings.Contains(res.Text, want) {
+			t.Errorf("answer does not contain %q:\n%s", want, res.Text)
+		}
+	}
+
+	past := tool.Handler(runWithLeft(-time.Minute), map[string]any{})
+	if !strings.Contains(past.Text, "already past the deadline") {
+		t.Errorf("a run past its deadline is not told so:\n%s", past.Text)
+	}
+}
+
+// A wait cut short by the run's own clock must not tell the run to call
+// again with a bigger timeout: the thing that ran out is not the
+// timeout, and there is no more of it to ask for.
+func TestATimedOutClampedWaitDoesNotSayToWaitLonger(t *testing.T) {
+	client := &scriptedChecks{head: pushed(), rounds: [][]github.CheckRun{{running("tests")}}}
+	waiter := waiterFor(client, &fakeClock{})
+	waiter.deadlineClamped = true
+
+	text, err := waiter.wait(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if strings.Contains(text, "timeout_seconds") {
+		t.Errorf("answer tells the run to wait longer than the run has:\n%s", text)
+	}
+	for _, want := range []string{"timed out", "this run's own clock", "pushed to grain/task-9"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("answer does not contain %q:\n%s", want, text)
+		}
+	}
+}
+
+// The description says the wait is bounded by the run as well, since a
+// bound an agent does not know about is one it will argue with by asking
+// for a longer wait.
+func TestWaitForChecksDescriptionSaysTheRunsClockBoundsItToo(t *testing.T) {
+	tool := namedTool(t, NewWaitForChecksTools(nil, PullRequestScope{}), "wait_for_checks")
+	if !strings.Contains(tool.Description, "before grain cancels it") {
+		t.Errorf("description does not mention the run's own deadline:\n%s", tool.Description)
 	}
 }

@@ -235,7 +235,8 @@ export function defaultCapabilitiesFor(config, repo) {
 // not what a task "belongs to"), and every repo carrying configuration
 // of its own, which today is a default capability set
 // (config.repoDefaultCapabilities), standing instructions
-// (config.reposWithPromptExtension), or both -- into one row per repo, sorted
+// (config.reposWithPromptExtension), a setup command
+// (config.reposWithSetupCommand), or any of them -- into one row per repo, sorted
 // alphabetically, for the repo page and its per-state counts. Tasks with
 // no target (a proposal nobody has pointed at a repo yet) are omitted
 // rather than grouped under a blank name.
@@ -250,8 +251,9 @@ export function defaultCapabilitiesFor(config, repo) {
 // empty, so every row it has is `configured: false`.
 //
 // The third source is there for the same reason, one step further out.
-// Neither ui.(*Client).SetRepoDefaultCapabilities nor
-// SetRepoPromptExtension requires a repo to be allow-listed (their own
+// None of ui.(*Client).SetRepoDefaultCapabilities,
+// SetRepoPromptExtension or SetRepoSetupCommand requires a repo to be
+// allow-listed (their own
 // doc comments: a repo can be configured before it is allowed, and keeps
 // its configuration after it is removed), so a repo can hold stored
 // configuration while matching neither of the other two -- and this page
@@ -276,7 +278,8 @@ export function repoRows(config, tasks) {
         blocked: 0,
         configured: false,
         defaults: (config?.repoDefaultCapabilities?.[repo] || []).length > 0
-          || (config?.reposWithPromptExtension || []).includes(repo),
+          || (config?.reposWithPromptExtension || []).includes(repo)
+          || (config?.reposWithSetupCommand || []).includes(repo),
       });
     }
     return byRepo.get(repo);
@@ -295,6 +298,12 @@ export function repoRows(config, tasks) {
   // (ui.configResponse.ReposWithPromptExtension, which lists exactly the
   // repos that have some).
   for (const repo of config?.reposWithPromptExtension || []) {
+    row(repo);
+  }
+  // And its third: a repo whose only configuration is the setup command
+  // grain runs in every checkout it makes there
+  // (ui.configResponse.ReposWithSetupCommand).
+  for (const repo of config?.reposWithSetupCommand || []) {
     row(repo);
   }
   for (const t of tasks) {

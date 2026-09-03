@@ -131,7 +131,7 @@ func TestBuildPromptMentionsReadOnlyRepos(t *testing.T) {
 			{Owner: "acme", Name: "schema"},
 		},
 	}
-	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if !strings.Contains(prompt, "acme/shared-lib") || !strings.Contains(prompt, "acme/schema") {
 		t.Fatalf("prompt does not mention both read-only repos: %q", prompt)
 	}
@@ -150,7 +150,7 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	for _, want := range []string{"./" + orchestrator.CheckoutDir, model.BranchName("t1"), "rather than cloning"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt does not mention %q: %q", want, prompt)
@@ -162,11 +162,42 @@ func TestBuildPromptNamesAPreparedCheckout(t *testing.T) {
 	// a bare substring search for it fails on prose that mentions no
 	// checkout at all. "./work" and "rather than cloning" are what only
 	// that sentence says, which is what this is checking is absent.
-	bare := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	bare := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	for _, unwanted := range []string{"./" + orchestrator.CheckoutDir, "rather than cloning"} {
 		if strings.Contains(bare, unwanted) {
 			t.Fatalf("prompt mentions %q, a checkout that was never prepared: %q", unwanted, bare)
 		}
+	}
+}
+
+// A repo with a setup command gets it reported in the same breath as the
+// checkout it ran in, before anything about pushing or CI -- the failure
+// case being the one that matters, since a run not told is a run
+// debugging the repo's toolchain from a build it has no reason to
+// distrust.
+func TestBuildPromptReportsAFailedSetupBeforeTheMechanics(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false,
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{},
+		&orchestrator.SetupResult{Command: "make deps", ExitCode: 2, Output: "no such package: widgetlib"})
+
+	setup := strings.Index(prompt, "make deps")
+	if setup < 0 || !strings.Contains(prompt, "no such package: widgetlib") {
+		t.Fatalf("prompt says nothing about the setup command that failed: %q", prompt)
+	}
+	// Ahead of the push/check/repair paragraphs: a run that reads it
+	// after those has already spent turns on the failure it explains.
+	if push := strings.Index(prompt, "Push as often as you like"); push >= 0 && setup > push {
+		t.Errorf("the setup report comes after the CI loop paragraphs: %q", prompt)
+	}
+	// And a repo that configures none says nothing at all -- most repos.
+	none := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false,
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
+	if strings.Contains(none, "setup command") {
+		t.Errorf("prompt mentions a setup command for a repo that has none: %q", none)
 	}
 }
 
@@ -179,7 +210,7 @@ func TestBuildPromptDescribesThePushAndCheckCILoop(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	for _, want := range []string{"pull_request_status", "Push as often as you like", "check fails"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt does not mention %q: %q", want, prompt)
@@ -189,7 +220,7 @@ func TestBuildPromptDescribesThePushAndCheckCILoop(t *testing.T) {
 	// A task with no repo has no branch to push and no CI to watch, so
 	// the paragraph must not appear at all -- the same reason the
 	// pushing/branching sentences do not.
-	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if strings.Contains(bare, "pull_request_status") {
 		t.Errorf("prompt offers a CI tool to a task with no repo: %q", bare)
 	}
@@ -205,7 +236,7 @@ func TestBuildPromptSaysCommitMessagesBecomeTheDescription(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	for _, want := range []string{"human reviewer", "pull request description", "commit messages"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt does not mention %q: %q", want, prompt)
@@ -214,7 +245,7 @@ func TestBuildPromptSaysCommitMessagesBecomeTheDescription(t *testing.T) {
 
 	// A task with no repo pushes no branch and earns no pull request, so
 	// there is no description for its commit messages to become.
-	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if strings.Contains(bare, "pull request description") {
 		t.Errorf("prompt promises a description to a task with no repo: %q", bare)
 	}
@@ -231,7 +262,7 @@ func TestBuildPromptSaysGreenChecksAndACleanMergeAreTheFinishLine(t *testing.T) 
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	for _, want := range []string{"not done", "merges cleanly", "carries no verdict", "conflicts with", "git fetch origin"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt does not mention %q: %q", want, prompt)
@@ -245,14 +276,14 @@ func TestBuildPromptSaysGreenChecksAndACleanMergeAreTheFinishLine(t *testing.T) 
 	}
 
 	task.Base = "release-2"
-	based := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	based := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if !strings.Contains(based, "`release-2`") {
 		t.Errorf("prompt does not name the base this task is built on: %q", based)
 	}
 
 	// A task with no repo has no branch, no base and no CI, the same
 	// reason the paragraph above it is absent.
-	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if strings.Contains(bare, "merges cleanly") {
 		t.Errorf("prompt talks about merging to a task with no repo: %q", bare)
 	}
@@ -269,14 +300,14 @@ func TestBuildPromptOffersOpenPullRequestOnlyToARunThatHasIt(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, true, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, true, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	for _, want := range []string{"open_pull_request", "push again", "never opens a second one"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt does not mention %q: %q", want, prompt)
 		}
 	}
 
-	without := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	without := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if strings.Contains(without, "open_pull_request") {
 		t.Errorf("prompt names a tool this run's mcpserver never registered: %q", without)
 	}
@@ -285,7 +316,7 @@ func TestBuildPromptOffersOpenPullRequestOnlyToARunThatHasIt(t *testing.T) {
 	// the sentence has nothing to attach itself to even where the tool is
 	// registered -- registration turns on -server/-task, neither of which
 	// knows whether the task has a target.
-	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", true, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", true, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if strings.Contains(bare, "open_pull_request") {
 		t.Errorf("prompt offers to open a pull request for a task with no repo: %q", bare)
 	}
@@ -326,7 +357,7 @@ func TestRunDispatchTellsARunItCanOpenItsOwnPullRequest(t *testing.T) {
 // like a clone that silently failed.
 func TestBuildPromptExplainsThereIsNoRepo(t *testing.T) {
 	task := model.Task{ID: "t1", Title: "Do the thing", Body: "details"}
-	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if !strings.Contains(prompt, "no repo") {
 		t.Fatalf("prompt does not say there is no repo: %q", prompt)
 	}
@@ -344,7 +375,7 @@ func TestBuildPromptTellsAnAgentWhatItsProposalsCanSay(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	for _, want := range []string{"task t1", "depends_on"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt does not mention %q: %q", want, prompt)
@@ -356,7 +387,7 @@ func TestBuildPromptTellsAnAgentWhatItsProposalsCanSay(t *testing.T) {
 	}
 
 	task.AutoMerge = true
-	prompt = orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt = orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if !strings.Contains(prompt, "auto_merge") {
 		t.Errorf("prompt does not tell an auto-merge job it can pass that on: %q", prompt)
 	}
@@ -372,7 +403,7 @@ func TestBuildPromptStatesTheRunsWallClockBudget(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, 90*time.Minute, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, 90*time.Minute, orchestrator.History{}, nil)
 	for _, want := range []string{"1h30m", "cancels this run", "push each piece"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt does not mention %q: %q", want, prompt)
@@ -382,7 +413,7 @@ func TestBuildPromptStatesTheRunsWallClockBudget(t *testing.T) {
 	// The real default, rendered for a person rather than as Duration's
 	// own "2h0m0s".
 	if dflt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false,
-		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}); !strings.Contains(dflt, "2h ") {
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil); !strings.Contains(dflt, "2h ") {
 		t.Errorf("prompt does not state the default budget as 2h: %q", dflt)
 	}
 
@@ -390,7 +421,7 @@ func TestBuildPromptStatesTheRunsWallClockBudget(t *testing.T) {
 	// -- its work product is the closing note comment_on_issue relays, so
 	// that is what the paragraph tells it to write early.
 	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"},
-		"", false, 90*time.Minute, orchestrator.History{})
+		"", false, 90*time.Minute, orchestrator.History{}, nil)
 	if !strings.Contains(bare, "1h30m") || !strings.Contains(bare, "comment_on_issue") {
 		t.Errorf("prompt does not give a task with no repo its budget and what to do with it: %q", bare)
 	}
@@ -402,7 +433,7 @@ func TestBuildPromptStatesTheRunsWallClockBudget(t *testing.T) {
 	// forever: no dispatch passes it (Config.maxRunRuntime substitutes
 	// the default), and a paragraph promising unbounded time would be
 	// worse than none.
-	if none := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, 0, orchestrator.History{}); strings.Contains(none, "cancels this run") {
+	if none := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false, 0, orchestrator.History{}, nil); strings.Contains(none, "cancels this run") {
 		t.Errorf("prompt talks about a budget it was given none of: %q", none)
 	}
 }
@@ -446,7 +477,7 @@ func TestBuildPromptOmitsReadsSectionWhenThereAreNone(t *testing.T) {
 		ID: "t1", Title: "Do the thing", Body: "details",
 		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
 	}
-	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{})
+	prompt := orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
 	if strings.Contains(prompt, "You may also read") {
 		t.Fatalf("prompt mentions reading a repo with no Reads set: %q", prompt)
 	}
@@ -883,7 +914,7 @@ func TestRunDispatchOmitsTheCommentThreadOnAFirstDispatch(t *testing.T) {
 	if _, err := orchestrator.RunDispatch(ctx, store, fw, orchestrator.Config{}, *task, d, nil, t.TempDir(), "", nil, baseTime); err != nil {
 		t.Fatalf("RunDispatch: %v", err)
 	}
-	if gotPrompt != orchestrator.BuildPrompt(*task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}) {
+	if gotPrompt != orchestrator.BuildPrompt(*task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil) {
 		t.Errorf("prompt = %q, want exactly BuildPrompt's own prompt with no conversation yet", gotPrompt)
 	}
 }

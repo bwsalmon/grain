@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -160,5 +161,50 @@ func TestTheDeadlineNoticeStartsAtTheWindow(t *testing.T) {
 	}
 	if got := runDeadlineNotice(runDeadlineFinalWindow); !strings.Contains(got, "no time for another") {
 		t.Errorf("notice at exactly the final window = %q, want the last-minutes wording", got)
+	}
+}
+
+// The deadline reaches the handler itself, not just the line appended
+// after it. A tool that blocks -- wait_for_checks -- has to know how much
+// of the run is left *before* it decides how long to block, and this is
+// the wire it reads it off.
+func TestAToolCallRunsUnderTheAnnouncedDeadline(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 0, 0, 0, time.UTC)
+	registry := NewRegistry()
+	registry.AnnounceDeadline(now.Add(45*time.Minute), func() time.Time { return now })
+	registry.Register(Tool{
+		Name:        "say",
+		InputSchema: map[string]any{"type": "object"},
+		Handler: func(ctx context.Context, _ map[string]any) Result {
+			remaining, ok := runDeadlineRemaining(ctx)
+			return Result{Text: fmt.Sprintf("%v %v", remaining, ok)}
+		},
+	})
+	client := NewInProcess(context.Background(), registry)
+	t.Cleanup(func() { client.Close() })
+
+	if got := callSay(t, client).Text(); got != "45m0s true" {
+		t.Errorf("the handler saw %q, want the announced deadline's 45m0s", got)
+	}
+}
+
+// And a server nobody gave a deadline hands its handlers no deadline
+// either -- "nobody said" has to stay distinguishable from "no time
+// left", or every unconfigured run would clamp its waits to nothing.
+func TestAToolCallWithNoAnnouncedDeadlineSeesNone(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(Tool{
+		Name:        "say",
+		InputSchema: map[string]any{"type": "object"},
+		Handler: func(ctx context.Context, _ map[string]any) Result {
+			_, ok := runDeadlineRemaining(ctx)
+			return Result{Text: fmt.Sprintf("%v", ok)}
+		},
+	})
+	client := NewInProcess(context.Background(), registry)
+	t.Cleanup(func() { client.Close() })
+
+	if got := callSay(t, client).Text(); got != "false" {
+		t.Errorf("the handler saw a deadline (%q) on a server that was told none", got)
 	}
 }
