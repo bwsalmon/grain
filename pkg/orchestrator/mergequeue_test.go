@@ -627,6 +627,182 @@ func TestSyncPullRequestsMergesOnARegisteredCheckWithoutWaitingOutTheWindow(t *t
 	}
 }
 
+// Waiting for CI is right up to the point where CI is never going to
+// answer. A workflow waiting on an approval nobody gives, a self-hosted
+// runner that never picks the job up, a provider that reported "queued"
+// and went away: each reads PENDING every cycle forever, and PENDING is
+// acted on by neither of the arms that merge or file a fix -- so without
+// a deadline the task holds the head of its repo's queue for the life of
+// the deployment, with nothing merged, nothing filed, nothing said to
+// anyone, and everything queued behind it waiting too.
+//
+// orchestrator.SetCheckStallDeadline is the bound. Past it the queue says
+// so on the task, stops driving it, and gets on with the next one --
+// while the stuck pull request still merges the moment its checks do
+// finish green, since giving up costs the queue position and the
+// automatic fix, not the merge.
+func TestSyncPullRequestsGivesUpOnAQueueHeadWhoseChecksNeverFinish(t *testing.T) {
+	deadline := 2 * time.Hour
+	defer orchestrator.SetCheckStallDeadline(deadline)()
+
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	stuck, stuckBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	behind, _ := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
+
+	setMergeable(sim, true)
+	// The head's own check never leaves "queued". The task behind it has
+	// nothing to wait for at all and is only kept from merging by being
+	// second in the queue.
+	sim.CheckRuns[stuckBranch] = []github.CheckRun{{Name: "deploy approval", Status: "queued"}}
+
+	// Well inside the deadline: still waiting, still nothing said. This is
+	// the same cycle a slow-but-honest CI run gets.
+	for _, at := range []time.Time{baseTime, baseTime.Add(deadline / 2)} {
+		if err := orchestrator.SyncPullRequests(ctx, store, client, at); err != nil {
+			t.Fatalf("SyncPullRequests inside the deadline: %v", err)
+		}
+	}
+	for _, pr := range sim.PullRequests {
+		if pr.Merged {
+			t.Fatal("something merged while the queue head's checks were still unfinished")
+		}
+	}
+	if bodies := commentBodies(t, ctx, store, stuck.ID); len(bodies) != 0 {
+		t.Fatalf("expected no comments while inside the deadline, got %q", bodies)
+	}
+	obs, err := store.GetObservation(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs != nil && obs.MergeQueueBlockedAt != nil {
+		t.Fatal("gave up on the queue head inside the deadline")
+	}
+
+	// Past it. The queue says what it was waiting on and marks the task
+	// as needing a person -- but files no fix task: nothing has failed,
+	// and there may be nothing in the pull request to fix at all.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline)); err != nil {
+		t.Fatalf("SyncPullRequests past the deadline: %v", err)
+	}
+	obs, err = store.GetObservation(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs == nil || obs.MergeQueueBlockedAt == nil {
+		t.Fatal("the queue never gave up on a head whose checks never finished")
+	}
+	got, err := store.GetTask(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fixTaskLinkOf(got); ok {
+		t.Error("filed an automatic fix for a pull request nothing had said was broken")
+	}
+	bodies := commentBodies(t, ctx, store, stuck.ID)
+	if len(bodies) != 1 {
+		t.Fatalf("expected exactly one comment explaining the wait, got %q", bodies)
+	}
+	if !strings.Contains(bodies[0], "deploy approval") {
+		t.Errorf("the comment does not name the check that never finished:\n%s", bodies[0])
+	}
+
+	// And the queue has moved on: the task behind the stuck one is head
+	// now, and merges.
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline+time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests after the queue moved on: %v", err)
+	}
+	st, err := store.State(ctx, behind.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state of the task behind the stuck one = %q, want closed: the queue never moved on", st)
+	}
+
+	// Giving up is not abandoning. The checks finally report, green, and
+	// the pull request the queue stopped driving still merges -- no
+	// second comment, no fix task, no human step in between.
+	sim.CheckRuns[stuckBranch] = []github.CheckRun{
+		{Name: "deploy approval", Status: "completed", Conclusion: strPtr("success")},
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline+2*time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests once the stuck checks finished: %v", err)
+	}
+	st, err = store.State(ctx, stuck.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != model.StateClosed {
+		t.Fatalf("state = %q, want closed: a blocked task still merges the moment it reads clean", st)
+	}
+	// One comment for the whole episode, not one per cycle: the task
+	// stopped being its repo's queue head the moment it was blocked, so
+	// nothing brings it back through the arm that said this.
+	if bodies := commentBodies(t, ctx, store, stuck.ID); len(bodies) != 1 {
+		t.Fatalf("expected the queue to say this once, got %q", bodies)
+	}
+}
+
+// The clock runs per pull request, not per queue position. Every entry's
+// checks are timed on every cycle, head or not, so a repo whose CI is
+// wedged for everything in it clears in one deadline rather than in one
+// deadline per queued task -- which is what timing only the head would
+// have cost, on exactly the outage that produces the most queued tasks.
+func TestSyncPullRequestsTimesStalledChecksBehindTheQueueHeadToo(t *testing.T) {
+	deadline := 2 * time.Hour
+	defer orchestrator.SetCheckStallDeadline(deadline)()
+
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	first, firstBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t1", repo)
+	second, secondBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t2", repo)
+
+	setMergeable(sim, true)
+	stuck := []github.CheckRun{{Name: "tests", Status: "in_progress"}}
+	sim.CheckRuns[firstBranch] = stuck
+	sim.CheckRuns[secondBranch] = stuck
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime); err != nil {
+		t.Fatalf("SyncPullRequests on the cycle both went pending: %v", err)
+	}
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline)); err != nil {
+		t.Fatalf("SyncPullRequests once the deadline elapsed: %v", err)
+	}
+
+	obs, err := store.GetObservation(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs == nil || obs.MergeQueueBlockedAt == nil {
+		t.Fatal("the queue head was not given up on")
+	}
+	// The second task was never the head, so nothing has been said about
+	// it yet -- but its own clock has been running since the same cycle
+	// the head's was, so the very next cycle, with no further waiting,
+	// gives up on it too.
+	obs, err = store.GetObservation(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs != nil && obs.MergeQueueBlockedAt != nil {
+		t.Fatal("gave up on a task that was not the queue head")
+	}
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(deadline)); err != nil {
+		t.Fatalf("SyncPullRequests on the cycle the second task became head: %v", err)
+	}
+	obs, err = store.GetObservation(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs == nil || obs.MergeQueueBlockedAt == nil {
+		t.Fatal("the second task waited out a second deadline of its own after being promoted")
+	}
+}
+
 func strPtr(s string) *string { return &s }
 
 func fixTaskLinkOf(task *model.Task) (string, bool) {

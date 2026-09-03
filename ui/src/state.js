@@ -33,7 +33,7 @@ export function completionPhase(t) {
     return {
       label: "Merge blocked",
       color: "error",
-      title: "The merge queue tried to land this automatically and gave up -- push a fix by hand, or close it.",
+      title: "The merge queue gave up on landing this automatically -- its own comment says why. Sort it out by hand, or close it.",
     };
   }
   if (!t.autoMerge) {

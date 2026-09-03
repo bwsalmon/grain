@@ -2291,6 +2291,27 @@ not finished*, and resolves by itself; `UNKNOWN` is *grain could not find
 out*, and may never resolve without an operator granting a permission.
 Neither is acted on, which is what makes waiting the default.
 
+Waiting is the default, not the end of it. "Resolves by itself" is true
+of CI that finishes and false of the CI that does not — a workflow
+waiting on an approval nobody gives, a self-hosted runner that never
+picks the job up, a third-party check whose provider posted `queued` and
+went away — and a queue acts only on its head, so an unbounded wait is a
+whole repo's queue stopped on one pull request with nothing said to
+anyone. `PENDING` therefore has a deadline (`defaultCheckStallDeadline`,
+two hours, measured per head commit over one unbroken run of `PENDING`
+reads, so a re-run hours later is timed from the re-run). Past it the
+merge queue comments on the task naming the checks it was waiting for,
+sets `Observation.MergeQueueBlockedAt`, and moves on. No fix task is
+filed first, unlike a `CONFLICTED` or `FAILING` head: nothing has
+reported a failure, and the usual causes sit outside the pull request
+entirely, so there may be nothing in it for an agent to repair. The
+pull request still merges the moment its checks do finish clean — what
+giving up costs is the queue position and the automatic fix, not the
+merge. `UNKNOWN` gets no such deadline: what produces it cycle after
+cycle is a credential that cannot read checks, which is one fact about
+the deployment rather than something wrong with each of the pull
+requests it would otherwise comment on one at a time.
+
 `PENDING` also covers the state before there is a check to read. GitHub
 creates a workflow run's check runs asynchronously, *after* it has
 processed the push, while the pull request exists from the moment the
