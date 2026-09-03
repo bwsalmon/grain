@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/bwsalmon/grain/pkg/model"
@@ -236,4 +237,21 @@ func (c *HTTPClient) UpdateSettings(ctx context.Context, req UpdateSettingsReque
 		return Settings{}, err
 	}
 	return settings, nil
+}
+
+// Metrics fetches a throughput and latency report over the window ending
+// now. window is sent as the daemon's own ?window= string rather than a
+// Go duration in nanoseconds, so a request made by hand (`curl
+// '.../api/metrics?window=7d'`) and one made through here read the same;
+// "" asks for the server's own default.
+func (c *HTTPClient) Metrics(ctx context.Context, window string) (MetricsReport, error) {
+	path := "/api/metrics"
+	if window = strings.TrimSpace(window); window != "" {
+		path += "?window=" + url.QueryEscape(window)
+	}
+	var report MetricsReport
+	if err := c.do(ctx, http.MethodGet, path, nil, &report); err != nil {
+		return MetricsReport{}, err
+	}
+	return report, nil
 }
