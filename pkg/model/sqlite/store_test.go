@@ -1714,6 +1714,11 @@ func testConfig() model.Config {
 		SandboxDiskGB:       40,
 		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
 		EnvironmentName:     "staging",
+		// Multi-line on purpose: the deployment's standing instructions
+		// are the one Config field that is prose (grain/task-114), and a
+		// column that stored only its first line would still round-trip a
+		// one-line value.
+		PromptExtension: "Run `make lint` before you push.\nSay what you tried.",
 	}
 }
 
@@ -1750,7 +1755,15 @@ func TestRepoConfigRoundTripsAndReplaces(t *testing.T) {
 		t.Fatalf("get on an unconfigured repo = %+v, want nil", got)
 	}
 
-	want := model.RepoConfig{Repo: widgets, DefaultCapabilities: []string{"gcp-key", "github-sandbox"}}
+	want := model.RepoConfig{
+		Repo:                widgets,
+		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
+		// The second field this row carries (grain/task-114), stored
+		// beside the first rather than instead of it: both are written
+		// through the same wholesale replace, so a put that named only
+		// one of them and dropped the other is exactly what this pins.
+		PromptExtension: "Widgets keeps its migrations in db/.",
+	}
 	if err := store.PutRepoConfig(ctx, want); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -1786,7 +1799,8 @@ func TestRepoConfigRoundTripsAndReplaces(t *testing.T) {
 	}
 	wantList := []model.RepoConfig{
 		{Repo: gadgets, DefaultCapabilities: []string{"gcp-key"}},
-		{Repo: widgets, DefaultCapabilities: []string{"gemini-key"}},
+		{Repo: widgets, DefaultCapabilities: []string{"gemini-key"},
+			PromptExtension: "Widgets keeps its migrations in db/."},
 	}
 	if !reflect.DeepEqual(list, wantList) {
 		t.Fatalf("list = %+v, want %+v, sorted by repo", list, wantList)
@@ -1821,6 +1835,45 @@ func TestPutRepoConfigWithNothingToSayDeletesTheRow(t *testing.T) {
 	}
 	if len(list) != 0 {
 		t.Fatalf("list = %+v, want no rows left", list)
+	}
+}
+
+// The other half of that rule, since RepoConfig.Empty gained a second
+// term with grain/task-114: standing instructions alone are something to
+// say, so a repo that has unticked its last default capability but still
+// carries a prompt extension keeps its row -- and stays listed, which is
+// what puts it on the repos page and in `grain repo list` at all. A row
+// dropped here would leave text that every run against the repo is still
+// told but nothing admits exists.
+func TestPutRepoConfigKeepsARowThatOnlyHasStandingInstructions(t *testing.T) {
+	store, _, ctx := openStore(t)
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	want := model.RepoConfig{Repo: repo, PromptExtension: "Read db/README.md before touching migrations."}
+	if err := store.PutRepoConfig(ctx, want); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := store.GetRepoConfig(ctx, repo)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v), want the row to have survived", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+	list, err := store.ListRepoConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !reflect.DeepEqual(list, []model.RepoConfig{want}) {
+		t.Fatalf("list = %+v, want %+v", list, []model.RepoConfig{want})
+	}
+
+	// And clearing that last thing it had to say does delete it, exactly
+	// as unticking a last capability does.
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{Repo: repo}); err != nil {
+		t.Fatalf("put with nothing to say: %v", err)
+	}
+	if got, err := store.GetRepoConfig(ctx, repo); err != nil || got != nil {
+		t.Fatalf("get after clearing = (%+v, %v), want nil", got, err)
 	}
 }
 
@@ -2887,6 +2940,215 @@ func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
 	}
 	if got.EnvironmentName != want.EnvironmentName {
 		t.Fatalf("EnvironmentName = %q, want %q", got.EnvironmentName, want.EnvironmentName)
+	}
+}
+
+// --- the prompt extension's three columns (grain/task-114) ---------------
+//
+// One migration each, on three tables every existing deployment already
+// has rows in, and CREATE TABLE IF NOT EXISTS never alters one of those
+// -- so each is simulated here directly: the table as it was, a row in
+// it, then Init, then the column read and written for real. Getting any
+// of the three wrong breaks an upgraded deployment rather than a fresh
+// one, which is the failure nothing else in this suite would see.
+
+// TestInitMigratesAnExistingDatabaseMissingConfigPromptExtension is the
+// same pattern as the environment-name migration above, applied to
+// grain_config.prompt_extension: the column arrives defaulted to '',
+// which adds nothing to any prompt -- exactly what an upgraded
+// deployment was doing until somebody writes standing instructions.
+func TestInitMigratesAnExistingDatabaseMissingConfigPromptExtension(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`grain_config`"+` (
+  `+"`id`"+`                         INTEGER NOT NULL,
+  `+"`poll_interval_ms`"+`           INTEGER NOT NULL,
+  `+"`max_concurrent`"+`             INTEGER NOT NULL,
+  `+"`gemini_model`"+`                TEXT    NOT NULL,
+  `+"`max_agent_turns`"+`             INTEGER NOT NULL,
+  `+"`github_host`"+`                 TEXT    NOT NULL,
+  `+"`github_insecure_http`"+`        INTEGER NOT NULL,
+  `+"`gcp_project`"+`                 TEXT    NOT NULL,
+  `+"`gcp_service_account_email`"+`   TEXT    NOT NULL,
+  `+"`target_repos`"+`                TEXT    NOT NULL,
+  `+"`newest_first`"+`                INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-114 grain_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `grain_config` (`id`,`poll_interval_ms`,`max_concurrent`,`gemini_model`,`max_agent_turns`,"+
+			"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`,`newest_first`) "+
+			"VALUES (1,30000,2,'gemini-2.5-pro',40,'github.com',0,'grain-prod','agent@grain-prod.iam.gserviceaccount.com','',0)"); err != nil {
+		t.Fatalf("seeding a pre-task-114 config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing grain_config.prompt_extension: %v", err)
+	}
+
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.PromptExtension != "" {
+		t.Fatalf("PromptExtension after migrating = %q, want empty", got.PromptExtension)
+	}
+
+	// And writable afterwards: PutConfig binds this column, so an
+	// operator who writes standing instructions after the upgrade gets
+	// them stored rather than every save failing.
+	want := testConfig()
+	if err := store.PutConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.PromptExtension != want.PromptExtension {
+		t.Fatalf("PromptExtension = %q, want %q", got.PromptExtension, want.PromptExtension)
+	}
+}
+
+// repo_config predates its own prompt_extension column (schema.go's DDL
+// comment on that table), so a deployment that had already given one repo
+// default capabilities has the table without the column. The row it
+// already holds has to survive, and the new field has to be writable
+// onto it.
+func TestInitMigratesAnExistingDatabaseMissingRepoConfigPromptExtension(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`repo_config`"+` (
+  `+"`owner`"+`                TEXT NOT NULL,
+  `+"`name`"+`                 TEXT NOT NULL,
+  `+"`default_capabilities`"+` TEXT NOT NULL,
+  PRIMARY KEY (`+"`owner`"+`, `+"`name`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-114 repo_config table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `repo_config` (`owner`,`name`,`default_capabilities`) VALUES ('acme','widgets','gcp-key')"); err != nil {
+		t.Fatalf("seeding a pre-task-114 repo_config row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing repo_config.prompt_extension: %v", err)
+	}
+
+	widgets := model.RepoRef{Owner: "acme", Name: "widgets"}
+	got, err := store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", got, err)
+	}
+	want := model.RepoConfig{Repo: widgets, DefaultCapabilities: []string{"gcp-key"}}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v -- the capabilities it already had, and no standing instructions", *got, want)
+	}
+
+	want.PromptExtension = "Widgets keeps its migrations in db/."
+	if err := store.PutRepoConfig(ctx, want); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	got, err = store.GetRepoConfig(ctx, widgets)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+}
+
+// task.prompt_extension is the third, and the one whose absence would be
+// loudest: scanTask selects every column by name, so a database missing
+// this one fails *every* task read rather than only the feature's own.
+func TestInitMigratesAnExistingDatabaseMissingTaskPromptExtension(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task`"+` (
+  `+"`id`"+`                    TEXT    NOT NULL,
+  `+"`intent`"+`                TEXT    NOT NULL,
+  `+"`title`"+`                 TEXT    NOT NULL,
+  `+"`body`"+`                  TEXT    NOT NULL,
+  `+"`origin_actor_kind`"+`     TEXT    NOT NULL,
+  `+"`origin_actor_id`"+`       TEXT    NOT NULL,
+  `+"`origin_behalf_kind`"+`    TEXT    NULL,
+  `+"`origin_behalf_id`"+`      TEXT    NULL,
+  `+"`origin_reason`"+`         TEXT    NOT NULL,
+  `+"`approval_actor_kind`"+`   TEXT    NULL,
+  `+"`approval_actor_id`"+`     TEXT    NULL,
+  `+"`approval_behalf_kind`"+`  TEXT    NULL,
+  `+"`approval_behalf_id`"+`    TEXT    NULL,
+  `+"`approved_at`"+`           DATETIME NULL,
+  `+"`target_owner`"+`          TEXT    NULL,
+  `+"`target_name`"+`           TEXT    NULL,
+  `+"`binding`"+`               TEXT    NOT NULL,
+  `+"`base`"+`                  TEXT    NULL,
+  `+"`folder`"+`                TEXT    NULL,
+  `+"`auto_merge`"+`            INTEGER  NOT NULL,
+  `+"`created_at`"+`            DATETIME NULL,
+  `+"`order_key`"+`             REAL     NOT NULL DEFAULT 0,
+  `+"`sandbox_cpus`"+`          INTEGER  NOT NULL DEFAULT 0,
+  `+"`sandbox_memory_mb`"+`     INTEGER  NOT NULL DEFAULT 0,
+  `+"`sandbox_disk_gb`"+`       INTEGER  NOT NULL DEFAULT 0,
+  `+"`interactive`"+`           INTEGER  NOT NULL DEFAULT 0,
+  `+"`configuration`"+`         INTEGER  NOT NULL DEFAULT 0,
+  `+"`agent_framework`"+`       TEXT     NOT NULL DEFAULT '',
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-114 task table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task` (`id`,`intent`,`title`,`body`,`origin_actor_kind`,`origin_actor_id`,"+
+			"`origin_reason`,`binding`,`auto_merge`,`created_at`) "+
+			"VALUES ('a1b2','implement','Rename the endpoint','','human','bwsalmon','direct','directive',0,?)",
+		now); err != nil {
+		t.Fatalf("seeding a pre-task-114 task row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task.prompt_extension: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", got, err)
+	}
+	// '' is Task.PromptExtension's own "no override": a task filed before
+	// this existed is dispatched with exactly what the deployment and its
+	// repo say, which is what it would have been given anyway.
+	if got.PromptExtension != "" {
+		t.Fatalf("PromptExtension after migrating = %q, want empty", got.PromptExtension)
+	}
+
+	got.PromptExtension = "Ignore the house rules: this task is regenerating them."
+	if err := store.PutTask(ctx, *got); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	reread, err := store.GetTask(ctx, "a1b2")
+	if err != nil || reread == nil {
+		t.Fatalf("get: (%+v, %v)", reread, err)
+	}
+	if reread.PromptExtension != got.PromptExtension {
+		t.Fatalf("PromptExtension = %q, want %q", reread.PromptExtension, got.PromptExtension)
 	}
 }
 

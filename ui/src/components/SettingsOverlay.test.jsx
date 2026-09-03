@@ -167,6 +167,40 @@ describe("SettingsOverlay", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  // Half of what this pane writes is read back out of /api/config, which
+  // App fetches once at mount: the target repo allowlist the repos page
+  // lists from, the default capabilities and task defaults the new-task
+  // form starts from, and the deployment's own prompt extension. Without
+  // this, all of them kept answering with what the page was told at load
+  // until it was reloaded.
+  it("refreshes the app's config after a successful save", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const onSaved = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} onSaved={onSaved} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onSaved).toHaveBeenCalled();
+  });
+
+  // A save that failed wrote nothing, so there is nothing to re-read --
+  // and the error the pane reports has to be the save's own.
+  it("does not refresh the config when the save failed", async () => {
+    api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("store is down"));
+    const onSaved = vi.fn();
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} onSaved={onSaved} showError={showError} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "store is down" }));
+  });
+
   it("sends an empty payload when nothing changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const user = userEvent.setup();

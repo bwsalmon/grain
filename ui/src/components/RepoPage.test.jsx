@@ -361,10 +361,16 @@ describe("RepoPage", () => {
     expect(screen.getByText(/Deployment-wide, set in Settings/)).toHaveTextContent("nothing");
   });
 
-  it("saves the repo's own prompt extension", async () => {
+  // The refresh matters as much as the save: config.reposWithPromptExtension
+  // is one of the three sources repoRows lists a repo from, so a repo
+  // whose standing instructions are the only thing this deployment knows
+  // it by is missing from the list page until the config is re-read --
+  // and a repo that just had its last ones cleared stays on it.
+  it("saves the repo's own prompt extension and refreshes the config the repo list is built from", async () => {
     routeApi();
+    const onRefreshConfig = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
-    renderPage();
+    renderPage({ onRefreshConfig });
 
     await user.type(
       await screen.findByLabelText(/Prompt extension for acme\/widgets/),
@@ -382,6 +388,7 @@ describe("RepoPage", () => {
     expect(api).toHaveBeenCalledWith("/api/repos/acme/widgets/prompt-extension", {
       method: "PUT", body: JSON.stringify({ promptExtension: "Migrations live in db/." }),
     });
+    expect(onRefreshConfig).toHaveBeenCalled();
   });
 
   it("reports the error when saving the repo's prompt extension fails", async () => {

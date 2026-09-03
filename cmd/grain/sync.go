@@ -47,6 +47,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"google.golang.org/api/option"
 
@@ -194,6 +195,25 @@ func printSettingsDiff(before, after ui.Settings) {
 		// rather than breaking the two-column shape of every line
 		// around it.
 		{"prompt extension", before.PromptExtension, after.PromptExtension},
+		// The rest of what a config file can set. Every one of them was
+		// missing here for the same reason the sandbox shape was -- the
+		// table was written once and each new setting was added to
+		// UpdateSettingsRequest without it -- and the cost is the same and
+		// worse for these: `grain sync` narrowing a deployment's target
+		// repos, or turning auto-merge on for every task filed after it,
+		// printed "already up to date, nothing changed". A sync that
+		// changes something has to say what.
+		//
+		// The two lists are joined rather than printed as Go slices: this
+		// is output a workflow log is read in, and ["a" "b"] is not how
+		// anything else here names a set.
+		{"target repos", strings.Join(before.TargetRepos, ", "), strings.Join(after.TargetRepos, ", ")},
+		{"default capabilities", strings.Join(before.DefaultCapabilities, ", "), strings.Join(after.DefaultCapabilities, ", ")},
+		{"agent framework", before.AgentFramework, after.AgentFramework},
+		{"newest first", fmt.Sprint(before.NewestFirst), fmt.Sprint(after.NewestFirst)},
+		{"show closed by default", fmt.Sprint(before.ShowClosedByDefault), fmt.Sprint(after.ShowClosedByDefault)},
+		{"approved by default", fmt.Sprint(before.ApprovedByDefault), fmt.Sprint(after.ApprovedByDefault)},
+		{"auto merge by default", fmt.Sprint(before.AutoMergeByDefault), fmt.Sprint(after.AutoMergeByDefault)},
 	}
 	changed := false
 	for _, f := range fields {
