@@ -17,8 +17,8 @@ import (
 var scheduler = model.Principal{Kind: model.PrincipalAutomation, ID: "schedule"}
 
 // reconcileSchedule fires every schedule whose interval has come due --
-// filing a task, or starting a task suite run, depending on which of the
-// two that schedule names (fireSchedule).
+// filing a task, or starting a suite run, depending on which of the two
+// that schedule names (fireSchedule).
 //
 // One schedule failing to file (or a store error while checking it)
 // does not stop the others -- Reconciler's own doc comment on why each
@@ -40,10 +40,10 @@ func reconcileSchedule(ctx context.Context, deps Deps, now time.Time) error {
 }
 
 // fireSchedule fires sched, whichever of the two things a schedule can
-// fire it names: a task suite run (SuiteID set) or a single task. The
-// two paths differ only in what a firing *is* -- both check that the
-// previous firing has finished first, and both advance the schedule's own
-// timing afterwards through advanceSchedule.
+// fire it names: a suite run (SuiteID set) or a single task. The two
+// paths differ only in what a firing *is* -- both check that the
+// previous firing has finished first, and both advance the schedule's
+// own timing afterwards through advanceSchedule.
 func fireSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time) error {
 	if sched.SuiteID != nil {
 		return fireSuiteSchedule(ctx, store, sched, now)
@@ -61,11 +61,12 @@ func fireSchedule(ctx context.Context, store *model.Store, sched model.Schedule,
 func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 
 // fireTaskSchedule files sched's next task, unless its previous firing
-// has not finished yet -- in which case this is a no-op, tried again next
-// cycle with NextRunAt left exactly where it was, so the check costs
-// nothing and cannot skip a firing outright, only delay it. This is the
-// path for a schedule that files a single task; fireSuiteSchedule is the
-// one for a schedule that runs a whole task suite instead.
+// has not finished yet -- in which case this is a no-op, tried again
+// next cycle with NextRunAt left exactly where it was, so the check
+// costs nothing and cannot skip a firing outright, only delay it. This
+// is the path for a schedule that files a single task;
+// fireSuiteSchedule is the one for a schedule that runs a whole suite
+// instead.
 //
 // The filed task lands already approved: docs/data-model.md's "the
 // SCHEDULED special case dissolves" is why -- a schedule is itself a
@@ -85,9 +86,9 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // schedule outright.
 //
 // sched.Target and sched.Base are never taken from the template, set or
-// not -- a template carries no target of its own (model.TaskTemplate's
-// own doc comment on why), so the schedule's own standing repo and
-// branch are what every firing targets, template-backed or not.
+// not -- a template carries no target of its own (model.Template's own
+// doc comment on why), so the schedule's own standing repo and branch
+// are what every firing targets, template-backed or not.
 func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time) error {
 	tag := firingTag(sched.ID)
 	open, err := store.HasOpenTaskWithTag(ctx, tag)
@@ -100,7 +101,7 @@ func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Sched
 
 	content := sched
 	if sched.TemplateID != nil {
-		tmpl, err := store.GetTaskTemplate(ctx, *sched.TemplateID)
+		tmpl, err := store.GetTemplate(ctx, *sched.TemplateID)
 		if err != nil {
 			return fmt.Errorf("resolving template %s: %w", *sched.TemplateID, err)
 		}
@@ -151,12 +152,13 @@ func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Sched
 	})
 }
 
-// fireSuiteSchedule starts one run of the task suite sched names --
+// fireSuiteSchedule starts one run of the suite sched names --
 // bwsalmon/agents#642's own "run the suite against a repo and branch",
 // started by sched's cadence instead of by a human clicking "Run…", and
-// otherwise exactly the run ui.Client.CreateSuiteRun would have made: the
-// suite decides its own items, mode, passes, approval and auto-merge, and
-// sched decides only when it runs and what it runs against.
+// otherwise exactly the run ui.Client.CreateSuiteRun would have made:
+// the suite decides its own items, mode, passes, approval and
+// auto-merge, and sched decides only when it runs and what it runs
+// against.
 //
 // The gate here is a run of this schedule that has not finished yet, not
 // an open task: a suite run is a whole sequence of tasks over as many
@@ -179,15 +181,15 @@ func fireSuiteSchedule(ctx context.Context, store *model.Store, sched model.Sche
 		return nil
 	}
 
-	suite, err := store.GetTaskSuite(ctx, *sched.SuiteID)
+	suite, err := store.GetSuite(ctx, *sched.SuiteID)
 	if err != nil {
-		return fmt.Errorf("resolving task suite %s: %w", *sched.SuiteID, err)
+		return fmt.Errorf("resolving suite %s: %w", *sched.SuiteID, err)
 	}
 	if suite == nil {
-		return fmt.Errorf("task suite %s no longer exists", *sched.SuiteID)
+		return fmt.Errorf("suite %s no longer exists", *sched.SuiteID)
 	}
 	if _, err := store.CreateScheduledSuiteRun(ctx, *suite, sched.Target, sched.Base, sched.ID, now); err != nil {
-		return fmt.Errorf("starting a run of task suite %s: %w", suite.ID, err)
+		return fmt.Errorf("starting a run of suite %s: %w", suite.ID, err)
 	}
 
 	return advanceSchedule(ctx, store, sched, now, func(s *model.Schedule) {

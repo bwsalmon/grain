@@ -102,10 +102,10 @@ type Task struct {
 	// already gives model.ReasonFix, so a task that appeared with nobody
 	// having filed it by hand reads as expected rather than as a mystery.
 	Scheduled bool `json:"scheduled,omitempty"`
-	// SuiteRun is true for a task a task suite run filed automatically
+	// SuiteRun is true for a task a suite run filed automatically
 	// (model.ReasonSuite, bwsalmon/agents#642) -- Scheduled's own badge
-	// treatment, so a pass of tasks that appeared with nobody filing them
-	// by hand reads as expected rather than as a mystery.
+	// treatment, so a pass of tasks that appeared with nobody filing
+	// them by hand reads as expected rather than as a mystery.
 	SuiteRun  bool       `json:"suiteRun,omitempty"`
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
 	// DependsOn is every task this one has declared a depends-on link to,

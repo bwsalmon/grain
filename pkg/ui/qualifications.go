@@ -49,7 +49,7 @@ func (c *Client) qualificationPlanFrom(ctx context.Context, p model.Qualificatio
 	}
 	for _, it := range p.Items {
 		name := it.TemplateID
-		if tmpl, err := c.Store.GetTaskTemplate(ctx, it.TemplateID); err == nil && tmpl != nil {
+		if tmpl, err := c.Store.GetTemplate(ctx, it.TemplateID); err == nil && tmpl != nil {
 			name = tmpl.Name
 		}
 		out.Items = append(out.Items, qualificationItemFrom(it, name))
@@ -85,13 +85,13 @@ type PutQualificationPlanRequest struct {
 	Items           []QualificationItem `json:"items"`
 }
 
-// PutQualificationPlan validates req -- every item naming a template that
-// actually exists, a positive repeat count, and a dependency graph with
-// no cycle (model.QualificationPlan.Validate) -- before replacing repo's
-// plan wholesale. It does not check a template against repo: a template
-// carries no target of its own (model.TaskTemplate's own doc comment on
-// why), so any template may schedule against any repo's plan --
-// CreateQualificationRun always targets repo and the candidate's own
+// PutQualificationPlan validates req -- every item naming a template
+// that actually exists, a positive repeat count, and a dependency graph
+// with no cycle (model.QualificationPlan.Validate) -- before replacing
+// repo's plan wholesale. It does not check a template against repo: a
+// template carries no target of its own (model.Template's own doc
+// comment on why), so any template may schedule against any repo's plan
+// -- CreateQualificationRun always targets repo and the candidate's own
 // branch, whatever the template itself says.
 func (c *Client) PutQualificationPlan(ctx context.Context, repo model.RepoRef, req PutQualificationPlanRequest) (QualificationPlan, error) {
 	items := make([]model.QualificationItem, 0, len(req.Items))
@@ -99,12 +99,12 @@ func (c *Client) PutQualificationPlan(ctx context.Context, repo model.RepoRef, r
 		if it.TemplateID == "" {
 			return QualificationPlan{}, validationErrorf("every qualification item needs a template")
 		}
-		tmpl, err := c.Store.GetTaskTemplate(ctx, it.TemplateID)
+		tmpl, err := c.Store.GetTemplate(ctx, it.TemplateID)
 		if err != nil {
 			return QualificationPlan{}, err
 		}
 		if tmpl == nil {
-			return QualificationPlan{}, validationErrorf("unknown task template %s", it.TemplateID)
+			return QualificationPlan{}, validationErrorf("unknown template %s", it.TemplateID)
 		}
 		repeat := it.Repeat
 		if repeat < 1 {

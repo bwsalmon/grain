@@ -7,7 +7,7 @@ import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-// The task suites page (bwsalmon/agents#642) landed with no tests of its
+// The suites page (bwsalmon/agents#642) landed with no tests of its
 // own, unlike every other list page here -- SchedulesList.test.jsx's own
 // shape applied to it: the two lists it renders, the create/edit/delete
 // round trips through SuiteOverlay, and starting a run through
@@ -125,8 +125,8 @@ describe("SuitesList", () => {
   it("shows empty messages for both lists when there is nothing yet", () => {
     renderList({ suites: [], suiteRuns: [] });
 
-    expect(screen.getByText(/No task suites yet/)).toBeInTheDocument();
-    expect(screen.getByText("No task suite runs yet.")).toBeInTheDocument();
+    expect(screen.getByText(/No suites yet/)).toBeInTheDocument();
+    expect(screen.getByText("No suite runs yet.")).toBeInTheDocument();
   });
 
   it("creates a suite defaulting to until_clean, auto-merge on and approval off", async () => {
@@ -136,10 +136,10 @@ describe("SuitesList", () => {
     renderList({ suites: [], suiteRuns: [], onRefresh });
 
     await user.click(screen.getByRole("button", { name: "+ New suite" }));
-    expect(screen.getByRole("heading", { name: "New task suite" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "New suite" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText(/Name/), "Nightly sweep");
-    await user.click(screen.getByLabelText("Task templates"));
+    await user.click(screen.getByLabelText("Templates"));
     await user.click(await screen.findByRole("option", { name: /Smoke/ }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Add suite" }));
@@ -156,10 +156,10 @@ describe("SuitesList", () => {
       }),
     });
     expect(onRefresh).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "New task suite" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "New suite" })).not.toBeInTheDocument();
   });
 
-  it("creates a task template inline from the suite overlay and preselects it", async () => {
+  it("creates a template inline from the suite overlay and preselects it", async () => {
     const createdTemplate = { id: "template-new", name: "New template" };
     api.mockResolvedValueOnce(createdTemplate); // POST /api/templates
     api.mockResolvedValueOnce({}); // POST /api/suites
@@ -214,7 +214,7 @@ describe("SuitesList", () => {
 
     await user.click(screen.getByRole("button", { name: "+ New suite" }));
     await user.type(screen.getByLabelText(/Name/), "Three times");
-    await user.click(screen.getByLabelText("Task templates"));
+    await user.click(screen.getByLabelText("Templates"));
     await user.click(await screen.findByRole("option", { name: /Lint/ }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByLabelText("Run mode"));
@@ -249,11 +249,11 @@ describe("SuitesList", () => {
     renderList({ onRefresh });
 
     await user.click(suiteRow("Nightly sweep"));
-    expect(screen.getByRole("heading", { name: "Edit task suite" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Edit suite" })).toBeInTheDocument();
 
     const nameField = screen.getByLabelText(/Name/);
     expect(nameField).toHaveValue("Nightly sweep");
-    expect(screen.getByLabelText("Task templates")).toHaveTextContent("Smoke");
+    expect(screen.getByLabelText("Templates")).toHaveTextContent("Smoke");
 
     await user.clear(nameField);
     await user.type(nameField, "Weekly sweep");
@@ -307,7 +307,7 @@ describe("SuitesList", () => {
     renderList({ onRefreshRuns });
 
     await user.click(screen.getByRole("button", { name: "Run…" }));
-    expect(screen.getByRole("heading", { name: "Run a task suite" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Run a suite" })).toBeInTheDocument();
     // The clicked suite comes preselected, so the common case is repo,
     // branch, go.
     expect(screen.getByLabelText("Suite")).toHaveTextContent("Nightly sweep");
@@ -321,7 +321,7 @@ describe("SuitesList", () => {
       body: JSON.stringify({ suiteId: "suite-1", repo: "acme/widgets", base: "release-1" }),
     });
     expect(onRefreshRuns).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "Run a task suite" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Run a suite" })).not.toBeInTheDocument();
   });
 
   it("does not open the edit overlay when the Run action is clicked", async () => {
@@ -330,7 +330,7 @@ describe("SuitesList", () => {
 
     await user.click(screen.getByRole("button", { name: "Run…" }));
 
-    expect(screen.queryByRole("heading", { name: "Edit task suite" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Edit suite" })).not.toBeInTheDocument();
   });
 
   it("reports the error and leaves the run overlay open when starting one fails", async () => {
@@ -345,6 +345,6 @@ describe("SuitesList", () => {
     await user.click(screen.getByRole("button", { name: "Run" }));
 
     expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "base is required" }));
-    expect(screen.getByRole("heading", { name: "Run a task suite" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Run a suite" })).toBeInTheDocument();
   });
 });

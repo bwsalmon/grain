@@ -274,7 +274,7 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
 
         <Typography variant="subtitle1" sx={{ mt: 3 }}>Qualification plan</Typography>
         <p className="hint">
-          Task templates a fresh, active release candidate schedules automatically -- run this many
+          Templates a fresh, active release candidate schedules automatically -- run this many
           times each, in dependency order, against the candidate's own branch. Pick from any
           template declared under Templates.
         </p>
@@ -406,7 +406,7 @@ function QualificationPlanEditor({ plan, templates, onSave }) {
 
       {templates.length === 0 && (
         <Alert severity="info" sx={{ mt: 2 }}>
-          No task templates exist yet -- create one under Templates first.
+          No templates exist yet -- create one under Templates first.
         </Alert>
       )}
 

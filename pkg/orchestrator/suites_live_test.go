@@ -1,44 +1,44 @@
 package orchestrator_test
 
-// TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops is bwsalmon/
+// TestLiveSuiteUntilCleanFindsAndFixesABugThenStops is bwsalmon/
 // agents#642's own live confirmation: the issue asks specifically to
 // "confirm that the 'run until no repo changes or new issues' pattern
-// works for a standard bug finding workflow with real agents" before the
-// feature is trusted. Every other test in this package proves
-// SyncTaskSuites' own pass-to-pass bookkeeping against a scripted
-// agent (suites_test.go) or pure store state (this package's own
+// works for a standard bug finding workflow with real agents" before
+// the feature is trusted. Every other test in this package proves
+// SyncSuites' own pass-to-pass bookkeeping against a scripted agent
+// (suites_test.go) or pure store state (this package's own
 // suites_test.go in the orchestrator package); none of them can say
-// whether a *real* model, given nothing but a task suite's own prompt
-// and a real git checkout, actually behaves the way that bookkeeping
-// assumes -- finds and fixes a genuine bug on one pass, then correctly
-// reports "nothing to do" on the next once that fix has landed, rather
-// than hallucinating a change or looping forever. This is what checks
-// that, gated on GEMINI_API_KEY exactly like this package's own
-// live_test.go and pkg/agent/antigravity's own live test, so it costs
-// nothing and runs nowhere (including CI) without a live key:
+// whether a *real* model, given nothing but a suite's own prompt and a
+// real git checkout, actually behaves the way that bookkeeping assumes
+// -- finds and fixes a genuine bug on one pass, then correctly reports
+// "nothing to do" on the next once that fix has landed, rather than
+// hallucinating a change or looping forever. This is what checks that,
+// gated on GEMINI_API_KEY exactly like this package's own live_test.go
+// and pkg/agent/antigravity's own live test, so it costs nothing and
+// runs nowhere (including CI) without a live key:
 //
-//	GEMINI_API_KEY=... go test ./pkg/orchestrator/... -run TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops -v -timeout 5m
+//	GEMINI_API_KEY=... go test ./pkg/orchestrator/... -run TestLiveSuiteUntilCleanFindsAndFixesABugThenStops -v -timeout 5m
 //
 // The scenario: a tiny real repo seeded with one genuine, findable bug
-// (calc.py's add() subtracts instead of adding). A task suite in
-// TaskSuiteUntilClean mode, one item, targets it:
+// (calc.py's add() subtracts instead of adding). A suite in
+// SuiteUntilClean mode, one item, targets it:
 //
-//  1. Pass 1 dispatches a real agent against the buggy checkout. It is
-//     expected to find the bug, fix it, and push -- OutcomeOfPass reads
-//     that as PassChanged (a pull request was opened), so the run fires
-//     a second pass rather than stopping.
-//  2. The test plays GitHub's part and actually merges that pull
-//     request into the branch the suite is running against (a real git
-//     merge over the same bare repo, githubsim.Sim.mergeIntoBase) --
-//     the run's own "stack against the source branch" is what makes
-//     this matter: pass 2 clones that same branch, so it only sees the
-//     fix if it actually landed there first.
-//  3. Pass 2 dispatches a second real agent against the now-fixed
-//     checkout. It is expected to find no bug, leave a closing comment
-//     (the template's own instruction: comment_on_issue, not silence --
-//     see the comment below on why silence does not read as "clean"
-//     here), and push nothing -- OutcomeOfPass reads that as PassClean,
-//     and the run stops, succeeded, without needing MaxPasses.
+// 1. Pass 1 dispatches a real agent against the buggy checkout. It is
+// expected to find the bug, fix it, and push -- OutcomeOfPass reads
+// that as PassChanged (a pull request was opened), so the run fires
+// a second pass rather than stopping.
+// 2. The test plays GitHub's part and actually merges that pull
+// request into the branch the suite is running against (a real git
+// merge over the same bare repo, githubsim.Sim.mergeIntoBase) --
+// the run's own "stack against the source branch" is what makes
+// this matter: pass 2 clones that same branch, so it only sees the
+// fix if it actually landed there first.
+// 3. Pass 2 dispatches a second real agent against the now-fixed
+// checkout. It is expected to find no bug, leave a closing comment
+// (the template's own instruction: comment_on_issue, not silence --
+// see the comment below on why silence does not read as "clean"
+// here), and push nothing -- OutcomeOfPass reads that as PassClean,
+// and the run stops, succeeded, without needing MaxPasses.
 //
 // If a real agent cannot be trusted to behave this way, this test is
 // where that shows up -- as a failure here, not as a support ticket
@@ -77,10 +77,10 @@ def multiply(a, b):
 
 const fixedAddLine = "return a + b"
 
-func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
+func TestLiveSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
-		t.Skip("GEMINI_API_KEY not set; skipping live task suite integration test")
+		t.Skip("GEMINI_API_KEY not set; skipping live suite integration test")
 	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -138,7 +138,7 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 			"found none.",
 		bare,
 	)
-	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+	if err := store.PutTemplate(ctx, model.Template{
 		ID:        "template-live-bugfinder",
 		Name:      "Bug finder",
 		Title:     "Find and fix a bug in this repository",
@@ -149,14 +149,14 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 		t.Fatalf("put template: %v", err)
 	}
 
-	suite := model.TaskSuite{
+	suite := model.Suite{
 		Name:      "live bug sweep",
-		Items:     []model.TaskSuiteItem{{TemplateID: "template-live-bugfinder"}},
-		Mode:      model.TaskSuiteUntilClean,
+		Items:     []model.SuiteItem{{TemplateID: "template-live-bugfinder"}},
+		Mode:      model.SuiteUntilClean,
 		MaxPasses: 3,
 		AutoMerge: true,
 	}
-	suiteRun, err := store.CreateTaskSuiteRun(ctx, suite, repoRef, "main", baseTime)
+	suiteRun, err := store.CreateSuiteRun(ctx, suite, repoRef, "main", baseTime)
 	if err != nil {
 		t.Fatalf("create suite run: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 	t.Log("pass 1: dispatching a real agent against the buggy checkout")
 	clock = dispatchUntilSettled(t, ctx, store, deps, clock, pass1TaskID, 3)
 
-	pass1Run, err := store.GetTaskSuiteRun(ctx, suiteRun.ID)
+	pass1Run, err := store.GetSuiteRun(ctx, suiteRun.ID)
 	if err != nil || pass1Run == nil {
 		t.Fatalf("suite run: (%+v, %v)", pass1Run, err)
 	}
@@ -241,12 +241,12 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 	}
 
 	clock = clock.Add(time.Minute)
-	t.Log("cycle: syncing the merge and letting SyncTaskSuites fire pass 2 if it has not already")
+	t.Log("cycle: syncing the merge and letting SyncSuites fire pass 2 if it has not already")
 	if err := orchestrator.RunCycle(ctx, deps, clock); err != nil {
 		t.Logf("RunCycle (sync after merge) returned an error (tolerated): %v", err)
 	}
 
-	afterMerge, err := store.GetTaskSuiteRun(ctx, suiteRun.ID)
+	afterMerge, err := store.GetSuiteRun(ctx, suiteRun.ID)
 	if err != nil || afterMerge == nil {
 		t.Fatalf("suite run: (%+v, %v)", afterMerge, err)
 	}
@@ -259,7 +259,7 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 	t.Log("pass 2: dispatching a real agent against the now-fixed checkout")
 	clock = dispatchUntilSettled(t, ctx, store, deps, clock, pass2TaskID, 3)
 
-	final, err := store.GetTaskSuiteRun(ctx, suiteRun.ID)
+	final, err := store.GetSuiteRun(ctx, suiteRun.ID)
 	if err != nil || final == nil {
 		t.Fatalf("suite run: (%+v, %v)", final, err)
 	}
@@ -279,13 +279,13 @@ func TestLiveTaskSuiteUntilCleanFindsAndFixesABugThenStops(t *testing.T) {
 		t.Fatal("pass 2 opened a pull request -- the live agent found (or invented) another change on an already-fixed repo")
 	}
 
-	if final.Status != model.TaskSuiteRunSucceeded {
+	if final.Status != model.SuiteRunSucceeded {
 		t.Fatalf("run status = %q after a clean second pass, want succeeded (error: %s)", final.Status, final.LastError)
 	}
 	if final.CurrentPass() != 2 {
 		t.Fatalf("current pass = %d, want exactly 2 -- a third pass means the clean pass was not recognised as clean", final.CurrentPass())
 	}
-	t.Log("confirmed: TaskSuiteUntilClean found and fixed a real bug on pass 1, then correctly stopped on a clean pass 2")
+	t.Log("confirmed: SuiteUntilClean found and fixed a real bug on pass 1, then correctly stopped on a clean pass 2")
 }
 
 // bareFileAt reads path out of branch in the bare repo at bareDir, via a

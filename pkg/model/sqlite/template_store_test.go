@@ -1,6 +1,6 @@
 package sqlite_test
 
-// The task-template store (bwsalmon/agents#516), against a real embedded
+// The template store (bwsalmon/agents#516), against a real embedded
 // SQLite database -- store_test.go's own doc comment on why gives the
 // reasoning again here, and schedule_store_test.go's own shape is the
 // pattern this file follows almost field for field.
@@ -14,8 +14,8 @@ import (
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 )
 
-func template(id string) model.TaskTemplate {
-	return model.TaskTemplate{
+func template(id string) model.Template {
+	return model.Template{
 		ID:        id,
 		Name:      "Dependency bump",
 		Title:     "Bump dependencies",
@@ -24,17 +24,17 @@ func template(id string) model.TaskTemplate {
 	}
 }
 
-func TestTaskTemplateRoundTrips(t *testing.T) {
+func TestTemplateRoundTrips(t *testing.T) {
 	store, _, ctx := openStore(t)
 	want := template("template-1")
 	want.AutoMerge = true
 	want.Reads = []model.RepoRef{{Owner: "owner", Name: "shared-lib"}}
 	want.Grants = []model.Grant{{Capability: "web-search", Via: model.GrantByLabel}}
 
-	if err := store.PutTaskTemplate(ctx, want); err != nil {
+	if err := store.PutTemplate(ctx, want); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	got, err := store.GetTaskTemplate(ctx, "template-1")
+	got, err := store.GetTemplate(ctx, "template-1")
 	if err != nil || got == nil {
 		t.Fatalf("get: %v (nil=%v)", err, got == nil)
 	}
@@ -55,15 +55,15 @@ func TestTaskTemplateRoundTrips(t *testing.T) {
 	}
 }
 
-func TestGetTaskTemplateReturnsNilWhenAbsent(t *testing.T) {
+func TestGetTemplateReturnsNilWhenAbsent(t *testing.T) {
 	store, _, ctx := openStore(t)
-	got, err := store.GetTaskTemplate(ctx, "nope")
+	got, err := store.GetTemplate(ctx, "nope")
 	if err != nil || got != nil {
 		t.Fatalf("want (nil, nil), got (%v, %v)", got, err)
 	}
 }
 
-func TestNewTaskTemplateIDsAreDistinctFromTaskAndScheduleIDs(t *testing.T) {
+func TestNewTemplateIDsAreDistinctFromTaskAndScheduleIDs(t *testing.T) {
 	store, _, ctx := openStore(t)
 	taskID, err := store.NewTaskID(ctx)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestNewTaskTemplateIDsAreDistinctFromTaskAndScheduleIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	templateID, err := store.NewTaskTemplateID(ctx)
+	templateID, err := store.NewTemplateID(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,18 +85,18 @@ func TestNewTaskTemplateIDsAreDistinctFromTaskAndScheduleIDs(t *testing.T) {
 	}
 }
 
-func TestListTaskTemplatesReturnsNewestFirst(t *testing.T) {
+func TestListTemplatesReturnsNewestFirst(t *testing.T) {
 	store, _, ctx := openStore(t)
 	earlier := template("template-1")
 	earlier.CreatedAt = now.Add(-time.Hour)
 	later := template("template-2")
 	later.CreatedAt = now
-	for _, tmpl := range []model.TaskTemplate{earlier, later} {
-		if err := store.PutTaskTemplate(ctx, tmpl); err != nil {
+	for _, tmpl := range []model.Template{earlier, later} {
+		if err := store.PutTemplate(ctx, tmpl); err != nil {
 			t.Fatal(err)
 		}
 	}
-	got, err := store.ListTaskTemplates(ctx)
+	got, err := store.ListTemplates(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,12 +105,12 @@ func TestListTaskTemplatesReturnsNewestFirst(t *testing.T) {
 	}
 }
 
-func TestUpdateTaskTemplateAppliesAndPersists(t *testing.T) {
+func TestUpdateTemplateAppliesAndPersists(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutTaskTemplate(ctx, template("template-1")); err != nil {
+	if err := store.PutTemplate(ctx, template("template-1")); err != nil {
 		t.Fatal(err)
 	}
-	err := store.UpdateTaskTemplate(ctx, "template-1", func(tmpl *model.TaskTemplate) error {
+	err := store.UpdateTemplate(ctx, "template-1", func(tmpl *model.Template) error {
 		tmpl.Title = "Bump dependencies (patch only)"
 		tmpl.AutoMerge = true
 		return nil
@@ -118,7 +118,7 @@ func TestUpdateTaskTemplateAppliesAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got, err := store.GetTaskTemplate(ctx, "template-1")
+	got, err := store.GetTemplate(ctx, "template-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,23 +127,23 @@ func TestUpdateTaskTemplateAppliesAndPersists(t *testing.T) {
 	}
 }
 
-func TestUpdateTaskTemplateOnAnUnknownIDErrors(t *testing.T) {
+func TestUpdateTemplateOnAnUnknownIDErrors(t *testing.T) {
 	store, _, ctx := openStore(t)
-	err := store.UpdateTaskTemplate(ctx, "nope", func(*model.TaskTemplate) error { return nil })
+	err := store.UpdateTemplate(ctx, "nope", func(*model.Template) error { return nil })
 	if err == nil {
 		t.Fatal("want an error updating an unknown template, got nil")
 	}
 }
 
-func TestDeleteTaskTemplateRemovesIt(t *testing.T) {
+func TestDeleteTemplateRemovesIt(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutTaskTemplate(ctx, template("template-1")); err != nil {
+	if err := store.PutTemplate(ctx, template("template-1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DeleteTaskTemplate(ctx, "template-1"); err != nil {
+	if err := store.DeleteTemplate(ctx, "template-1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	got, err := store.GetTaskTemplate(ctx, "template-1")
+	got, err := store.GetTemplate(ctx, "template-1")
 	if err != nil || got != nil {
 		t.Fatalf("want (nil, nil) after delete, got (%v, %v)", got, err)
 	}
@@ -151,10 +151,10 @@ func TestDeleteTaskTemplateRemovesIt(t *testing.T) {
 
 func TestSchedulesUsingTemplate(t *testing.T) {
 	store, _, ctx := openStore(t)
-	if err := store.PutTaskTemplate(ctx, template("template-1")); err != nil {
+	if err := store.PutTemplate(ctx, template("template-1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutTaskTemplate(ctx, template("template-2")); err != nil {
+	if err := store.PutTemplate(ctx, template("template-2")); err != nil {
 		t.Fatal(err)
 	}
 	id := "template-1"
@@ -185,8 +185,8 @@ func TestSchedulesUsingTemplate(t *testing.T) {
 }
 
 // TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn simulates a
-// database built before bwsalmon/agents#516 -- schedule with none of the
-// columns task_template introduced, template_id included -- the same
+// database built before bwsalmon/agents#516 -- schedule with none of
+// the columns template introduced, template_id included -- the same
 // "build the old shape directly, then run Init" approach
 // TestInitMigratesAnExistingDatabaseWithBareIntervalMS already uses for
 // the recurrence-columns migration.
@@ -250,15 +250,15 @@ func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
 	}
 }
 
-// TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns
-// simulates a database built while task_template still carried its own
-// target_owner/target_name/base (model.TaskTemplate's own doc comment on
+// TestInitMigratesAnExistingDatabaseWithTemplateTargetColumns simulates
+// a database built while template still carried its own
+// target_owner/target_name/base (model.Template's own doc comment on
 // why they moved out) directly rather than through Store, and checks
-// Store.Init's own migration step (ensureTaskTemplateNoTargetColumns)
-// drops those three columns without disturbing the rest of the row --
+// Store.Init's own migration step (ensureTemplateNoTargetColumns) drops
+// those three columns without disturbing the rest of the row --
 // store_test.go's own TestInitMigratesAnExistingDatabaseWithNamedSlots
 // pattern, applied to a drop with no data to backfill anywhere else.
-func TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns(t *testing.T) {
+func TestInitMigratesAnExistingDatabaseWithTemplateTargetColumns(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
 		t.Fatalf("opening embedded sqlite: %v", err)
@@ -266,7 +266,7 @@ func TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns(t *testing.
 	defer db.Close()
 	ctx := context.Background()
 
-	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_template`"+` (
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`template`"+` (
   `+"`id`"+`           TEXT     NOT NULL,
   `+"`name`"+`         TEXT     NOT NULL,
   `+"`title`"+`        TEXT     NOT NULL,
@@ -278,10 +278,10 @@ func TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns(t *testing.
   `+"`created_at`"+`   DATETIME NOT NULL,
   PRIMARY KEY (`+"`id`"+`)
 )`); err != nil {
-		t.Fatalf("creating the pre-target-removal task_template table: %v", err)
+		t.Fatalf("creating the pre-target-removal template table: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
-		"INSERT INTO `task_template` (`id`,`name`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
+		"INSERT INTO `template` (`id`,`name`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
 			"`auto_merge`,`created_at`) VALUES "+
 			"('template-1','Dependency bump','Bump dependencies','Bump every dependency.','owner','payments-api',NULL,0,?)",
 		now); err != nil {
@@ -290,10 +290,10 @@ func TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns(t *testing.
 
 	store := model.New(db)
 	if err := store.Init(ctx); err != nil {
-		t.Fatalf("Init against an existing database with task_template.target_owner: %v", err)
+		t.Fatalf("Init against an existing database with template.target_owner: %v", err)
 	}
 
-	got, err := store.GetTaskTemplate(ctx, "template-1")
+	got, err := store.GetTemplate(ctx, "template-1")
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
@@ -301,10 +301,105 @@ func TestInitMigratesAnExistingDatabaseWithTaskTemplateTargetColumns(t *testing.
 		t.Fatalf("got %+v, want the pre-existing row intact", got)
 	}
 
-	// The old columns are gone, not merely ignored -- PutTaskTemplate
-	// stops supplying them, so target_owner/target_name would otherwise
-	// fail every write with a NOT NULL constraint violation.
-	if err := store.PutTaskTemplate(ctx, template("template-2")); err != nil {
+	// The old columns are gone, not merely ignored -- PutTemplate stops
+	// supplying them, so target_owner/target_name would otherwise fail
+	// every write with a NOT NULL constraint violation.
+	if err := store.PutTemplate(ctx, template("template-2")); err != nil {
 		t.Fatalf("put after migrating: %v", err)
+	}
+}
+
+// The feature was called "task templates" before it was called
+// templates (docs/schedules.md), and its four tables were named for it.
+// This simulates a database built under the old names -- directly
+// rather than through Store, since Store no longer knows how to write
+// one -- and checks Store.Init's own renameTemplateAndSuiteTables step
+// carries it onto the new ones with every row, child row and sequence
+// position intact.
+func TestInitRenamesTheOldTaskTemplateTables(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		"CREATE TABLE `task_template` (" +
+			"`id` TEXT NOT NULL, `name` TEXT NOT NULL, `title` TEXT NOT NULL," +
+			"`body` TEXT NOT NULL, `auto_merge` INTEGER NOT NULL," +
+			"`created_at` DATETIME NOT NULL, PRIMARY KEY (`id`))",
+		"CREATE TABLE `task_template_sequence` (" +
+			"`number` INTEGER PRIMARY KEY AUTOINCREMENT, `issued_at` DATETIME NOT NULL)",
+		"CREATE TABLE `task_template_read` (" +
+			"`task_template_id` TEXT NOT NULL, `owner` TEXT NOT NULL, `name` TEXT NOT NULL," +
+			"PRIMARY KEY (`task_template_id`, `owner`, `name`))",
+		"CREATE TABLE `task_template_grant` (" +
+			"`task_template_id` TEXT NOT NULL, `capability` TEXT NOT NULL," +
+			"`via` TEXT NOT NULL, `folder` TEXT NULL, PRIMARY KEY (`task_template_id`, `capability`))",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("creating the pre-rename tables: %v", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_template` (`id`,`name`,`title`,`body`,`auto_merge`,`created_at`) "+
+			"VALUES ('template-3','Dependency bump','Bump dependencies','Bump every dependency.',1,?)",
+		now); err != nil {
+		t.Fatalf("seeding a pre-rename template row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_template_read` (`task_template_id`,`owner`,`name`) "+
+			"VALUES ('template-3','owner','shared-lib')"); err != nil {
+		t.Fatalf("seeding a pre-rename read: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_template_grant` (`task_template_id`,`capability`,`via`,`folder`) "+
+			"VALUES ('template-3','web-search','label',NULL)"); err != nil {
+		t.Fatalf("seeding a pre-rename grant: %v", err)
+	}
+	// Three ids already issued, so the sequence has somewhere to carry
+	// from: an id allocated after the rename must not collide with
+	// template-3 above.
+	for i := 0; i < 3; i++ {
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO `task_template_sequence` (`issued_at`) VALUES (?)", now); err != nil {
+			t.Fatalf("seeding the pre-rename sequence: %v", err)
+		}
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against a database written before the rename: %v", err)
+	}
+
+	got, err := store.GetTemplate(ctx, "template-3")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.Name != "Dependency bump" || got.Title != "Bump dependencies" || !got.AutoMerge {
+		t.Fatalf("got %+v, want the pre-rename row intact under the new table name", got)
+	}
+	if len(got.Reads) != 1 || got.Reads[0] != (model.RepoRef{Owner: "owner", Name: "shared-lib"}) {
+		t.Errorf("reads = %+v, want the pre-rename child row", got.Reads)
+	}
+	if len(got.Grants) != 1 || got.Grants[0].Capability != "web-search" {
+		t.Errorf("grants = %+v, want the pre-rename child row", got.Grants)
+	}
+
+	// The sequence came across too, rather than restarting at 1 and
+	// handing out an id template-3 already has.
+	id, err := store.NewTemplateID(ctx)
+	if err != nil {
+		t.Fatalf("allocating an id after the rename: %v", err)
+	}
+	if id != "template-4" {
+		t.Errorf("NewTemplateID after the rename = %q, want template-4", id)
+	}
+
+	// And the renamed tables are writable under their new names, which
+	// is what every later PutTemplate needs.
+	if err := store.PutTemplate(ctx, template(id)); err != nil {
+		t.Fatalf("put after the rename: %v", err)
 	}
 }

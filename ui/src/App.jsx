@@ -352,7 +352,7 @@ export default function App() {
         }
         if (view === "schedules") {
           // All three, not just schedules: ScheduleOverlay's own
-          // "Template" and "Task suite" pickers (opened from
+          // "Template" and "Suite" pickers (opened from
           // SchedulesList.jsx) need up-to-date lists too, since either can
           // open at any time while this pane is on screen.
           await Promise.all([refreshSchedules(), refreshTemplates(), refreshSuites()]);

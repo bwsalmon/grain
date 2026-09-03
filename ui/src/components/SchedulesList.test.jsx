@@ -389,7 +389,7 @@ describe("SchedulesList", () => {
     expect(screen.getByRole("heading", { name: "New schedule" })).toBeInTheDocument();
   });
 
-  // --- schedules that run a task suite ---------------------------------
+  // --- schedules that run a suite ---------------------------------
 
   const suites = [{ id: "suite-1", name: "Bug sweep" }, { id: "suite-2", name: "Dependency sweep" }];
   const suiteBacked = {
@@ -403,7 +403,7 @@ describe("SchedulesList", () => {
     expect(screen.getByText("Suite: Bug sweep")).toBeInTheDocument();
   });
 
-  it("creates a schedule that runs a task suite", async () => {
+  it("creates a schedule that runs a suite", async () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
@@ -411,8 +411,8 @@ describe("SchedulesList", () => {
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Fires"));
-    await user.click(await screen.findByRole("option", { name: "A task suite" }));
-    await user.click(screen.getByLabelText("Task suite"));
+    await user.click(await screen.findByRole("option", { name: "A suite" }));
+    await user.click(screen.getByLabelText("Suite"));
     await user.click(await screen.findByRole("option", { name: "Bug sweep" }));
 
     // The suite decides all of this schedule's content, so none of the
@@ -443,14 +443,14 @@ describe("SchedulesList", () => {
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Fires"));
-    await user.click(await screen.findByRole("option", { name: "A task suite" }));
+    await user.click(await screen.findByRole("option", { name: "A suite" }));
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.type(screen.getByLabelText(/Base branch/), "main");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
     expect(api).not.toHaveBeenCalled();
     expect(showError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "choose a task suite for this schedule to run" }));
+      expect.objectContaining({ message: "choose a suite for this schedule to run" }));
   });
 
   // What a schedule fires is fixed when it is created (ui.
@@ -463,9 +463,9 @@ describe("SchedulesList", () => {
 
     await user.click(screen.getByText("Bug sweep"));
     expect(screen.queryByLabelText("Fires")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Task suite")).toHaveTextContent("Bug sweep");
+    expect(screen.getByLabelText("Suite")).toHaveTextContent("Bug sweep");
 
-    await user.click(screen.getByLabelText("Task suite"));
+    await user.click(screen.getByLabelText("Suite"));
     await user.click(await screen.findByRole("option", { name: "Dependency sweep" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
 
