@@ -3164,7 +3164,7 @@ disk-full error, on a VM that had CPUs and memory to spare.
 `model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
 tab in Settings and the shape override under New task -> Advanced
 options, `orchestrator.Shape.DiskGB` resolved per dimension against the
-deployment default, and `konturctl vm create -disk-size-gb` at the one
+deployment default, and `konturctl vm create -disk-size-mb` at the one
 moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
 is left off the create entirely, so a deployment that never sets one
 passes exactly the arguments it passed before.
@@ -3185,17 +3185,29 @@ visible in the code:
   runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
   disk was not enlarged and a one-line grow on one whose was.
 
-**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
-snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
-disk-size field, and `writeQcow2Overlay` — which already takes the
-virtual size as an argument — is called with the source image's size
-unconditionally. Passing the flag against a `konturctl` without it fails
-the create, which is why zero omits it rather than sending an explicit
-size: a deployment that has not set one is unaffected either way, and a
-deployment that sets one has said out loud that it expects the flag to
-work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
-the other half of this, and belongs there rather than as a local patch
-here — see `third_party/kontur/VENDORED.md`.
+**The `konturctl` half of it exists now, and is vendored here.** For a
+while it did not: this setting reached a flag no `konturctl` had, so a
+deployment that set one got a failed create and one that left it at zero
+passed the arguments it always did, which is why nothing noticed.
+`konturctl vm create -disk-size-mb` (bwsalmon/kontur#39) is that flag —
+the VM's own container sizes the qcow2 overlay to it before
+cloud-hypervisor opens it, growing one an earlier boot left behind rather
+than only sizing a fresh one, and refusing to shrink it or to go below
+the guest image it reads through to. It landed on `bwsalmon/kontur`'s
+`main` and reached this repo by a resync rather than as a local patch,
+which is what `third_party/kontur/VENDORED.md` asks for.
+
+It is MiB where this setting is GiB, so
+`orchestrator.KonturConfig.createArgs` converts at that one point, and it
+is `-disk-mode=overlay` only — the guest image underneath is shared with
+every other VM booting it, so nothing ever resizes that. grain's VMs are
+in that mode already: `scripts/setup.sh` asks for it by name. Zero still
+omits the flag entirely.
+
+The real-KVM suite asserts the whole chain from inside a guest: a VM
+created a gigabyte larger than the image it boots comes up with a
+`/dev/vda` that size and a root filesystem grown onto it. A fake
+`konturctl` can only ever prove the flag was passed.
 
 ### Monitoring it
 

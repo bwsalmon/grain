@@ -58,7 +58,19 @@ type VMSpec struct {
 	// here: that is why a writable disk no longer needs a host directory
 	// of its own, and why nothing on this side has to know that a qcow2
 	// is involved at all.
-	DiskMode  string `json:"diskMode,omitempty"`
+	DiskMode string `json:"diskMode,omitempty"`
+
+	// DiskSizeMB is how large a disk the guest is given, in MiB, passed
+	// straight through as CHV_DISK_SIZE_MB: the VM's container sizes its
+	// overlay to it before boot, creating it that large or growing one an
+	// earlier boot left behind. Zero means the disk image's own size,
+	// which is what an overlay has always been given.
+	//
+	// Only meaningful in config.DiskModeOverlay -- the overlay is the
+	// only disk kontur creates, and the image underneath it is shared
+	// with every other VM using it, so nothing here ever resizes that.
+	DiskSizeMB int `json:"diskSizeMB,omitempty"`
+
 	Kernel    string `json:"kernel,omitempty"`
 	Initramfs string `json:"initramfs,omitempty"`
 	Firmware  string `json:"firmware,omitempty"`
@@ -258,6 +270,17 @@ func (s *VMSpec) Validate() error {
 	default:
 		return fmt.Errorf("disk mode must be %q, %q or %q, got %q",
 			config.DiskModeOverlay, config.DiskModePersistent, config.DiskModeReadOnly, s.DiskMode)
+	}
+	// Caught here rather than left to the VM container, which rejects the
+	// same combination on its own (see config.FromEnv): "vm create" can
+	// say so before a pod is submitted or a container started, the same
+	// way every other check in here does.
+	if s.DiskSizeMB < 0 {
+		return fmt.Errorf("disk-size-mb must not be negative, got %d", s.DiskSizeMB)
+	}
+	if s.DiskSizeMB > 0 && s.DiskMode != config.DiskModeOverlay {
+		return fmt.Errorf("disk-size-mb needs -disk-mode=%s: only the VM's own overlay is resized, never the shared disk image (got %q)",
+			config.DiskModeOverlay, s.DiskMode)
 	}
 	s.NetMode = s.NetModeOrDefault()
 	switch s.NetMode {

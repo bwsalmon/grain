@@ -328,7 +328,7 @@ func daemon(args []string) {
 			"default in place. Overridable per task from the UI/API (model.Task.SandboxMemoryMB)"+seedOnly)
 	sandboxDiskGB := fs.Int("sandbox-disk-gb", 0,
 		"deployment-wide default root disk size, in GiB, for a kontur-managed sandbox VM, passed as `konturctl "+
-			"vm create`'s own -disk-size-gb (only used with -kontur-sandboxes); 0 leaves the VM's disk as large "+
+			"vm create`'s own -disk-size-mb (only used with -kontur-sandboxes); 0 leaves the VM's disk as large "+
 			"as the guest image behind it, which is what every sandbox got before this flag existed. "+
 			"Overridable per task from the UI/API (model.Task.SandboxDiskGB)"+seedOnly)
 	fs.Parse(args)

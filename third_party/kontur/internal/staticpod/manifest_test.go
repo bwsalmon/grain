@@ -245,3 +245,37 @@ func TestRender_NoGuestUser(t *testing.T) {
 		t.Errorf("manifest sets KONTUR_EXEC_USER with no guest user configured:\n%s", out)
 	}
 }
+
+func TestRender_DiskSizeMB(t *testing.T) {
+	s := baseSpec()
+	s.DiskReadOnly = false
+	s.DiskSizeMB = 8192
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if got, want := envValue(t, out, "CHV_DISK_SIZE_MB"), "8192"; got != want {
+		t.Errorf("CHV_DISK_SIZE_MB = %q, want %q", got, want)
+	}
+}
+
+func TestRender_OmitsDiskSizeWhenUnset(t *testing.T) {
+	// Unset means "whatever the disk image itself is", which the VM
+	// container already does when it sees no CHV_DISK_SIZE_MB -- rendering
+	// a "0" instead would have to be special-cased in there.
+	s := baseSpec()
+	s.DiskReadOnly = false
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if strings.Contains(out, "CHV_DISK_SIZE_MB") {
+		t.Errorf("manifest unexpectedly contains CHV_DISK_SIZE_MB when unset:\n%s", out)
+	}
+}
