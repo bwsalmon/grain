@@ -538,13 +538,15 @@ type CreateTaskRequest struct {
 	// hand, and dispatch.Cycle lets a task carrying it start even with
 	// the deployment already at MaxConcurrent.
 	Configuration bool `json:"configuration"`
-	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) set model.Task's
-	// own fields of the same name -- a per-task override of the
-	// deployment's default sandbox shape. 0 (the default for both) means
-	// no override: the task dispatches at whatever shape the deployment
-	// otherwise configures.
+	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) set model.Task's own fields of
+	// the same name -- a per-task override of the deployment's default
+	// sandbox shape. 0 (the default for all three) means no override: the
+	// task dispatches at whatever shape the deployment otherwise
+	// configures.
 	SandboxCPUs     int `json:"sandboxCpus"`
 	SandboxMemoryMB int `json:"sandboxMemoryMb"`
+	SandboxDiskGB   int `json:"sandboxDiskGb"`
 	// AgentFramework sets model.Task's own field of the same name -- a
 	// per-task override of the deployment's default agent framework
 	// (Settings' own "Agent framework"). "" (the default) means no
@@ -783,7 +785,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		}
 	}
 
-	if err := validateSandboxShape(req.SandboxCPUs, req.SandboxMemoryMB); err != nil {
+	if err := validateSandboxShape(req.SandboxCPUs, req.SandboxMemoryMB, req.SandboxDiskGB); err != nil {
 		return Task{}, err
 	}
 	if err := validateAgentFramework(req.AgentFramework); err != nil {
@@ -848,6 +850,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Configuration:   req.Configuration,
 		SandboxCPUs:     req.SandboxCPUs,
 		SandboxMemoryMB: req.SandboxMemoryMB,
+		SandboxDiskGB:   req.SandboxDiskGB,
 		AgentFramework:  req.AgentFramework,
 		Grants:          grants,
 		Links:           links,
@@ -895,19 +898,27 @@ func validateAgentFramework(framework string) error {
 	}
 }
 
-// validateSandboxShape checks a task's own SandboxCPUs/SandboxMemoryMB
-// override, mirroring bwsalmon/kontur's own staticpod.VMSpec.Validate
-// bounds ("cpus must be at least 1", "memory-mb must be at least 128")
-// the same way UpdateSettings' identical check does for the
-// deployment-wide default -- 0 is the one value each rejects that
-// Validate would not, since 0 means "no override" here rather than a
-// literal request for a zero-vCPU or zero-memory VM.
-func validateSandboxShape(cpus, memoryMB int) error {
+// validateSandboxShape checks a task's own SandboxCPUs/SandboxMemoryMB/
+// SandboxDiskGB override, mirroring bwsalmon/kontur's own
+// staticpod.VMSpec.Validate bounds ("cpus must be at least 1",
+// "memory-mb must be at least 128") the same way UpdateSettings'
+// identical check does for the deployment-wide default -- 0 is the one
+// value each rejects that Validate would not, since 0 means "no
+// override" here rather than a literal request for a zero-vCPU or
+// zero-memory VM.
+//
+// Disk has no Validate bound to mirror (konturctl has no disk-size
+// default of its own -- a VM's disk is as large as the guest image
+// behind it), so the only value rejected there is a negative one.
+func validateSandboxShape(cpus, memoryMB, diskGB int) error {
 	if cpus != 0 && cpus < 1 {
 		return validationErrorf("sandboxCpus must be 0 (no override) or at least 1")
 	}
 	if memoryMB != 0 && memoryMB < 128 {
 		return validationErrorf("sandboxMemoryMb must be 0 (no override) or at least 128")
+	}
+	if diskGB < 0 {
+		return validationErrorf("sandboxDiskGb must be 0 (no override) or at least 1")
 	}
 	return nil
 }
@@ -1096,14 +1107,16 @@ type UpdateTaskRequest struct {
 	Repo        *string `json:"repo,omitempty"`
 	Base        *string `json:"base,omitempty"`
 	AutoMerge   *bool   `json:"autoMerge,omitempty"`
-	// SandboxCPUs and SandboxMemoryMB (bwsalmon/agents#534) edit the same
-	// per-task override CreateTaskRequest's own fields set. Unlike most
+	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) edit the same per-task
+	// override CreateTaskRequest's own fields set. Unlike most
 	// pointer fields here, *req.SandboxCPUs == 0 is a meaningful, valid
 	// edit (clearing a previously-set override back to "use the
 	// deployment default"), not rejected the way Repo's own empty string
 	// is -- only the request field itself being nil means "leave alone".
 	SandboxCPUs     *int `json:"sandboxCpus,omitempty"`
 	SandboxMemoryMB *int `json:"sandboxMemoryMb,omitempty"`
+	SandboxDiskGB   *int `json:"sandboxDiskGb,omitempty"`
 	// AgentFramework edits the same per-task override
 	// CreateTaskRequest.AgentFramework sets, and an empty string is a
 	// meaningful edit here for the same reason a 0 is above: it clears
@@ -1142,15 +1155,18 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 	if req.Title != nil && strings.TrimSpace(*req.Title) == "" {
 		return Task{}, validationErrorf("title cannot be empty")
 	}
-	if req.SandboxCPUs != nil || req.SandboxMemoryMB != nil {
-		var cpus, memoryMB int
+	if req.SandboxCPUs != nil || req.SandboxMemoryMB != nil || req.SandboxDiskGB != nil {
+		var cpus, memoryMB, diskGB int
 		if req.SandboxCPUs != nil {
 			cpus = *req.SandboxCPUs
 		}
 		if req.SandboxMemoryMB != nil {
 			memoryMB = *req.SandboxMemoryMB
 		}
-		if err := validateSandboxShape(cpus, memoryMB); err != nil {
+		if req.SandboxDiskGB != nil {
+			diskGB = *req.SandboxDiskGB
+		}
+		if err := validateSandboxShape(cpus, memoryMB, diskGB); err != nil {
 			return Task{}, err
 		}
 	}
@@ -1197,6 +1213,9 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 		}
 		if req.SandboxMemoryMB != nil {
 			task.SandboxMemoryMB = *req.SandboxMemoryMB
+		}
+		if req.SandboxDiskGB != nil {
+			task.SandboxDiskGB = *req.SandboxDiskGB
 		}
 		if req.AgentFramework != nil {
 			task.AgentFramework = *req.AgentFramework

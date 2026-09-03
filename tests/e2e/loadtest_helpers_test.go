@@ -85,7 +85,7 @@ func (g *loadGitHub) FindOpenPullRequestForBranch(owner, repo, branch string) (*
 func (g *loadGitHub) CreateIssue(owner, repo, title, body string, labels []string) (github.Issue, error) {
 	return github.Issue{}, g.unsupported("CreateIssue")
 }
-func (g *loadGitHub) MergePullRequest(owner, repo string, number int) error {
+func (g *loadGitHub) MergePullRequest(owner, repo string, number int, headSHA string) error {
 	return g.unsupported("MergePullRequest")
 }
 func (g *loadGitHub) GetPullRequest(owner, repo string, number int) (github.PullRequestDetail, error) {
@@ -102,6 +102,9 @@ func (g *loadGitHub) ListCheckRuns(owner, repo, ref string) ([]github.CheckRun, 
 }
 func (g *loadGitHub) ListWorkflowRuns(owner, repo, headSHA string) ([]github.CheckRun, error) {
 	return nil, g.unsupported("ListWorkflowRuns")
+}
+func (g *loadGitHub) FailedJobLogs(owner, repo, headSHA string) ([]github.JobLog, error) {
+	return nil, g.unsupported("FailedJobLogs")
 }
 func (g *loadGitHub) ListComments(owner, repo string, number int) ([]github.Comment, error) {
 	return nil, g.unsupported("ListComments")
@@ -354,7 +357,11 @@ type loadMetrics struct {
 	writeErrs int
 	writeOps  int
 
-	tickDur []time.Duration
+	// How long a tick took is not here: RunCycle measures that itself,
+	// into the orchestrator.CycleTimes ring loadtest_test.go hands its
+	// Deps (reportCycles). All this counts is how many ticks were driven,
+	// which is what reportCycles checks that ring against.
+	ticks int
 
 	outcomes map[loadOutcomeKind]int
 
@@ -424,10 +431,16 @@ func (m *loadMetrics) recordWrite(d time.Duration, err error) {
 	}
 }
 
-func (m *loadMetrics) recordTick(d time.Duration) {
+func (m *loadMetrics) tickRan() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.tickDur = append(m.tickDur, d)
+	m.ticks++
+}
+
+func (m *loadMetrics) tickCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ticks
 }
 
 func (m *loadMetrics) recordOutcome(k loadOutcomeKind) {
@@ -517,7 +530,6 @@ type loadMetricsSnapshot struct {
 	stillUnresolved     int
 	write               durationStats
 	writeErrs, writeOps int
-	tick                durationStats
 	outcomes            map[loadOutcomeKind]int
 }
 
@@ -536,7 +548,6 @@ func (m *loadMetrics) snapshot() loadMetricsSnapshot {
 		write:           statsOf(m.writeLat),
 		writeErrs:       m.writeErrs,
 		writeOps:        m.writeOps,
-		tick:            statsOf(m.tickDur),
 		outcomes:        outcomes,
 	}
 }

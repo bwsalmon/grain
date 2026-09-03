@@ -1415,6 +1415,7 @@ func testConfig() model.Config {
 		TargetRepos:         []string{"acme/widgets", "acme/gadgets"},
 		SandboxCPUs:         4,
 		SandboxMemoryMB:     8192,
+		SandboxDiskGB:       40,
 		DefaultCapabilities: []string{"gcp-key", "github-sandbox"},
 	}
 }
@@ -1951,6 +1952,177 @@ func TestReorderRebalancesWhenNeighboursAreCrowded(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// --- the merge queue at the front of the backlog -------------------------
+
+// putOrdered files tasks at the OrderKey each name maps to, so a test can
+// state the backlog it starts from as the order itself rather than as a
+// sequence of writes.
+func putOrdered(t *testing.T, store *model.Store, ctx context.Context, keys map[string]float64) {
+	t.Helper()
+	for id, key := range keys {
+		tk := task(id, true)
+		tk.OrderKey = key
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func orderKeys(t *testing.T, store *model.Store, ctx context.Context) map[string]float64 {
+	t.Helper()
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	keys := map[string]float64{}
+	for _, tk := range tasks {
+		keys[tk.ID] = tk.OrderKey
+	}
+	return keys
+}
+
+// TestMoveToFrontOfBacklogCarriesTheQueuePastOrdinaryWork is the merge
+// queue making its order visible: the tasks whose pull requests are
+// waiting to land go to the front of the list, keeping the relative order
+// they already had, and everything else keeps its own.
+func TestMoveToFrontOfBacklogCarriesTheQueuePastOrdinaryWork(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued-2": 20, "queued-1": 5})
+
+	// Named in neither backlog nor queue order, to pin that the block
+	// lands in the order the backlog already gave it rather than in the
+	// order the caller happened to list.
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued-2", "queued-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"queued-1", "queued-2", "ordinary"}) {
+		t.Fatalf("backlog = %v, want the two queued tasks in front of the ordinary one", got)
+	}
+}
+
+// TestMoveToFrontOfBacklogStaysBehindAFixTaskAtTheHead is the other half
+// of the ordering: a merge task the queue filed (orchestrator.fileFixTask)
+// sits at the very head, so the queue it repairs goes in front of the
+// ordinary backlog but behind that.
+func TestMoveToFrontOfBacklogStaysBehindAFixTaskAtTheHead(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued": 20})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = -10
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"fix", "queued", "ordinary"}) {
+		t.Fatalf("backlog = %v, want the fix task still at the very head", got)
+	}
+}
+
+// TestMoveToFrontOfBacklogIgnoresAFixTaskInsideTheBacklog is the same
+// question asked of a fix task that is *not* at the head -- dragged down
+// by a human, or filed before fix tasks were placed at all and left at
+// OrderKey's zero value. It bounds nothing: the queue goes to the front
+// of the whole list, which is the only place it can be seen.
+func TestMoveToFrontOfBacklogIgnoresAFixTaskInsideTheBacklog(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued": 30})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = 20
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"queued", "ordinary", "fix"}) {
+		t.Fatalf("backlog = %v, want the queue in front of a fix task sitting inside the backlog", got)
+	}
+}
+
+// TestMoveToFrontOfBacklogWritesNothingWhenTheOrderAlreadyHolds is what
+// makes it safe for orchestrator.SyncPullRequests to call every cycle: an
+// order already correct is left exactly as it is, rather than rewritten to
+// the same order with fresh keys that crowd every later split.
+func TestMoveToFrontOfBacklogWritesNothingWhenTheOrderAlreadyHolds(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"queued-1": 5, "queued-2": 6, "ordinary": 10})
+
+	before := orderKeys(t, store, ctx)
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued-1", "queued-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if after := orderKeys(t, store, ctx); !reflect.DeepEqual(after, before) {
+		t.Fatalf("order keys changed from %v to %v with nothing out of place", before, after)
+	}
+}
+
+// TestMoveToFrontOfBacklogRebalancesWhenTheFrontIsCrowded is Reorder's own
+// backstop reached from here: the gap between the fix task at the head and
+// the first ordinary task is too fine to split two keys out of, so the
+// whole backlog is renumbered first and the move still lands in order.
+func TestMoveToFrontOfBacklogRebalancesWhenTheFrontIsCrowded(t *testing.T) {
+	store, db, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10, "queued-1": 20, "queued-2": 30})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = 9.99999999
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+	// Belt and braces, the same as TestReorderRebalancesWhenNeighboursAreCrowded.
+	if _, err := db.ExecContext(ctx, "UPDATE `task` SET `order_key` = 9.99999999 WHERE `id` = 'fix'"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"queued-1", "queued-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"fix", "queued-1", "queued-2", "ordinary"}) {
+		t.Fatalf("backlog = %v, want the queue landed between a crowded head and the backlog", got)
+	}
+}
+
+func TestMoveToFrontOfBacklogRejectsAnUnknownID(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MoveToFrontOfBacklog(ctx, []string{"gone"}); err == nil {
+		t.Fatal("MoveToFrontOfBacklog with an unknown id succeeded, want an error")
+	}
+}
+
+// TestReadyDispatchesAFixTaskInBacklogOrderLikeAnythingElse pins the
+// carve-out Store.Ready used to make for Origin.Reason == ReasonFix being
+// gone: a fix task is dispatched first because
+// orchestrator.fileFixTask puts it at the head of the backlog, and one a
+// human has since dragged behind other work waits its turn there like
+// anything else. Dispatch order is the order on screen, both ways round.
+func TestReadyDispatchesAFixTaskInBacklogOrderLikeAnythingElse(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"ordinary": 10})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = 20
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ordinary", "fix"}; !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready = %v, want %v -- a fix task behind other work in the backlog waits behind it", ready, want)
+	}
+}
+
 // --- backlog order settings (bwsalmon/agents#476) ------------------------
 
 func TestInitMigratesAnExistingDatabaseMissingOrderKey(t *testing.T) {
@@ -2103,8 +2275,9 @@ func TestInitMigratesAnExistingDatabaseMissingSandboxShape(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB/SandboxDiskGB after migrating = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 
@@ -2473,8 +2646,9 @@ func TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
-	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 {
-		t.Fatalf("SandboxCPUs/SandboxMemoryMB after migrating = %d/%d, want 0/0", got.SandboxCPUs, got.SandboxMemoryMB)
+	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
+		t.Fatalf("SandboxCPUs/SandboxMemoryMB/SandboxDiskGB after migrating = %d/%d/%d, want 0/0/0",
+			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
 	}
 }
 

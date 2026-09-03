@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -156,6 +158,15 @@ func unfinishedChecks(checks []github.CheckRun) []string {
 // reading that as clean is how a merge beats the tests. A repo with no CI
 // configured never fills the list in, and there is nothing in the Checks
 // API that tells the two apart; only time does.
+//
+// GitHub's own mergeable_state is not the exception it looks like: it
+// reads "clean" for an empty check list, the same answer it gives a
+// genuinely green one, because it is computed from that same empty list.
+// A live pull request on this repository was caught reading "clean" with
+// zero check runs four seconds after a push, two seconds before its
+// first check registered -- this gap, measured, in the field that was
+// supposed to close it. See github.PullRequestDetail.MergeableState for
+// the whole run. Nothing there removes this wait.
 //
 // Two minutes is chosen against what it costs on each side. On a repo
 // that does have CI it costs nothing at all: the checks appear within
@@ -455,12 +466,31 @@ func ChecksUnavailable() bool {
 // below never clears within a process). github.IsPermissionDenied draws
 // that line by message, not by status.
 //
-// headSHA may be empty on a PR read before GitHub filled it in; the
-// Actions fallback needs a commit to scope to, so it is skipped rather
-// than widened to a branch-scoped read that could return an older
-// commit's runs.
+// Both endpoints are scoped to headSHA -- the commit the caller read off
+// the pull request a moment ago, and the commit whose health it is about
+// to decide. The Checks API takes any ref, including the head branch's
+// name, and a branch-scoped read is a read of whatever that branch points
+// at *now*: a push landing between the caller's GetPullRequest and this
+// call answers for a commit the caller never saw, so the check list, the
+// verdict computed from it and the registration-window sighting keyed on
+// the caller's headSHA would each describe a different commit. Naming the
+// commit costs nothing and keeps all three talking about one (a push
+// during the cycle then simply makes the *next* cycle start that new
+// commit's window afresh, which is what sighting.headSHA is for).
+//
+// head, the branch name, is the fallback for the one case there is no sha
+// to name: headSHA may be empty on a PR read before GitHub filled it in.
+// A branch-scoped read is then better than no CI signal at all, since the
+// caller's own headSHA is empty too and emptyChecksSettled already
+// refuses to conclude anything from an empty list without one. The
+// Actions fallback below has no such fallback of its own -- it takes a
+// commit and nothing else -- so it is skipped rather than widened.
 func checkRunsFor(client github.Client, ref model.PullRequestRef, head, headSHA string) ([]github.CheckRun, bool, error) {
-	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, head)
+	commit := headSHA
+	if commit == "" {
+		commit = head
+	}
+	checks, err := client.ListCheckRuns(ref.Repo.Owner, ref.Repo.Name, commit)
 	if err == nil {
 		return checks, true, nil
 	}
@@ -529,35 +559,85 @@ func isQueueMember(e queueEntry) bool {
 	return e.obs == nil || e.obs.MergeQueueBlockedAt == nil
 }
 
-// queueHeads returns, for every target repo with at least one queued
-// task, the ID of the one task in front: the earliest submitted (by
-// Task.CreatedAt, ties broken by ID so the choice is deterministic) among
-// entries for which isQueueMember is true. Only a repo's head task is
-// ever merged or auto-fixed on a given cycle -- everything behind it
-// waits, which is the whole property that makes this a queue rather than
-// "merge every clean PR in whatever order GitHub happens to return them
-// in": a fix filed for the second task while the first is still being
-// repaired would very likely need refiling the moment the first merges
-// and changes what the second is based against.
-func queueHeads(entries []queueEntry) map[string]string {
-	heads := map[string]string{}
-	earliest := map[string]time.Time{}
+// queueOrder is every entry isQueueMember accepts, across all repos at
+// once, in the merge queue's own order: the backlog's, ascending
+// Task.OrderKey with the task ID as the tiebreak, which is the order
+// Store.ListTasks shows a human and Store.Ready dispatches in.
+//
+// The queue used to have an order of its own -- earliest submitted, by
+// Task.CreatedAt -- computed here, inside one cycle, and written down
+// nowhere. Reading position off the backlog instead means there is one
+// ordering rather than two, and it is the one already on screen:
+// showQueueAtFrontOfBacklog keeps these entries at the front of that
+// backlog, in this order, so what a list shows and what merges next
+// cannot drift apart, and a human who disagrees with the order can drag a
+// row rather than discover there was nothing to drag. For a deployment
+// that has never reordered anything this is the same answer CreatedAt
+// gave: Store.OrderKeyForNewTask files each new task behind the last.
+func queueOrder(entries []queueEntry) []queueEntry {
+	members := make([]queueEntry, 0, len(entries))
 	for _, e := range entries {
-		if !isQueueMember(e) {
-			continue
+		if isQueueMember(e) {
+			members = append(members, e)
 		}
+	}
+	sort.SliceStable(members, func(i, j int) bool {
+		if members[i].task.OrderKey != members[j].task.OrderKey {
+			return members[i].task.OrderKey < members[j].task.OrderKey
+		}
+		return members[i].task.ID < members[j].task.ID
+	})
+	return members
+}
+
+// queueHeads returns, for every target repo with at least one queued
+// task, the ID of the one task in front: the first of that repo's
+// entries in queueOrder. Only a repo's head task is ever merged or
+// auto-fixed on a given cycle -- everything behind it waits, which is the
+// whole property that makes this a queue rather than "merge every clean
+// PR in whatever order GitHub happens to return them in": a fix filed for
+// the second task while the first is still being repaired would very
+// likely need refiling the moment the first merges and changes what the
+// second is based against.
+func queueHeads(members []queueEntry) map[string]string {
+	heads := map[string]string{}
+	for _, e := range members {
 		repo := e.ref.Repo.String()
-		created := time.Time{}
-		if e.task.CreatedAt != nil {
-			created = *e.task.CreatedAt
-		}
-		cur, ok := heads[repo]
-		if !ok || created.Before(earliest[repo]) || (created.Equal(earliest[repo]) && e.task.ID < cur) {
+		if _, ok := heads[repo]; !ok {
 			heads[repo] = e.task.ID
-			earliest[repo] = created
 		}
 	}
 	return heads
+}
+
+// showQueueAtFrontOfBacklog moves every task waiting on the merge queue to
+// the front of the backlog, in the order the queue will act on them
+// (queueOrder), so grain's internal ordering is something a person can
+// read off the task list rather than something only a cycle knows.
+//
+// Reconciled every cycle rather than written once when a task joins the
+// queue: membership is a derived fact (isQueueMember, over auto-merge,
+// fix-task and blocked-at state that all move on their own), so the only
+// way for the front of the backlog to keep agreeing with it is to
+// recompute both together. Store.MoveToFrontOfBacklog writes nothing when
+// the order already holds, which is almost every cycle.
+//
+// Failing is not fatal to the sync it runs inside: what is lost is the
+// backlog showing the right order for one cycle, and every merge decision
+// here is made from queueOrder directly rather than from what was
+// written.
+func showQueueAtFrontOfBacklog(ctx context.Context, store *model.Store, members []queueEntry) error {
+	if len(members) == 0 {
+		return nil
+	}
+	ids := make([]string, len(members))
+	for i, e := range members {
+		ids[i] = e.task.ID
+	}
+	if err := store.MoveToFrontOfBacklog(ctx, ids); err != nil {
+		return fmt.Errorf("orchestrator: moving the merge queue to the front of the backlog: %w", err)
+	}
+	return nil
 }
 
 // SyncPullRequests refreshes every completed task's tracked pull request,
@@ -565,11 +645,12 @@ func queueHeads(entries []queueEntry) map[string]string {
 // tasks whose PR finished -- the other half of core.py's _close_finished_prs
 // this package owns, plus the merge queue bwsalmon/agents#283 asked for in
 // place of core.py's own _suggest_fix (a suggestion a human had to
-// approve before the agent set would attempt it). See queueHeads and
-// syncEntry for the queue itself; this function only gathers the state
-// every entry's decision needs before any of them act, so a decision
-// about task N never depends on an in-progress change queueHeads has not
-// seen yet.
+// approve before the agent set would attempt it). See queueOrder,
+// queueHeads and syncEntry for the queue itself, and
+// showQueueAtFrontOfBacklog for where it puts itself so a person can see
+// it; this function only gathers the state every entry's decision needs
+// before any of them act, so a decision about task N never depends on an
+// in-progress change queueHeads has not seen yet.
 func SyncPullRequests(ctx context.Context, store *model.Store, client github.Client, now time.Time) error {
 	links, err := store.OpenPullRequestLinks(ctx)
 	if err != nil {
@@ -614,13 +695,20 @@ func SyncPullRequests(ctx context.Context, store *model.Store, client github.Cli
 		entries = append(entries, queueEntry{task: *task, obs: obs, ref: ref})
 	}
 
+	// The queue, in the order it will act: computed once against the whole
+	// set, and put where a person can see it before anything acts on it.
+	members := queueOrder(entries)
+	heads := queueHeads(members)
+	if err := showQueueAtFrontOfBacklog(ctx, store, members); err != nil {
+		errs = append(errs, err)
+	}
+
 	// Acting on one entry is isolated, because head-of-queue was already
 	// decided above against the complete set: an entry that fails here
 	// cannot make another entry merge that would not have merged anyway
 	// (syncEntry merges an ordinary queue member only when it is its
 	// repo's head), so the worst a failure costs the others is a cycle of
 	// latency -- which is what returning early used to cost all of them.
-	heads := queueHeads(entries)
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
@@ -667,8 +755,18 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		// is what keeps the sighting map to pull requests that are
 		// actually in that state (emptyChecksSettled starts a commit's
 		// window on the first call for it).
-		if checksKnown && len(checks) == 0 {
-			checksSettled = emptyChecksSettled(ref, detail.HeadSHA, now)
+		//
+		// A list that is *not* empty drops the sighting, the same way
+		// forgetPendingChecks below drops the other clock the moment its
+		// own state stops holding: checks have registered, so there is
+		// nothing left to time, and a sighting left lying around is one
+		// that could outlive the state it was timing.
+		if checksKnown {
+			if len(checks) == 0 {
+				checksSettled = emptyChecksSettled(ref, detail.HeadSHA, now)
+			} else {
+				forgetEmptyChecks(ref)
+			}
 		}
 	}
 	health := healthFrom(detail, checks, checksKnown, checksSettled)
@@ -730,8 +828,28 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// pull requests it would otherwise comment on individually.
 	switch {
 	case health == model.PrClean && task.AutoMerge && (isFixTask || isHead || blocked):
-		if err := client.MergePullRequest(ref.Repo.Owner, ref.Repo.Name, ref.Number); err != nil {
-			return fmt.Errorf("orchestrator: auto-merging %s: %w", ref, err)
+		// Pinned to the commit the verdict above was computed for, not
+		// left to land on whatever the head branch points at by the time
+		// GitHub processes this. The two are the same commit right up
+		// until they are not: a push arriving between the reads above and
+		// this call -- a fix task merging into this branch, a human's own
+		// "push a fix by hand" that escalateToUser asked for, a
+		// redispatched task pushing again -- would otherwise merge code
+		// whose CI this cycle never read, which is the one thing waiting
+		// for CI at all exists to prevent.
+		//
+		// GitHub refuses that with 409 (MergePullRequest's own doc
+		// comment), and refusing is the whole point: the error goes back
+		// to SyncPullRequests, which is already built to have one entry
+		// fail without disturbing the others, and the next cycle reads
+		// the commit that is there now and judges it on its own CI.
+		//
+		// An empty HeadSHA merges unpinned, as before. There is nothing
+		// to pin to, and it is very nearly unreachable anyway: a PR
+		// GitHub has not filled the sha in for reads PENDING on an empty
+		// check list (emptyChecksSettled) rather than clean.
+		if err := client.MergePullRequest(ref.Repo.Owner, ref.Repo.Name, ref.Number, detail.HeadSHA); err != nil {
+			return fmt.Errorf("orchestrator: auto-merging %s (head %q): %w", ref, detail.HeadSHA, err)
 		}
 		// The merge above may have already settled the PR; re-read rather
 		// than assume, since GitHub applies it asynchronously the same way
@@ -744,7 +862,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		health = healthFrom(detail, checks, checksKnown, checksSettled)
 
 	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
-		if err := advanceMergeQueueHead(ctx, store, task, ref, detail, health, checks, now); err != nil {
+		if err := advanceMergeQueueHead(ctx, store, client, task, ref, detail, health, checks, now); err != nil {
 			return err
 		}
 
@@ -823,13 +941,13 @@ func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID str
 // filed has finished and decide whether that resolved things, or give up
 // on a fix that has not finished and is not going to
 // (defaultFixTaskDeadline).
-func advanceMergeQueueHead(ctx context.Context, store *model.Store,
+func advanceMergeQueueHead(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
 	fixTaskID, hasFix := fixTaskLink(task)
 	if !hasFix {
-		return fileFixTask(ctx, store, task, ref, detail, health, checks, now)
+		return fileFixTask(ctx, store, client, task, ref, detail, health, checks, now)
 	}
 
 	fixState, err := store.State(ctx, fixTaskID)
@@ -887,15 +1005,15 @@ func fixTaskLink(task model.Task) (string, bool) {
 // side.
 //
 // Six hours is chosen against what a fix task honestly needs: it has to
-// wait its turn to be dispatched (briefly -- Store.Ready sorts ReasonFix
-// tasks ahead of everything else), run an agent (capped at
-// defaultMaxRunRuntime, two hours), open a pull request and get its own
-// CI through. That is comfortably inside six hours even when every stage
-// takes longer than usual, and the cost of erring long is one that is
-// paid once per stuck head rather than per cycle. Erring short is worse
-// here than it is for CI: giving up throws away an automatic fix that
-// might have been minutes from landing, and the queue never files a
-// second one.
+// wait its turn to be dispatched (briefly -- fileFixTask files it at the
+// very head of the backlog, which is the order Store.Ready dispatches
+// in), run an agent (capped at defaultMaxRunRuntime, two hours), open a
+// pull request and get its own CI through. That is comfortably inside
+// six hours even when every stage takes longer than usual, and the cost
+// of erring long is one that is paid once per stuck head rather than per
+// cycle. Erring short is worse here than it is for CI: giving up throws
+// away an automatic fix that might have been minutes from landing, and
+// the queue never files a second one.
 //
 // Measured from the fix task's own CreatedAt, which fileFixTask stamps in
 // the same cycle it writes LinkFixTask, rather than from an in-memory
@@ -952,6 +1070,80 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks
 	}
 }
 
+// fixLogTailLines is how many lines of each failing job's log a fix
+// task's body carries. Enough for a Go test failure's own output and the
+// package lines around it; short enough that four of them stay a thing a
+// person scrolls rather than a file they search.
+const fixLogTailLines = 80
+
+// actionsLogTimestamp is the RFC3339 stamp GitHub prefixes every line of
+// a job log with. It is the same on every line, says nothing about the
+// failure, and costs about a quarter of each line, so it comes off.
+var actionsLogTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z `)
+
+// failingJobLogs is the rest of what a fix task needs and healthReason
+// cannot give it: not just which jobs are red, but what they printed.
+//
+// healthReason already names the failing checks, which is what a person
+// reading the fix task needs to know where to look. An agent dispatched
+// into a sandbox needs more than that, because the sandbox is not a CI
+// runner -- it may not be able to run the failing suite at all -- so
+// "which test is red" has to travel with the task rather than be
+// rediscovered inside it. A job name plus the tail of its log is the
+// difference between "one or more required checks are failing" and a
+// stack trace.
+//
+// Best effort, deliberately: this is three extra GitHub reads
+// (github.FailedJobLogs) against a credential that may not be allowed to
+// make them, for a CI provider that may not be Actions at all, at the
+// one moment the queue has finally decided to act on a broken head.
+// Failing the whole cycle over the *annotation* on a fix task would cost
+// the fix itself, so an error is logged and the body says what it said
+// before this existed.
+func failingJobLogs(client github.Client, ref model.PullRequestRef, headSHA string) string {
+	logs, err := client.FailedJobLogs(ref.Repo.Owner, ref.Repo.Name, headSHA)
+	if err != nil {
+		log.Printf("orchestrator: reading the failing job logs for %s: %v -- "+
+			"filing the fix task with the check names alone", ref, err)
+		return ""
+	}
+	if len(logs) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n## What CI printed\n\n" +
+		"The end of each failing job's own log, copied here because the sandbox " +
+		"this fix runs in is not the runner that produced it:")
+	for _, l := range logs {
+		fmt.Fprintf(&b, "\n\n### %s\n", l.Name)
+		if l.URL != "" {
+			fmt.Fprintf(&b, "\n%s\n", l.URL)
+		}
+		// Four backticks, so a log that itself contains a fenced block --
+		// any Go test printing three backticks does -- cannot close this
+		// one early.
+		fmt.Fprintf(&b, "\n````\n%s\n````\n", jobLogExcerpt(l.Log))
+		if l.Truncated {
+			b.WriteString("\n(the tail of the log, not all of it)\n")
+		}
+	}
+	return b.String()
+}
+
+// jobLogExcerpt is one job's log as it goes into a task body: its last
+// fixLogTailLines lines, without Actions' own per-line timestamps.
+func jobLogExcerpt(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) > fixLogTailLines {
+		lines = lines[len(lines)-fixLogTailLines:]
+	}
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(actionsLogTimestamp.ReplaceAllString(line, ""), "\r")
+	}
+	return strings.Join(lines, "\n")
+}
+
 // fixTaskTitle names a fix after the task it repairs -- "Resolve: Add
 // pagination to the tasks API" -- where it used to be named after the
 // pull request that went red ("🤖 grain: fix acme/widgets#104").
@@ -1004,7 +1196,14 @@ func fixTaskTitle(task model.Task, ref model.PullRequestRef) string {
 // task it repairs says so -- both writes grain owns, where the GitHub
 // version needed an issue created for the fix and a comment posted on the
 // original task's own issue.
-func fileFixTask(ctx context.Context, store *model.Store,
+//
+// Its body carries the failure itself, not just the verdict: healthReason
+// names the jobs that went red, and for a failing pull request
+// failingJobLogs appends what those jobs printed. The comment on the
+// parent task stays the one-line version -- it is read by a person
+// watching the queue, who has the pull request itself a click away, where
+// the agent dispatched into a sandbox has neither.
+func fileFixTask(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
@@ -1015,6 +1214,17 @@ func fileFixTask(ctx context.Context, store *model.Store,
 	if err != nil {
 		return fmt.Errorf("orchestrator: allocating an id for a fix task for %s: %w", task.ID, err)
 	}
+	// At the very head of the backlog: ahead of the queue this repairs,
+	// which showQueueAtFrontOfBacklog has already put at the front of it,
+	// and so ahead of everything else. That is bwsalmon/agents#389's "a
+	// queue head's repair must not wait behind unrelated new work" said as
+	// a position rather than as a sort rule inside Store.Ready, which is
+	// where it used to live and where nobody could see it -- the backlog
+	// now shows the repair first because it really is dispatched first.
+	orderKey, err := store.OrderKeyForNewTask(ctx, true)
+	if err != nil {
+		return fmt.Errorf("orchestrator: placing a fix task for %s at the head of the backlog: %w", task.ID, err)
+	}
 	title := fixTaskTitle(task, ref)
 	body := fmt.Sprintf(
 		"Task %s opened %s (%s), but %s.\n\n"+
@@ -1024,6 +1234,9 @@ func fileFixTask(ctx context.Context, store *model.Store,
 			"merge queue dispatches it itself.",
 		task.ID, ref, detail.HTMLURL, reason, detail.HeadRef, detail.HeadRef,
 	)
+	if health == model.PrFailing {
+		body += failingJobLogs(client, ref, detail.HeadSHA)
+	}
 
 	fixTask := model.Task{
 		ID:     id,
@@ -1041,6 +1254,7 @@ func fileFixTask(ctx context.Context, store *model.Store,
 		AutoMerge: true,
 		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
 		CreatedAt: &now,
+		OrderKey:  orderKey,
 	}
 	if err := store.PutTask(ctx, fixTask); err != nil {
 		return fmt.Errorf("orchestrator: filing fix task %s: %w", fixTask.ID, err)

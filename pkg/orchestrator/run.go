@@ -611,6 +611,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 // nothing at all when the framework returned no result to say. Kept to
 // names and counts, like noActionDetail: this lands in a stored outcome
 // column that `grain get` prints, not a transcript.
+//
+// Both ways a run can fail with a result behind it use this: a framework
+// that returned an error (above) and a run whose own tool call errored
+// (outcomeOf). The second used to record only the failing call's name, so
+// a run that opened its pull request and then tripped over something
+// unrelated read back as never having opened one -- which is a wrong
+// answer to the only question task_run.detail can be asked about tool
+// use, not merely a thinner one.
 func partialWorkSuffix(result *agent.Result) string {
 	if result == nil || len(result.ToolCalls) == 0 {
 		return ""
@@ -627,18 +635,40 @@ func partialWorkSuffix(result *agent.Result) string {
 // run_command did not do the work. Ported from pkg/orchestrate's own
 // runAgent (bwsalmon/agents#254), extended with detail for
 // bwsalmon/agents#403's own "a human should see why, not just that".
+//
+// Every ending that had a run behind it at all carries toolCallSummary,
+// including the successful one, which used to record nothing. That is not
+// symmetry for its own sake: which tools a run reached for is the only
+// evidence there is for whether a tool grain went to the trouble of
+// building and naming in the prompt is actually being used, and until now
+// it survived a successful run nowhere. agent.Result is never persisted;
+// noActionDetail and partialWorkSuffix wrote the summary only for runs
+// that failed or achieved nothing; and Result.Transcript is prose, is
+// best-effort per framework (agent.Result's own doc comment), and renders
+// a call as a "> name(args)" line that any tool's own *output* can
+// contain verbatim -- so counting calls out of it is both framework-
+// specific and unsound. A run that pushed, checked CI, repaired and
+// pushed again is exactly the run that succeeds, so the successful path
+// was precisely the one where the question "did it call the tool?" could
+// not be answered.
+//
+// Names and counts only, into a stored column a task listing prints --
+// the same bound noActionDetail's own doc comment sets, and the reason
+// this is not a transcript store.
 func outcomeOf(result *agent.Result) (outcome, detail string) {
 	sawTool := false
 	for _, c := range result.ToolCalls {
 		sawTool = true
 		if c.IsError {
-			return "failed", fmt.Sprintf("tool call %q failed: %s", c.Name, c.Text)
+			return "failed", fmt.Sprintf("tool call %q failed: %s%s",
+				c.Name, c.Text, partialWorkSuffix(result))
 		}
 	}
 	if !sawTool {
 		return "failed", "the agent made no tool calls at all"
 	}
-	return "succeeded", ""
+	return "succeeded", fmt.Sprintf("the run made %d tool call(s)%s",
+		len(result.ToolCalls), toolCallSummary(result))
 }
 
 // prepareCapabilities resolves and materializes cc.Task's capability

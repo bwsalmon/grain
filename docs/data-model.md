@@ -2342,6 +2342,23 @@ deployments with genuinely no CI, which wait it out once per head
 commit; the alternative is that every repo that does have CI can merge a
 change in the seconds before its first check run appears.
 
+**One commit, from the read to the merge.** All of the above is reasoning
+about a *commit*, while a pull request is a moving branch, and the two
+part company whenever a push lands mid-cycle — a human's own "push a fix
+by hand", a fix task merging into the branch it repairs, a redispatched
+task pushing again. So the cycle names the commit at every step rather
+than letting any of them mean "whatever the branch points at now": the
+head sha comes off the pull-request read, the check runs are read for
+that sha (a branch-scoped Checks read would answer for a commit the cycle
+never saw), the settling window above is keyed on it, and the merge
+carries it in GitHub's own `sha` parameter, which refuses the merge with
+`409` if the branch has moved since. A refusal costs one cycle: the task
+keeps its queue position, and the commit that has landed is judged next
+cycle on its own CI, with its own window started afresh. Without the
+pinning, a push arriving in the gap between the verdict and the merge
+lands untested code with grain having had no way to know — the exact
+outcome the `PENDING` rules above exist to prevent.
+
 **The wire types stay separate.** `PullRequestDetail`, `Issue`, and
 `Comment` in `github.py` are projections of GitHub's records, shaped by
 what GitHub's endpoints return, and `github.py`'s own docstrings already

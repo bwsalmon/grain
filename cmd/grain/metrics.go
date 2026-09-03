@@ -1,5 +1,7 @@
 // metrics.go is "grain metrics": the throughput and latency report
-// (pkg/metrics, served as GET /api/metrics) printed at a terminal.
+// (pkg/metrics, served as GET /api/metrics) printed at a terminal --
+// including the daemon's own reconcile tick, which is what says whether
+// a queue wait in that report was contention or scheduling.
 //
 // It is a task verb like every other one in main.go rather than a mode of
 // its own -- it asks a running daemon over REST, holds no store, and
@@ -68,6 +70,13 @@ func (p *printer) metrics(rep ui.MetricsReport) {
 	}
 	fmt.Printf("  live now                 %6d\n", rep.Runs.Live)
 
+	// Printed right after capacity and before the latency stages, so
+	// "approved -> attempt started" below is read with both of its causes
+	// already on screen: the utilization above says whether the
+	// deployment was full, and this says what the tick itself cost
+	// regardless of that.
+	printCycles(rep.Cycles)
+
 	// Latency's own header says what a window means for it: these are the
 	// samples that *ended* inside it, so a task filed last month and
 	// completed this morning is in here at its full lead time.
@@ -90,6 +99,74 @@ func (p *printer) metrics(rep ui.MetricsReport) {
 			fmt.Printf("  oldest queued: task %s, waiting %s\n",
 				rep.Backlog.OldestQueuedTaskID, seconds(rep.Backlog.OldestQueuedSeconds))
 		}
+	}
+}
+
+// printCycles renders the daemon's own tick -- the section that says
+// whether the queue_wait stage printed below it was capacity or
+// scheduling.
+//
+// The line the whole section builds to is the scheduling floor:
+// tick-to-tick p50 plus dispatch p50 is what a task pays for grain's own
+// scheduling with no contention at all, so a queue_wait near it is the
+// tick and a queue_wait far above it is the deployment being full. The
+// per-reconciler table under it is what says which reconciler to look at
+// when the tick itself is the problem, since they run in sequence and a
+// slow one delays every decision behind it.
+//
+// Nothing is printed for a report whose daemon had no ticks to speak
+// for: `grain metrics` against a deployment serving a UI without a
+// reconcile loop (Enabled false), or against one that has only just
+// restarted (n == 0). An empty table there would read as "the tick takes
+// no time", which is the opposite of "nobody measured it".
+func printCycles(c ui.MetricsCycles) {
+	if !c.Enabled || c.N == 0 {
+		return
+	}
+	fmt.Println("\nreconcile tick (this daemon, since it started -- not stored, so not over the window)")
+	fmt.Printf("  ticks measured           %6d", c.N)
+	if c.Truncated {
+		fmt.Printf("  (of %d run; older ones forgotten)", c.Observed)
+	}
+	fmt.Println()
+	fmt.Printf("  %-24s %10s %10s %10s\n", "", "p50", "p90", "max")
+	fmt.Printf("  %-24s %10s %10s %10s\n", "tick duration",
+		preciseSeconds(c.Tick.P50Seconds), preciseSeconds(c.Tick.P90Seconds), preciseSeconds(c.Tick.MaxSeconds))
+	fmt.Printf("  %-24s %10s %10s %10s\n", "tick to tick",
+		preciseSeconds(c.Interval.P50Seconds), preciseSeconds(c.Interval.P90Seconds), preciseSeconds(c.Interval.MaxSeconds))
+	fmt.Printf("  %-24s %10s %10s %10s\n", "cycle start -> dispatch",
+		preciseSeconds(c.DispatchWait.P50Seconds), preciseSeconds(c.DispatchWait.P90Seconds), preciseSeconds(c.DispatchWait.MaxSeconds))
+	fmt.Printf("  scheduling floor: %s  (tick-to-tick p50 + dispatch p50 -- the queue wait a task pays\n"+
+		"    for grain's own scheduling with no contention at all)\n",
+		preciseSeconds(c.Interval.P50Seconds+c.DispatchWait.P50Seconds))
+
+	if len(c.Reconcilers) > 0 {
+		fmt.Printf("\n  %-16s %10s %10s %10s %8s\n", "reconciler", "wait p50", "p50", "p90", "failed")
+		for _, r := range c.Reconcilers {
+			fmt.Printf("  %-16s %10s %10s %10s %8d\n", r.Name,
+				preciseSeconds(r.Wait.P50Seconds), preciseSeconds(r.Duration.P50Seconds),
+				preciseSeconds(r.Duration.P90Seconds), r.Failures)
+		}
+	}
+}
+
+// preciseSeconds renders one of the cycles section's own second counts.
+// It is seconds() with a finer hand: a healthy tick is measured in
+// milliseconds, and rounding to the whole second the way every other
+// number in this report does would print it as "0s" -- which is the one
+// answer this section must never give, since "too fast to matter" and
+// "nobody measured it" would then look the same.
+func preciseSeconds(s float64) string {
+	d := time.Duration(s * float64(time.Second))
+	switch {
+	case d >= time.Minute:
+		return d.Round(time.Second).String()
+	case d >= time.Second:
+		return d.Round(10 * time.Millisecond).String()
+	case d >= time.Millisecond:
+		return d.Round(100 * time.Microsecond).String()
+	default:
+		return d.Round(time.Microsecond).String()
 	}
 }
 

@@ -23,6 +23,8 @@ type SandboxSnapshot struct {
 	LoadAverage   string `json:"loadAverage,omitempty"`
 	MemoryUsedMB  int    `json:"memoryUsedMB,omitempty"`
 	MemoryTotalMB int    `json:"memoryTotalMB,omitempty"`
+	DiskUsedMB    int    `json:"diskUsedMB,omitempty"`
+	DiskTotalMB   int    `json:"diskTotalMB,omitempty"`
 }
 
 // SandboxHealth is implemented by whatever can report every live
@@ -45,6 +47,15 @@ type HostPressure struct {
 	LoadAverage15 float64 `json:"loadAverage15"`
 	MemoryUsedMB  int     `json:"memoryUsedMB"`
 	MemoryTotalMB int     `json:"memoryTotalMB"`
+	// DiskUsedMB and DiskTotalMB are the daemon's own data directory's
+	// filesystem -- the disk a deployment actually runs out of, since
+	// every sandbox VM's disk overlay is allocated from it as its guest
+	// writes (grain/task-41). 0/0 when unavailable, which is how a
+	// non-Linux host and an unreadable path both read: the pane shows a
+	// dash rather than taking the load/memory reading beside it down
+	// over a number it could not get.
+	DiskUsedMB  int `json:"diskUsedMB"`
+	DiskTotalMB int `json:"diskTotalMB"`
 }
 
 // sandboxHealthResponse is GET /api/sandboxes' whole body. Enabled is
