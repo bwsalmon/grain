@@ -89,21 +89,36 @@ export default function SettingsOverlay({ onClose, showError }) {
   // unchanged contract UpdateSettingsRequest's pointer fields already
   // give a PUT that leaves a key out entirely.
   //
-  // It stays open on success rather than closing the way it did before
-  // this pane had more than one tab: each tab is now its own Save
-  // button, and closing the whole overlay after one of them would force
-  // a reopen to then save a second tab -- neither AgentKeysSection nor
-  // SecretsPanel, saved from tabs right alongside these, close it
-  // either. The response replaces whatever it overlaps of the loaded
-  // settings, so a tab switched to afterwards reflects what was just
-  // saved; merged rather than assigned outright since a test's mocked
-  // response is typically a bare {}, which a plain assignment would
-  // otherwise wipe every other field's value with.
+  // A successful save closes the whole overlay: Save is the button that
+  // finishes with this pane, so it saves and leaves rather than saving
+  // and sitting there with nothing left to say. It briefly did the
+  // opposite, once the pane grew a tab per subject, so that a second
+  // tab could be saved without a reopen -- but a tab only owns the
+  // fields it submits, so anything typed on another tab and left
+  // unsaved was never going into that PUT anyway, and staying open made
+  // a saved pane and an unsaved one look exactly alike.
+  //
+  // A failed save keeps it open, error banner and typed values intact:
+  // closing there would throw away the very edit that has to be fixed.
+  //
+  // The response is still folded into the loaded settings before
+  // closing, so the state the pane leaves behind matches what was
+  // stored -- and it is merged rather than assigned outright, since a
+  // test's mocked response is typically a bare {}, which a plain
+  // assignment would otherwise wipe every other field's value with.
+  //
+  // One thing closing does cost: saving a restart-only field no longer
+  // leaves the "saved, but not applied yet" banner on screen, since the
+  // pane carrying it is gone by then. The field said "takes effect when
+  // the daemon restarts" while it was being edited, and the banner is
+  // still there on the next open, so the fact is told before the save
+  // rather than only after it.
   const save = async (payload) => {
     try {
       const updated = await api("/api/settings", { method: "PUT", body: JSON.stringify(payload) });
       setSettings((prev) => ({ ...prev, ...updated }));
       if ("defaultCapabilities" in updated) setDefaultCapabilities(updated.defaultCapabilities || []);
+      onClose();
     } catch (err) {
       // Same banner task creation's own validation errors surface
       // through.
