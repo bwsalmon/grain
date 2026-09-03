@@ -10,11 +10,27 @@
 // It mints nothing and writes no Placement -- Resolve, Materialize,
 // PromptSection and Revoke are all model.BaseCapability's defaults --
 // because what it grants is not material moved into a sandbox, it is
-// tools (SourceTools below) that orchestrator's own dispatch adds
-// straight to a run's tool set once it sees this capability granted on
-// an Interactive task. See orchestrator/cycle.go's runOne for that
-// wiring, and pkg/capability/selfrepair for this capability's
-// destructive counterpart, which does need a confirmation step.
+// tools.
+//
+// Two sets of them, and this package holds only the first: SourceTools
+// below, for grain's own source, and pkg/mcp's NewTaskTools, for grain's
+// own *tasks* -- their prompts, their session transcripts and the errors
+// their attempts recorded, which is where the answer to "why did that
+// run do that" actually lives. The second set is in pkg/mcp because it
+// reads the store through the daemon's REST API and pkg/ui imports this
+// package; both are turned on together, by the same grant.
+//
+// How they reach a run is `grain mcpserver -self-debug`, passed by a
+// Framework only for a task holding this grant (agent.RunConfig.
+// SelfDebug, agent.SelfDebugArgs). orchestrator.Config.GrantTools also
+// adds SourceTools straight to a run's in-process tool set for an
+// Interactive task (see orchestrator/cycle.go's runOne), which is where
+// this started and which no CLI-driving Framework can consume -- the
+// flag is what actually gets these tools to an agent.
+//
+// See pkg/capability/selfrepair for this capability's destructive
+// counterpart, which does need a confirmation step, and which cannot
+// take the same route for exactly that reason.
 package selfdebug
 
 import (

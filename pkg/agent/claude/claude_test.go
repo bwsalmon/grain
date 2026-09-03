@@ -578,6 +578,44 @@ func TestRunOmitsTheGrainServerWhenEitherHalfIsMissing(t *testing.T) {
 	}
 }
 
+// The self-debug grant travels to the forked mcpserver as its own
+// flags, since that process is where the capability's tools are actually
+// served from -- a Framework driving a CLI can hand it nothing else.
+func TestRunPassesTheSelfDebugFlagsToTheMCPServer(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "/path/to/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "go", SandboxRoot: t.TempDir(),
+		SelfDebug: true, GrainSourceDir: "/usr/local/share/grain/src",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args := mcpConfigArgs(t, fake.gotMCPConfig)
+	if !slices.Contains(args, "-self-debug") ||
+		!argsHave(args, "-grain-src-dir", "/usr/local/share/grain/src") {
+		t.Errorf("mcpserver args = %v, want -self-debug and -grain-src-dir among them", args)
+	}
+}
+
+// A task without the grant gets a roster with nothing of grain's own
+// insides in it, whatever the deployment happens to know about where its
+// source lives.
+func TestRunOmitsTheSelfDebugFlagsWithoutTheGrant(t *testing.T) {
+	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
+	f := newFramework(fake, "/path/to/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{
+		Prompt: "go", SandboxRoot: t.TempDir(), GrainSourceDir: "/usr/local/share/grain/src",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args := mcpConfigArgs(t, fake.gotMCPConfig)
+	if slices.Contains(args, "-self-debug") || slices.Contains(args, "-grain-src-dir") {
+		t.Errorf("mcpserver args = %v, want neither -self-debug nor -grain-src-dir", args)
+	}
+}
+
 // mcpConfigArgs pulls the grain-sandbox server's own argument list out of
 // the --mcp-config file Run wrote.
 func mcpConfigArgs(t *testing.T, configJSON []byte) []string {
