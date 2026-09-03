@@ -179,8 +179,16 @@ echo \
 apt-get update
 apt-get install -y --no-install-recommends google-cloud-cli terraform
 
-# Leaves the apt lists out of the committed image. Not identity, so not
-# something konturctl's own scrub touches -- it only removes what would
-# otherwise be shared between every VM cloned from this image -- but a few
-# hundred MB that no dispatched task reads.
+# Leaves the apt lists and the downloaded .debs out of the committed
+# image. Not identity, so not something konturctl's own scrub touches --
+# that only removes what would otherwise be shared between every VM
+# cloned from this image -- but a few hundred MB that no dispatched task
+# reads.
+#
+# The archives matter more than they look. apt keeps every .deb it
+# installed under /var/cache/apt/archives, so without this they are
+# committed into the image *and* still occupying the guest's disk when a
+# task runs -- on the very filesystem an install needs free space in.
+# This guest installs ~110MB of them.
+apt-get clean
 rm -rf /var/lib/apt/lists/*
