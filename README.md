@@ -2799,6 +2799,58 @@ What that leaves worth measuring, rather than assuming, is whether runs
 actually start calling it, and whether a run that sees a failing check
 fixes it instead of opening the pull request and stopping there.
 
+## What a pull request says it does
+
+For a while grain's own pull requests said nothing. `EnsurePullRequest`
+wrote one line -- "Automated change for grain task 131." -- and a
+reviewer opening one got a title, a diff, and no account of what the
+change was for. That was a regression, and an old one: v1 built a
+freshly opened pull request's body out of the pushed branch's own head
+commit message (`bwsalmon/agents#79`), and the port to this repository
+kept the plumbing -- `github.BranchHead` still carries the tip commit's
+message, and its doc comment still says why -- while dropping the use.
+
+The description is the agent's own words again, but from the whole
+branch rather than its tip (`orchestrator/description.go`,
+`github.Client.CompareCommits`). The tip alone was good enough for v1,
+where a run pushed once. It is not good enough now: "Letting a run watch
+its own CI" (above) sends every run round a push/check/repair loop, so
+the newest commit on a finished branch is routinely "Fix the vet
+warning". So the description leads with the first commit whose message
+has a body -- a message with a body was written to explain something,
+which is exactly the one a reviewer wants -- and lists every other
+commit underneath by its summary line, with merge commits dropped, since
+"Merge main into grain/task-131" is a fact about the branch's shape and
+not about the change.
+
+Opening a pull request early would otherwise freeze that description at
+whatever the branch said at the time, which for a run that opens one to
+see CI is often a single "wip" commit. So the description is rewritten,
+not written once: every `EnsurePullRequest` on a pull request that
+already exists -- the next `open_pull_request` call, and the finish path
+after them all -- rebuilds it from the branch as it now stands. What a
+reviewer eventually reads is the finished change's own account of
+itself.
+
+Two things it will not do. It never overwrites a body a human has
+touched: grain's own footer is the marker, and a description that does
+not end in it belongs to a reviewer, who wrote something no commit
+message can reconstruct. And a failed read never downgrades a good
+description -- if the commits cannot be read, the pull request opens
+with the one-line body grain can always write, and an existing
+description is left exactly where it was. A description is worth an API
+call and never worth failing a finish over: the pull request is the
+thing that matters, and it opens either way.
+
+The last piece is telling the agent, since a commit message is the one
+thing here grain cannot write itself. `BuildPrompt` says outright that
+the pull request's description is built from this branch's commit
+messages and asks for a summary line, a blank line, and a paragraph on
+what changed and why -- the same sentence v1's prompt carried, and for
+the same reason. A run that is not told writes "wip" and "fix tests",
+which are perfectly good `git log` entries and a description-free pull
+request.
+
 ## A run can rebuild its own sandbox
 
 Every tool a run has runs *inside* its sandbox. That is the whole design

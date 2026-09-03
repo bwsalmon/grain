@@ -11,8 +11,9 @@
 //
 // Sim implements every endpoint github.Client's real implementation
 // (github.RESTClient) calls: list/get/create issues, close/reopen/update
-// an issue, add/remove a label, default branch, branch existence,
-// create/find/get/merge a pull request, merging one branch into another,
+// an issue, add/remove a label, default branch, branch existence, the
+// commits one branch carries over another, create/find/get/merge a pull
+// request, rewrite one's body, merging one branch into another,
 // the plain comment thread, inline review comments and draft reviews, and
 // check runs -- the whole surface
 // github.go's Client interface names, so a live end-to-end test never
@@ -52,11 +53,16 @@ var (
 	// repoRe: the target repo's own default branch, read once per
 	// dispatch so the PR base comes from the repo itself rather than a
 	// single configured base branch.
-	repoRe         = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)$`)
-	issuesRe       = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues$`)
-	labelsPostRe   = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels$`)
-	labelDeleteRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels/([^/]+)$`)
-	branchRe       = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/branches/(.+)$`)
+	repoRe        = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)$`)
+	issuesRe      = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues$`)
+	labelsPostRe  = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels$`)
+	labelDeleteRe = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/issues/(\d+)/labels/([^/]+)$`)
+	branchRe      = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/branches/(.+)$`)
+	// compareRe: the commits one branch carries that another does not
+	// (github.RESTClient.CompareCommits), which a pull request's
+	// description is built from. Both refs live in one path segment
+	// separated by "...", slashes in a branch name and all.
+	compareRe      = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/compare/(.+?)\.\.\.(.+)$`)
 	pullsRe        = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls$`)
 	pullRe         = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)$`)
 	pullMergeRe    = regexp.MustCompile(`^/repos/([^/]+)/([^/]+)/pulls/(\d+)/merge$`)
@@ -290,6 +296,49 @@ func (s *Sim) branchHead(branch string) (sha, message string, ok bool) {
 	return strings.TrimSpace(string(shaOut)), strings.TrimRight(string(msgOut), "\n"), true
 }
 
+// commitsBetween is the real `git log base..head` against BareRepo, in
+// GitHub's own compare order (oldest first) and shape (sha, message,
+// parents) -- answered honestly for the same reason branchHead is: what
+// a pull request's description gets built from is exactly the commits an
+// agent really pushed, and a canned list would let a test pass on a
+// description assembled from commits nobody wrote.
+//
+// ok is false when either ref is missing, which is real GitHub's own 404
+// here.
+func (s *Sim) commitsBetween(base, head string) ([]map[string]any, bool) {
+	if !s.branchExists(base) || !s.branchExists(head) {
+		return nil, false
+	}
+	// %x00 between the fields and %x1e between commits: a commit message
+	// is multi-line by design, so nothing line-oriented can frame it.
+	out, err := exec.Command("git", "--git-dir", s.BareRepo, "log", "--reverse",
+		"--format=%H%x00%P%x00%B%x1e", "refs/heads/"+base+"..refs/heads/"+head).Output()
+	if err != nil {
+		return nil, false
+	}
+	commits := []map[string]any{}
+	for _, record := range strings.Split(string(out), "\x1e") {
+		record = strings.TrimLeft(record, "\n")
+		if strings.TrimSpace(record) == "" {
+			continue
+		}
+		fields := strings.SplitN(record, "\x00", 3)
+		if len(fields) != 3 {
+			continue
+		}
+		parents := []map[string]any{}
+		for _, p := range strings.Fields(fields[1]) {
+			parents = append(parents, map[string]any{"sha": p})
+		}
+		commits = append(commits, map[string]any{
+			"sha":     fields[0],
+			"commit":  map[string]any{"message": strings.TrimRight(fields[2], "\n")},
+			"parents": parents,
+		})
+	}
+	return commits, true
+}
+
 // branchSHA is branchHead's first half on its own: branch's tip, or ""
 // if there is no such branch. Separate because the pull-request detail
 // endpoint needs the sha on every read and nothing else -- branchHead
@@ -414,6 +463,17 @@ func runGit(dir, name string, args ...string) error {
 		return fmt.Errorf("githubsim: %s %s: %w\n%s", name, strings.Join(args, " "), err, out)
 	}
 	return nil
+}
+
+// unescapeRef undoes whatever percent-encoding a client applied to a
+// branch name in a path, leaving it alone when it decodes to nothing
+// valid -- the same tolerance every other ref-taking endpoint here shows.
+func unescapeRef(ref string) string {
+	decoded, err := url.PathUnescape(ref)
+	if err != nil {
+		return ref
+	}
+	return decoded
 }
 
 func splitPathQuery(path string) (string, url.Values) {
@@ -559,6 +619,15 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 				items = append(items, issueJSON(n, s.Owner, s.Repo, issue))
 			}
 			return jsonResponse(200, items), nil
+		}
+		if m := compareRe.FindStringSubmatch(p); m != nil {
+			s.mustOwn(m[1], m[2])
+			base, head := unescapeRef(m[3]), unescapeRef(m[4])
+			commits, ok := s.commitsBetween(base, head)
+			if !ok {
+				return github.ApiResponse{Status: 404, Body: []byte(`{"message":"Not Found"}`)}, nil
+			}
+			return jsonResponse(200, map[string]any{"commits": commits}), nil
 		}
 		if m := branchRe.FindStringSubmatch(p); m != nil {
 			branch, err := url.PathUnescape(m[3])
@@ -721,6 +790,34 @@ func (s *Sim) Request(method, path string, headers map[string]string, body []byt
 	}
 
 	if method == "PATCH" {
+		// The one field of a pull request anything here edits: its body
+		// (github.RESTClient.UpdatePullRequestBody, rewriting a
+		// description for a branch that has moved). A PATCH carrying
+		// anything else -- closing a pull request without merging it, say
+		// -- falls through to the unhandled-request panic below rather
+		// than being silently accepted and ignored, which is the whole
+		// value of that panic.
+		if m := pullRe.FindStringSubmatch(p); m != nil {
+			var payload struct {
+				Body *string `json:"body"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				return github.ApiResponse{}, err
+			}
+			if payload.Body != nil {
+				s.mustOwn(m[1], m[2])
+				number := mustAtoi(m[3])
+				for i := range s.PullRequests {
+					if s.PullRequests[i].Number != number {
+						continue
+					}
+					s.PullRequests[i].Body = *payload.Body
+					return jsonResponse(200, pullRequestDetailJSON(
+						s.PullRequests[i], s.branchSHA(s.PullRequests[i].Head))), nil
+				}
+				return github.ApiResponse{Status: 404, Body: []byte("{}")}, nil
+			}
+		}
 		if m := issueRe.FindStringSubmatch(p); m != nil {
 			number := mustAtoi(m[3])
 			var payload struct {

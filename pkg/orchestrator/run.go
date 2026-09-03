@@ -132,6 +132,12 @@ func frameworkOpensPullRequests(framework agent.Framework) bool {
 // informational -- it tells the agent those repos exist and are safe to
 // clone, rather than granting anything itself.
 //
+// The commit-message paragraph is a fact of the same kind: grain builds
+// the pull request's description out of this branch's commit messages
+// (description.go), which no tool description says and nothing in the
+// sandbox reveals. A run that does not know it has no reason to write a
+// commit message for anyone but git.
+//
 // The last paragraphs, for a task that has a target at all, are the
 // push/check/repair loop pkg/mcp's pull_request_status exists for, and
 // what finishing that loop means: green checks and a branch that still
@@ -187,6 +193,20 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool) s
 	// separate fix task (sync.go's fileFixTask) even when the run that
 	// caused it was still running.
 	if task.Target != nil {
+		// What the commit messages are for, which is discoverable from
+		// nowhere else at all: grain builds the pull request's
+		// description out of them (description.go), so they are the only
+		// place an agent can write for the human who will review the
+		// change. A run never told this writes "wip" and "fix tests" --
+		// perfectly good git log entries -- and earns a pull request that
+		// reads as description-free, which is exactly what grain's own
+		// did for as long as this paragraph was missing and the body was
+		// one line of metadata.
+		prompt += "\n\nCommit with a message written for a human reviewer: a short summary " +
+			"line, a blank line, then a paragraph on what changed and why. grain builds " +
+			"this branch's pull request description out of those commit messages, so " +
+			"they are where you explain the change -- there is nowhere else for it to " +
+			"come from, and a description is what a reviewer reads first."
 		prompt += fmt.Sprintf(
 			"\n\nPush as often as you like: %q is your branch, and each push reruns CI "+
 				"against the new commit. After a push, call `pull_request_status` to "+

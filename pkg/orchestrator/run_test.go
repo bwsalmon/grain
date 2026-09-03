@@ -195,6 +195,31 @@ func TestBuildPromptDescribesThePushAndCheckCILoop(t *testing.T) {
 	}
 }
 
+// Where a pull request's description comes from is a fact about grain
+// that nothing in the sandbox reveals: an agent told nothing writes
+// "wip" and "fix tests", which are fine git log entries and a
+// description-free pull request. So the prompt says what those messages
+// become.
+func TestBuildPromptSaysCommitMessagesBecomeTheDescription(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false)
+	for _, want := range []string{"human reviewer", "pull request description", "commit messages"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+
+	// A task with no repo pushes no branch and earns no pull request, so
+	// there is no description for its commit messages to become.
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", false)
+	if strings.Contains(bare, "pull request description") {
+		t.Errorf("prompt promises a description to a task with no repo: %q", bare)
+	}
+}
+
 // The other half of that loop: when it is over. Every sentence before it
 // is about how to push and how to look, and a run that pushed once, read
 // one status and stopped has obeyed all of them -- so the prompt says

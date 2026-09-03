@@ -96,9 +96,12 @@ func openPullRequestTool(opener PullRequestOpener) Tool {
 			"not commit you to anything and not calling it loses you nothing but " +
 			"the checks. Call it again after pushing more commits, or after " +
 			"waiting for checks that were still running, to see the current " +
-			"state -- it never opens a second pull request. It takes no " +
-			"arguments: which repo, branch, base and title are grain's to decide, " +
-			"not yours.",
+			"state -- it never opens a second pull request. Its description is " +
+			"built from your branch's own commit messages and rebuilt every time " +
+			"you call this, so opening one early costs the finished change " +
+			"nothing: write the commit messages and the description follows. It " +
+			"takes no arguments: which repo, branch, base and title are grain's " +
+			"to decide, not yours.",
 		InputSchema: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
