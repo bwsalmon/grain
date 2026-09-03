@@ -196,6 +196,44 @@ func TestEveryFileHandedToTheContainerisedCLIIsReadableByIt(t *testing.T) {
 	absent(t, staged, "umask 077 && cat")
 }
 
+// The minter key is the one secret this deployment rotates on its own,
+// and for a while the two halves of that disagreed.
+//
+// deploy/push-secrets.sh mints a fresh minter key on every run and then
+// deletes every key on the account beyond the newest two, while
+// seed_gcp_minter_key returned early whenever the host already had a
+// gcp-key-minter entry -- so a host kept authenticating with the key
+// from its first deploy until the third push-secrets.sh run deleted it,
+// and every gcp-key mint after that failed with Google's `invalid_grant`
+// on a deployment whose Capabilities tab still read Ready.
+//
+// So the seed converges: a key handed to this script is the key the
+// daemon ends up holding. The early return that is left is the one for
+// a deploy carrying no key at all, which must still leave an operator's
+// own `grain secrets set` alone.
+func TestTheMinterKeyIsReseededOnEveryRunSoRotationReachesTheDaemon(t *testing.T) {
+	seed := body(t, setupCode(t), "seed_gcp_minter_key() {")
+
+	if strings.Contains(seed, `grep -q '^gcp-key-minter:'`) {
+		t.Error("seed_gcp_minter_key still skips a run whose key it has already seen, " +
+			"so a rotated minter key never reaches the daemon")
+	}
+	if !strings.Contains(seed, `if [ -z "$GRAIN_GCP_SERVICE_ACCOUNT_KEY_FILE" ]; then`) {
+		t.Error("seed_gcp_minter_key no longer leaves an existing credential alone when " +
+			"this deploy carries no key of its own")
+	}
+	// pkg/secrets.Store.Resolve answers the bare "gcp-key-minter" name
+	// only while the secret holds exactly one key, so writing under a
+	// fixed name would break a secret first written from Settings (which
+	// uses `value`) in a second way -- the resolve would fail as
+	// ambiguous rather than hand back either key.
+	if !strings.Contains(seed, "minter_secret_key") {
+		t.Error("the key is written under a fixed name rather than the one the secret " +
+			"already holds, which can leave gcp-key-minter with two keys and no way " +
+			"to resolve the bare name")
+	}
+}
+
 // `set -e` plus a command substitution is a trap worth pinning.
 //
 // Each of these assigns the output of the containerised CLI to a variable

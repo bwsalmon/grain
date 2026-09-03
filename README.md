@@ -2567,6 +2567,73 @@ private key material was base64-decoded to nothing, placed at
 failed mint now, and the useless key is deleted rather than left to
 count against the very cap above.
 
+### Debugging `gcp-key` again: the deploy rotated the key out from under the host
+
+"Attempting to add a gcp key to a task fails to provision the task."
+The same sentence as last time, a different failure underneath it, and
+this one was never grain's classification of a GCP error — it was the
+deployment invalidating its own credential on a schedule.
+
+```
+materializing capabilities: model: materializing capability "gcp-key":
+gcpkey: minting a key for projects/…/serviceAccounts/grain-main-agent@…:
+gcpkey: minting a key for projects/…/serviceAccounts/grain-main-agent@…:
+Post "https://iam.googleapis.com/…/keys?alt=json": auth: cannot fetch
+token: 400 Response: {"error":"invalid_grant","error_description":"Invalid
+JWT Signature."}
+```
+
+`invalid_grant` is Google's token endpoint refusing to exchange the JWT
+`gcp-key-minter`'s stored key signed, which means Google no longer holds
+the public half of that key. Nothing in the message says so: it names the
+*agent* account being minted for, never the minter credential doing the
+minting, and it arrives before any request reaches `iam.googleapis.com`
+— so it carries no `googleapi.Error`, no status code, and none of
+`explainCreateFailure`'s four explanations fire. It is also, as printed,
+the same forty characters of resource name twice, because `iamMinter`
+re-labelled every failure with the context `Materialize` had already
+wrapped it in.
+
+**Where the key went is `terraform/gcp/deploy/push-secrets.sh`.** It
+mints a *fresh* minter key on every run, pushes it into instance
+metadata, and then deletes every key on the minter account beyond the
+newest two — a deliberate rotate-and-prune, ported from v1. The other
+half never held up its end: `scripts/setup.sh`'s `seed_gcp_minter_key`
+returned early whenever `grain secrets list` already showed a
+`gcp-key-minter` entry, on the same never-overwrite rule every plain-file
+secret beside it follows. So the host seeded its copy on the first deploy
+and refused every replacement afterward, and the third `push-secrets.sh`
+run deleted, in GCP, the key the daemon was still authenticating with.
+The rotation was not a safety measure that happened to be inconvenient;
+it was a countdown. The documented remedy was to delete the entry by hand
+over IAP and bump `deploy_generation` — a manual step to repair a state
+the deployment created for itself.
+
+The seed converges now: a key handed to `setup.sh` is the key the daemon
+ends up holding, every run, so a rotation lands on the next deploy the
+way every other pushed secret does. The one early return left is for a
+deploy carrying no key at all, which still leaves an operator's own
+`grain secrets set` alone. It writes to whichever key the secret already
+holds rather than always to `key.json`, for the reason "Secrets sit with
+what uses them" below gives from the other side: `Resolve` answers the
+bare `gcp-key-minter` name only while the secret holds exactly one key,
+so a fixed name would break a secret first written from Settings (as
+`value`) in a second way while fixing the first.
+
+**And grain says which secret is dead when it happens**, since a key
+deleted in GCP by anything at all lands here, not just this deployment's
+own rotation. `isCredentialRefused` matches the token endpoint's body,
+and `explainRefusedCredential` — on `Provider`, the only thing that knows
+which secret the material came out of, and that `Revoke` authenticates as
+whatever the *lease* names rather than what `Config` says today — names
+that secret, the ways a stored key stops being one GCP will accept, and
+the two places a current one is pasted. `Materialize`, `Revoke` and
+`Reap` all go through it: a dead minter credential breaks releasing and
+reaping a key exactly as it breaks minting one. This is the third thing
+about `gcp-key` that no configuration pane can see — the tab reads
+**Ready** throughout, because the secret is set and only GCP knows the
+key inside it stopped working.
+
 ### The same set, per repo
 
 The ask task-14 came from also said "we will also want this to be

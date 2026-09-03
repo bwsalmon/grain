@@ -248,6 +248,49 @@ func (p *Provider) Resolve(ctx context.Context, cc model.CapabilityContext) (mod
 	return model.Honoured(), nil
 }
 
+// explainRefusedCredential names the one failure that is about the
+// minter credential itself rather than about the account being minted
+// for: GCP refusing to issue a token for it at all, so that nothing
+// this package does ever reaches the IAM API (isCredentialRefused, and
+// see it for the shape that error arrives in).
+//
+// Task 163 is that failure, and what an operator got was Google's own
+// `invalid_grant` / "Invalid JWT Signature" -- a sentence naming no
+// credential, no secret, no service account and nothing about grain, on
+// a deployment whose Settings pane reads **Ready** because a project,
+// an account and a secret are all set. Nothing on any configuration
+// pane can see that the key inside that secret has stopped working:
+// only GCP knows, and only when something authenticates with it.
+//
+// Every cause comes down to "the key in that secret is not one GCP will
+// accept any more", so the sentence names the ways that happens --
+// including the one this deployment shape actually hits, a deployer
+// that rotates the minter key underneath a host that had only ever
+// seeded its own copy once -- and the two places a current key is
+// pasted. Wrapped, never replaced: GCP's own words survive, the same
+// rule explainCreateFailure holds to.
+//
+// The credential's *name* is the reason this lives here rather than
+// beside iam.go's other explanations: a Minter is handed material and
+// never told which secret it came out of, while Provider is the only
+// thing that knows both (and, for Revoke, that the lease may name a
+// different one than Config does).
+func explainRefusedCredential(err error, credential string) error {
+	if !isCredentialRefused(err) {
+		return err
+	}
+	return fmt.Errorf(
+		"GCP will not issue a token for the minter credential held in the `%s` secret, so "+
+			"nothing here reached the IAM API at all: the service-account key that secret "+
+			"holds has been deleted or rotated away in GCP (terraform/gcp's push-secrets.sh "+
+			"mints a fresh minter key and invalidates older ones on every run), or the "+
+			"account it belongs to is gone or disabled, or this host's clock is too far out "+
+			"for Google to accept a request signed by it. Paste a current key file into "+
+			"Settings -> Capabilities, or run `grain secrets set %s key.json -value-file "+
+			"<path>` on the host: %w",
+		credential, credential, err)
+}
+
 func (p *Provider) Materialize(ctx context.Context, cc model.CapabilityContext) (model.Materialization, error) {
 	credential := p.minterCredential()
 	minterKey, err := cc.Credentials.Resolve(ctx, credential)
@@ -260,7 +303,8 @@ func (p *Provider) Materialize(ctx context.Context, cc model.CapabilityContext) 
 	}
 	id, keyJSON, err := minter.CreateKey(ctx, p.account())
 	if err != nil {
-		return model.Materialization{}, fmt.Errorf("gcpkey: minting a key for %s: %w", p.account(), err)
+		return model.Materialization{}, fmt.Errorf("gcpkey: minting a key for %s: %w",
+			p.account(), explainRefusedCredential(err, credential))
 	}
 	expires := cc.Now.Add(p.maxKeyAge())
 	return model.Materialization{
@@ -323,7 +367,8 @@ func (p *Provider) Revoke(ctx context.Context, cc model.CapabilityContext, lease
 		return err
 	}
 	if err := minter.DeleteKey(ctx, p.account(), lease.Resource); err != nil {
-		return fmt.Errorf("gcpkey: revoking key %s: %w", lease.Resource, err)
+		return fmt.Errorf("gcpkey: revoking key %s: %w",
+			lease.Resource, explainRefusedCredential(err, lease.MintedBy.Name))
 	}
 	return nil
 }
@@ -356,7 +401,10 @@ func (p *Provider) Reap(ctx context.Context, creds model.CredentialResolver, now
 	account := p.account()
 	keys, err := minter.ListKeys(ctx, account)
 	if err != nil {
-		return nil, fmt.Errorf("gcpkey: listing keys for %s: %w", account, err)
+		// No wrap of its own: ListKeys already says "listing keys for
+		// <account>", and saying it twice is what this change is
+		// taking out of the mint path above.
+		return nil, explainRefusedCredential(err, credential)
 	}
 	maxAge := p.maxKeyAge()
 	var deleted []string

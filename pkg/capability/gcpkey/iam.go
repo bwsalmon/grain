@@ -117,7 +117,16 @@ func (m *iamMinter) CreateKey(ctx context.Context, account string) (id, keyJSON 
 // is wrapped, never replaced, and a listing that fails while counting
 // leaves the two possibilities named rather than one of them asserted.
 func explainCreateFailure(ctx context.Context, m *iamMinter, account string, err error) error {
-	wrapped := fmt.Errorf("gcpkey: minting a key for %s: %w", account, err)
+	// GCP's own error, carried into every message below and never
+	// replaced -- but no longer re-labelled "minting a key for
+	// <account>" on the way, which Materialize's own wrap already says.
+	// Both saying it is what made task 163's failure reach an operator
+	// as "materializing capabilities: model: materializing capability
+	// \"gcp-key\": gcpkey: minting a key for projects/.../serviceAccounts/...:
+	// gcpkey: minting a key for projects/.../serviceAccounts/...: Post ..."
+	// -- forty duplicated characters of resource name ahead of the one
+	// clause that said what went wrong.
+	wrapped := err
 	project, email := splitAccount(account)
 
 	var apiErr *googleapi.Error
@@ -206,6 +215,35 @@ func isFailedPrecondition(detail string) bool {
 func isKeyCreationDisabled(detail string) bool {
 	return strings.Contains(detail, "iam.disableServiceAccountKeyCreation") ||
 		strings.Contains(detail, "Key creation is not allowed")
+}
+
+// isCredentialRefused reports whether err is Google's *token* endpoint
+// refusing the credential this client was built with, rather than the
+// IAM API refusing a call it made. It is the failure task 163 arrived
+// as, and it is unlike every other one in this file: it happens before
+// any request reaches iam.googleapis.com, so it carries no
+// googleapi.Error, no status code errors.As can read, and no resource
+// name at all -- only the token endpoint's own JSON body, quoted inside
+// an oauth2 transport error:
+//
+//	Post "https://iam.googleapis.com/v1/projects/.../keys?alt=json":
+//	auth: cannot fetch token: 400 Response:
+//	{"error":"invalid_grant","error_description":"Invalid JWT Signature."}
+//
+// So the only thing to match on is that body. `invalid_grant` is
+// conclusive on its own -- it is the OAuth error for "this grant is not
+// one I will exchange", which for a service-account JWT means the key
+// signing it is not one Google holds the public half of any more --
+// and the signature description is matched too because it is the
+// spelling a deleted or rotated key produces, which is the common case
+// by a wide margin.
+func isCredentialRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := err.Error()
+	return strings.Contains(detail, "invalid_grant") ||
+		strings.Contains(detail, "Invalid JWT Signature")
 }
 
 // isServiceDisabled reports whether a 403 is Google's "this API has never
