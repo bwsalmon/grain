@@ -338,6 +338,27 @@ of hundred bytes of detail each — the goal is orientation, not a
 transcript store. The transcript itself stays where it is; it is prose,
 per-framework and unbounded, and none of that belongs in a prompt.
 
+**Done** (grain/task-152). `BuildPrompt` takes an
+`orchestrator.History` — the attempts before this one (`previousAttempts`,
+`store.Runs` with this run's own row filtered out, since `dispatch.Cycle`
+writes that row before `RunDispatch` ever sees the dispatch), the commits
+they left on the branch (`checkoutCommits`, run through the same sandbox
+tool `prepareCheckout` clones with), and the conversation — and renders
+it as `previousAttemptsSection`: per attempt its number, outcome and
+`detail`, then the branch's own commits newest first. Bounded by
+`maxPreviousAttempts` (3), `maxAttemptDetail` (240 bytes, one line) and
+`maxBranchCommits` (10, with a pointer at `git log` for the rest);
+`RunDispatch` asks for one commit more than the list holds so "there is
+more" needs no second read. The store read is fatal like the two reads
+either side of it, the git read is best effort and silent, and it is
+skipped altogether on a first attempt.
+
+The ordering constraint is why `commentThreadSection` moved out of
+`prepareCapabilities` and into `BuildPrompt`: both history sections now
+sit together, immediately after the sentences naming the checkout and the
+branch they explain, and ahead of the commit-message, CI and budget
+paragraphs. See README.md's "Telling attempt N what attempt N−1 did".
+
 ## 9. There is no way to say how to set a repo up
 
 `RepoConfig` carries `DefaultCapabilities` and `PromptExtension`
@@ -443,7 +464,8 @@ Filed as separate proposals, each depending on this document:
    (findings 3, 4, and the check in 5) — **done**, grain/task-150.
 3. Tell a run its wall-clock budget (finding 7) — **done**,
    grain/task-151.
-4. Tell a redispatched run what its previous attempts did (finding 8).
+4. Tell a redispatched run what its previous attempts did (finding 8) —
+   **done**, grain/task-152.
 5. Per-run tool telemetry, and the metrics over it (findings 11, 12, 13).
 6. A per-repo setup command (finding 9).
 

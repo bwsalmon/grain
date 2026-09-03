@@ -177,7 +177,21 @@ func frameworkOpensPullRequests(framework agent.Framework) bool {
 // remaining on every tool result once the budget runs low. The paragraph
 // says so, since a run that expects the reminder can spend its early
 // turns working rather than counting.
-func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, maxRuntime time.Duration) string {
+//
+// history is everything that has already happened to this task: the
+// attempts before this one, the commits they left on the branch this one
+// continues, and the conversation (see History, previousAttemptsSection
+// and commentThreadSection). Both of its sections go here, immediately
+// after the sentences that say where the checkout is and which branch is
+// in it -- the facts they explain -- and ahead of the commit-message, CI
+// and budget paragraphs. That is deliberate: a redispatch's first
+// question is "what is already on this branch, and what did the attempt
+// that put it there run into?", and a section that answered it after two
+// paragraphs of push-and-check mechanics would be answering it too late
+// to stop the re-diagnosis it exists to prevent. History{} -- a first
+// attempt at a task nobody has said anything about -- leaves the prompt
+// exactly as it reads without either section.
+func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, maxRuntime time.Duration, history History) string {
 	branch := model.BranchName(task.ID)
 	var prompt string
 	if task.Target == nil {
@@ -202,6 +216,23 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 				"push with `git push origin %s`.",
 			checkoutDir, branch, branch,
 		)
+	}
+	// The two history sections, together and in that order: what the
+	// attempts before this one did, then what has been said about the
+	// task. Both are the same kind of fact -- something a run would
+	// otherwise pay to rediscover -- and both are read before the
+	// mechanics below them. See this function's own doc comment on why
+	// they sit here rather than at the tail.
+	//
+	// Both are lists, so both end in a newline of their own; trimmed on
+	// the way in rather than shaped differently, so that a section
+	// followed by another paragraph is separated from it by the same one
+	// blank line every other pair of paragraphs here is.
+	if attempts := previousAttemptsSection(history, branch); attempts != "" {
+		prompt += "\n\n" + strings.TrimRight(attempts, "\n")
+	}
+	if thread := commentThreadSection(history.Comments); thread != "" {
+		prompt += "\n\n" + strings.TrimRight(thread, "\n")
 	}
 	// Said out loud because neither half is discoverable from the tools
 	// alone. Nothing stops a run pushing repeatedly -- the branch is its
@@ -461,6 +492,183 @@ func proposalSection(task model.Task) string {
 	return s
 }
 
+// History is what has already happened to a task, as the run about to be
+// dispatched for it is told: the attempts before this one, the commits
+// those attempts left on the branch this one continues, and the
+// conversation. RunDispatch assembles it (from store.Runs,
+// checkoutCommits and store.Comments) and BuildPrompt renders it.
+//
+// The zero value is a first attempt at a task nobody has commented on,
+// which is what every one of this package's own prompt tests passes and
+// what a task's first dispatch really is.
+type History struct {
+	// Attempt is this run's own attempt number (dispatch.Dispatch.Attempt),
+	// stated so a run can place itself in the list below rather than
+	// counting it -- a list bounded to the last few attempts is one a run
+	// cannot count its way to the end of.
+	Attempt int
+	// Attempts is the runs before this one, oldest first and this run's
+	// own row excluded. model.Run rather than a narrower struct because
+	// the two fields that matter here -- Outcome and Detail -- are
+	// exactly the pair the store already carries per run, and since
+	// outcomeOf a succeeded run fills Detail in too.
+	Attempts []model.Run
+	// Commits is what those attempts left on the branch: `git log
+	// <base>..HEAD` in the checkout prepareCheckout just made, newest
+	// first, one "<abbrev> <subject>" per entry (checkoutCommits). Empty
+	// when nothing was ever pushed, when there is no checkout to read, or
+	// when the read failed -- none of which is worth failing a dispatch
+	// over.
+	Commits []string
+	// Comments is the task's conversation so far, oldest first, exactly
+	// as store.Comments returns it -- see commentThreadSection.
+	Comments []model.Comment
+}
+
+// previousAttempts is the runs before this one at taskID, oldest first --
+// store.Runs with this run's own row, and anything numbered at or beyond
+// it, left out.
+//
+// The filter is not optional: dispatch.Cycle writes the task_run row
+// (store.StartRun) before RunDispatch ever sees the Dispatch, so store.Runs
+// always returns this very run alongside its predecessors, and a prompt
+// that listed it would be telling a run about itself -- with an outcome
+// column that is empty precisely because it has not happened yet.
+func previousAttempts(ctx context.Context, store *model.Store, taskID string, attempt int) ([]model.Run, error) {
+	runs, err := store.Runs(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("orchestrator: reading %s's earlier attempts: %w", taskID, err)
+	}
+	var out []model.Run
+	for _, r := range runs {
+		if r.Attempt < attempt {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// maxPreviousAttempts is how many earlier attempts previousAttemptsSection
+// describes, newest kept: a task that has failed nine times has nothing
+// more to teach its tenth attempt than its last few endings do, and the
+// older ones are the ones whose commits are already folded into the
+// branch it is about to read anyway.
+const maxPreviousAttempts = 3
+
+// maxAttemptDetail bounds one attempt's task_run.detail in that section.
+// Detail is short by construction (model.Run.Detail, outcomeOf's own tool
+// census, agent.TrimLimitMessage) but not bounded anywhere: a framework's
+// own error text is whatever the CLI printed, and a prompt is not the
+// place to find out how long that can get.
+const maxAttemptDetail = 240
+
+// maxBranchCommits is how many of the branch's commits are listed. Enough
+// to see the shape of what an earlier attempt built, short of being the
+// git log a run can read for itself in one tool call -- this section's job
+// is to tell it there is something there to read.
+const maxBranchCommits = 10
+
+// previousAttemptsSection tells a redispatched run what the attempts
+// before it did and how they ended, or "" for a first attempt -- which
+// is every task's first dispatch, and every caller that has no history to
+// pass.
+//
+// Without it, attempt 2 opens on a branch carrying commits it did not
+// make, with no account of what they were for or why the attempt that
+// made them stopped: grain hands it the task, the conversation, the
+// attachments and a checkout continuing the previous attempt's branch
+// (prepareCheckout, deliberately), and says nothing at all about the
+// attempt itself. The store has had all of it the whole time -- every
+// task_run row carries outcome and detail, and since outcomeOf that
+// detail includes the tool census for a run that succeeded as well as
+// one that failed. The cheapest thing that costs is re-doing the
+// diagnosis attempt 1 already paid for; the dearest is re-attempting
+// precisely the thing that hit the wall clock -- an ending a branch
+// cannot reveal and the detail says outright ("the run exceeded its 2h0m0s
+// wall-clock limit", recorded on RunDispatch's errRunTimedOut arm).
+//
+// Bounded on purpose, by maxPreviousAttempts, maxAttemptDetail and
+// maxBranchCommits: this is orientation, not a transcript store. The
+// transcript stays exactly where it is (Store.SetRunTranscript, and
+// pkg/ui's own pane over it) -- it is prose, per-framework and unbounded,
+// and none of that belongs in a prompt.
+func previousAttemptsSection(h History, branch string) string {
+	if len(h.Attempts) == 0 {
+		return ""
+	}
+	shown := h.Attempts
+	if len(shown) > maxPreviousAttempts {
+		shown = shown[len(shown)-maxPreviousAttempts:]
+	}
+
+	var b strings.Builder
+	b.WriteString("This task has been attempted before")
+	if h.Attempt > 0 {
+		fmt.Fprintf(&b, " -- you are attempt %d", h.Attempt)
+	}
+	b.WriteString(". Read this before you start: it is the diagnosis those attempts " +
+		"already paid for, and re-doing it, or re-attempting whatever the last one " +
+		"ended on, is the commonest way a redispatch spends its budget twice.\n")
+	if len(shown) < len(h.Attempts) {
+		fmt.Fprintf(&b, "The %d most recent, oldest first (%d earlier one(s) not listed):\n",
+			len(shown), len(h.Attempts)-len(shown))
+	} else {
+		b.WriteString("Each of them, oldest first:\n")
+	}
+	for _, r := range shown {
+		fmt.Fprintf(&b, "- attempt %d ended %s%s\n", r.Attempt,
+			attemptOutcome(r), attemptDetail(r))
+	}
+	if len(h.Commits) > 0 {
+		commits := h.Commits
+		if len(commits) > maxBranchCommits {
+			commits = commits[:maxBranchCommits]
+		}
+		fmt.Fprintf(&b, "Commits those attempts already pushed to %q, newest first -- "+
+			"they are on the branch you have checked out, so read them and the diff "+
+			"rather than writing them again:\n", branch)
+		for _, c := range commits {
+			fmt.Fprintf(&b, "- %s\n", c)
+		}
+		// No count on the overflow line, because there is no honest one
+		// to give: RunDispatch asks checkoutCommits for one commit more
+		// than this list holds, precisely so that "there is more" can be
+		// said without a second, unbounded read whose only use would be
+		// to make this sentence a number.
+		if len(h.Commits) > len(commits) {
+			b.WriteString("- ... and older ones still; `git log` in the checkout has all of them.\n")
+		}
+	}
+	return b.String()
+}
+
+// attemptOutcome renders one earlier run's task_run.outcome for that
+// list. "" is a run whose row was never finished -- a daemon that died
+// mid-run, before recover.go's own sweep reached it -- and reads as the
+// unknown it is rather than as a blank where an outcome should be.
+func attemptOutcome(r model.Run) string {
+	if r.Outcome == "" {
+		return "with no outcome recorded (grain lost the run)"
+	}
+	return strconv.Quote(r.Outcome)
+}
+
+// attemptDetail renders one earlier run's task_run.detail, trimmed to one
+// line and to maxAttemptDetail -- the same shape agent.TrimLimitMessage
+// gives the details it writes, applied here to every other writer of that
+// column too, since a prompt has no more room for a pasted stack trace
+// than a run listing does.
+func attemptDetail(r model.Run) string {
+	s := strings.Join(strings.Fields(r.Detail), " ")
+	if s == "" {
+		return ""
+	}
+	if len(s) > maxAttemptDetail {
+		s = s[:maxAttemptDetail] + "..."
+	}
+	return ": " + s
+}
+
 // commentThreadSection renders task's conversation into a prompt section,
 // or "" if there is none yet -- a task's first dispatch always gets "",
 // since nothing has been said about it until a run itself says something
@@ -473,6 +681,12 @@ func proposalSection(task model.Task) string {
 // question and got answered would redispatch, ask the identical question
 // again, and go straight back to awaiting_reply -- forever, since nothing
 // about the run ever changed (bwsalmon/agents#402).
+//
+// It is rendered by BuildPrompt, next to previousAttemptsSection: the
+// conversation and the attempt history are the same kind of fact about
+// what has already happened to this task, and a run told to read the
+// thread first should not have to find it three paragraphs past the one
+// telling it how to push.
 func commentThreadSection(comments []model.Comment) string {
 	if len(comments) == 0 {
 		return ""
@@ -620,6 +834,15 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: reading %s's attachments: %w", task.ID, err)
 	}
+	// What the attempts before this one did, for the prompt section that
+	// tells this one (previousAttemptsSection). Read from the same store
+	// as the two reads above, and fatal for the same reason they are: a
+	// store that cannot answer this is one that cannot record how this
+	// run ends either.
+	previous, err := previousAttempts(ctx, store, task.ID, d.Attempt)
+	if err != nil {
+		return nil, err
+	}
 	promptExtension, err := resolvePromptExtension(ctx, store, cfg.PromptExtension, task)
 	if err != nil {
 		return nil, err
@@ -644,11 +867,21 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		checkoutDir, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task)
 	}
 
+	// The commits those earlier attempts pushed, read out of the checkout
+	// they are in -- the one place they can be read at all
+	// (checkoutCommits). Only for a redispatch, and only where there is a
+	// checkout: a first attempt's branch has nothing on it that is not
+	// the base's, so this would be a tool call spent proving that.
+	history := History{Attempt: d.Attempt, Attempts: previous, Comments: comments}
+	if len(previous) > 0 && checkoutErr == nil && checkoutDir != "" {
+		history.Commits = checkoutCommits(ctx, tools, task, maxBranchCommits+1)
+	}
+
 	var materialized []model.Materialized
 	var prompt string
 	var prepErr error
 	if checkoutErr == nil {
-		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
+		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, history,
 			attachments, checkoutDir, frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
 	}
 	// Told to the recreate path, which is registered one level up in
@@ -1043,9 +1276,10 @@ func erroredCallSuffix(result *agent.Result) string {
 
 // prepareCapabilities resolves and materializes cc.Task's capability
 // grants against reg and assembles the prompt they, the task itself,
-// comments (its conversation so far -- see commentThreadSection) and
-// attachments (every file the task or its conversation carries -- see
-// placeAttachments) all contribute, applying every SideSandbox placement
+// history (what has already happened to it -- its earlier attempts and
+// its conversation, both rendered by BuildPrompt) and attachments (every
+// file the task or its conversation carries -- see placeAttachments) all
+// contribute, applying every SideSandbox placement
 // under sandboxRoot and every attachment under AttachmentsDir on the way.
 // A nil registry, or a task with no Grants, skips capability resolution
 // and returns the rest of the prompt unchanged -- a deployment or test
@@ -1073,8 +1307,8 @@ func erroredCallSuffix(result *agent.Result) string {
 // Silently running an agent without a capability its task is recorded as
 // holding would trade that for a run that quietly does the wrong work.
 //
-// checkoutDir, canOpenPullRequest and maxRuntime are passed straight
-// through to BuildPrompt, which is where all three are explained:
+// history, checkoutDir, canOpenPullRequest and maxRuntime are passed
+// straight through to BuildPrompt, which is where all four are explained:
 // nothing here reads any of them, this being the one path that assembles
 // a dispatch's prompt.
 //
@@ -1088,15 +1322,12 @@ func erroredCallSuffix(result *agent.Result) string {
 // standing rule it is. "" -- no deployment, repo or task has written one
 // -- leaves the prompt exactly as it was before any of this existed.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
-	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, comments []model.Comment,
+	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, history History,
 	attachments []model.Attachment, checkoutDir string,
 	canOpenPullRequest bool, promptExtension string, maxRuntime time.Duration) (materialized []model.Materialized, prompt string, err error) {
 
 	extension := promptExtensionSection(promptExtension)
-	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest, maxRuntime)
-	if thread := commentThreadSection(comments); thread != "" {
-		prompt += "\n\n" + thread
-	}
+	prompt = BuildPrompt(cc.Task, checkoutDir, canOpenPullRequest, maxRuntime, history)
 	attachmentsSection, err := placeAttachments(ctx, tools, attachments)
 	if err != nil {
 		return nil, "", err
