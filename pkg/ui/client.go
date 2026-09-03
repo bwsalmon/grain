@@ -1505,7 +1505,8 @@ func (c *Client) Approve(ctx context.Context, id string) error {
 //
 //   - A task with no approval is untouched, mirroring Approve's own
 //     no-op on an already-approved task.
-//   - A task that is running, completed or closed is refused. Its
+//   - A task that is running, or past its run (completed, awaiting
+//     submit, or closed) is refused. Its
 //     approval has already been spent on work that happened, so clearing
 //     it would erase the record (Task.ApprovedAt, which metrics reads as
 //     "queued since") of a queue wait that was real, and it would stop
@@ -1531,7 +1532,7 @@ func (c *Client) WithdrawApproval(ctx context.Context, id string) error {
 	switch state {
 	case model.StateRunning:
 		return validationErrorf("task %s is running: close it to cancel the run", id)
-	case model.StateCompleted, model.StateClosed:
+	case model.StateCompleted, model.StateAwaitingSubmit, model.StateClosed:
 		return validationErrorf("task %s is %s: its approval is a record of work that already happened", id, state)
 	}
 	return c.Store.WithdrawApproval(ctx, id)
@@ -1639,8 +1640,8 @@ type CloseOptions struct {
 // is a record of a dispatch that happened.
 //
 // A task closed with a pull request still open leaves that pull request
-// behind: grain will not merge it and will not look at it again (only a
-// completed task's fixes-link reaches Store.OpenPullRequestLinks). That
+// behind: grain will not merge it and will not look at it again (only an
+// unclosed task's fixes-link reaches Store.OpenPullRequestLinks). That
 // is the intended outcome, and this is where the person who caused it --
 // and whoever finds the pull request later -- is told about it.
 //

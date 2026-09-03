@@ -901,8 +901,9 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 // PrMergedAt or PrClosedAt -- mutually exclusive, per Observation's own
 // doc comment -- are set the one cycle health first reads PrMerged or
 // PrClosed, alongside ClosedAt: once written, this task drops out of
-// OpenPullRequestLinks (task_state stops reading 'completed' once
-// closed_at is set) and syncEntry never runs for it again, so there is no
+// OpenPullRequestLinks (task_state reads 'closed', rather than either of
+// the two post-run states that query names, once closed_at is set) and
+// syncEntry never runs for it again, so there is no
 // second cycle for either field to be overwritten on.
 func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID string,
 	obs *model.Observation, detail github.PullRequestDetail, health model.PrHealth, now time.Time) error {

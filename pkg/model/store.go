@@ -2973,8 +2973,9 @@ func grantsOf(ctx context.Context, q querier, taskID string) ([]Grant, error) {
 }
 
 // TaskPullRequestLink is one task_link row of kind LinkFixes, belonging to
-// a task whose state is 'completed' — a run pushed and a PR was opened or
-// found for it, and grain has not yet observed that PR finish.
+// a task whose run is over and whose pull request has not finished — a run
+// pushed and a PR was opened or found for it, and grain has not yet
+// observed that PR merge or close.
 type TaskPullRequestLink struct {
 	TaskID string
 	// PullRequest is the link's own target, a model.PullRequestRef's
@@ -2982,20 +2983,28 @@ type TaskPullRequestLink struct {
 	PullRequest string
 }
 
-// OpenPullRequestLinks returns every fixes-link on a completed task —
-// what a GitHub-sync component polls each cycle to find a PR whose health
-// it should refresh, without needing a table of its own: task_link and
-// task_state already carry everything this needs, and task_state already
-// stops returning 'completed' the moment task_observation's closed_at is
-// set, so a closed-out task drops out of this list with no extra
-// bookkeeping.
+// OpenPullRequestLinks returns every fixes-link on a task whose run has
+// finished and which has not closed — what a GitHub-sync component polls
+// each cycle to find a PR whose health it should refresh, without needing
+// a table of its own: task_link and task_state already carry everything
+// this needs, and task_state stops returning either post-run state the
+// moment task_observation's closed_at is set, so a closed-out task drops
+// out of this list with no extra bookkeeping.
+//
+// Both post-run states, not only 'completed'. A task nobody has submitted
+// reads 'awaiting_submit' (StateAwaitingSubmit) and its pull request is
+// every bit as real: somebody may merge or close it on GitHub by hand,
+// and that is precisely the observation SyncPullRequests exists to make.
+// Narrowing this to 'completed' would leave such a task showing a pull
+// request grain had quietly stopped watching, open forever after it had
+// already merged.
 func (s *Store) OpenPullRequestLinks(ctx context.Context) ([]TaskPullRequestLink, error) {
 	var out []TaskPullRequestLink
 	err := each(ctx, s.db,
 		"SELECT `l`.`task_id`, `l`.`target` FROM `task_link` AS `l` "+
 			"JOIN `task_state` AS `st` ON `st`.`task_id` = `l`.`task_id` "+
-			"WHERE `l`.`kind` = ? AND `st`.`state` = 'completed' ORDER BY `l`.`task_id`",
-		string(LinkFixes),
+			"WHERE `l`.`kind` = ? AND `st`.`state` IN (?, ?) ORDER BY `l`.`task_id`",
+		[]any{string(LinkFixes), string(StateCompleted), string(StateAwaitingSubmit)},
 		func(rows *sql.Rows) error {
 			var l TaskPullRequestLink
 			if err := rows.Scan(&l.TaskID, &l.PullRequest); err != nil {

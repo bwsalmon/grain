@@ -161,7 +161,7 @@ var listTasksInputSchema = map[string]any{
 		"state": map[string]any{
 			"type": "string",
 			"description": "only list tasks in this state: proposed, queued, running, awaiting_reply, " +
-				"failed, completed or closed. Omit for every state.",
+				"failed, awaiting_submit, completed or closed. Omit for every state.",
 		},
 		"limit": map[string]any{
 			"type":        "number",

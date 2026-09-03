@@ -46,6 +46,12 @@
   --state-running: var(--accent);
   --state-awaiting: #a855f7;
   --state-failed: var(--danger);
+  /* Awaiting submit is the other state waiting on a person, and it is
+     amber rather than state-awaiting's purple: the two are adjacent in
+     STATE_ORDER and sit in the same sidebar rail, so a reader scanning
+     for "what needs me" should be able to tell a question to answer from
+     a pull request to submit without reading the labels. */
+  --state-awaiting-submit: #c2820b;
   --state-completed: #1a9c53;
   --state-closed: #9a9588;
   /* pr-merged is GitHub's own colour for a merged pull request -- the
@@ -99,6 +105,7 @@
   --state-running: var(--accent);
   --state-awaiting: #c084fc;
   --state-failed: var(--danger);
+  --state-awaiting-submit: #e2a33a;
   --state-completed: #3ec573;
   --state-closed: #85827b;
   --pr-merged: #a371f7;
@@ -189,6 +196,7 @@ body {
 .dot-running { background: var(--state-running); }
 .dot-awaiting_reply { background: var(--state-awaiting); }
 .dot-failed { background: var(--state-failed); }
+.dot-awaiting_submit { background: var(--state-awaiting-submit); }
 .dot-completed { background: var(--state-completed); }
 .dot-closed { background: var(--state-closed); }
 .dot-blocked { background: var(--danger); }
@@ -301,6 +309,7 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 .badge-awaiting_reply::before { background: var(--state-awaiting); }
 .badge-failed::before { background: var(--state-failed); }
 .badge-proposed::before { background: var(--state-proposed); }
+.badge-awaiting_submit::before { background: var(--state-awaiting-submit); }
 .badge-completed::before { background: var(--state-completed); }
 .badge-closed::before { background: var(--state-closed); }
 

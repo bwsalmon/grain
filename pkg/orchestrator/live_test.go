@@ -139,8 +139,8 @@ func TestRunCycleCompletesEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state after the first cycle = %q, want completed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state after the first cycle = %q, want awaiting_submit: the pull request is open and unsubmitted", st)
 	}
 	if len(sim.PullRequests) != 1 {
 		t.Fatalf("expected a pull request to have been opened, got %+v", sim.PullRequests)
@@ -227,8 +227,8 @@ func TestRunCycleParksOnAQuestionThenResumesAfterAReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state after resuming = %q, want completed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state after resuming = %q, want awaiting_submit: the pull request is open and unsubmitted", st)
 	}
 	if len(sim.PullRequests) != 1 {
 		t.Fatalf("expected a pull request to have been opened, got %+v", sim.PullRequests)

@@ -116,8 +116,8 @@ func TestOpenPullRequestForTaskIsAdoptedByTheFinishPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed once the run itself finished", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit once the run itself finished", st)
 	}
 }
 
@@ -280,15 +280,15 @@ func TestRunCycleAdoptsThePullRequestAFailedRunAlreadyOpened(t *testing.T) {
 	assertAdoptedNotReopened(t, ctx, store, sim, task, repo, opened, branch)
 
 	// The task ends the way a failed run that nonetheless pushed ends:
-	// completed, because the branch is real and now has a pull request
-	// (cycle.go's own "only the ending failed"), while the run itself
-	// keeps its failure and its reason.
+	// out of the queue with an open pull request, because the branch is
+	// real and now has one (cycle.go's own "only the ending failed"),
+	// while the run itself keeps its failure and its reason.
 	st, err := store.State(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed: the branch was salvaged even though the run failed", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit: the branch was salvaged even though the run failed", st)
 	}
 	runs, err := store.Runs(ctx, task.ID)
 	if err != nil {
@@ -328,8 +328,8 @@ func TestRecoverOrphanedRunsAdoptsThePullRequestTheRunAlreadyOpened(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st != model.StateCompleted {
-		t.Fatalf("state = %q, want completed: the branch and its pull request outlived the process", st)
+	if st != model.StateAwaitingSubmit {
+		t.Fatalf("state = %q, want awaiting_submit: the branch and its pull request outlived the process", st)
 	}
 	runs, err := store.Runs(ctx, task.ID)
 	if err != nil {

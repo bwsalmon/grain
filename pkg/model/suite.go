@@ -247,7 +247,12 @@ func OutcomeOfPass(tasks []SuiteTaskStatus) PassOutcome {
 	changed, anyFailed, anyPending := false, false, false
 	for _, t := range tasks {
 		switch t.State {
-		case StateCompleted:
+		// StateAwaitingSubmit counts as completed here for the reason
+		// QualificationStatus gives: a pass measures whether its tasks ran
+		// and what they produced, and a pull request nobody has submitted
+		// yet is a pull request all the same -- OpenedPullRequest below is
+		// exactly the case that makes a task read that way.
+		case StateCompleted, StateAwaitingSubmit:
 			if t.OpenedPullRequest || t.Proposed {
 				changed = true
 			}

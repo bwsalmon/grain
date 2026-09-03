@@ -214,7 +214,13 @@ func QualificationStatus(tasks []QualificationTaskStatus) QualificationRunStatus
 			anyUnapproved = true
 		}
 		switch t.State {
-		case StateCompleted:
+		// StateAwaitingSubmit alongside StateCompleted: both mean the run
+		// is over and produced what it was going to produce, and the only
+		// difference between them is whether anything will merge the pull
+		// request without a human. A qualification run asks whether the
+		// candidate's tasks worked, not whether somebody has since clicked
+		// Submit on them.
+		case StateCompleted, StateAwaitingSubmit:
 		case StateFailed, StateClosed:
 			// StateClosed here means closed without ever completing --
 			// StateCompleted is set independently the moment a task does,
