@@ -51,6 +51,25 @@ test("files a new task through the New task overlay", async ({ page }) => {
   await expect(row.locator(".badge-proposed")).toBeVisible();
 });
 
+// grain/task-91: every task row carries a button that shows the whole
+// prompt its agent was handed. The seeded running task is the one with a
+// recorded prompt (cmd/grain/demo.go builds it with the same
+// orchestrator.BuildPrompt a real dispatch uses), so this is the one
+// place the button, the route and the recorded prompt are exercised
+// together against a real server.
+test("shows the full prompt behind a task row's own button", async ({ page }) => {
+  await page.goto("/");
+
+  const row = page.locator(".task-row", { hasText: "Bump the Go toolchain to 1.24" });
+  await row.getByRole("button", { name: /^Show the prompt for/ }).click();
+
+  const dialog = page.locator(".MuiDialog-paper");
+  await expect(dialog.getByText(/Push your change to a new branch named/)).toBeVisible();
+  // The task itself must not have opened behind it: the button stops the
+  // row's own click (TaskList's PromptButton).
+  await expect(page.locator(".detail-header")).toHaveCount(0);
+});
+
 // grain/task-94: a task opens into the whole content area beside the
 // sidebar rather than a box floating in the middle of it. Layout is the
 // one thing jsdom cannot answer for -- Overlay.test.jsx can only check

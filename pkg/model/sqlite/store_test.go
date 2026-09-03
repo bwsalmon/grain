@@ -1961,6 +1961,58 @@ func TestInitMigratesAnExistingDatabaseMissingTranscript(t *testing.T) {
 	}
 }
 
+// A store written before task_run.prompt existed keeps working: Init
+// adds the column (Store.ensureTaskRunPromptColumn), the runs recorded
+// before it read back with no prompt rather than failing the query, and
+// the next run can record one for real -- the same shape the transcript
+// migration above pins for the column before it.
+func TestInitMigratesAnExistingDatabaseMissingPrompt(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_run`"+` (
+  `+"`id`"+`               TEXT     NOT NULL,
+  `+"`task_id`"+`          TEXT     NOT NULL,
+  `+"`sandbox`"+`          TEXT     NOT NULL,
+  `+"`unit`"+`             TEXT     NULL,
+  `+"`attempt`"+`          INTEGER  NOT NULL,
+  `+"`started_at`"+`       DATETIME NOT NULL,
+  `+"`agent_started_at`"+` DATETIME NULL,
+  `+"`finished_at`"+`      DATETIME NULL,
+  `+"`outcome`"+`          TEXT     NULL,
+  `+"`detail`"+`           TEXT     NULL,
+  `+"`transcript`"+`       TEXT     NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the task_run table as it was before the prompt column: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_run` (`id`,`task_id`,`sandbox`,`attempt`,`started_at`,`outcome`) "+
+			"VALUES ('r1','a1b2','s1',1,?,'succeeded')", now); err != nil {
+		t.Fatalf("seeding a run recorded before the column existed: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task_run.prompt: %v", err)
+	}
+
+	prompt, found, err := store.RunPrompt(ctx, "a1b2", 1)
+	if err != nil || !found || prompt != "" {
+		t.Fatalf("RunPrompt after migrating = (%q, %v, %v), want (\"\", true, nil)", prompt, found, err)
+	}
+	if err := store.SetRunPrompt(ctx, "r1", "what the agent was told"); err != nil {
+		t.Fatalf("set after migrating: %v", err)
+	}
+	if prompt, _, err := store.RunPrompt(ctx, "a1b2", 1); err != nil || prompt != "what the agent was told" {
+		t.Fatalf("RunPrompt after set = (%q, %v), want the prompt now durable", prompt, err)
+	}
+}
+
 // The merge queue's own record of having refreshed a stale head
 // (task_observation.merge_queue_refreshed_at) was added to a table every
 // existing deployment already has rows in, and CREATE TABLE IF NOT EXISTS

@@ -555,6 +555,26 @@ func (s *Server) handleGetAttemptTranscript(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, attemptTranscriptResponse{Transcript: transcript})
 }
 
+// handleGetTaskPrompt serves the prompt a task's own agent was handed --
+// its own route rather than a field on TaskDetail, the same reasoning
+// attemptTranscriptResponse gives for the transcript: a prompt runs to
+// thousands of words, and the list every task detail fetch already pays
+// for should not carry one per task for the sake of a pane most readers
+// never open.
+//
+// A task that has no recorded prompt is a 200 with an empty one, not a
+// 404: the task exists and the honest answer is "nothing has been
+// dispatched for it yet" (Client.TaskPrompt), which the frontend renders
+// as such. Only an unknown task id 404s.
+func (s *Server) handleGetTaskPrompt(w http.ResponseWriter, r *http.Request) {
+	prompt, err := s.tasks.TaskPrompt(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, prompt)
+}
+
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	var req CreateTaskRequest
 	if !readJSON(w, r, &req) {

@@ -8,6 +8,7 @@ import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
 import Markdown from "./Markdown.jsx";
 import Overlay from "./Overlay.jsx";
+import PromptOverlay from "./PromptOverlay.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
@@ -25,6 +26,10 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
   // to know a task's title and description are mid-edit, and closing
   // the overlay (which unmounts it) is itself "cancel" for free.
   const [editing, setEditing] = useState(false);
+  // showPrompt is the same local treatment editing gets, for the same
+  // reason: nothing outside this overlay needs to know the prompt pane
+  // is open, and closing the task closes it too.
+  const [showPrompt, setShowPrompt] = useState(false);
   return (
     <Overlay onClose={onClose} pane>
       <div className="detail-layout">
@@ -35,6 +40,12 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             <>
               <div className="detail-header">
                 <Typography variant="h6" component="h2" sx={{ m: 0, fontWeight: 600, fontSize: "1.15rem" }}>{t.id} {t.title}</Typography>
+                {/* The same prompt every task row offers a button for
+                    (TaskList's own PromptButton), offered again here
+                    because this is where someone works out why a task
+                    went the way it did -- and the title and description
+                    above are only part of what its agent was handed. */}
+                <Button size="small" onClick={() => setShowPrompt(true)}>Prompt</Button>
                 <Button size="small" onClick={() => setEditing(true)}>Edit</Button>
               </div>
 
@@ -90,6 +101,7 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
           <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
         </div>
       </div>
+      {showPrompt && <PromptOverlay taskId={t.id} onClose={() => setShowPrompt(false)} />}
     </Overlay>
   );
 }
