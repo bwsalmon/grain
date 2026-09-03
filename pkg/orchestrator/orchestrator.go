@@ -67,8 +67,9 @@ type Sandboxes interface {
 }
 
 // Shape is how big a sandbox a run asked for -- model.Task's own
-// SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534), or the zero value
-// for a run content with the deployment default.
+// SandboxCPUs/SandboxMemoryMB/SandboxDiskGB (bwsalmon/agents#534,
+// grain/task-41), or the zero value for a run content with the
+// deployment default.
 //
 // It is passed to Acquire rather than applied afterwards because a
 // sandbox is now built per run: the one moment its size is decided is
@@ -76,14 +77,22 @@ type Sandboxes interface {
 // used to expose a Reshape for exactly that gap -- a `konturctl vm
 // update` against a long-lived slot VM already sized from the deployment
 // default at create time, undone by the next recreate -- and it is gone
-// with the gap.
+// with the gap. Disk is the one dimension that could never have been
+// applied afterwards even then: a VM's root disk is a qcow2 overlay
+// created with the VM, and growing one under a running guest is not
+// something `konturctl vm update` offers.
 type Shape struct {
 	CPUs, MemoryMB int
+	// DiskGB is the VM's root disk size, in GiB -- the third dimension,
+	// added by grain/task-41 alongside the other two rather than as a
+	// type of its own so every path that already carries a requested
+	// size carries this one too.
+	DiskGB int
 }
 
 // IsZero reports whether a shape asks for nothing in particular, which is
-// what a task with neither override set produces.
-func (s Shape) IsZero() bool { return s.CPUs == 0 && s.MemoryMB == 0 }
+// what a task with no override at all produces.
+func (s Shape) IsZero() bool { return s.CPUs == 0 && s.MemoryMB == 0 && s.DiskGB == 0 }
 
 // orDefault fills each dimension this shape leaves at zero from def --
 // how a run that asked for no size of its own (or asked in only one
@@ -97,6 +106,9 @@ func (s Shape) orDefault(def Shape) Shape {
 	}
 	if s.MemoryMB == 0 {
 		s.MemoryMB = def.MemoryMB
+	}
+	if s.DiskGB == 0 {
+		s.DiskGB = def.DiskGB
 	}
 	return s
 }
@@ -250,13 +262,15 @@ type Config struct {
 	// instead of switching this off.
 	MaxRunRuntime time.Duration
 
-	// Now reads the current time, and exists for the one timestamp
-	// RunDispatch cannot take from its caller: when a run finished.
-	// Every other moment this package records is the `at` RunCycle hands
-	// down -- the moment the cycle began -- and a run's finish is the one
-	// that is genuinely later than that, by however long the agent
-	// worked. Stamping finished_at with `at` too made every run ever
-	// recorded read back as zero seconds long.
+	// Now reads the current time, and exists for the timestamps
+	// RunDispatch cannot take from its caller: when a run's agent got its
+	// first turn, and when the run finished. Every other moment this
+	// package records is the `at` RunCycle hands down -- the moment the
+	// cycle began -- and those two are genuinely later than that, by
+	// however long setup and then the agent took. Stamping finished_at
+	// with `at` too made every run ever recorded read back as zero
+	// seconds long; the agent's own start is the line pkg/metrics splits
+	// that duration at (Store.SetRunAgentStarted).
 	//
 	// nil is the wall clock, which is what a real deployment wants. A
 	// test driving this package off a fake clock sets it so a run's
@@ -365,13 +379,14 @@ func NewHostSandboxes(baseDir string) *HostSandboxes {
 // for the run.
 //
 // A non-zero shape is refused rather than ignored. A local directory has
-// no CPU or memory of its own to size, so a task that asked for a
-// specific one would silently get the host's instead -- the same refusal
-// this backend gave before, when a shape override went looking for a
-// Reshape it does not implement.
+// no CPU, memory or disk of its own to size -- it is a path on the host's
+// own filesystem -- so a task that asked for a specific one would
+// silently get the host's instead: the same refusal this backend gave
+// before, when a shape override went looking for a Reshape it does not
+// implement.
 func (h *HostSandboxes) Acquire(ctx context.Context, name string, shape Shape) (Sandbox, error) {
 	if !shape.IsZero() {
-		return nil, fmt.Errorf("orchestrator: sandbox %q asks for %d vCPU/%d MiB but a host-directory sandbox has no shape of its own", name, shape.CPUs, shape.MemoryMB)
+		return nil, fmt.Errorf("orchestrator: sandbox %q asks for %d vCPU/%d MiB/%d GiB but a host-directory sandbox has no shape of its own", name, shape.CPUs, shape.MemoryMB, shape.DiskGB)
 	}
 	root := filepath.Join(h.baseDir, name)
 	// A directory left behind by a previous process using this same

@@ -158,11 +158,23 @@ func TestLiveConfigPushesAChangedSandboxShapeToTheBackend(t *testing.T) {
 	changed := cfg.toModelConfig()
 	changed.SandboxCPUs = 4
 	changed.SandboxMemoryMB = 8192
+	changed.SandboxDiskGB = 40
 	putConfig(t, store, changed)
 	live.refresh(ctx, &deps)
 
-	if want := (orchestrator.Shape{CPUs: 4, MemoryMB: 8192}); sandboxes.shape != want {
+	if want := (orchestrator.Shape{CPUs: 4, MemoryMB: 8192, DiskGB: 40}); sandboxes.shape != want {
 		t.Fatalf("default shape = %+v, want %+v", sandboxes.shape, want)
+	}
+
+	// And a change to the disk alone reaches the backend too: the three
+	// dimensions are compared independently (liveConfig's own reshape
+	// check), not as one all-or-nothing pair of CPU and memory.
+	changed.SandboxDiskGB = 80
+	putConfig(t, store, changed)
+	live.refresh(ctx, &deps)
+
+	if want := (orchestrator.Shape{CPUs: 4, MemoryMB: 8192, DiskGB: 80}); sandboxes.shape != want {
+		t.Fatalf("default shape after a disk-only change = %+v, want %+v", sandboxes.shape, want)
 	}
 }
 

@@ -27,8 +27,18 @@
 # nothing to regenerate otherwise, and whose failure mode is a guest that
 # boots with no address at all.
 #
-# Inputs, both as environment variables rather than files (nothing here is
-# ever written into this repo):
+# Inputs, all as environment variables rather than files (nothing here is
+# ever written into this repo). build-guest.sh splices each one into the
+# text of this script, since kontur's hook execs it with only its own
+# build stage's environment:
+#   GO_VERSION               required. The Go toolchain to install, read
+#                            out of this repo's own go.mod by
+#                            build-guest.sh -- see "The Go and Node
+#                            toolchains" below.
+#   GRAIN_DEP_MANIFESTS      required. base64 of a gzipped tar of go.mod,
+#                            go.sum, ui/package.json and
+#                            ui/package-lock.json, which is what the
+#                            module and npm caches are warmed from.
 #   SANDBOX_SETUP_SCRIPT     optional. An operator's own extra
 #                            customization, run after everything below.
 #
@@ -48,6 +58,24 @@
 set -eux
 
 KIND_VERSION="v0.32.0"
+# Node is pinned here rather than read out of a file, because no file in
+# this repo names a full one: .github/workflows/tests.yml pins the major
+# ("node-version: 20") and package.json pins none at all. The major has
+# to keep matching that workflow -- a sandbox agent reproducing a red
+# `npm test` on a different major is reproducing a different thing --
+# which tests/deploy asserts across the two files.
+NODE_VERSION="20.19.0"
+
+# Both are spliced in by build-guest.sh; running this script by hand
+# needs them set the same way. Checked here rather than left to fail
+# further down, where an empty GO_VERSION would fetch a 404 and an empty
+# manifest bundle would quietly produce an image whose toolchain works
+# only on a machine with a network -- which is exactly the machine this
+# image is never on.
+if [ -z "${GO_VERSION:-}" ] || [ -z "${GRAIN_DEP_MANIFESTS:-}" ]; then
+  echo "guest-setup.sh: GO_VERSION and GRAIN_DEP_MANIFESTS must both be set -- build-guest.sh reads them out of the tree and splices them in" >&2
+  exit 1
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -64,11 +92,21 @@ apt-get update
 # that changes how the kernel gets in (a copied-in kernel rather than the
 # Debian package, say) would silently take ipconfig with it and leave
 # every guest without an address.
+# xz-utils is here for the same kind of reason: `tar -J` shells out to
+# the xz binary, and the Node tarball below is the only .tar.xz this
+# script unpacks. minbase has liblzma5 (dpkg needs it) but not the
+# command.
+# e2fsprogs is named for the same reason klibc-utils is: resize2fs is what
+# the grain-growfs unit below execs, and while e2fsprogs is a
+# Priority: required package that debootstrap --variant=minbase does
+# install today, a guest that silently lost it would boot fine and simply
+# never grow onto the disk its VM was created with -- a failure that looks
+# like "-disk-size-gb did nothing" several layers away from its cause.
 apt-get install -y --no-install-recommends \
   linux-image-amd64 \
-  sudo libnss-myhostname klibc-utils \
+  sudo libnss-myhostname klibc-utils e2fsprogs \
   git curl jq ripgrep fd-find build-essential python3 python3-venv \
-  pipx tmux unzip ca-certificates bubblewrap gnupg
+  pipx tmux unzip xz-utils ca-certificates bubblewrap gnupg
 
 # --- Hostname resolution. The chroot this runs in shares the build host's
 # UTS namespace, so anything above that asked for "the current hostname"
@@ -175,6 +213,149 @@ echo \
 apt-get update
 apt-get install -y --no-install-recommends google-cloud-cli terraform
 
+# --- The Go and Node toolchains, and warm caches for both.
+#
+# A sandbox is where the merge queue's own fix tasks run
+# (orchestrator.fileFixTask), and until this block existed every one of
+# them ended its commit message with some version of "not built or run:
+# this sandbox has no Go toolchain and no network to fetch one". A fix
+# agent that cannot run `go test ./...` is guessing, and a merge fix that
+# is a guess costs another queue cycle when it turns out not to be the
+# fix. What `make test` needs is exactly this: the Go the module asks
+# for, the Node CI pins, and every dependency of both already on disk.
+#
+# The caches are the load-bearing half, not an optimization. A dispatched
+# sandbox has no route off the host except the git proxy -- no DNS, no
+# proxy.golang.org, no registry.npmjs.org -- so a toolchain with a cold
+# cache cannot build anything at all. They are warmed from this repo's
+# own go.mod/go.sum and ui/package-lock.json, carried in as
+# GRAIN_DEP_MANIFESTS, so what lands here is what the tree at build time
+# actually resolves to rather than whatever is newest. A branch that adds
+# a dependency the published image predates still cannot fetch it; that
+# costs that one branch its `go test`, where a cold cache costs every
+# branch its `go test`.
+#
+# Deliberately *not* here: Playwright's browsers. `npx playwright install`
+# is a ~300MB download of Chromium/Firefox/WebKit per image, and the job
+# it feeds (`make test-e2e`, tests.yml's ui-e2e) is a separate CI job
+# from the one merge fixes actually keep tripping over. `go test ./...`
+# and `npm test` are what the `go` job gates on, and they are what this
+# block makes runnable.
+#
+# One image, uniform (README.md's own section) still holds: these caches
+# are grain's because grain is what this image's sandboxes work on, the
+# same way the package list above is v1's sandbox list. Nothing here is
+# per-task or per-branch.
+
+# Go, from the upstream tarball rather than Debian's golang-go: bookworm
+# ships 1.19, and go.mod asks for a version years past that. GO_VERSION
+# is read out of go.mod itself by build-guest.sh (the Makefile reads it
+# the same way for Dockerfile.build), so the image and the module cannot
+# drift apart while only one of them is ever edited.
+go_tarball="go${GO_VERSION}.linux-amd64.tar.gz"
+curl -fsSL -o "/tmp/${go_tarball}" "https://go.dev/dl/${go_tarball}"
+rm -rf /usr/local/go
+tar -C /usr/local -xzf "/tmp/${go_tarball}"
+rm -f "/tmp/${go_tarball}"
+# /usr/local/bin, not a profile script: sshd runs `bash -c` for a
+# non-interactive command, which reads no profile at all, and its default
+# PATH (/usr/local/bin:/usr/bin:/bin:/usr/games -- confirmed on a booted
+# guest) already has this directory in it. Every environment default
+# below is likewise written where the tool itself reads it rather than
+# into a shell's environment, for the same reason.
+ln -sf /usr/local/go/bin/go /usr/local/bin/go
+ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+# Node, likewise from upstream: bookworm ships 18, and vitest -- what
+# `npm test` runs -- needs 20.19 or newer.
+node_tarball="node-v${NODE_VERSION}-linux-x64.tar.xz"
+curl -fsSL -o "/tmp/${node_tarball}" "https://nodejs.org/dist/v${NODE_VERSION}/${node_tarball}"
+rm -rf /usr/local/lib/nodejs
+install -d -m0755 /usr/local/lib/nodejs
+tar -C /usr/local/lib/nodejs --strip-components=1 -xJf "/tmp/${node_tarball}"
+rm -f "/tmp/${node_tarball}"
+ln -sf /usr/local/lib/nodejs/bin/node /usr/local/bin/node
+ln -sf /usr/local/lib/nodejs/bin/npx /usr/local/bin/npx
+
+# npm is a wrapper rather than a symlink, for Playwright specifically.
+# @playwright/test's own install script downloads three browsers unless
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD is set, and ui/'s devDependencies
+# include it -- so a plain `npm ci` in ui/ (which is what `make frontend`
+# runs, and so what `make test` runs) would try to fetch ~300MB from a
+# guest with no route to fetch it over, and fail the install outright.
+# Not for want of a cache: npm's cache holds packages, and those
+# browsers are not a package.
+#
+# The default is set with ${VAR-1} rather than ${VAR:-1} so that setting
+# the variable to the empty string is a way back to the normal
+# behaviour -- Playwright reads the variable's presence, not its value,
+# so there is no "0" that means no.
+cat > /usr/local/bin/npm <<'EOF'
+#!/bin/sh
+# grain's sandbox guest (scripts/kontur/guest-setup.sh) wraps npm to
+# default PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD on: this guest has no route to
+# the CDN Playwright's install script downloads browsers from, and
+# without this every `npm ci` in ui/ fails on that download rather than
+# installing from npm's own warm cache. Run `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD= npm ...`
+# on a guest that does have a network to get the browsers anyway.
+export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD="${PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD-1}"
+exec /usr/local/lib/nodejs/bin/npm "$@"
+EOF
+chmod 0755 /usr/local/bin/npm
+
+# Defaults for the two tools, written where each one reads them rather
+# than exported into a shell that a non-interactive SSH command never
+# sources:
+#
+#   GOTOOLCHAIN=local -- the same pin Dockerfile.build sets, for the same
+#   reason. A go.mod asking for a newer Go than this image carries would
+#   otherwise have the go command fetch that toolchain at build time,
+#   which here means failing on the network rather than saying so; local
+#   makes it an error naming both versions, which is the signal to
+#   republish this image.
+#
+#   prefer-offline -- npm serves from its cache without revalidating
+#   against the registry, so a warm cache is enough on its own. It is
+#   not `offline`, which would make a guest that *does* have a network
+#   unable to install anything new.
+#
+#   audit/fund false -- both are registry round trips on every install
+#   with nothing to say to an offline guest.
+install -d -m0755 -o debian -g debian /home/debian/.config/go
+GOENV=/home/debian/.config/go/env /usr/local/go/bin/go env -w GOTOOLCHAIN=local
+HOME=/home/debian npm config set prefer-offline=true --location=global
+HOME=/home/debian npm config set audit=false --location=global
+HOME=/home/debian npm config set fund=false --location=global
+
+# The caches themselves, warmed into the sandbox account's own default
+# locations -- /home/debian/go/pkg/mod and /home/debian/.npm -- so that
+# nothing has to point either tool at them, and both stay writable by the
+# account that will use them (a read-only shared cache would turn "this
+# module is missing" into a permission error).
+#
+# `go mod download` with no arguments is the whole build list for a
+# go.mod at 1.17 or newer: the modules its own require directives name,
+# resolved without loading a single package, which is what lets this run
+# against a directory holding nothing but go.mod and go.sum. `npm ci`
+# does need a node_modules to install into, so it gets one, in the same
+# temporary directory that goes away afterwards -- the cache it fills on
+# the way is the part that stays.
+grain_manifests="$(mktemp -d)"
+# set -x would otherwise echo the whole base64 blob into the build log.
+set +x
+printf '%s' "${GRAIN_DEP_MANIFESTS}" | base64 -d | tar -xz -C "${grain_manifests}"
+set -x
+(
+  cd "${grain_manifests}"
+  HOME=/home/debian GOMODCACHE=/home/debian/go/pkg/mod go mod download
+  cd "${grain_manifests}/ui"
+  HOME=/home/debian npm ci
+)
+rm -rf "${grain_manifests}"
+# Everything above ran as root with HOME pointed at the account's home,
+# so the files are in the right places under the wrong owner.
+chown -R debian:debian /home/debian
+
 # --- Networking: kernel interface naming, and static addressing from the
 # kernel's own "ip=" boot parameter.
 #
@@ -247,6 +428,71 @@ EOF
 mkdir -p /etc/systemd/system/sysinit.target.wants
 ln -sf /etc/systemd/system/kontur-net-cmdline.service \
   /etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service
+
+# --- Grow the root filesystem onto whatever disk this VM was actually
+# given (grain/task-41).
+#
+# `konturctl vm create -disk-size-gb` sizes the VM's own writable qcow2
+# overlay, and that is all it can do: the filesystem packed into the
+# backing guest image (kontur's `mke2fs -d`, sized to the rootfs plus 20%
+# headroom) still ends where it ended, so a VM asked for 40 GiB boots
+# with the image's few hundred megabytes and tens of gigabytes of
+# unallocated space past the end of it. Nothing but the guest can close
+# that gap -- the hypervisor has no idea what filesystem is on the device
+# -- so this is grain's half of the disk-size setting.
+#
+# Online, on every boot, rather than once at build time: the size is not
+# known when the image is built (it is a per-VM create-time argument, and
+# a per-task one at that), and it is the same VM's first boot either way
+# since a sandbox lives exactly as long as one run. On a VM whose disk was
+# not enlarged -- every VM on a deployment that never sets a disk size --
+# resize2fs finds nothing to do and exits 0, so this costs those a
+# fraction of a second and changes nothing.
+#
+# Failure is deliberately not fatal: a guest that boots with its original
+# filesystem is a run that may run out of disk, while a guest that fails
+# to boot is a run that cannot start at all. The message lands on the
+# console either way, which is where a VM's own boot is read from
+# (`docker logs` on its container).
+cat > /usr/local/sbin/grain-growfs <<'EOF'
+#!/bin/sh
+# Grows the root filesystem to fill its block device, if it does not
+# already. See guest-setup.sh's own "Grow the root filesystem" block.
+set -u
+root_dev=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+case "${root_dev}" in
+  /dev/*) ;;
+  # An overlay or anything else that is not a plain block device has
+  # nothing here to grow, and is not an error worth failing a boot over.
+  *) echo "grain-growfs: root is ${root_dev:-unknown}, not a block device -- nothing to grow"; exit 0 ;;
+esac
+if ! resize2fs "${root_dev}"; then
+  echo "grain-growfs: resize2fs ${root_dev} failed -- continuing with the filesystem as it is" >&2
+fi
+exit 0
+EOF
+chmod 0755 /usr/local/sbin/grain-growfs
+
+cat > /etc/systemd/system/grain-growfs.service <<'EOF'
+[Unit]
+Description=Grow the root filesystem onto the whole virtual disk (grain sandbox)
+DefaultDependencies=no
+After=systemd-remount-fs.service
+Before=sysinit.target
+ConditionPathIsReadWrite=/
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/grain-growfs
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=sysinit.target
+EOF
+ln -sf /etc/systemd/system/grain-growfs.service \
+  /etc/systemd/system/sysinit.target.wants/grain-growfs.service
 
 # --- Stop forcing kontur's console wrapper on every SSH session.
 #
@@ -346,15 +592,28 @@ Added on top of kontur's own guest image:
   guest needs (see guest-setup.sh's "Networking"). kontur's flat-mode
   control link (its own kontur-control-net service, from kontur's guest
   overlay) configures eth1 on top of that
+- a systemd unit (grain-growfs) that grows the root filesystem onto the
+  whole virtual disk on each boot, so a VM created with
+  `konturctl vm create -disk-size-gb` actually has that space rather than
+  just a larger empty device. A no-op on a VM whose disk was not enlarged
 - git curl jq ripgrep fd-find build-essential python3 python3-venv pipx
-  tmux unzip ca-certificates bubblewrap gnupg
+  tmux unzip xz-utils ca-certificates bubblewrap gnupg
 - docker-ce plus kind (its node image is not pre-pulled -- see
   guest-setup.sh's own comment on that)
 - google-cloud-cli and terraform, for a task whose deployment mints a
   per-task GCP key at dispatch time (nothing here bakes the key itself)
+- the Go toolchain go.mod asks for and the Node major CI pins, plus a
+  module cache and an npm cache already holding every dependency
+  go.sum/ui/package-lock.json name -- so `make test` runs on a guest
+  with no route to proxy.golang.org or registry.npmjs.org. A branch
+  that adds a dependency this image predates is the one case that still
+  needs a network.
 
 Not baked in, on purpose:
 - any credential -- git config/credentials are set per-dispatch
 - Claude Code -- it runs on the controller side against this VM's four MCP
   sandbox tools, not on the guest itself
+- Playwright's browsers (~300MB): `make test-e2e` does not run here. npm
+  is wrapped to skip their download so that `npm ci` still works --
+  guest-setup.sh's own "The Go and Node toolchains" explains it.
 DOC

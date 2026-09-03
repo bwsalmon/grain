@@ -220,9 +220,37 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 // while the run was still live; re-reading the observation here is what
 // model/state.go's StateOf precedence (ClosedAt outranks a live run)
 // means for a run that already pushed. Nobody wants a closed task's work
-// merged, so the branch is left pushed but unopened rather than turned
-// into a real pull request. It still counts as handled: there was a
-// branch, and the decision about it has been made.
+// merged, so nothing is opened here: the branch is left pushed, and left
+// unopened unless the run itself already opened a pull request for it.
+// It still counts as handled either way -- there was a branch, and the
+// decision about it has been made.
+//
+// That qualifier is what a run calling open_pull_request (pullrequest.go)
+// mid-flight changed, and it is a real case: the close can land after the
+// tool call and before this runs, on all three of this function's callers.
+// The pull request then already exists on GitHub and is already linked to
+// the task, and this function undoes neither. Nothing in grain closes a
+// pull request, and the commits on the branch are real work whichever way
+// the human went on the task, so it is left open and left linked, for a
+// person to merge or close by hand.
+//
+// What that leaves behind is bounded, which is why it is the choice made:
+// grain itself never touches that pull request again.
+// Store.OpenPullRequestLinks only returns links belonging to a
+// *completed* task, and a closed task is not completed, so it never
+// becomes a merge queue entry and SyncPullRequests never so much as reads
+// it. The thing "nobody wants a closed task's work merged" is protecting
+// is protected either way; all that remains is a pull request visible on
+// a task somebody just closed.
+//
+// It is also the answer already given to the same question one moment
+// later in a task's life -- a task closed after its pull request was
+// opened at the finish keeps that pull request open and unmerged forever
+// (tests/e2e's TestClosingATaskWithAnOpenPullRequestDropsItFromTheMerge
+// QueueForGood). A run opening its own pull request only moved when that
+// moment can arrive. pullrequest_test.go's
+// TestClosingATaskLeavesThePullRequestItsRunAlreadyOpenedAlone pins both
+// halves of it here.
 func salvagePushedBranch(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, now time.Time) (bool, error) {
 

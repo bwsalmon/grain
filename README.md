@@ -132,7 +132,25 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 (see "Input is a model update, not a GitHub issue").
                 RunCycle runs the two halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
-                pipeline" below.
+                pipeline" below. It also times itself
+                (orchestrator.CycleTimes): a bounded in-memory ring of how
+                long recent ticks took and how far into each one the
+                dispatch decision was reached, which is the one thing a
+                deployment measures about itself rather than derives from
+                a row -- see "Measuring the daemon's own tick" below
+pkg/metrics/    what the deployment actually delivers: tasks completed per
+                day (throughput) and where a task's wall-clock time goes
+                (latency), computed from rows that already exist -- filed,
+                approved, dispatched, agent-started, finished, completed --
+                with nothing stored, nothing counted on a hot path and no
+                way for a number to disagree with the task it describes.
+                It holds no state and opens no database: pkg/model reads
+                the rows (Store.TaskTimings/RunTimings), this decides what
+                they mean, pkg/ui serves it as GET /api/metrics and
+                `grain metrics` prints it. Its one non-derived input is
+                the daemon's own RunCycle tick, which leaves no row to
+                derive anything from -- see "Measuring the daemon's own
+                tick" below. See "Measuring throughput and latency" below
 tests/e2e/      tasks filed the way a user would, carried through
                 dispatch.Cycle, a real agent/antigravity run, and a real
                 gitproxy push, against a real embedded SQLite store and a
@@ -973,7 +991,8 @@ could do with it.
 Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
 task that asked for `/auto-merge` and still has a PR open. Only the
-queue's head — the earliest submitted, per repo — is ever acted on in a
+queue's head — whichever of a repo's waiting tasks sits first in the
+backlog — is ever acted on in a
 cycle; a fix filed for the second task while the first is still being
 repaired would likely need refiling the moment the first merges and
 changes what the second is based against, so everything behind the head
@@ -994,7 +1013,18 @@ sync landing in the gap between the push and that sees nothing — and
 nothing is also what a repo with no CI configured answers, forever, with
 no way to tell the two apart from the Checks API. The window is the only
 thing that can, and a deployment with genuinely no CI pays it once per
-head commit. Nor does it wait for CI that is never coming: a head that
+head commit. And all of that is reasoning about one *commit*, so the
+cycle names it at every step rather than letting any of them mean
+"whatever the branch points at now": the check runs are read for the head
+sha off the pull-request read (a branch-scoped read answers for a commit
+the cycle never saw), the window above is keyed on it, and the merge
+carries it in GitHub's own `sha` parameter, which refuses with `409` if
+the branch has moved since. That closes the gap a push landing mid-cycle
+would otherwise walk through — a human's own "push a fix by hand", a fix
+task merging into the branch it repairs, a redispatched task pushing
+again — and costs one cycle when it happens: the task keeps its queue
+position and the commit that landed is judged next cycle on its own CI.
+Nor does it wait for CI that is never coming: a head that
 has read `PENDING` for longer than `defaultCheckStallDeadline` (two
 hours, timed per head commit over one unbroken run of pending reads) is
 given up on — a comment naming the checks that never finished,
@@ -1021,9 +1051,23 @@ automatically rather than refiling: it comments explaining why, sets
 task in that repo — a blocked task still merges the moment a human's own
 push makes it clean, it just stops being anyone's queue head, so it can
 no longer hold up what's behind it. No new record was needed for the
-queue itself: `queueHeads` derives head-of-queue from `Task.CreatedAt`
-and `Task.AutoMerge` fresh every cycle, the same "derive it, don't store
-it" discipline `TaskState` already holds to.
+queue itself: `queueOrder` derives the whole queue from `Task.AutoMerge`,
+`Origin.Reason` and `MergeQueueBlockedAt` fresh every cycle, and
+`queueHeads` takes each repo's first entry from it — the same "derive it,
+don't store it" discipline `TaskState` already holds to.
+
+What the queue does write down is where it is. Every cycle,
+`showQueueAtFrontOfBacklog` moves the tasks waiting to land to the front
+of the backlog in the order they will land, and `fileFixTask` files a
+repair at the very head of it (`Store.MoveToFrontOfBacklog`,
+`Store.OrderKeyForNewTask`) — so a task list answers "what is grain about
+to finish, and in what order" without anyone opening a task. It is the
+same order in both directions: `queueOrder` reads position back off the
+backlog rather than comparing `Task.CreatedAt` behind everyone's back, so
+dragging one waiting pull request above another really does change which
+merges first, and `Store.Ready` needs no carve-out for a fix task any
+more — being at the head of the list is what dispatches it first, which
+is a thing a human can see and, if they disagree, undo.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
@@ -1669,7 +1713,22 @@ read-modify-write against whatever `grain_config` currently holds (or
 the zero `model.Config`, the first time). `grain settings` is the CLI
 side of the same `Client` methods — no flags prints what is stored (or
 that nothing is, yet); any flags apply just those, the way `grain
-update` already treats a task's own flags.
+update` already treats a task's own flags. Every store-backed field has
+a flag there, all three dimensions of the deployment-wide sandbox VM
+shape (`-sandbox-cpus`/`-sandbox-memory-mb`/`-sandbox-disk-gb`) included:
+a setting reachable only
+from the Settings pane would be one a deployment could not be configured
+from a shell, which is where `grain sync` and every scripted setup
+already live. Unset, vCPUs and memory print as the shape actually in
+effect — `bwsalmon/kontur`'s own default, carried alongside the stored
+value as `sandboxCpusDefault`/`sandboxMemoryMbDefault` — rather than as
+the bare `0` that is stored, since a literal `0` reads as a deliberately
+empty VM. Disk has no such default to print beside it, deliberately (see
+`Settings`' own doc comment): a VM's disk is however large the guest
+image behind it happens to be, which is a property of the image a
+deployment built rather than a constant this build could name, so unset
+disk prints as `unset` instead of a number that would be wrong for
+anyone who rebuilt their guest.
 
 `ui/` (bwsalmon/agents#333) now has a settings panel too — the topbar's
 "Settings" button opens a form reading `GET /api/settings`,
@@ -1700,7 +1759,8 @@ is noticed: once per tick, before the cycle, `liveConfig.refresh`
 re-reads `grain_config` and hands each change to whatever it configures
 — its own ticker for `poll-interval`, a rebuilt `model.CapabilityRegistry`
 for `gcp-project`/`gcp-agent-service-account`, and
-`KonturSandboxes.SetDefaultShape` for `sandbox-cpus`/`sandbox-memory-mb`.
+`KonturSandboxes.SetDefaultShape` for
+`sandbox-cpus`/`sandbox-memory-mb`/`sandbox-disk-gb`.
 The rest were already read per cycle or per dispatch, or gained it here:
 `RunCycle` re-reads `max-concurrent` *and* `max-agent-turns`;
 `dispatchConfig` re-reads `agent-framework`, `gemini-model` and
@@ -1912,6 +1972,60 @@ avoided by seeding at task creation and reading nothing at dispatch. A
 schedule that wants `gcp-key` says so, once, where every task it files
 can be traced back to it.
 
+### A `grain repo` family, and why `-target-repos` stayed put
+
+The layer above left a one-directional surface behind: `grain settings`
+prints what each repo defaults ("default in: `owner/name`", on the
+capability line it already printed) with no way from a shell to act on
+what it just showed. `grain repo` (`cmd/grain/repo.go`, grain/task-36) is
+that missing half — `list`, `capabilities [-set a,b] <owner/name>`, `add`
+and `remove` — over four new `ui.HTTPClient` methods mirroring the
+`ui.Client` ones the repos pane already calls.
+
+**Why this and not schedules, templates or suites**, which are still
+UI-only and stay that way. The CLI's subset was never "tasks only": it is
+task management *plus deployment configuration* — `grain settings`,
+`grain secrets`, `grain config` — because "why did this deployment do
+that" is asked from a shell on the host at least as often as from a
+browser. A repo's own defaults are deployment configuration by that
+reading, and were the one member of the category with no spelling here.
+Schedules, templates and suites are authored *content*: written once, in
+a form built for writing them, and docs/scheduled-tasks.md records their
+absence from the CLI as an open gap waiting on somebody who needs it
+rather than as a decision. Adding a `repo` family does not make them
+next.
+
+**`-target-repos` stays on `grain settings`.** The repos *pane* dropped
+its own copy of that field when bwsalmon/agents#473 moved add/remove onto
+the repo rows, but what it dropped was a comma-separated text box — a bad
+control for a human and a perfectly good flag for a script. The field
+itself is still deployment-wide configuration (`model.Config.
+TargetRepos`), and it is the whole-list form `grain sync`'s own
+`settings` section already speaks verbatim (`ui.UpdateSettingsRequest.
+TargetRepos`); removing the flag would leave the CLI unable to say
+declaratively what a config file next to it can, and break existing
+scripts to buy nothing. So both spellings exist and write the same field:
+`-target-repos` replaces the list, `grain repo add`/`remove` change one
+entry, and `grain repo add` says out loud when the list it prints back
+has exactly one entry — an empty allowlist is what means *unrestricted*,
+so the first repo added to a deployment that never restricted itself
+narrows it rather than widening anything.
+
+**`grain repo list` is composed on the client, from `GET /api/config` and
+`GET /api/tasks`**, rather than served by a `GET /api/repos` of its own.
+A repo is not a stored row: the folder tree is still unbuilt, so "a repo
+grain knows about" is *derived* — whatever `targetRepos` names, union
+whatever a task targets, union whatever carries defaults of its own — and
+`ui/src/state.js`'s `repoRows` already derives it from those same two
+responses. A third derivation on the server would be a second definition
+to keep in step with the first. It does differ from `repoRows` in one
+way, deliberately: a repo that carries defaults while being neither
+allow-listed nor targeted still gets a row, because
+`SetRepoDefaultCapabilities` permits exactly that repo to exist and a
+list whose job includes reporting per-repo defaults must not be the one
+place they are invisible. (The repos *page* still drops such a row; that
+is a UI gap, filed separately, not a difference of opinion.)
+
 ## Write-only secrets access when colocated
 
 `pkg/secrets.Store` (above, "no secret store in the model") was
@@ -2000,7 +2114,8 @@ startup: switching the default in Settings takes effect on the next run,
 not the next restart. A task that names one instead
 (`agentFramework` on `POST /api/tasks`, or the picker under New task ->
 Advanced options) overrides it for that task alone -- the same
-"zero means unset" per-task override `SandboxCPUs`/`SandboxMemoryMB`
+"zero means unset" per-task override
+`SandboxCPUs`/`SandboxMemoryMB`/`SandboxDiskGB`
 already are, for the same reason: a task filed with no choice must
 follow the deployment wherever it is set later, rather than pin itself
 to whatever was configured the moment it was filed.
@@ -2737,3 +2852,316 @@ smaller idea than a pool of assignments, and does not bring slots back.
 The sandbox-health pane changed meaning with everything else: it reports
 live sandboxes, so an idle deployment shows nothing rather than a table
 of idle slots.
+
+## Disk is the third dimension of a sandbox's shape
+
+A sandbox VM's size had two knobs — `sandbox-cpus` and
+`sandbox-memory-mb`, deployment-wide in Settings and overridable per task
+— and no third. Its disk was whatever the guest image happened to be:
+`konturctl` gives each VM a copy-on-write qcow2 overlay backed by that
+image, and an overlay is created at exactly the image's own virtual size,
+which `scripts/kontur/build-guest.sh` packs to the rootfs plus 20%
+headroom. That is a few hundred megabytes of slack for every run, and a
+build-heavy checkout spends it: the run fails part way through with a
+disk-full error, on a VM that had CPUs and memory to spare.
+
+`sandbox-disk-gb` is that knob, everywhere the other two already are:
+`model.Config.SandboxDiskGB` and `model.Task.SandboxDiskGB`, the Sandbox
+tab in Settings and the shape override under New task -> Advanced
+options, `orchestrator.Shape.DiskGB` resolved per dimension against the
+deployment default, and `konturctl vm create -disk-size-gb` at the one
+moment a sandbox's size is decided. Zero keeps meaning "unset" — the flag
+is left off the create entirely, so a deployment that never sets one
+passes exactly the arguments it passed before.
+
+Two things about it are genuinely unlike CPUs and memory, and both are
+visible in the code:
+
+- **There is no default to show.** `ui.Settings` reports
+  `sandboxCpusDefault`/`sandboxMemoryMbDefault` so an unset box can show
+  what is really in effect rather than a misleading literal 0. Disk has
+  no such constant: an unset disk is however large *this deployment's*
+  guest image is, which is a property of an image somebody built, not a
+  number this build can name. The field has no placeholder, and says so
+  in words instead.
+- **A bigger disk is not by itself more space.** The image's filesystem
+  ends where it ended; the extra is unallocated until something grows it.
+  `scripts/kontur/guest-setup.sh` installs a `grain-growfs` unit that
+  runs `resize2fs /dev/vda` on each boot, which is a no-op on a VM whose
+  disk was not enlarged and a one-line grow on one whose was.
+
+**It needs a `konturctl` that takes `-disk-size-gb`.** The vendored
+snapshot under `third_party/kontur` does not: `staticpod.VMSpec` has no
+disk-size field, and `writeQcow2Overlay` — which already takes the
+virtual size as an argument — is called with the source image's size
+unconditionally. Passing the flag against a `konturctl` without it fails
+the create, which is why zero omits it rather than sending an explicit
+size: a deployment that has not set one is unaffected either way, and a
+deployment that sets one has said out loud that it expects the flag to
+work. Landing that flag on `bwsalmon/kontur`'s `main` and re-vendoring is
+the other half of this, and belongs there rather than as a local patch
+here — see `third_party/kontur/VENDORED.md`.
+
+### Monitoring it
+
+Setting a size is half the ask; the other half is seeing whether it was
+the right one. The sandbox-health pane now reports disk alongside load
+average and memory, from both ends:
+
+- **Per sandbox.** `KonturSandboxes.sandboxHealth` already pulled
+  `/proc/loadavg` and `/proc/meminfo` out of the guest in one command
+  over the same transport a run's own tools use; it now asks for
+  `df -Pk /` in that same command rather than paying a second guest login
+  out of the five-second health budget. `-P` is what makes the parse
+  reliable — one line per filesystem, six columns — and the row is found
+  by shape ("the line whose last field is `/`") rather than by position,
+  so the `/proc` lines sharing the stream cannot be mistaken for it.
+- **For the host.** `pkg/sysstat` gains `DiskUsage`, one `statfs` call,
+  which `hostStats` asks about the daemon's own `-data-dir` rather than
+  about `/`: the daemon runs in a container whose root filesystem is an
+  image layer nobody's runs fill, while the data directory is on the host
+  volume that holds the store *and* every VM's disk overlay. That is the
+  disk a deployment actually runs out of.
+
+Both report 0/0 when there is no reading to be had, which the pane shows
+as a dash and the trend charts skip rather than plotting as an empty
+disk — the same "unavailable is not zero" treatment memory already got.
+## Measuring throughput and latency
+
+The previous section ends with "worth measuring before reaching for
+either," and grain could not. Every moment needed to answer *how much is
+this deployment getting done, and where does a task's day actually go?*
+has been in the store since tasks became rows — filed, approved,
+dispatched, finished, completed, closed — and nothing ever read them
+together. `pkg/metrics` does, `GET /api/metrics` serves it, and `grain
+metrics` prints it:
+
+```console
+$ grain metrics -window 7d
+window: 2026-08-27T00:00:00Z -> 2026-09-03T00:00:00Z (168h0m0s)
+
+throughput
+  tasks filed                  42  (6.0/day)
+  tasks completed              38  (5.4/day)
+  tasks closed                  3
+  attempts started             61
+  attempts finished            60  (8.6/day)
+  attempt outcomes         succeeded=45 failed=14 cancelled=1
+  attempts per completion    1.58
+
+capacity
+  mean concurrent runs       0.42 of 3  (14% of the limit)
+  live now                      2
+
+latency (stages that ended inside the window)
+  stage                                        n        p50        p90        max
+  filed -> approved                           12      4m12s     1h2m0s    3h10m0s
+  approved -> attempt started                 38        31s      2m10s       9m0s
+  attempt started -> agent's first turn       57      3m20s      6m41s      11m2s
+  agent's first turn -> attempt finished      57      9m11s     21m30s      48m0s
+  one whole attempt                           60     12m48s     26m10s      52m0s
+  attempt finished -> next attempt started     8       2m0s       4m0s       6m0s
+  first attempt started -> completed          38      9m10s      22m0s      48m0s
+  filed -> completed                          38      12m0s      50m0s    3h10m0s
+
+backlog (right now, not over the window)
+  awaiting_reply=1  proposed=1  queued=4  running=2
+  oldest queued: task 51, waiting 2h14m0s
+```
+
+**Nothing is stored, and nothing is counted on a hot path.** A report is
+derived from the rows every time it is asked for, the same way
+`task_state` is a view rather than a column
+(`docs/data-model.md`: "anything derivable is derived, never stored").
+There is no counter to increment, nothing to reset, and no way for a
+metric to drift from the task it describes — retry a task, close it,
+edit it, and every report from then on says what the record now says.
+The cost is a full scan of `task` and `task_run` per report, which is
+what a single-operator deployment can afford and what a much larger one
+would have to revisit.
+
+**One moment had to start being recorded: `task_run.agent_started_at`.**
+A run's `started_at` is stamped by dispatch, before any sandbox exists
+(`Store.SetRunSandbox`), so `finished_at - started_at` is a VM boot, a
+clone, a capability mint *and* the agent's own work, fused into one
+number that cannot answer the question the previous section asks.
+`RunDispatch` now records the moment it hands the run to
+`agent.Framework.Run`, which splits that in two: **attempt started ->
+agent's first turn** is the setup a golden image or a warm spare would
+cut, and **agent's first turn -> attempt finished** is what the agent
+framework spent, which grain does not control. Writing it can never cost
+a run — a failure there is logged and the dispatch proceeds — and it is a
+nullable column added by an ordinary `ensure*Column` migration, so an
+existing store keeps working and its older runs simply report no split.
+
+**A window bounds measurements, not rows.** A sample belongs to a window
+when the moment it *ended* falls inside it, so a task filed last month
+and completed this morning contributes its whole lead time. That makes
+the report answer "what did this deployment deliver during these dates"
+rather than "what happened entirely within them," which nothing ever
+asks.
+
+**A missing moment is skipped, never guessed**, which is why every stage
+carries its own `n` and two stages of one report legitimately disagree
+about how many samples they have. A run that failed in setup never
+reached an agent, so it has no setup or agent sample — but it was still
+an attempt, and still took time, so it is in `one whole attempt`. A task
+a human filed directly was approved in the instant it was filed, so it is
+left out of `filed -> approved` rather than counted as a zero that would
+drag the percentile of the proposals that really did wait.
+
+**The stages do not sum to the lead time,** and are not meant to. A task
+can sit in `awaiting_reply` for a day, back off between attempts, or wait
+on a dependency, and none of those is a stage anything records the start
+of. Each stage is measured on its own; the lead time is what somebody who
+filed a task actually waited, and the rest are answers to why it is what
+it is.
+
+**Throughput alone cannot say whether a deployment is fast enough,** so
+the report carries the two gauges it has to be read against: the backlog
+(by `task_state`'s own vocabulary, since "not finished" covers queued,
+blocked, awaiting a reply and failed, which are four different problems —
+and counting only the unfinished states, since every task ever completed
+is a census rather than a queue), and occupancy as a fraction of
+`max_concurrent`. Idle capacity next to a
+deep queue is a scheduling problem; saturated capacity next to a deep
+queue is a capacity one. They are the first two numbers any optimization
+here should have to move.
+
+**The UI reads the same report,** as the Metrics tab of the Debugging
+pane — alongside Logs and Sandbox health, since all three are read-only
+views of how the deployment is behaving rather than knobs on it. The
+window picker sends the same strings `-window` takes, the throughput
+buckets are drawn as sparklines, and the two presentation rules above
+are enforced rather than described: the latency stages are a table of
+independent distributions and never a stacked bar, which would draw a
+claim about them adding up that the numbers do not make, and the backlog
+is a section of its own headed "right now, not over the window". Each
+stage's `n` sits beside its percentiles, and a percentile with too few
+samples behind it to mean what its name says — fewer than 10 for a p90,
+100 for a p99 — is dimmed and footnoted rather than shown as if it were
+one. Unlike the panels beside it there is no poll: a report costs a full
+scan every time it is asked for, so it loads once and reloads when the
+window changes or Refresh is clicked.
+
+What this still does not have is a history of its own: because nothing
+is stored, a report can only ever be computed from rows that still
+exist, so a task deleted from the store takes its own past contribution
+with it.
+
+## Measuring the daemon's own tick
+
+The section above ends with the pair worth reading together — idle
+capacity next to a deep queue is a scheduling problem — and leaves the
+next question unanswered. `queue_wait` (approved -> the first attempt
+starting) is the one latency stage that is grain's own scheduling rather
+than anyone's work, and two entirely different causes produce the same
+number:
+
+1. the deployment was at `max_concurrent` and the task genuinely waited
+   for headroom, which `runs.utilization` near 1.0 already shows; or
+2. there was headroom the whole time, and the task waited on the tick —
+   `-poll-interval`, plus however long a `RunCycle` pass itself takes
+   before it reaches the dispatch decision.
+
+Nothing measured the second, so a tick that had quietly grown to minutes
+under a large store looked exactly like a busy deployment. `GET
+/api/metrics` now carries a `cycles` section beside `runs`, and `grain
+metrics` prints it right after capacity, so both causes are on screen
+before the `queue_wait` row is:
+
+```console
+reconcile tick (this daemon, since it started -- not stored, so not over the window)
+  ticks measured              720  (of 5304 run; older ones forgotten)
+                                    p50        p90        max
+  tick duration                    83.4ms      1.42s      4.9s
+  tick to tick                        30s        30s     34.9s
+  cycle start -> dispatch          21.1ms     34.6ms    212.7ms
+  scheduling floor: 30.02s  (tick-to-tick p50 + dispatch p50 -- the queue wait a task pays
+    for grain's own scheduling with no contention at all)
+
+  reconciler         wait p50        p50        p90   failed
+  schedule             1.1ms      2.4ms      8.9ms        0
+  dispatch            21.1ms     11.2ms     48.0ms        0
+  sync                32.4ms     47.1ms      1.31s        3
+```
+
+**The number the section builds to is the scheduling floor.** Ticks do
+not overlap (`cmd/grain`'s `reconcile` waits for one to return before the
+next interval starts), so tick-to-tick is the loop's real period, which
+is the `-poll-interval` only while a tick is fast compared to it. Adding
+the dispatch wait to it gives what a task pays for grain's own scheduling
+with no contention involved at all. A `queue_wait` p50 near that floor is
+the tick; a `queue_wait` p50 far above it is the deployment being full.
+They are opposite problems with opposite fixes — more concurrency for one,
+a faster or better-ordered cycle for the other — and until now the report
+could not tell them apart.
+
+**A per-reconciler breakdown, not one number for the tick.** The
+reconcilers run in order ("Reconcilers, not a pipeline"), so a
+pull-request sync that has grown to a minute is a minute every decision
+behind it did not get to spend, and a single tick duration cannot say
+which one grew. Each reconciler reports how far into the cycle it
+started, how long it took, and how many of those cycles it ended in an
+error — that last one because a reconciler that is fast *because* it
+fails immediately is not a fast reconciler, and a duration alone cannot
+tell the two apart.
+
+**The dispatch wait is recorded by the cycle, not picked out of the list
+by name.** `pkg/orchestrator` is the package that knows which reconciler
+is the decision a queued task is actually waiting for — it names them —
+so it reports that offset as its own field (`CycleTiming.DispatchWait`)
+rather than leaving every consumer to hardcode the string `"dispatch"`.
+
+### Why this one measurement is in memory
+
+Everything else in `pkg/metrics` is derived from rows that already exist,
+and holds to `docs/data-model.md`'s "anything derivable is derived, never
+stored." A tick is the one thing that leaves no row at all: it reads the
+store, decides, and returns. That left two options.
+
+A **row per cycle** would be durable across restarts and queryable over
+any window. It costs a new table, a write on every single tick forever
+(2,880 a day at the default 30s `-poll-interval`) and a growth curve
+nothing prunes — to measure something whose whole purpose is to say
+whether *this process, right now* is dispatching promptly. It would also
+make the measurement change what it measures: a tick that writes a row is
+a tick with a store write in it.
+
+A **ring in the process** — `orchestrator.CycleTimes`, 720 cycles, six
+hours at the default interval — costs bounded memory, no schema, no
+write, and stores nothing, which keeps the doctrine intact rather than
+carving an exception into it. That is what this is. The honest cost is
+that it is lost on restart, and the report says so rather than hiding it:
+the section is scoped to "this daemon, since it started", carries
+`observed` alongside `n` so a truncated ring is visible, and reports
+`first`/`last` as the span it really covers, which is however long the
+ring is rather than however long a window was asked for. Tick history
+belongs to the process that produced it anyway — a daemon that has just
+restarted has a fresh tick, with none of the accumulated store the slow
+tick this exists to catch would have been slow because of.
+
+The wiring follows the same seam the sandbox-health pane already uses:
+`pkg/ui` does not import `pkg/orchestrator`, so `cmd/grain`'s own
+`cycleTimesAdapter` is the one place both types are in scope, and the
+ring is package-level in `cmd/grain` because the UI/API server starts
+before the reconcile loop that writes into it (the same ordering
+`reconcilerDown` and `livePullRequests` already straddle). A UI with no
+reconcile loop behind it reports `"enabled": false` rather than a tick of
+zero: "nobody measured it" and "the tick costs nothing" are opposite
+answers, and only one of them is ever true.
+
+`tests/e2e/loadtest_test.go` had measured `RunCycle` tick duration with
+instrumentation of its own since it was written ("RunCycle tick duration:
+n=… p50=… p95=…"), and no longer does. The harness passes a `CycleTimes`
+into the `Deps` it ticks and reports out of that instead, so the load
+test and a deployment read one measurement taken by one piece of code,
+rather than two that agree only for as long as nobody changes either. It
+is also the more useful of the two: the harness now reports the dispatch
+wait and the per-reconciler breakdown alongside the tick, and fails on
+what a stopwatch around `RunCycle` could not see at all — a cycle that did
+not run every reconciler, and a p95 dispatch wait past a third of the
+per-tick budget, which is a queued task waiting on the tick itself rather
+than on a deployment that was full. A tick growing under a large store is
+the thing a load test is best placed to catch, and that is the shape it
+now catches it in.

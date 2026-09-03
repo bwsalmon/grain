@@ -19,7 +19,9 @@ const SIDEBAR_WIDTH = 232;
 // Debug tab for a while too (bwsalmon/agents#623), but moved back out
 // to a "Debugging" entry of its own here, under Settings (bwsalmon/
 // agents#640) -- diagnosing a deployment gone wrong wants faster reach
-// than a tab buried inside Settings' configuration form.
+// than a tab buried inside Settings' configuration form. The throughput
+// and latency report (GET /api/metrics) is a fourth tab in there, for
+// the same reason the other three are.
 export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, onOpenSettings, onOpenDebug, onOpenNewTask }) {
   const counts = {};
   let blocked = 0;

@@ -14,11 +14,22 @@ const REFRESH_MS = 5000;
 // pane left open overnight does not grow its history without bound.
 const HISTORY_LENGTH = 60;
 
-const emptySeries = { cpu: [], mem: [] };
+const emptySeries = { cpu: [], mem: [], disk: [] };
 
 function formatMemory(usedMB, totalMB) {
   if (!totalMB) return "—";
   return `${usedMB} / ${totalMB} MB`;
+}
+
+// formatDisk is formatMemory for a figure that arrives in MB but is
+// normally counted in GB: a sandbox disk is tens of gigabytes where its
+// memory is a couple, and "3174 / 20480 MB" is a worse answer to "how
+// full is it" than "3.1 / 20.0 GB". Anything under a gigabyte stays in
+// MB, where the same argument runs the other way.
+function formatDisk(usedMB, totalMB) {
+  if (!totalMB) return "—";
+  if (totalMB < 1024) return `${usedMB} / ${totalMB} MB`;
+  return `${(usedMB / 1024).toFixed(1)} / ${(totalMB / 1024).toFixed(1)} GB`;
 }
 
 // pushSample appends a value to a capped history array, dropping the
@@ -40,7 +51,14 @@ function pushSample(series, value) {
 // as the existing text summary already shows.
 export function appendHistory(prev, result) {
   const host = result?.host
-    ? { cpu: pushSample(prev.host.cpu, result.host.loadAverage1), mem: pushSample(prev.host.mem, result.host.memoryUsedMB) }
+    ? {
+      cpu: pushSample(prev.host.cpu, result.host.loadAverage1),
+      mem: pushSample(prev.host.mem, result.host.memoryUsedMB),
+      // 0/0 is how both ends spell "no disk reading available" (a
+      // non-Linux host, an unreadable data directory), and plotting the
+      // 0 would read as an empty disk rather than as a missing sample.
+      disk: pushSample(prev.host.disk, result.host.diskTotalMB ? result.host.diskUsedMB : null),
+    }
     : prev.host;
 
   const sandboxes = { ...prev.sandboxes };
@@ -50,6 +68,7 @@ export function appendHistory(prev, result) {
     sandboxes[s.sandbox] = {
       cpu: pushSample(existing.cpu, load1),
       mem: pushSample(existing.mem, s.ready ? s.memoryUsedMB : null),
+      disk: pushSample(existing.disk, s.ready && s.diskTotalMB ? s.diskUsedMB : null),
     };
   }
   return { host, sandboxes };
@@ -62,7 +81,7 @@ export function appendHistory(prev, result) {
 // apart from Settings (bwsalmon/agents#640). It shows a live view of
 // every live run's own sandbox -- a kontur VM or a host directory,
 // whichever backend this deployment runs -- plus the daemon's own host
-// machine's CPU/RAM pressure. Both come back from the same
+// machine's CPU/RAM/disk pressure. Both come back from the same
 // GET /api/sandboxes call since a sandbox that looks stuck is often
 // really the host it runs on being starved, so debugging one usually
 // means looking at both at once. GET /api/sandboxes' own "enabled" flag
@@ -118,6 +137,8 @@ export default function SandboxHealthPage({ showError }) {
                 Load average (1/5/15 min): {data.host.loadAverage1.toFixed(2)} / {data.host.loadAverage5.toFixed(2)} / {data.host.loadAverage15.toFixed(2)}
                 {" · "}
                 Memory: {formatMemory(data.host.memoryUsedMB, data.host.memoryTotalMB)}
+                {" · "}
+                Disk: {formatDisk(data.host.diskUsedMB, data.host.diskTotalMB)}
               </Typography>
               <div style={{ display: "flex", gap: "2.5rem", marginBottom: "1.5rem" }}>
                 <div>
@@ -127,6 +148,10 @@ export default function SandboxHealthPage({ showError }) {
                 <div>
                   <Typography variant="caption" color="text.secondary" component="div">Memory (MB)</Typography>
                   <Sparkline data={history.host.mem} color="#9c27b0" />
+                </div>
+                <div>
+                  <Typography variant="caption" color="text.secondary" component="div">Disk (MB)</Typography>
+                  <Sparkline data={history.host.disk} color="#2e7d32" />
                 </div>
               </div>
             </>
@@ -152,6 +177,8 @@ export default function SandboxHealthPage({ showError }) {
                   <TableCell>CPU trend</TableCell>
                   <TableCell>Memory</TableCell>
                   <TableCell>Memory trend</TableCell>
+                  <TableCell>Disk</TableCell>
+                  <TableCell>Disk trend</TableCell>
                 </TableRow>
               </TableHead>
               <TableBody>
@@ -171,6 +198,8 @@ export default function SandboxHealthPage({ showError }) {
                       <TableCell><Sparkline data={series.cpu} width={80} height={24} /></TableCell>
                       <TableCell>{formatMemory(s.memoryUsedMB, s.memoryTotalMB)}</TableCell>
                       <TableCell><Sparkline data={series.mem} width={80} height={24} color="#9c27b0" /></TableCell>
+                      <TableCell>{formatDisk(s.diskUsedMB, s.diskTotalMB)}</TableCell>
+                      <TableCell><Sparkline data={series.disk} width={80} height={24} color="#2e7d32" /></TableCell>
                     </TableRow>
                   );
                 })}

@@ -88,9 +88,15 @@ func call(t *testing.T, client PullRequestReader, scope PullRequestScope) Result
 // settle for.
 func TestPullRequestStatusNamesFailingChecks(t *testing.T) {
 	client := &fakePullRequests{
-		head:   &github.BranchHead{SHA: "0123456789abcdef", Message: "wire it up\n\nlonger body"},
-		pr:     &github.PullRequest{Number: 42, HTMLURL: "https://example.test/pull/42"},
-		detail: github.PullRequestDetail{Number: 42, State: "open", BaseRef: "main", Mergeable: boolPtr(true)},
+		head: &github.BranchHead{SHA: "0123456789abcdef", Message: "wire it up\n\nlonger body"},
+		pr:   &github.PullRequest{Number: 42, HTMLURL: "https://example.test/pull/42"},
+		// The number and the link are printed off the same lookup, `pr`,
+		// so one blank field cannot silently drop half the reference.
+		// This fixture carries html_url on both reads because GitHub
+		// does, which means it cannot tell the two sources apart --
+		// TestPullRequestStatusTakesTheLinkOffTheLookupThatNamedTheNumber
+		// is the one that can.
+		detail: github.PullRequestDetail{Number: 42, HTMLURL: "https://example.test/pull/42", State: "open", BaseRef: "main", Mergeable: boolPtr(true)},
 		checks: []github.CheckRun{
 			{Name: "lint", Status: "completed", Conclusion: conclusion("success")},
 			{Name: "unit tests", Status: "completed", Conclusion: conclusion("failure")},
@@ -113,6 +119,36 @@ func TestPullRequestStatusNamesFailingChecks(t *testing.T) {
 	// The commit body must not follow the subject into the answer.
 	if strings.Contains(res.Text, "longer body") {
 		t.Errorf("answer carries the whole commit message, not just its subject:\n%s", res.Text)
+	}
+}
+
+// The link is printed off the lookup that named the number, not off the
+// detail read. Every other fixture here mirrors GitHub, which returns
+// html_url on both, so none of them can tell the two apart -- and neither
+// can the end-to-end test, since githubsim serves the field on its list
+// and detail responses alike. This one gives it to the search result
+// only, which is the exact shape a live run found rendering "Pull
+// request #42 () is open": an empty pair of parentheses where the link
+// belongs. It is what goes red if the field moves back to `detail`.
+//
+// The converse -- html_url on the detail read and none on the search
+// result -- is deliberately not pinned; pullRequestStatus's own comment
+// records why the answer does not fall back for it.
+func TestPullRequestStatusTakesTheLinkOffTheLookupThatNamedTheNumber(t *testing.T) {
+	res := call(t, &fakePullRequests{
+		head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+		pr:     &github.PullRequest{Number: 42, HTMLURL: "https://example.test/pull/42"},
+		detail: github.PullRequestDetail{Number: 42, State: "open", BaseRef: "main", Mergeable: boolPtr(true)},
+	}, testScope)
+
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "Pull request #42 (https://example.test/pull/42) is open") {
+		t.Errorf("answer does not print the link the lookup carried:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, "#42 ()") {
+		t.Errorf("answer renders empty parentheses where the link belongs:\n%s", res.Text)
 	}
 }
 
@@ -291,5 +327,246 @@ func TestPullRequestStatusReportsUnknownMergeability(t *testing.T) {
 	}
 	if !strings.Contains(res.Text, "has not finished working out") {
 		t.Errorf("answer does not report mergeability as still unknown:\n%s", res.Text)
+	}
+}
+
+// The other three mergeability answers, of which the conflict one is the
+// most actionable thing this tool produces: a run told its branch
+// conflicts can rebase and push inside its own turn budget, and a run
+// wrongly told it merges cleanly finishes on work nobody can land. Merged
+// wins over Mergeable because GitHub leaves the tri-state set to whatever
+// it last computed on a PR that is already in.
+func TestPullRequestStatusReportsMergeability(t *testing.T) {
+	for name, tc := range map[string]struct {
+		detail  github.PullRequestDetail
+		want    string
+		notWant string
+	}{
+		"conflicts": {
+			detail:  github.PullRequestDetail{Number: 7, State: "open", BaseRef: "main", Mergeable: boolPtr(false)},
+			want:    "is open and conflicts with main",
+			notWant: "merges cleanly",
+		},
+		"merges cleanly": {
+			detail:  github.PullRequestDetail{Number: 7, State: "open", BaseRef: "release-2", Mergeable: boolPtr(true)},
+			want:    "is open and merges cleanly into release-2",
+			notWant: "conflicts with",
+		},
+		"merged": {
+			detail:  github.PullRequestDetail{Number: 7, State: "closed", BaseRef: "main", Merged: true, Mergeable: boolPtr(false)},
+			want:    "is closed and merged",
+			notWant: "conflicts with",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := call(t, &fakePullRequests{
+				head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+				pr:     &github.PullRequest{Number: 7, HTMLURL: "https://example.test/pull/7"},
+				detail: tc.detail,
+			}, testScope)
+
+			if res.IsError {
+				t.Fatalf("IsError = true: %s", res.Text)
+			}
+			if !strings.Contains(res.Text, tc.want) {
+				t.Errorf("answer does not say %q:\n%s", tc.want, res.Text)
+			}
+			if strings.Contains(res.Text, tc.notWant) {
+				t.Errorf("answer says %q, which is the opposite verdict:\n%s", tc.notWant, res.Text)
+			}
+		})
+	}
+}
+
+// checkFailed's conclusions, including the one it deliberately does not
+// share with orchestrator.failingChecks. "cancelled" is not a failure
+// here: nothing broke, so telling a run to "reproduce those failures"
+// would send it hunting a bug that does not exist -- but it is still
+// listed by name, with GitHub's own word, for somebody who might rerun
+// it. That divergence is what checkFailed's doc comment records, so it is
+// the line a later edit is most likely to "tidy" back into agreement.
+func TestPullRequestStatusTreatsTimeoutsAndStartupFailuresAsFailing(t *testing.T) {
+	for _, conc := range []string{"failure", "timed_out", "startup_failure"} {
+		t.Run(conc, func(t *testing.T) {
+			res := call(t, &fakePullRequests{
+				head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+				checks: []github.CheckRun{{Name: "unit tests", Status: "completed", Conclusion: conclusion(conc)}},
+			}, testScope)
+
+			if res.IsError {
+				t.Fatalf("IsError = true: %s", res.Text)
+			}
+			if !strings.Contains(res.Text, "FAILING") || !strings.Contains(res.Text, "1 failing") {
+				t.Errorf("a %q check does not read as failing:\n%s", conc, res.Text)
+			}
+			if !strings.Contains(res.Text, conc) {
+				t.Errorf("answer drops GitHub's own conclusion %q:\n%s", conc, res.Text)
+			}
+		})
+	}
+
+	t.Run("cancelled", func(t *testing.T) {
+		res := call(t, &fakePullRequests{
+			head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+			checks: []github.CheckRun{{Name: "unit tests", Status: "completed", Conclusion: conclusion("cancelled")}},
+		}, testScope)
+
+		if res.IsError {
+			t.Fatalf("IsError = true: %s", res.Text)
+		}
+		if strings.Contains(res.Text, "FAILING") || !strings.Contains(res.Text, "0 failing") {
+			t.Errorf("a cancelled check reads as a failure to reproduce:\n%s", res.Text)
+		}
+		if !strings.Contains(res.Text, "unit tests (cancelled)") {
+			t.Errorf("answer does not name the cancelled check and say it was cancelled:\n%s", res.Text)
+		}
+	})
+}
+
+// A check that says it completed and reports no conclusion at all is not
+// something GitHub is supposed to produce, so the answer says exactly
+// that rather than inventing a verdict for it. It counts toward
+// "otherwise done" -- deliberately not "passing", which is the word the
+// summary line pointedly does not use -- because the one thing that can
+// be said about it is that it did not fail, and the alternative,
+// counting it as pending, would tell a run to call back in a minute or
+// two for a check that is never going to report anything more.
+func TestPullRequestStatusDoesNotInventAVerdictForACheckThatReportedNone(t *testing.T) {
+	res := call(t, &fakePullRequests{
+		head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+		checks: []github.CheckRun{{Name: "mystery", Status: "completed"}},
+	}, testScope)
+
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "mystery (no conclusion reported)") {
+		t.Errorf("answer does not say the check reported no conclusion:\n%s", res.Text)
+	}
+	if !strings.Contains(res.Text, "0 failing, 0 not finished, 1 otherwise done") {
+		t.Errorf("a completed check with no conclusion is miscounted:\n%s", res.Text)
+	}
+	if strings.Contains(res.Text, "no verdict yet") {
+		t.Errorf("a finished check is reported as still running:\n%s", res.Text)
+	}
+}
+
+// A check with no name still gets a line. Dropping it, or printing an
+// empty column, would leave a run reading "1 failing" with nothing
+// underneath it that names anything.
+func TestPullRequestStatusLabelsAnUnnamedCheck(t *testing.T) {
+	res := call(t, &fakePullRequests{
+		head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+		checks: []github.CheckRun{{Status: "completed", Conclusion: conclusion("failure")}},
+	}, testScope)
+
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "FAILING  (unnamed check) (failure)") {
+		t.Errorf("answer does not stand in for the missing check name:\n%s", res.Text)
+	}
+}
+
+// The commit subject is bounded and never empty: a message with a novel
+// in it cannot flood the answer past the part the run needs to read, and
+// a commit with no message at all says so rather than rendering an empty
+// pair of quotes that reads like the tool lost the message.
+func TestPullRequestStatusBoundsTheCommitSubject(t *testing.T) {
+	t.Run("long subject", func(t *testing.T) {
+		subject := strings.Repeat("a", 72) + strings.Repeat("b", 40)
+		res := call(t, &fakePullRequests{
+			head: &github.BranchHead{SHA: "0011223344556677", Message: subject},
+		}, testScope)
+
+		if res.IsError {
+			t.Fatalf("IsError = true: %s", res.Text)
+		}
+		if !strings.Contains(res.Text, `"`+strings.Repeat("a", 72)+`..."`) {
+			t.Errorf("answer does not truncate the oversized subject:\n%s", res.Text)
+		}
+		if strings.Contains(res.Text, "bbbb") {
+			t.Errorf("answer carries the subject past its bound:\n%s", res.Text)
+		}
+	})
+
+	t.Run("no message", func(t *testing.T) {
+		res := call(t, &fakePullRequests{
+			head: &github.BranchHead{SHA: "0011223344556677", Message: "  \n\n"},
+		}, testScope)
+
+		if res.IsError {
+			t.Fatalf("IsError = true: %s", res.Text)
+		}
+		if !strings.Contains(res.Text, "(no commit message)") {
+			t.Errorf("answer does not say the commit has no message:\n%s", res.Text)
+		}
+		if strings.Contains(res.Text, `""`) {
+			t.Errorf("answer renders an empty quoted subject:\n%s", res.Text)
+		}
+	})
+}
+
+// The two GitHub reads either side of the check reads fail the same way
+// the CI read already does: reported, with GitHub's own error and enough
+// context to say which call broke. Swallowing either would hand a run a
+// confident-looking answer with the pull request silently missing from
+// it.
+func TestPullRequestStatusReportsPullRequestReadErrors(t *testing.T) {
+	t.Run("looking for the pull request", func(t *testing.T) {
+		res := call(t, &fakePullRequests{
+			head:  &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+			prErr: errors.New("connection refused"),
+		}, testScope)
+
+		if !res.IsError {
+			t.Fatalf("IsError = false, want the error reported: %s", res.Text)
+		}
+		for _, want := range []string{"open pull request for grain/task-9", "connection refused"} {
+			if !strings.Contains(res.Text, want) {
+				t.Errorf("answer does not mention %q:\n%s", want, res.Text)
+			}
+		}
+	})
+
+	t.Run("reading the pull request", func(t *testing.T) {
+		res := call(t, &fakePullRequests{
+			head:      &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+			pr:        &github.PullRequest{Number: 42, HTMLURL: "https://example.test/pull/42"},
+			detailErr: errors.New("connection refused"),
+		}, testScope)
+
+		if !res.IsError {
+			t.Fatalf("IsError = false, want the error reported: %s", res.Text)
+		}
+		for _, want := range []string{"reading pull request #42", "connection refused"} {
+			if !strings.Contains(res.Text, want) {
+				t.Errorf("answer does not mention %q:\n%s", want, res.Text)
+			}
+		}
+	})
+}
+
+// A pushed branch with no pull request on it yet is grain working as
+// designed -- the orchestrator opens one after the run finishes -- so the
+// answer has to say so. Without that sentence a run reads "no pull
+// request" as grain having failed to open one and goes looking for a
+// problem that is not there, or worse, tries to open one itself.
+func TestPullRequestStatusExplainsWhyNoPullRequestIsOpenYet(t *testing.T) {
+	res := call(t, &fakePullRequests{
+		head:   &github.BranchHead{SHA: "0011223344556677", Message: "x"},
+		checks: []github.CheckRun{{Name: "lint", Status: "completed", Conclusion: conclusion("success")}},
+	}, testScope)
+
+	if res.IsError {
+		t.Fatalf("IsError = true: %s", res.Text)
+	}
+	if !strings.Contains(res.Text, "No pull request is open for it yet") ||
+		!strings.Contains(res.Text, "once this run finishes") {
+		t.Errorf("answer does not explain that grain opens the pull request later:\n%s", res.Text)
+	}
+	// The checks the push triggered directly are still reported.
+	if !strings.Contains(res.Text, "lint") {
+		t.Errorf("answer drops the checks that ran without a pull request:\n%s", res.Text)
 	}
 }

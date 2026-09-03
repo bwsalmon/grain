@@ -94,6 +94,16 @@ type Deps struct {
 	// such a caller has nothing to hold the process open while a detached
 	// goroutine works. A deployment always sets one.
 	Runs *InFlight
+	// CycleTimes, when non-nil, is where each RunCycle call records how
+	// long it took and where inside itself that time went -- see
+	// CycleTimes' own doc comment for why the record is a ring in this
+	// process rather than a row per tick.
+	//
+	// nil means the cycle measures nothing, which is what every caller
+	// with no report to serve wants (a test, a one-shot cycle). A
+	// deployment sets one; cmd/grain hands the same ring to its UI/API
+	// server, which serves it as GET /api/metrics' own "cycles" section.
+	CycleTimes *CycleTimes
 }
 
 // runCleanupTimeout bounds each of the two things runOne does after a run
@@ -125,6 +135,11 @@ type Reconciler struct {
 	Name      string
 	Reconcile func(ctx context.Context, deps Deps, now time.Time) error
 }
+
+// dispatchReconciler names the one reconciler in the cycle that decides
+// what runs now -- the one a queued task is actually waiting for, which
+// is why CycleTiming.DispatchWait singles its start out from the rest.
+const dispatchReconciler = "dispatch"
 
 // Reconcilers returns the cycle's reconcilers, in the order RunCycle runs
 // them.
@@ -169,7 +184,7 @@ type Reconciler struct {
 func Reconcilers() []Reconciler {
 	return []Reconciler{
 		{Name: "schedule", Reconcile: reconcileSchedule},
-		{Name: "dispatch", Reconcile: reconcileDispatch},
+		{Name: dispatchReconciler, Reconcile: reconcileDispatch},
 		{Name: "sync", Reconcile: reconcileSync},
 		{Name: "releases", Reconcile: reconcileReleases},
 		{Name: "branches", Reconcile: reconcileBranches},
@@ -224,7 +239,38 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // A store with no row yet -- deps.Store is nil in tests that build Deps
 // by hand, or GetConfig itself returns nil -- leaves both exactly as the
 // caller set them.
+//
+// A cycle times itself when deps.CycleTimes is set: the whole tick, each
+// reconciler's own share of it, and how far in the dispatch decision was
+// reached. That last number is the one a deployment cannot otherwise
+// get -- see CycleTiming.DispatchWait -- since a queue wait looks
+// identical whether the deployment was full or the tick was simply slow
+// to get to dispatch.
 func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
+	// The tick times itself from here, before the stored-configuration
+	// read below: that read is a store call like any other, on the
+	// critical path of every dispatch decision, so a cycle that measured
+	// only its reconcilers would under-report exactly the kind of
+	// slowness this is here to catch.
+	//
+	// timing is filled in as the cycle goes and handed over in one write
+	// at the end, so nothing on this path takes the ring's lock more than
+	// once per tick. The deferred Observe declines a cycle cut short by
+	// cancellation: that is the shutdown tick, whose truncated duration
+	// describes the daemon stopping rather than the daemon being slow,
+	// and there is at most one of them per process.
+	started := time.Now()
+	timing := CycleTiming{Start: now}
+	if deps.CycleTimes != nil {
+		defer func() {
+			if ctx.Err() != nil {
+				return
+			}
+			timing.Duration = time.Since(started)
+			deps.CycleTimes.Observe(timing)
+		}()
+	}
+
 	if deps.Store != nil {
 		if mc, err := deps.Store.GetConfig(ctx); err != nil {
 			log.Printf("orchestrator: reading stored configuration: %v", err)
@@ -234,13 +280,32 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 		}
 	}
 	var errs []error
-	for _, r := range Reconcilers() {
+	reconcilers := Reconcilers()
+	if deps.CycleTimes != nil {
+		timing.Reconcilers = make([]ReconcilerTiming, 0, len(reconcilers))
+	}
+	for _, r := range reconcilers {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
 			break
 		}
-		if err := recoverReconcile(ctx, r, deps, now); err != nil {
+		wait := time.Since(started)
+		began := time.Now()
+		err := recoverReconcile(ctx, r, deps, now)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
+		}
+		if deps.CycleTimes == nil {
+			continue
+		}
+		timing.Reconcilers = append(timing.Reconcilers, ReconcilerTiming{
+			Name:     r.Name,
+			Wait:     wait,
+			Duration: time.Since(began),
+			Failed:   err != nil,
+		})
+		if r.Name == dispatchReconciler {
+			timing.DispatchWait = wait
 		}
 	}
 	return errors.Join(errs...)
@@ -487,11 +552,12 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		return fmt.Errorf("orchestrator: recording run %s's sandbox: %w", d.RunID, err)
 	}
 
-	// A task's own SandboxCPUs/SandboxMemoryMB (bwsalmon/agents#534) is a
-	// create-time argument now rather than something applied to an
-	// already-built sandbox: this one is built for this run, so its size
-	// is decided once, here, and goes away with it.
-	shape := Shape{CPUs: task.SandboxCPUs, MemoryMB: task.SandboxMemoryMB}
+	// A task's own SandboxCPUs/SandboxMemoryMB/SandboxDiskGB
+	// (bwsalmon/agents#534, grain/task-41) is a create-time argument now
+	// rather than something applied to an already-built sandbox: this one
+	// is built for this run, so its size is decided once, here, and goes
+	// away with it.
+	shape := Shape{CPUs: task.SandboxCPUs, MemoryMB: task.SandboxMemoryMB, DiskGB: task.SandboxDiskGB}
 	sandbox, err := deps.Sandboxes.Acquire(ctx, sandboxName, shape)
 	if err != nil {
 		return fmt.Errorf("orchestrator: acquiring a sandbox for run %s: %w", d.RunID, err)

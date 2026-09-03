@@ -586,10 +586,15 @@ placed at the *head* of the backlog and shown there:
 `Store.OrderKeyForNewTask(ctx, true)` -- the head-of-backlog placement
 `ui.Client.CreateTask` already gives an interactive task -- rather than
 leaving the field at its zero value, which fell wherever zero happened
-to fall among the keys already handed out. This is the same thing
-dispatch has said since bwsalmon/agents#389: `Store.Ready`'s `ReasonFix`
-carve-out runs a fix ahead of everything else whatever its key. Now the
-order tasks are *read* in agrees with the order they are run in.
+to fall among the keys already handed out. Main reached the same
+placement from the other direction while this branch was open --
+`showQueueAtFrontOfBacklog` writes the merge queue's own order into the
+backlog every cycle (`Store.MoveToFrontOfBacklog`), with a fix task
+ahead of the queue it repairs -- and dropped `Store.Ready`'s old
+`ReasonFix` carve-out (bwsalmon/agents#389) along the way, so a fix
+task's priority is now its position and nothing else. Either way, the
+order tasks are *read* in agrees with the order they are run in, which
+is what the UI half below is placing rows against.
 `cmd/grain/demo.go` seeds its own fix through the same call, so `grain
 demo` shows the list a real merge queue produces.
 

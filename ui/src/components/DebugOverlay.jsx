@@ -3,11 +3,13 @@ import { Alert, Button, Tab, Tabs, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import LogsPage from "./LogsPage.jsx";
+import MetricsPage from "./MetricsPage.jsx";
 import SandboxHealthPage from "./SandboxHealthPage.jsx";
 
 const TABS = [
   { id: "logs", label: "Logs" },
   { id: "sandboxHealth", label: "Sandbox health" },
+  { id: "metrics", label: "Metrics" },
   { id: "restart", label: "Restart" },
 ];
 
@@ -18,7 +20,20 @@ const TABS = [
 // than staying folded into Settings' Debug tab (bwsalmon/agents#623).
 // Each gets its own tab, the same layout SettingsOverlay.jsx already
 // uses for its own General/Capabilities/Secrets/Upgrade split.
-export default function DebugOverlay({ config, onClose, showError }) {
+//
+// Metrics (GET /api/metrics) joined them later rather than taking a
+// sidebar entry of its own: it is the same kind of thing the
+// other tabs are -- a read-only, deployment-wide view of how the machine
+// is behaving, reached when somebody is asking a question about the
+// deployment rather than about a task -- and "why is this slow" is
+// usually answered by looking at it next to sandbox health anyway.
+//
+// onOpenTask is threaded through for the one link out of these panels:
+// the metrics backlog names the oldest queued task, and the useful thing
+// to do with that is go and look at it. App closes this overlay on the
+// way, since two stacked dialogs would put the task behind the one it
+// was opened from.
+export default function DebugOverlay({ config, onClose, onOpenTask, showError }) {
   const [tab, setTab] = useState("logs");
   // rebootHost is deliberately its own confirm/try, separate from any
   // settings-form save flow: it is not a settings field, and unlike a
@@ -46,8 +61,11 @@ export default function DebugOverlay({ config, onClose, showError }) {
     }
   };
 
+  // wide: every panel in here is either a table too many columns across
+  // for the default width (sandbox health, metrics) or a <pre> of log
+  // lines that wraps badly without it.
   return (
-    <Overlay onClose={onClose}>
+    <Overlay onClose={onClose} wide>
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Debug</Typography>
       <Tabs value={tab} onChange={(_, value) => setTab(value)} sx={{ mb: 2 }}>
         {TABS.map((t) => (
@@ -56,6 +74,7 @@ export default function DebugOverlay({ config, onClose, showError }) {
       </Tabs>
       {tab === "logs" && <LogsPage showError={showError} />}
       {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
+      {tab === "metrics" && <MetricsPage showError={showError} onOpenTask={onOpenTask} />}
       {tab === "restart" && (
         config && config.rebootEnabled ? (
           <fieldset>

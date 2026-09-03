@@ -177,6 +177,14 @@ func printSettingsDiff(before, after ui.Settings) {
 		{"github insecure http", fmt.Sprint(before.GitHubInsecureHTTP), fmt.Sprint(after.GitHubInsecureHTTP)},
 		{"gcp project", before.GCPProject, after.GCPProject},
 		{"gcp agent service account", before.GCPServiceAccountEmail, after.GCPServiceAccountEmail},
+		// The sandbox VM shape (bwsalmon/agents#534) is applied like
+		// every other field here -- syncSettings hands UpdateSettings
+		// the whole ui.UpdateSettingsRequest the config file carries --
+		// so leaving it out of this table only made a real change print
+		// as "nothing changed".
+		{"sandbox cpus", fmt.Sprint(before.SandboxCPUs), fmt.Sprint(after.SandboxCPUs)},
+		{"sandbox memory mb", fmt.Sprint(before.SandboxMemoryMB), fmt.Sprint(after.SandboxMemoryMB)},
+		{"sandbox disk gb", fmt.Sprint(before.SandboxDiskGB), fmt.Sprint(after.SandboxDiskGB)},
 	}
 	changed := false
 	for _, f := range fields {
