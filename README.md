@@ -1905,6 +1905,63 @@ summary and far short of an unbounded `git log -p`. The result-size
 telemetry in `docs/agent-ergonomics.md`'s finding 11 is what should
 eventually set it from what runs actually ask for, rather than taste.
 
+## Telling attempt N what attempt N−1 did
+
+A redispatch got the task, the conversation, its attachments and a
+checkout continuing the previous attempt's branch (`prepareCheckout`,
+which is the right thing to hand it), and nothing at all about the
+attempt that made those commits. So attempt 2 opened on a branch it had
+not written, with no account of what any of it was for, or of why the
+attempt that wrote it stopped — and grain had all of it the whole time.
+Every `task_run` row carries `outcome` and `detail`, and since `outcomeOf`
+that detail describes a run that succeeded as well as one that failed.
+The cheapest thing that costs is re-doing a diagnosis grain already paid
+for. The dearest is re-attempting exactly the thing that ran out of wall
+clock, which is the one ending a branch cannot reveal.
+
+`BuildPrompt` now takes an `orchestrator.History`: the attempts before
+this one, the commits they left on the branch, and the conversation. The
+first comes from `store.Runs` with this run's own row filtered out —
+`dispatch.Cycle` writes that row before `RunDispatch` ever sees the
+dispatch, so a prompt that listed it would be telling a run about itself,
+with an empty outcome because it has not happened yet. The second comes
+from `checkoutCommits`, a `git log <base>..HEAD` run through the same
+sandbox `run_command` tool `prepareCheckout` clones with — the only place
+in a dispatch that has a repository rather than a string — with each line
+marked so it can be picked back out of the tool's own `exit=`/`stdout:`
+framing, exactly as `baseGoneMarker` already is.
+
+It reads as a list: per attempt its number, outcome and `detail`, then
+the branch's commits newest first. Bounded on purpose — three attempts,
+240 bytes of one-line detail each, ten commits, and a pointer at `git
+log` for the rest, which `RunDispatch` can say without a second read
+because it asks `checkoutCommits` for one commit more than the list holds.
+This is orientation, not a transcript store: the transcript stays in
+`task_run.transcript` and the UI's pane over it, being prose,
+per-framework and unbounded.
+
+Where it sits is part of the fix. Both history sections go together,
+immediately after the sentences saying where the checkout is and which
+branch is in it — the facts they explain — and ahead of the
+commit-message, CI and budget paragraphs, which is why
+`commentThreadSection` moved out of `prepareCapabilities` and into
+`BuildPrompt` alongside it. The conversation and the attempt history are
+the same kind of fact, something a run would otherwise pay to
+rediscover, and a run told to read the thread before doing anything else
+should not have to find it three paragraphs past the one telling it how
+to push.
+
+Neither read can fail a dispatch for nothing. The store read is fatal for
+the same reason the conversation and attachment reads either side of it
+are: a store that cannot answer it cannot record how this run ends
+either. The git read is best effort and silent — a missing base (it falls
+back to `origin/HEAD`, the survivable case `baseCheck` already carries on
+through), a branch with nothing on it, a sandbox with no checkout at all
+— because the commits are on the branch for the agent to read either way,
+and orientation that could fail a run would be a worse trade than the
+re-diagnosis it saves. On a first attempt it is not read at all: there is
+nothing on that branch its base does not already have.
+
 ## Reaching a sandbox guest without a route into it
 
 A slot's VM guest is reached by exec'ing into that VM's own container:
