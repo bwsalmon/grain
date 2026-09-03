@@ -957,7 +957,8 @@ could do with it.
 Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
 task that asked for `/auto-merge` and still has a PR open. Only the
-queue's head — the earliest submitted, per repo — is ever acted on in a
+queue's head — whichever of a repo's waiting tasks sits first in the
+backlog — is ever acted on in a
 cycle; a fix filed for the second task while the first is still being
 repaired would likely need refiling the moment the first merges and
 changes what the second is based against, so everything behind the head
@@ -1005,9 +1006,23 @@ automatically rather than refiling: it comments explaining why, sets
 task in that repo — a blocked task still merges the moment a human's own
 push makes it clean, it just stops being anyone's queue head, so it can
 no longer hold up what's behind it. No new record was needed for the
-queue itself: `queueHeads` derives head-of-queue from `Task.CreatedAt`
-and `Task.AutoMerge` fresh every cycle, the same "derive it, don't store
-it" discipline `TaskState` already holds to.
+queue itself: `queueOrder` derives the whole queue from `Task.AutoMerge`,
+`Origin.Reason` and `MergeQueueBlockedAt` fresh every cycle, and
+`queueHeads` takes each repo's first entry from it — the same "derive it,
+don't store it" discipline `TaskState` already holds to.
+
+What the queue does write down is where it is. Every cycle,
+`showQueueAtFrontOfBacklog` moves the tasks waiting to land to the front
+of the backlog in the order they will land, and `fileFixTask` files a
+repair at the very head of it (`Store.MoveToFrontOfBacklog`,
+`Store.OrderKeyForNewTask`) — so a task list answers "what is grain about
+to finish, and in what order" without anyone opening a task. It is the
+same order in both directions: `queueOrder` reads position back off the
+backlog rather than comparing `Task.CreatedAt` behind everyone's back, so
+dragging one waiting pull request above another really does change which
+merges first, and `Store.Ready` needs no carve-out for a fix task any
+more — being at the head of the list is what dispatches it first, which
+is a thing a human can see and, if they disagree, undo.
 
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder

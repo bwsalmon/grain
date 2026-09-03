@@ -475,6 +475,14 @@ type Task struct {
 	// step past whichever extreme is currently in play, and Store.Reorder
 	// (a drag-and-drop move) rewrites it directly, so two tasks created
 	// or moved in the same instant still compare distinctly.
+	//
+	// It is also where grain writes down its own ordering, rather than
+	// keeping a second one to itself: Store.MoveToFrontOfBacklog puts the
+	// tasks waiting on a repo's merge queue at the front of the backlog in
+	// the order they will land, and orchestrator.fileFixTask files a
+	// repair at the very head of it. Everything that decides what happens
+	// next -- Ready, ListTasks, orchestrator.queueOrder -- then reads that
+	// one column, which is the one a human can see and drag.
 	OrderKey float64
 }
 
