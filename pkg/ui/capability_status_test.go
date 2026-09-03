@@ -10,12 +10,15 @@ package ui_test
 // (gcp-key/gemini-key), and gated on secrets once one is (github-sandbox).
 
 import (
+	"context"
+	"net/http"
 	"reflect"
 	"sort"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/pkg/capability/githubsandbox"
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -29,6 +32,83 @@ func capabilityStatus(t *testing.T, statuses []ui.CapabilityStatus, id string) u
 	}
 	t.Fatalf("no capability status for %q among %+v", id, statuses)
 	return ui.CapabilityStatus{}
+}
+
+// The per-task picker (GET /api/config) and Settings' Capabilities tab
+// used to be entirely independent listings, so a deployment could report
+// gemini-key as "Not ready -- Needs: GCP project" on one pane while the
+// other offered it as an ordinary tickable row. Ticking it filed a
+// perfectly valid grant whose only symptom was the task failing to
+// dispatch later on. These two cover the join between them.
+func TestConfigPickerReportsACapabilityThisDeploymentCannotHonour(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	cfg := decode[struct {
+		Capabilities []ui.Capability `json:"capabilities"`
+	}](t, rec)
+
+	gemini := pickerRow(t, cfg.Capabilities, "gemini-key")
+	if gemini.Ready == nil {
+		t.Fatal("gemini-key: Ready is nil -- the picker was told nothing about readiness")
+	}
+	if *gemini.Ready {
+		t.Error("gemini-key: Ready = true with no GCP project set on this deployment")
+	}
+	if !reflect.DeepEqual(gemini.Needs, []string{"GCP project"}) {
+		t.Errorf("gemini-key: Needs = %v, want [GCP project]", gemini.Needs)
+	}
+
+	// A capability that needs no deployment configuration at all is
+	// reported ready, not merely "not not-ready" -- the picker has to be
+	// able to tell the two apart to warn about only one of them.
+	selfDebug := pickerRow(t, cfg.Capabilities, "self-debug")
+	if selfDebug.Ready == nil || !*selfDebug.Ready {
+		t.Errorf("self-debug: Ready = %v, want true", selfDebug.Ready)
+	}
+	if len(selfDebug.Needs) != 0 {
+		t.Errorf("self-debug: Needs = %v, want none", selfDebug.Needs)
+	}
+}
+
+func TestConfigPickerReportsGeminiKeyReadyOnceItsProjectAndSecretAreSet(t *testing.T) {
+	srv, client := testServer(t)
+	client.Config.Secrets = secrets.New(t.TempDir())
+	if err := client.Config.Secrets.Set(gcpkey.DefaultMinterCredential, "value", []byte("shh")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := model.DefaultConfig()
+	cfg.GCPProject = "acme-project"
+	if err := client.Store.PutConfig(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	got := decode[struct {
+		Capabilities []ui.Capability `json:"capabilities"`
+	}](t, rec)
+
+	gemini := pickerRow(t, got.Capabilities, "gemini-key")
+	if gemini.Ready == nil || !*gemini.Ready {
+		t.Fatalf("gemini-key: Ready = %v, want true (row: %+v)", gemini.Ready, gemini)
+	}
+	if len(gemini.Needs) != 0 {
+		t.Errorf("gemini-key: Needs = %v, want none once the project and its minter secret are set", gemini.Needs)
+	}
+}
+
+func pickerRow(t *testing.T, rows []ui.Capability, id string) ui.Capability {
+	t.Helper()
+	for _, r := range rows {
+		if r.ID == id {
+			return r
+		}
+	}
+	t.Fatalf("no picker row for %q among %+v", id, rows)
+	return ui.Capability{}
 }
 
 func TestCapabilitiesListsEveryKnownCapabilityOnAFreshStore(t *testing.T) {

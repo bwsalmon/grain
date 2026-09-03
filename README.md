@@ -2094,6 +2094,65 @@ set a new task starts with, which is a different thing from
 docs/data-model.md's folder `offers`, those being floors a task cannot
 drop rather than a seed it can.
 
+### Debugging `gemini-key`: the picker didn't know what Settings knew
+
+"The gemini key capability fails when I attempt to add it to a task."
+Attaching it is not what fails — `POST /api/tasks/{id}/capabilities`
+writes the grant and returns the task, exactly as it should. What fails
+is the task, at its next dispatch, and the reason it fails is one of
+three things that were each invisible from where the mistake was made.
+
+`gemini-key` needs a GCP project (`capabilityProviders` registers no
+provider without one, and a grant nothing answers to is refused as `no
+provider is registered for capability "gemini-key"`), a
+`gcp-key-minter` secret to mint under, and a minter holding
+`roles/serviceusage.apiKeysAdmin` in a project with
+`apikeys.googleapis.com` enabled. Settings' Capabilities tab already
+reported the first two, as **Not ready** with a `Needs:` line. The
+capability picker on a task — the pane where somebody actually ticks the
+box — was built from `ui.OfferedCapabilities`, a static listing with no
+deployment behind it, and offered the row regardless. Two panes, two
+independent answers, and the disagreement only surfaced minutes later as
+a failed run.
+
+`GET /api/config` now carries `ready` and `needs` per picker row, joined
+to the same `capabilityStatuses` Settings is built from rather than
+re-derived, so the two cannot drift into saying different things again.
+The row warns and stays tickable: filing the task first and pasting the
+secret second is an ordinary order to do things in, and a picker that
+refused would also leave a capability already attached with no row to
+untick it from.
+
+The third gap is the one no configuration pane can see, because it lives
+in GCP. `grain setup gcp` defaults `-enable-gemini-key` to *off* while
+`terraform/gcp`'s own `enable_gemini_key` defaults to *on*, so a
+deployment installed by script rather than by that module has a project,
+a minter credential, a **Ready** badge — and a minter that cannot
+administer API keys. The API answers both that and "this API was never
+enabled" with an indistinguishable 403, whose message (`Permission
+'apikeys.keys.create' denied on resource ... (or it may not exist)`)
+reads like a bug in grain rather than like one unrun setup flag.
+`geminikey.advise` now names which of the two it is — from the error's
+own `SERVICE_DISABLED` reason — and names the command that fixes either.
+
+Two smaller things fell out of writing a fake API Keys server to test
+that. `apiKeysMinter`, the code that actually runs the moment somebody
+attaches this capability, was covered by nothing but the live test that
+skips without a real GCP project; it has real tests now, for the
+long-running-operation polling, the request paths and the cleanup after
+a key that is created but unreadable. And an empty key string coming
+back from `GetKeyString` was being placed at `KeyPath` and described to
+the agent as a working key — the one failure here that looks like
+success, now a failed mint like any other.
+
+`Resolve` also refuses when the standing credential resolves to nothing,
+rather than leaving `Materialize` to discover it a moment later. Nothing
+new is caught: what changes is that a refusal's `Reason` is posted to
+the task verbatim, so an operator reads a sentence naming the secret to
+set, where a failed materialize reads as `materializing capabilities:
+geminikey: resolving credential ...` — grain describing its own
+internals.
+
 ### The same set, per repo
 
 The ask task-14 came from also said "we will also want this to be

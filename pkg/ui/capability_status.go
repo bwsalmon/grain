@@ -211,6 +211,53 @@ func missingSecretsFor(requires []string, list []secrets.SecretInfo) []string {
 	return missing
 }
 
+// capabilitiesWithReadiness is Config.Capabilities -- the per-task
+// picker's own listing -- with each row told whether this deployment can
+// actually honour it, from the same capabilityStatuses the Settings
+// pane's Capabilities tab is built from.
+//
+// The two listings were entirely independent before this, which is the
+// whole problem: a deployment could show gemini-key as "Not ready --
+// Needs: GCP project" on one pane while the picker on another offered it
+// as an ordinary tickable row, and the only place the disagreement
+// surfaced was a task failing to dispatch. Joining them here rather than
+// re-deriving readiness keeps one answer to "would this work", so the
+// two panes cannot drift into saying different things again.
+//
+// A copy is returned, never Config.Capabilities itself: that slice is
+// shared by every request this Client serves, and readiness is a
+// per-deployment answer written per call.
+//
+// A picker row with no capabilityStatuses entry keeps a nil Ready --
+// unknown, not broken. That can only happen if OfferedCapabilities and
+// capabilityCatalog drift, which
+// TestOfferedCapabilitiesCoversEveryShippedCapability exists to stop,
+// and inventing "not ready" for one would be a worse answer than saying
+// nothing.
+func (c *Client) capabilitiesWithReadiness(cfg *model.Config, repoConfigs []model.RepoConfig) []Capability {
+	var deployment model.Config
+	if cfg != nil {
+		deployment = *cfg
+	}
+	byID := make(map[string]CapabilityStatus, len(c.Config.Capabilities))
+	for _, s := range c.capabilityStatuses(deployment, repoConfigs) {
+		byID[s.ID] = s
+	}
+	out := make([]Capability, 0, len(c.Config.Capabilities))
+	for _, row := range c.Config.Capabilities {
+		if status, ok := byID[row.ID]; ok {
+			ready := status.Ready
+			row.Ready = &ready
+			row.Needs = append(append([]string{}, status.MissingConfig...), status.MissingSecrets...)
+			if len(row.Needs) == 0 {
+				row.Needs = nil
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 // capabilityStatuses builds every CapabilityStatus for cfg -- the
 // deployment's current store-backed settings -- repoConfigs, every repo
 // that adds defaults of its own (Store.ListRepoConfigs), c.Config.Secrets,

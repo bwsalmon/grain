@@ -3,7 +3,7 @@ import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, C
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { defaultCapabilitiesFor, frameworkLabel, knownRepos, lastBaseForRepo, suggestsBase } from "../state.js";
+import { capabilityUnavailableHint, defaultCapabilitiesFor, frameworkLabel, knownRepos, lastBaseForRepo, suggestsBase } from "../state.js";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
@@ -252,12 +252,19 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               </Box>
             )}
           >
-            {(config?.capabilities || []).map((c) => (
-              <MenuItem key={c.id} value={c.id} title={c.description}>
-                <Checkbox checked={capabilities.includes(c.id)} size="small" />
-                <ListItemText primary={c.name} />
-              </MenuItem>
-            ))}
+            {(config?.capabilities || []).map((c) => {
+              const unavailable = capabilityUnavailableHint(c);
+              return (
+                <MenuItem key={c.id} value={c.id} title={unavailable ? `${c.description}\n\n${unavailable}` : c.description}>
+                  <Checkbox checked={capabilities.includes(c.id)} size="small" />
+                  <ListItemText
+                    primary={c.name}
+                    secondary={unavailable || null}
+                    secondaryTypographyProps={{ color: "warning.main" }}
+                  />
+                </MenuItem>
+              );
+            })}
           </Select>
           {defaultCapabilitiesFor(config, noRepo ? "" : repo).length > 0 && (
             <FormHelperText>

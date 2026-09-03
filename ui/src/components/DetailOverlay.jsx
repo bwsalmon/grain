@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, capabilityRows, completionPhase, frameworkLabel } from "../state.js";
+import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, completionPhase, frameworkLabel } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -513,12 +513,19 @@ function CapabilityToggles({ t, config, act }) {
             </Box>
           ))}
         >
-          {rows.map((c) => (
-            <MenuItem key={c.id} value={c.id} title={c.description}>
-              <Checkbox checked={selected.includes(c.id)} size="small" />
-              <ListItemText primary={c.name} />
-            </MenuItem>
-          ))}
+          {rows.map((c) => {
+            const unavailable = capabilityUnavailableHint(c);
+            return (
+              <MenuItem key={c.id} value={c.id} title={unavailable ? `${c.description}\n\n${unavailable}` : c.description}>
+                <Checkbox checked={selected.includes(c.id)} size="small" />
+                <ListItemText
+                  primary={c.name}
+                  secondary={unavailable || null}
+                  secondaryTypographyProps={{ color: "warning.main" }}
+                />
+              </MenuItem>
+            );
+          })}
         </Select>
       </FormControl>
     </fieldset>
