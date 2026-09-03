@@ -1905,8 +1905,9 @@ func (s *Store) OrderKeyForNewTask(ctx context.Context, atFront bool) (float64, 
 // currently name -- a drag-and-drop move (bwsalmon/agents#476), against
 // the same OrderKey column ListTasks and Ready both already read, so a
 // move here is immediately visible to both. Either bound may be nil: no
-// afterID means ids become the new minimum -- dropped at the head of a
-// list, "just before the following job" -- and no beforeID means they
+// afterID means ids go to the head of the list -- "just before the
+// following job", though still behind the merge tasks pinned at the very
+// head of the backlog, see reorderBounds -- and no beforeID means they
 // become the new maximum. Both nil is only reachable by dropping into an
 // empty list, which cannot happen through the UI (there would be nothing
 // to drop onto) but is handled the same as any other unbounded case
@@ -1934,7 +1935,7 @@ func (s *Store) Reorder(ctx context.Context, ids []string, afterID, beforeID *st
 		if err != nil {
 			return err
 		}
-		lower, upper, err := orderKeyBounds(ctx, tx, afterID, beforeID)
+		lower, upper, err := reorderBounds(ctx, tx, ordered, afterID, beforeID)
 		if err != nil {
 			return err
 		}
@@ -1942,7 +1943,7 @@ func (s *Store) Reorder(ctx context.Context, ids []string, afterID, beforeID *st
 			if err := rebalanceOrderKeys(ctx, tx); err != nil {
 				return err
 			}
-			if lower, upper, err = orderKeyBounds(ctx, tx, afterID, beforeID); err != nil {
+			if lower, upper, err = reorderBounds(ctx, tx, ordered, afterID, beforeID); err != nil {
 				return err
 			}
 		}
@@ -2021,7 +2022,9 @@ func (s *Store) MoveToFrontOfBacklog(ctx context.Context, ids []string) error {
 
 // frontOfBacklogBounds is the interval MoveToFrontOfBacklog moves ids
 // into: below the first task of the ordinary backlog, above whatever
-// merge tasks are already scheduled at the very head of it. Either side
+// merge tasks are already scheduled at the very head of it. reorderBounds
+// takes its lower side alone, so that a hand-drag to the head of the list
+// lands in this same interval rather than above it. Either side
 // is nil when there is nothing on it -- a deployment whose whole backlog
 // is the merge queue, or one with no fix task filed -- which
 // splitOrderKeys reads as "step away from the other side" the same way
@@ -2109,6 +2112,42 @@ func sortByOrderKey(ctx context.Context, tx *sql.Tx, ids []string) ([]string, ma
 	ordered := append([]string(nil), ids...)
 	sort.SliceStable(ordered, func(i, j int) bool { return keys[ordered[i]] < keys[ordered[j]] })
 	return ordered, keys, nil
+}
+
+// reorderBounds is orderKeyBounds with the one clamp Reorder needs that
+// its two neighbour names cannot express: a drop with no afterID -- the
+// head of the list -- lands *behind* the merge tasks pinned at the very
+// head of the backlog rather than in front of them.
+//
+// A fix task (orchestrator.fileFixTask) is the one task nobody files and
+// nobody orders. It is placed at the head of the backlog and dispatched
+// from there (Ready), and the frontend gives its row no drag handle at
+// all, pinning it above the draggable rows to match (TaskList.jsx's
+// partitionPinned). So the rows a human can drop between start below it,
+// and "no preceding job" from up there means "first among the tasks a
+// human orders" -- which is what MoveToFrontOfBacklog already means by
+// the front of the backlog, computed here by the same
+// frontOfBacklogBounds. Without the clamp the two orderings quietly
+// disagree: the dropped task would take a key at or under the fix task's
+// own, so the list would go on showing the repair first while Ready
+// dispatched the dropped task first.
+//
+// The clamp is skipped when beforeID already names a position at or
+// under that head -- there is no room to honour both, and the neighbour
+// the caller named is the more specific of the two requests.
+func reorderBounds(ctx context.Context, tx *sql.Tx, ids []string, afterID, beforeID *string) (lower, upper *float64, err error) {
+	lower, upper, err = orderKeyBounds(ctx, tx, afterID, beforeID)
+	if err != nil || afterID != nil {
+		return lower, upper, err
+	}
+	head, _, err := frontOfBacklogBounds(ctx, tx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	if head != nil && (upper == nil || *head < *upper) {
+		lower = head
+	}
+	return lower, upper, nil
 }
 
 // orderKeyBounds resolves Reorder's afterID/beforeID to the OrderKey

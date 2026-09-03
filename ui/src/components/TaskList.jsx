@@ -102,11 +102,17 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   // backlog is a position grain gave itself (orchestrator.fileFixTask),
   // not one anything is ordered against, so a drop at the top of the
   // orderable rows names no preceding task rather than naming a pinned
-  // one. The store places the dragged tasks between whatever those two
-  // names resolve to in the *full*, unfiltered backlog, which is what
-  // makes a drag inside a filtered view still land correctly relative to
-  // tasks the filter is hiding: dropping at the very top of a filtered
-  // view has no preceding job, so it goes just before the following one
+  // one. The store still keeps such a drop behind them
+  // (Store.reorderBounds): "no preceding job" means first among the
+  // tasks a human orders, which is where these rows begin, so the order
+  // this list shows and the order Store.Ready dispatches stay the same
+  // order.
+  //
+  // The store places the dragged tasks between whatever those two names
+  // resolve to in the *full*, unfiltered backlog, which is what makes a
+  // drag inside a filtered view still land correctly relative to tasks
+  // the filter is hiding: dropping at the very top of a filtered view
+  // has no preceding job, so it goes just before the following one
   // instead -- the same rule the issue itself asks for.
   const dropOn = (targetId) => {
     if (!dragIds) return;

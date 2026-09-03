@@ -2045,6 +2045,56 @@ func TestMoveToFrontOfBacklogIgnoresAFixTaskInsideTheBacklog(t *testing.T) {
 	}
 }
 
+// TestReorderStaysBehindAFixTaskAtTheHead is the drag-and-drop half of
+// TestMoveToFrontOfBacklogStaysBehindAFixTaskAtTheHead. A merge task the
+// queue filed for itself is not a row anything is ordered against -- the
+// list gives it no drag handle and pins it above every draggable row
+// (TaskList.jsx's partitionPinned) -- so a drop at the top of those rows
+// names no preceding job, and has to land first among the tasks a human
+// orders rather than ahead of the repair. Otherwise the list goes on
+// showing the repair first while Ready dispatches the dropped task first.
+func TestReorderStaysBehindAFixTaskAtTheHead(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"a": 10, "b": 20})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = -10
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Reorder(ctx, []string{"b"}, nil, ptr("a")); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"fix", "b", "a"}) {
+		t.Fatalf("backlog = %v, want b at the head of the ordinary backlog and the fix task still ahead of it", got)
+	}
+}
+
+// TestReorderIgnoresAFixTaskInsideTheBacklog is
+// TestMoveToFrontOfBacklogIgnoresAFixTaskInsideTheBacklog's own question
+// asked of a drop: only a fix task actually sitting ahead of the whole
+// ordinary backlog is one the list pins above the draggable rows, so one
+// that has been dragged down into the backlog since bounds nothing and a
+// drop at the head really is the head.
+func TestReorderIgnoresAFixTaskInsideTheBacklog(t *testing.T) {
+	store, _, ctx := openStore(t)
+	putOrdered(t, store, ctx, map[string]float64{"a": 10, "b": 30})
+	fix := task("fix", true)
+	fix.Origin.Reason = model.ReasonFix
+	fix.OrderKey = 20
+	if err := store.PutTask(ctx, fix); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Reorder(ctx, []string{"b"}, nil, ptr("a")); err != nil {
+		t.Fatal(err)
+	}
+	if got := listedIDs(t, store, ctx); !reflect.DeepEqual(got, []string{"b", "a", "fix"}) {
+		t.Fatalf("backlog = %v, want b at the very head, past a fix task sitting inside the backlog", got)
+	}
+}
+
 // TestMoveToFrontOfBacklogWritesNothingWhenTheOrderAlreadyHolds is what
 // makes it safe for orchestrator.SyncPullRequests to call every cycle: an
 // order already correct is left exactly as it is, rather than rewritten to

@@ -605,7 +605,15 @@ row). `partitionPinned` splits the stacked rows off instead and renders
 them above the orderable ones, whichever sort the toolbar is showing:
 they are neither draggable nor drop targets, since there is nothing to
 land between up there, and a drop at the top of the orderable rows names
-no preceding task rather than naming a pinned one. `TaskRow`'s new
+no preceding task rather than naming a pinned one. `Store.reorderBounds`
+is what makes that name mean what the list shows: a `Reorder` with no
+`afterID` lands at the head of the *ordinary* backlog, behind whatever
+merge tasks are pinned ahead of it -- the same interval
+`MoveToFrontOfBacklog` already moves the merge queue into, read off the
+same `frontOfBacklogBounds`. Without it a task dropped at the top would
+take a key at or under the fix task's own, and the list would go on
+showing the repair first while `Store.Ready` dispatched the dropped task
+first. `TaskRow`'s new
 `reserveDragSpace` holds the handle's column open (`.task-drag-spacer`)
 on those rows, so a pinned row's checkbox, badge and title line up with
 the draggable rows below. Every stacked row carries the `merge fix` chip
@@ -614,6 +622,9 @@ names the task being repaired when `GeneratedFrom` has one.
 
 Tests: `pkg/orchestrator/mergequeue_test.go` (a filed fix leads the
 backlog, ahead of both the task it repairs and work already queued),
+`pkg/model/sqlite/store_test.go` (a drop at the head of the list lands
+behind a fix task pinned at the head of the backlog, and past one that
+has been dragged down into the backlog since),
 `cmd/grain/demo_test.go` (the seeded fix leads it too), and
 `TaskList.test.jsx` (no handle but the column held open, the column left
 out entirely when the list is not reorderable, pinned above every
