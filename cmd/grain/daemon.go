@@ -612,10 +612,12 @@ func run(ctx context.Context, cfg config) error {
 	if err := staterepo.Load(ctx, stateRepo, db, model.SchemaVersion); err != nil {
 		return fmt.Errorf("loading the state repository: %w", err)
 	}
-	syncState := func(ctx context.Context) (bool, error) {
-		return staterepo.Sync(ctx, stateRepo, db, model.SchemaVersion)
-	}
-	go stateSyncLoop(ctx, syncState)
+	// One manager over that repository, shared by the timer below and the
+	// UI's bootstrap pane: adopting a different repository swaps the
+	// repository out from under the timer, so both go through the same
+	// lock rather than holding two handles on one working tree.
+	stateManager := newStateManager(cfg.dataDir, db, stateRepo, openSecrets(cfg.dataDir))
+	go stateSyncLoop(ctx, stateManager.sync)
 
 	cfg, err = loadConfig(ctx, store, cfg)
 	if err != nil {
@@ -712,7 +714,7 @@ func run(ctx context.Context, cfg config) error {
 	// longer happens: runDaemon's own failure is logged, not fatal, and
 	// run() itself only returns once ctx is actually cancelled.
 	if cfg.uiAddr != "" {
-		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes, live)
+		stopUI, err := startUIServer(cfg, store, transcriptDir, sandboxes, live, stateManager)
 		if err != nil {
 			return fmt.Errorf("starting the UI/API server: %w", err)
 		}
@@ -2321,7 +2323,7 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // mode is gone -- see this file's own doc comment), it always has that
 // directory to hand; there is no longer a cross-process case where it
 // would not.
-func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes, live *liveConfig) (stop func(context.Context) error, err error) {
+func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes, live *liveConfig, stateRepo ui.StateRepoManager) (stop func(context.Context) error, err error) {
 	// A second CredentialSet, loaded the same way BuildProxy (above) and
 	// run's own githubClient each load their own: not hot-reloaded,
 	// cheap to load again, and this is the one Settings checks
@@ -2341,6 +2343,10 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// one a dispatch can actually resolve.
 		Capabilities: append(ui.OfferedCapabilities(), ui.GitHubTokenCapabilities(live.gitHubTokens())...),
 		Secrets:      openSecrets(cfg.dataDir),
+		// The bootstrap pane: this process owns the state repository its
+		// store is exported to, so the UI it serves is the one place that
+		// can offer the choice of where state lives (pkg/ui/staterepo.go).
+		StateRepo: stateRepo,
 		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,
 		Credentials:  uiCredentials,

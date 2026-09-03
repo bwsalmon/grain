@@ -116,6 +116,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
 	s.mux.HandleFunc("DELETE /api/secrets/{secret}", s.handleDeleteSecret)
 
+	s.mux.HandleFunc("GET /api/state-repo", s.handleGetStateRepo)
+	s.mux.HandleFunc("POST /api/state-repo", s.handleSetStateRepo)
+	s.mux.HandleFunc("POST /api/state-repo/sync", s.handleSyncStateRepo)
+
 	s.mux.HandleFunc("POST /api/host/reboot", s.handleRebootHost)
 	s.mux.HandleFunc("GET /api/host/top", s.handleGetHostTop)
 	s.mux.HandleFunc("GET /api/upgrade", s.handleGetUpgradeStatus)

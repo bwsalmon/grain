@@ -35,6 +35,11 @@ import (
 // -data-dir means.
 func stateRepoDir(dataDir string) string { return filepath.Join(dataDir, "state-repo") }
 
+// secretsDir is the private half of the layout: the key, the GitHub
+// credential ladder, the sandbox token file -- everything that must stay
+// on this host and out of the repository.
+func secretsDir(dataDir string) string { return filepath.Join(dataDir, "secrets") }
+
 // secretsConfig places the two halves of pkg/secrets: the encrypted file
 // inside the state repository, where a push carries it off the host, and
 // the private key outside it under -data-dir/secrets, where nothing
@@ -46,7 +51,7 @@ func stateRepoDir(dataDir string) string { return filepath.Join(dataDir, "state-
 func secretsConfig(dataDir string) secrets.Config {
 	return secrets.Config{
 		File:    filepath.Join(stateRepoDir(dataDir), secrets.DefaultFileName),
-		KeyFile: filepath.Join(dataDir, "secrets", secrets.DefaultKeyFileName),
+		KeyFile: filepath.Join(secretsDir(dataDir), secrets.DefaultKeyFileName),
 	}
 }
 
