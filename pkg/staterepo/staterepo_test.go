@@ -489,7 +489,7 @@ func TestApplyMakesAMergedSettingsChangeLiveWithoutARestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+	if err := store.PutTemplate(ctx, model.Template{
 		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", Body: "as configured", CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("putting a template: %v", err)
@@ -501,7 +501,7 @@ func TestApplyMakesAMergedSettingsChangeLiveWithoutARestart(t *testing.T) {
 	// An agent's pull request against the template, merged.
 	work := filepath.Join(t.TempDir(), "clone")
 	git(t, "", "clone", "--quiet", remote, work)
-	path := filepath.Join(work, staterepo.TablesDir, "task_template.json")
+	path := filepath.Join(work, staterepo.TablesDir, "template.json")
 	edited := strings.Replace(read(t, path), "Run the nightly sweep", "Run the nightly sweep, twice", 1)
 	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
 		t.Fatalf("editing the dump: %v", err)
@@ -523,7 +523,7 @@ func TestApplyMakesAMergedSettingsChangeLiveWithoutARestart(t *testing.T) {
 	if !applied {
 		t.Fatal("a merged commit arrived and nothing was applied")
 	}
-	tmpl, err := store.GetTaskTemplate(ctx, "tpl-1")
+	tmpl, err := store.GetTemplate(ctx, "tpl-1")
 	if err != nil || tmpl == nil {
 		t.Fatalf("reading the template: %v %v", tmpl, err)
 	}
@@ -559,7 +559,7 @@ func TestApplyDeletesASettingAMergeRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+	if err := store.PutTemplate(ctx, model.Template{
 		ID: "tpl-1", Name: "retired", Title: "Something nobody wants any more", CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("putting a template: %v", err)
@@ -570,7 +570,7 @@ func TestApplyDeletesASettingAMergeRemoved(t *testing.T) {
 
 	work := filepath.Join(t.TempDir(), "clone")
 	git(t, "", "clone", "--quiet", remote, work)
-	path := filepath.Join(work, staterepo.TablesDir, "task_template.json")
+	path := filepath.Join(work, staterepo.TablesDir, "template.json")
 	if err := os.WriteFile(path, []byte("[]\n"), 0o644); err != nil {
 		t.Fatalf("emptying the dump: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestApplyDeletesASettingAMergeRemoved(t *testing.T) {
 	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("applying: %v", err)
 	}
-	got, err := store.GetTaskTemplate(ctx, "tpl-1")
+	got, err := store.GetTemplate(ctx, "tpl-1")
 	if err != nil {
 		t.Fatalf("reading the template: %v", err)
 	}
@@ -602,7 +602,7 @@ func TestApplyRefusesADumpFromANewerBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening: %v", err)
 	}
-	if err := store.PutTaskTemplate(ctx, model.TaskTemplate{
+	if err := store.PutTemplate(ctx, model.Template{
 		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("putting a template: %v", err)
@@ -614,7 +614,7 @@ func TestApplyRefusesADumpFromANewerBuild(t *testing.T) {
 	// A host running a later build pushed its own dump.
 	work := filepath.Join(t.TempDir(), "clone")
 	git(t, "", "clone", "--quiet", remote, work)
-	tmplPath := filepath.Join(work, staterepo.TablesDir, "task_template.json")
+	tmplPath := filepath.Join(work, staterepo.TablesDir, "template.json")
 	edited := strings.Replace(read(t, tmplPath), "Run the nightly sweep", "Written by a newer build", 1)
 	if err := os.WriteFile(tmplPath, []byte(edited), 0o644); err != nil {
 		t.Fatalf("editing the dump: %v", err)
@@ -632,7 +632,7 @@ func TestApplyRefusesADumpFromANewerBuild(t *testing.T) {
 	if !errors.Is(err, staterepo.ErrSchemaTooNew) {
 		t.Fatalf("the error does not say what is wrong: %v", err)
 	}
-	tmpl, err := store.GetTaskTemplate(ctx, "tpl-1")
+	tmpl, err := store.GetTemplate(ctx, "tpl-1")
 	if err != nil || tmpl == nil {
 		t.Fatalf("reading the template: %v %v", tmpl, err)
 	}
