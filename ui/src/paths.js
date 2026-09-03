@@ -14,8 +14,9 @@
 // Logs and Sandbox health used to be sidebar destinations of their own
 // (bwsalmon/agents#457, bwsalmon/agents#536), then moved into Settings'
 // own Debug tab (bwsalmon/agents#623) and so lost their own paths, the
-// same way Secrets and Upgrade live there without ever having had a
-// path of their own. Debugging (Logs, Sandbox health and the reboot
+// same way Upgrade lives there without ever having had a path of its
+// own (and Secrets did too, until grain/task-110 gave each secret to
+// whatever uses it). Debugging (Logs, Sandbox health and the reboot
 // control together) is a sidebar destination again now (bwsalmon/
 // agents#640), with /debug as its own path -- a stale bookmark to the
 // old /logs or /sandboxes still just falls back to the tasks view like

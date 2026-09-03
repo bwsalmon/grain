@@ -3,11 +3,13 @@ import { Alert, Box, Button, Chip, Stack, TextField, Typography } from "@mui/mat
 import api from "../api.js";
 
 // The credential each agent framework runs as, set from the same pane
-// that picks the framework. They are ordinary secrets (the Secrets tab
-// can see them, under the names below), but nothing there says which
-// name belongs to which framework or whether the one selected above can
-// actually run -- so the pair lives here instead, next to the choice
-// that needs them.
+// that picks the framework. They are ordinary secrets, stored under the
+// names below, but a bare name and key says nothing about which
+// framework it belongs to or whether the one selected above can actually
+// run -- so the pair lives here instead, next to the choice that needs
+// them. (grain/task-110 finished that move for the rest: every other
+// secret grain resolves is now set beside the capability that resolves
+// it, and there is no secrets pane of its own left to set one from.)
 //
 // Write-only, like everything else built on the secrets store: a value
 // goes in, presence comes back, and no value is ever read out.
@@ -15,16 +17,24 @@ const FRAMEWORKS = [
   {
     id: "antigravity",
     label: "Gemini API key",
+    secret: "gemini-api-key",
     setFlag: "geminiApiKeySet",
     help: "the key the Antigravity CLI (agy) authenticates with -- stored as the \"gemini-api-key\" secret",
   },
   {
     id: "claude",
     label: "Claude Code OAuth token",
+    secret: "claude-oauth-token",
     setFlag: "claudeOAuthTokenSet",
     help: "passed to the claude CLI as CLAUDE_CODE_OAUTH_TOKEN -- stored as the \"claude-oauth-token\" secret",
   },
 ];
+
+// AGENT_KEY_SECRETS is which secrets this section owns, for
+// SettingsOverlay to keep out of the "other secrets" remainder it shows
+// on the Capabilities tab -- one list, so a secret cannot be both set
+// here and listed there as unclaimed.
+export const AGENT_KEY_SECRETS = FRAMEWORKS.map((f) => f.secret);
 
 // AgentKeysSection renders inside SettingsOverlay's own <form>, so every
 // control here is a type="button" and Enter is swallowed: a stray submit

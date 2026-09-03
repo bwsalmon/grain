@@ -108,7 +108,58 @@ type CapabilityStatus struct {
 	// actionable to say, the same nil-means-unavailable contract that
 	// field's own doc comment gives every other check built on it).
 	MissingSecrets []string `json:"missingSecrets,omitempty"`
+	// Secrets is every CapabilitySpec.Requires entry -- set or not --
+	// resolved into the secret and key a colocated UI would write it to,
+	// so the pane that reports a missing secret is also the pane that
+	// can fill it in (grain/task-110: secrets belong with whatever uses
+	// them, not in a pane of their own where nothing says which name
+	// goes with which capability).
+	//
+	// A superset of MissingSecrets, which stays what it was: the names
+	// this deployment is short of, and what Ready is computed from.
+	// Empty for the same nil-Config.Secrets reason MissingSecrets is --
+	// with no store to write to there is nothing to offer.
+	Secrets []CapabilitySecret `json:"secrets,omitempty"`
 }
+
+// CapabilitySecret is one credential a capability resolves through
+// CapabilityContext.Credentials, addressed the way the secrets endpoints
+// take it: PUT/DELETE /api/secrets/{Secret}/{Key}.
+//
+// Presence only, never a value -- the same write-only contract
+// secrets.Store.List gives every other reader in this package.
+type CapabilitySecret struct {
+	// Name is the credential name as the capability itself resolves it,
+	// in either form secrets.Store.Resolve accepts: "github-app/app-id"
+	// names a key directly, "gcp-key-minter" names a secret whose sole
+	// key it is. It is what MissingSecrets reports and what a hint
+	// naming this credential should say.
+	Name string `json:"name"`
+	// Secret and Key are Name split into the two path elements a write
+	// needs. For the "<secret>/<key>" form they are exactly that. For the
+	// bare "<secret>" form Key is the key already stored, when the secret
+	// holds exactly one -- so setting a value replaces it rather than
+	// adding a second key that would leave the bare name resolving to
+	// nothing -- and defaultSecretKey otherwise.
+	Secret string `json:"secret"`
+	Key    string `json:"key"`
+	// Set reports whether this deployment resolves the credential today,
+	// by exactly the check missingSecretsFor makes: a secret sitting
+	// there with the wrong number of keys is not set, because Resolve
+	// would refuse it.
+	Set bool `json:"set"`
+}
+
+// defaultSecretKey is the key a bare "<secret>" credential is written to
+// when nothing is stored under it yet -- the same secrets.
+// AgentCredentialKey the agent credentials already use, and for the same
+// reason: the secret's own name says what the value is, so the key
+// inside it need only be a name Resolve's sole-key form can find.
+//
+// Deliberately not the name a seeding script happened to pick for one of
+// these (setup.sh writes the minter key as gcp-key-minter/key.json);
+// where such a key already exists it is reused rather than added to.
+const defaultSecretKey = secrets.AgentCredentialKey
 
 // capabilityDisplayNames gives each capabilityCatalog entry a short,
 // human-facing name for Settings to show -- CapabilitySpec.Label is not
@@ -211,6 +262,34 @@ func missingSecretsFor(requires []string, list []secrets.SecretInfo) []string {
 	return missing
 }
 
+// capabilitySecretsFor is requires paired with where each entry would be
+// written and whether it is set -- CapabilityStatus.Secrets, built from
+// the same listing missingSecretsFor checks against so the two cannot
+// disagree about what "set" means.
+func capabilitySecretsFor(requires []string, list []secrets.SecretInfo) []CapabilitySecret {
+	byName := make(map[string][]string, len(list))
+	for _, s := range list {
+		byName[s.Name] = s.Keys
+	}
+	out := make([]CapabilitySecret, 0, len(requires))
+	for _, name := range requires {
+		secret, key, explicit := strings.Cut(name, "/")
+		if !explicit {
+			key = defaultSecretKey
+			if keys := byName[secret]; len(keys) == 1 {
+				key = keys[0]
+			}
+		}
+		out = append(out, CapabilitySecret{
+			Name:   name,
+			Secret: secret,
+			Key:    key,
+			Set:    len(missingSecretsFor([]string{name}, list)) == 0,
+		})
+	}
+	return out
+}
+
 // capabilitiesWithReadiness is Config.Capabilities -- the per-task
 // picker's own listing -- with each row told whether this deployment can
 // actually honour it, from the same capabilityStatuses the Settings
@@ -304,6 +383,7 @@ func (c *Client) capabilityStatuses(cfg model.Config, repoConfigs []model.RepoCo
 		}
 		if c.Config.Secrets != nil {
 			status.MissingSecrets = missingSecretsFor(spec.Requires, secretList)
+			status.Secrets = capabilitySecretsFor(spec.Requires, secretList)
 		}
 		status.Ready = len(status.MissingConfig) == 0 && len(status.MissingSecrets) == 0
 		out = append(out, status)

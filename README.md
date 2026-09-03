@@ -2374,8 +2374,9 @@ cross-process case where it would not, and no flag to set. `grain demo`'s
 own throwaway UI is the one caller that still leaves it nil, on purpose:
 a fake store seeded with fake tasks has no real secrets to manage either.
 `GET /api/secrets` reports `{enabled, secrets}` either way, so the
-frontend's secrets pane can hide its controls behind a note rather than
-show ones that would only ever 404; `PUT`/`DELETE
+frontend's "Other secrets" list (below, "Secrets sit with what uses
+them") can hide its controls behind a note rather than show ones that
+would only ever 404; `PUT`/`DELETE
 /api/secrets/{secret}/{key}` and `DELETE /api/secrets/{secret}` are the
 set/delete-one-key/delete-the-whole-secret surface, each answering with
 the refreshed `{enabled, secrets}` the same way a mutating task route
@@ -2409,6 +2410,49 @@ command line, the same narrow-as-possible sudoers shape
 that would only ever 404 -- the case for `grain demo`'s throwaway UI,
 which leaves `Config.Reboot` nil since there is no real machine behind it
 worth rebooting.
+
+### Secrets sit with what uses them, not in a pane of their own
+
+The endpoints above gave the UI a Secrets tab: every secret in the store,
+each key a deletable chip, and a secret/key/value form under it. That is
+the whole store faithfully rendered, and it is nearly useless as an
+operator surface — a value is only ever meaningful to whatever resolves
+it, and nothing on that tab said which name belonged to what. Knowing
+that `gcp-key-minter` is the credential `gcp-key` mints *through*, or
+that `github-app/private-key` is half of what `github-sandbox`
+authenticates as, was knowledge you brought to the pane rather than
+anything it told you. Meanwhile the pane that *did* know — the
+Capabilities tab, which already reported "Missing secrets:
+`gcp-key-minter`" — could only point somewhere else.
+
+grain/task-110 puts each one where it is used. `CapabilityStatus.Secrets`
+reports every `CapabilitySpec.Requires` entry, set or not, resolved into
+the `{secret, key}` a write would address it by, and the Capabilities tab
+renders a write-only field per entry on the capability's own row: the
+pane that says what is missing is the pane that fills it in. The agent
+credentials were already this shape, on the Agents tab beside the choice
+of framework (below, "Two agent frameworks"), which is where the argument
+came from.
+
+Two details are worth naming. `Requires` comes in the two forms
+`Store.Resolve` accepts, and the bare `<secret>` one names no key at all
+— so for that form the reported key is whichever key the secret already
+holds, when it holds exactly one, and `secrets.AgentCredentialKey`
+otherwise. Writing to the key already there is what keeps a value set
+from the UI from *adding* a second key to a secret seeded under some
+other name (`scripts/setup.sh` writes the minter key as
+`gcp-key-minter/key.json`), which is precisely the two-key state the bare
+form can no longer be resolved out of. And nothing is offered at all when
+`Config.Secrets` is nil: no store, no field, the same
+nil-means-unavailable reading `missingSecrets` already took.
+
+What is left is the remainder — a secret in the store that no capability
+requires and no framework runs as, which is a state a renamed
+`gcpkey.Config.MinterCredential` or a future capability can put a
+deployment in. That keeps the old flat list and its form, under "Other
+secrets" at the foot of the Capabilities tab, filtered to exactly what
+nothing above claims. It is deliberately not a tab: it is the leftovers,
+and nothing grain itself resolves should ever appear in it.
 
 ## Two agent frameworks, either per task
 
@@ -2998,7 +3042,7 @@ hand.
 
 Every flag is empty by default, which disables the feature entirely (the
 UI's own Upgrade pane reports itself unavailable, the same convention the
-Secrets pane already uses for its own optional `-server-data-dir`
+secrets endpoints already use for their own optional `-server-data-dir`
 wiring).
 
 Since bwsalmon/agents#645 there are two pipelines behind that one button,

@@ -450,7 +450,12 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
   });
 
-  it("opens Secrets and Upgrade as tabs inside Settings rather than their own sidebar entries", async () => {
+  // Upgrade is a tab inside Settings rather than a sidebar entry
+  // (bwsalmon/agents#456). Secrets was one too until grain/task-110 gave
+  // each secret to whatever uses it: the agent credentials to Agents, a
+  // capability's own to the row beside it on Capabilities, and the
+  // remainder to "Other secrets" at the foot of that tab.
+  it("opens Upgrade as a tab inside Settings, and keeps secrets with what uses them", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
@@ -462,8 +467,11 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "Secrets" }));
-    expect(await screen.findByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Secrets" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+    expect(await screen.findByText("Other secrets")).toBeInTheDocument();
+    expect(screen.getByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
     expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
