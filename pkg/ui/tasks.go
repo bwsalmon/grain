@@ -404,6 +404,25 @@ type configResponse struct {
 	// AutoMergeByDefault above. What is filed is what the request names;
 	// this is only what it names when nobody has said otherwise.
 	DefaultCapabilities []string `json:"defaultCapabilities"`
+	// RepoDefaultCapabilities is the per-repo layer of the same thing
+	// (model.RepoConfig.DefaultCapabilities, grain/task-24): what each
+	// repo adds to DefaultCapabilities above, keyed by "owner/name". Only
+	// repos that add something appear -- Store.ListRepoConfigs keeps no
+	// row for a repo that says nothing -- so an absent key and an empty
+	// list mean the same thing here.
+	//
+	// Sent with the config rather than fetched per repo because the
+	// new-task form needs it the moment the repo picker changes, on a
+	// form that has not been submitted yet: this is one small map for a
+	// deployment's whole repo list, and re-seeding the capability picker
+	// from a round trip per keystroke would be a request for every
+	// character typed into a repo field. The repos pane, which edits one
+	// repo at a time and has somewhere to show a save failing, reads and
+	// writes GET/PUT /api/repos/{owner}/{name}/capabilities instead.
+	//
+	// Filtered to what this build offers, the same as DefaultCapabilities
+	// above and for the same reason.
+	RepoDefaultCapabilities map[string][]string `json:"repoDefaultCapabilities,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -439,6 +458,29 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				resp.DefaultCapabilities = append(resp.DefaultCapabilities, id)
 			}
 		}
+	}
+	// Outside the cfg != nil branch above: a repo can carry defaults of
+	// its own on a deployment that has never saved a settings row, the
+	// same case GetSettings reads this in both of its branches for.
+	repoConfigs, err := s.tasks.Store.ListRepoConfigs(r.Context())
+	if err != nil {
+		writeClientError(w, err)
+		return
+	}
+	for _, rc := range repoConfigs {
+		var ids []string
+		for _, id := range rc.DefaultCapabilities {
+			if _, ok := s.tasks.capabilityByID(id); ok {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		if resp.RepoDefaultCapabilities == nil {
+			resp.RepoDefaultCapabilities = make(map[string][]string, len(repoConfigs))
+		}
+		resp.RepoDefaultCapabilities[rc.Repo.String()] = ids
 	}
 	if s.tasks.Config.AutoMergeDegraded != nil {
 		resp.AutoMergeDegraded = s.tasks.Config.AutoMergeDegraded()

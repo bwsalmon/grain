@@ -540,6 +540,43 @@ func TestConfigEndpointReportsDefaultCapabilities(t *testing.T) {
 	}
 }
 
+// The per-repo layer travels with the same response, keyed by repo, so
+// the new-task form can re-seed its picker the moment the repo picker
+// changes rather than asking the server once per keystroke
+// (grain/task-24). Filtered the same way, and only repos that add
+// something appear at all.
+func TestConfigEndpointReportsRepoDefaultCapabilities(t *testing.T) {
+	srv, client := testServer(t)
+	ctx := context.Background()
+
+	if err := client.Store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo:                model.RepoRef{Owner: "acme", Name: "widgets"},
+		DefaultCapabilities: []string{"gcp-key", "scratch-repo"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Nothing but a retired id: the repo has nothing this build can
+	// grant, so it is not reported as adding anything.
+	if err := client.Store.PutRepoConfig(ctx, model.RepoConfig{
+		Repo:                model.RepoRef{Owner: "acme", Name: "gadgets"},
+		DefaultCapabilities: []string{"scratch-repo"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := decode[struct {
+		RepoDefaultCapabilities map[string][]string `json:"repoDefaultCapabilities"`
+	}](t, rec)
+	want := map[string][]string{"acme/widgets": {"gcp-key"}}
+	if !reflect.DeepEqual(got.RepoDefaultCapabilities, want) {
+		t.Fatalf("repoDefaultCapabilities = %v, want %v", got.RepoDefaultCapabilities, want)
+	}
+}
+
 func TestSettingsRoutesReadAndWrite(t *testing.T) {
 	srv, _ := testServer(t)
 

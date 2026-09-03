@@ -216,11 +216,14 @@ type Config struct {
 	//
 	// Distinct, too, from docs/data-model.md's "Attaching capabilities to
 	// repos and folders" -- those offers are floors, unioned in at
-	// resolution and not droppable by the task. This is a seed. When
-	// per-repo defaults arrive (the same doc's offers tree, or a repo row
-	// of this same shape), they compose with this one the same way: as
-	// more ids in the set a new task starts with, resolved in
-	// ui.(*Client).defaultCapabilities.
+	// resolution and not droppable by the task. This is a seed.
+	//
+	// RepoConfig.DefaultCapabilities is the per-repo layer of this same
+	// seed (grain/task-24), and composes with it exactly that way: more
+	// ids in the set a new task starts with, unioned deployment-first in
+	// ui.(*Client).defaultCapabilities. This layer is the one that
+	// applies wherever a task points, including a task with no repo at
+	// all; a repo can add to it and never subtract from it.
 	//
 	// An id here that this build's picker does not offer is skipped at
 	// creation rather than failing it -- ui.UpdateSettings validates the

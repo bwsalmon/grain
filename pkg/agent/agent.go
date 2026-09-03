@@ -41,7 +41,26 @@ type RunConfig struct {
 	// at instead of a local directory -- see agent/antigravity's and
 	// agent/claude's Framework.Run.
 	KonturVM string
-	Tools    []mcp.Tool
+	// Repo ("owner/name") and Branch are the repository this run pushes
+	// to and the branch it pushes -- model.BranchName's answer for this
+	// task, the same pair BuildPrompt already names in the prompt. A
+	// Framework passes them to its forked "mcpserver" subprocess so
+	// pkg/mcp's pull_request_status can read CI for exactly that branch
+	// and no other (cmd/grain/mcpserver.go's -pr-repo/-pr-branch).
+	//
+	// Both empty is a task with no repo attached, which is a real case
+	// (Target is a pointer, and BuildPrompt has a sentence for it): the
+	// tool then reports that there is nothing to look at rather than
+	// disappearing from the roster.
+	//
+	// They are deliberately not derived from SandboxRoot or from
+	// anything the agent can influence. Where a run's tools may look is
+	// grain's to decide, the same "deterministic, not self-reported"
+	// rule model.BranchName's own doc comment sets out for the branch
+	// itself.
+	Repo   string
+	Branch string
+	Tools  []mcp.Tool
 	// MaxTurns caps the number of model-response/tool-call round trips
 	// before Run gives up and returns an error, guarding against a run
 	// that never stops asking for tools. Zero means the framework's own
