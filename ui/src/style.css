@@ -606,12 +606,38 @@ fieldset legend {
 .upgrade-phase-ok { color: var(--state-completed); }
 .upgrade-phase-failed { color: var(--danger); }
 
-.detail-layout { display: flex; gap: 1.75rem; align-items: flex-start; }
+/* ---------- The detail pane: what opening a task, a schedule, a
+   template or a suite fills the whole content area beside the sidebar
+   with (grain/task-94, Overlay's own `pane`). ---------- */
+/* The pane's paper is the viewport's full height, so this -- not the
+   document -- is what scrolls, the same split .main-column already
+   draws for a list pane. */
+.overlay-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.5rem 1.75rem;
+}
+
+/* A form is a single column of fields however wide the pane is: full
+   width would stretch a one-word "Name" input across the screen. Both
+   caps here are left-aligned rather than centred, so what an item you
+   opened shows starts exactly where the list you opened it from did. */
+.pane-form { max-width: 44rem; }
+
+/* Wider than a form -- two columns of a task use the room -- but still
+   capped: a line of prose running the width of a widescreen is no more
+   readable than the 900px dialog this replaced. */
+.detail-layout { display: flex; gap: 1.75rem; align-items: flex-start; max-width: 1200px; }
 .detail-main { flex: 1; min-width: 0; }
-.detail-side { width: 240px; flex: none; }
+/* Sticky so the state, the actions and the dependencies stay put while
+   a long timeline scrolls past them -- in a pane tall enough to scroll
+   a long way, the buttons would otherwise be a scroll back up. */
+.detail-side { width: 260px; flex: none; position: sticky; top: 0; }
 @media (max-width: 720px) {
+  .overlay-pane { padding: 1.25rem 1rem; }
   .detail-layout { flex-direction: column; }
-  .detail-side { width: 100%; }
+  .detail-side { width: 100%; position: static; }
 }
 
 .detail-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
