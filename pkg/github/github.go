@@ -379,6 +379,17 @@ type PullRequestDetail struct {
 	// better placed to tell those apart than the Checks API is. The
 	// clock in orchestrator.healthFrom stays.
 	//
+	// That window was caught open rather than argued from. Polling
+	// grain#544 once a second across a push, on this repository, whose
+	// every push runs CI: two seconds after the new head appeared the PR
+	// read "unknown" with no checks; two seconds after that it read
+	// "clean" with *zero* check runs; two seconds after that the first
+	// check registered and it went back to "unstable". A merge gate
+	// reading "clean" as passing would have had a four-second window,
+	// per push, to merge a pull request whose tests had not been created
+	// yet -- which is the exact failure defaultCheckRegistrationWindow
+	// exists to prevent, not a reason to retire it.
+	//
 	// Nor does "unstable" separate pending from failing -- a check still
 	// running and a check finished red both read "unstable" -- so it
 	// could not stand in for the PrPending/PrFailing distinction either.
