@@ -43,7 +43,7 @@ func TestLiveConfigAppliesAChangedPollInterval(t *testing.T) {
 	store := testStore(t)
 	cfg := startupConfig()
 	putConfig(t, store, cfg.toModelConfig())
-	live := newLiveConfig(store, nil, cfg)
+	live := newLiveConfig(store, nil, cfg, nil)
 	deps := orchestrator.Deps{}
 
 	// Nothing changed yet: the loop is told not to disturb its ticker.
@@ -73,7 +73,7 @@ func TestLiveConfigNeverAdoptsARestartOnlySetting(t *testing.T) {
 	store := testStore(t)
 	cfg := startupConfig()
 	putConfig(t, store, cfg.toModelConfig())
-	live := newLiveConfig(store, nil, cfg)
+	live := newLiveConfig(store, nil, cfg, nil)
 	deps := orchestrator.Deps{}
 
 	changed := cfg.toModelConfig()
@@ -106,9 +106,9 @@ func TestLiveConfigRebuildsCapabilityProvidersWhenGCPChanges(t *testing.T) {
 	store := testStore(t)
 	cfg := startupConfig()
 	putConfig(t, store, cfg.toModelConfig())
-	live := newLiveConfig(store, nil, cfg)
+	live := newLiveConfig(store, nil, cfg, nil)
 	deps := orchestrator.Deps{Config: orchestrator.Config{
-		Capabilities: model.NewCapabilityRegistry(capabilityProviders(cfg)...),
+		Capabilities: model.NewCapabilityRegistry(capabilityProviders(cfg, nil)...),
 	}}
 
 	if _, ok := deps.Config.Capabilities.Lookup("gcp-key"); ok {
@@ -147,7 +147,7 @@ func TestLiveConfigPushesAChangedSandboxShapeToTheBackend(t *testing.T) {
 	cfg := startupConfig()
 	putConfig(t, store, cfg.toModelConfig())
 	sandboxes := &shapedSandboxes{}
-	live := newLiveConfig(store, sandboxes, cfg)
+	live := newLiveConfig(store, sandboxes, cfg, nil)
 	deps := orchestrator.Deps{}
 
 	live.refresh(ctx, &deps)
@@ -186,7 +186,7 @@ func TestLiveConfigToleratesABackendWithNoShape(t *testing.T) {
 	store := testStore(t)
 	cfg := startupConfig()
 	putConfig(t, store, cfg.toModelConfig())
-	live := newLiveConfig(store, orchestrator.NewHostSandboxes(t.TempDir()), cfg)
+	live := newLiveConfig(store, orchestrator.NewHostSandboxes(t.TempDir()), cfg, nil)
 	deps := orchestrator.Deps{}
 
 	changed := cfg.toModelConfig()
@@ -208,7 +208,7 @@ func TestLiveConfigKeepsStartupValuesForUnsetStoredFields(t *testing.T) {
 	store := testStore(t)
 	cfg := startupConfig()
 	putConfig(t, store, model.Config{})
-	live := newLiveConfig(store, nil, cfg)
+	live := newLiveConfig(store, nil, cfg, nil)
 	deps := orchestrator.Deps{}
 
 	live.refresh(ctx, &deps)

@@ -25,6 +25,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -138,6 +139,86 @@ func (c *CredentialSet) Get(name string) (Credential, bool) {
 		}
 	}
 	return c.load(name), true
+}
+
+// Names is every credential this deployment has configured: one per
+// <name>.token or <name>.app.json file in the secrets directory, sorted,
+// with a name that has both counted once (load prefers the App
+// credential, so it is one credential either way).
+//
+// Read from the directory rather than from credentials.json, because the
+// two answer different questions: the pattern file says which credential
+// a repo falls back to, while this says which credentials exist at all
+// -- including the extra named tokens an operator drops in for Get above
+// to reach, which no pattern ever names (ExtraNames below).
+//
+// Unlike load's own cache this re-reads the directory on every call: it
+// is called at startup, not per request, and a listing is cheap next to
+// the "restart the one service that reads it" contract the rest of this
+// file keeps.
+func (c *CredentialSet) Names() []string {
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		// A secrets directory that cannot be read is the same "no
+		// credentials configured" this file already treats a missing
+		// credentials.json as -- every Select then fails closed with
+		// "no credential configured," which is the failure worth
+		// surfacing, and it is surfaced where a request can see it.
+		return nil
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name, ok := credentialFileName(e.Name())
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// DefaultName is the credential the global "*" pattern names -- the one
+// every repo with no narrower entry is pushed and pulled with, and so
+// the one a task needs no capability to be using already. Empty when
+// this deployment has no "*" entry at all.
+func (c *CredentialSet) DefaultName() string { return c.patterns["*"] }
+
+// ExtraNames is Names minus DefaultName: every named GitHub token beyond
+// the deployment default, which is exactly the set that becomes a
+// capability of its own (model.GitCredentialCapability, pkg/capability/
+// githubtoken). A credential some *narrower* ladder entry names is
+// deliberately still in here: the ladder decides which repos reach it by
+// default, and this decides which tokens a task can ask for by name,
+// which are two independent choices about the same credential.
+func (c *CredentialSet) ExtraNames() []string {
+	def := c.DefaultName()
+	var out []string
+	for _, name := range c.Names() {
+		if name == def {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// credentialFileName maps a file in the secrets directory back to the
+// credential it backs -- "bot.token" and "bot.app.json" are both the
+// "bot" credential (load's own two forms) -- and reports false for
+// anything else there, credentials.json itself included.
+func credentialFileName(file string) (string, bool) {
+	for _, suffix := range []string{".token", ".app.json"} {
+		if name, ok := strings.CutSuffix(file, suffix); ok && name != "" {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 func (c *CredentialSet) now() time.Time {

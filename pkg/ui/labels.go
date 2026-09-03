@@ -23,6 +23,7 @@ package ui
 import (
 	"context"
 
+	"github.com/bwsalmon/grain/pkg/capability/githubtoken"
 	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/metrics"
 	"github.com/bwsalmon/grain/pkg/model"
@@ -111,6 +112,46 @@ func OfferedCapabilities() []Capability {
 			Description: "Create a private, single-use GitHub sandbox repo for this task to work in instead of /repo"},
 	}
 }
+
+// GitHubTokenCapabilities is one row per named GitHub token this
+// deployment has configured beyond its default one
+// (gitproxy.CredentialSet.ExtraNames), for a caller to append to
+// OfferedCapabilities above -- grain/task-117.
+//
+// These are the one part of the picker that is not a fixed list: which
+// tokens exist is an operator's own files under secrets/github, read
+// once at startup like the rest of that ladder, so this is handed the
+// names rather than reading anything itself. Everything downstream
+// treats them as ordinary capabilities, which is the whole point of
+// giving each token an id (model.GitCredentialCapability) instead of a
+// second, token-shaped picker: they can be defaulted deployment-wide or
+// per repo, attached and detached per task, and reported on Settings'
+// Capabilities tab, with no code that knows about tokens in particular.
+//
+// A task holding two of them still only pushes with one -- the git proxy
+// picks a winner (model's own gitCredentialOverride) rather than
+// refusing -- so the picker deliberately does not try to make them
+// mutually exclusive.
+func GitHubTokenCapabilities(names []string) []Capability {
+	out := make([]Capability, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		out = append(out, Capability{
+			ID:          model.GitCredentialCapability(name),
+			Name:        GitHubTokenDisplayName(name),
+			Description: githubtoken.Description(name),
+		})
+	}
+	return out
+}
+
+// GitHubTokenDisplayName is what a named token is called on screen, in
+// both listings that show one: the per-task picker's own row
+// (GitHubTokenCapabilities) and Settings' Capabilities tab
+// (capabilityStatuses).
+func GitHubTokenDisplayName(name string) string { return "GitHub token: " + name }
 
 // Config is what a Client needs to know about the deployment it fronts.
 //

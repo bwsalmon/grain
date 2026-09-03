@@ -137,7 +137,7 @@ func TestCapabilityProviders(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			providers := capabilityProviders(tc.cfg)
+			providers := capabilityProviders(tc.cfg, nil)
 			var got []string
 			for _, p := range providers {
 				got = append(got, p.Spec().Name)
@@ -146,6 +146,66 @@ func TestCapabilityProviders(t *testing.T) {
 				t.Fatalf("capabilityProviders(%+v) = %v, want %v", tc.cfg, got, tc.want)
 			}
 		})
+	}
+}
+
+// gitHubTokenNames is what run() reads the deployment's named tokens
+// from, once, before either half of the process is up -- the ladder's
+// own directory under -data-dir, the same place the default token lives.
+func TestGitHubTokenNames(t *testing.T) {
+	dataDir := t.TempDir()
+	githubDir := filepath.Join(dataDir, "secrets", "github")
+	if err := os.MkdirAll(githubDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(githubDir, "credentials.json"), []byte(`{"*":"bot"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"bot", "release-bot"} {
+		if err := os.WriteFile(filepath.Join(githubDir, name+".token"), []byte("tok\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := gitHubTokenNames(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "bot" is the default every repo already pushes with: a capability
+	// for it would grant a task exactly what it has without one.
+	if want := []string{"release-bot"}; !slices.Equal(got, want) {
+		t.Fatalf("gitHubTokenNames = %v, want %v", got, want)
+	}
+
+	// A deployment that has never had a GitHub credential configured is
+	// not an error here -- it simply offers no named tokens.
+	if got, err := gitHubTokenNames(t.TempDir()); err != nil || len(got) != 0 {
+		t.Fatalf("gitHubTokenNames on an empty data dir = %v, %v, want none, nil", got, err)
+	}
+}
+
+// A named GitHub token is a capability of its own (grain/task-117), and
+// the two ends of that -- the picker row a human ticks and the provider
+// a dispatch resolves it against -- are built from the same list of
+// names in startUIServer and capabilityProviders. This is that pairing:
+// the ids have to match exactly, or granting a token would be refused at
+// dispatch as a capability no provider is registered for.
+func TestCapabilityProvidersRegistersEachNamedGitHubToken(t *testing.T) {
+	names := []string{"release-bot", "docs-bot"}
+	var registered []string
+	for _, p := range capabilityProviders(config{}, names) {
+		registered = append(registered, p.Spec().Name)
+	}
+	for _, capability := range ui.GitHubTokenCapabilities(names) {
+		if !slices.Contains(registered, capability.ID) {
+			t.Errorf("the picker offers %q but no provider is registered for it (registered: %v)",
+				capability.ID, registered)
+		}
+	}
+	// And nothing extra: a deployment with no named tokens registers
+	// exactly what it did before this existed (TestCapabilityProviders).
+	if len(registered) != len(capabilityProviders(config{}, nil))+len(names) {
+		t.Errorf("registered %v, want the fixed set plus one provider per name %v", registered, names)
 	}
 }
 
@@ -165,7 +225,7 @@ func TestCapabilityProviders(t *testing.T) {
 func TestEveryRegisteredCapabilityIsGrantable(t *testing.T) {
 	cfg := config{gcpProject: "proj", gcpServiceAccountEmail: "agent@proj.iam.gserviceaccount.com"}
 	var registered []string
-	for _, p := range capabilityProviders(cfg) {
+	for _, p := range capabilityProviders(cfg, nil) {
 		registered = append(registered, p.Spec().Name)
 	}
 	var offered []string

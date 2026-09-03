@@ -26,6 +26,37 @@ func TestGitCredentialOverrideIsAbsentWithNoGrants(t *testing.T) {
 	}
 }
 
+func TestGitCredentialOverridePicksOneWinnerDeterministically(t *testing.T) {
+	// Two named tokens on one task: the proxy uses one of them rather
+	// than refusing, and which one follows the order the grants arrive
+	// in -- Store.GitCredentialOverride reads them sorted by capability
+	// id, so the same task resolves the same way on every request.
+	grants := []Grant{
+		GitCredentialGrant("bot-two"),
+		GitCredentialGrant("release-bot"),
+	}
+	name, ok := gitCredentialOverride(grants)
+	if !ok || name != "bot-two" {
+		t.Errorf("name=%q ok=%v, want %q true", name, ok, "bot-two")
+	}
+}
+
+func TestGitCredentialCapabilityRoundTrips(t *testing.T) {
+	id := GitCredentialCapability("release-bot")
+	if id != "github-credential:release-bot" {
+		t.Errorf("GitCredentialCapability = %q, want %q", id, "github-credential:release-bot")
+	}
+	if name, ok := GitCredentialName(id); !ok || name != "release-bot" {
+		t.Errorf("GitCredentialName(%q) = %q, %v, want %q true", id, name, ok, "release-bot")
+	}
+	if _, ok := GitCredentialName("gemini-key"); ok {
+		t.Error("an ordinary capability id should not read as a named GitHub token")
+	}
+	if _, ok := GitCredentialName(GitCredentialCapabilityPrefix); ok {
+		t.Error("the bare prefix names no credential and should not read as one")
+	}
+}
+
 func TestGitCredentialGrantIsAppliedByLabel(t *testing.T) {
 	g := GitCredentialGrant("workflow")
 	if g.Via != GrantByLabel {

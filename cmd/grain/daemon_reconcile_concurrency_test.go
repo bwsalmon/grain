@@ -85,7 +85,7 @@ func TestReconcileDispatchesWhileAnEarlierRunIsStillLive(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		reconcile(ctx, deps, newLiveConfig(store, deps.Sandboxes, config{pollInterval: 20 * time.Millisecond}))
+		reconcile(ctx, deps, newLiveConfig(store, deps.Sandboxes, config{pollInterval: 20 * time.Millisecond}, nil))
 	}()
 	awaitRun(t, agentStub, "t1-1")
 
@@ -168,7 +168,7 @@ func TestDrainInFlightWaitsForACancelledRunToReleaseItsSandbox(t *testing.T) {
 	loopDone := make(chan struct{})
 	go func() {
 		defer close(loopDone)
-		reconcile(ctx, deps, newLiveConfig(store, deps.Sandboxes, config{pollInterval: 20 * time.Millisecond}))
+		reconcile(ctx, deps, newLiveConfig(store, deps.Sandboxes, config{pollInterval: 20 * time.Millisecond}, nil))
 	}()
 	awaitRun(t, agentStub, "t1-1")
 

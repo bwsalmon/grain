@@ -710,6 +710,28 @@ selected repos (one per resource owner; note orgs must opt in to
 fine-grained PATs at all) → machine-account classic PAT → personal token
 for the remainder.
 
+### Named tokens as capabilities
+
+The ladder above answers "which credential does *this repo* fall back to",
+which is a deployment-wide decision. The other half is per task: a token
+some particular piece of work needs and the rest must not have — the
+`workflow` scope below being the standing example.
+
+Every credential in the directory beyond the one `credentials.json`'s `*`
+entry names is therefore also offered as a **capability of its own**
+(`github-credential:<name>`, `pkg/capability/githubtoken`). A human ticks
+it on one task like any other capability; the proxy, resolving that task's
+sandbox, uses that credential in place of the ladder for every request the
+run makes. Nothing about the token reaches the sandbox — it is still the
+proxy that attaches it — and detaching the capability puts the task back
+on the ladder.
+
+Adding one is adding a file: drop `release-bot.token` (or
+`release-bot.app.json`) beside `bot.token` and restart, the same "replace
+a file under `/data/secrets` and restart the one service that reads it"
+this whole directory follows. A task holding two named tokens pushes with
+one of them, chosen deterministically rather than refused.
+
 ### Scopes to withhold
 
 `delete_repo` is a separate classic scope — never grant it. No `admin:*`,
