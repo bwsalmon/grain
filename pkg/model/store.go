@@ -1739,8 +1739,9 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 // ReadyConfiguration is Ready narrowed to the configuration agent
 // (Task.Configuration, bwsalmon/agents#621): every such task
 // dispatchable right now, in the same backlog order Ready itself uses
-// (ascending OrderKey, task ID the tiebreak) -- there is no fix-task
-// carve-out to make here, since a configuration task is never one.
+// (ascending OrderKey, task ID the tiebreak), and with no carve-out of
+// its own for the same reason Ready has none: position in the backlog is
+// the whole of the order, here as there.
 //
 // dispatch.Cycle calls this before it ever looks at MaxConcurrent, and
 // starts every task it returns unconditionally: the configuration agent

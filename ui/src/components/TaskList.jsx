@@ -181,7 +181,8 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
               <ul className="task-sublist">
                 {children.get(t.id).map((c) => (
                   <li key={c.id}>
-                    <TaskRow t={c} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect} />
+                    <TaskRow t={c} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
+                      nested />
                   </li>
                 ))}
               </ul>
@@ -216,7 +217,14 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // nowhere to put a batch-actions bar or a reorderable list (the repo
 // pane, again) just omits onToggleSelect/draggable and gets a plain row
 // with no checkbox or drag handle rather than a dead one.
-export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging }) {
+//
+// nested says this row is already sitting in a .task-sublist under the
+// task it was generated from, which is the only thing that makes a
+// stacked task self-explaining -- so it is what decides whether the
+// "merge fix" chip below is worth its space. Callers that list tasks
+// flat (the repo pane; groupByStack's own fallback for a stacked task
+// whose parent is filtered out or gone) leave it off and get the chip.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, nested }) {
   const phase = completionPhase(t);
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
@@ -248,6 +256,17 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       <span className="task-title">{t.title}</span>
       <span className="chips">
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
+        {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a task suite run" label="suite" />}
+        {t.stacked && !nested && (
+          <Chip
+            size="small"
+            className="chip-stacked"
+            title={t.generatedFrom
+              ? `the merge queue's own automatic fix for ${t.generatedFrom}`
+              : "the merge queue's own automatic fix for another task's pull request"}
+            label="merge fix"
+          />
+        )}
         {t.configuration ? (
           <Chip size="small" className="chip-interactive" title="grain's own configuration agent" label="configuration" />
         ) : t.interactive ? (

@@ -402,6 +402,37 @@ describe("SettingsOverlay", () => {
     });
   });
 
+  // grain/task-43: settings.defaultCapabilities is reported as stored,
+  // retired ids included, so an id whose row this build has dropped
+  // arrives selected with nothing in the listing to untick it. Without a
+  // row of its own it sticks in the selection and every later save of
+  // this tab sends it back, which UpdateSettings refuses as "unknown
+  // capability" -- a pane nobody can save. The extra row is what clears
+  // it.
+  it("offers a row for a stored default capability this build no longer lists", async () => {
+    const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
+    api
+      .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key", "scratch-repo"] })
+      .mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+    await user.click(screen.getByRole("tab", { name: "Capabilities" }));
+
+    await user.click(screen.getByLabelText("Default capabilities"));
+    const row = await screen.findByRole("option", { name: /scratch-repo/ });
+    expect(row).toHaveTextContent("No longer offered -- untick to remove it");
+
+    await user.click(row);
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ defaultCapabilities: ["gcp-key"] }),
+    });
+  });
+
   it("leaves default capabilities out of the payload when they are not touched", async () => {
     const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
     api

@@ -88,6 +88,16 @@ func TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead(t *testing.T
 	if fixTask.Base != "grain/task-"+task.ID {
 		t.Fatalf("fix task base = %q, want the original PR's own branch", fixTask.Base)
 	}
+	// Named after the task it repairs, not after the pull request that
+	// went red -- see fixTaskTitle. This is the fix's pull request title
+	// too, since EnsurePullRequest takes Title verbatim.
+	if want := "Resolve: " + task.Title; fixTask.Title != want {
+		t.Fatalf("fix task title = %q, want %q", fixTask.Title, want)
+	}
+	// The pull request it is filed for is still identified, in the body.
+	if !strings.Contains(fixTask.Body, "acme/widgets#") {
+		t.Fatalf("fix task body = %q, want it to name the pull request it repairs", fixTask.Body)
+	}
 	proposedBy, hasProposedBy := "", false
 	for _, l := range fixTask.Links {
 		if l.Kind == model.LinkProposedBy {
