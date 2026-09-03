@@ -1,0 +1,76 @@
+#!/bin/sh
+# Write this guest's /etc/resolv.conf from the nameservers on the kernel
+# command line.
+#
+# The "ip=" boot parameter carries two of them past the fields that
+# configure the interface --
+# ip=<client>:<server>:<gw>:<netmask>:<hostname>:<device>:<autoconf>:<dns0>:<dns1>
+# -- and kontur fills them in from NETSHIM_DNS (see
+# internal/netshim.FlatGuestConfig, and internal/staticpod's own derived
+# cmdline for NAT mode). Nothing else in a kontur guest ever writes that
+# file: there is no systemd-resolved here and no DHCP client, since the
+# address is static on the command line, so a plain file written once per
+# boot is the whole of this guest's DNS configuration and nothing later
+# overwrites it.
+#
+# Without this a guest resolves through whatever /etc/resolv.conf the
+# machine that *built* the image happened to have, which debootstrap
+# copies in -- typically the build host's own resolver, on an address
+# reachable in the build host's network namespace and unroutable from a
+# guest on a tap. The symptom is a guest with completely open IP egress
+# where every name lookup hangs until it times out, which reads as a
+# blocked network rather than as a missing resolver.
+#
+# Neither the kernel's own CONFIG_IP_PNP handling nor klibc's ipconfig(8)
+# (which kontur-configure-net runs on a distro-kernel guest) writes
+# resolv.conf: the kernel only exposes what it was given, in
+# /proc/net/pnp, and ipconfig only writes /run/net-<dev>.conf, leaving the
+# file itself to an initramfs script this guest does not run. So this is a
+# step of its own, in overlay-common rather than beside
+# kontur-configure-net, and it applies to every guest kontur builds --
+# bundled kernel or distro kernel, Debian or Alpine.
+#
+# A command line naming no nameservers leaves the file alone: an operator
+# who set CHV_CMDLINE by hand, or who set NETSHIM_DNS to the empty string
+# to keep whatever the image ships with, gets exactly that.
+set -eu
+
+RESOLV_CONF="${KONTUR_RESOLV_CONF:-/etc/resolv.conf}"
+
+ipparam=$(sed -n 's/.*\bip=\([^ ]*\).*/\1/p' /proc/cmdline)
+[ -n "$ipparam" ] || exit 0
+
+# Fields 8 and 9 of the ip= spec. cut yields the empty string for a field
+# the spec is too short to have, which is the common case: the parameter
+# is normally written with seven.
+dns0=$(printf '%s' "$ipparam" | cut -d: -f8)
+dns1=$(printf '%s' "$ipparam" | cut -d: -f9)
+
+nameservers=""
+for ns in "$dns0" "$dns1"; do
+	# 0.0.0.0 is how the kernel's own ip= handling spells "no
+	# nameserver here", so it is not one to write down.
+	case "$ns" in
+		"" | 0.0.0.0) continue ;;
+	esac
+	nameservers="${nameservers}nameserver ${ns}
+"
+done
+[ -n "$nameservers" ] || exit 0
+
+# Written through a temporary file and renamed, so a resolver reading the
+# file while this runs sees either the old contents or the new ones
+# rather than a half-written file. The rename also replaces a symlink
+# (e.g. one left pointing into a stub resolver's runtime directory) with a
+# real file, which is what a guest with no resolver daemon wants.
+tmp="${RESOLV_CONF}.kontur.$$"
+if ! printf '%s' "$nameservers" > "$tmp" 2>/dev/null; then
+	# A read-only root (CHV_DISK_MODE=readonly) has nowhere to write
+	# this. Not fatal: a guest that boots without DNS is worth more
+	# than a guest that does not boot, and the message lands on the
+	# console, which is where a VM's boot is read from.
+	echo "kontur-configure-dns: cannot write ${RESOLV_CONF} -- leaving this guest's DNS configuration as it is" >&2
+	exit 0
+fi
+chmod 0644 "$tmp"
+mv -f "$tmp" "$RESOLV_CONF"

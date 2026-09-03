@@ -90,6 +90,7 @@ type vmFlags struct {
 	bridgeCIDR                    *string
 	externalIface                 *string
 	netMode                       *string
+	dns                           *string
 	controlCIDR                   *string
 	dockerRunOpts                 stringList
 	imagesHostPath                *string
@@ -126,6 +127,7 @@ func registerVMFlags(fs *flag.FlagSet, d staticpod.VMSpec) *vmFlags {
 	v.bridgeCIDR = fs.String("bridge-cidr", d.BridgeCIDR, "the bridge's own address and subnet; -ip must fall within it")
 	v.externalIface = fs.String("external-iface", d.ExternalIface, "the pod's primary interface")
 	v.netMode = fs.String("net", d.NetModeOrDefault(), "how the guest reaches the network: \"nat\" (private subnet behind netshim's DNAT/masquerade) or \"flat\" (spliced onto the sandbox's own segment, taking over its address and MAC)")
+	v.dns = fs.String("dns", d.DNS, "nameserver(s) the guest resolves through, comma separated, at most two: they travel on the guest's ip= boot parameter and become its /etc/resolv.conf; empty leaves whatever the guest image ships with")
 	v.controlCIDR = fs.String("control-cidr", d.ControlCIDR, "address netshim holds on the flat-mode control link, the private second NIC that keeps \"kontur exec\" and the memory agent able to reach the guest; empty disables it")
 	v.dockerRunOpts.values = append([]string(nil), d.DockerRunOpts...)
 	fs.Var(&v.dockerRunOpts, "docker-run-opt", "extra option passed verbatim to the \"docker run\" creating the network namespace holder, repeatable (e.g. -docker-run-opt -p -docker-run-opt 8080:80); -backend docker only")
@@ -162,6 +164,7 @@ func (v *vmFlags) toSpec(name string) staticpod.VMSpec {
 		BridgeCIDR:                    *v.bridgeCIDR,
 		ExternalIface:                 *v.externalIface,
 		NetMode:                       *v.netMode,
+		DNS:                           *v.dns,
 		ControlCIDR:                   *v.controlCIDR,
 		DockerRunOpts:                 v.dockerRunOpts.values,
 		ImagesHostPath:                *v.imagesHostPath,

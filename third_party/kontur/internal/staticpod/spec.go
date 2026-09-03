@@ -120,6 +120,24 @@ type VMSpec struct {
 	// container's.
 	NetMode string `json:"netMode,omitempty"`
 
+	// DNS is the nameserver(s) the guest resolves through, comma
+	// separated, at most two of them (netshim.ParseDNS). They reach the
+	// guest on its ip= boot parameter's own dns0/dns1 fields, where
+	// kontur-configure-dns writes them into /etc/resolv.conf -- derived
+	// here in NAT mode, where this side builds the whole parameter, and
+	// handed to the VM container as NETSHIM_DNS in flat mode, where the
+	// parameter is only assembled at boot from the identity the runtime
+	// assigned (see internal/netshim.FlatGuestConfig).
+	//
+	// netshim.DefaultDNS is what "vm create" fills in when the flag is
+	// left alone, and it is a public resolver on purpose: neither the
+	// host's own resolver nor docker's embedded one is reachable from
+	// inside a guest, so an image that inherits either resolves nothing.
+	// A deployment whose network has its own resolver names it here; the
+	// empty string leaves the guest with whatever /etc/resolv.conf its
+	// image ships.
+	DNS string `json:"dns,omitempty"`
+
 	// ControlCIDR is the address netshim holds on the flat-mode control
 	// link, the private second NIC that keeps "kontur exec" and the
 	// memory agent able to reach a guest that now answers to the
@@ -198,6 +216,7 @@ func Defaults() VMSpec {
 		ShutdownTimeout:               "20s",
 		GuestPort:                     80,
 		NetMode:                       netshim.ModeNAT,
+		DNS:                           netshim.DefaultDNS,
 		ControlCIDR:                   "169.254.100.1/24",
 		Bridge:                        "kontur0",
 		BridgeCIDR:                    "169.254.100.1/24",
@@ -329,9 +348,16 @@ func (s *VMSpec) Validate() error {
 	if _, err := time.ParseDuration(s.ShutdownTimeout); err != nil {
 		return fmt.Errorf("invalid shutdown timeout %q: %w", s.ShutdownTimeout, err)
 	}
+	// Parsed in both modes, though only NAT mode renders it here: flat
+	// mode's own copy is assembled inside the VM container from
+	// NETSHIM_DNS, and an address rejected there would fail a VM that
+	// "vm create" had already reported as started.
+	dns, err := netshim.ParseDNS(s.DNS)
+	if err != nil {
+		return fmt.Errorf("invalid dns %q: %w", s.DNS, err)
+	}
 	var gateway, netmask string
 	if s.NetMode == netshim.ModeNAT {
-		var err error
 		gateway, netmask, err = gatewayAndNetmask(s.BridgeCIDR)
 		if err != nil {
 			return fmt.Errorf("invalid bridge CIDR %q: %w", s.BridgeCIDR, err)
@@ -354,7 +380,8 @@ func (s *VMSpec) Validate() error {
 		if s.NetMode == netshim.ModeFlat {
 			s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s", root)
 		} else {
-			s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s ip=%s::%s:%s::eth0:off", root, s.IP, gateway, netmask)
+			s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s ip=%s::%s:%s::eth0:off%s",
+				root, s.IP, gateway, netmask, netshim.DNSFields(dns))
 		}
 		s.CmdlineAuto = true
 	}

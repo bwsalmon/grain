@@ -112,6 +112,27 @@ ARG GUEST_CONSOLE_WRAP=1
 # setting. Worth doing if the amounts here ever get large.
 ARG GUEST_DISK_EXTRA_MB=0
 
+# The nameserver(s) the guest's own /etc/resolv.conf ships with, comma
+# separated, or the empty string to leave whatever the rootfs build left
+# behind.
+#
+# It has to be written by hand because debootstrap copies the *build
+# host's* resolv.conf into the rootfs, and a build host's resolver is
+# routinely an address that only exists in its own network namespace (a
+# cloud metadata resolver, docker's own 127.0.0.11). A guest booted with
+# that file has open IP egress and no working DNS at all, and every
+# lookup in it hangs rather than failing -- so an image built on one
+# machine silently resolves and one built on another silently does not.
+# Naming a resolver here makes the image the same wherever it was built.
+#
+# This is only the baseline the image carries. What a guest actually
+# resolves through is settled per boot, from the nameservers on its ip=
+# kernel parameter (NETSHIM_DNS, konturctl's -dns), which
+# overlay-common/usr/local/libexec/kontur-configure-dns writes over this
+# file -- so a deployment on a network where 8.8.8.8 is wrong changes it
+# there rather than rebuilding this image.
+ARG GUEST_DNS=8.8.8.8
+
 FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -200,6 +221,7 @@ RUN set -eux; \
 FROM debian:bookworm-slim AS guest-rootfs-debian
 ARG GUEST_SUITE
 ARG GUEST_SSH_AUTHORIZED_KEY
+ARG GUEST_DNS
 RUN apt-get update && apt-get install -y --no-install-recommends \
       debootstrap ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -240,6 +262,11 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 #   no-op on a guest booting the bundled kernel, which handles "ip="
 #   itself -- see overlay-debian/usr/local/libexec/kontur-configure-net
 #   for when it is not, and why.
+# - kontur-configure-dns.service is enabled into sysinit.target for the
+#   same reason, and /etc/resolv.conf is written here rather than left as
+#   debootstrap copied it off the build host -- see GUEST_DNS at the top
+#   of this file, and overlay-common/usr/local/libexec/kontur-configure-dns
+#   for the per-boot half.
 # - systemd-udevd's own /lib/udev/rules.d/80-net-setup-link.rules renames
 #   NICs to "predictable" names (e.g. virtio-pci's second NIC becomes
 #   "ens3", not "eth1") based on each device's PCI slot -- masked here by
@@ -257,6 +284,7 @@ RUN set -eux; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-authorized-key; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-configure-net; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-configure-dns; \
     for t in sed base64 awk mkdir chmod chown; do \
       [ -e "/rootfs/bin/$t" ] || [ -e "/rootfs/usr/bin/$t" ] || \
         { echo "kontur-authorized-key execs $t, which this rootfs does not have" >&2; exit 1; }; \
@@ -274,6 +302,15 @@ RUN set -eux; \
     install -d /rootfs/etc/systemd/system/sysinit.target.wants; \
     ln -sf /etc/systemd/system/kontur-net-cmdline.service \
       /rootfs/etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service; \
+    ln -sf /etc/systemd/system/kontur-configure-dns.service \
+      /rootfs/etc/systemd/system/sysinit.target.wants/kontur-configure-dns.service; \
+    if [ -n "${GUEST_DNS}" ]; then \
+      : > /rootfs/etc/resolv.conf; \
+      echo "${GUEST_DNS}" | tr ',' '\n' | while read -r ns; do \
+        if [ -n "$ns" ]; then printf 'nameserver %s\n' "$ns" >> /rootfs/etc/resolv.conf; fi; \
+      done; \
+      chmod 0644 /rootfs/etc/resolv.conf; \
+    fi; \
     rm -f /rootfs/etc/ssh/ssh_host_*; \
     install -d -m0700 /rootfs/root/.ssh; \
     : > /rootfs/root/.ssh/authorized_keys; \
@@ -296,6 +333,7 @@ RUN set -eux; \
 FROM alpine:${GUEST_ALPINE_VERSION} AS guest-rootfs-alpine
 ARG GUEST_ALPINE_VERSION
 ARG GUEST_SSH_AUTHORIZED_KEY
+ARG GUEST_DNS
 # --root only changes where packages are installed; apk still reads its
 # own trusted keys and repository list from this stage's own /etc/apk
 # (i.e. this Alpine image's), not /rootfs's, unless told otherwise -- so
@@ -330,6 +368,8 @@ RUN set -eux; \
     chmod 0755 /rootfs/etc/init.d/kontur-control-net; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-authorized-key; \
     chmod 0755 /rootfs/etc/init.d/kontur-authorized-key; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-configure-dns; \
+    chmod 0755 /rootfs/etc/init.d/kontur-configure-dns; \
     for t in sed base64 awk mkdir chmod chown; do \
       [ -e "/rootfs/bin/$t" ] || [ -e "/rootfs/usr/bin/$t" ] || \
         { echo "kontur-authorized-key execs $t, which this rootfs does not have" >&2; exit 1; }; \
@@ -337,9 +377,16 @@ RUN set -eux; \
     for svc in devfs dmesg mdev hwdrivers; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/sysinit/"${svc}"; \
     done; \
-    for svc in hwclock modules sysctl hostname bootmisc syslog; do \
+    for svc in hwclock modules sysctl hostname bootmisc syslog kontur-configure-dns; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/boot/"${svc}"; \
     done; \
+    if [ -n "${GUEST_DNS}" ]; then \
+      : > /rootfs/etc/resolv.conf; \
+      echo "${GUEST_DNS}" | tr ',' '\n' | while read -r ns; do \
+        if [ -n "$ns" ]; then printf 'nameserver %s\n' "$ns" >> /rootfs/etc/resolv.conf; fi; \
+      done; \
+      chmod 0644 /rootfs/etc/resolv.conf; \
+    fi; \
     for svc in local sshd acpid kontur-control-net kontur-mem-agent kontur-authorized-key; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/default/"${svc}"; \
     done; \

@@ -369,6 +369,12 @@ func TestCreate_FlatMode(t *testing.T) {
 	if !containsArg(vmCall, "NETSHIM_MODE=flat") {
 		t.Errorf("VM call = %v, want the flat-mode netshim settings", vmCall)
 	}
+	// Including the nameservers: the VM container is what assembles the
+	// guest's ip= parameter here, so this is the only way the resolver a
+	// deployment chose reaches the guest at all.
+	if !containsArg(vmCall, "NETSHIM_DNS="+netshim.DefaultDNS) {
+		t.Errorf("VM call = %v, missing NETSHIM_DNS", vmCall)
+	}
 	for _, unwanted := range []string{"CHV_NET=tap=tap-web", "CHV_NET="} {
 		if containsArg(vmCall, unwanted) {
 			t.Errorf("VM call = %v, should not set CHV_NET in flat mode", vmCall)

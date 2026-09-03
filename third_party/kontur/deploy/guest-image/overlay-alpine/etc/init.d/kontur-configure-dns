@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+
+description="Write /etc/resolv.conf from the ip= kernel command line"
+
+depend() {
+	# Enabled in the "boot" runlevel rather than "default" (see the
+	# Dockerfile's guest-rootfs-alpine stage), so it has already run by
+	# the time anything that resolves a name starts.
+	before sshd kontur-mem-agent
+}
+
+start() {
+	ebegin "Configuring this guest's resolver"
+	/usr/local/libexec/kontur-configure-dns
+	eend $?
+}

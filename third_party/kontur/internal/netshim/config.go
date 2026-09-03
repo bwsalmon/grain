@@ -23,6 +23,7 @@ const (
 	envExternalIface = "NETSHIM_EXTERNAL_IFACE"
 	envGuestPort     = "NETSHIM_GUEST_PORT"
 	envVMs           = "NETSHIM_VMS"
+	envDNS           = "NETSHIM_DNS"
 
 	// ModeNAT is the original mode: a private subnet inside the
 	// namespace, with DNAT/masquerade rules sharing the namespace's
@@ -41,6 +42,28 @@ const (
 	defaultBridgeCIDR    = "169.254.100.1/24"
 	defaultExternalIface = "eth0"
 	defaultGuestPort     = 80
+
+	// DefaultDNS is the nameserver a guest is pointed at when nothing
+	// names one -- a public resolver, because it is the only answer that
+	// is right on an arbitrary host: the namespace's own resolver is
+	// docker's embedded one on 127.0.0.11, which is the *namespace's*
+	// loopback and not on the wire, and the host's resolver is routinely
+	// an address (a cloud metadata service, a link-local stub) that
+	// exists only in the host's own network namespace and is unroutable
+	// from a guest on a tap. Neither is reachable from inside the guest,
+	// and a guest pointed at one has open IP egress and hangs on every
+	// name it looks up.
+	//
+	// It is a default rather than a fact: a deployment on a restricted
+	// or air-gapped network names its own resolver instead
+	// (NETSHIM_DNS, konturctl's -dns), and one that wants the guest
+	// image's own /etc/resolv.conf left alone passes the empty string.
+	DefaultDNS = "8.8.8.8"
+
+	// maxDNS is how many nameservers the guest can be told about: the
+	// ip= boot parameter has exactly two fields for them (dns0 and
+	// dns1), so a third has nowhere to go.
+	maxDNS = 2
 
 	// tapPrefix is prepended to each VM's name to derive its tap device
 	// name. Linux interface names are capped at 15 bytes, which bounds
@@ -116,6 +139,17 @@ type Config struct {
 	// pod IP that inbound traffic actually arrives on.
 	ExternalIface string
 
+	// DNS is the nameservers the guest is told to resolve through, at
+	// most maxDNS of them, parsed from NETSHIM_DNS. They reach the guest
+	// on its ip= boot parameter (FlatGuestConfig), where
+	// kontur-configure-dns writes them into /etc/resolv.conf. Empty
+	// leaves the guest resolving through whatever its image ships with.
+	//
+	// Flat mode only: in NAT mode konturctl derives the whole ip=
+	// parameter itself, nameservers included (internal/staticpod), and
+	// netshim never sees it.
+	DNS []net.IP
+
 	// GuestPort is the single fixed port every VM is expected to listen
 	// on internally. Each VM gets its own external port (VM.Port) on the
 	// pod IP, but all of them forward to this same in-guest port.
@@ -151,6 +185,12 @@ func flatFromEnv() (Config, error) {
 		Bridge:        getEnvDefault(envBridge, defaultBridge),
 		ExternalIface: getEnvDefault(envExternalIface, defaultExternalIface),
 	}
+
+	dns, err := dnsFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.DNS = dns
 
 	name := strings.TrimSpace(os.Getenv(envVM))
 	if name == "" {
@@ -245,6 +285,52 @@ func natFromEnv() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// dnsFromEnv reads NETSHIM_DNS. Unset means DefaultDNS; set to the empty
+// string means no nameservers at all, the same "explicitly empty disables
+// it" shape NETSHIM_CONTROL_CIDR already has -- which is how a guest whose
+// image ships a resolver of its own keeps it.
+func dnsFromEnv() ([]net.IP, error) {
+	raw, ok := os.LookupEnv(envDNS)
+	if !ok {
+		raw = DefaultDNS
+	}
+	dns, err := ParseDNS(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", envDNS, err)
+	}
+	return dns, nil
+}
+
+// ParseDNS parses a comma-separated list of nameserver addresses, as
+// NETSHIM_DNS and konturctl's own -dns both spell them. The empty string
+// (or a list of nothing but separators and spaces) parses to no
+// nameservers, which is how both spell "leave the guest's resolver
+// alone".
+//
+// IPv4 only, and at most two: they travel to the guest in the ip= boot
+// parameter's dns0/dns1 fields, which are neither more nor other than
+// that. Rejected here rather than silently truncated -- an operator who
+// listed three resolvers is owed the news that the third is unreachable
+// from the guest.
+func ParseDNS(spec string) ([]net.IP, error) {
+	var dns []net.IP
+	for _, field := range strings.Split(spec, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		ip := net.ParseIP(field)
+		if ip == nil || ip.To4() == nil {
+			return nil, fmt.Errorf("invalid IPv4 nameserver address %q", field)
+		}
+		dns = append(dns, ip.To4())
+	}
+	if len(dns) > maxDNS {
+		return nil, fmt.Errorf("at most %d nameservers fit the guest's ip= boot parameter, got %d", maxDNS, len(dns))
+	}
+	return dns, nil
 }
 
 // parseVM parses one "name:ip:port" entry from NETSHIM_VMS.

@@ -56,6 +56,8 @@ Copied verbatim into the rootfs before it's packed into `disk.img`:
 | `overlay-debian/etc/systemd/system/kontur-control-net.service`, `overlay-alpine/etc/init.d/kontur-control-net` | Run that script once at boot, ordered before `kontur-mem-agent` so the address it writes is in place before the agent starts. |
 | `overlay-debian/usr/local/libexec/kontur-configure-net` | Configures the primary NIC from the kernel command line's `ip=` for a guest whose kernel lacks `CONFIG_IP_PNP` -- i.e. a `GUEST_KERNEL_PACKAGE` build. Exits immediately when the interface is already addressed, so it is a no-op under the bundled kernel. See "Networking". |
 | `overlay-debian/etc/systemd/system/kontur-net-cmdline.service` | Runs that script after udev settles and before `sshd`. Debian only: it exists to compensate for a distro kernel, which is a Debian-variant option. |
+| `overlay-common/usr/local/libexec/kontur-configure-dns` | Writes `/etc/resolv.conf` from the `dns0`/`dns1` fields of the same `ip=` parameter. Both variants and both kernels: nothing else in this guest ever writes that file. Leaves it alone when the command line names no nameserver. See "DNS" below. |
+| `overlay-debian/etc/systemd/system/kontur-configure-dns.service`, `overlay-alpine/etc/init.d/kontur-configure-dns` | Run that script once at boot, before `sshd` (Debian: `sysinit.target`, like `kontur-net-cmdline.service`; Alpine: the `boot` runlevel). |
 
 The Alpine variant has no equivalent of `kontur-ssh-host-keys.service`:
 unlike Debian's, Alpine's `openssh-server` package doesn't generate host
@@ -360,7 +362,41 @@ implements the same syntax in userspace. It runs before `sshd`, and exits
 immediately when the interface is already addressed -- so on a guest
 booting the bundled kernel it does nothing at all.
 
-Two details it depends on, both easy to lose:
+### DNS
+
+The address is only half of a working network, and the other half used to
+be missing. `debootstrap` copies the *build host's* `/etc/resolv.conf`
+into the rootfs, so an image built on a machine whose resolver is
+namespace-local -- a cloud metadata resolver, docker's own `127.0.0.11`
+-- produced guests that could open a TCP connection to any address in the
+world and hang forever on every name they looked up. Nothing about it
+looked like DNS: kontur reaches the guest by address rather than by name,
+so a VM comes up, `kontur exec` works and everything this repo tests is
+fine -- and the first symptom is `apt` or `curl` inside the guest timing
+out, which reads as a blocked network rather than as a missing resolver.
+
+Two things close it, and they are layered on purpose:
+
+- `GUEST_DNS` (default `8.8.8.8`, comma separated, empty to leave it
+  alone) writes `/etc/resolv.conf` at build time, so the image carries a
+  resolver that was chosen rather than inherited, and is the same
+  wherever it was built.
+- `kontur-configure-dns` rewrites that file on every boot from the
+  nameservers on the kernel command line -- `NETSHIM_DNS` in flat mode,
+  `konturctl vm create -dns` in either, both landing in the `ip=`
+  parameter's own `dns0`/`dns1` fields. That is what makes the resolver a
+  per-deployment setting: a network where `8.8.8.8` is wrong (a
+  restricted or air-gapped one, or simply one with its own resolver)
+  names its own, without rebuilding this image.
+
+Neither the kernel's `CONFIG_IP_PNP` handling nor `ipconfig(8)` writes
+`resolv.conf` -- the kernel only exposes what it was given in
+`/proc/net/pnp`, and `ipconfig` writes `/run/net-<dev>.conf` and leaves
+the file to an initramfs script this guest doesn't run -- which is why
+this is a step of its own rather than something `kontur-configure-net`
+gets for free.
+
+Two details `ip=` autoconfiguration depends on, both easy to lose:
 
 - The NIC has to keep the name the `ip=` spec gives it. `konturctl`
   hard-codes `eth0` (`internal/staticpod/spec.go`), and udev's

@@ -272,7 +272,7 @@ func FlatGuestConfig(cfg Config, id Identity) FlatGuest {
 	if id.Gateway != nil {
 		gw = id.Gateway.String()
 	}
-	g.IPParam = fmt.Sprintf("ip=%s::%s:%s::eth0:off", id.IP, gw, id.Netmask())
+	g.IPParam = fmt.Sprintf("ip=%s::%s:%s::eth0:off%s", id.IP, gw, id.Netmask(), DNSFields(cfg.DNS))
 
 	if cfg.ControlNet != nil {
 		g.Nets = append(g.Nets, fmt.Sprintf("tap=%s", vm.ControlTapName()))
@@ -280,6 +280,27 @@ func FlatGuestConfig(cfg Config, id Identity) FlatGuest {
 	}
 
 	return g
+}
+
+// DNSFields renders nameservers as the trailing dns0/dns1 fields of an
+// ip= boot parameter -- ":8.8.8.8" for one, ":8.8.8.8:1.1.1.1" for two --
+// or the empty string for none, which leaves the parameter exactly as
+// short as it always was.
+//
+// The guest is what acts on them: nothing in the kernel's own ip=
+// handling writes /etc/resolv.conf, so the guest's kontur-configure-dns
+// reads them back off /proc/cmdline and writes the file itself (see
+// deploy/guest-image/overlay-common). Passing them here rather than
+// baking a resolver into the guest image is what makes the resolver a
+// per-boot setting: one image, and each deployment names the nameserver
+// its own network actually has.
+func DNSFields(dns []net.IP) string {
+	var b strings.Builder
+	for _, ip := range dns {
+		b.WriteString(":")
+		b.WriteString(ip.String())
+	}
+	return b.String()
 }
 
 // ControlGuestIP returns the address the guest is expected to hold on the

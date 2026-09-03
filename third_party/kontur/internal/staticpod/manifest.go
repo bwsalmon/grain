@@ -77,6 +77,8 @@ const netshimEnvTemplateSrc = `{{define "netshimEnv"}}
           value: {{yq .ControlCIDR}}
         - name: NETSHIM_EXTERNAL_IFACE
           value: {{yq .ExternalIface}}
+        - name: NETSHIM_DNS
+          value: {{yq .DNS}}
 {{- else}}
         - name: NETSHIM_VMS
           value: {{yq (printf "%s:%s:%d" .Name .IP .Port)}}
