@@ -256,6 +256,17 @@ export default function App() {
     })();
   }, [refreshList, refreshSchedules, refreshTemplates, refreshSuites, showError]);
 
+  // The deployment's name in the browser tab (grain/task-69), beside
+  // the sidebar badge Sidebar.jsx renders it as. A tab strip is where a
+  // staging window and a production window actually get confused, and it
+  // is the one piece of chrome the app cannot draw into -- so the name
+  // goes first, since a narrow tab truncates its title from the end and
+  // "grain — sta..." would say nothing this is for.
+  useEffect(() => {
+    const name = config?.environmentName;
+    document.title = name ? `${name} — grain` : "grain";
+  }, [config?.environmentName]);
+
   useEffect(() => {
     async function poll() {
       if (polling.current || document.visibilityState === "hidden") return;

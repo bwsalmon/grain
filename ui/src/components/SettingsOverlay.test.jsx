@@ -290,6 +290,40 @@ describe("SettingsOverlay", () => {
     });
   });
 
+  // grain/task-69: naming the deployment, so the sidebar and the browser
+  // tab can say which one this is.
+  it("sends environmentName when the deployment is given a name", async () => {
+    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.type(screen.getByLabelText(/Environment name/), "staging");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ environmentName: "staging" }),
+    });
+  });
+
+  // Clearing the box is a real change, not "leave it alone": unnaming a
+  // deployment has to be sendable, so "" goes in the payload.
+  it("sends an empty environmentName when a configured name is cleared", async () => {
+    api.mockResolvedValueOnce({ ...settings, environmentName: "staging" }).mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
+    await screen.findByDisplayValue("30s");
+
+    await user.clear(screen.getByLabelText(/Environment name/));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ environmentName: "" }),
+    });
+  });
+
   // bwsalmon/agents#537: the global "hide closed tasks by default" switch.
   it("toggles showClosedByDefault and includes it in the payload only when changed", async () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});

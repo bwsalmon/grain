@@ -494,6 +494,12 @@ var Tables = []string{
 	// grain_config. Empty, the default, means a new task starts with only
 	// the capabilities whoever files it asked for -- exactly what every
 	// deployment did before this column existed.
+	//
+	// environment_name is Config.EnvironmentName's own column -- what
+	// this deployment is called on screen -- DEFAULT '' both here and in
+	// Store.ensureConfigEnvironmentNameColumn for an already-created
+	// grain_config. Empty is an unnamed deployment, which is what every
+	// deployment was before this column existed.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
@@ -517,6 +523,7 @@ var Tables = []string{
   ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
   ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
   ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
+  ` + "`environment_name`" + `             TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

@@ -181,6 +181,29 @@ describe("App", () => {
     expect(await screen.findByText(/reconcile loop has stopped/i)).toBeInTheDocument();
   });
 
+  // grain/task-69: the deployment's name in the tab strip, which is the
+  // one piece of chrome the app cannot draw into. Name first, because a
+  // narrow tab truncates its title from the end.
+  it("titles the tab with the environment name when one is configured", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      (path === "/api/config" ? Promise.resolve({ ...config, environmentName: "staging" }) : realImpl(path, opts)));
+
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    await waitFor(() => expect(document.title).toBe("staging — grain"));
+  });
+
+  it("leaves the tab titled just grain on an unnamed deployment", async () => {
+    setupApi();
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    await waitFor(() => expect(document.title).toBe("grain"));
+  });
+
   it("shows a loading screen with the large mark until config loads (bwsalmon/agents#555)", async () => {
     setupApi();
     let resolveConfig;

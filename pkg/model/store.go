@@ -160,6 +160,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigDefaultCapabilitiesColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
+	if err := s.ensureConfigEnvironmentNameColumn(ctx); err != nil {
+		return fmt.Errorf("migrating grain_config: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -777,6 +780,23 @@ func (s *Store) ensureConfigDefaultCapabilitiesColumn(ctx context.Context) error
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `grain_config` ADD COLUMN `default_capabilities` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureConfigEnvironmentNameColumn adds grain_config.environment_name
+// (model.Config.EnvironmentName's own doc comment has the reasoning) to
+// a database created before this column existed, the same
+// probe-then-ALTER approach ensureConfigDefaultCapabilitiesColumn above
+// uses. It defaults to the empty string, which reads back as an unnamed
+// deployment: an upgraded deployment's UI looks exactly as it did until
+// an operator names it through Settings.
+func (s *Store) ensureConfigEnvironmentNameColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `environment_name` FROM `grain_config` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `grain_config` ADD COLUMN `environment_name` TEXT NOT NULL DEFAULT ''")
 	return err
 }
 
@@ -2607,7 +2627,7 @@ func (s *Store) GetConfig(ctx context.Context) (*Config, error) {
 const configColumns = "`poll_interval_ms`,`max_workers`,`max_mergers`,`gemini_model`,`max_agent_turns`," +
 	"`github_host`,`github_insecure_http`,`gcp_project`,`gcp_service_account_email`,`target_repos`," +
 	"`newest_first`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`show_closed_by_default`,`agent_framework`," +
-	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`"
+	"`approved_by_default`,`auto_merge_by_default`,`claude_model`,`default_capabilities`,`environment_name`"
 
 func scanConfig(scan func(...any) error) (Config, error) {
 	var c Config
@@ -2618,7 +2638,7 @@ func scanConfig(scan func(...any) error) (Config, error) {
 		&c.GitHubHost, &c.GitHubInsecureHTTP, &c.GCPProject, &c.GCPServiceAccountEmail,
 		&targetRepos, &c.NewestFirst, &c.SandboxCPUs, &c.SandboxMemoryMB, &c.SandboxDiskGB, &c.ShowClosedByDefault,
 		&c.AgentFramework, &c.ApprovedByDefault, &c.AutoMergeByDefault, &c.ClaudeModel,
-		&defaultCapabilities); err != nil {
+		&defaultCapabilities, &c.EnvironmentName); err != nil {
 		return Config{}, err
 	}
 	c.PollInterval = time.Duration(pollMS) * time.Millisecond
@@ -2639,12 +2659,12 @@ func scanConfig(scan func(...any) error) (Config, error) {
 func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	return s.write(ctx, "update config", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"REPLACE INTO `grain_config` (`id`, "+configColumns+") VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 			c.PollInterval.Milliseconds(), c.MaxWorkers, c.MaxMergers, c.GeminiModel, c.MaxAgentTurns,
 			c.GitHubHost, c.GitHubInsecureHTTP, c.GCPProject, c.GCPServiceAccountEmail,
 			joinCSV(c.TargetRepos), c.NewestFirst, c.SandboxCPUs, c.SandboxMemoryMB, c.SandboxDiskGB, c.ShowClosedByDefault,
 			c.AgentFramework, c.ApprovedByDefault, c.AutoMergeByDefault, c.ClaudeModel,
-			joinCSV(c.DefaultCapabilities))
+			joinCSV(c.DefaultCapabilities), c.EnvironmentName)
 		return err
 	})
 }

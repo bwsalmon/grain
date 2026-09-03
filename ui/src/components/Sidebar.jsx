@@ -1,4 +1,4 @@
-import { Box, Button, Divider, List, ListItemButton, ListItemText, Typography } from "@mui/material";
+import { Box, Button, Chip, Divider, List, ListItemButton, ListItemText, Typography } from "@mui/material";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import GrainMark from "./GrainMark.jsx";
 
@@ -82,6 +82,26 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
         <Typography variant="subtitle1" fontWeight={600} letterSpacing="-0.01em" component="h1" sx={{ m: 0 }}>
           grain
         </Typography>
+        {/* The deployment's own name (grain/task-69), next to the
+            wordmark because that is the one piece of chrome on screen in
+            every view: an operator with a staging tab and a production
+            tab open is one click from approving or merging on the wrong
+            one, and the two are otherwise pixel-identical. Warning
+            colour rather than the brand accent for the same reason --
+            it should not blend into the mark beside it. Absent entirely
+            when nothing is configured, which is grain's own shape for a
+            single deployment with nothing to be told apart from. App.jsx
+            puts the same name in the browser tab's title, for the tab
+            strip this box cannot reach. */}
+        {config?.environmentName ? (
+          <Chip
+            label={config.environmentName}
+            size="small"
+            color="warning"
+            title={`Environment: ${config.environmentName}`}
+            sx={{ ml: "auto", maxWidth: 110, fontWeight: 600 }}
+          />
+        ) : null}
       </Box>
 
       <Button variant="contained" fullWidth onClick={onOpenNewTask}>+ New task</Button>

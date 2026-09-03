@@ -116,6 +116,13 @@ export default function SettingsOverlay({ onClose, showError }) {
     const form = evt.target;
     const payload = {};
 
+    // Trimmed here and again on the way in (ui.UpdateSettings), so
+    // clearing the box back to blank sends "" -- a deliberate "this
+    // deployment has no name" -- rather than being mistaken for
+    // unchanged the way a blank sandbox-shape box would be.
+    const environmentName = form.elements.environmentName.value.trim();
+    if (environmentName !== (settings.environmentName || "")) payload.environmentName = environmentName;
+
     const pollInterval = form.elements.pollInterval.value.trim();
     if (pollInterval !== (settings.pollInterval || "")) payload.pollInterval = pollInterval;
 
@@ -328,6 +335,17 @@ export default function SettingsOverlay({ onClose, showError }) {
             <FormControlLabel value="dark" control={<Radio />} label="Dark" />
           </RadioGroup>
           <form onSubmit={submitGeneral}>
+            <Typography variant="subtitle2" sx={{ mt: 1 }}>Deployment</Typography>
+            <TextField
+              name="environmentName"
+              label="Environment name"
+              helperText="Shown beside the grain mark and in the browser tab, e.g. staging. Leave empty for an unnamed deployment."
+              defaultValue={settings.environmentName || ""}
+              inputProps={{ maxLength: 32 }}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+            />
             <TextField name="pollInterval" label="Poll interval" helperText="Go duration, e.g. 30s" defaultValue={settings.pollInterval || ""} autoComplete="off" fullWidth margin="normal" />
             <TextField name="maxWorkers" label="Max worker agents" helperText="maximum number of ordinary tasks dispatched at once" type="number" inputProps={{ min: 1, step: 1 }} defaultValue={String(settings.maxWorkers || "")} fullWidth margin="normal" />
             <TextField name="maxMergers" label="Max merge agents" helperText="extra agents only the merge queue may dispatch, to repair a pull request that will not land -- on top of the workers above, and free to use a spare worker slot too. 0 makes them wait for one like anything else" type="number" inputProps={{ min: 0, step: 1 }} defaultValue={String(settings.maxMergers ?? "")} fullWidth margin="normal" />

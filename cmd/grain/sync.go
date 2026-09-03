@@ -168,6 +168,7 @@ func printSettingsDiff(before, after ui.Settings) {
 		afterValue  string
 	}
 	fields := []field{
+		{"environment name", before.EnvironmentName, after.EnvironmentName},
 		{"poll interval", before.PollInterval, after.PollInterval},
 		{"max workers", fmt.Sprint(before.MaxWorkers), fmt.Sprint(after.MaxWorkers)},
 		{"max mergers", fmt.Sprint(before.MaxMergers), fmt.Sprint(after.MaxMergers)},
