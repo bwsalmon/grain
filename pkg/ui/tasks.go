@@ -368,6 +368,17 @@ type configResponse struct {
 	// this the moment a list first renders, before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// EnvironmentName mirrors model.Config.EnvironmentName -- what this
+	// deployment is called on screen -- read from the store the same way
+	// ShowClosedByDefault above is. It rides on this response rather than
+	// on GET /api/settings alone because the frontend shows it in the
+	// sidebar and the tab title from the first paint, on every view, and
+	// this is the one call App.jsx makes before rendering anything.
+	//
+	// omitempty: absent and empty both mean an unnamed deployment, and
+	// unlike ui.Settings there is nothing here to merge a cleared value
+	// over -- App.jsx replaces this response wholesale on every poll.
+	EnvironmentName string `json:"environmentName,omitempty"`
 	// ApprovedByDefault and AutoMergeByDefault mirror model.Config's own
 	// fields of the same name (bwsalmon/agents#612), the same
 	// read-straight-from-the-store-not-cached way ShowClosedByDefault
@@ -451,6 +462,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	resp.ApprovedByDefault, resp.AutoMergeByDefault = def.ApprovedByDefault, def.AutoMergeByDefault
 	if cfg != nil {
 		resp.ShowClosedByDefault = cfg.ShowClosedByDefault
+		resp.EnvironmentName = cfg.EnvironmentName
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
 		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)

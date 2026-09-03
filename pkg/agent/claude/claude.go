@@ -281,7 +281,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // allowedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools and NewOpenPullRequestTools register, mcp__-prefixed
+// NewPullRequestTools, NewOpenPullRequestTools and
+// NewRecreateSandboxTools register, mcp__-prefixed
 // the way claude reports them once loaded from --mcp-config -- computed
 // from those constructors
 // directly rather than hand-copied, so this can never drift from what
@@ -313,6 +314,14 @@ func allowedTools() []string {
 	// refused by --strict-mcp-config. nil is a PullRequestOpener no run
 	// ever gets -- this only wants the names.
 	for _, t := range mcp.NewOpenPullRequestTools(nil) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
+	// recreate_sandbox comes from the same -server/-task pair
+	// open_pull_request does, so it is named on the same terms and for
+	// the same reason: unconditionally, since this list filters what the
+	// server advertises rather than adding to it. nil is a
+	// SandboxRecreator no run ever gets -- this only wants the name.
+	for _, t := range mcp.NewRecreateSandboxTools(nil) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	return names

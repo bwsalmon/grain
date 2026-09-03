@@ -18,20 +18,29 @@
 // after and reused under. A sandbox is now created for a run and
 // destroyed with it, so there is no pool to assign out of and nothing
 // for an identifier to name: concurrency is a count of live runs against
-// Config.MaxConcurrent, and the run's own ID is the only name anything
+// model.Limits, and the run's own ID is the only name anything
 // downstream needs.
 //
 // There is almost no scheduling policy here: no fairness, no preemption.
 // Ordering is whatever task_ready yields, and Cycle takes its prefix,
 // skipping over (never reordering past its own turn) a task still backing
-// off after a recently failed run -- see retryEligible. The one other
-// exception is Store.Ready's own: a fix task the merge queue filed for a
-// repo's stuck head sorts before ordinary ready tasks (task ID is still
-// the tiebreak within each group), which is a fact about task_ready
-// rather than a policy Cycle itself makes -- see Store.Ready's doc
-// comment (bwsalmon/agents#389) for why. A package that ranked ready
-// tasks against each other on some richer notion of priority would be a
-// scheduler; this one drains a queue into whatever headroom there is.
+// off after a recently failed run -- see retryEligible -- or one of a
+// kind whose own half of model.Limits is already full, which is the same
+// skip for the same reason. The one other exception is Store.Ready's own:
+// a fix task the merge queue filed for a repo's stuck head sorts before
+// ordinary ready tasks (task ID is still the tiebreak within each group),
+// which is a fact about task_ready rather than a policy Cycle itself
+// makes -- see Store.Ready's doc comment (bwsalmon/agents#389) for why. A
+// package that ranked ready tasks against each other on some richer
+// notion of priority would be a scheduler; this one drains a queue into
+// whatever headroom there is.
+//
+// Which headroom, though, is two numbers rather than one since
+// grain/task-63: a merge-queue fix task draws on capacity ordinary work
+// cannot reach (model.Limits' own doc comment for what that buys and why
+// the two are not symmetric). That is a fact about how much of the
+// deployment each kind may occupy, not about their order -- the backlog
+// still says which task goes first.
 //
 // One exception to "drains into whatever headroom there is": the
 // configuration agent (Task.Configuration, bwsalmon/agents#621) is not
@@ -192,26 +201,42 @@ func (o options) skip(taskID string) bool {
 }
 
 // Cycle is one pass: start the next ready, backed-off tasks in
-// task_ready's own order until maxConcurrent runs are in flight, and
+// task_ready's own order until limits admits no more of either kind, and
 // start nothing else. It is the entire dispatch decision for now — no
 // polling, no completion detection, no side effect beyond the store
 // writes StartRun already makes durable.
 //
-// maxConcurrent is the whole limit, not the remaining headroom. Cycle
-// works out how much of it is already spent itself, from the store, on
-// every call, rather than trusting a caller's idea of it left over from
-// the last one — a run can finish and free capacity with nothing about
-// this cycle's caller changing, the same "re-read, never pin" discipline
-// IsBlocked's docstring argues for and for the same reason.
+// limits is the whole limit, not the remaining headroom. Cycle works out
+// how much of it is already spent itself, from the store, on every call,
+// rather than trusting a caller's idea of it left over from the last one
+// — a run can finish and free capacity with nothing about this cycle's
+// caller changing, the same "re-read, never pin" discipline IsBlocked's
+// docstring argues for and for the same reason.
 //
-// That count is read once, up front, and then spent down as this loop
-// starts runs; it is not the thing that enforces the limit. StartRun
-// re-checks it inside the transaction that records each run, and returns
-// model.ErrAtCapacity if another caller took the last of the headroom in
-// between -- which Cycle treats as "no more room this tick" and stops on,
-// returning what it did manage to start. See StartRun's own doc comment:
-// the check has to happen there to be a check at all, and this one exists
-// only to avoid asking for capacity that is obviously not there.
+// Those counts are read once, up front, and then spent down as this loop
+// starts runs; they are not the thing that enforces the limit. StartRun
+// re-checks them inside the transaction that records each run, and
+// returns model.ErrAtCapacity if another caller took the last of the
+// headroom in between -- which Cycle treats as "no more room this tick"
+// and stops on, returning what it did manage to start. See StartRun's own
+// doc comment: the check has to happen there to be a check at all, and
+// this one exists only to avoid asking for capacity that is obviously not
+// there.
+//
+// Which of the two limits a ready task spends is model.Limits' own
+// distinction: a merge-queue fix task is a merger (Store.ReadyMergers),
+// everything else a worker. A candidate whose own kind is full is passed
+// over rather than stopping the cycle, exactly the way one still backing
+// off is, since the other kind may still have room and the ready order is
+// not a queue of interchangeable items any more. The cycle stops when
+// nothing of either kind could start.
+//
+// Limits that bound nothing (model.Limits.Unlimited -- the zero value)
+// mean "nothing may start" here, the opposite of what StartRun reads them
+// as. That asymmetry is deliberate and predates the split: a cycle whose
+// deployment has configured no capacity at all has nothing it could
+// sensibly start, while a caller reaching StartRun directly with no
+// limits is saying it has none to enforce.
 //
 // A task already running never appears in Ready — task_ready requires
 // state = 'queued', and a live run makes the state 'running' — so Cycle
@@ -222,12 +247,12 @@ func (o options) skip(taskID string) bool {
 // capacity it would otherwise have taken, so a task further down the
 // ready order is not made to wait behind one that is not actually
 // eligible yet.
-func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.Time, opts ...Option) ([]Dispatch, error) {
+func Cycle(ctx context.Context, store *model.Store, limits model.Limits, now time.Time, opts ...Option) ([]Dispatch, error) {
 	o := newOptions(opts)
 	// The configuration agent (Task.Configuration, bwsalmon/agents#621)
 	// dispatches first, and unconditionally -- see dispatchConfiguration's
 	// own doc comment for why it cannot wait on the same headroom check
-	// below. Doing this before LiveRunCount is read is what makes the
+	// below. Doing this before LiveRunCounts is read is what makes the
 	// free-capacity math that follows accurate for everything else: a
 	// configuration task started here already counts as live by the time
 	// this function asks.
@@ -236,59 +261,65 @@ func Cycle(ctx context.Context, store *model.Store, maxConcurrent int, now time.
 		return nil, err
 	}
 
-	live, err := store.LiveRunCount(ctx)
+	if limits.Total() <= 0 {
+		return out, nil
+	}
+	live, err := store.LiveRunCounts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: counting live runs: %w", err)
-	}
-	free := maxConcurrent - live
-	if free <= 0 {
-		return out, nil
 	}
 
 	ready, err := store.Ready(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: reading ready tasks: %w", err)
 	}
+	mergerIDs, err := store.ReadyMergers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch: reading ready merge-queue tasks: %w", err)
+	}
+	mergers := make(map[string]bool, len(mergerIDs))
+	for _, id := range mergerIDs {
+		mergers[id] = true
+	}
 
-	readyIdx := 0
-	for started := 0; started < free; started++ {
-		var taskID string
-		for {
-			if readyIdx >= len(ready) {
-				return out, nil
-			}
-			candidate := ready[readyIdx]
-			readyIdx++
-			if o.skip(candidate) {
-				continue
-			}
-			eligible, err := retryEligible(ctx, store, candidate, now)
-			if err != nil {
-				return nil, fmt.Errorf("dispatch: %w", err)
-			}
-			if eligible {
-				taskID = candidate
-				break
-			}
+	for _, candidate := range ready {
+		if !limits.Admits(live, true) && !limits.Admits(live, false) {
+			break
+		}
+		if o.skip(candidate) {
+			continue
+		}
+		merger := mergers[candidate]
+		if !limits.Admits(live, merger) {
+			continue
+		}
+		eligible, err := retryEligible(ctx, store, candidate, now)
+		if err != nil {
+			return nil, fmt.Errorf("dispatch: %w", err)
+		}
+		if !eligible {
+			continue
 		}
 
-		d, err := startTask(ctx, store, taskID, now, maxConcurrent)
+		d, err := startTask(ctx, store, candidate, now, limits)
 		if err != nil {
 			if errors.Is(err, model.ErrAtCapacity) {
 				return out, nil
 			}
-			return nil, fmt.Errorf("dispatch: starting run for %s: %w", taskID, err)
+			return nil, fmt.Errorf("dispatch: starting run for %s: %w", candidate, err)
 		}
 		out = append(out, d)
+		live = live.Add(merger)
 	}
 	return out, nil
 }
 
 // dispatchConfiguration starts every configuration-agent task
 // (Store.ReadyConfiguration) that is ready and not still backing off
-// after a failed run, regardless of how much of Config.MaxConcurrent is
-// already spent -- it calls startTask with a limit of 0, which StartRun
-// takes to mean "no limit of mine to enforce" (its own doc comment).
+// after a failed run, regardless of how much of this deployment's
+// capacity is already spent -- it calls startTask with zero limits, which
+// StartRun takes to mean "no limit of mine to enforce" (its own doc
+// comment).
 //
 // The configuration agent is what bwsalmon/agents#621 added for a person
 // to reach for when something about this deployment needs a live look --
@@ -314,7 +345,7 @@ func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Tim
 		if !eligible {
 			continue
 		}
-		d, err := startTask(ctx, store, taskID, now, 0)
+		d, err := startTask(ctx, store, taskID, now, model.Limits{})
 		if err != nil {
 			return nil, fmt.Errorf("dispatch: starting configuration run for %s: %w", taskID, err)
 		}
@@ -324,11 +355,11 @@ func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Tim
 }
 
 // startTask records taskID's next run (Store.Attempts + 1) and starts
-// it, against maxConcurrent the same way StartRun itself interprets that
-// limit -- 0 disables the check entirely. Factored out of Cycle's own
-// loop so dispatchConfiguration can share it rather than duplicate the
-// attempt bookkeeping.
-func startTask(ctx context.Context, store *model.Store, taskID string, now time.Time, maxConcurrent int) (Dispatch, error) {
+// it, against limits the same way StartRun itself interprets them --
+// limits that bound nothing disable the check entirely. Factored out of
+// Cycle's own loop so dispatchConfiguration can share it rather than
+// duplicate the attempt bookkeeping.
+func startTask(ctx context.Context, store *model.Store, taskID string, now time.Time, limits model.Limits) (Dispatch, error) {
 	attempts, err := store.Attempts(ctx, taskID)
 	if err != nil {
 		return Dispatch{}, fmt.Errorf("counting attempts for %s: %w", taskID, err)
@@ -344,7 +375,7 @@ func startTask(ctx context.Context, store *model.Store, taskID string, now time.
 		Attempt:   attempt,
 		StartedAt: now,
 	}
-	if err := store.StartRun(ctx, run, maxConcurrent); err != nil {
+	if err := store.StartRun(ctx, run, limits); err != nil {
 		return Dispatch{}, err
 	}
 	return Dispatch{TaskID: taskID, RunID: run.ID, Attempt: attempt}, nil

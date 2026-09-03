@@ -132,7 +132,7 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		Sandbox:   "demo-sandbox",
 		Attempt:   1,
 		StartedAt: ago(6 * time.Minute),
-	}, 0); err != nil {
+	}, model.Limits{}); err != nil {
 		return fmt.Errorf("seeding a running task: %w", err)
 	}
 

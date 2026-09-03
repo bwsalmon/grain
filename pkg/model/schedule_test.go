@@ -93,7 +93,7 @@ func TestRecurrenceMonthlyClampsToTheMonthsLastDay(t *testing.T) {
 
 // February, the shortest month, is where clamping matters most: a
 // schedule asking for the 31st fires on the 28th (2026 is not a leap
-// year) and then the loop fireScheduledTask runs (advancing from the
+// year) and then the loop fireTaskSchedule runs (advancing from the
 // previous NextRunAt, not from "now") must not get stuck re-clamping to
 // February forever.
 func TestRecurrenceMonthlyAdvancesPastFebruaryOnRepeatedCalls(t *testing.T) {

@@ -393,7 +393,7 @@ func (k *KonturSandboxes) Acquire(ctx context.Context, sandbox string, shape Sha
 		}
 	}
 
-	sb := &konturSandbox{owner: k, name: sandbox, vmName: name, runner: runner}
+	sb := &konturSandbox{owner: k, name: sandbox, vmName: name, shape: shape, runner: runner}
 	k.mu.Lock()
 	k.live[sandbox] = sb
 	k.mu.Unlock()
@@ -492,6 +492,12 @@ type konturSandbox struct {
 	owner  *KonturSandboxes
 	name   string
 	vmName string
+	// shape is the size this run asked its VM to be, kept so Rebuild can
+	// create the replacement at the same one. Acquire's own resolution
+	// against the deployment default (Shape.orDefault) happens inside
+	// create, so this stays the run's own request rather than a snapshot
+	// of the default that was in force when the VM was first built.
+	shape  Shape
 	runner sandboxRunner
 }
 
@@ -529,6 +535,36 @@ func (s *konturSandbox) ConfigureGitCredentials(ctx context.Context, remoteURL, 
 func (s *konturSandbox) PlaceFile(ctx context.Context, path, content, mode string) error {
 	if err := mcp.PlaceFileOverSSH(ctx, s.runner, path, content, mode); err != nil {
 		return fmt.Errorf("orchestrator: placing %s on kontur VM %q: %w", path, s.vmName, err)
+	}
+	return nil
+}
+
+// Rebuild implements SandboxRebuilder: delete this run's VM and create
+// it again, at the same name and the same size, waiting for the new
+// guest to answer a command before returning.
+//
+// It is Acquire's own create-and-wait pair, reused rather than
+// reimplemented -- create deletes whatever is under the name first,
+// which is exactly the destroy half of this operation.
+//
+// Nothing here replaces s.runner, and nothing needs to. The transport
+// reaches a guest by exec'ing into the VM's own container, whose name is
+// derived from the VM name alone (kontur.PodName), so the runner this
+// sandbox already holds -- and the separate one a run's forked mcpserver
+// holds, which this process could not reach to replace anyway -- address
+// the new VM the moment it exists. runnerFor's result is discarded for
+// that reason: what is wanted from it is the wait.
+//
+// A VM whose container is found dead is not retried the way Acquire
+// retries it. Acquire is rebuilding on behalf of a run that has no other
+// recourse; here the caller is an agent that just asked for a rebuild
+// and can read the failure and ask again.
+func (s *konturSandbox) Rebuild(ctx context.Context) error {
+	if err := s.owner.create(ctx, s.vmName, s.shape); err != nil {
+		return err
+	}
+	if _, err := s.owner.runnerFor(ctx, s.vmName); err != nil {
+		return err
 	}
 	return nil
 }

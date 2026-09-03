@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/model"
@@ -33,8 +34,16 @@ type Settings struct {
 	Configured bool `json:"configured"`
 	// PollInterval is a Go duration string ("30s"), the same syntax
 	// -poll-interval itself parses.
-	PollInterval           string `json:"pollInterval"`
-	MaxConcurrent          int    `json:"maxConcurrent"`
+	PollInterval string `json:"pollInterval"`
+	// MaxWorkers and MaxMergers are model.Config's own fields of the same
+	// name (grain/task-63): how many runs of ordinary work may be in
+	// flight at once, and how much further capacity only the merge
+	// queue's own fix tasks may reach. MaxWorkers was called
+	// maxConcurrent, and was the whole limit, until the two were split --
+	// see model.Limits for the rule they make together, in particular why
+	// a merger may take a worker's free slot and never the reverse.
+	MaxWorkers             int    `json:"maxWorkers"`
+	MaxMergers             int    `json:"maxMergers"`
 	GeminiModel            string `json:"geminiModel"`
 	ClaudeModel            string `json:"claudeModel"`
 	MaxAgentTurns          int    `json:"maxAgentTurns"`
@@ -98,6 +107,20 @@ type Settings struct {
 	// has it to seed that toggle with before Settings has ever been
 	// opened this session.
 	ShowClosedByDefault bool `json:"showClosedByDefault"`
+	// EnvironmentName is model.Config's own field of the same name: what
+	// this deployment is called on screen ("staging", "dev", whatever an
+	// operator running more than one of these needs to tell them apart).
+	// Empty is an unnamed deployment, and the UI shows nothing for it.
+	// Also mirrored onto GET /api/config (configResponse, tasks.go) the
+	// same way ShowClosedByDefault is, since the frontend needs it on
+	// first paint rather than only once Settings has been opened.
+	//
+	// Deliberately not omitempty, like DefaultCapabilities and
+	// PendingRestart above: the frontend merges an update response over
+	// the settings it already has, so a name cleared back to nothing has
+	// to arrive as present-and-empty rather than as an absent key leaving
+	// the old one on screen.
+	EnvironmentName string `json:"environmentName"`
 	// Capabilities is every capability grain ships a provider for, with
 	// this deployment's own readiness computed against it -- capability_
 	// status.go's own CapabilityStatus, bwsalmon/agents#611. Always
@@ -206,6 +229,13 @@ type Settings struct {
 	PendingRestart []string `json:"pendingRestart"`
 }
 
+// maxEnvironmentNameLen bounds Settings.EnvironmentName, in runes. The
+// name is rendered as a badge in the sidebar and appended to the
+// browser tab's title, neither of which has room for prose: this is
+// generously above every real answer ("staging", "dev", "bwsalmon-prod")
+// and far below a paste that would take the chrome over.
+const maxEnvironmentNameLen = 32
+
 // restartOnlySetting is one setting a running daemon cannot pick up on
 // its own, and how to tell whether a stored value for it differs from
 // the one actually in effect.
@@ -294,7 +324,8 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 	return Settings{
 		Configured:                    true,
 		PollInterval:                  cfg.PollInterval.String(),
-		MaxConcurrent:                 cfg.MaxConcurrent,
+		MaxWorkers:                    cfg.MaxWorkers,
+		MaxMergers:                    cfg.MaxMergers,
 		GeminiModel:                   cfg.GeminiModel,
 		ClaudeModel:                   cfg.ClaudeModel,
 		MaxAgentTurns:                 cfg.MaxAgentTurns,
@@ -311,6 +342,7 @@ func (c *Client) settingsFrom(cfg model.Config, repoConfigs []model.RepoConfig) 
 		SandboxCPUsDefault:            kontur.DefaultCPUs,
 		SandboxMemoryMBDefault:        kontur.DefaultMemoryMB,
 		ShowClosedByDefault:           cfg.ShowClosedByDefault,
+		EnvironmentName:               cfg.EnvironmentName,
 		Capabilities:                  c.capabilityStatuses(cfg, repoConfigs),
 		DefaultCapabilities:           cfg.DefaultCapabilities,
 		ApprovedByDefault:             cfg.ApprovedByDefault,
@@ -407,7 +439,8 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 // than that yet.
 type UpdateSettingsRequest struct {
 	PollInterval           *string   `json:"pollInterval"`
-	MaxConcurrent          *int      `json:"maxConcurrent"`
+	MaxWorkers             *int      `json:"maxWorkers"`
+	MaxMergers             *int      `json:"maxMergers"`
 	GeminiModel            *string   `json:"geminiModel"`
 	ClaudeModel            *string   `json:"claudeModel"`
 	MaxAgentTurns          *int      `json:"maxAgentTurns"`
@@ -421,6 +454,7 @@ type UpdateSettingsRequest struct {
 	SandboxMemoryMB        *int      `json:"sandboxMemoryMb"`
 	SandboxDiskGB          *int      `json:"sandboxDiskGb"`
 	ShowClosedByDefault    *bool     `json:"showClosedByDefault"`
+	EnvironmentName        *string   `json:"environmentName"`
 	ApprovedByDefault      *bool     `json:"approvedByDefault"`
 	AutoMergeByDefault     *bool     `json:"autoMergeByDefault"`
 	AgentFramework         *string   `json:"agentFramework"`
@@ -438,17 +472,21 @@ type UpdateSettingsRequest struct {
 // zero model.Config if nothing is yet) and writes the result back
 // wholesale.
 //
-// The first time settings are ever saved, PollInterval, MaxConcurrent,
+// The first time settings are ever saved, PollInterval, MaxWorkers,
 // GeminiModel, ClaudeModel and GitHubHost are required: leaving one of
 // them out would otherwise write a zero value that reads back later as a
 // deliberate setting rather than as "never configured" -- Configured
 // already tells a caller that much on the way in, so writing a config
 // that could not be told apart from one somebody actually chose is worse
-// than asking for the field up front. MaxAgentTurns, GitHubInsecureHTTP,
-// GCPProject, GCPServiceAccountEmail and TargetRepos have real,
-// meaningful zero values (the framework's own default, HTTPS, "no GCP
-// capability configured", and "unrestricted" respectively -- daemon.go's
-// own flag defaults), so nothing here demands them.
+// than asking for the field up front. MaxMergers, MaxAgentTurns,
+// GitHubInsecureHTTP, GCPProject, GCPServiceAccountEmail, TargetRepos
+// and EnvironmentName have real, meaningful zero values ("mergers take
+// worker capacity", the framework's own default, HTTPS, "no GCP
+// capability configured", "unrestricted", and "this deployment has no
+// name" respectively -- daemon.go's own flag defaults), so nothing here
+// demands them. A first save that never mentions MaxMergers stores
+// model.DefaultConfig's own value for it rather than that zero, the same
+// as every other field whose default is not its zero value.
 func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) (Settings, error) {
 	current, err := c.Store.GetConfig(ctx)
 	if err != nil {
@@ -475,11 +513,22 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		}
 		cfg.PollInterval = d
 	}
-	if req.MaxConcurrent != nil {
-		if *req.MaxConcurrent < 1 {
-			return Settings{}, validationErrorf("maxConcurrent must be at least 1")
+	if req.MaxWorkers != nil {
+		if *req.MaxWorkers < 1 {
+			return Settings{}, validationErrorf("maxWorkers must be at least 1")
 		}
-		cfg.MaxConcurrent = *req.MaxConcurrent
+		cfg.MaxWorkers = *req.MaxWorkers
+	}
+	if req.MaxMergers != nil {
+		// 0 is allowed where maxWorkers' own 0 is not, and means
+		// something rather than nothing: mergers then contend for worker
+		// capacity alongside every other task, which is what a deployment
+		// filed before this setting existed was doing
+		// (model.Config.MaxMergers).
+		if *req.MaxMergers < 0 {
+			return Settings{}, validationErrorf("maxMergers cannot be negative")
+		}
+		cfg.MaxMergers = *req.MaxMergers
 	}
 	if req.GeminiModel != nil {
 		if strings.TrimSpace(*req.GeminiModel) == "" {
@@ -577,6 +626,23 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 	if req.ShowClosedByDefault != nil {
 		cfg.ShowClosedByDefault = *req.ShowClosedByDefault
 	}
+	if req.EnvironmentName != nil {
+		// Trimmed, so "  " and "" both store as the unnamed deployment
+		// they mean rather than as a name made of spaces that the UI
+		// would render as an empty badge.
+		name := strings.TrimSpace(*req.EnvironmentName)
+		if utf8.RuneCountInString(name) > maxEnvironmentNameLen {
+			return Settings{}, validationErrorf("environmentName cannot be longer than %d characters", maxEnvironmentNameLen)
+		}
+		// A control character here would be pasted straight into the
+		// badge the frontend renders; a newline in particular turns one
+		// line of chrome into two. There is no environment anyone names
+		// with one, so this is a refusal rather than a silent strip.
+		if strings.ContainsFunc(name, func(r rune) bool { return r == '\n' || r == '\r' || r == '\t' }) {
+			return Settings{}, validationErrorf("environmentName cannot contain line breaks or tabs")
+		}
+		cfg.EnvironmentName = name
+	}
 	if req.ApprovedByDefault != nil {
 		cfg.ApprovedByDefault = *req.ApprovedByDefault
 	}
@@ -607,8 +673,8 @@ func (c *Client) UpdateSettings(ctx context.Context, req UpdateSettingsRequest) 
 		if cfg.PollInterval <= 0 {
 			return Settings{}, validationErrorf("pollInterval is required the first time settings are saved")
 		}
-		if cfg.MaxConcurrent < 1 {
-			return Settings{}, validationErrorf("maxConcurrent is required the first time settings are saved")
+		if cfg.MaxWorkers < 1 {
+			return Settings{}, validationErrorf("maxWorkers is required the first time settings are saved")
 		}
 		if strings.TrimSpace(cfg.GeminiModel) == "" {
 			return Settings{}, validationErrorf("geminiModel is required the first time settings are saved")

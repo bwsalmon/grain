@@ -114,7 +114,7 @@ func TestConfigReportsTheDeploymentAgentFramework(t *testing.T) {
 	}
 
 	if _, err := client.UpdateSettings(ctx, ui.UpdateSettingsRequest{
-		PollInterval: ptr("30s"), MaxConcurrent: ptr(1),
+		PollInterval: ptr("30s"), MaxWorkers: ptr(1),
 		GeminiModel: ptr("gemini-3.1-pro"), ClaudeModel: ptr("claude-sonnet-5"), GitHubHost: ptr("github.com"),
 		AgentFramework: ptr(model.AgentFrameworkClaude),
 	}); err != nil {

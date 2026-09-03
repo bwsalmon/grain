@@ -69,7 +69,7 @@ func TestNewTaskTemplateIDsAreDistinctFromTaskAndScheduleIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	schedID, err := store.NewScheduledTaskID(ctx)
+	schedID, err := store.NewScheduleID(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,8 +161,8 @@ func TestSchedulesUsingTemplate(t *testing.T) {
 	pointsAtOne := schedule("sched-1", now)
 	pointsAtOne.TemplateID = &id
 	pointsAtNone := schedule("sched-2", now)
-	for _, s := range []model.ScheduledTask{pointsAtOne, pointsAtNone} {
-		if err := store.PutScheduledTask(ctx, s); err != nil {
+	for _, s := range []model.Schedule{pointsAtOne, pointsAtNone} {
+		if err := store.PutSchedule(ctx, s); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -185,9 +185,9 @@ func TestSchedulesUsingTemplate(t *testing.T) {
 }
 
 // TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn simulates a
-// database built before bwsalmon/agents#516 -- scheduled_task with none
-// of the columns task_template introduced, template_id included -- the
-// same "build the old shape directly, then run Init" approach
+// database built before bwsalmon/agents#516 -- schedule with none of the
+// columns task_template introduced, template_id included -- the same
+// "build the old shape directly, then run Init" approach
 // TestInitMigratesAnExistingDatabaseWithBareIntervalMS already uses for
 // the recurrence-columns migration.
 func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
@@ -198,7 +198,7 @@ func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 
-	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`scheduled_task`"+` (
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`schedule`"+` (
   `+"`id`"+`                    TEXT     NOT NULL,
   `+"`title`"+`                 TEXT     NOT NULL,
   `+"`body`"+`                  TEXT     NOT NULL,
@@ -217,10 +217,10 @@ func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
   `+"`created_at`"+`            DATETIME NOT NULL,
   PRIMARY KEY (`+"`id`"+`)
 )`); err != nil {
-		t.Fatalf("creating the pre-#516 scheduled_task table: %v", err)
+		t.Fatalf("creating the pre-#516 schedule table: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
-		"INSERT INTO `scheduled_task` (`id`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
+		"INSERT INTO `schedule` (`id`,`title`,`body`,`target_owner`,`target_name`,`base`,"+
 			"`auto_merge`,`recurrence_kind`,`every_n_hours`,`enabled`,`next_run_at`,`last_run_at`,`created_at`) "+
 			"VALUES ('sched-1','Nightly dependency bump','Bump every dependency.','owner','payments-api',NULL,"+
 			"0,'everyNHours',24,1,?,NULL,?)", now, now); err != nil {
@@ -232,7 +232,7 @@ func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
 		t.Fatalf("Init against an existing database with no template_id column: %v", err)
 	}
 
-	got, err := store.GetScheduledTask(ctx, "sched-1")
+	got, err := store.GetSchedule(ctx, "sched-1")
 	if err != nil || got == nil {
 		t.Fatalf("get: (%+v, %v)", got, err)
 	}
@@ -240,12 +240,12 @@ func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
 		t.Fatalf("got %+v, want the pre-existing row intact with a nil TemplateID", got)
 	}
 
-	// The new column is writable, not merely readable -- PutScheduledTask
-	// now supplies it on every write.
+	// The new column is writable, not merely readable -- PutSchedule now
+	// supplies it on every write.
 	id := "template-1"
 	withTemplate := schedule("sched-2", now)
 	withTemplate.TemplateID = &id
-	if err := store.PutScheduledTask(ctx, withTemplate); err != nil {
+	if err := store.PutSchedule(ctx, withTemplate); err != nil {
 		t.Fatalf("put with a template id after migrating: %v", err)
 	}
 }

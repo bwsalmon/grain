@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/bwsalmon/grain/pkg/gitproxy"
@@ -126,6 +127,94 @@ func TestUpdateSettingsRoundTripsShowClosedByDefault(t *testing.T) {
 	}
 	if !read.ShowClosedByDefault {
 		t.Fatalf("ShowClosedByDefault = false after UpdateSettings, want true")
+	}
+}
+
+// TestUpdateSettingsRoundTripsEnvironmentName is grain/task-69's
+// deployment label: unset it reads back empty (an unnamed deployment,
+// which the UI shows nothing for), setting it sticks through a
+// GetSettings read, and clearing it back to "" is a real value rather
+// than a no-op -- an operator who names a deployment by mistake has to
+// be able to unname it.
+func TestUpdateSettingsRoundTripsEnvironmentName(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.EnvironmentName != "" {
+		t.Fatalf("EnvironmentName = %q with nothing set, want empty", read.EnvironmentName)
+	}
+
+	// Surrounding whitespace is trimmed on the way in, so a stray space
+	// is not the difference between named and unnamed.
+	name := "  staging  "
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{EnvironmentName: &name}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.EnvironmentName != "staging" {
+		t.Fatalf("EnvironmentName = %q after UpdateSettings, want %q", read.EnvironmentName, "staging")
+	}
+
+	cleared := ""
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{EnvironmentName: &cleared}); err != nil {
+		t.Fatal(err)
+	}
+	read, err = c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.EnvironmentName != "" {
+		t.Fatalf("EnvironmentName = %q after clearing, want empty", read.EnvironmentName)
+	}
+}
+
+// TestUpdateSettingsRejectsUnrenderableEnvironmentName pins the two
+// bounds on what is otherwise free text: it is rendered as a badge in
+// the sidebar and appended to the tab title, so a pasted paragraph or an
+// embedded newline would take that chrome over rather than label it.
+func TestUpdateSettingsRejectsUnrenderableEnvironmentName(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"too long", strings.Repeat("s", 33)},
+		{"newline", "staging\nproduction"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value := tc.value
+			if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{EnvironmentName: &value}); err == nil {
+				t.Fatalf("UpdateSettings(%q) = nil error, want a validation error", tc.value)
+			}
+			read, err := c.GetSettings(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if read.EnvironmentName != "" {
+				t.Fatalf("EnvironmentName = %q after a refused save, want empty", read.EnvironmentName)
+			}
+		})
+	}
+
+	// The bound is in runes, not bytes: 32 characters of a multi-byte
+	// script is a name, and rejecting it would be a limit that depends on
+	// what alphabet an operator writes in.
+	multibyte := strings.Repeat("é", 32)
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{EnvironmentName: &multibyte}); err != nil {
+		t.Fatalf("UpdateSettings with a 32-rune multi-byte name: %v", err)
 	}
 }
 
@@ -519,7 +608,7 @@ func TestSettingsReportsWhichSettingsNeedARestart(t *testing.T) {
 	// And the settings a running daemon does pick up on its own are
 	// deliberately absent: this list is what the UI annotates, so
 	// anything named here is a promise that it cannot be applied live.
-	for _, live := range []string{"pollInterval", "maxConcurrent", "geminiModel", "claudeModel",
+	for _, live := range []string{"pollInterval", "maxWorkers", "maxMergers", "geminiModel", "claudeModel",
 		"maxAgentTurns", "agentFramework", "gcpProject", "sandboxCpus", "sandboxMemoryMb", "sandboxDiskGb"} {
 		if contains(fresh.RestartRequired, live) {
 			t.Errorf("restartRequired names %q, which the daemon applies without a restart", live)

@@ -629,6 +629,40 @@ describe("DetailOverlay", () => {
     expect(item.querySelector(".badge")).toHaveClass("badge-failed");
   });
 
+  // The one a task retried over and over is most likely to be sitting
+  // on: the agent worked, the branch is pushed, and the call that turns
+  // it into a pull request is what failed. Through the raw-string
+  // fallback it read "Finish-failed" under a "queued" badge, which is
+  // the opposite of what a reader needs from an attempt that is the
+  // reason the task keeps coming back.
+  it("labels an attempt whose result could not be turned into a pull request", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:02:00Z",
+              outcome: "finish-failed",
+              detail:
+                "this run's result could not be turned into a pull request or a comment: 422 Validation Failed",
+            },
+          ],
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />
+    );
+
+    const item = screen.getByText("Finish failed").closest(".timeline-item");
+    expect(item.querySelector(".badge")).toHaveClass("badge-failed");
+  });
+
   // The fallback still has to work: an outcome added on the backend
   // before this map catches up shows up rather than disappearing.
   it("falls back to the raw outcome for one it does not recognise", () => {

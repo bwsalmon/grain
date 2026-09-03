@@ -287,9 +287,9 @@ var Tables = []string{
 )`,
 
 	// One row per schedule (bwsalmon/agents#376), not one per firing --
-	// task_sequence's own reasoning applies again for a firing's identity,
-	// but the schedule itself needs exactly one durable row to carry
-	// next_run_at/last_run_at and the enabled switch a UI toggles.
+	// task_sequence's own reasoning applies again for a firing's
+	// identity, but the schedule itself needs exactly one durable row to
+	// carry next_run_at/last_run_at and the enabled switch a UI toggles.
 	// recurrence_kind/every_n_hours/time_of_day_minutes/weekday/day_of_month
 	// are model.Recurrence's fields (bwsalmon/agents#464) -- only the
 	// subset matching recurrence_kind is ever non-NULL for a given row
@@ -298,17 +298,17 @@ var Tables = []string{
 	// approval_actor_kind columns already use for a different sum type.
 	// This replaces the original bare interval_ms (every N hours since it
 	// last fired, with no wall-clock alignment); a database from before
-	// that widening is migrated by ensureScheduledTaskRecurrenceColumns.
+	// that widening is migrated by ensureScheduleRecurrenceColumns.
 	//
 	// template_id and suite_id are what a firing actually is: both NULL
 	// for a schedule carrying its own inline task content, template_id
 	// for one firing a task_template's content instead, suite_id for one
 	// starting a task_suite run instead of filing a task at all
-	// (model.ScheduledTask's own doc comment on why the two are mutually
+	// (model.Schedule's own doc comment on why the two are mutually
 	// exclusive). A database created before either existed gets the
-	// column from ensureScheduledTaskTemplateColumn/
-	// ensureScheduledTaskSuiteColumn rather than from this DDL.
-	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task`" + ` (
+	// column from ensureScheduleTemplateColumn/ensureScheduleSuiteColumn
+	// rather than from this DDL.
+	`CREATE TABLE IF NOT EXISTS ` + "`schedule`" + ` (
   ` + "`id`" + `                    TEXT     NOT NULL,
   ` + "`title`" + `                 TEXT     NOT NULL,
   ` + "`body`" + `                  TEXT     NOT NULL,
@@ -333,7 +333,7 @@ var Tables = []string{
 	// task_sequence's own doc comment gives the reasoning for a dedicated
 	// allocator rather than a counter column: an INSERT that lets SQLite
 	// assign the rowid is atomic where read-modify-write is a race.
-	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task_sequence`" + ` (
+	`CREATE TABLE IF NOT EXISTS ` + "`schedule_sequence`" + ` (
   ` + "`number`" + `    INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`issued_at`" + ` DATETIME NOT NULL
 )`,
@@ -341,11 +341,11 @@ var Tables = []string{
 	// task_read's own doc comment gives the reasoning for a table rather
 	// than a JSON column, applied again here now that a schedule's firing
 	// carries read-only repos too (bwsalmon/agents#464).
-	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task_read`" + ` (
-  ` + "`scheduled_task_id`" + ` TEXT NOT NULL,
-  ` + "`owner`" + `             TEXT NOT NULL,
-  ` + "`name`" + `              TEXT NOT NULL,
-  PRIMARY KEY (` + "`scheduled_task_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
+	`CREATE TABLE IF NOT EXISTS ` + "`schedule_read`" + ` (
+  ` + "`schedule_id`" + ` TEXT NOT NULL,
+  ` + "`owner`" + `       TEXT NOT NULL,
+  ` + "`name`" + `        TEXT NOT NULL,
+  PRIMARY KEY (` + "`schedule_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
 )`,
 
 	// task_grant's own shape, for a schedule's own capabilities
@@ -353,23 +353,24 @@ var Tables = []string{
 	// it in the schedule's own form, same as grantsFor does for a task),
 	// but the column exists anyway so scanning stays identical to
 	// task_grant's.
-	`CREATE TABLE IF NOT EXISTS ` + "`scheduled_task_grant`" + ` (
-  ` + "`scheduled_task_id`" + ` TEXT NOT NULL,
-  ` + "`capability`" + `        TEXT NOT NULL,
-  ` + "`via`" + `               TEXT NOT NULL,
-  ` + "`folder`" + `            TEXT NULL,
-  PRIMARY KEY (` + "`scheduled_task_id`" + `, ` + "`capability`" + `)
+	`CREATE TABLE IF NOT EXISTS ` + "`schedule_grant`" + ` (
+  ` + "`schedule_id`" + ` TEXT NOT NULL,
+  ` + "`capability`" + `  TEXT NOT NULL,
+  ` + "`via`" + `         TEXT NOT NULL,
+  ` + "`folder`" + `      TEXT NULL,
+  PRIMARY KEY (` + "`schedule_id`" + `, ` + "`capability`" + `)
 )`,
 
 	// One row per template (bwsalmon/agents#516) -- task_sequence's own
 	// "identity allocated here, not borrowed" reasoning applies again:
 	// name/title/body/auto_merge are exactly the reusable-content fields
 	// a schedule already carried inline, now given a row of their own so
-	// more than one schedule (scheduled_task.template_id) can point at
-	// the same one instead of repeating it. Deliberately no target_owner/
-	// target_name/base here (model.TaskTemplate's own doc comment on
-	// why): which repo and branch a firing targets is a property of the
-	// caller using this template, not of the template itself.
+	// more than one schedule (schedule.template_id) can point at the same
+	// one instead of repeating it. Deliberately no
+	// target_owner/target_name/base here (model.TaskTemplate's own doc
+	// comment on why): which repo and branch a firing targets is a
+	// property of the caller using this template, not of the template
+	// itself.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_template`" + ` (
   ` + "`id`" + `           TEXT     NOT NULL,
   ` + "`name`" + `         TEXT     NOT NULL,
@@ -380,15 +381,15 @@ var Tables = []string{
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
-	// scheduled_task_sequence's own doc comment gives the reasoning for a
+	// schedule_sequence's own doc comment gives the reasoning for a
 	// dedicated allocator rather than a counter column.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_template_sequence`" + ` (
   ` + "`number`" + `    INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`issued_at`" + ` DATETIME NOT NULL
 )`,
 
-	// scheduled_task_read's own doc comment gives the reasoning for a
-	// table rather than a JSON column, ported onto a template's own id.
+	// schedule_read's own doc comment gives the reasoning for a table
+	// rather than a JSON column, ported onto a template's own id.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_template_read`" + ` (
   ` + "`task_template_id`" + ` TEXT NOT NULL,
   ` + "`owner`" + `            TEXT NOT NULL,
@@ -396,7 +397,7 @@ var Tables = []string{
   PRIMARY KEY (` + "`task_template_id`" + `, ` + "`owner`" + `, ` + "`name`" + `)
 )`,
 
-	// scheduled_task_grant's own shape, for a template's own capabilities.
+	// schedule_grant's own shape, for a template's own capabilities.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_template_grant`" + ` (
   ` + "`task_template_id`" + ` TEXT NOT NULL,
   ` + "`capability`" + `       TEXT NOT NULL,
@@ -430,16 +431,32 @@ var Tables = []string{
 	// Store.Init's own migration step (store.go's
 	// ensureConfigTargetReposColumn) instead of from this DDL.
 	//
-	// max_concurrent replaced a slots column (a comma-separated list of
-	// operator-chosen concurrency-slot names) here for bwsalmon/agents#461:
-	// Config.MaxConcurrent is a plain count. It stayed one when slots
-	// themselves were removed -- dispatch.Cycle no longer expands it into
-	// identifiers at all, it simply starts runs until this many are live.
-	// The same CREATE TABLE IF NOT EXISTS limitation applies,
-	// so an already-created grain_config gets max_concurrent added, and
-	// backfilled from however many names its old slots column held, by
-	// Store.Init's own ensureConfigMaxConcurrentColumn, which also drops
-	// that now-unused column.
+	// max_workers and max_mergers are the two halves of this deployment's
+	// concurrency (model.Limits, grain/task-63): how many runs of
+	// ordinary work may be live, and how much further capacity only the
+	// merge queue's own fix tasks may reach.
+	//
+	// max_workers is the descendant of a slots column (a comma-separated
+	// list of operator-chosen concurrency-slot names), which
+	// bwsalmon/agents#461 replaced with a plain max_concurrent count, and
+	// which grain/task-63 renamed once it stopped being the whole limit.
+	// The same CREATE TABLE IF NOT EXISTS limitation applies to both
+	// columns, so an already-created grain_config gets max_concurrent
+	// added and backfilled from its old slots column by Store.Init's own
+	// ensureConfigMaxConcurrentColumn, and then gets max_workers
+	// (backfilled from max_concurrent, which is dropped) and max_mergers
+	// from ensureConfigWorkerMergerColumns after it. max_mergers DEFAULT
+	// 1 is model.DefaultMaxMergers, the same number DefaultConfig carries
+	// for every row written from Go rather than defaulted by the engine.
+	//
+	// Both carry a DEFAULT, unlike the columns beside them that predate
+	// the convention, and max_workers' own is what keeps a *downgrade*
+	// survivable: a build from before the split writes a settings row
+	// naming max_concurrent and not max_workers (its own migration
+	// re-adds the column this one dropped), which a NOT NULL column with
+	// no default would reject outright. The setting such a write leaves
+	// behind is wrong until something sets it again; the alternative is a
+	// deployment that cannot save settings at all.
 	//
 	// agent_framework (bwsalmon/agents#609) is Config.AgentFramework's own
 	// column -- DEFAULT 'antigravity' both here and in
@@ -478,10 +495,17 @@ var Tables = []string{
 	// grain_config. Empty, the default, means a new task starts with only
 	// the capabilities whoever files it asked for -- exactly what every
 	// deployment did before this column existed.
+	//
+	// environment_name is Config.EnvironmentName's own column -- what
+	// this deployment is called on screen -- DEFAULT '' both here and in
+	// Store.ensureConfigEnvironmentNameColumn for an already-created
+	// grain_config. Empty is an unnamed deployment, which is what every
+	// deployment was before this column existed.
 	`CREATE TABLE IF NOT EXISTS ` + "`grain_config`" + ` (
   ` + "`id`" + `                         INTEGER NOT NULL,
   ` + "`poll_interval_ms`" + `           INTEGER NOT NULL,
-  ` + "`max_concurrent`" + `              INTEGER NOT NULL,
+  ` + "`max_workers`" + `                 INTEGER NOT NULL DEFAULT 1,
+  ` + "`max_mergers`" + `                 INTEGER NOT NULL DEFAULT 1,
   ` + "`gemini_model`" + `                TEXT    NOT NULL,
   ` + "`max_agent_turns`" + `             INTEGER NOT NULL,
   ` + "`github_host`" + `                 TEXT    NOT NULL,
@@ -500,6 +524,7 @@ var Tables = []string{
   ` + "`claude_model`" + `                 TEXT    NOT NULL DEFAULT '',
   ` + "`task_defaults_on_backfilled`" + `  INTEGER NOT NULL DEFAULT 1,
   ` + "`default_capabilities`" + `         TEXT    NOT NULL DEFAULT '',
+  ` + "`environment_name`" + `             TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -636,12 +661,12 @@ var Tables = []string{
 	// (bwsalmon/agents#516) this plan schedules, referenced by id rather
 	// than copied: content lives on the template, and
 	// CreateQualificationRun resolves it fresh every time a candidate is
-	// qualified, the same "not a stale copy" discipline
-	// fireScheduledTask already holds a schedule's own TemplateID to.
-	// repeat_count is model.QualificationItem's own Repeat; order_key is
-	// display order only -- unlike task.order_key it decides nothing
-	// about dispatch, since an item's actual scheduling order comes from
-	// the dependency graph below, not from this column.
+	// qualified, the same "not a stale copy" discipline fireTaskSchedule
+	// already holds a schedule's own TemplateID to. repeat_count is
+	// model.QualificationItem's own Repeat; order_key is display order
+	// only -- unlike task.order_key it decides nothing about dispatch,
+	// since an item's actual scheduling order comes from the dependency
+	// graph below, not from this column.
 	`CREATE TABLE IF NOT EXISTS ` + "`qualification_item`" + ` (
   ` + "`owner`" + `        TEXT    NOT NULL,
   ` + "`name`" + `         TEXT    NOT NULL,
@@ -701,10 +726,10 @@ var Tables = []string{
 
 	// A task suite template (bwsalmon/agents#642) -- a saved combination
 	// of task templates plus how to run them. INTEGER-free TEXT id, the
-	// same "own sequence, own prefix" shape task_template and
-	// scheduled_task already use (task_suite_sequence below), since a
-	// suite is created directly rather than cut like a release or a
-	// candidate. mode/count/max_passes are model.TaskSuite's own
+	// same "own sequence, own prefix" shape task_template and schedule
+	// already use (task_suite_sequence below), since a suite is created
+	// directly rather than cut like a release or a candidate.
+	// mode/count/max_passes are model.TaskSuite's own
 	// TaskSuiteMode/Count/MaxPasses -- which pair is meaningful depends
 	// on mode, model.TaskSuite.Validate's own job to check, not the
 	// schema's.
@@ -755,13 +780,13 @@ var Tables = []string{
 	// with more than one writer.
 	//
 	// schedule_id is NULL for a run a human started by hand, and names
-	// the scheduled_task that fired it otherwise -- Store.
+	// the schedule that fired it otherwise -- Store.
 	// HasActiveRunForSchedule reads it back as the "a previous firing
 	// that has not finished suppresses the next one" check a schedule
 	// firing a suite needs, exactly what task_tag's own firing tag is for
 	// a schedule filing a task. A database created before schedules could
-	// fire a suite gets this column from
-	// ensureTaskSuiteRunScheduleColumn rather than from this DDL.
+	// fire a suite gets this column from ensureTaskSuiteRunScheduleColumn
+	// rather than from this DDL.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_suite_run`" + ` (
   ` + "`id`" + `                INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`suite_id`" + `          TEXT     NOT NULL,

@@ -96,7 +96,7 @@ func TestSandboxTokenMintedAfterGitProxyStartsAuthenticates(t *testing.T) {
 	// this needs a real Dispatch on record, not just a queued task -- and
 	// the run has to name its sandbox, which is what orchestrator.runOne
 	// records via SetRunSandbox once it has acquired one.
-	dispatches, err := dispatch.Cycle(context.Background(), store, 1, time.Now().UTC())
+	dispatches, err := dispatch.Cycle(context.Background(), store, model.Limits{Workers: 1}, time.Now().UTC())
 	if err != nil || len(dispatches) != 1 {
 		t.Fatalf("expected exactly one dispatch, got %v (err=%v)", dispatches, err)
 	}

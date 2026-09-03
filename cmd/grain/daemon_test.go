@@ -258,7 +258,7 @@ func TestLoadConfigSeedsAFreshStoreFromFlags(t *testing.T) {
 	ctx := context.Background()
 
 	flagCfg := config{
-		maxConcurrent: 2, pollInterval: time.Minute,
+		maxWorkers: 2, pollInterval: time.Minute,
 		// agentFramework is named rather than left zero because it is
 		// the one field that never round-trips verbatim: the store
 		// normalizes it on read (model.NormalizeAgentFramework), so an
@@ -300,7 +300,7 @@ func TestLoadConfigSeedsTheTaskDefaultsOn(t *testing.T) {
 	ctx := context.Background()
 
 	flagCfg := config{
-		maxConcurrent: 2, pollInterval: time.Minute,
+		maxWorkers: 2, pollInterval: time.Minute,
 		agentFramework: model.AgentFrameworkAntigravity,
 		geminiModel:    "gemini-2.5-pro", githubHost: "github.com",
 	}
@@ -331,7 +331,7 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 	ctx := context.Background()
 
 	stored := model.Config{
-		MaxConcurrent: 1, PollInterval: 5 * time.Second,
+		MaxWorkers: 1, PollInterval: 5 * time.Second,
 		// Named for the same reason as in the test above: GetConfig
 		// normalizes this field, so a stored "" reads back as
 		// AgentFrameworkAntigravity and would not compare equal.
@@ -345,8 +345,8 @@ func TestLoadConfigPrefersTheStoreOverFlagsOnceOneExists(t *testing.T) {
 	}
 
 	flagCfg := config{
-		dataDir:       "/should/be/left/alone",
-		maxConcurrent: 4, pollInterval: time.Hour,
+		dataDir:    "/should/be/left/alone",
+		maxWorkers: 4, pollInterval: time.Hour,
 		geminiModel: "ignored", maxAgentTurns: -1,
 		githubHost: "ignored.example.com", githubInsecureHTTP: true,
 		gcpProject: "ignored-proj", gcpServiceAccountEmail: "ignored@example.com",
@@ -381,7 +381,7 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 	ctx := context.Background()
 
 	stored := model.Config{
-		MaxConcurrent: 1, PollInterval: 5 * time.Second,
+		MaxWorkers: 1, PollInterval: 5 * time.Second,
 		// Named for the same reason as in the test above: GetConfig
 		// normalizes this field, so a stored "" reads back as
 		// AgentFrameworkAntigravity and would not compare equal.
@@ -396,9 +396,9 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 	}
 
 	// Agrees with the store on everything except -github-host and
-	// -max-concurrent, so only those two should be logged.
+	// -max-workers, so only those two should be logged.
 	flagCfg := config{
-		maxConcurrent: 4, pollInterval: stored.PollInterval,
+		maxWorkers: 4, pollInterval: stored.PollInterval,
 		geminiModel: stored.GeminiModel, maxAgentTurns: stored.MaxAgentTurns,
 		githubHost: "ignored.example.com", githubInsecureHTTP: stored.GitHubInsecureHTTP,
 		gcpProject: stored.GCPProject, gcpServiceAccountEmail: stored.GCPServiceAccountEmail,
@@ -415,14 +415,14 @@ func TestLoadConfigLogsEveryOverriddenFlag(t *testing.T) {
 
 	got := logs.String()
 	for _, want := range []string{
-		"ignoring -max-concurrent=4, stored config already has 1",
+		"ignoring -max-workers=4, stored config already has 1",
 		"ignoring -github-host=ignored.example.com, stored config already has github.com",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("loadConfig log output = %q, want it to contain %q", got, want)
 		}
 	}
-	for _, unwanted := range []string{"-poll-interval", "-gemini-model", "-claude-model", "-max-agent-turns", "-github-insecure-http", "-gcp-project", "-gcp-agent-service-account", "-target-repos"} {
+	for _, unwanted := range []string{"-poll-interval", "-gemini-model", "-claude-model", "-max-agent-turns", "-max-mergers", "-github-insecure-http", "-gcp-project", "-gcp-agent-service-account", "-target-repos"} {
 		if strings.Contains(got, unwanted) {
 			t.Errorf("loadConfig log output = %q, should not mention %q since the flag and the store agree", got, unwanted)
 		}

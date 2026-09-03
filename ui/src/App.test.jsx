@@ -181,6 +181,29 @@ describe("App", () => {
     expect(await screen.findByText(/reconcile loop has stopped/i)).toBeInTheDocument();
   });
 
+  // grain/task-69: the deployment's name in the tab strip, which is the
+  // one piece of chrome the app cannot draw into. Name first, because a
+  // narrow tab truncates its title from the end.
+  it("titles the tab with the environment name when one is configured", async () => {
+    setupApi();
+    const realImpl = api.getMockImplementation();
+    api.mockImplementation((path, opts) =>
+      (path === "/api/config" ? Promise.resolve({ ...config, environmentName: "staging" }) : realImpl(path, opts)));
+
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    await waitFor(() => expect(document.title).toBe("staging — grain"));
+  });
+
+  it("leaves the tab titled just grain on an unnamed deployment", async () => {
+    setupApi();
+    render(<App />);
+
+    await screen.findByText("Fix bug");
+    await waitFor(() => expect(document.title).toBe("grain"));
+  });
+
   it("shows a loading screen with the large mark until config loads (bwsalmon/agents#555)", async () => {
     setupApi();
     let resolveConfig;
@@ -350,9 +373,9 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
 
-    expect(await screen.findByRole("heading", { name: "Scheduled tasks" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Schedules" })).toBeInTheDocument();
     expect(screen.getByText("Nightly dependency bump")).toBeInTheDocument();
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
@@ -364,7 +387,7 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
     await user.click(await screen.findByText("Nightly dependency bump"));
     expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
 
@@ -397,7 +420,7 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: /^Scheduled tasks/ }));
+    await user.click(screen.getByRole("button", { name: /^Schedules/ }));
     await user.click(await screen.findByRole("button", { name: "+ New schedule" }));
     await screen.findByRole("heading", { name: "New schedule" });
 

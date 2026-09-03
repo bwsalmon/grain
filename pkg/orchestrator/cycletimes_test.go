@@ -28,12 +28,12 @@ func TestRunCycleRecordsItsOwnTiming(t *testing.T) {
 
 	times := orchestrator.NewCycleTimes(8)
 	deps := orchestrator.Deps{
-		Store:         store,
-		Client:        client,
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
-		CycleTimes:    times,
+		Store:      store,
+		Client:     client,
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  completesWithAComment(),
+		MaxWorkers: 1,
+		CycleTimes: times,
 	}
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
 		t.Fatalf("RunCycle: %v", err)
@@ -120,12 +120,12 @@ func TestRunCycleRecordsWhichReconcilerFailed(t *testing.T) {
 
 	times := orchestrator.NewCycleTimes(8)
 	deps := orchestrator.Deps{
-		Store:         store,
-		Client:        failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
-		CycleTimes:    times,
+		Store:      store,
+		Client:     failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  completesWithAComment(),
+		MaxWorkers: 1,
+		CycleTimes: times,
 	}
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err == nil {
 		t.Fatal("RunCycle returned nil, want the injected sync failure")
@@ -162,12 +162,12 @@ func TestRunCycleRecordsNothingForACancelledCycle(t *testing.T) {
 
 	times := orchestrator.NewCycleTimes(8)
 	deps := orchestrator.Deps{
-		Store:         store,
-		Client:        client,
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
-		CycleTimes:    times,
+		Store:      store,
+		Client:     client,
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  completesWithAComment(),
+		MaxWorkers: 1,
+		CycleTimes: times,
 	}
 	_ = orchestrator.RunCycle(cancelled, deps, baseTime)
 
@@ -185,11 +185,11 @@ func TestRunCycleWithNoCycleTimesStillDispatches(t *testing.T) {
 	task := filedTask(t, ctx, store, "t1", repo)
 
 	deps := orchestrator.Deps{
-		Store:         store,
-		Client:        client,
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     completesWithAComment(),
-		MaxConcurrent: 1,
+		Store:      store,
+		Client:     client,
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  completesWithAComment(),
+		MaxWorkers: 1,
 	}
 	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
 		t.Fatalf("RunCycle: %v", err)

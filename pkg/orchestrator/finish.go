@@ -166,7 +166,7 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 	// That bound only works if this run's own outcome says so: RunDispatch
 	// already called FinishRun before ProcessResult ever ran, using
 	// outcomeOf's own guess -- "succeeded" the moment the agent made any
-	// harmless tool call, since RunDispatch has no way to check GitHub or
+	// tool call at all, since RunDispatch has no way to check GitHub or
 	// task_observation itself. A run that, say, ran a few shell commands
 	// and then gave up without pushing, asking, or leaving a comment would
 	// otherwise sit in task_run as a permanent "succeeded" that never

@@ -195,6 +195,22 @@ func (c *HTTPClient) OpenPullRequest(ctx context.Context, id string) (PullReques
 	return status, nil
 }
 
+// RecreateSandbox is Client.RecreateSandbox over the wire: destroy the
+// sandbox of id's live run and build an empty one in its place.
+//
+// Its caller, like OpenPullRequest's above, is not the CLI but `grain
+// mcpserver` (cmd/grain/mcpserver.go), which serves a dispatched run's
+// own tools. Everything that process can do happens *inside* the
+// sandbox, so throwing that sandbox away and building another is the one
+// thing it has to ask the daemon for.
+func (c *HTTPClient) RecreateSandbox(ctx context.Context, id string) (SandboxRecreation, error) {
+	var recreation SandboxRecreation
+	if err := c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/sandbox/recreate", nil, &recreation); err != nil {
+		return SandboxRecreation{}, err
+	}
+	return recreation, nil
+}
+
 // Config reads the deployment's fixed configuration -- who the daemon
 // attributes every task and comment written through this API to, its
 // default target repo, and the capabilities it offers. Unlike the

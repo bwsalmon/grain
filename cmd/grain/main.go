@@ -64,8 +64,8 @@
 // Schedules, templates, suites and qualification plans remain UI-only,
 // and repo.go's own doc comment has why that is not the same question:
 // they are authored content rather than deployment configuration, and
-// docs/scheduled-tasks.md records their absence here as an open gap
-// waiting on somebody who needs it.
+// docs/schedules.md records their absence here as an open gap waiting on
+// somebody who needs it.
 package main
 
 import (
@@ -596,7 +596,8 @@ func cmdConfig(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain settings", flag.ContinueOnError)
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
-	maxConcurrent := fs.Int("max-concurrent", 0, "maximum number of tasks dispatched at once")
+	maxWorkers := fs.Int("max-workers", 0, "maximum number of ordinary tasks dispatched at once")
+	maxMergers := fs.Int("max-mergers", 0, "capacity on top of -max-workers only the merge queue's own fix tasks may use (0 lets them contend for it like anything else)")
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	maxAgentTurns := fs.Int("max-agent-turns", 0, "cap on model/tool round trips per run (0 = uncapped; runs are bounded by wall-clock runtime instead)")
@@ -629,6 +630,15 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		"comma-separated owner/name list a task's repo may name -- empty allows any; replaces the whole list, where \"grain repo add\"/\"remove\" change one entry")
 	defaultCapabilities := fs.String("default-capabilities", "",
 		"comma-separated capability IDs every new task is filed holding -- empty files each task with only what it asks for")
+	// Settable from a shell, not only from the Settings pane, because
+	// naming a deployment is something scripts/setup.sh-style
+	// provisioning wants to do as it brings one up -- "grain settings
+	// -environment-name=staging" beside the rest of the deployment's
+	// configuration, rather than a browser trip afterwards. Empty clears
+	// it back to an unnamed deployment, the same way an empty
+	// -target-repos clears the allowlist.
+	environmentName := fs.String("environment-name", "",
+		"what this deployment is called in the UI, e.g. staging -- empty leaves it unnamed and shows nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -639,9 +649,12 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "poll-interval":
 			v := *pollInterval
 			req.PollInterval = &v
-		case "max-concurrent":
-			v := *maxConcurrent
-			req.MaxConcurrent = &v
+		case "max-workers":
+			v := *maxWorkers
+			req.MaxWorkers = &v
+		case "max-mergers":
+			v := *maxMergers
+			req.MaxMergers = &v
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
@@ -672,6 +685,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "sandbox-disk-gb":
 			v := *sandboxDiskGB
 			req.SandboxDiskGB = &v
+		case "environment-name":
+			v := *environmentName
+			req.EnvironmentName = &v
 		case "target-repos":
 			v := splitRepoList(*targetRepos)
 			req.TargetRepos = &v
@@ -793,8 +809,18 @@ func (p *printer) settings(s ui.Settings) {
 		fmt.Println("not configured yet -- nothing here until a daemon starts, or a value is set")
 		return
 	}
+	// First line, and printed even when unset: "which deployment am I
+	// talking to" is the question every line under it is an answer for,
+	// and a CLI pointed at the wrong -server has no sidebar badge to
+	// give it away.
+	if s.EnvironmentName != "" {
+		fmt.Printf("environment:    %s\n", s.EnvironmentName)
+	} else {
+		fmt.Println("environment:    unnamed")
+	}
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
-	fmt.Printf("max concurrent: %d\n", s.MaxConcurrent)
+	fmt.Printf("max workers:    %d\n", s.MaxWorkers)
+	fmt.Printf("max mergers:    %d\n", s.MaxMergers)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
 	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
 	fmt.Printf("max agent turns: %d\n", s.MaxAgentTurns)

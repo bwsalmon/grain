@@ -1,7 +1,7 @@
 package orchestrator_test
 
 // The settings a cycle itself is the consumer of, changed while the
-// daemon runs. Deps.MaxConcurrent has its own test alongside the rest of
+// daemon runs. Deps.MaxWorkers has its own test alongside the rest of
 // the concurrency ones (concurrent_dispatch_test.go); this is its
 // sibling, Config.MaxAgentTurns, which reaches the agent as
 // agent.RunConfig.MaxTurns and so is observable at the far end of a real
@@ -33,7 +33,7 @@ func (f *turnsFramework) Run(_ context.Context, cfg agent.RunConfig) (*agent.Res
 // A change to max-agent-turns made through the store -- `grain
 // settings`, or the UI's Settings page -- takes effect on the next
 // dispatch, with no restart and no change to the Deps a long-lived
-// daemon process already built, exactly as max-concurrent does.
+// daemon process already built, exactly as max-workers does.
 func TestACycleAdoptsAMaxAgentTurnsChangeFromTheStoreWithoutRestart(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
@@ -48,11 +48,11 @@ func TestACycleAdoptsAMaxAgentTurnsChangeFromTheStoreWithoutRestart(t *testing.T
 		Framework: orchestrator.StaticFramework(fw),
 		// What this process started with -- the flag that seeded the row,
 		// or the value stored the last time it was restarted.
-		Config:        orchestrator.Config{MaxAgentTurns: 10},
-		MaxConcurrent: 1,
+		Config:     orchestrator.Config{MaxAgentTurns: 10},
+		MaxWorkers: 1,
 	}
 
-	if err := store.PutConfig(ctx, model.Config{MaxConcurrent: 1, MaxAgentTurns: 40}); err != nil {
+	if err := store.PutConfig(ctx, model.Config{MaxWorkers: 1, MaxAgentTurns: 40}); err != nil {
 		t.Fatalf("PutConfig: %v", err)
 	}
 

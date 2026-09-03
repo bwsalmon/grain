@@ -48,7 +48,7 @@ func TestRunReapsHostSandboxesLeftByAPreviousProcess(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- run(ctx, config{
-			dataDir: dataDir, sandboxDir: sandboxDir, maxConcurrent: 1, pollInterval: time.Hour,
+			dataDir: dataDir, sandboxDir: sandboxDir, maxWorkers: 1, pollInterval: time.Hour,
 			githubHost: "127.0.0.1:0", githubInsecureHTTP: true, actor: "tester",
 		})
 	}()

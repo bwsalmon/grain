@@ -27,8 +27,8 @@ type Config struct {
 	// loop that is already running rather than the next one
 	// (cmd/grain/daemon.go's liveConfig).
 	PollInterval time.Duration
-	// MaxConcurrent is how many runs dispatch.Cycle lets be in flight at
-	// once -- the same count -max-concurrent parses.
+	// MaxWorkers is how many runs of ordinary work dispatch.Cycle lets be
+	// in flight at once -- the same count -max-workers parses.
 	//
 	// bwsalmon/agents#461 replaced named slots (an operator-chosen list,
 	// each entry its own sandbox directory or kontur VM name) with this
@@ -38,7 +38,29 @@ type Config struct {
 	// left for such an identifier to name: this is now read as a limit
 	// and nothing else, by dispatch.Cycle counting live runs against it
 	// and by nobody else at all.
-	MaxConcurrent int
+	//
+	// It was called MaxConcurrent, and was the whole limit, until
+	// grain/task-63 split the merge queue's own repair runs out from
+	// under it -- see MaxMergers below and Limits, which is the pair of
+	// them as everything that enforces a limit reads them. Its column was
+	// renamed with it, max_concurrent to max_workers, by
+	// Store.ensureConfigWorkerMergerColumns.
+	MaxWorkers int
+	// MaxMergers is capacity on top of MaxWorkers that only the merge
+	// queue's own fix tasks may reach (model.Limits' own doc comment has
+	// why they are worth reserving, and exactly how the two numbers
+	// combine: workers never exceed MaxWorkers, nothing exceeds
+	// MaxWorkers+MaxMergers, and a merger may take a free worker slot
+	// while the reverse never happens).
+	//
+	// 0 is a meaningful value rather than an unset one: mergers then
+	// contend for MaxWorkers alongside everything else, exactly as every
+	// deployment behaved before this field existed. DefaultConfig's 1 is
+	// what a deployment that has never chosen gets instead -- one run of
+	// headroom is enough to keep a queue head's repair from waiting out
+	// whatever else is running, and cheap enough that a single-worker
+	// deployment can afford it.
+	MaxMergers int
 	// AgentFramework selects which agent.Framework a run is meant to be
 	// driven by -- AgentFrameworkAntigravity (agent/antigravity, the
 	// Antigravity CLI's `agy` binary as a subprocess) or
@@ -84,7 +106,7 @@ type Config struct {
 	// agent framework's own default in place, which for both frameworks
 	// is no cap at all (agent/claude's defaultMaxTurns has why). A run's
 	// real ceiling is orchestrator.Config.MaxRunRuntime. Re-read by
-	// orchestrator.RunCycle every cycle, the same as MaxConcurrent, so a
+	// orchestrator.RunCycle every cycle, the same as MaxWorkers, so a
 	// changed cap reaches the next run dispatched.
 	MaxAgentTurns int
 	// GitHubHost is the GitHub API host -- overridable to point at a mock
@@ -212,6 +234,29 @@ type Config struct {
 	// ApprovedByDefault -- CreateTaskRequest.AutoMerge, not this, is what
 	// a filed task actually gets.
 	AutoMergeByDefault bool
+	// EnvironmentName is what this deployment is called, for whoever is
+	// looking at it: "staging", "dev", a hostname, anything. Empty, the
+	// default, means an unnamed deployment and the UI shows nothing at
+	// all -- the shape grain has always had, and the right one for an
+	// operator running a single deployment who has nothing to tell it
+	// apart from.
+	//
+	// It names nothing the daemon itself does: no dispatch, no sandbox,
+	// no credential is chosen by it, and nothing outside the UI reads it.
+	// It exists for the one failure a single-operator cluster invites --
+	// approving, merging or rebooting on the deployment you thought was
+	// the other one -- which is a question of what the screen says, not
+	// of what the daemon enforces. A deployment that should refuse to
+	// touch a repo wants TargetRepos above; this is a label.
+	//
+	// Free text, deliberately, rather than an enum of "staging"/"prod":
+	// what environments a deployment sits among is the operator's own
+	// vocabulary, and grain has no list of them to validate against.
+	// ui.UpdateSettings bounds its length so it can be rendered somewhere
+	// prominent without a paragraph pasted in taking the pane over, and
+	// trims it so a stray space is not the difference between named and
+	// unnamed.
+	EnvironmentName string
 	// DefaultCapabilities is the set of capability ids a new task is
 	// filed holding, by id -- the deployment-wide answer to "what should
 	// every task here start out able to do", and the reason gcp-key need
@@ -251,7 +296,7 @@ type Config struct {
 }
 
 // DefaultConfig is the configuration a deployment that has never chosen
-// one runs: every field's own zero value, except the two whose default
+// one runs: every field's own zero value, except the three whose default
 // is not it.
 //
 // Every path that builds a Config with nothing stored behind it starts
@@ -267,8 +312,17 @@ func DefaultConfig() Config {
 	return Config{
 		ApprovedByDefault:  true,
 		AutoMergeByDefault: true,
+		MaxMergers:         DefaultMaxMergers,
 	}
 }
+
+// DefaultMaxMergers is Config.MaxMergers for a deployment that has never
+// chosen one -- named here rather than repeated at each of the three
+// places that have to agree on it: DefaultConfig above, cmd/grain
+// daemon's own -max-mergers flag default, and schema.go's grain_config
+// DDL (which is also what Store.ensureConfigWorkerMergerColumns
+// backfills a database predating the column with).
+const DefaultMaxMergers = 1
 
 // AgentFramework's own vocabulary -- the two agent.Framework
 // implementations pkg/agent has today (pkg/agent/antigravity,

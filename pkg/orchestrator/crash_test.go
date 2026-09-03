@@ -60,7 +60,7 @@ func TestRestartAfterACrashMidRunDoesNotDoubleDispatchOrLoseTheRun(t *testing.T)
 
 	task := dispatchTask(t, ctx, store1, "t1")
 
-	dispatches, err := dispatch.Cycle(ctx, store1, 1, baseTime)
+	dispatches, err := dispatch.Cycle(ctx, store1, model.Limits{Workers: 1}, baseTime)
 	if err != nil {
 		t.Fatalf("Cycle: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestRestartAfterACrashMidRunDoesNotDoubleDispatchOrLoseTheRun(t *testing.T)
 	// still excludes t1 -- this must hold across the restart exactly as
 	// it holds within one process (dispatch_test.go's own
 	// TestCycleLeavesAnAlreadyRunningTaskAlone).
-	again, err := dispatch.Cycle(ctx, store2, 1, baseTime.Add(time.Minute))
+	again, err := dispatch.Cycle(ctx, store2, model.Limits{Workers: 1}, baseTime.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Cycle after restart: %v", err)
 	}

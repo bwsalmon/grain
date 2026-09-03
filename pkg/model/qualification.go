@@ -23,7 +23,7 @@ var QualificationPrincipal = Principal{Kind: PrincipalAutomation, ID: "qualifica
 // There is no per-item content here -- no Title, nothing a TaskTemplate
 // itself already carries -- because CreateQualificationRun resolves each
 // item's template fresh from the store at the moment a candidate is
-// qualified, the same "not a stale copy" discipline fireScheduledTask
+// qualified, the same "not a stale copy" discipline fireTaskSchedule
 // already holds TemplateID to. Base is never among that content either
 // way (TaskTemplate's own doc comment on why): CreateQualificationRun
 // always targets the candidate's own branch.

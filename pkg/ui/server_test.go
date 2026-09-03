@@ -274,7 +274,7 @@ func TestRetryRouteClearsAFailedTasksStreak(t *testing.T) {
 		started := baseTime.Add(time.Duration(i) * time.Hour)
 		if err := client.Store.StartRun(context.Background(), model.Run{
 			ID: runID, TaskID: id, Sandbox: "s1", Attempt: i + 1, StartedAt: started,
-		}, 0); err != nil {
+		}, model.Limits{}); err != nil {
 			t.Fatal(err)
 		}
 		if err := client.Store.FinishRun(context.Background(), runID, started.Add(time.Minute), "failed", "boom"); err != nil {
@@ -443,6 +443,39 @@ func TestConfigEndpointReportsShowClosedByDefault(t *testing.T) {
 	}
 }
 
+// TestConfigEndpointReportsEnvironmentName is grain/task-69's label
+// reaching the frontend on the one call it makes before rendering
+// anything: unconfigured reports nothing (an unnamed deployment, and the
+// sidebar draws no badge), and naming the deployment through Settings is
+// reflected immediately, the same store round trip
+// TestConfigEndpointReportsShowClosedByDefault covers above.
+func TestConfigEndpointReportsEnvironmentName(t *testing.T) {
+	srv, client := testServer(t)
+
+	type environment struct {
+		EnvironmentName string `json:"environmentName"`
+	}
+	rec := do(t, srv, http.MethodGet, "/api/config", "")
+	cfg := decode[environment](t, rec)
+	if cfg.EnvironmentName != "" {
+		t.Fatalf("environmentName = %q with nothing configured, want empty", cfg.EnvironmentName)
+	}
+
+	if _, err := client.UpdateSettings(context.Background(), firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	name := "staging"
+	if _, err := client.UpdateSettings(context.Background(), ui.UpdateSettingsRequest{EnvironmentName: &name}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = do(t, srv, http.MethodGet, "/api/config", "")
+	cfg = decode[environment](t, rec)
+	if cfg.EnvironmentName != "staging" {
+		t.Fatalf("environmentName = %q after UpdateSettings, want %q", cfg.EnvironmentName, "staging")
+	}
+}
+
 // TestConfigEndpointReportsTaskDefaults is the same round trip for
 // bwsalmon/agents#612's pair, which differs from showClosedByDefault
 // above in what "nothing configured" reports: both default on
@@ -589,7 +622,7 @@ func TestSettingsRoutesReadAndWrite(t *testing.T) {
 	}
 
 	rec = do(t, srv, http.MethodPut, "/api/settings",
-		`{"pollInterval":"1m","maxConcurrent":2,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
+		`{"pollInterval":"1m","maxWorkers":2,"geminiModel":"gemini-2.5-pro","claudeModel":"claude-sonnet-5","githubHost":"github.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put status = %d, want 200: %s", rec.Code, rec.Body)
 	}

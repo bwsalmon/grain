@@ -22,9 +22,10 @@ import (
 // for the local-directory stand-in, or KonturSandboxes for a real
 // bwsalmon/kontur-managed VM — see the package doc comment.
 //
-// MaxConcurrent is how many runs may be in flight at once. It was a
-// []string of slot identifiers until slots stopped existing; dispatch.
-// Cycle counts live runs against this instead of differencing a pool.
+// MaxWorkers/MaxMergers are how many runs may be in flight at once, of
+// each kind model.Limits distinguishes. They were one []string of slot
+// identifiers until slots stopped existing, then one count; dispatch.
+// Cycle counts live runs against them instead of differencing a pool.
 type Deps struct {
 	Store     *model.Store
 	Client    github.Client
@@ -70,20 +71,26 @@ type Deps struct {
 	// not authorization, which Store.GitScope already handles by
 	// resolving a sandbox through the live run on it.
 	RevokeSandboxToken func(sandbox string) error
-	// MaxConcurrent is the starting value for a deployment -- cmd/grain
-	// seeds it from cfg.maxConcurrent -- but RunCycle overwrites its own
+	// MaxWorkers is the starting value for a deployment -- cmd/grain
+	// seeds it from cfg.maxWorkers -- but RunCycle overwrites its own
 	// copy every cycle from deps.Store's grain_config row, so changing it
 	// through the store takes effect on the next tick rather than
 	// requiring a restart. See RunCycle's own doc comment.
-	MaxConcurrent int
+	MaxWorkers int
+	// MaxMergers is MaxWorkers' counterpart for the merge queue's own fix
+	// tasks (grain/task-63): capacity on top of MaxWorkers that only they
+	// may reach, refreshed from the store every cycle the same way. The
+	// pair of them is what reconcileDispatch hands dispatch.Cycle as one
+	// model.Limits -- see that type for the rule they make together.
+	MaxMergers int
 	// Runs, when non-nil, is where a cycle parks the runs it starts:
 	// reconcileDispatch gives each dispatch a goroutine tracked there and
 	// returns without waiting for it, so the cycle -- and the tick after
 	// it -- is over in the time the dispatch *decisions* take rather than
-	// in the time the agents take. That is what makes MaxConcurrent
-	// reachable by a deployment whose tasks arrive one at a time: see
-	// InFlight's own doc comment for what waiting used to cost, and
-	// cmd/grain's drainInFlight for the other half, draining it at
+	// in the time the agents take. That is what makes the configured
+	// concurrency reachable by a deployment whose tasks arrive one at a
+	// time: see InFlight's own doc comment for what waiting used to
+	// cost, and cmd/grain's drainInFlight for the other half, draining it at
 	// shutdown so a run still gets to release its sandbox.
 	//
 	// Nil means a cycle waits for every run it started before returning,
@@ -225,11 +232,12 @@ func StaticFramework(f agent.Framework) func(context.Context, string) (agent.Fra
 // cancelled context means the daemon is shutting down rather than that
 // one reconciler has a problem the others might not.
 //
-// deps.MaxConcurrent and deps.Config.MaxAgentTurns are refreshed from
-// deps.Store's own grain_config row (if any) before any reconciler runs,
-// so a change made through the store -- `grain settings`, or the UI's
-// Settings page -- takes effect on this cycle rather than at the next
-// restart. They are the two settings this package itself is the consumer
+// deps.MaxWorkers, deps.MaxMergers and deps.Config.MaxAgentTurns are
+// refreshed from deps.Store's own grain_config row (if any) before any
+// reconciler runs, so a change made through the store -- `grain
+// settings`, or the UI's Settings page -- takes effect on this cycle
+// rather than at the next
+// restart. They are the settings this package itself is the consumer
 // of; the rest of model.Config is re-applied by whoever owns the piece
 // it configures (cmd/grain/daemon.go's liveConfig, once per tick, for
 // everything a running daemon can adopt at all). deps is taken by value,
@@ -275,7 +283,7 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 		if mc, err := deps.Store.GetConfig(ctx); err != nil {
 			log.Printf("orchestrator: reading stored configuration: %v", err)
 		} else if mc != nil {
-			deps.MaxConcurrent = mc.MaxConcurrent
+			deps.MaxWorkers, deps.MaxMergers = mc.MaxWorkers, mc.MaxMergers
 			deps.Config.MaxAgentTurns = mc.MaxAgentTurns
 		}
 	}
@@ -371,7 +379,7 @@ func reconcileSuites(ctx context.Context, deps Deps, now time.Time) error {
 // handed to deps.Runs, and so outliving this cycle, wherever a caller has
 // given it somewhere to park them (Deps.Runs).
 //
-// This is what actually makes -max-concurrent/GRAIN_MAX_CONCURRENT a
+// This is what actually makes -max-workers/GRAIN_MAX_WORKERS a
 // concurrency knob rather than just a scheduling one (bwsalmon/
 // agents#435): each Dispatch names a distinct task and a distinct run,
 // and each run acquires a sandbox of its own, so two dispatches from the
@@ -409,7 +417,8 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	if deps.Runs != nil {
 		opts = append(opts, dispatch.Busy(deps.Runs.Busy))
 	}
-	dispatches, err := dispatch.Cycle(ctx, deps.Store, deps.MaxConcurrent, now, opts...)
+	limits := model.Limits{Workers: deps.MaxWorkers, Mergers: deps.MaxMergers}
+	dispatches, err := dispatch.Cycle(ctx, deps.Store, limits, now, opts...)
 	if err != nil {
 		return fmt.Errorf("orchestrator: %w", err)
 	}
@@ -420,16 +429,19 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	// for why -- in short, waiting here made a cycle as slow as its
 	// slowest agent, and cmd/grain's reconcile loop does not tick again
 	// until a cycle returns, so a single running task stopped every other
-	// task from starting however much of MaxConcurrent was free.
+	// task from starting however much of the deployment's capacity was
+	// free.
 	//
 	// An error has nowhere to be returned to once that happens -- the
 	// cycle it belonged to is long over -- so it is logged, the same way
 	// cmd/grain's own loop logs whatever a cycle returns. Nothing else is
 	// lost by that: the run's own outcome and diagnosis are already in
-	// the store (RunDispatch finishes the row on every path it takes,
-	// and runOne's setup guard finishes one whose sandbox never came up),
-	// which is where a UI or a retry reads them from rather than from a
-	// cycle's error.
+	// the store, on all three of the paths there are to get them there --
+	// RunDispatch finishes the row for anything the agent's own run did,
+	// runOne's setup guard finishes one whose sandbox never came up, and
+	// noteFinishFailure records what went wrong after the run, once
+	// RunDispatch has already finished the row. That is where a UI or a
+	// retry reads them from, rather than from a cycle's error.
 	if deps.Runs != nil {
 		for _, d := range dispatches {
 			deps.Runs.Go(d.RunID, d.TaskID, func() {
@@ -499,7 +511,7 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// That is not merely untidy. task_state reads a live run as 'running',
 	// so the task never returns to 'queued' and task_ready never offers it
 	// again; LiveRunCount still counts the row, so the deployment
-	// permanently loses one unit of -max-concurrent; and retryEligible
+	// permanently loses one unit of -max-workers; and retryEligible
 	// reads *finished* runs, so the backoff that is supposed to retry a
 	// transient failure never sees one to retry. Nothing sweeps it either:
 	// Config.MaxRunRuntime is enforced inside RunDispatch, and
@@ -688,6 +700,30 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 		placer = placing
 	}
 
+	// From here this run can be asked to throw its sandbox away and start
+	// again in a fresh one (Config.SandboxRecreations, and pkg/mcp's
+	// recreate_sandbox behind it) -- an agent that has wedged its own
+	// sandbox, or landed on a guest that stopped answering, otherwise has
+	// no move left but to spend the rest of its turns failing.
+	//
+	// Registered after everything a rebuild has to put back is in hand
+	// (the sandbox itself, its tools, and the two routes a placement can
+	// take into it) and deferred *after* the release above, so that
+	// deferred calls run in the order this needs: unregistering first --
+	// which waits out a rebuild already in flight -- and only then
+	// destroying the VM that rebuild was building.
+	stopRecreating := deps.Config.SandboxRecreations.register(d.TaskID, &sandboxRecreation{
+		store:       deps.Store,
+		cfg:         deps.Config,
+		task:        *task,
+		sandbox:     sandbox,
+		tools:       tools,
+		sandboxRoot: sandboxRoot,
+		placer:      placer,
+		mint:        deps.MintSandboxToken,
+	})
+	defer stopRecreating()
+
 	// Built here, after the sandbox and before RunDispatch takes over
 	// finishing this run, so a task naming a framework whose credential
 	// is not configured yet ends as a setup-failed run saying exactly
@@ -729,7 +765,71 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 				salvageErr = err
 			}
 		}
-		return errors.Join(runErr, salvageErr)
+		if salvageErr != nil {
+			// Joined, so the overwrite noteFinishFailure is about to make
+			// carries the framework's own diagnosis too: a run that ran
+			// out of turns *and* could not have its branch salvaged has
+			// two things wrong with it, and the row has one detail.
+			return noteFinishFailure(ctx, deps.Store, d.RunID, errors.Join(runErr, salvageErr))
+		}
+		return runErr
 	}
-	return ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now)
+	return noteFinishFailure(ctx, deps.Store, d.RunID,
+		ProcessResult(ctx, deps.Store, deps.Client, *task, result, d.RunID, now))
+}
+
+// noteFinishFailure records, on the run's own row, that turning a
+// finished agent run into the effects it implies is what failed -- then
+// hands err back unchanged for its caller to return.
+//
+// It closes the one hole in reconcileDispatch's claim that "the run's own
+// outcome and diagnosis are already in the store". They are for
+// everything RunDispatch owns: it finishes the row on every path it can
+// take. They are not for anything after it. ProcessResult runs once
+// FinishRun has already written this run's outcome, and every way it can
+// fail is a GitHub call -- reading whether the branch is there
+// (branchExistsSettled), finding or opening its pull request
+// (EnsurePullRequest) -- so an error here means the agent's work is on
+// the remote and nothing points at it. The task is left un-completed and
+// dispatch retries it, which is the right thing to do about a transient
+// GitHub failure and the wrong thing to do about a persistent one; either
+// way the row still says whatever outcomeOf guessed, the error reaches
+// only the daemon's journal, and a human reading the task sees an attempt
+// whose detail describes a run that went fine, repeated, with no reason
+// given anywhere for why it is being repeated. That is precisely the
+// question `grain get` exists to answer.
+//
+// "finish-failed" rather than a correction of the outcome already there:
+// the run itself is not what failed, the same distinction runOne's own
+// setup guard draws with "setup-failed" at the other end. The vocabulary
+// is open (metrics.Runs.Outcomes' own doc comment), and task_streak
+// counts it the way it counts any other non-"succeeded" ending, so the
+// retry this failure earns still backs off rather than spinning.
+//
+// The salvage half of a run that had already failed on its own goes
+// through here too, with both errors joined, so overwriting the row does
+// not throw the framework's own diagnosis away. A salvage that worked
+// never reaches this at all, which is what leaves a run that ran out of
+// turns after pushing reading "failed" with the reason it failed --
+// salvaging its branch was never a claim that the run went well.
+//
+// A failure to record the failure is joined on rather than replacing it:
+// the original error is the one worth reporting, and a store that cannot
+// take this write is its own separate problem.
+func noteFinishFailure(ctx context.Context, store *model.Store, runID string, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Detached from ctx's own cancellation, and bounded, for the same
+	// reason the sandbox release above is: a daemon shutting down or a
+	// task closed mid-run is exactly when this row would otherwise keep
+	// an outcome that does not explain itself.
+	noteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runCleanupTimeout)
+	defer cancel()
+	if serr := store.SetRunOutcome(noteCtx, runID, "finish-failed",
+		"this run's result could not be turned into a pull request or a comment: "+
+			err.Error()); serr != nil {
+		return errors.Join(err, fmt.Errorf("orchestrator: recording run %s's finishing failure: %w", runID, serr))
+	}
+	return err
 }

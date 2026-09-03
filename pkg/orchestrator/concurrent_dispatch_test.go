@@ -3,7 +3,7 @@
 // started. Every test here files its second task *after* the first run
 // is already inside framework.Run, which is the ordinary case (a person
 // files a task while something is running) and the one that used to wait
-// out the whole run however much of MaxConcurrent was idle.
+// out the whole run however much of MaxWorkers was idle.
 package orchestrator_test
 
 import (
@@ -78,7 +78,7 @@ func cycle(t *testing.T, ctx context.Context, deps orchestrator.Deps) {
 
 // asyncDeps is the wiring a deployment has: an InFlight to park runs in,
 // so a cycle is over once its decisions are made.
-func asyncDeps(t *testing.T, store *model.Store, fw *blockingFramework, maxConcurrent int) (orchestrator.Deps, *orchestrator.InFlight) {
+func asyncDeps(t *testing.T, store *model.Store, fw *blockingFramework, maxWorkers int) (orchestrator.Deps, *orchestrator.InFlight) {
 	t.Helper()
 	_, client := newSim(t, "acme", "widgets", "main")
 	runs := &orchestrator.InFlight{}
@@ -87,7 +87,7 @@ func asyncDeps(t *testing.T, store *model.Store, fw *blockingFramework, maxConcu
 		Client:        client,
 		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
 		Framework:     orchestrator.StaticFramework(fw),
-		MaxConcurrent: maxConcurrent,
+		MaxWorkers: maxWorkers,
 		Runs:          runs,
 	}, runs
 }
@@ -130,7 +130,7 @@ func TestACycleDispatchesATaskFiledWhileAnotherRunIsLive(t *testing.T) {
 // live across ticks precisely because the goroutine that finishes it
 // outlives the cycle -- so a second tick sees the first run's capacity
 // still spent.
-func TestACycleDoesNotDispatchPastMaxConcurrentWhileARunIsLive(t *testing.T) {
+func TestACycleDoesNotDispatchPastMaxWorkersWhileARunIsLive(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	filedTask(t, ctx, store, "t1", repo)
@@ -167,12 +167,12 @@ func TestACycleDoesNotDispatchPastMaxConcurrentWhileARunIsLive(t *testing.T) {
 	finishedRun(t, ctx, store, "t2")
 }
 
-// A change to max-concurrent made through the store -- `grain settings`,
+// A change to max-workers made through the store -- `grain settings`,
 // or the UI's Settings page, either of which ends in Store.PutConfig --
 // takes effect on the next cycle, with no restart and no change to the
 // Deps a long-lived daemon process already built: RunCycle itself
 // re-reads it (RunCycle's own doc comment).
-func TestACycleAdoptsAMaxConcurrentChangeFromTheStoreWithoutRestart(t *testing.T) {
+func TestACycleAdoptsAMaxWorkersChangeFromTheStoreWithoutRestart(t *testing.T) {
 	store, ctx := openStore(t)
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
 	filedTask(t, ctx, store, "t1", repo)
@@ -190,11 +190,11 @@ func TestACycleAdoptsAMaxConcurrentChangeFromTheStoreWithoutRestart(t *testing.T
 		t.Fatalf("t2 was dispatched (%+v) with the deployment's one run already live", got)
 	}
 
-	if err := store.PutConfig(ctx, model.Config{MaxConcurrent: 2}); err != nil {
+	if err := store.PutConfig(ctx, model.Config{MaxWorkers: 2}); err != nil {
 		t.Fatalf("PutConfig: %v", err)
 	}
 
-	// deps itself still says MaxConcurrent: 1 -- exactly what a running
+	// deps itself still says MaxWorkers: 1 -- exactly what a running
 	// daemon's own copy would say, since nothing restarted it.
 	cycle(t, ctx, deps)
 	enteredRun(t, fw, "t2-1")

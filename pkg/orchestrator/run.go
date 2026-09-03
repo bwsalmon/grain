@@ -442,6 +442,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, comments,
 			attachments, checkoutDir, frameworkOpensPullRequests(framework))
 	}
+	// Told to the recreate path, which is registered one level up in
+	// runOne and so never sees this: what a rebuilt sandbox needs is
+	// these already-minted placements written back into it, not a second
+	// materialization that would mint a second set of credentials behind
+	// the back of the single revoke below. A no-op for the usual run,
+	// which has no capabilities at all, and for every caller that wired
+	// no registry.
+	cfg.SandboxRecreations.setMaterialized(d.TaskID, materialized)
 
 	var result *agent.Result
 	var runErr error
@@ -612,13 +620,14 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 // names and counts, like noActionDetail: this lands in a stored outcome
 // column that `grain get` prints, not a transcript.
 //
-// Both ways a run can fail with a result behind it use this: a framework
-// that returned an error (above) and a run whose own tool call errored
-// (outcomeOf). The second used to record only the failing call's name, so
-// a run that opened its pull request and then tripped over something
-// unrelated read back as never having opened one -- which is a wrong
-// answer to the only question task_run.detail can be asked about tool
-// use, not merely a thinner one.
+// The one way a run can now fail with a result behind it uses this: a
+// framework that returned an error (above). An erroring tool call used to
+// be a second way, and used to record only the failing call's name, so a
+// run that opened its pull request and then tripped over something
+// unrelated read back as never having opened one -- a wrong answer to the
+// only question task_run.detail can be asked about tool use, not merely a
+// thinner one. It is not an ending at all any more (outcomeOf), which
+// leaves this to the framework's own failures.
 func partialWorkSuffix(result *agent.Result) string {
 	if result == nil || len(result.ToolCalls) == 0 {
 		return ""
@@ -630,11 +639,47 @@ func partialWorkSuffix(result *agent.Result) string {
 // outcomeOf reads agent.Result.ToolCalls -- the only record of what
 // happened inside the run (mcp/mock_tools.go's own sink is internal and
 // discarded when Run returns) -- and turns it into a run outcome and a
-// short reason for it: any error tool call fails the run, and so does a
-// run that made no tool call at all, since an agent that never touched
-// run_command did not do the work. Ported from pkg/orchestrate's own
-// runAgent (bwsalmon/agents#254), extended with detail for
-// bwsalmon/agents#403's own "a human should see why, not just that".
+// short reason for it: a run that made no tool call at all failed, since
+// an agent that never touched run_command did not do the work, and every
+// other run that got as far as its tools reads "succeeded" here until
+// ProcessResult has checked whether those calls amounted to anything
+// (Store.SetRunOutcome's own doc comment on that division of labour).
+// Ported from pkg/orchestrate's own runAgent (bwsalmon/agents#254),
+// extended with detail for bwsalmon/agents#403's own "a human should see
+// why, not just that".
+//
+// An errored tool call is deliberately not a failure any more. It used to
+// be -- the first ToolCall with IsError set ended this function -- and
+// that read a normal turn of the agent's own loop as a broken run. IsError
+// is how a tool reports an ordinary result the agent is expected to read
+// and work around: pkg/mcp's run_command sets it for any non-zero exit
+// status, so a grep that matched nothing, a test suite that failed before
+// the agent fixed it, or a `git diff --quiet` that found changes all
+// marked the whole run failed; read_file sets it for a file that is not
+// there, and edit_file for an old_string that did not match or matched
+// twice, which is the search-and-refine loop working exactly as intended.
+// Almost every real run trips one of those, so almost every real run --
+// including the ones that committed, pushed and opened a pull request --
+// was recorded "failed".
+//
+// What that cost was never cosmetic. task_streak (schema.go) counts every
+// finished run whose outcome is not "succeeded", so those bogus failures
+// drive dispatch.retryEligible's exponential backoff on a task that is
+// working fine, and take it to model.MaxConsecutiveFailures -- state
+// 'failed', dispatched no more -- on the strength of a grep. It also had
+// to be papered over twice downstream, once in model.Transitions and once
+// in ui.Client.Task, both of which suppress a failure streak on a task
+// that plainly completed (bwsalmon/agents#502 and #514); those guards are
+// treating this symptom rather than the cause.
+//
+// A run really broken by its tools does not need this heuristic. A tool
+// framework that failed -- the agent CLI dying, its MCP connection
+// dropping, a sandbox that stopped answering -- comes back as a non-nil
+// error from framework.Run and is recorded "failed" by RunDispatch above,
+// with the framework's own diagnosis. A run whose tools worked but which
+// achieved nothing is corrected to "no_action" by ProcessResult once a
+// push, a question and a closing comment have all actually been ruled
+// out. This function's job is only the guess in between.
 //
 // Every ending that had a run behind it at all carries toolCallSummary,
 // including the successful one, which used to record nothing. That is not
@@ -656,19 +701,34 @@ func partialWorkSuffix(result *agent.Result) string {
 // the same bound noActionDetail's own doc comment sets, and the reason
 // this is not a transcript store.
 func outcomeOf(result *agent.Result) (outcome, detail string) {
-	sawTool := false
-	for _, c := range result.ToolCalls {
-		sawTool = true
-		if c.IsError {
-			return "failed", fmt.Sprintf("tool call %q failed: %s%s",
-				c.Name, c.Text, partialWorkSuffix(result))
-		}
-	}
-	if !sawTool {
+	if len(result.ToolCalls) == 0 {
 		return "failed", "the agent made no tool calls at all"
 	}
-	return "succeeded", fmt.Sprintf("the run made %d tool call(s)%s",
-		len(result.ToolCalls), toolCallSummary(result))
+	return "succeeded", fmt.Sprintf("the run made %d tool call(s)%s%s",
+		len(result.ToolCalls), toolCallSummary(result), erroredCallSuffix(result))
+}
+
+// erroredCallSuffix says how many of a run's tool calls came back as
+// errors, or nothing at all when none did.
+//
+// Recorded even though it no longer decides the outcome (see outcomeOf):
+// toolCallSummary already marks which tools errored and how often, but it
+// marks them per tool, and the one number a human scanning `grain get`
+// wants is how much of the run was spent on calls that did not land. A
+// handful is the ordinary shape of agentic work; nearly all of them is
+// the shape of a sandbox that stopped answering, and that is worth being
+// able to see on a run whose outcome is otherwise unremarkable.
+func erroredCallSuffix(result *agent.Result) string {
+	errored := 0
+	for _, c := range result.ToolCalls {
+		if c.IsError {
+			errored++
+		}
+	}
+	if errored == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d of them returned an error", errored)
 }
 
 // prepareCapabilities resolves and materializes cc.Task's capability

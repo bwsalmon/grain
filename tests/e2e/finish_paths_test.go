@@ -59,7 +59,7 @@ func TestAgentCompletesByCommentingWithNoPushOpensNoPullRequest(t *testing.T) {
 
 	const comment = "looked into it -- the behavior described is already correct, no change needed"
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxWorkers: 1,
 		Framework: scriptedFramework(commentOnlyScript(comment)),
 	}
 
@@ -120,7 +120,7 @@ func TestSyncPullRequestsClosesATaskWhosePullRequestWasClosedWithoutMerging(t *t
 
 	branch := model.BranchName("t-declined")
 	deps := orchestrator.Deps{
-		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxConcurrent: 1,
+		Store: w.store, Client: client, Sandboxes: worldSandboxes{w}, MaxWorkers: 1,
 		Framework: scriptedFramework(pushScript(w.remote(owner, repoName), branch, "t-declined")),
 	}
 
