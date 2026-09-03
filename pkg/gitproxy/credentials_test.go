@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -123,6 +124,55 @@ func TestGetFailsClosedForAnUnconfiguredName(t *testing.T) {
 	}
 	if _, ok := set.Get("nonexistent"); ok {
 		t.Error("expected Get to fail closed for a missing token file")
+	}
+}
+
+func TestNamesListsEveryConfiguredCredentialOnce(t *testing.T) {
+	dir := writeCredentialSet(t, map[string]string{"*": "bot"},
+		map[string]string{"bot": "bot-token", "release-bot": "release-token"})
+	// A credential backed by both file shapes is still one credential --
+	// load prefers the App one, so counting it twice would offer a
+	// duplicate capability for a single token.
+	if err := os.WriteFile(filepath.Join(dir, "release-bot.app.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	set, err := LoadCredentialSet(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := set.Names()
+	want := []string{"bot", "release-bot"}
+	if !slices.Equal(got, want) {
+		t.Errorf("Names() = %v, want %v -- credentials.json itself is not a credential", got, want)
+	}
+}
+
+func TestExtraNamesIsEveryCredentialButTheDefault(t *testing.T) {
+	dir := writeCredentialSet(t, map[string]string{"*": "bot", "acme/*": "acme-bot"},
+		map[string]string{"bot": "bot-token", "acme-bot": "acme-token", "release-bot": "release-token"})
+	set, err := LoadCredentialSet(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := set.DefaultName(); got != "bot" {
+		t.Errorf("DefaultName() = %q, want %q", got, "bot")
+	}
+	// acme-bot stays in: a narrower ladder entry says which repos reach
+	// it without being asked, which is a different question from which
+	// tokens a task may ask for by name.
+	got, want := set.ExtraNames(), []string{"acme-bot", "release-bot"}
+	if !slices.Equal(got, want) {
+		t.Errorf("ExtraNames() = %v, want %v", got, want)
+	}
+}
+
+func TestExtraNamesIsEmptyWithNothingConfigured(t *testing.T) {
+	set, err := LoadCredentialSet(filepath.Join(t.TempDir(), "never-created"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := set.ExtraNames(); len(got) != 0 {
+		t.Errorf("ExtraNames() = %v, want none -- an unreadable secrets directory configures no credentials", got)
 	}
 }
 

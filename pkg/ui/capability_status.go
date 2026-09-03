@@ -261,5 +261,41 @@ func (c *Client) capabilityStatuses(cfg model.Config, repoConfigs []model.RepoCo
 		status.Ready = len(status.MissingConfig) == 0 && len(status.MissingSecrets) == 0
 		out = append(out, status)
 	}
+	return append(out, c.githubTokenStatuses(cfg, reposByCapability)...)
+}
+
+// githubTokenStatuses is one row per named GitHub token this deployment
+// offers as a capability of its own (grain/task-117) -- read off
+// c.Config.Capabilities rather than capabilityCatalog above, because
+// unlike every other row here these are not a property of this build at
+// all: they are whatever tokens an operator has placed under
+// secrets/github, which cmd/grain/daemon.go turned into picker rows and
+// providers at startup.
+//
+// Ready and Grantable are both true by construction, and that is the
+// honest answer rather than an unchecked one: a row exists here only
+// because a credential file of that name exists (gitproxy.CredentialSet.
+// ExtraNames), and it exists in the picker only because the same startup
+// pass put it there beside the matching provider. There is no
+// deployment setting and no secrets-store entry either could be waiting
+// on -- MissingConfig and MissingSecrets ask about the two gates a
+// GitHub token has neither of.
+func (c *Client) githubTokenStatuses(cfg model.Config, reposByCapability map[string][]string) []CapabilityStatus {
+	var out []CapabilityStatus
+	for _, capability := range c.Config.Capabilities {
+		name, ok := model.GitCredentialName(capability.ID)
+		if !ok {
+			continue
+		}
+		out = append(out, CapabilityStatus{
+			ID:           capability.ID,
+			Name:         GitHubTokenDisplayName(name),
+			Description:  capability.Description,
+			Ready:        true,
+			Grantable:    true,
+			Default:      slices.Contains(cfg.DefaultCapabilities, capability.ID),
+			DefaultRepos: reposByCapability[capability.ID],
+		})
+	}
 	return out
 }

@@ -14,6 +14,12 @@ import { Alert, Box, Chip, Stack, Typography } from "@mui/material";
 // fixing a missing secret means visiting the Secrets tab instead, which
 // each capability's own hint below points at.
 //
+// The list is not quite fixed: a deployment's extra named GitHub tokens
+// are capabilities too (grain/task-117, "github-credential:<name>"), and
+// arrive here in the same shape as everything else -- ready and
+// grantable, with no missing config or secrets to report, since a token
+// is a file an operator placed rather than something this build gates.
+//
 // cap.defaultRepos is the second layer of the same choice, made
 // somewhere else again -- on the repos page, one repo at a time
 // (model.RepoConfig.DefaultCapabilities). It is reported here beside
@@ -25,7 +31,9 @@ export default function CapabilitiesPanel({ capabilities }) {
   return (
     <>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Every capability grain ships a provider for, and whether this deployment is currently
+        Every capability grain ships a provider for -- plus one per named GitHub token this
+        deployment has configured beyond its default one, which a task can be given to push and
+        pull through that token instead -- and whether this deployment is currently
         configured for it to work. Secrets live on the Secrets tab. A capability marked "not
         grantable" is one no task can ask for at all, however this deployment is configured; one
         marked "default" is attached to every new task as it is filed, and one marked "default in"

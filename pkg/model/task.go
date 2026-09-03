@@ -226,31 +226,59 @@ func GrantsSubsetOf(grants, allowed []Grant) bool {
 	return true
 }
 
-// gitCredentialGrantPrefix marks a Grant as bwsalmon/agents#52's per-task
-// git credential override: the named credential (gitproxy's
+// GitCredentialCapabilityPrefix marks a capability id as a per-task git
+// credential override: the named credential (gitproxy's
 // CredentialSet.Get) a sandbox's git proxy requests should use in place
 // of the owner/repo ladder, for a scope the ladder's own credentials
 // deliberately withhold (docs/design.md, "Scopes to withhold" --
 // `workflow`, most notably).
-const gitCredentialGrantPrefix = "github-credential:"
+//
+// One id per named credential a deployment has configured beyond its
+// default one, which is what makes each of those tokens a capability of
+// its own -- offered by ui.GitHubTokenCapabilities, provided by
+// pkg/capability/githubtoken, and attached to a task like any other.
+const GitCredentialCapabilityPrefix = "github-credential:"
 
-// GitCredentialGrant is the Grant a `grain-github-<name>` label produces.
-// Via is GrantByLabel: applying the label already requires the same
-// "can apply a label" trust tier the trigger label itself relies on, so
-// this opens no new gate -- the same reasoning bwsalmon/agents#52 gave
-// for the label in the first place. Unlike grain/proxy's
-// SandboxCredentialOverrides, this needs no storage or dispatch/release
-// lifecycle of its own: it lives and dies with the task the same as
-// every other Grant.
+// GitCredentialCapability is the capability id standing for "use the
+// GitHub token named name instead of this deployment's default one".
+func GitCredentialCapability(name string) string {
+	return GitCredentialCapabilityPrefix + name
+}
+
+// GitCredentialName is the credential a GitCredentialCapability id
+// names, and false for any other capability id.
+func GitCredentialName(capability string) (name string, ok bool) {
+	name, ok = strings.CutPrefix(capability, GitCredentialCapabilityPrefix)
+	return name, ok && name != ""
+}
+
+// GitCredentialGrant is the Grant attaching one of those capabilities to
+// a task produces. Via is GrantByLabel: it is something a human turns on
+// per task, the same trust tier applying the trigger label itself relies
+// on, so this opens no new gate -- the same reasoning bwsalmon/agents#52
+// gave for the `grain-github-<name>` label this started as. Unlike
+// grain/proxy's SandboxCredentialOverrides, it needs no storage or
+// dispatch/release lifecycle of its own: it lives and dies with the task
+// the same as every other Grant.
 func GitCredentialGrant(name string) Grant {
-	return Grant{Capability: gitCredentialGrantPrefix + name, Via: GrantByLabel}
+	return Grant{Capability: GitCredentialCapability(name), Via: GrantByLabel}
 }
 
 // gitCredentialOverride returns the credential name a GitCredentialGrant
 // among grants asks for, if any.
+//
+// A task holding more than one of these gets the first in grants' own
+// order -- which, coming from Store.GitCredentialOverride, is the
+// capability id sorted ascending, so the same task resolves to the same
+// token on every request rather than to whichever row was read first.
+// Picking a winner rather than refusing is deliberate: two named tokens
+// on one task is an odd thing to ask for, not a dangerous one (both are
+// credentials this deployment already trusts a task with), and failing
+// the run over it would be a worse answer than quietly using one of
+// them.
 func gitCredentialOverride(grants []Grant) (name string, ok bool) {
 	for _, g := range grants {
-		if n, isOverride := strings.CutPrefix(g.Capability, gitCredentialGrantPrefix); isOverride {
+		if n, isOverride := GitCredentialName(g.Capability); isOverride {
 			return n, true
 		}
 	}

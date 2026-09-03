@@ -89,7 +89,28 @@ edit the file with `run_host_command`, and restart the git proxy for it
 to pick up the change -- it reads this file once at startup, not
 hot-reloaded.
 
-## 4. Verify
+## 4. (Optional) Extra named tokens, one per capability
+
+Everything above configures the credential *every* repo falls back to.
+A deployment can also hold extra named tokens -- a second machine
+account, a token carrying a scope the default one deliberately withholds
+(`workflow`, per docs/design.md's "Scopes to withhold") -- stored exactly
+the way step 2 stored the default one, under a different credential name,
+and needing no `credentials.json` entry at all.
+
+Each of those names becomes a capability of its own,
+`github-credential:<name>`, offered in the per-task capability picker and
+listed on Settings' Capabilities tab. A task holding one pushes and pulls
+through that token instead of the ladder above, for that task only; the
+token itself never enters the sandbox. Like the ladder, the names are
+read once at daemon startup, so a token added now needs a restart before
+it can be ticked on anything.
+
+Only offer this if the human asks for a second token or describes work
+one task needs wider (or narrower) access for. One default credential is
+the ordinary shape.
+
+## 5. Verify
 
 Ask the human to confirm a real push against one of the covered repos
 succeeds (an ordinary task's own dispatch is the real test), or, if

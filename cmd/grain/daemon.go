@@ -87,6 +87,7 @@ import (
 	"github.com/bwsalmon/grain/pkg/capability/gcpkey"
 	"github.com/bwsalmon/grain/pkg/capability/geminikey"
 	"github.com/bwsalmon/grain/pkg/capability/githubsandbox"
+	"github.com/bwsalmon/grain/pkg/capability/githubtoken"
 	"github.com/bwsalmon/grain/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/pkg/capability/selfrepair"
 	"github.com/bwsalmon/grain/pkg/github"
@@ -603,13 +604,24 @@ func run(ctx context.Context, cfg config) error {
 		sandboxes = orchestrator.NewHostSandboxes(cfg.sandboxDir)
 	}
 
+	// Every named GitHub token this deployment has beyond its default one
+	// (grain/task-117), read once here and carried on live below so that
+	// the two halves of this process -- the picker the UI offers and the
+	// providers the reconcile loop resolves grants against -- are built
+	// from one reading of the credential directory rather than two that
+	// could disagree if a file appeared between them.
+	githubTokens, err := gitHubTokenNames(cfg.dataDir)
+	if err != nil {
+		return err
+	}
+
 	// One liveConfig, shared by the two halves of this process: the
 	// reconcile loop refreshes it once per tick and applies what changed
 	// (its own doc comment), and the UI server reads it back to report
 	// what this deployment is actually running with, as opposed to what
 	// is merely stored. Built here because it needs both the config
 	// loadConfig just resolved and the sandbox backend above.
-	live := newLiveConfig(store, sandboxes, cfg)
+	live := newLiveConfig(store, sandboxes, cfg, githubTokens)
 
 	// transcriptDir is where a run's own agent.Framework may mirror its
 	// transcript-in-progress live, and where the UI server below reads one
@@ -773,7 +785,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	// finish path would have opened for it.
 	livePullRequests.Store(&pullRequestOpener{store: store, client: githubClient})
 
-	registry := model.NewCapabilityRegistry(capabilityProviders(cfg)...)
+	registry := model.NewCapabilityRegistry(capabilityProviders(cfg, live.gitHubTokens())...)
 
 	// Recovering any run a previous process left running (bwsalmon/agents#425)
 	// has to happen here, once, before reconcile's first tick -- see
@@ -1496,16 +1508,36 @@ type liveConfig struct {
 	// nil, or a backend that is not one, simply means that pair of
 	// settings has nothing to apply to.
 	sandboxes orchestrator.Sandboxes
+	// githubTokens is every named GitHub token this deployment has
+	// beyond its default one (gitproxy.CredentialSet.ExtraNames), each of
+	// which is a capability of its own (pkg/capability/githubtoken).
+	//
+	// Fixed for this process's lifetime, unlike everything below it: the
+	// credential ladder these names come from is loaded once at startup
+	// and is not hot-reloaded (pkg/gitproxy/credentials.go's own doc
+	// comment), so adding a token means restarting the daemon the same
+	// way changing the default one already does. It is held here anyway
+	// because refresh rebuilds the capability registry from scratch, and
+	// a rebuild that forgot these would quietly drop every named token's
+	// provider the first time somebody changed the GCP project.
+	githubTokens []string
 
 	mu      sync.Mutex
 	applied config
 }
 
 // newLiveConfig starts a liveConfig off at what loadConfig resolved --
-// the configuration this process is about to run with.
-func newLiveConfig(store *model.Store, sandboxes orchestrator.Sandboxes, cfg config) *liveConfig {
-	return &liveConfig{store: store, sandboxes: sandboxes, applied: cfg}
+// the configuration this process is about to run with, plus the named
+// GitHub tokens (githubTokens above) it was started with.
+func newLiveConfig(store *model.Store, sandboxes orchestrator.Sandboxes, cfg config, githubTokens []string) *liveConfig {
+	return &liveConfig{store: store, sandboxes: sandboxes, githubTokens: githubTokens, applied: cfg}
 }
+
+// gitHubTokens is the named GitHub tokens this process started with --
+// see the field's own doc comment on why they need no lock: they are set
+// once, before either half of this process is running, and never
+// change.
+func (l *liveConfig) gitHubTokens() []string { return l.githubTokens }
 
 // current is the configuration in effect right now. Safe to call from
 // any goroutine -- the UI server calls it to answer GET /api/settings
@@ -1560,7 +1592,7 @@ func (l *liveConfig) refresh(ctx context.Context, deps *orchestrator.Deps) (poll
 		// and a dispatch goroutine still holding the old registry keeps
 		// resolving against it (deps is copied per cycle and per
 		// dispatch) rather than seeing one change underneath it.
-		deps.Config.Capabilities = model.NewCapabilityRegistry(capabilityProviders(now)...)
+		deps.Config.Capabilities = model.NewCapabilityRegistry(capabilityProviders(now, l.githubTokens)...)
 	}
 	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB || now.sandboxDiskGB != was.sandboxDiskGB {
 		if shaper, ok := l.sandboxes.(defaultShaper); ok {
@@ -1766,7 +1798,10 @@ func (c config) withModelConfig(mc model.Config) config {
 // who never runs `grain controller bootstrap-github-app` simply leaves
 // its two secrets unresolvable, and Materialize fails closed the same
 // way any other missing secret does.
-func capabilityProviders(cfg config) []model.CapabilityProvider {
+//
+// githubTokens is this deployment's named GitHub tokens beyond its
+// default one (gitHubTokenNames below), one provider each.
+func capabilityProviders(cfg config, githubTokens []string) []model.CapabilityProvider {
 	var providers []model.CapabilityProvider
 	if cfg.gcpProject != "" {
 		if cfg.gcpServiceAccountEmail != "" {
@@ -1780,7 +1815,34 @@ func capabilityProviders(cfg config) []model.CapabilityProvider {
 		Host: cfg.githubHost, InsecureHTTP: cfg.githubInsecureHTTP,
 	}))
 	providers = append(providers, selfdebug.New(), selfrepair.New(), bootstrap.New())
+	// One per named GitHub token beyond this deployment's default one
+	// (grain/task-117). Registered last, and unconditionally on the names
+	// being there: a token is a capability because an operator's own file
+	// under secrets/github says so, not because anything in this build
+	// enumerates it -- so without these, granting one would be refused as
+	// a capability no provider is registered for (model.ResolveGrants),
+	// and the run would never dispatch.
+	providers = append(providers, githubtoken.Providers(githubTokens)...)
 	return providers
+}
+
+// gitHubTokenNames is every named GitHub token dataDir's credential
+// ladder holds beyond the deployment default -- the names
+// capabilityProviders above turns into providers and startUIServer into
+// picker rows.
+//
+// A fourth load of the same ladder (runDaemon's own git proxy, its
+// GitHub REST client and the UI server each build one too, all of them
+// cheap and none of them hot-reloaded -- see startUIServer's own comment
+// on why a second copy is fine): run() needs these names before either
+// of those exists, and one reading shared by both halves of the process
+// is what keeps the picker and the registry offering the same set.
+func gitHubTokenNames(dataDir string) ([]string, error) {
+	credentials, err := gitproxy.LoadCredentialSet(filepath.Join(dataDir, "secrets", "github"))
+	if err != nil {
+		return nil, fmt.Errorf("loading GitHub credential ladder for named-token capabilities: %w", err)
+	}
+	return credentials.ExtraNames(), nil
 }
 
 // defaultSourceDir is where the deployment image carries the source it
@@ -2027,8 +2089,13 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		return nil, fmt.Errorf("loading GitHub credential ladder for the UI: %w", err)
 	}
 	uiCfg := ui.Config{
-		Actor:        ui.DefaultActor(actorID(cfg.actor)),
-		Capabilities: ui.OfferedCapabilities(),
+		Actor: ui.DefaultActor(actorID(cfg.actor)),
+		// The fixed set grain ships providers for, plus one row per named
+		// GitHub token this deployment has beyond its default one
+		// (grain/task-117) -- the same names capabilityProviders builds
+		// the matching providers from, so every id the picker offers is
+		// one a dispatch can actually resolve.
+		Capabilities: append(ui.OfferedCapabilities(), ui.GitHubTokenCapabilities(live.gitHubTokens())...),
 		Secrets:      secrets.New(filepath.Join(cfg.dataDir, "secrets")),
 		Reboot:       rebootHost(cfg.rebootCmd),
 		TargetRepos:  cfg.targetRepos,
