@@ -31,6 +31,14 @@
 // `grain daemon` loads) and never crosses into the sandbox, so
 // docs/design.md's split surface -- "Sandboxes: git transport only" --
 // is untouched. See pkg/mcp/pullrequest_tools.go's own doc comment.
+//
+// -server and -task add one further tool, open_pull_request: a run that
+// has pushed its branch can have grain open its pull request there and
+// then, and read back what the repo's own CI makes of it, rather than
+// exiting blind and leaving the pull request to the finish path. They
+// name the daemon to ask and the task to ask about -- see
+// daemonPullRequests below for why this process asks a daemon rather than
+// calling GitHub itself.
 package main
 
 import (
@@ -49,7 +57,46 @@ import (
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/ui"
 )
+
+// daemonPullRequests implements mcp.PullRequestOpener by asking a running
+// "grain daemon" to open the pull request for one task's branch (pkg/ui's
+// POST /api/tasks/{id}/pull-request) -- the same REST API the grain CLI
+// speaks, reached the same way, since this process is on the controller
+// alongside the daemon that forked it.
+//
+// The hop exists because of what this process deliberately does not have.
+// A run's route to GitHub is grain's, never the agent's (pkg/gitproxy's
+// whole shape), and an mcpserver drives tools on the agent's behalf, so
+// handing it a GitHub token to open a pull request with would put that
+// credential exactly where the design says it must never be. The daemon
+// has the token; this asks it, by task id, and the daemon decides from
+// that task's own record which repo and which branch that means.
+type daemonPullRequests struct {
+	client *ui.HTTPClient
+	taskID string
+}
+
+func (d daemonPullRequests) OpenPullRequest(ctx context.Context) (mcp.PullRequestReport, error) {
+	status, err := d.client.OpenPullRequest(ctx, d.taskID)
+	if err != nil {
+		return mcp.PullRequestReport{}, err
+	}
+	report := mcp.PullRequestReport{
+		Repo:            status.Repo,
+		Number:          status.Number,
+		URL:             status.URL,
+		ChecksAvailable: status.ChecksAvailable,
+		ChecksError:     status.ChecksError,
+	}
+	for _, c := range status.Checks {
+		report.Checks = append(report.Checks, mcp.CheckReport{
+			Name: c.Name, Status: c.Status, Conclusion: c.Conclusion,
+		})
+	}
+	return report, nil
+}
 
 func mcpserver(args []string) {
 	fs := flag.NewFlagSet("grain mcpserver", flag.ExitOnError)
@@ -79,6 +126,13 @@ func mcpserver(args []string) {
 	githubInsecureHTTP := fs.Bool("github-insecure-http", false,
 		"reach -github-host over plain HTTP instead of HTTPS -- for a local mock GitHub in a "+
 			"live test, never for a real deployment")
+
+	server := fs.String("server", "",
+		"base URL of the \"grain daemon\" this server's run was dispatched by, e.g. http://127.0.0.1:8420 "+
+			"-- with -task, adds the open_pull_request tool, which asks that daemon to open the run's own "+
+			"pull request (this process holds no GitHub credential of its own)")
+	taskID := fs.String("task", "",
+		"id of the task this server's run belongs to (required with -server)")
 	fs.Parse(args)
 
 	var tools []mcp.Tool
@@ -109,6 +163,24 @@ func mcpserver(args []string) {
 	// Unlike those, this one is not mocked: it really does read GitHub,
 	// from this process, on the controller. See the file's doc comment.
 	registry.Register(pullRequestTools(*dataDir, *githubHost, *githubInsecureHTTP, *prRepo, *prBranch)...)
+
+	// open_pull_request is the one tool here whose effect is real and
+	// immediate, so it is registered only when this process was actually
+	// told which daemon and which task it serves -- a run driven from a
+	// bare `grain mcpserver -sandbox-root` (pkg/mcp's own tests,
+	// tests/e2e/) has no daemon to ask and is better off not advertising
+	// a tool that could only ever refuse.
+	switch {
+	case *server != "" && *taskID == "":
+		fmt.Fprintln(os.Stderr, "grain mcpserver: -task is required with -server")
+		os.Exit(2)
+	case *server == "" && *taskID != "":
+		fmt.Fprintln(os.Stderr, "grain mcpserver: -server is required with -task")
+		os.Exit(2)
+	case *server != "":
+		registry.Register(mcp.NewOpenPullRequestTools(
+			daemonPullRequests{client: ui.NewHTTPClient(*server), taskID: *taskID})...)
+	}
 
 	// Serve returns io.EOF once its caller closes the write end of our
 	// stdin -- the ordinary way a client signals "done", not a failure.

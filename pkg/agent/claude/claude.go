@@ -151,6 +151,7 @@ type Framework struct {
 	githubDataDir   string
 	githubHost      string
 	githubInsecure  bool
+	grainServerURL  string
 }
 
 // Option configures a Framework at construction time.
@@ -227,6 +228,22 @@ func WithGitHubAccess(dataDir, host string, insecureHTTP bool) Option {
 	}
 }
 
+// WithGrainServer names the running "grain daemon"'s own UI/API base URL
+// (e.g. "http://127.0.0.1:8420") for the forked "mcpserver" subprocess to
+// reach it at -- which, together with a RunConfig.TaskID, is what gives a
+// run the open_pull_request tool. That tool's effect is real and
+// immediate, unlike the mocked escape hatches, and it happens by asking
+// the daemon rather than by this process or its children holding a GitHub
+// credential (cmd/grain/mcpserver.go's daemonPullRequests).
+//
+// Unset -- a deployment serving no UI/API, or any caller that has no
+// daemon to name -- leaves the tool unregistered and every run exactly as
+// it was: a pushed branch still becomes a pull request when the run
+// finishes.
+func WithGrainServer(url string) Option {
+	return func(f *Framework) { f.grainServerURL = url }
+}
+
 // New builds a Framework that runs the real claude binary at claudePath
 // (typically just "claude", resolved against $PATH) and points every
 // run's --mcp-config at grainBinaryPath -- the same grain binary this
@@ -268,6 +285,15 @@ func allowedTools() []string {
 	for _, t := range mcp.NewPullRequestTools(nil, mcp.PullRequestScope{}) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
+	// Named unconditionally, even for a run whose mcpserver will not
+	// register it (no -server/-task): --allowedTools is a filter over
+	// what the server actually advertises, so admitting a tool that is
+	// not there costs nothing, while a run that *does* have it and is not
+	// admitted would be refused by --strict-mcp-config. nil is a
+	// PullRequestOpener no run ever gets -- this only wants the names.
+	for _, t := range mcp.NewOpenPullRequestTools(nil) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
 	return names
 }
 
@@ -298,6 +324,13 @@ func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 //
 // pullRequestArgs is appended to either, since which repo's CI a run may
 // read is independent of which backend its sandbox runs on.
+//
+// The daemon's own address and this run's task id are appended to
+// whichever of those two the sandbox produced, when both are known: they
+// are what the forked server needs to offer open_pull_request (see
+// WithGrainServer). Both or neither -- one without the other names a
+// question with no address to send it to, or an address with nothing to
+// ask about, and mcpserver.go rejects either half on its own.
 func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 	var args []string
 	switch {
@@ -322,7 +355,11 @@ func (f *Framework) mcpServerArgs(cfg agent.RunConfig) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("claude: RunConfig.SandboxRoot or .KonturVM is required")
 	}
-	return append(args, f.pullRequestArgs(cfg)...), nil
+	args = append(args, f.pullRequestArgs(cfg)...)
+	if f.grainServerURL != "" && cfg.TaskID != "" {
+		args = append(args, "-server", f.grainServerURL, "-task", cfg.TaskID)
+	}
+	return args, nil
 }
 
 // pullRequestArgs is the "-data-dir/-pr-repo/-pr-branch" triple that
