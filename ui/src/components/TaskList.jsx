@@ -64,6 +64,7 @@ const ORIGIN_LABELS = {
   schedule: "Scheduled",
   suite: "Suite run",
   fix: "Merge fix",
+  review: "Review",
 };
 
 // originOf is the one thing that put this task in the list -- what the
@@ -73,6 +74,9 @@ const ORIGIN_LABELS = {
 // generated from another task, so answering "proposed" for it would say
 // the less specific of two true things.
 function originOf(t) {
+  // Review before fix: both are stacked, and only one of them is a
+  // repair of a red build.
+  if (t.review) return "review";
   if (t.stacked) return "fix";
   if (t.scheduled) return "schedule";
   if (t.suiteRun) return "suite";
@@ -442,7 +446,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // nested says this row is already sitting in a .task-sublist under the
 // task it was generated from, which is the only thing that makes a
 // stacked task self-explaining -- so it is what decides whether the
-// "merge fix" chip below is worth its space. Callers that list tasks
+// "merge fix"/"review" chip below is worth its space. Callers that list tasks
 // flat (groupByStack's own fallback for a stacked task whose parent is
 // filtered out or gone) leave it off and get the chip.
 //
@@ -452,11 +456,26 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // rather than from every row of every list a task can appear in.
 //
 // dragPlaceholder is for a row with no handle of its own in a list where
-// the other rows have one -- a stacked merge fix, which is never
-// reordered because the merge queue always runs it ahead of the backlog.
+// the other rows have one -- a stacked merge fix or review, neither of
+// which is ever reordered, since both are filed ahead of the backlog.
 // Without it that row's badge, number and title would each sit a handle's
 // width left of every other row's, so the column the handle occupies is
 // held open and empty instead.
+// reviewOrFixTitle says which of the two stacked kinds a row is, and
+// what it was stacked onto -- the same words the chip's label picks
+// between, spelled out. Both branch off another task's own branch and
+// merge back into it; only one of them is a repair of a red build.
+function reviewOrFixTitle(t) {
+  if (t.review) {
+    return t.generatedFrom
+      ? `a review of ${t.generatedFrom}'s own code, run before it merges`
+      : "a review of another task's own code, run before it merges";
+  }
+  return t.generatedFrom
+    ? `the merge queue's own automatic fix for ${t.generatedFrom}`
+    : "the merge queue's own automatic fix for another task's pull request";
+}
+
 export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, dragPlaceholder, nested }) {
   const phase = completionPhase(t);
   // What the run itself says it is doing, for as long as it is running
@@ -509,10 +528,8 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
           <Chip
             size="small"
             className="chip-stacked"
-            title={t.generatedFrom
-              ? `the merge queue's own automatic fix for ${t.generatedFrom}`
-              : "the merge queue's own automatic fix for another task's pull request"}
-            label="merge fix"
+            title={reviewOrFixTitle(t)}
+            label={t.review ? "review" : "merge fix"}
           />
         )}
         {t.interactive && (

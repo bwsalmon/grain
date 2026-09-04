@@ -113,6 +113,14 @@ type Task struct {
 	// propose_task child, a stacked task is not new work, just a
 	// continuation of the same change.
 	Stacked bool `json:"stacked,omitempty"`
+	// Review is true for the half of Stacked that is a review of another
+	// task's work rather than a repair of its pull request
+	// (model.ReasonReview, grain/task-284). Both nest under the task
+	// they came from, which is what Stacked says; only this says which
+	// of the two a nested task is, and a reader wants to know -- "a
+	// second agent read this change" and "the merge queue patched a red
+	// build" are not the same event.
+	Review bool `json:"review,omitempty"`
 	// Scheduled is true for a task a schedule filed automatically
 	// (model.ReasonSchedule) -- a UI badge, the same treatment Stacked
 	// already gives model.ReasonFix, so a task that appeared with nobody
@@ -326,6 +334,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		ReviewTemplateName:  reviewTemplateName,
 		Capabilities:        []string{},
 		Stacked:             t.Origin.Reason == model.ReasonFix || t.Origin.Reason == model.ReasonReview,
+		Review:              t.Origin.Reason == model.ReasonReview,
 		Scheduled:           t.Origin.Reason == model.ReasonSchedule,
 		SuiteRun:            t.Origin.Reason == model.ReasonSuite,
 		CreatedAt:           t.CreatedAt,

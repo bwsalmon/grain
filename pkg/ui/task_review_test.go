@@ -9,6 +9,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -101,6 +102,42 @@ func TestUpdateTaskRejectsAnUnknownReviewTemplate(t *testing.T) {
 	var ve *ui.ValidationError
 	if !errors.As(err, &ve) {
 		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+// A review task nests under the task it reviews the way an automatic
+// fix nests under the one it repairs (Stacked), and says which of the
+// two it is (Review) -- both are stacked on another task's branch, and
+// "a second agent read this change" is not "the merge queue patched a
+// red build".
+func TestTaskReadsAReviewTaskAsStackedAndAsAReview(t *testing.T) {
+	c, store, ctx := testClient(t)
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	reviewer := model.Principal{Kind: model.PrincipalAutomation, ID: "review"}
+	if err := store.PutTask(ctx, model.Task{
+		ID: "9", Intent: model.IntentImplement, Title: "Review the change",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: reviewer},
+			Reason:      model.ReasonReview,
+		},
+		Approval: &model.Attribution{Actor: reviewer},
+		Target:   &repo,
+		Binding:  model.BindingDirective,
+		Base:     model.BranchName("8"),
+		Links:    []model.Link{{Kind: model.LinkProposedBy, Target: "8"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.Task(ctx, "9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Stacked || !got.Review {
+		t.Fatalf("stacked = %v, review = %v, want both true", got.Stacked, got.Review)
+	}
+	if got.GeneratedFrom != "8" {
+		t.Fatalf("generatedFrom = %q, want the task it reviews", got.GeneratedFrom)
 	}
 }
 

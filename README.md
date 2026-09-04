@@ -6219,6 +6219,13 @@ both the record of that and what the merge queue waits on), and the
 picker locks and says which task is carrying it out. A review task
 carries no review of its own, which is what stops reviews nesting.
 
+The review task itself nests under the task it reviews, the way an
+automatic fix nests under the one it repairs, and says which of the two
+it is rather than borrowing the other's name: a "review" chip in the task
+list, and `grain list -origin review` beside `-origin fix`. Both are
+stacked on another task's branch; only one of them is a repair of a red
+build.
+
 ## Pausing when the agent runs out of budget
 
 A coding agent's credential has a budget, and it runs out: Claude Code
