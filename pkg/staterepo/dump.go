@@ -588,6 +588,120 @@ func tableNames(ctx context.Context, db querier) ([]string, error) {
 	return out, rows.Err()
 }
 
+// schemaStampTables names the tables a database has rows in merely by
+// existing, and therefore the tables that say nothing about whether
+// there is a deployment here.
+//
+// There is one: model.Store.Init writes the schema it just applied into
+// grain_schema, so a store file that was created a millisecond ago
+// already has a row in it and "no rows anywhere" is never true of a
+// database grain has opened. The dump has the same row for the same
+// reason, so both halves of the question below discount the same table
+// -- see databaseIsEmpty and dumpHasRows, which are a matched pair and
+// would answer differently about a fresh install if either forgot.
+//
+// Pinned by a test rather than trusted, because a later Init that seeded
+// a second bookkeeping row would make every database look populated and
+// quietly turn both of those into functions that always answer the same
+// thing (empty_internal_test.go).
+var schemaStampTables = map[string]bool{"grain_schema": true}
+
+// databaseIsEmpty reports whether db holds nothing a deployment put
+// there: no row, in any table, other than the schema stamp above.
+//
+// It is the question the loaded-head marker cannot answer. That marker
+// lives inside the git directory and says whether the *repository* has
+// moved under this host; a store file that was deleted, restored from a
+// backup that did not include it, or opened at a path that has never
+// held one takes none of it with it, so a host can agree with the
+// repository exactly and still have nothing to run on. What follows from
+// the answer is bind.go's -- Load restores, Apply and sync refuse.
+//
+// One row is enough to stop, and no row is read: LIMIT 1 with nothing
+// scanned out of it, table by table until something has one. On the
+// ordinary tick, where this runs before every export, the answer comes
+// out of the first table that holds anything.
+func databaseIsEmpty(ctx context.Context, db querier) (bool, error) {
+	tables, err := tableNames(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	for _, table := range tables {
+		if schemaStampTables[table] {
+			continue
+		}
+		rows, err := db.QueryContext(ctx, "SELECT 1 FROM "+quote(table)+" LIMIT 1")
+		if err != nil {
+			return false, fmt.Errorf("staterepo: looking for rows in %s: %w", table, err)
+		}
+		present := rows.Next()
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return false, fmt.Errorf("staterepo: looking for rows in %s: %w", table, err)
+		}
+		if present {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// dumpHasRows is databaseIsEmpty's other half, asked of the files: does
+// the dump in dir hold a row of anything, and which table was the first
+// one found to have one. The name is for the message an operator reads,
+// which is worth more with a table in it than without.
+//
+// Asked only once the database has already answered that it holds
+// nothing, which is why it may read files at all: the two together are
+// "an export from here would delete the deployment", and the pair of
+// them is a good deal cheaper than the export it declines to do.
+//
+// Streamed to the first element rather than parsed: task_run.json is
+// tens of megabytes on a deployment that has been running a while, and
+// nothing here needs more than its first token. A file caught
+// half-written therefore counts as holding rows, since what it starts
+// with is a row, and that is the direction to err in: this guard's
+// failure is a deployment deleted from its own repository, and refusing
+// an export costs a delay. A file that will not open, or that does not
+// begin a JSON array at all, holds no rows as far as this is concerned
+// -- the reader with an opinion about malformed JSON is Import.
+func dumpHasRows(dir string) (string, bool) {
+	entries, err := os.ReadDir(filepath.Join(dir, TablesDir))
+	if err != nil {
+		return "", false
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		table := strings.TrimSuffix(e.Name(), ".json")
+		if schemaStampTables[table] {
+			continue
+		}
+		if fileHoldsARow(filepath.Join(dir, TablesDir, e.Name())) {
+			return table, true
+		}
+	}
+	return "", false
+}
+
+// fileHoldsARow reports whether path is a JSON array with anything in
+// it, reading as little of it as that takes.
+func fileHoldsARow(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	// The opening bracket, then whether anything follows it.
+	if _, err := dec.Token(); err != nil {
+		return false
+	}
+	return dec.More()
+}
+
 func quote(ident string) string {
 	return "`" + strings.ReplaceAll(ident, "`", "``") + "`"
 }
