@@ -57,6 +57,26 @@ func newStateManager(dataDir string, db *sql.DB, repo *staterepo.Repo, secretSto
 	return &stateManager{dataDir: dataDir, db: db, repo: repo, secrets: secretStore, forbidden: forbidden}
 }
 
+// noteLoadFailure records a startup load that did not entirely work but
+// was not a reason to stop -- an unreachable remote, in practice
+// (fatalStateRepoLoad) -- so the pane says so from the first paint
+// rather than only once the sync loop's first tick has failed too. A
+// deployment running on the database it has, out of touch with its
+// remote, is a thing an operator should be able to see the moment they
+// look, and thirty seconds of an untroubled-looking State pane is thirty
+// seconds of it looking like nothing is wrong.
+//
+// nil is a no-op, so the caller need not ask twice whether there was
+// anything to record.
+func (m *stateManager) noteLoadFailure(err error) {
+	if err == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastErr = err
+}
+
 // refreshForbidden re-reads which repositories the git proxy must refuse
 // to every sandbox and pushes the answer into the set it authorizes
 // against, so that a repository this deployment has just started using

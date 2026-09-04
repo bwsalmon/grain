@@ -2847,6 +2847,25 @@ aside alongside the store on a schema bump so the daemon re-seeds it.
 The encrypted secrets file is carried across rather than archived with
 it: it is the one thing in there that cannot be regenerated.
 
+Not reaching the remote is a different fact, and the daemon treats it as
+one. "The repository holds something this build must not overwrite" --
+a schema stamp it cannot read, rows that will not import, a history that
+diverged and is somebody's to resolve -- stops the process, because
+starting would export today's database over it and push that. "The fetch
+did not complete" -- a network blip, an installation token that expired
+overnight, a repository renamed on GitHub -- says nothing about what the
+repository holds, and every deployment on GCP has a remote now, so
+exiting over it would take the UI down with the daemon and let systemd
+restart both into the same failure. So grain starts on the database it
+already has, with the working tree as the last fetch left it: the sync
+loop retries every 30s, and the State pane carries the reason until one
+works. `staterepo.ErrUnreachable` is what marks the second kind, and
+`fatalStateRepoLoad` in `cmd/grain` is where the decision is written
+down. The exception is a host with no copy of the repository at all --
+`ErrNoLocalCopy`, a fetch that failed with no commits in the working
+tree. There is nothing to carry on with there, and seeding one would
+commit a history the remote can never fast-forward onto.
+
 ### The remote is optional, by construction
 
 A `Config` with no `Remote` is a plain `git init` in the data directory:

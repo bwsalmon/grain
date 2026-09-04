@@ -392,6 +392,22 @@ func (r *Repo) Push(ctx context.Context) error {
 	return nil
 }
 
+// ErrUnreachable marks the one failure in this package that says nothing
+// at all about what the repository holds: the fetch itself did not
+// complete.
+//
+// A network blip, an installation token that expired an hour ago, a
+// repository renamed on GitHub -- git reports them differently and they
+// mean the same thing here, which is that grain knows exactly what it
+// knew before it asked. That is a different fact from "the repository
+// holds something this build must not overwrite" (ErrSchemaTooNew and
+// its neighbours in bind.go), and only the second is worth refusing to
+// start over; the sentinel exists so that the difference is something a
+// caller keys off rather than something it matches an error string for.
+// Load, and cmd/grain's own run(), are where that decision is written
+// down.
+var ErrUnreachable = errors.New("the state repository's remote could not be reached")
+
 // Pull fast-forwards the working tree to the remote's branch, reporting
 // whether anything arrived.
 //
@@ -407,6 +423,11 @@ func (r *Repo) Push(ctx context.Context) error {
 // about: RecoverDiverged (diverge.go) clears the case where the only
 // commits in the way are grain's own exports, which is what a push that
 // failed before a merge landed leaves behind.
+//
+// A fetch that never got off the ground is marked too, with
+// ErrUnreachable, and for the opposite reason: there is nothing to do
+// about it and nothing to act on, so a caller that has a working tree
+// already can carry on with it and ask again on the next tick.
 func (r *Repo) Pull(ctx context.Context) (bool, error) {
 	if r.cfg.Remote == "" {
 		return false, nil
@@ -417,7 +438,11 @@ func (r *Repo) Pull(ctx context.Context) (bool, error) {
 		if r.remoteBranchMissing(ctx) {
 			return false, nil
 		}
-		return false, fmt.Errorf("staterepo: fetching %s: %w", r.branch, err)
+		// Marked, because a fetch that did not happen is the one failure
+		// here a caller can carry on from: see ErrUnreachable. Everything
+		// below this point is local git against a tree we did reach, and
+		// keeps its own words.
+		return false, fmt.Errorf("%w: fetching %s: %w", ErrUnreachable, r.branch, err)
 	}
 	before, _ := r.git(ctx, "rev-parse", "HEAD")
 	if empty, _ := r.isEmpty(ctx); empty {
