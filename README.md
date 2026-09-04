@@ -1805,6 +1805,35 @@ against a real credential and reading the tool steps back off its
   as grain runs agy. They are written because they are the documented
   place to say what a session may do and they cost a run nothing, and the
   hook below is what actually blocks a call.
+- **What dropping that override would cost is a live question, and it is
+  now asked nightly.** Enforcing the rules means removing
+  `--dangerously-skip-permissions` from `Run`, which leaves a run in agy's
+  own `request-review` mode (the same `init` event says so) -- and agy's
+  changelog describes a headless run there as *soft-denying* anything that
+  would need a confirmation, naming the allow rule that would have
+  permitted it. The risk is therefore not a run that is merely stricter
+  about agy's own tools: grain's tools are the only ones that reach a
+  sandbox, so a run whose allow rules are not matched is a dispatch that
+  can do nothing at all. `permissionRules` writes them in the exact
+  eagerly registered spelling (`mcp_grain-sandbox_run_command` and
+  friends) because agy matches an approval rule strictly unless it is
+  prefixed `regex:`, and `TestLiveAgyLoadsGrainsPermissionRules` proves
+  those rules reach the binary -- but whether *that* spelling is what agy's
+  permission check compares against takes a live model to find out, the
+  same way the hook payload log had to establish that a tool name reaches
+  the hook in the shape the deny list is written in.
+  `TestLiveRunWithoutThePermissionOverride` (`tests/e2e`) is that
+  measurement: the same framework a dispatch gets, minus that one flag
+  (`antigravity.WithoutPermissionOverrideForTest`, the only seam that drops
+  it), asserting that grain's own `run_command` still writes a file into
+  the sandbox and reporting what a native call does under review mode --
+  including whether grain's `PreToolUse` hook is still asked about one, or
+  whether the permission check now refuses it first. Its control is the
+  `init` event: a run reporting `always-proceed` measured nothing and fails
+  outright, since a vacuous "safe to drop the flag" is the worst answer
+  available. **Until that nightly has answered, `Run` keeps the flag** --
+  and `TestRunOverridesAgysPermissionPromptsByDefault`
+  (`pkg/agent/antigravity`) fails any change that stops passing it.
 - **A `PreToolUse` hook is a hard block, and this one has been watched
   blocking.** A live `agy` 1.1.26 driving `gemini-3.1-pro-high`, told in
   as many words to run `echo ... > /tmp/agyprobe.txt` as a shell command,

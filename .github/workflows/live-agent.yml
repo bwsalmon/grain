@@ -3,7 +3,14 @@
 # reaches its sandbox through one (TestLiveIssueCompletesEndToEnd), and
 # that agy honours the denial grain writes into every run's HOME for
 # agy's own file and command tools (TestLiveNativeToolsAreDenied). Both
-# drive the binary against a real Gemini API key.
+# drive the binary against a real Gemini API key, and so does a third:
+# TestLiveRunWithoutThePermissionOverride, which runs that same framework
+# with --dangerously-skip-permissions dropped to measure whether a run in
+# agy's own request-review mode still reaches its sandbox through grain's
+# tools -- the question standing between this repository and enforcing the
+# permission rules it already writes. It measures a run grain does not
+# ship, so its verdict is a log line to read rather than a promise to
+# keep; see the README's agy section.
 #
 # Two of them do not: TestLiveAgyLoadsGrainsHookConfig and
 # TestLiveAgyLoadsGrainsPermissionRules ask agy's print mode what it
@@ -80,10 +87,12 @@ jobs:
   live-agy:
     name: live agy run
     runs-on: ubuntu-latest
-    # Each test's own run is capped by its context (120s and 180s) and by
-    # MaxTurns; the rest is checkout, a Go build and the agy install, and
-    # this job runs the tests twice when the first attempt fails.
-    timeout-minutes: 25
+    # Each test's own run is capped by its context (120s and two of 180s)
+    # and by MaxTurns; the rest is checkout, a Go build and the agy
+    # install, and this job runs the tests twice when the first attempt
+    # fails. Raised from 25 when the third live run was added: eight
+    # minutes of model time per attempt no longer fits twice inside it.
+    timeout-minutes: 40
     # Where GEMINI_API_KEY lives -- see this file's header. Not a
     # repository secret: the deployment branch policy on this environment
     # is the only thing that keeps a branch's own workflow from reading
@@ -157,7 +166,7 @@ jobs:
           for attempt in 1 2; do
             echo "::group::live agy run, attempt $attempt of 2"
             if go test ./tests/e2e/ -run 'TestLive' \
-                 -count=1 -v -timeout 10m; then
+                 -count=1 -v -timeout 15m; then
               echo "::endgroup::"
               exit 0
             fi
