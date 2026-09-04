@@ -863,6 +863,15 @@ fieldset legend {
    it was. */
 .declared-value { color: var(--text-secondary); text-align: right; word-break: break-word; white-space: pre-wrap; }
 
+/* .hint is styled above for the forms it started in, and the detail
+   pane's side column uses the same class for the same thing -- "No
+   dependencies.", the "None" an empty capability picker shows, and the
+   note under the read-only repos picker about what an edit made mid-run
+   does and does not reach. Without this they inherit body type in a
+   260px column, which reads as prose rather than as an aside. */
+.detail-side .hint { color: var(--text-tertiary); font-size: 0.8rem; font-weight: normal; }
+.detail-side p.hint { margin: 0.4rem 0 0; }
+
 .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0 0 1.1rem; }
 .detail-side .actions { flex-direction: column; }
 .detail-side .actions button { width: 100%; }
