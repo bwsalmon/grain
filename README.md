@@ -1188,7 +1188,9 @@ a person watching the queue should see — so the frontend says which kind
 of work it is: `ui.Task.Repairing` carries it, a repairing row's grain
 mark animates in green rather than the accent's gold, and its badge reads
 "Repairing" instead of "Running". A row that has gone back to running has
-not gone back to the beginning. No new record was needed for the
+not gone back to the beginning.
+
+No new record was needed for the
 queue itself: `queueOrder` derives the whole queue from `Task.AutoMerge`,
 `Origin.Reason` and `MergeQueueBlockedAt` fresh every cycle, and
 `queueHeads` takes each repo's first entry from it — the same "derive it,
