@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,6 +112,111 @@ func TestCapabilityCheckRefusesACapabilityWithNoCredential(t *testing.T) {
 	adapter := capabilityCheckAdapter{live: testLiveConfig(config{}), creds: noCredentials{}}
 	if _, err := adapter.CheckCapability(context.Background(), "self-debug"); err == nil {
 		t.Fatal("expected self-debug, which holds no credential, to be refused")
+	}
+}
+
+// --- named GitHub tokens (grain/task-189) ------------------------------
+
+// writeLadder lays out a data directory's credential ladder: a default
+// token every repo falls back to, plus whatever else is named, and
+// returns the data directory.
+func writeLadder(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dataDir := t.TempDir()
+	dir := filepath.Join(dataDir, "secrets", "github")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(`{"*":"bot"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dataDir
+}
+
+// A named token's material is not in the secrets store at all -- it is
+// an operator's file under secrets/github -- so its provider is built
+// holding the credential ladder instead, and the resolver every other
+// capability is checked through goes unused. This is that wiring, and it
+// stays offline by using a credential the ladder serves as anonymous: an
+// empty token file, which the provider has an answer for before it ever
+// reaches GitHub.
+func TestCapabilityCheckReachesANamedGitHubTokensLadder(t *testing.T) {
+	dataDir := writeLadder(t, map[string]string{"bot.token": "tok\n", "release-bot.token": "\n"})
+	ladder, err := gitHubCredentialLadder(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := newLiveConfig(nil, nil, config{}, ladder)
+	if got := live.gitHubTokens(); len(got) != 1 || got[0] != "release-bot" {
+		t.Fatalf("named tokens = %v, want just the non-default one", got)
+	}
+	adapter := capabilityCheckAdapter{live: live, creds: noCredentials{}}
+
+	result, err := adapter.CheckCapability(context.Background(), model.GitCredentialCapability("release-bot"))
+	if err == nil {
+		t.Fatal("expected a credential file with no token in it to be reported")
+	}
+	if !strings.Contains(err.Error(), "secrets/github/release-bot.token") {
+		t.Errorf("error %q does not name the file that resolves to nothing", err)
+	}
+	if len(result.Credentials) != 1 || result.Credentials[0] != "secrets/github/release-bot.token" {
+		t.Errorf("Credentials = %v, want the file named even on the failure path", result.Credentials)
+	}
+}
+
+// A token this deployment has no file for has no provider registered
+// either, which is the adapter's own answer to give rather than the
+// provider's -- the same one an unconfigured gcp-key gets.
+func TestCapabilityCheckSaysWhenANamedTokenIsNotConfigured(t *testing.T) {
+	adapter := capabilityCheckAdapter{live: testLiveConfig(config{}), creds: noCredentials{}}
+
+	_, err := adapter.CheckCapability(context.Background(), model.GitCredentialCapability("release-bot"))
+	if err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Fatalf("err = %v, want the unconfigured answer for a token with no file behind it", err)
+	}
+}
+
+// githubCredentialSource is the one place the credential ladder and the
+// capability package meet: a name in, the material a push through it
+// would carry out, and which of the two file forms it came from -- which
+// is what decides whether a refusal tells an operator to paste a token
+// or to replace a file.
+func TestGitHubCredentialSourceResolvesBothFileForms(t *testing.T) {
+	dataDir := writeLadder(t, map[string]string{
+		"bot.token":         "tok\n",
+		"release-bot.token": "ghp_live\n",
+		// Deliberately not a usable App credential: what is asserted
+		// here is that it is recognised as one, and the ladder's own
+		// fail-soft-to-anonymous path is exactly the state the check
+		// reports as "every push goes out unauthenticated".
+		"app-bot.app.json": `{"app_id":"1","installation_id":"2","private_key":"not a key"}`,
+	})
+	ladder, err := gitHubCredentialLadder(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := githubCredentialSource{set: ladder}
+
+	cred, ok := source.GitHubCredential("release-bot")
+	if !ok || cred.Token != "ghp_live" || cred.App {
+		t.Errorf("release-bot = %+v, %v, want the token file's own value", cred, ok)
+	}
+	cred, ok = source.GitHubCredential("app-bot")
+	if !ok || !cred.App || cred.Token != "" {
+		t.Errorf("app-bot = %+v, %v, want an App credential with nothing minted from it", cred, ok)
+	}
+	if _, ok := source.GitHubCredential("never-configured"); ok {
+		t.Error("a credential with no file behind it was resolved anyway")
+	}
+	// A process with no ladder at all answers the same way rather than
+	// panicking: it offers no named tokens to check in the first place.
+	if _, ok := (githubCredentialSource{}).GitHubCredential("release-bot"); ok {
+		t.Error("a nil ladder resolved a credential")
 	}
 }
 

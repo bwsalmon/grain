@@ -3363,12 +3363,68 @@ being a **Ready** badge and nothing else. `grain settings
 where whoever is reading a failed task's error is usually already
 standing.
 
-The one standing credential still unchecked is a named GitHub token
-(`github-credential:<name>`): those rows are reported `Ready` by
-construction, since a row exists only because an operator's own file
-does, and a revoked token behind one goes stale exactly the way the
-three above do. That capability holds no API client of its own to check
-through, so it is left for its own change.
+### The fourth credential: a named GitHub token
+
+task-172 stopped at three, and named the one it left out: a named GitHub
+token (`github-credential:<name>`). Those rows are reported `Ready` by
+construction — a row exists only because an operator's own file under
+`secrets/github` does — and a token revoked, expired or rotated at
+GitHub's end changes nothing about that file, so the pane went on
+agreeing with itself while the first symptom was a push failing through
+the git proxy, mid-run, as a sandbox's own error. task-189 is that
+fourth check, and the two questions it turned on are worth recording.
+
+**What it authenticates with, given the provider holds no client.** A
+named token is a SELECT capability: it mints nothing, places nothing,
+and during a dispatch resolves no credential at all — the proxy looks
+the material up per request. So unlike the other three there was no
+client to reuse, and the choice was between teaching the provider to
+read credential files itself and handing it the thing that already
+does. It is handed the ladder: `githubtoken.Config.Credentials`, a
+one-method interface over `gitproxy.CredentialSet` (the adapter lives in
+`cmd/grain/daemon.go`, beside the one that already adapts the same
+ladder onto `github.TokenSource`). That is what keeps "what does this
+token authenticate as" answered in exactly one place, and it is what
+makes the check test the material a push would actually carry — a
+`<name>.token` read as-is, or a `<name>.app.json` whose installation
+token the ladder re-mints, which are two different auth flows a check of
+its own would have had to learn separately. It is also why the UI now
+shares run()'s ladder rather than loading a copy: the Settings pane that
+writes a token is what makes a ladder forget the old one, so a check
+through any other copy would go on testing the token an operator had
+just replaced on that very pane.
+
+**What the cheap call is.** `GET /rate_limit`, then one `GET
+/repos/{owner}/{repo}` per repo this deployment targets.
+`/rate_limit` is the cheapest live-or-dead answer GitHub gives — it
+costs nothing against the limit it reports — and unlike `GET /user` it
+is answerable by both forms of credential, since an App installation
+token has no user. But "the token is alive" is rarely the interesting
+failure: a token that is alive and has lost access to the repo it exists
+to push to fails in exactly the same place a dead one does, and
+`permissions.push` on the repo lookup is the difference between "it can
+still push there" and "it can see it and nothing more".
+
+**Repo reach is evidence, not the verdict — with one exception.** A
+named token is deliberately narrower than the deployment default; that
+is what it is for. Failing the check for a repo it was never meant to
+reach would paint a correctly-scoped token permanently red, so what it
+cannot see is reported in the detail beside what it can. The exception
+is a token that can reach *none* of them: it is live and useless for
+anything any task here could ask of it, which is the same news to an
+operator as a dead token, and it is reported refused in the same words.
+
+`Ready` keeps meaning what it meant. It is still true by construction
+for these rows, because the two gates it asks about — a deployment
+setting, a secrets-store entry — are gates a GitHub token has neither
+of; what changed is that `Checkable` is now true beside it, which is
+task-172's own rule that a checked-and-refused credential is reported
+next to **Ready** and never folded into it. `pkg/ui`'s drift tests grew
+the matching half: the catalog test cannot see these rows, since which
+tokens exist is not a property of any build, so a second test holds the
+named-token listing to the same bar — the provider must implement
+`model.CredentialChecker`, and the row must report itself checkable, or
+the pane offers no way to reach it.
 
 ### The same set, per repo
 
