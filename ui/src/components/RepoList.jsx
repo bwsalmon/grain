@@ -3,6 +3,7 @@ import { Alert, Button, Chip, Stack, TextField, Typography } from "@mui/material
 import api from "../api.js";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
+import ItemGlyph from "./ItemGlyph.jsx";
 
 // RepoList is the repo index: one row per known repo -- every
 // config.targetRepos entry, plus any repo tasks target that isn't one,
@@ -108,6 +109,7 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
     <main>
       <ListHeader
         title="Repos"
+        icon={<ItemGlyph kind="repos" size={20} />}
         count={visible.length}
         style={{ alignItems: "center" }}
         action={(

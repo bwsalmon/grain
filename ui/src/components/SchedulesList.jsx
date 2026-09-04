@@ -3,6 +3,7 @@ import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
 import ScheduleOverlay from "./ScheduleOverlay.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
+import ItemGlyph from "./ItemGlyph.jsx";
 
 // SORTS mirrors TaskList's own toolbar Select (bwsalmon/agents#547): a
 // schedule has no backlog order to sort by (it is never itself dispatched
@@ -47,6 +48,7 @@ export default function SchedulesList({ schedules, templates = [], suites = [], 
     <main>
       <ListHeader
         title="Schedules"
+        icon={<ItemGlyph kind="schedules" size={20} />}
         count={visible.length}
         action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New schedule</Button>}
       />

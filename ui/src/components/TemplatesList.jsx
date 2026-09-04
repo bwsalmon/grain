@@ -3,6 +3,7 @@ import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
 import TemplateOverlay from "./TemplateOverlay.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
+import ItemGlyph from "./ItemGlyph.jsx";
 
 // SORTS mirrors TaskList's own toolbar Select (bwsalmon/agents#545): a
 // template has no state or backlog order to sort by (it is never itself
@@ -49,6 +50,7 @@ export default function TemplatesList({ templates, config, tasks, openTemplateId
     <main>
       <ListHeader
         title="Templates"
+        icon={<ItemGlyph kind="templates" size={20} />}
         count={visible.length}
         action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New template</Button>}
       />

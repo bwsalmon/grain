@@ -58,6 +58,19 @@ describe("SchedulesList", () => {
     expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
   });
 
+  // The page's heading carries the same figure as the nav entry that
+  // opened it (ItemGlyph.jsx, docs/brand.md) -- decoration beside the
+  // heading rather than inside it, so "Schedules" is still the whole of
+  // the heading's accessible name.
+  it("heads the page with the schedules glyph, without renaming the heading", () => {
+    const { container } = render(
+      <ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />,
+    );
+
+    expect(container.querySelector('svg[data-glyph="schedules"]')).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Schedules" })).toBeInTheDocument();
+  });
+
   it("describes daily, weekly and monthly recurrences", () => {
     const daily = { ...schedule, id: "sched-daily", recurrence: { kind: "daily", timeOfDay: "09:00" } };
     const weekly = { ...schedule, id: "sched-weekly", recurrence: { kind: "weekly", timeOfDay: "14:30", weekday: "friday" } };
