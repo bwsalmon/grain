@@ -54,7 +54,10 @@ export default function App() {
   // (The repo page's own copy is already scoped to that repo, which is
   // why its Repo menu is hidden there -- a repo picked on the flat list
   // simply has nothing to narrow while that page is up, and is back in
-  // force on the way out.)
+  // force on the way out. The query goes on naming it there, which is
+  // the price of not throwing it away: the URL still describes exactly
+  // the state it reopens, since the same choice is inert again on the
+  // way back in.)
   const [narrowing, setNarrowing] = useState(
     () =>
       parsePath(window.location.pathname, window.location.search).narrowing ||
