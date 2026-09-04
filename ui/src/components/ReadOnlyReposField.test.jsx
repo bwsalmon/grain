@@ -18,6 +18,32 @@ describe("ReadOnlyReposField", () => {
       expect(screen.getByText(repo)).toBeInTheDocument();
   });
 
+  // grain/task-320: this popper is TaskPicker's, applied to repos --
+  // same box, same eight rows under it -- so each row carries the repos
+  // figure (ItemGlyph.jsx, docs/brand.md) to say what kind of thing is
+  // being listed. The typed "Add owner/name" row names repos too, so it
+  // carries one as well rather than being the odd row out.
+  it("marks every result row with the repos glyph, typed ones included", async () => {
+    const user = userEvent.setup();
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={() => {}} />,
+    );
+
+    await user.click(screen.getByLabelText(/Read-only repos/));
+    for (const repo of options)
+      expect(
+        screen.getByText(repo).closest("li").querySelector("svg[data-glyph]"),
+      ).toHaveAttribute("data-glyph", "repos");
+
+    await user.type(screen.getByLabelText(/Read-only repos/), "typed/repo");
+    expect(
+      screen
+        .getByText("Add typed/repo")
+        .closest("li")
+        .querySelector('svg[data-glyph="repos"]'),
+    ).toBeInTheDocument();
+  });
+
   it("filters the options as the user types, case-insensitively", async () => {
     const user = userEvent.setup();
     render(

@@ -185,6 +185,20 @@ export const FILTERS = [
   },
 ];
 
+// NO_NARROWING is a task view's toolbar with nothing asked of it: the
+// search box empty, the backlog's own order, no attribute picked. It is
+// the shape every narrowing takes -- {search, sortBy, filters}, filters
+// keyed by FILTERS entry id -- and the value App starts from when the
+// URL asks for no narrowing at all (paths.js).
+//
+// Frozen because it is shared: App hands the same object to every task
+// view, and a view that mutated it would narrow every other one.
+export const NO_NARROWING = Object.freeze({
+  search: "",
+  sortBy: "manual",
+  filters: Object.freeze({}),
+});
+
 // optionsFor is every value of one attribute the given tasks actually
 // carry -- so a menu never offers a choice that would come back empty.
 // A fixed-vocabulary attribute keeps its own order; the rest are

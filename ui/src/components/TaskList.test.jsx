@@ -1,7 +1,9 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import TaskList from "./TaskList.jsx";
+import { NO_NARROWING } from "../taskFilters.js";
 
 const tasks = [
   {
@@ -21,6 +23,22 @@ const tasks = [
   },
 ];
 
+// Narrowed holds the search text, sort order and filters the toolbar
+// drives, the way App does now that they live there and in the URL
+// (grain/task-317) rather than inside TaskList itself. Tests that only
+// look at rows never touch it; a test that starts from an already
+// narrowed list passes a `narrowing` prop, which seeds it.
+function Narrowed({ props }) {
+  const [narrowing, setNarrowing] = useState(props.narrowing || NO_NARROWING);
+  return (
+    <TaskList
+      {...props}
+      narrowing={narrowing}
+      onNarrow={(patch) => setNarrowing((prev) => ({ ...prev, ...patch }))}
+    />
+  );
+}
+
 function renderList(overrides = {}) {
   const props = {
     tasks,
@@ -32,13 +50,15 @@ function renderList(overrides = {}) {
     onSelectAll: vi.fn(),
     ...overrides,
   };
-  const { rerender } = render(<TaskList {...props} />);
+  const { rerender } = render(<Narrowed props={props} />);
   // rerender takes another set of overrides, for a test that needs this
   // component to survive a change of props -- a poll bringing new task
   // states, the sidebar's own filter moving -- rather than mount fresh.
+  // Whatever the toolbar was asking survives it, since Narrowed above
+  // is what holds that.
   return {
     ...props,
-    rerender: (next) => rerender(<TaskList {...props} {...next} />),
+    rerender: (next) => rerender(<Narrowed props={{ ...props, ...next }} />),
   };
 }
 
@@ -363,6 +383,8 @@ describe("TaskList", () => {
           tasks={threeTasks}
           stateFilter="all"
           config={null}
+          narrowing={NO_NARROWING}
+          onNarrow={vi.fn()}
           onOpenTask={vi.fn()}
           selected={new Set()}
           onToggleSelect={vi.fn()}
@@ -404,6 +426,41 @@ describe("TaskList", () => {
     expect(
       screen.queryByTitle("filed automatically by a schedule"),
     ).not.toBeInTheDocument();
+  });
+
+  // grain/task-320: the two "nobody filed this by hand" chips carry the
+  // figure of the thing that did (ItemGlyph.jsx, docs/brand.md), so the
+  // hourglass and the four lobes mean the same on a task row as they do
+  // in the nav rail. A glyph on the wrong chip is exactly what nobody
+  // spots by eye.
+  it("marks each origin chip with the glyph of the thing that filed the task", () => {
+    renderList({
+      tasks: [
+        { ...tasks[0], scheduled: true },
+        { ...tasks[1], suiteRun: true },
+      ],
+    });
+
+    expect(
+      screen
+        .getByTitle("filed automatically by a schedule")
+        .querySelector('svg[data-glyph="schedules"]'),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getByTitle("filed automatically by a suite run")
+        .querySelector('svg[data-glyph="suites"]'),
+    ).toBeInTheDocument();
+    // Decoration beside the word, not a replacement for it: the chips
+    // still read "scheduled" and "suite".
+    expect(
+      screen.getByTitle("filed automatically by a schedule"),
+    ).toHaveTextContent("scheduled");
+  });
+
+  it("leaves an ordinary task's chips unglyphed", () => {
+    renderList();
+    expect(document.querySelector(".chips svg[data-glyph]")).toBeNull();
   });
 
   // bwsalmon/agents#378: a stacked task explains itself by sitting under

@@ -11,6 +11,7 @@ import {
   Typography,
 } from "@mui/material";
 import api from "../api.js";
+import ItemGlyph, { GlyphLabel } from "./ItemGlyph.jsx";
 import Overlay from "./Overlay.jsx";
 import RepoField from "./RepoField.jsx";
 
@@ -53,9 +54,16 @@ export default function SuiteRunOverlay({
 
   return (
     <Overlay onClose={onClose}>
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>
-        Run a suite
-      </Typography>
+      {/* The suites figure heads this the way it heads the page the
+          overlay opened over (ListPrimitives' own `icon`, ItemGlyph.jsx)
+          -- 20px, ahead of the heading rather than inside it, so "Run a
+          suite" is still the whole of the heading's accessible name. */}
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+        <ItemGlyph kind="suites" size={20} />
+        <Typography variant="h6" component="h2" sx={{ m: 0 }}>
+          Run a suite
+        </Typography>
+      </Stack>
       <form onSubmit={submit}>
         <FormControl fullWidth margin="normal" size="small">
           <InputLabel id="suite-run-suite-label">Suite</InputLabel>
@@ -68,7 +76,7 @@ export default function SuiteRunOverlay({
           >
             {suites.map((s) => (
               <MenuItem key={s.id} value={s.id}>
-                {s.name}
+                <GlyphLabel kind="suites">{s.name}</GlyphLabel>
               </MenuItem>
             ))}
           </Select>

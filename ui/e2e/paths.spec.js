@@ -187,6 +187,34 @@ test("opens a template into its own URL, and back closes the pane rather than th
   ).toBeVisible();
 });
 
+// grain/task-317: how a task list is narrowed -- its search text, sort
+// order and attribute filters -- rides in the query string, so a list
+// narrowed down to what somebody actually cares about is a URL they can
+// keep or send. The reload is the half only a real server can answer
+// for: a GET for "/?q=..." has to reach index.html through the SPA
+// fallback with its query intact, and App.jsx has to seed the toolbar
+// from it before the list first renders.
+test("keeps a narrowed task list in the URL, including after a hard reload", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const rows = page.locator(".task-row");
+  await expect(rows.first()).toBeVisible();
+  const all = await rows.count();
+
+  await page.getByPlaceholder("Search tasks…").fill("toolchain");
+  await expect(page).toHaveURL(/\/\?q=toolchain$/);
+  const narrowed = await rows.count();
+  expect(narrowed).toBeGreaterThan(0);
+  expect(narrowed).toBeLessThan(all);
+  const title = await rows.first().locator(".task-title").innerText();
+
+  await page.reload();
+  await expect(page.getByPlaceholder("Search tasks…")).toHaveValue("toolchain");
+  await expect(rows).toHaveCount(narrowed);
+  await expect(rows.first().locator(".task-title")).toHaveText(title);
+});
+
 test("updates the URL when navigating the sidebar, and restores the previous page on back", async ({
   page,
 }) => {

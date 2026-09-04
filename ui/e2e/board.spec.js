@@ -38,10 +38,23 @@ test("loads /board cold", async ({ page }) => {
   await expect(page.locator(".board-column").first()).toBeVisible();
 });
 
+// The toolbar's own "Columns" button, named exactly. Not a stylistic
+// preference: the board grows a *second* button whose accessible name
+// contains "Columns" the moment it has anything to hide -- the "Edit
+// columns" link in the "N tasks in no column (Closed)" note (TaskBoard.jsx)
+// -- and getByRole's name option is a case-insensitive substring match
+// unless it is told otherwise, so a plain { name: "Columns" } matches both
+// and fails Playwright's strict mode. Which of the two the page had when
+// the click landed came down to whether the seeded tasks had arrived yet:
+// green on a warm machine, red on a slower runner, and a locator that is
+// exact is right whichever way that race falls.
+const columnsButton = (page) =>
+  page.getByRole("button", { name: "Columns", exact: true });
+
 test("keeps an edited column layout across a reload", async ({ page }) => {
   await page.goto("/board");
 
-  await page.getByRole("button", { name: "Columns" }).click();
+  await columnsButton(page).click();
   await expect(page.getByText("Board columns")).toBeVisible();
   await page.getByRole("button", { name: "+ Add column" }).click();
   const title = page.getByLabel(/Column \d+ title/).last();
@@ -66,7 +79,7 @@ test("keeps an edited column layout across a reload", async ({ page }) => {
 
   // Put the default board back, so a rerun of this suite starts from the
   // same place a first run did.
-  await page.getByRole("button", { name: "Columns" }).click();
+  await columnsButton(page).click();
   await page.getByRole("button", { name: "Reset to default" }).click();
   await page.getByRole("button", { name: "Save" }).click();
   await expect(

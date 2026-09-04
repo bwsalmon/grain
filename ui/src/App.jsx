@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "./api.js";
 import { buildPath, parsePath } from "./paths.js";
+import { NO_NARROWING } from "./taskFilters.js";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
 import TaskBoard from "./components/TaskBoard.jsx";
@@ -38,6 +39,36 @@ export default function App() {
   const [suites, setSuites] = useState([]);
   const [suiteRuns, setSuiteRuns] = useState([]);
   const [stateFilter, setStateFilter] = useState("all");
+  // narrowing is how the task views are narrowed right now -- the search
+  // text, the sort order and the attribute filters their shared toolbar
+  // offers (taskFilters.js) -- lifted out of TaskList/TaskBoard and
+  // seeded from the query string the page loaded with, which is also
+  // where every change to it is written back (grain/task-317). A list
+  // narrowed by several menus at once is a view worth linking to, so it
+  // gets the same treatment as which sub-page is showing: loadable cold,
+  // survives a reload, and the Back button undoes it.
+  //
+  // One narrowing, not one per view: the flat list, the board and the
+  // list on a repo's own page all ask taskFilters.js's question, so
+  // moving between them keeps it rather than silently dropping it.
+  // (The repo page's own copy is already scoped to that repo, which is
+  // why its Repo menu is hidden there -- a repo picked on the flat list
+  // simply has nothing to narrow while that page is up, and is back in
+  // force on the way out. The query goes on naming it there, which is
+  // the price of not throwing it away: the URL still describes exactly
+  // the state it reopens, since the same choice is inert again on the
+  // way back in.)
+  const [narrowing, setNarrowing] = useState(
+    () =>
+      parsePath(window.location.pathname, window.location.search).narrowing ||
+      NO_NARROWING,
+  );
+  // narrow takes a patch rather than a whole narrowing, so a toolbar
+  // control only has to name what it changed.
+  const narrow = useCallback(
+    (patch) => setNarrowing((prev) => ({ ...prev, ...patch })),
+    [],
+  );
   // view switches the main pane between the flat task list, the repos
   // pane, and the schedules page.
   //
@@ -514,12 +545,23 @@ export default function App() {
       showSettings,
       showDebug,
       showMetrics,
+      narrowing,
     });
-    if (path !== window.location.pathname) {
+    if (path !== window.location.pathname + window.location.search) {
+      // Going somewhere pushes; narrowing where you already are
+      // replaces. A narrowing is a change of question rather than of
+      // page, and the search box writes one per keystroke -- pushing
+      // those would fill the history with a step per character and make
+      // Back mean "delete the last letter I typed" rather than "the
+      // page I was on". The URL is still the current one either way,
+      // which is the whole point: it can be copied, reloaded and sent.
+      // The toolbar's own Clear button is how a narrowing is undone.
+      //
       // The very first correction (e.g. an unrecognized path normalized
-      // back to "/") replaces rather than pushes, so a mistyped or
+      // back to "/") replaces rather than pushes too, so a mistyped or
       // stale URL doesn't leave an extra "back" step to it in history.
-      if (mountedRef.current) {
+      const samePage = path.split("?")[0] === window.location.pathname;
+      if (mountedRef.current && !samePage) {
         window.history.pushState(null, "", path);
       } else {
         window.history.replaceState(null, "", path);
@@ -537,13 +579,21 @@ export default function App() {
     showSettings,
     showDebug,
     showMetrics,
+    narrowing,
   ]);
 
   // Mirrors the browser's own back/forward buttons onto the same state
   // buildPath/parsePath already govern everything else through.
   useEffect(() => {
     function onPopState() {
-      const parsed = parsePath(window.location.pathname);
+      const parsed = parsePath(
+        window.location.pathname,
+        window.location.search,
+      );
+      // A path that carries no narrowing puts the toolbar back to
+      // asking nothing -- Back out of a narrowed list is how you undo
+      // the narrowing, so it cannot be the one thing that survives.
+      setNarrowing(parsed.narrowing || NO_NARROWING);
       setShowSettings(parsed.showSettings === true);
       setShowDebug(parsed.showDebug === true);
       setShowMetrics(parsed.showMetrics === true);
@@ -571,12 +621,19 @@ export default function App() {
   // comment). A repo page always shows all of the repo's tasks: the
   // sidebar's state filter is a question about the flat list, and
   // picking one there navigates back to it (Sidebar's selectState).
+  //
+  // The narrowing is the flat list's own, shared rather than copied, so
+  // /repos/acme/widgets?capability=gcp-key is as much a link as
+  // /?capability=gcp-key is -- and a search typed on a repo's page is
+  // still there on the way back out to the whole backlog.
   const taskListPane = (list, filter) => (
     <>
       <TaskList
         tasks={list}
         stateFilter={filter}
         config={config}
+        narrowing={narrowing}
+        onNarrow={narrow}
         onOpenTask={openTask}
         selected={selected}
         onToggleSelect={toggleSelect}
@@ -603,12 +660,17 @@ export default function App() {
   // It takes no state filter for the reason the board view never had
   // one: the columns *are* the board's answer to which states it is
   // about, and a board pre-filtered to one state would be a single
-  // column.
+  // column. The narrowing it does take is the one every task view
+  // shares (see taskListPane), so a search survives the switch between
+  // a repo's list and a repo's board as it does the switch between
+  // pages.
   const taskBoardPane = (list) => (
     <>
       <TaskBoard
         tasks={list}
         config={config}
+        narrowing={narrowing}
+        onNarrow={narrow}
         onOpenTask={openTask}
         selected={selected}
         onToggleSelect={toggleSelect}

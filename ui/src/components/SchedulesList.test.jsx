@@ -836,6 +836,61 @@ describe("SchedulesList", () => {
     );
   });
 
+  // grain/task-320: "A task" and "A suite" differed by one word, and so
+  // did the two pickers under them. Each option that names one of the
+  // four kinds now carries its figure (ItemGlyph.jsx, docs/brand.md);
+  // the options that name none of them -- "A task", and the template
+  // picker's "None" -- hold the slot open and empty instead, so the
+  // labels of one menu stay in one column.
+  it("glyphs the suite and template options, and holds the slot for the ones with no figure", async () => {
+    const templates = [{ id: "template-1", name: "Dependency bump" }];
+    const user = userEvent.setup();
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        templates={templates}
+        suites={suites}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
+
+    // The template picker is what a task-firing schedule chooses in.
+    await user.click(screen.getByLabelText("Template"));
+    expect(
+      (
+        await screen.findByRole("option", { name: "Dependency bump" })
+      ).querySelector('svg[data-glyph="templates"]'),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("option", { name: /^None/ })
+        .querySelector("svg[data-glyph]"),
+    ).toBeNull();
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByLabelText("Fires"));
+    expect(
+      (await screen.findByRole("option", { name: "A suite" })).querySelector(
+        'svg[data-glyph="suites"]',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "A task" }).querySelector("svg"),
+    ).toBeNull();
+
+    await user.click(screen.getByRole("option", { name: "A suite" }));
+    await user.click(screen.getByLabelText("Suite"));
+    expect(
+      (await screen.findByRole("option", { name: "Bug sweep" })).querySelector(
+        'svg[data-glyph="suites"]',
+      ),
+    ).toBeInTheDocument();
+  });
+
   // What a schedule fires is fixed when it is created (ui.
   // UpdateScheduleRequest's own doc comment), so editing one offers no
   // "Fires" picker -- only which suite it runs.
