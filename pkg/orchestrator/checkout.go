@@ -175,8 +175,15 @@ const setupOutputBudget = 4000
 // rather than branched over: a redispatch is usually the second attempt
 // at the same task, and its push is a fast-forward of what the first
 // attempt pushed instead of a rejected non-fast-forward.
+//
+// notes is how the two waits in here reach the task's own row while
+// nobody is driving the run yet (setupNotes) -- the clone itself is
+// stamped by RunDispatch before it calls this, and the setup command,
+// which can run for minutes more, by runSetupCommand below. The zero
+// value narrates nothing, which is what the recreate path passes: see
+// restoreCheckout.
 func prepareCheckout(ctx context.Context, tools []mcp.Tool, remoteBase string, task model.Task,
-	setup string) (checkout, error) {
+	setup string, notes setupNotes) (checkout, error) {
 
 	if remoteBase == "" || task.Target == nil {
 		return checkout{}, nil
@@ -235,7 +242,7 @@ fi
 		}
 	}
 	out := checkout{Dir: CheckoutDir, StateRepo: strings.Contains(result.Text, stateRepoMarker)}
-	ran, err := runSetupCommand(ctx, run, task, setup)
+	ran, err := runSetupCommand(ctx, run, task, setup, notes)
 	if err != nil {
 		return checkout{}, err
 	}
@@ -262,12 +269,16 @@ fi
 // setupCommandTimeout fails the dispatch, which that var's own doc
 // comment explains.
 func runSetupCommand(ctx context.Context, run func(context.Context, map[string]any) mcp.Result,
-	task model.Task, setup string) (*SetupResult, error) {
+	task model.Task, setup string, notes setupNotes) (*SetupResult, error) {
 
 	setup = strings.TrimSpace(setup)
 	if setup == "" {
 		return nil, nil
 	}
+	// Said only once there is something to say it about: a repo with no
+	// setup command must not leave "running the repo's setup command"
+	// standing on the row for the rest of the run's setup.
+	notes.say(ctx, setupCommandNote)
 	// cd first, in its own line, so a setup command is written the way
 	// somebody would type it at the top of the checkout rather than
 	// having to know where grain put the clone. `set -e` is deliberately

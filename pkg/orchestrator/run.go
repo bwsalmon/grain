@@ -1182,10 +1182,24 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	if err != nil {
 		return nil, err
 	}
+	// The rest of this run's setup, narrated on the task's own row for
+	// whoever is watching it -- runOne has already said what it was doing
+	// while the sandbox was being built, and this picks the story up from
+	// the clone. See setupNotes.
+	notes := setupNotes{store: store, taskID: task.ID, now: cfg.now}
+
 	var prepared checkout
 	var checkoutErr error
 	if closed, err := taskClosed(ctx, store, task.ID); err != nil || !closed {
-		prepared, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task, setupCommand)
+		// Named, because on a deployment with several repos "cloning" on
+		// its own says nothing the row did not already say. Only where
+		// there is actually a clone to make: prepareCheckout returns a
+		// zero checkout and does nothing at all for a task with no target
+		// or a deployment running no git proxy.
+		if cfg.GitRemoteBase != "" && task.Target != nil {
+			notes.say(ctx, cloningNote(*task.Target))
+		}
+		prepared, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task, setupCommand, notes)
 	}
 
 	// The commits those earlier attempts pushed, read out of the checkout
@@ -1202,6 +1216,13 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prompt string
 	var prepErr error
 	if checkoutErr == nil {
+		// Only for a task that actually holds grants: prepareCapabilities
+		// runs for every task -- it is what assembles the prompt -- but
+		// there is nothing to mint for a task that was granted nothing,
+		// and saying so would be a phrase about somebody else's run.
+		if len(task.Grants) > 0 {
+			notes.say(ctx, capabilityCredentialsNote)
+		}
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, history,
 			attachments, prepared, cfg.settingsRepo(), frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
 	}
@@ -1324,6 +1345,13 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if err := store.SetRunAgentStarted(ctx, d.RunID, cfg.now()); err != nil {
 			log.Printf("orchestrator: run %s: recording when its agent started: %v", d.RunID, err)
 		}
+
+		// The other half of that line: the row stops being grain's to
+		// narrate here, so grain's last setup phrase comes off it rather
+		// than standing over the agent's first quiet half-hour as if it
+		// were still true. From here only update_status writes it. See
+		// setupNotes.handOver.
+		notes.handOver(ctx)
 
 		// The prompt itself, recorded here rather than reconstructed
 		// later: it is assembled once, out of a task that may since be

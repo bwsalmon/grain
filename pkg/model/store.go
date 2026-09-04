@@ -2303,12 +2303,27 @@ func (s *Store) RunPrompt(ctx context.Context, taskID string, attempt int) (prom
 // task is ever open (schema.go's task_run_open_task index), so "the live
 // run of this task" names exactly one row, and a call that arrives late
 // cannot overwrite the synopsis a finished run ended on.
+//
+// The agent is not the only caller. grain narrates the run's own setup
+// through this same write, before there is an agent to call anything
+// (orchestrator.setupNotes), which is why nothing here is agent-specific
+// and why "" is a meaningful argument: it stores NULL, clearing whatever
+// stood, and is how the dispatch path hands a clean row to the agent it
+// is about to start. ui.Client.SetTaskActivity refuses "" on the way in
+// from the tool, so an agent cannot blank its own row by accident.
 func (s *Store) SetTaskActivity(ctx context.Context, taskID, activity string, at time.Time) (live bool, err error) {
+	// Both columns go, not just the note: activity_at is the note's own
+	// timestamp and nothing else reads it, so a cleared row that kept one
+	// would only offer a later reader a time with nothing it belongs to.
+	var stamp any = at.UTC()
+	if activity == "" {
+		stamp = nil
+	}
 	err = s.write(ctx, "set task "+taskID+" activity", func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx,
 			"UPDATE `task_run` SET `activity` = ?, `activity_at` = ? "+
 				"WHERE `task_id` = ? AND `finished_at` IS NULL",
-			nullable(activity), at.UTC(), taskID)
+			nullable(activity), stamp, taskID)
 		if err != nil {
 			return err
 		}
@@ -2337,19 +2352,23 @@ func (s *Store) SetTaskActivity(ctx context.Context, taskID, activity string, at
 // A live run that has never called the tool is absent rather than present
 // and empty: "said nothing" and "is not running" are different, but
 // neither gives a caller anything to show.
+//
+// agent_started_at comes along because it is what says whose phrase this
+// is: unset means the run has not been handed to its agent yet, so the
+// note is one grain stamped during setup (RunActivity.BySetup).
 func (s *Store) TaskActivity(ctx context.Context) (map[string]RunActivity, error) {
 	out := map[string]RunActivity{}
 	err := each(ctx, s.db,
-		"SELECT `task_id`,`activity`,`activity_at` FROM `task_run` "+
+		"SELECT `task_id`,`activity`,`activity_at`,`agent_started_at` FROM `task_run` "+
 			"WHERE `finished_at` IS NULL AND `activity` IS NOT NULL", nil,
 		func(rows *sql.Rows) error {
 			var taskID string
 			var note sql.NullString
-			var at sql.NullTime
-			if err := rows.Scan(&taskID, &note, &at); err != nil {
+			var at, agentStarted sql.NullTime
+			if err := rows.Scan(&taskID, &note, &at, &agentStarted); err != nil {
 				return err
 			}
-			out[taskID] = RunActivity{Note: note.String, At: timePtr(at)}
+			out[taskID] = RunActivity{Note: note.String, At: timePtr(at), BySetup: !agentStarted.Valid}
 			return nil
 		})
 	return out, err
@@ -2362,17 +2381,17 @@ func (s *Store) TaskActivity(ctx context.Context) (map[string]RunActivity, error
 // Client.ListTasks already make over MergeQueueBlocked.
 func (s *Store) TaskActivityOf(ctx context.Context, taskID string) (*RunActivity, error) {
 	var note sql.NullString
-	var at sql.NullTime
+	var at, agentStarted sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `activity`,`activity_at` FROM `task_run` "+
-			"WHERE `task_id` = ? AND `finished_at` IS NULL", taskID).Scan(&note, &at)
+		"SELECT `activity`,`activity_at`,`agent_started_at` FROM `task_run` "+
+			"WHERE `task_id` = ? AND `finished_at` IS NULL", taskID).Scan(&note, &at, &agentStarted)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !note.Valid) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &RunActivity{Note: note.String, At: timePtr(at)}, nil
+	return &RunActivity{Note: note.String, At: timePtr(at), BySetup: !agentStarted.Valid}, nil
 }
 
 // DropLease forgets a lease once its resource is actually revoked.

@@ -69,7 +69,7 @@ func TestPrepareCheckoutClonesTheTargetAndCreatesTheBranch(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
-	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "")
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{})
 	if err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestPrepareCheckoutStartsFromTheTasksBase(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "release"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, CheckoutDir, "RELEASE")); err != nil {
@@ -135,7 +135,7 @@ func TestPrepareCheckoutContinuesAnExistingBranch(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	work := filepath.Join(root, CheckoutDir)
@@ -166,7 +166,7 @@ func TestPrepareCheckoutReplacesALeftoverCheckout(t *testing.T) {
 	}
 
 	task := model.Task{ID: "t2", Target: &repo}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout over a leftover checkout: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(stale, "LEFTOVER")); !os.IsNotExist(err) {
@@ -180,7 +180,7 @@ func TestPrepareCheckoutReplacesALeftoverCheckout(t *testing.T) {
 func TestPrepareCheckoutSkippedWithoutARemoteBase(t *testing.T) {
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "widgets"}}
-	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), "", task, "")
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), "", task, "", setupNotes{})
 	if err != nil || prepared.Dir != "" {
 		t.Fatalf("prepareCheckout with no remote base = (%q, %v), want (\"\", nil)", prepared.Dir, err)
 	}
@@ -195,7 +195,7 @@ func TestPrepareCheckoutSkippedWithoutARemoteBase(t *testing.T) {
 func TestPrepareCheckoutRefusesAnUnusableRef(t *testing.T) {
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "widgets"}, Base: "x';touch pwned;'"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task, ""); err == nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task, "", setupNotes{}); err == nil {
 		t.Fatal("prepareCheckout accepted a base branch carrying shell syntax")
 	}
 	if _, err := os.Stat(filepath.Join(root, "pwned")); !os.IsNotExist(err) {
@@ -212,7 +212,7 @@ func TestPrepareCheckoutReportsAFailedClone(t *testing.T) {
 	}
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &model.RepoRef{Owner: "acme", Name: "nope"}}
-	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task, "")
+	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), t.TempDir(), task, "", setupNotes{})
 	if err == nil {
 		t.Fatal("prepareCheckout reported success cloning a repo that does not exist")
 	}
@@ -235,7 +235,7 @@ func TestPrepareCheckoutNamesABaseBranchThatNoLongerExists(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
-	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "")
+	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{})
 	if err == nil {
 		t.Fatal("prepareCheckout succeeded against a base branch that does not exist")
 	}
@@ -282,7 +282,7 @@ func TestPrepareCheckoutContinuesAnExistingBranchWhenTheBaseIsGone(t *testing.T)
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout over a branch that already exists: %v", err)
 	}
 	work := filepath.Join(root, CheckoutDir)
@@ -312,7 +312,7 @@ func TestPrepareCheckoutSaysNothingAboutABaseThatIsStillThere(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo, Base: "main"}
-	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	if journal.String() != "" {
@@ -345,7 +345,7 @@ func TestCheckoutCommitsListsWhatEarlierAttemptsPushed(t *testing.T) {
 	root := t.TempDir()
 	tools := mcp.NewSandboxTools(root)
 	task := model.Task{ID: "t1", Target: &repo}
-	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 
@@ -383,7 +383,7 @@ func TestCheckoutCommitsIsEmptyOnAFreshBranch(t *testing.T) {
 	root := t.TempDir()
 	tools := mcp.NewSandboxTools(root)
 	task := model.Task{ID: "t1", Target: &repo}
-	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	if commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1); len(commits) != 0 {
@@ -415,7 +415,7 @@ func TestCheckoutCommitsFallsBackWhenTheBaseIsGone(t *testing.T) {
 	root := t.TempDir()
 	tools := mcp.NewSandboxTools(root)
 	task := model.Task{ID: "t1", Target: &repo, Base: "grain/issue-642"}
-	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	commits := checkoutCommits(context.Background(), tools, task, maxBranchCommits+1)
@@ -438,7 +438,7 @@ func TestCheckoutCommitsRefusesAnUnusableBase(t *testing.T) {
 	root := t.TempDir()
 	tools := mcp.NewSandboxTools(root)
 	task := model.Task{ID: "t1", Target: &repo}
-	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(context.Background(), tools, remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	task.Base = "x';touch pwned;'"
@@ -476,7 +476,7 @@ func TestPrepareCheckoutRunsTheReposSetupCommandInTheCheckout(t *testing.T) {
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
 	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task,
-		"test -f README.md && echo deps installed > DEPS")
+		"test -f README.md && echo deps installed > DEPS", setupNotes{})
 	if err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestPrepareCheckoutReportsAFailedSetupRatherThanFailingTheDispatch(t *testi
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
 	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task,
-		"echo no such package >&2; exit 3")
+		"echo no such package >&2; exit 3", setupNotes{})
 	if err != nil {
 		t.Fatalf("a failed setup command failed the dispatch: %v", err)
 	}
@@ -540,7 +540,7 @@ func TestPrepareCheckoutFailsTheDispatchWhenSetupOutrunsItsBound(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
-	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "sleep 30")
+	_, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "sleep 30", setupNotes{})
 	if err == nil {
 		t.Fatal("a setup command that outran its bound was reported as a prepared checkout")
 	}
