@@ -42,6 +42,16 @@ const (
 	SecretsFile = "secrets.enc"
 	// ReadmeFile explains the repository to whoever opens it next.
 	ReadmeFile = "README.md"
+	// IgnoreFile keeps what is not state out of the repository
+	// (EnsureIgnored).
+	IgnoreFile = ".gitignore"
+	// WorkflowFile is the CI step that validates a proposed change before
+	// it is merged: `grain state check`, run against the pull request
+	// rather than against the deployment that would otherwise be the
+	// first thing to find out (format.go). A slash-separated path, since
+	// it is a path in a git repository as well as one on disk; callers
+	// writing it go through filepath.FromSlash.
+	WorkflowFile = ".github/workflows/grain-state-check.yml"
 )
 
 // Export writes every table in db to dir as JSON, one file per table.
