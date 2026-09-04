@@ -356,39 +356,47 @@ func fill(t *testing.T, ctx context.Context, store *model.Store, db *sql.DB) {
 	}
 }
 
-// A dump nothing in the database explains is still one every table of
-// the database is in: an export writes a file per table, empty tables
-// included, so a restore from it clears what it does not mention rather
-// than leaving yesterday's rows behind.
-func TestEveryTableGetsAFileEvenWithNoRows(t *testing.T) {
+// tables_internal_test.go checks that the export writes a file for every
+// table the schema has. This is the converse: that it writes a file for
+// nothing else. A view exported as a table would be imported back as one
+// -- pkg/model derives task_state as a view precisely so that nothing
+// writes it -- and a file left behind by a table a later build dropped
+// would restore rows nothing wrote.
+func TestTheDumpHoldsNoFileThatNamesNoTable(t *testing.T) {
 	ctx := context.Background()
-	_, db := openDB(t)
+	store, db := openDB(t)
+	fill(t, ctx, store, db)
 	dir := t.TempDir()
 	if err := staterepo.Export(ctx, db, dir); err != nil {
 		t.Fatalf("exporting: %v", err)
-	}
-	for _, table := range realTables(t, ctx, db) {
-		path := filepath.Join(dir, staterepo.TablesDir, table+".json")
-		if _, err := os.Stat(path); err != nil {
-			t.Errorf("%s has no file in the dump: %v", table, err)
-		}
-	}
-	// And nothing else: a file naming a table that is not there would be
-	// imported as rows nothing wrote.
-	entries, err := os.ReadDir(filepath.Join(dir, staterepo.TablesDir))
-	if err != nil {
-		t.Fatal(err)
 	}
 	known := map[string]bool{}
 	for _, table := range realTables(t, ctx, db) {
 		known[table+".json"] = true
 	}
-	for _, e := range entries {
-		if !known[e.Name()] {
-			t.Errorf("the dump holds %s, which names no table", e.Name())
-		}
+	entries, err := os.ReadDir(filepath.Join(dir, staterepo.TablesDir))
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(entries) == 0 {
-		t.Fatal("the dump is empty")
+		t.Fatal("the dump is empty, so nothing here is checking anything")
+	}
+	for _, e := range entries {
+		if !known[e.Name()] {
+			t.Errorf("the dump holds %s, which names no table this build has", e.Name())
+		}
+	}
+	// And a stale file really is removed rather than merely not written:
+	// a table a later build drops must not leave its rows behind for the
+	// build after that to import.
+	stale := filepath.Join(dir, staterepo.TablesDir, "task_template.json")
+	if err := os.WriteFile(stale, []byte("[]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := staterepo.Export(ctx, db, dir); err != nil {
+		t.Fatalf("re-exporting: %v", err)
+	}
+	if _, err := os.Stat(stale); err == nil {
+		t.Error("the export left behind a file naming a table this build does not have")
 	}
 }
