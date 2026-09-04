@@ -320,9 +320,9 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // publishedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
-// and NewTaskTools register, plus selfdebug.SourceTools' -- bare, as the
-// "mcpserver" subcommand registers them. Computed from those
+// NewPullRequestTools, NewOpenPullRequestTools and
+// NewRecreateSandboxTools register, plus selfdebug.SourceTools' -- bare,
+// as the "mcpserver" subcommand registers them. Computed from those
 // constructors directly rather than hand-copied, so this can never drift
 // from what that subcommand actually advertises the way v1's
 // hand-maintained _ALLOWED_TOOLS constant could (dispatch.py).
@@ -364,12 +364,9 @@ func publishedTools() []string {
 	}
 	// The self-debug capability's own tools, named on the same terms
 	// again: mcpserver registers them only for a run whose task holds
-	// that grant (-self-debug). "" is a source directory and nil a
-	// TaskReader no run ever gets -- this only wants the names.
+	// that grant (-self-debug). "" is a source directory no run ever
+	// gets -- this only wants the names.
 	for _, t := range selfdebug.SourceTools("") {
-		names = append(names, t.Name)
-	}
-	for _, t := range mcp.NewTaskTools(nil) {
 		names = append(names, t.Name)
 	}
 	return names
@@ -400,8 +397,7 @@ func eagerToolNames() []string {
 // its pull request, are both independent of which backend its sandbox
 // runs on. So is agent.SelfDebugArgs, which passes on whether this
 // task holds the self-debug grant -- and so whether that server serves
-// the read-only tools for grain's own source and grain's own task
-// records.
+// the read-only tools for grain's own source.
 //
 // So is agent.RunDeadlineArgs, which is why ctx is here at all: the
 // deadline on the ctx this run was given is what grain will cancel it
