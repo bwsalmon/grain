@@ -1,0 +1,123 @@
+# TEMPORARY probe job for task 255 -- delete before this branch merges.
+#
+# The agent sandbox has no network beyond the git proxy and no agy, so a
+# question about agy's own config schema can only be answered on a runner
+# that can install it. This installs the same agy a deployment would get
+# and reads its settings/permission schema out of the binary, then pushes
+# the whole capture to a *tag* (tags are excluded from build-artifacts.yml's
+# branches: ['**'], so this does not kick off an image build).
+name: agy-probe
+
+on:
+  push:
+    branches: [grain/task-255]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    name: probe agy permissions schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the agy CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 180 https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh
+          test -s /tmp/agy-install.sh
+          bash /tmp/agy-install.sh
+          rm -f /tmp/agy-install.sh
+          agy="$(find "$HOME" -type f -name agy -perm -u+x 2>/dev/null | head -n1 || true)"
+          test -n "$agy"
+          sudo ln -sf "$agy" /usr/local/bin/agy
+          echo "AGY_BIN=$agy" >> "$GITHUB_ENV"
+          agy --version
+
+      - name: Capture
+        run: |
+          set -uo pipefail
+          out=/tmp/agy-evidence
+          mkdir -p "$out"
+          agy --version > "$out"/version.txt 2>&1
+          agy --help > "$out"/help.txt 2>&1
+          agy mcp --help > "$out"/mcp-help.txt 2>&1
+          agy agent --help > "$out"/agent-help.txt 2>&1 || true
+          agy changelog > "$out"/changelog.txt 2>&1 || true
+
+          strings -n 4 "$AGY_BIN" > /tmp/agy.strings || true
+          wc -l /tmp/agy.strings
+
+          grep -i 'permission' /tmp/agy.strings | sort -u > "$out"/strings-permission.txt || true
+          grep -aoE 'json:"[^"]{1,60}"' /tmp/agy.strings | sort -u > "$out"/json-tags.txt || true
+          grep -iE '^json:"[^"]*(permission|allow|deny|tool)' "$out"/json-tags.txt \
+            > "$out"/json-tags-interesting.txt || true
+          grep -iE '(allowedTools|disallowedTools|deniedTools|toolPermissions|permissions\.|allowlist|denylist|enabledTools|disabledTools)' \
+            /tmp/agy.strings | sort -u | head -200 > "$out"/strings-tool-lists.txt || true
+          grep -iE 'jsonschema_description[^"]*' /tmp/agy.strings | grep -i -E 'permission|tool' | sort -u | head -100 \
+            > "$out"/schema-descriptions.txt || true
+
+          # Does a settings.json shaped the way task 255 proposes even
+          # parse? Unknown keys are said to be ignored silently; this
+          # records what the binary actually says about one.
+          probe_home=/tmp/agy-probe-home
+          rm -rf "$probe_home"
+          mkdir -p "$probe_home/.gemini/antigravity-cli" "$probe_home/.gemini/config"
+          settings="$probe_home/.gemini/antigravity-cli/settings.json"
+          echo '{"modelProvider":"gemini","permissions":{"allow":["mcp_grain-sandbox_*"],"deny":["run_command(*)","view_file(*)","write_to_file(*)"]}}' > "$settings"
+          echo '{"mcpServers":{}}' > "$probe_home/.gemini/config/mcp_config.json"
+          ( HOME="$probe_home" agy mcp list ) > "$out"/mcp-list-with-permissions.txt 2>&1
+          echo "exit=$?" >> "$out"/mcp-list-with-permissions.txt
+
+          # And with a deliberately unparseable value for the same key, to
+          # tell "known key" from "ignored key": a known key with a bad
+          # value is the one thing agy has been seen to reject.
+          echo '{"modelProvider":"gemini","permissions":12345}' > "$settings"
+          ( HOME="$probe_home" agy mcp list ) > "$out"/mcp-list-bad-permissions.txt 2>&1
+          echo "exit=$?" >> "$out"/mcp-list-bad-permissions.txt
+
+          # The same two, for the keys the README says the settings file
+          # really carries.
+          echo '{"modelProvider":"gemini","permissionPreset":12345}' > "$settings"
+          ( HOME="$probe_home" agy mcp list ) > "$out"/mcp-list-bad-preset.txt 2>&1
+          echo "exit=$?" >> "$out"/mcp-list-bad-preset.txt
+
+          wc -l "$out"/* | tail -20
+
+      - name: Push the capture to a tag
+        run: |
+          set -euo pipefail
+          tag="agy-probe-255-${GITHUB_SHA::7}"
+          work=/tmp/evidence-repo
+          rm -rf "$work"
+          git clone --depth 1 "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" "$work"
+          cd "$work"
+          git config user.email "actions@github.com"
+          git config user.name "agy probe"
+          rm -rf docs/agy-evidence
+          mkdir -p docs/agy-evidence
+          cp /tmp/agy-evidence/* docs/agy-evidence/
+          git add -A docs/agy-evidence
+          git commit -m "agy probe evidence for task 255"
+          git tag -f "$tag"
+          git push -f origin "$tag"
+          echo "pushed tag $tag"
+
+      - name: Digest
+        run: |
+          set -uo pipefail
+          cd /tmp/agy-evidence
+          echo "===== version ====="; cat version.txt
+          echo "===== help (flags) ====="; grep -E '^\s+--' help.txt | head -60
+          echo "===== permission-ish strings (first 60) ====="; head -60 strings-permission.txt
+          echo "===== interesting json tags ====="; head -60 json-tags-interesting.txt
+          echo "===== tool-list strings ====="; head -40 strings-tool-lists.txt
+          echo "===== mcp list with permissions block ====="; cat mcp-list-with-permissions.txt
+          echo "===== mcp list with permissions: 12345 ====="; cat mcp-list-bad-permissions.txt
+          echo "===== mcp list with permissionPreset: 12345 ====="; cat mcp-list-bad-preset.txt
+          echo "::error::probe job -- fails on purpose so its log is quoted back"
+          exit 1
