@@ -792,12 +792,19 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	isFixTask := task.Origin.Reason == model.ReasonFix
 	isHead := heads[ref.Repo.String()] == task.ID
 	blocked := e.obs != nil && e.obs.MergeQueueBlockedAt != nil
+	// A repair the queue asked for is still being worked on this very
+	// branch (requeueForRepair), so nothing below acts on it: merging it
+	// would land a tree an agent is still pushing to, and both ways of
+	// giving up are the repair's own clock to run, not this cycle's.
+	repairing := e.obs.RepairInFlight()
 
-	// A fix task always merges into the branch it repairs the moment it
-	// reads clean, unconditionally, the same as every AutoMerge task did
-	// before this package had a queue at all -- it is not itself a queue
-	// entry (isQueueMember excludes it), so it is never "blocking" a repo
-	// the way a stuck top-level task would. A task the queue already gave
+	// A fix task -- the separate, stacked repair branch the queue used to
+	// file, which nothing creates any more but a database may still carry
+	// one of in flight -- always merges into the branch it repairs the
+	// moment it reads clean, unconditionally, the same as every AutoMerge
+	// task did before this package had a queue at all: it is not itself a
+	// queue entry (isQueueMember excludes it), so it is never "blocking" a
+	// repo the way a stuck top-level task would. A task the queue already gave
 	// up on (blocked) gets the same unconditional treatment: it stopped
 	// being anyone's queue head so it cannot hold the queue back, but it
 	// still lands the moment a human's own push makes it clean. Anything
@@ -826,7 +833,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// that reports it) rather than something wrong with any one of the
 	// pull requests it would otherwise comment on individually.
 	switch {
-	case health == model.PrClean && task.AutoMerge && (isFixTask || isHead || blocked):
+	case health == model.PrClean && task.AutoMerge && !repairing && (isFixTask || isHead || blocked):
 		// Pinned to the commit the verdict above was computed for, not
 		// left to land on whatever the head branch points at by the time
 		// GitHub processes this. The two are the same commit right up
@@ -865,7 +872,7 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 			return err
 		}
 
-	case isHead && !isFixTask && !blocked && stalled:
+	case isHead && !isFixTask && !blocked && !repairing && stalled:
 		if err := escalateStalledChecks(ctx, store, task, ref, checks, stallDeadline, now); err != nil {
 			return err
 		}
@@ -937,17 +944,16 @@ func recordPullRequestEvents(ctx context.Context, store *model.Store, taskID str
 
 // advanceMergeQueueHead is what makes task -- the head of its repo's
 // merge queue, its PR conflicted or failing checks -- progress: bring a
-// stale branch up to date with its base and re-ask next cycle, file an
-// automatic fix the first time a genuine failure happens, or notice the
-// fix already filed has finished and decide whether that resolved things,
-// or give up on a fix that has not finished and is not going to
-// (defaultFixTaskDeadline).
+// stale branch up to date with its base and re-ask next cycle, send the
+// task back to an agent the first time a genuine failure happens, or
+// notice the repair it asked for has finished and decide whether that
+// resolved things, or give up on a repair that has not finished and is
+// not going to (defaultRepairDeadline).
 func advanceMergeQueueHead(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, obs *model.Observation, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, now time.Time) error {
 
-	fixTaskID, hasFix := fixTaskLink(task)
-	if !hasFix {
+	if obs == nil || obs.MergeQueueRepairAt == nil {
 		outcome, err := refreshStaleHead(ctx, store, client, task, obs, ref, detail, now)
 		if err != nil {
 			return err
@@ -957,32 +963,24 @@ func advanceMergeQueueHead(ctx context.Context, store *model.Store, client githu
 			// Decide next cycle, on that answer rather than this one.
 			return nil
 		}
-		return fileFixTask(ctx, store, client, task, ref, detail, health, checks, outcome, now)
+		return requeueForRepair(ctx, store, client, task, ref, detail, health, checks, outcome, now)
 	}
 
-	fixState, err := store.State(ctx, fixTaskID)
-	if err != nil {
-		return fmt.Errorf("orchestrator: reading fix task %s for %s: %w", fixTaskID, task.ID, err)
-	}
-	if fixState != model.StateClosed {
-		// Still running, or its own PR is still open and being watched by
-		// this same SyncPullRequests call -- nothing to do until it
-		// finishes one way or the other, unless it has been not-finishing
-		// for longer than any fix is waited on.
-		overdue, err := fixTaskOverdue(ctx, store, fixTaskID, now)
-		if err != nil {
-			return err
-		}
-		if !overdue {
+	if obs.RepairInFlight() {
+		// The repair is queued, running, or waiting on an answer --
+		// nothing to do until the run that is fixing this very branch
+		// finishes one way or the other, unless it has been
+		// not-finishing for longer than any repair is waited on.
+		if !repairOverdue(obs, now) {
 			return nil
 		}
-		return escalateUnfinishedFix(ctx, store, task, ref, fixTaskID, health, now)
+		return escalateUnfinishedRepair(ctx, store, task, ref, health, now)
 	}
-	// The fix task ran to completion (its own PR merged into ref's branch,
-	// or was closed without merging) and yet ref itself still reads
-	// broken this cycle: the automatic fix did not stick. One attempt is
-	// the deployment's whole policy here -- see fileFixTask's own doc
-	// comment on why a second attempt is not just retried outright.
+	// The repair ran to completion -- another attempt of this task,
+	// pushed onto this very branch -- and yet ref still reads broken this
+	// cycle: it did not stick. One attempt is the deployment's whole
+	// policy here -- see requeueForRepair's own doc comment on why a
+	// second attempt is not just retried outright.
 	return escalateToUser(ctx, store, task, ref, health, now)
 }
 
@@ -1153,92 +1151,65 @@ func notFound(err error) bool {
 	return errors.As(err, &e) && e.Status == 404
 }
 
-// fixTaskLink returns the ID task's own LinkFixTask names, if it has filed
-// one already.
-func fixTaskLink(task model.Task) (string, bool) {
-	for _, l := range task.Links {
-		if l.Kind == model.LinkFixTask {
-			return l.Target, true
-		}
-	}
-	return "", false
-}
-
-// defaultFixTaskDeadline is the third clock the merge queue runs, and the
+// defaultRepairDeadline is the third clock the merge queue runs, and the
 // one that bounds advanceMergeQueueHead's wait: how long a queue head is
-// left waiting on the fix task filed for it before the queue gives up and
-// asks a person.
+// left waiting on the repair run it asked for before the queue gives up
+// and asks a person.
 //
 // Without it the wait is unbounded, and by a route neither of the two CI
-// clocks above reaches. A head with a fix in flight reads PrConflicted or
-// PrFailing, not PrPending, so defaultCheckStallDeadline never times it;
-// and the fix task's own pull request, which may be the thing hanging, is
-// never a queue head itself (isQueueMember excludes it), so nothing times
-// that either. Anything that leaves the fix task open forever -- its own
-// checks wedged, a dispatch that fails without closing it, an agent run
-// that never comes back -- would otherwise hold its parent at the head of
-// the repo's queue indefinitely, with everything behind it waiting: the
-// same stall defaultCheckStallDeadline closes, reached from the other
-// side.
+// clocks above reaches. A head being repaired reads PrConflicted or
+// PrFailing, not PrPending, so defaultCheckStallDeadline never times it.
+// Anything that leaves the repair unfinished -- a dispatch that never
+// happens because the deployment is saturated, an agent run that never
+// comes back, a run that ends without pushing and leaves the task queued
+// for another attempt -- would otherwise hold the head of the repo's
+// queue indefinitely, with everything behind it waiting: the same stall
+// defaultCheckStallDeadline closes, reached from the other side.
 //
-// Six hours is chosen against what a fix task honestly needs: it has to
-// wait its turn to be dispatched (briefly -- fileFixTask files it at the
-// very head of the backlog, which is the order Store.Ready dispatches
-// in), run an agent (capped at DefaultMaxRunRuntime, two hours), open a
-// pull request and get its own CI through. That is comfortably inside
-// six hours even when every stage takes longer than usual, and the cost
-// of erring long is one that is paid once per stuck head rather than per
-// cycle. Erring short is worse here than it is for CI: giving up throws
-// away an automatic fix that might have been minutes from landing, and
-// the queue never files a second one.
+// Six hours is chosen against what a repair honestly needs: it has to
+// wait its turn to be dispatched (briefly -- the queue's own members sit
+// at the front of the backlog, which is the order Store.Ready dispatches
+// in, and a repair draws on the capacity Limits.Mergers keeps back), run
+// an agent (capped at DefaultMaxRunRuntime, two hours), and push. That is
+// comfortably inside six hours even when every stage takes longer than
+// usual, and the cost of erring long is one that is paid once per stuck
+// head rather than per cycle. Erring short is worse here than it is for
+// CI: giving up throws away a repair that might have been minutes from
+// landing, and the queue never asks for a second one.
 //
-// Measured from the fix task's own CreatedAt, which fileFixTask stamps in
-// the same cycle it writes LinkFixTask, rather than from an in-memory
-// sighting like the CI clocks: this one is naturally persisted already,
-// so a restart does not hand a stuck head another six hours.
-const defaultFixTaskDeadline = 6 * time.Hour
+// Measured from Observation.MergeQueueRepairAt, which requeueForRepair
+// stamps in the same write that requeues the task, rather than from an
+// in-memory sighting like the CI clocks: this one is naturally persisted
+// already, so a restart does not hand a stuck head another six hours.
+const defaultRepairDeadline = 6 * time.Hour
 
-// fixTaskOverdue reports whether the fix task filed for a queue head has
-// been unfinished for longer than defaultFixTaskDeadline. Call it only
-// for a fix task that has not reached StateClosed.
+// repairOverdue reports whether the repair asked for on this head has
+// been unfinished for longer than defaultRepairDeadline. Call it only
+// while repairInFlight holds.
 //
-// A fix task the store has no row for counts as overdue immediately: the
-// link names something that can never reach StateClosed, so waiting on it
-// is waiting on nothing. That is unreachable today (nothing deletes
-// tasks) and is here so the unreachable case fails toward asking a person
-// rather than back into the stall this deadline exists to end. A row with
-// no CreatedAt -- also unreachable, since fileFixTask always sets one --
-// has no clock to consult and is waited on, the only direction that can
-// be wrong without giving up on a fix that was going to work.
-func fixTaskOverdue(ctx context.Context, store *model.Store, fixTaskID string, now time.Time) (bool, error) {
-	fixTask, err := store.GetTask(ctx, fixTaskID)
-	if err != nil {
-		return false, fmt.Errorf("orchestrator: reading fix task %s: %w", fixTaskID, err)
+// Compared against the deadline rather than as `now.Sub(asked) >=
+// deadline`, so a clock that jumped backwards reads as "not overdue yet"
+// -- the same direction the CI clocks err in.
+func repairOverdue(obs *model.Observation, now time.Time) bool {
+	if obs == nil || obs.MergeQueueRepairAt == nil {
+		return false
 	}
-	if fixTask == nil {
-		return true, nil
-	}
-	if fixTask.CreatedAt == nil {
-		return false, nil
-	}
-	// Compared against the deadline rather than as `now.Sub(filed) >=
-	// deadline`, so a clock that jumped backwards reads as "not overdue
-	// yet" -- the same direction the CI clocks err in.
-	return !now.Before(fixTask.CreatedAt.Add(defaultFixTaskDeadline)), nil
+	return !now.Before(obs.MergeQueueRepairAt.Add(defaultRepairDeadline))
 }
 
-// healthReason renders why a PR is not mergeable, for a human or an
-// agent reading the fix task's own body. A failing PR names the checks
-// that failed (failingChecks) rather than saying only that something
-// did: the agent sent to repair it starts from that list, and "one or
-// more required checks are failing" left it to go and find out which.
+// repairReason renders why a PR is not mergeable, for a human or an
+// agent reading the comment that asks for a repair. A failing PR names
+// the checks that failed (failingChecks) rather than saying only that
+// something did: the agent sent to repair it starts from that list, and
+// "one or more required checks are failing" left it to go and find out
+// which.
 //
 // A conflict the queue has just watched GitHub refuse (refreshConflicted)
 // is described as that rather than as the inference healthReason would
 // otherwise make from detail.Mergeable: the queue tried the merge, so it
 // can tell the agent what its job actually is -- a real resolution rather
 // than the plain merge that fixes a merely stale branch.
-func fixReason(outcome refreshOutcome, health model.PrHealth,
+func repairReason(outcome refreshOutcome, health model.PrHealth,
 	detail github.PullRequestDetail, checks []github.CheckRun) string {
 
 	if outcome == refreshConflicted {
@@ -1264,11 +1235,11 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks
 	}
 }
 
-// failingJobLogs is the rest of what a fix task needs and healthReason
+// failingJobLogs is the rest of what a repair needs and healthReason
 // cannot give it: not just which jobs are red, but what they printed.
 //
 // healthReason already names the failing checks, which is what a person
-// reading the fix task needs to know where to look. An agent dispatched
+// reading the task needs to know where to look. An agent dispatched
 // into a sandbox needs more than that, because the sandbox is not a CI
 // runner -- it may not be able to run the failing suite at all -- so
 // "which test is red" has to travel with the task rather than be
@@ -1280,9 +1251,9 @@ func healthReason(health model.PrHealth, detail github.PullRequestDetail, checks
 // (github.FailedJobLogs) against a credential that may not be allowed to
 // make them, for a CI provider that may not be Actions at all, at the
 // one moment the queue has finally decided to act on a broken head.
-// Failing the whole cycle over the *annotation* on a fix task would cost
-// the fix itself, so an error is logged and the body says what it said
-// before this existed.
+// Failing the whole cycle over the *annotation* on a repair would cost
+// the repair itself, so an error is logged and the comment says what it
+// said before this existed.
 func failingJobLogs(client github.Client, ref model.PullRequestRef, headSHA string) string {
 	logs, err := client.FailedJobLogs(ref.Repo.Owner, ref.Repo.Name, headSHA)
 	if err != nil {
@@ -1314,148 +1285,84 @@ func failingJobLogs(client github.Client, ref model.PullRequestRef, headSHA stri
 	return b.String()
 }
 
-// fixTaskTitle names a fix after the task it repairs -- "Resolve: Add
-// pagination to the tasks API" -- where it used to be named after the
-// pull request that went red ("🤖 grain: fix acme/widgets#104").
-// The queue files one of these per broken head, and a list of them named
-// by pull request number says only which numbers are broken, not what any
-// of them is about; the source task's title is what a human scanning the
-// queue already recognises. It is the fix's own pull request title too,
-// since EnsurePullRequest takes Title verbatim, so it is read in the
-// place a reviewer sees it as well. Nothing is lost by dropping the ref:
-// the pull request, its URL and why it is broken all open the body, and
-// LinkProposedBy is the machine-readable form of "after the source task".
+// requeueForRepair is what the merge queue does about a head that is
+// genuinely broken: it sends the task itself back to an agent, on the
+// very branch its pull request is already open from.
 //
-// Fix tasks do not nest -- syncEntry files one only for a head that is
-// not itself a fix -- so this cannot compound into "Resolve: Resolve:
-// ...". The ref stays as the fallback for the one thing a title cannot
-// cover: a task filed without one, which would otherwise leave a fix
-// called just "Resolve:".
-func fixTaskTitle(task model.Task, ref model.PullRequestRef) string {
-	title := strings.TrimSpace(task.Title)
-	if title == "" {
-		title = ref.String()
-	}
-	return "Resolve: " + title
-}
-
-// fileFixTask is bwsalmon/agents#283's replacement for core.py's
-// _suggest_fix: where that filed a new issue labelled needs_approval_label
-// and left it for a human to apply trigger_label (or comment /lgtm)
-// before the agent set would touch it, this files the task straight into
-// the store already approved -- Approval set, by PrincipalAutomation, so
-// task_state reads it 'queued' immediately and the very next dispatch.Cycle
-// dispatches it with no human in the loop. That is the issue's own "we
-// will no longer suggest tasks the user needs to approve for this."
+// It replaces filing a separate fix task (bwsalmon/agents#283's own
+// replacement for core.py's _suggest_fix, which filed an issue a human
+// had to approve). That version worked -- the fix branch was stacked on
+// the head branch and merged straight back into it -- but it bought the
+// resolution at the price of a second pull request and a second full run
+// of CI: once on the fix's own branch before it could merge, and again on
+// the head branch afterward, with the queue waiting out both. A conflict
+// resolved on the branch that has the conflict needs neither. The commits
+// land on the branch the pull request is open from, GitHub re-runs that
+// pull request's checks once, and the queue reads the answer on its next
+// cycle.
 //
-// The fix task's Base is ref's own head branch and its AutoMerge is set,
-// the same stacked-branch trick core.py's own _suggest_fix used: a fresh
-// branch built on top of ref's branch is a stacked PR, and AutoMerge is
-// what lets syncEntry merge that stacked PR straight back into ref's
-// branch once it reads clean, with no separate review of the fix itself.
-// Both were directive lines written into an issue body before; they are
-// columns set directly now. LinkFixTask on task is what stops this from running a
-// second time next cycle (advanceMergeQueueHead checks it first), and what
-// lets a later cycle find the fix task again once it finishes to decide
-// whether ref is fixed. LinkProposedBy on fixTask itself is the same
-// provenance relayProposedTasks records for a propose_task call: this
-// task exists because task did, and the UI reads it the same way
-// regardless of which path filed the task it is showing.
+// The requeue is three observations written together, and each is doing
+// something:
 //
-// The fix task is filed straight into the store, and a comment on the
-// task it repairs says so -- both writes grain owns, where the GitHub
-// version needed an issue created for the fix and a comment posted on the
-// original task's own issue.
+//   - CompletedAt cleared is the requeue itself. StateOf reads a task
+//     with no CompletedAt and no ClosedAt as 'queued' again, so
+//     task_ready offers it and the next dispatch.Cycle picks it up --
+//     the ordinary redispatch path every task already has, not a second
+//     way of starting work. The task goes visibly back to working, which
+//     is what a person watching the queue should see: the change is not
+//     finished, and the thing that is not finished is this task.
+//   - MergeQueueRepairAt is the record that this is a repair and not
+//     somebody's second thoughts. advanceMergeQueueHead waits on it,
+//     syncEntry will not merge underneath it, the store spends
+//     Limits.Mergers' reserved capacity on the run because of it
+//     (model.mergerTaskSQL), and it never being cleared is what holds the
+//     deployment to one automatic repair per pull request. A second is
+//     not simply retried, for core.py's own _suggest_fix reason
+//     ("suggesting a fix for a fix risks an unbounded chain") -- see
+//     escalateToUser.
+//   - RetryRequestedAt is what stops a task whose earlier attempts failed
+//     from being unable to have this one. A run salvaged into a pull
+//     request keeps its "failed" outcome forever (orchestrator.RunCycle's
+//     "only the ending failed"), so a task can sit on a full failure
+//     streak with a perfectly real pull request open, and StateOf would
+//     read the requeued task 'failed' rather than 'queued'. Asking for
+//     the repair is asking for the attempt.
 //
-// Origin.Reason is ReasonFix, which is more than provenance: a run of a
-// task filed here is a *merger* (model.OriginReason.Merger), so it draws
-// on the capacity model.Limits.Mergers keeps back for exactly this --
-// capacity ordinary work cannot reach, so a repair does not have to wait
-// out whatever else the deployment is running. Filing at the head of the
-// backlog decides when it runs; that decides whether there is room to.
-//
-// Its body carries the failure itself, not just the verdict: fixReason
-// names the jobs that went red -- or, for a head refreshStaleHead has
-// just watched GitHub refuse to merge, says that in place of the
-// inference healthReason would have made -- and for a failing pull
-// request failingJobLogs appends what those jobs printed. The comment on the
-// parent task stays the one-line version -- it is read by a person
-// watching the queue, who has the pull request itself a click away, where
-// the agent dispatched into a sandbox has neither.
-func fileFixTask(ctx context.Context, store *model.Store, client github.Client,
+// The comment goes in first, and it is not decoration: it is the whole of
+// what the dispatched run is told. A redispatched task's prompt carries
+// its conversation (BuildPrompt, commentThreadSection), so this comment
+// is where the agent learns which branch is broken, how, and that it must
+// push to that branch rather than start a new one -- repairReason names
+// the failure and, for a failing pull request, failingJobLogs appends
+// what the red jobs actually printed. Writing it before the requeue also
+// means the ordering cannot leave a dispatched run with nothing to read:
+// a crash in between leaves the task completed and the next cycle does
+// both again.
+func requeueForRepair(ctx context.Context, store *model.Store, client github.Client,
 	task model.Task, ref model.PullRequestRef, detail github.PullRequestDetail,
 	health model.PrHealth, checks []github.CheckRun, outcome refreshOutcome, now time.Time) error {
 
-	reason := fixReason(outcome, health, detail, checks)
-	queue := model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}
-
-	id, err := store.NewTaskID(ctx)
-	if err != nil {
-		return fmt.Errorf("orchestrator: allocating an id for a fix task for %s: %w", task.ID, err)
-	}
-	// At the very head of the backlog: ahead of the queue this repairs,
-	// which showQueueAtFrontOfBacklog has already put at the front of it,
-	// and so ahead of everything else. That is bwsalmon/agents#389's "a
-	// queue head's repair must not wait behind unrelated new work" said as
-	// a position rather than as a sort rule inside Store.Ready, which is
-	// where it used to live and where nobody could see it -- the backlog
-	// now shows the repair first because it really is dispatched first.
-	orderKey, err := store.OrderKeyForNewTask(ctx, true)
-	if err != nil {
-		return fmt.Errorf("orchestrator: placing a fix task for %s at the head of the backlog: %w", task.ID, err)
-	}
-	title := fixTaskTitle(task, ref)
+	reason := repairReason(outcome, health, detail, checks)
 	body := fmt.Sprintf(
-		"Task %s opened %s (%s), but %s.\n\n"+
-			"This is an automatic fix, filed by the merge queue: it works from "+
-			"`%s` (the same branch) and, once it succeeds, its own pull request "+
-			"is merged straight back into `%s` -- no approval needed, since the "+
-			"merge queue dispatches it itself.",
-		task.ID, ref, detail.HTMLURL, reason, detail.HeadRef, detail.HeadRef,
+		"%s %s, so the merge queue has sent this task back to an agent to repair it. "+
+			"No approval needed, and no separate task: the work happens on `%s` -- the "+
+			"branch this task's pull request is already open from -- so the resolution "+
+			"and the change share one pull request and one round of checks. Push to that "+
+			"branch, and %s merges as soon as it reads clean.",
+		ref, reason, detail.HeadRef, ref,
 	)
 	if health == model.PrFailing {
 		body += failingJobLogs(client, ref, detail.HeadSHA)
 	}
-
-	fixTask := model.Task{
-		ID:     id,
-		Intent: model.IntentImplement,
-		Title:  title,
-		Body:   body,
-		Origin: model.Origin{
-			Attribution: model.Attribution{Actor: queue},
-			Reason:      model.ReasonFix,
-		},
-		Approval:  &model.Attribution{Actor: queue},
-		Target:    &ref.Repo,
-		Binding:   model.BindingDirective,
-		Base:      detail.HeadRef,
-		AutoMerge: true,
-		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: task.ID}},
-		CreatedAt: &now,
-		OrderKey:  orderKey,
-	}
-	if err := store.PutTask(ctx, fixTask); err != nil {
-		return fmt.Errorf("orchestrator: filing fix task %s: %w", fixTask.ID, err)
-	}
-
-	// Through UpdateTask, for the reason finishWithPullRequest gives.
-	if err := store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
-		t.Links = append(t.Links, model.Link{Kind: model.LinkFixTask, Target: fixTask.ID})
-		return nil
-	}); err != nil {
-		return fmt.Errorf("orchestrator: linking %s to its fix task %s: %w", task.ID, fixTask.ID, err)
-	}
-
-	comment := fmt.Sprintf(
-		"%s %s -- filed task %s to fix it automatically. No approval needed: the "+
-			"merge queue will run it and, if it succeeds, merge it straight back "+
-			"into this branch.", ref, reason, fixTask.ID,
-	)
-	if err := queueComment(ctx, store, task.ID, comment, now); err != nil {
+	if err := queueComment(ctx, store, task.ID, body, now); err != nil {
 		return err
 	}
-	return nil
+
+	return observeField(ctx, store, task.ID, now, func(o *model.Observation) {
+		o.MergeQueueRepairAt = &now
+		o.CompletedAt = nil
+		o.RetryRequestedAt = &now
+	})
 }
 
 // queueComment records something the merge queue said about a task,
@@ -1491,9 +1398,9 @@ func queueComment(ctx context.Context, store *model.Store, taskID, body string, 
 //
 // The three callers below are the three reasons the queue gives up, and
 // they say different things to the person now holding it: escalateToUser
-// for a fix that ran and did not take, escalateUnfinishedFix for one that
-// never finished running at all, escalateStalledChecks for CI that never
-// reported.
+// for a repair that ran and did not take, escalateUnfinishedRepair for
+// one that never finished running at all, escalateStalledChecks for CI
+// that never reported.
 func blockMergeQueue(ctx context.Context, store *model.Store, taskID, comment string, now time.Time) error {
 	if err := queueComment(ctx, store, taskID, comment, now); err != nil {
 		return err
@@ -1501,19 +1408,21 @@ func blockMergeQueue(ctx context.Context, store *model.Store, taskID, comment st
 	return observeField(ctx, store, taskID, now, func(o *model.Observation) { o.MergeQueueBlockedAt = &now })
 }
 
-// escalateToUser gives up on task because its automatic fix ran and
-// finished and its PR is still broken. (A fix that has not finished at
-// all is escalateUnfinishedFix's, and says so differently.)
+// escalateToUser gives up on task because the repair run the queue asked
+// for ran and finished and its PR is still broken. (A repair that has not
+// finished at all is escalateUnfinishedRepair's, and says so
+// differently.)
 //
-// This never runs a second automatic fix for the same PR. core.py's own
-// _suggest_fix reasoning ("suggesting a fix for a fix risks an unbounded
-// chain") applies just as much to retrying a fix that already failed once
-// without anything about the PR having changed in between.
+// This never asks for a second automatic repair of the same PR. core.py's
+// own _suggest_fix reasoning ("suggesting a fix for a fix risks an
+// unbounded chain") applies just as much to redispatching a task whose
+// repair already failed once without anything about the PR having changed
+// in between.
 func escalateToUser(ctx context.Context, store *model.Store,
 	task model.Task, ref model.PullRequestRef, health model.PrHealth, now time.Time) error {
 
 	comment := fmt.Sprintf(
-		"The automatic fix for %s didn't take -- %s -- so this needs a person. "+
+		"The automatic repair of %s didn't take -- %s -- so this needs a person. "+
 			"Push a fix by hand (or resolve it directly on GitHub) and %s will "+
 			"merge as soon as it reads clean. The merge queue has moved on to "+
 			"the next task in %s.",
@@ -1522,32 +1431,29 @@ func escalateToUser(ctx context.Context, store *model.Store,
 	return blockMergeQueue(ctx, store, task.ID, comment, now)
 }
 
-// escalateUnfinishedFix gives up on task because the fix filed for it has
-// been neither finished nor abandoned for longer than
-// defaultFixTaskDeadline, so the head has been holding its queue position
+// escalateUnfinishedRepair gives up on task because the repair asked of
+// it has been neither finished nor abandoned for longer than
+// defaultRepairDeadline, so the head has been holding its queue position
 // on a repair that is not arriving.
 //
-// The fix task itself is left exactly as it is, running or queued or
-// waiting on its own checks. Nothing here can tell which of those it is
-// stuck in, and cancelling it would throw away work for no gain: if it
-// does finish and go clean, syncEntry still merges it into ref's branch
-// unconditionally (a fix task is never a queue member), and ref itself,
-// now blocked rather than abandoned, still merges the moment it reads
-// clean. What the queue gives up is the position and the waiting, not
-// either merge.
-func escalateUnfinishedFix(ctx context.Context, store *model.Store,
-	task model.Task, ref model.PullRequestRef, fixTaskID string,
-	health model.PrHealth, now time.Time) error {
+// The task is left dispatchable exactly as it is -- queued, running, or
+// waiting on an answer. Nothing here can tell which of those it is stuck
+// in, and cancelling the run would throw away work for no gain: if it
+// does finish and the branch goes clean, ref itself, now blocked rather
+// than abandoned, still merges the moment it reads clean. What the queue
+// gives up is the position and the waiting, not the merge.
+func escalateUnfinishedRepair(ctx context.Context, store *model.Store,
+	task model.Task, ref model.PullRequestRef, health model.PrHealth, now time.Time) error {
 
 	comment := fmt.Sprintf(
-		"The automatic fix for %s never finished -- task %s was filed to repair it "+
-			"more than %s ago and still hasn't run to completion, and %s -- so this "+
-			"needs a person. Have a look at %s (its run, or its own checks, may be "+
-			"stuck); either way, pushing a fix by hand is enough, and %s will merge "+
-			"as soon as it reads clean. The merge queue has moved on to the next "+
-			"task in %s.",
-		ref, fixTaskID, humanDuration(defaultFixTaskDeadline), healthReasonSuffix(health),
-		fixTaskID, ref, ref.Repo,
+		"The automatic repair of %s never finished -- this task was sent back to an "+
+			"agent more than %s ago and still hasn't run to completion, and %s -- so "+
+			"this needs a person. Have a look at its latest attempt (the run may be "+
+			"stuck); either way, pushing a fix by hand is enough, and %s will merge as "+
+			"soon as it reads clean. The merge queue has moved on to the next task in "+
+			"%s.",
+		ref, humanDuration(defaultRepairDeadline), healthReasonSuffix(health),
+		ref, ref.Repo,
 	)
 	return blockMergeQueue(ctx, store, task.ID, comment, now)
 }

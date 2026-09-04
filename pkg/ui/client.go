@@ -241,13 +241,20 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// And once more for "the merge queue is having this one repaired",
+	// which is the other thing a row has to say about a task the queue is
+	// driving rather than merely watching.
+	repairing, err := c.Store.MergeQueueRepairing(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Task, 0, len(tasks))
 	for _, t := range tasks {
 		var blockedAt *time.Time
 		if at, ok := mergeQueueBlocked[t.ID]; ok {
 			blockedAt = &at
 		}
-		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt))
+		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, repairing[t.ID]))
 	}
 	return out, nil
 }
@@ -305,7 +312,7 @@ func (c *Client) Task(ctx context.Context, id string) (Task, error) {
 	if obs != nil {
 		blockedAt = obs.MergeQueueBlockedAt
 	}
-	return taskFrom(*t, state, closed, blockedAt), nil
+	return taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight()), nil
 }
 
 // closedTargets resolves whether each of a task's own blocking-link
@@ -377,7 +384,7 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 		blockedAt = obs.MergeQueueBlockedAt
 	}
 	detail := TaskDetail{
-		Task:        taskFrom(*t, state, closed, blockedAt),
+		Task:        taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight()),
 		Comments:    make([]Comment, 0, len(comments)),
 		Attachments: taskAttachments,
 	}

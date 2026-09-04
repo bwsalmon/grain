@@ -136,6 +136,7 @@ var Tables = []string{
   ` + "`baseline_comment_id`" + `         INTEGER  NULL,
   ` + "`merge_queue_blocked_at`" + `      DATETIME NULL,
   ` + "`merge_queue_refreshed_at`" + `    DATETIME NULL,
+  ` + "`merge_queue_repair_at`" + `       DATETIME NULL,
   ` + "`observed_at`" + `                 DATETIME NULL,
   ` + "`retry_requested_at`" + `          DATETIME NULL,
   ` + "`pr_opened_at`" + `                DATETIME NULL,

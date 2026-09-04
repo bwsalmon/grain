@@ -100,12 +100,14 @@ func (c RunCounts) Add(merger bool) RunCounts {
 }
 
 // Merger reports whether a run of a task with this origin reason counts
-// against the merger half of Limits: the merge queue's own fix tasks
-// (ReasonFix) and nothing else.
+// against the merger half of Limits by its reason alone: a task the merge
+// queue filed to repair another task's branch (ReasonFix) and nothing
+// else.
 //
-// A method on the reason rather than on Task because the two places that
-// have to answer it hold different things -- dispatch.Cycle has a task
-// this store classified for it (Store.ReadyMergers), and StartRun has
-// only the origin_reason column of the task it is about to record a run
-// for.
+// It is no longer the whole of the question. A repair now runs as another
+// attempt of the task whose branch is broken (Observation.
+// MergeQueueRepairAt), whose reason is whatever it was filed as, so the
+// store answers "is this run a merger" with both halves at once
+// (mergerTaskSQL) and nothing here reads this. It stays as the reason
+// half's own name, for a caller holding an origin and no database.
 func (r OriginReason) Merger() bool { return r == ReasonFix }

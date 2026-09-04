@@ -42,6 +42,26 @@ export const STATE_LABELS = {
   closed: "Closed",
 };
 
+// stateLabel is STATE_LABELS for one task, plus the single thing a task's
+// state cannot say on its own: that the run it is in, or waiting for, is
+// the merge queue repairing its own pull request branch rather than
+// writing the change (ui.Task.Repairing, model.Observation.
+// MergeQueueRepairAt).
+//
+// The state really is "running" or "queued" -- the task went back to
+// working, on the same branch, and that is what the repair *is* now that
+// it no longer happens on a branch of its own. But a row that reads
+// "Running" days after its pull request opened looks like a task starting
+// over, so the label says which kind of work it is, and StateDot colours
+// the mark to match.
+export function stateLabel(t) {
+  const label = STATE_LABELS[t.state] || t.state;
+  if (!t.repairing) return label;
+  if (t.state === "running") return "Repairing";
+  if (t.state === "queued") return "Queued for repair";
+  return label;
+}
+
 // completionPhase names what a task whose run is over is waiting on when
 // that is not what its state badge already says. There is one such case
 // left: a pull request the merge queue has given up on, which is still

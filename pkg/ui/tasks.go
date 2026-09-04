@@ -130,6 +130,15 @@ type Task struct {
 	// own State now (model.StateAwaitingSubmit), so the badge says it
 	// rather than contradicting it.
 	MergeQueueBlockedAt *time.Time `json:"mergeQueueBlockedAt,omitempty"`
+	// Repairing is true for a task the merge queue has sent back to an
+	// agent to repair its own pull request branch, and whose repair has
+	// not finished (model.Observation.MergeQueueRepairAt,
+	// orchestrator.repairInFlight). Such a task reads 'running' or
+	// 'queued' like any other attempt, and from the state alone a person
+	// watching cannot tell "still being written" from "written, merged
+	// nowhere, and now being unstuck" -- so the frontend colours the
+	// running mark differently for it (ui/src/components/StateDot.jsx).
+	Repairing bool `json:"repairing,omitempty"`
 }
 
 // Comment is one entry in a task's conversation.
@@ -254,7 +263,8 @@ type Attempt struct {
 // closed -- the caller resolves it (Client.ListTasks over the whole
 // store in one query, Client.Task over just this task's own targets) so
 // this function stays free of the store itself.
-func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueueBlockedAt *time.Time) Task {
+func taskFrom(t model.Task, state model.State, closed map[string]bool,
+	mergeQueueBlockedAt *time.Time, repairing bool) Task {
 	out := Task{
 		ID:                  t.ID,
 		Title:               t.Title,
@@ -277,6 +287,7 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		SuiteRun:            t.Origin.Reason == model.ReasonSuite,
 		CreatedAt:           t.CreatedAt,
 		MergeQueueBlockedAt: mergeQueueBlockedAt,
+		Repairing:           repairing,
 	}
 	if t.Target != nil {
 		out.Repo = t.Target.String()
