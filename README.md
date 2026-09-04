@@ -1803,6 +1803,34 @@ in candidate directories to see which were read, and pushed the output to
 a branch. `agy changelog` in particular is the closest thing to
 documentation there is, since it ships in the binary.
 
+**That job is not throwaway any more.** It is
+`.github/workflows/agy-surface.yml` and `scripts/agy-surface.sh`, and the
+next question about agy's flags, settings keys or on-disk layout costs one
+`workflow_dispatch` rather than a re-derivation -- roughly every other
+task that has touched `pkg/agent/antigravity` has needed one. It installs
+the *unpinned* agy the Dockerfile would install, so what it reads is the
+binary a freshly built image would carry rather than one a comment froze
+months ago; it asks the fixed set of questions above, plus what agy
+unpacks into a `HOME` it has never seen (its own customization guides
+included, which is where the hook contract is written down), which of six
+candidate directories its agents actually come from, which of six
+candidate files its MCP servers actually come from, and what the `init`
+event of a session opened with `Run`'s own argv advertises. It holds no
+credential and runs on no schedule; the token that writes a branch lives
+in a second job that never runs agy.
+
+The output is committed, at
+[`docs/agy-surface.md`](docs/agy-surface.md), rather than left as a
+workflow artifact -- for two reasons that are the same reason. A sandboxed
+agent cannot download an artifact and can read a file in its own checkout
+(or `git fetch origin agy-surface`, the branch each dispatch pushes as one
+commit on top of the ref it ran from, to be merged like any other pull
+request). And a capture nobody can compare against the last one only
+answers "what does agy do today", where the question behind every one of
+these dispatches is "what changed" -- so the script writes nothing
+run-specific, no dates and no temporary paths, every list sorted, and two
+runs against one agy produce identical bytes. A diff is drift.
+
 The behavioural half above went further only because a sandbox with
 general network access *and* a Gemini key can do the whole thing itself:
 install agy, write the private `HOME` this package builds, point its hook
