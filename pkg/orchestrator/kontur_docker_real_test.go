@@ -497,9 +497,10 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	// This needs no retry loop around the first tool call. A readiness
 	// wait that only watched a TCP port start answering -- what reaching
 	// the guest over a forwarded port used to do -- would clear before
-	// the guest had finished booting to a usable agent; waitForGuestExec's
-	// probe is a whole command *running in the guest*, so Acquire
-	// returning here already means the guest ran one. Asserting that directly, rather
+	// the guest had finished booting; waitForGuestReady's probe is a
+	// whole command *running in the guest*, and one that only succeeds
+	// once the guest has a default route, so Acquire returning here
+	// already means both. Asserting that directly, rather
 	// than retrying and hiding it, is what would catch that guarantee
 	// regressing.
 	result := byName["run_command"].Handler(context.Background(), map[string]any{
