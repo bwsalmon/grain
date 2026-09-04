@@ -304,6 +304,28 @@ func liveDaemonContext(t *testing.T, inside, reserve time.Duration) (context.Con
 	return ctx, runCtx, func() { cancelWait(); cancel() }
 }
 
+// startLiveDaemon runs the daemon under test in the background, and
+// returns both the error run() will eventually give back and a channel
+// closed the moment it does.
+//
+// The second is what keeps a daemon that fell over from being reported as
+// a slow agent. run() can return early on its own -- a store it cannot
+// open, a UI address it cannot bind, a state repository this build must
+// not overwrite -- and when it does there is nothing left writing to the
+// store or serving the API the waits below poll. Without this they would
+// spend the whole budget finding that out and then blame the model for
+// it, which is the exact misdiagnosis this test's pacing is meant to
+// stop making.
+func startLiveDaemon(ctx context.Context, cfg config) (<-chan error, <-chan struct{}) {
+	done := make(chan error, 1)
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		done <- run(ctx, cfg)
+	}()
+	return done, stopped
+}
+
 // awaitFinishedRun blocks until taskID's latest run has been finished --
 // the stamp RunDispatch writes on the row once framework.Run has returned
 // -- and hands it back.
@@ -321,7 +343,7 @@ func liveDaemonContext(t *testing.T, inside, reserve time.Duration) (context.Con
 // run never finished, how long it had, and the last thing the run said
 // about itself -- grain's own setup notes while the sandbox is being
 // built, the agent's own update_status after that (model.Run.Activity).
-func awaitFinishedRun(ctx context.Context, store *model.Store, taskID string) (model.Run, error) {
+func awaitFinishedRun(ctx context.Context, store *model.Store, taskID string, stopped <-chan struct{}) (model.Run, error) {
 	started := time.Now()
 	last := "it had not been dispatched at all"
 	for {
@@ -339,17 +361,40 @@ func awaitFinishedRun(ctx context.Context, store *model.Store, taskID string) (m
 			last = describeLiveRun(run)
 		}
 		select {
+		case <-stopped:
+			if ctx.Err() == nil {
+				return model.Run{}, daemonStoppedEarly(taskID, last)
+			}
+			return model.Run{}, budgetSpent(taskID, time.Since(started), last)
 		case <-ctx.Done():
-			return model.Run{}, fmt.Errorf(
-				"no run of task %s finished in the %s this test waited: %s. That is the live "+
-					"agent's own pace against a ceiling this test chose, not evidence of anything "+
-					"wrong in grain -- `go test -timeout` is what sets the ceiling "+
-					"(liveDaemonContext), and the daemon's own log above says what the run was "+
-					"doing with the time",
-				taskID, time.Since(started).Round(time.Second), last)
+			return model.Run{}, budgetSpent(taskID, time.Since(started), last)
 		case <-time.After(livePollInterval):
 		}
 	}
+}
+
+// budgetSpent is what a wait for a live run says when it runs out, and it
+// is written for the reader who has to tell "the agent was slow" from
+// "grain is broken" -- the distinction the fixed windows this replaced
+// could not draw. last is whatever the run was last known to be doing.
+func budgetSpent(taskID string, waited time.Duration, last string) error {
+	return fmt.Errorf(
+		"no run of task %s finished in the %s this test waited: %s. That is the live agent's own "+
+			"pace against a ceiling this test chose, not evidence of anything wrong in grain -- "+
+			"`go test -timeout` is what sets the ceiling (liveDaemonContext), and the daemon's "+
+			"own log above says what the run was doing with the time",
+		taskID, waited.Round(time.Second), last)
+}
+
+// daemonStoppedEarly is the other way that wait ends: run() returned
+// while the test was still waiting on it, which is a failure of the
+// daemon and not of the agent's pace. stopLiveDaemon reports run()'s own
+// error, so this says where to look rather than repeating it.
+func daemonStoppedEarly(taskID, last string) error {
+	return fmt.Errorf(
+		"run() returned before any run of task %s finished: %s. The daemon stopping is what ended "+
+			"this wait, not the budget -- run()'s own error is reported alongside this one",
+		taskID, last)
 }
 
 // describeLiveRun words what a run that has not finished was last doing,
@@ -512,21 +557,18 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	// after framework.Run returns -- see liveDaemonContext.
 	ctx, runCtx, cancel := liveDaemonContext(t, liveFinishWindow, liveShutdownReserve)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- run(ctx, config{
-			dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: 5 * time.Second,
-			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
-			githubHost: githubHost, githubInsecureHTTP: true,
-		})
-	}()
+	done, stopped := startLiveDaemon(ctx, config{
+		dataDir: dataDir, sandboxDir: t.TempDir(), maxWorkers: 1, pollInterval: 5 * time.Second,
+		geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
+		githubHost: githubHost, githubInsecureHTTP: true,
+	})
 	defer stopLiveDaemon(t, cancel, done)
 
 	// The one wait that is about the agent, and it waits for an event
 	// rather than for a length of time: the run being over. Everything
 	// below it is a fact by then, which is what makes each failure
 	// message below able to name a cause.
-	finished, err := awaitFinishedRun(runCtx, store, taskID)
+	finished, err := awaitFinishedRun(runCtx, store, taskID, stopped)
 	if err != nil {
 		t.Fatal(err)
 	}

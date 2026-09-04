@@ -121,7 +121,7 @@ esac
 // store-side twin's does, off the same two facts the API happens to carry
 // in a different shape: the attempt's own progress (TaskDetail.Attempts)
 // and whatever the task last said it was doing (Task.Activity).
-func awaitFinishedAttempt(ctx context.Context, client *ui.HTTPClient, taskID string) (ui.Attempt, error) {
+func awaitFinishedAttempt(ctx context.Context, client *ui.HTTPClient, taskID string, stopped <-chan struct{}) (ui.Attempt, error) {
 	started := time.Now()
 	last := "it had not been dispatched at all"
 	for {
@@ -143,14 +143,13 @@ func awaitFinishedAttempt(ctx context.Context, client *ui.HTTPClient, taskID str
 			}
 		}
 		select {
+		case <-stopped:
+			if ctx.Err() == nil {
+				return ui.Attempt{}, daemonStoppedEarly(taskID, last)
+			}
+			return ui.Attempt{}, budgetSpent(taskID, time.Since(started), last)
 		case <-ctx.Done():
-			return ui.Attempt{}, fmt.Errorf(
-				"no run of task %s finished in the %s this test waited: %s. That is the live "+
-					"agent's own pace against a ceiling this test chose, not evidence of anything "+
-					"wrong in grain -- `go test -timeout` is what sets the ceiling "+
-					"(liveDaemonContext), and the daemon's own log above says what the run was "+
-					"doing with the time",
-				taskID, time.Since(started).Round(time.Second), last)
+			return ui.Attempt{}, budgetSpent(taskID, time.Since(started), last)
 		case <-time.After(livePollInterval):
 		}
 	}
@@ -250,22 +249,19 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	ctx, runCtx, cancel := liveDaemonContext(t,
 		liveFinishWindow+liveGitOps+liveMergeWindow, liveShutdownReserve)
 	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- run(ctx, config{
-			dataDir: dataDir, maxWorkers: 1, pollInterval: 5 * time.Second,
-			geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
-			githubHost: githubHost, githubInsecureHTTP: true,
+	done, stopped := startLiveDaemon(ctx, config{
+		dataDir: dataDir, maxWorkers: 1, pollInterval: 5 * time.Second,
+		geminiAPIKeyFile: writeKeyFile(t, apiKey), geminiModel: antigravity.DefaultModel, maxAgentTurns: 15,
+		githubHost: githubHost, githubInsecureHTTP: true,
 
-			uiAddr: uiAddr, actor: "tester",
+		uiAddr: uiAddr, actor: "tester",
 
-			konturSandboxes: true,
-			konturStateDir:  konturStateDir,
-			konturSSHUser:   "debian",
-			konturExecKey:   "/images/key",
-			konturWorkspace: workspace,
-		})
-	}()
+		konturSandboxes: true,
+		konturStateDir:  konturStateDir,
+		konturSSHUser:   "debian",
+		konturExecKey:   "/images/key",
+		konturWorkspace: workspace,
+	})
 	// Cancelling the daemon and waiting for run() to return, once, at the
 	// end -- rather than in front of each of the six assertions below,
 	// every one of which can end this test. See stopLiveDaemon.
@@ -327,7 +323,7 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	// The one wait in this test that is about the agent, and it waits for
 	// the run to be over rather than for a length of time -- through the
 	// REST API, like every assertion that follows it (awaitFinishedAttempt).
-	attempt, err := awaitFinishedAttempt(runCtx, client, task.ID)
+	attempt, err := awaitFinishedAttempt(runCtx, client, task.ID, stopped)
 	if err != nil {
 		t.Fatal(err)
 	}

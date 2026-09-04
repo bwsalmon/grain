@@ -112,7 +112,7 @@ func TestAwaitFinishedRunWaitsForTheFinishedRow(t *testing.T) {
 
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	run, err := awaitFinishedRun(waitCtx, store, "t1")
+	run, err := awaitFinishedRun(waitCtx, store, "t1", neverStops())
 	if err != nil {
 		t.Fatalf("awaitFinishedRun: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAwaitFinishedRunBlamesTheClockAndQuotesTheRun(t *testing.T) {
 
 	waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	if _, err := awaitFinishedRun(waitCtx, store, "t1"); err == nil {
+	if _, err := awaitFinishedRun(waitCtx, store, "t1", neverStops()); err == nil {
 		t.Fatal("awaitFinishedRun returned no error for a run that never finished")
 	} else {
 		for _, want := range []string{"t1", "go test -timeout", "attempt 1", "cloning acme/widgets"} {
@@ -153,6 +153,36 @@ func TestAwaitFinishedRunBlamesTheClockAndQuotesTheRun(t *testing.T) {
 				t.Errorf("the wait's own error does not mention %q: %v", want, err)
 			}
 		}
+	}
+}
+
+// A daemon that returned early is not a slow agent, and must not be
+// reported as one: run() can fail on its own -- a store it cannot open, a
+// UI address it cannot bind -- and then nothing is writing the row this
+// wait is watching for.
+func TestAwaitFinishedRunEndsWhenTheDaemonStops(t *testing.T) {
+	store, ctx := pacingStore(t)
+	if err := store.PutTask(ctx, model.Task{ID: "t1", Title: "live pacing"}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(stopped)
+	}()
+
+	// A budget far longer than this test is prepared to wait: the point
+	// is that the daemon stopping, and not the clock, is what ends it.
+	waitCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	started := time.Now()
+	_, err := awaitFinishedRun(waitCtx, store, "t1", stopped)
+	if err == nil || !strings.Contains(err.Error(), "run() returned") {
+		t.Errorf("awaitFinishedRun after run() returned = %v, want an error naming the daemon", err)
+	}
+	if elapsed := time.Since(started); elapsed > 30*time.Second {
+		t.Errorf("the wait took %s to notice the daemon had stopped", elapsed.Round(time.Second))
 	}
 }
 
@@ -166,7 +196,7 @@ func TestAwaitFinishedRunSaysWhenNothingWasDispatched(t *testing.T) {
 
 	waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 	defer cancel()
-	_, err := awaitFinishedRun(waitCtx, store, "t1")
+	_, err := awaitFinishedRun(waitCtx, store, "t1", neverStops())
 	if err == nil || !strings.Contains(err.Error(), "not been dispatched") {
 		t.Errorf("awaitFinishedRun for an undispatched task = %v, want an error saying so", err)
 	}
@@ -204,6 +234,10 @@ func TestPollUntil(t *testing.T) {
 		t.Error("pollUntil = false on a cancelled context for a condition that was true")
 	}
 }
+
+// neverStops is the "the daemon is still up" signal, for the waits in
+// here that are about something else.
+func neverStops() <-chan struct{} { return make(chan struct{}) }
 
 // enoughDeadlineFor reports whether this test binary's own `go test
 // -timeout` leaves room for liveDaemonContext to hand out a context at
