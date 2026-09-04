@@ -770,6 +770,15 @@ func baseDescription(task model.Task) string {
 // caps a proposal at the proposing task's own setting, so the sentence is
 // omitted, rather than negated, for a task that is not one -- there is
 // nothing an agent could usefully do with "you may not ask for this".
+//
+// An auto-merge task working against a base branch of its own is told
+// the opposite, and here the negation earns its place: relayProposedTasks
+// files a proposal against the repo's default branch, and auto-merge does
+// not cross from one branch to another (model.SameBranch), so a run told
+// only "this task is an auto-merge job" would split work out believing it
+// lands the same way the whole of it would have. What it can do with
+// that is real -- say in the proposal's body that it was meant to merge
+// unattended, so whoever approves it can decide.
 func proposalSection(task model.Task) string {
 	s := fmt.Sprintf(
 		"\n\nYou are running as task %s. Anything you split out with propose_task "+
@@ -781,7 +790,15 @@ func proposalSection(task model.Task) string {
 			"follow.",
 		task.ID, task.ID,
 	)
-	if task.AutoMerge {
+	switch {
+	case task.AutoMerge && task.Base != "":
+		s += fmt.Sprintf(" This task is an auto-merge job: its pull request merges on its "+
+			"own once its checks pass, with no human review. Nothing you propose inherits "+
+			"that, though, because this task lands on %s and a proposal is filed against "+
+			"the repository's default branch -- auto-merge is a permission for one branch, "+
+			"not for the run holding it. Say in a proposal's body if it was meant to merge "+
+			"unattended, and whoever approves it decides.", baseDescription(task))
+	case task.AutoMerge:
 		s += " This task is an auto-merge job: its pull request merges on its own " +
 			"once its checks pass, with no human review. A proposal that is a piece " +
 			"of this same task inherits that -- pass auto_merge: false on one that " +

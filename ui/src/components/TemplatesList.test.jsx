@@ -101,6 +101,8 @@ describe("TemplatesList", () => {
         name: "Dependency bump",
         title: "Bump dependencies",
         description: "",
+        repo: "",
+        base: "",
         autoMerge: false,
         reads: [],
         capabilities: [],
@@ -145,6 +147,8 @@ describe("TemplatesList", () => {
         name: "Dependency bump (patch only)",
         title: "Bump dependencies",
         description: "",
+        repo: "",
+        base: "",
         autoMerge: false,
         reads: [],
         capabilities: [],
@@ -168,10 +172,58 @@ describe("TemplatesList", () => {
     expect(screen.getByTitle("Remove owner/schema")).toBeInTheDocument();
 
     await user.click(screen.getByLabelText(/Read-only repos/));
-    await user.click(await screen.findByText("owner/shared-lib"));
+    // By role rather than by text: the target repo dropdown (the
+    // optional binding, grain/task-285) offers the same repos as
+    // <option>s, so a bare findByText would match two elements.
+    await user.click(await screen.findByRole("menuitem", { name: "owner/shared-lib" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(JSON.parse(api.mock.lastCall[1].body).reads).toEqual(["owner/schema", "owner/shared-lib"]);
+  });
+
+  // grain/task-285: a template can be bound to one repo (and branch),
+  // and the list says which for the templates that are.
+  it("chips the repo a bound template is bound to", () => {
+    const bound = { ...template, repo: "acme/widgets", base: "release" };
+    render(<ControlledTemplatesList templates={[bound, otherTemplate]} onRefresh={noop} showError={noop} />);
+
+    expect(screen.getByText("acme/widgets @ release")).toBeInTheDocument();
+    // The unbound one carries no chip -- most templates are unbound, and
+    // an empty chip would be noise on every row.
+    expect(screen.queryByText("Security patch").parentElement.querySelector(".MuiChip-root")).toBeNull();
+  });
+
+  it("binds a template to a repo and branch from its overlay", async () => {
+    api.mockResolvedValueOnce({});
+    const user = userEvent.setup();
+    render(<ControlledTemplatesList templates={[template]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByText("Dependency bump"));
+    await user.type(screen.getByPlaceholderText("owner/name"), "acme/widgets");
+    await user.type(screen.getByLabelText(/Base branch/), "release");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const sent = JSON.parse(api.mock.lastCall[1].body);
+    expect(sent.repo).toBe("acme/widgets");
+    expect(sent.base).toBe("release");
+  });
+
+  // Clearing the repo is how a template is unbound, which the API reads
+  // an empty repo as (ui.UpdateTemplateRequest's own doc comment).
+  it("unbinds a template when its repo is cleared", async () => {
+    api.mockResolvedValueOnce({});
+    const bound = { ...template, repo: "acme/widgets", base: "release" };
+    const user = userEvent.setup();
+    render(<ControlledTemplatesList templates={[bound]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByText("Dependency bump"));
+    await user.clear(screen.getByDisplayValue("acme/widgets"));
+    await user.clear(screen.getByLabelText(/Base branch/));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const sent = JSON.parse(api.mock.lastCall[1].body);
+    expect(sent.repo).toBe("");
+    expect(sent.base).toBe("");
   });
 
   it("deletes a template from its overlay after confirming", async () => {

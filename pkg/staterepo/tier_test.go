@@ -12,7 +12,6 @@ package staterepo_test
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -208,6 +207,11 @@ func TestAMergedChangeDoesNotRollBackRuns(t *testing.T) {
 	if err := store.PutTask(ctx, task("a1b2")); err != nil {
 		t.Fatalf("putting: %v", err)
 	}
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
 	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("loading: %v", err)
 	}
@@ -224,26 +228,18 @@ func TestAMergedChangeDoesNotRollBackRuns(t *testing.T) {
 		t.Fatalf("finishing the run: %v", err)
 	}
 
-	// Meanwhile a pull request retitling the task is merged and pushed.
-	work := filepath.Join(t.TempDir(), "clone")
-	git(t, "", "clone", "--quiet", remote, work)
-	path := filepath.Join(work, staterepo.TablesDir, "task.json")
-	edited := strings.Replace(read(t, path), "Rename the endpoint", "Retitled by a pull request", 1)
-	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
-		t.Fatalf("editing the dump: %v", err)
-	}
-	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "Retitle")
-	git(t, work, "push", "--quiet", "origin", "main")
+	// Meanwhile a pull request retitling the template is merged and pushed.
+	mergeIntoRemote(t, remote, "template.json", "Run the nightly sweep", "Retitled by a pull request")
 
 	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("loading after the merge: %v", err)
 	}
-	got, err := store.GetTask(ctx, "a1b2")
-	if err != nil || got == nil {
-		t.Fatalf("reading the task: %v %v", got, err)
+	tpl, err := store.GetTemplate(ctx, "tpl-1")
+	if err != nil || tpl == nil {
+		t.Fatalf("reading the template: %v %v", tpl, err)
 	}
-	if got.Title != "Retitled by a pull request" {
-		t.Fatalf("the merged change did not reach the database: %q", got.Title)
+	if tpl.Title != "Retitled by a pull request" {
+		t.Fatalf("the merged change did not reach the database: %q", tpl.Title)
 	}
 	runs, err := store.Runs(ctx, "a1b2")
 	if err != nil {

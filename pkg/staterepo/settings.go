@@ -36,10 +36,21 @@ type Settings struct {
 	TokenFile string `json:"tokenFile,omitempty"`
 	// CheckImage is the container image the CI workflow grain installs in
 	// the state repository runs `grain state check` from, and empty is
-	// DefaultCheckImage. A deployment held at an older tag wants that tag
-	// here: the check refuses a dump stamped with a schema it does not
-	// know, so a workflow pointed at a newer build fails every pull
-	// request for a reason that has nothing to do with the change.
+	// the image this build of grain is itself published as
+	// (cmd/grain/grainimage.go), falling back to DefaultCheckImage when
+	// nothing stamped one in. Empty is the right answer for almost every
+	// deployment for that reason: the check refuses a dump stamped with a
+	// schema it does not know, so a workflow pointed at any build but
+	// this one fails every pull request for a reason that has nothing to
+	// do with the change, and this one is the one grain can name without
+	// being told.
+	//
+	// Set, it is a pin grain maintains rather than one it argues with: it
+	// is what grain writes into the workflow, and what grain keeps that
+	// file pointed at. The deployment with a registry mirror, or one that
+	// deliberately checks its state against some other build, says so
+	// here rather than by editing the workflow -- an edit to that file
+	// stops grain touching the whole of it, image line included.
 	CheckImage string `json:"checkImage,omitempty"`
 	// NoWorkflow stops grain installing that workflow at all -- the
 	// operator whose state repository is checked by something else.

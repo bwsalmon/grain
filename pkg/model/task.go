@@ -286,6 +286,41 @@ func GrantsSubsetOf(grants, allowed []Grant) bool {
 	return true
 }
 
+// SameBranch reports whether two tasks' work lands in the same place:
+// the same write target, and the same base branch within it.
+//
+// It is the second half of the trust gate GrantsSubsetOf opens, for the
+// same "sub-tasks are tasks" reason. Auto-merge is a human's standing
+// permission for one branch to take commits nobody reviewed, not a
+// property of the run that happens to hold it: a task whose pull
+// requests merge themselves into a release branch has been told nothing
+// at all about the default branch, so a proposal it makes that lands
+// somewhere else is work a human still has to look at.
+//
+// Base compares as written, with "" -- the repo's default branch -- left
+// unresolved, because nothing in this package can reach the remote to
+// ask which branch that is. So a task that names its default branch
+// explicitly reads as a different branch from one that leaves Base
+// empty, and a proposal from it does not inherit auto-merge. That errs
+// toward withholding a permission that would in fact have been the same
+// one, which is the direction a trust gate should fail in.
+//
+// Owner and name compare case-insensitively, the way GitHub itself
+// resolves them. Two tasks with no
+// write target at all are on the same branch of the same nowhere:
+// neither opens a pull request, so there is no unreviewed merge here to
+// guard.
+func SameBranch(a, b Task) bool {
+	if a.Base != b.Base {
+		return false
+	}
+	if a.Target == nil || b.Target == nil {
+		return a.Target == nil && b.Target == nil
+	}
+	return strings.EqualFold(a.Target.Owner, b.Target.Owner) &&
+		strings.EqualFold(a.Target.Name, b.Target.Name)
+}
+
 // GitCredentialCapabilityPrefix marks a capability id as a per-task git
 // credential override: the named credential (gitproxy's
 // CredentialSet.Get) a sandbox's git proxy requests should use in place

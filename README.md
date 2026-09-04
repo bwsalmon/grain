@@ -1722,8 +1722,17 @@ against a real credential and reading the tool steps back off its
   `global<TAB>deny<TAB>run_command`. Bare names, `run_command(*)` and
   `regex:` forms all survive; a malformed value (`"deny": 12345`) is
   dropped in silence, no rule and no complaint -- the failure mode this
-  section already warned about. What the rules do *not* do is change the
-  roster: the `init` event of a real stream-json session advertises the
+  section already warned about, and the reason
+  `TestLiveAgyLoadsGrainsPermissionRules` (`tests/e2e`) now asks the
+  binary that question nightly, one assertion per rule
+  `permissionRules` wrote. They load for exactly the launch that finds
+  them: agy rewrites `settings.json` on *every* start, keeping the keys it
+  owns (`modelProvider`) and dropping the whole `permissions` block, so a
+  second `agy` in the same `HOME` has no rules at all. Harmless as grain
+  runs agy -- `writeAgyHome` builds a fresh `HOME` per run and `Run`
+  starts the binary once in it -- and a trap for any future change that
+  reuses one or starts agy again to resume a run. What the rules do *not*
+  do is change the roster: the `init` event of a real stream-json session advertises the
   same 55 native tools with the block and without it. And `Run` passes
   `--dangerously-skip-permissions`, which that same event reports as
   permission mode `always-proceed`, while agy's own prompt calls an
@@ -1752,6 +1761,34 @@ against a real credential and reading the tool steps back off its
   different mechanism from the permission prompt the flag auto-approves.
   grain's hook is grain: `hooks.json` runs `grain agy-tool-hook`
   (`cmd/grain/agyhook.go`), which answers from `HookDecision`.
+- **Whether it is loaded at all is a separate, cheaper question, and it
+  is now asked nightly.** `hooks.json` is not validated on load -- one agy
+  cannot make sense of leaves a run with no hooks and no complaint -- and
+  a live run only shows the hook working when the model happens to reach
+  for a native tool. `agy -p /hooks` needs neither: it prints one
+  tab-separated record per loaded hook,
+  `grain-native-tool-denial<TAB>enabled<TAB>PreToolUse<TAB>*<TAB>command<TAB>'/path/to/grain' agy-tool-hook`,
+  out of the config it just read and without an agent turn or a valid
+  credential. `TestLiveAgyLoadsGrainsHookConfig` (`tests/e2e`) asserts
+  each field of that record, and asserts as its control that the same
+  command names nothing when `hooks.json` is removed from the `HOME` --
+  without which "the output contains our hook's name" would not be
+  evidence of anything.
+- **What the hook is asked about is the name in the payload, and the
+  nightly now records it.** `HookDecision` matches `toolCall.name` against
+  agy's tool names, while agy's own hook guide describes matchers as
+  matching *step types* ("lowercasing the step type and removing the
+  `CORTEX_STEP_TYPE_` prefix") -- and a name arriving in a shape that deny
+  list is not written in would deny nothing, silently. A transcript cannot
+  answer it, since it reports the tool that ran rather than the name the
+  hook was handed, so `TestLiveNativeToolsAreDenied` points agy's config
+  at a stand-in for the grain binary that logs every payload before
+  passing it to the real one (`tests/e2e/hook_payload_log_test.go`, which
+  also covers the stand-in from the ordinary suite). Every name is logged,
+  split into the ones the deny list matches, grain's own qualified names,
+  and everything else; a run whose tool calls never reached the hook, or a
+  native call the hook was never asked about under a matchable name, fails
+  the test.
 - **It denies by name, and never allows by name.** `HookDecision` denies
   the tools in `withheldNativeTools` -- agy's own file and command tools,
   now the whole of that set rather than a representative handful -- and
@@ -1793,7 +1830,11 @@ agy stores policy but stop nothing, the `PreToolUse` hook is where a call
 is actually stopped, and a kontur sandbox is still what contains a native
 tool that gets past all three. Only the hook has been watched stopping a
 live model, and only nightly (`live-agent.yml`), since that is where the
-credential is.
+credential is -- though two of the three questions turn out not to need
+one: that agy loaded grain's hook, and that it loaded grain's permission
+rules, are both answered by print mode against any runner with `agy`
+installed, which is why the two tests that ask them fail on a laptop and
+in the nightly alike rather than waiting for a model turn.
 
 How that was established is worth keeping, because the question keeps
 coming back and a *locked-down* grain sandbox cannot answer it: a sandbox
@@ -1806,6 +1847,34 @@ accessor names, `jsonschema_description` text), planted agent definitions
 in candidate directories to see which were read, and pushed the output to
 a branch. `agy changelog` in particular is the closest thing to
 documentation there is, since it ships in the binary.
+
+**That job is not throwaway any more.** It is
+`.github/workflows/agy-surface.yml` and `scripts/agy-surface.sh`, and the
+next question about agy's flags, settings keys or on-disk layout costs one
+`workflow_dispatch` rather than a re-derivation -- roughly every other
+task that has touched `pkg/agent/antigravity` has needed one. It installs
+the *unpinned* agy the Dockerfile would install, so what it reads is the
+binary a freshly built image would carry rather than one a comment froze
+months ago; it asks the fixed set of questions above, plus what agy
+unpacks into a `HOME` it has never seen (its own customization guides
+included, which is where the hook contract is written down), which of six
+candidate directories its agents actually come from, which of six
+candidate files its MCP servers actually come from, and what the `init`
+event of a session opened with `Run`'s own argv advertises. It holds no
+credential and runs on no schedule; the token that writes a branch lives
+in a second job that never runs agy.
+
+The output is committed, at
+[`docs/agy-surface.md`](docs/agy-surface.md), rather than left as a
+workflow artifact -- for two reasons that are the same reason. A sandboxed
+agent cannot download an artifact and can read a file in its own checkout
+(or `git fetch origin agy-surface`, the branch each dispatch pushes as one
+commit on top of the ref it ran from, to be merged like any other pull
+request). And a capture nobody can compare against the last one only
+answers "what does agy do today", where the question behind every one of
+these dispatches is "what changed" -- so the script writes nothing
+run-specific, no dates and no temporary paths, every list sorted, and two
+runs against one agy produce identical bytes. A diff is drift.
 
 The behavioural half above went further only because a sandbox with
 general network access *and* a Gemini key can do the whole thing itself:
@@ -2004,6 +2073,15 @@ that this one triggers on nothing but the schedule and a manual dispatch.
 ```
 GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
   go test ./tests/e2e/ -run TestLiveIssueCompletesEndToEnd -v
+```
+
+The two that ask agy what it *loaded* rather than what it does need no
+key, since print mode spends nothing (agy still refuses to start without
+`GEMINI_API_KEY` set to something, so they pass a placeholder when the
+environment has none):
+
+```
+GRAIN_LIVE_AGENT_TEST=1 go test ./tests/e2e/ -run TestLiveAgyLoads -v
 ```
 
 with `agy` on `$PATH` and a Go toolchain to build `cmd/grain` with (agy
@@ -2811,6 +2889,48 @@ X: New task, Run a suite and an attempt's transcript are actions taken
 over the page you are already on, not somewhere you navigated to, and
 there is nothing there to go back to.
 
+**A task list narrows on any attribute a task has (grain/task-288).**
+The toolbar could ask two questions -- a word in the title or the id, and
+one of four orders -- and the sidebar a third, the state. Everything else
+a row shows was visible but not askable: which repo, which base branch,
+which capabilities, who filed it, whether a schedule or the merge queue
+filed it rather than a person, whether it is a live chat, whether it
+merges itself. On a deployment with a few hundred tasks that is the
+difference between finding the four `gcp-key` tasks somebody filed last
+week and scrolling for them. So `TaskList.jsx` grows a `FILTERS` table --
+one entry per attribute, each saying only how to read that attribute off
+a task, what to call a value, and what "has none of these" is worth
+calling -- and everything else happens once for all of them: the menus
+are built from the tasks currently in view, so a menu never offers a
+repo whose every task the state filter is already hiding; an attribute
+every task in view shares is not offered at all, which is why a repo's
+own page shows no Repo menu; and a choice that goes out of range when
+the sidebar moves reads as "any" again rather than as a filter matching
+nothing. One "Clear" undoes the search and every menu together, since
+getting out of six of them one at a time is the same work as getting in.
+The sort menu grows state, repo and author alongside the orders it had,
+all of them stable, so an order groups the backlog rather than
+reshuffling it inside each group -- and dragging a row is still disabled
+outside backlog order, for the reason it always was.
+
+The same question is worth asking from a terminal, so `grain list` grew
+the same vocabulary (`cmd/grain/list.go`): `-state`, `-repo`,
+`-base`, `-capability`, `-author`, `-origin`, `-search`, `-blocked`,
+`-auto-merge`, `-interactive` and `-sort`, with the words meaning exactly
+what the menus mean -- `-origin schedule` is the Origin menu's
+"Scheduled". Three of those are tri-state rather than boolean, since
+"only the tasks that merge themselves", "only the ones that need a human"
+and "no opinion" are three answers and a Go bool flag is two: `FlagSet.
+Visit` is what tells a flag left at its default from one explicitly set
+to it. It narrows in the CLI rather than on the server because `GET
+/api/tasks` answers with the whole list either way and the frontend
+narrows that same answer in the browser -- a query parameter would move
+the loop across the wire without removing it from either caller, and
+leave two places to look for what a word like "origin" covers. A value
+nobody can act on (`-state in_progress`) stops the command with the list
+of values that work, before the request, rather than printing an empty
+listing that reads like a deployment with no such tasks.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to
@@ -2902,29 +3022,36 @@ conflict in a database dump by guesswork.
 A change an agent makes arrives the other way: a pull request against
 the state repository, reviewed and merged like any other, which the
 daemon pulls on the same thirty-second timer it exports on. What it does
-with what arrives is asymmetric, and deliberately so. The whole-database
-import is a wholesale replacement of every row -- which is exactly what
-makes a merged deletion delete something -- and it happens only at
-startup, because clearing `task` and `task_run` underneath live runs
-holding those very ids is not something to do to a daemon that is
-working. On a tick, only the settings tables are imported
-(`staterepo.SettingsTables`: the deployment's config row, repo
-configuration, templates, suites, schedules, qualification plans), and
-they are imported the same wholesale way, so a merged deletion of a
-template still deletes it. Those are the tables an agent proposes
+with what arrives is asymmetric, and deliberately so. Only the settings
+tables are imported (`staterepo.SettingsTables`: the deployment's config
+row, repo configuration, templates, suites, schedules, qualification
+plans), and they are imported wholesale, so a merged deletion of a
+template really does delete it. Those are the tables an agent proposes
 changes to and the tables grain does not write for itself, which is what
 makes them safe to replace live. A merged change to a task or a run is
 not applied, and the next export writes the database's own version of it
 back out: the database is authoritative for what grain itself did.
 
-Even the startup import is only wholesale in the case that needs it to
-be. A working tree with no marker is a clone onto a host that has never
-loaded it -- the restore case, where the repository is the only copy
-there is -- and every table comes back. A marker that disagrees with
-HEAD is a repository that moved under a host which already has a
-database, and there only the state tier is replaced, because the
-database is by design ahead of the repository on grain's own churn
-(below).
+A restart imports exactly the same tables, and that is worth saying
+because it did not use to. `Load` read "HEAD is not the commit this host
+recorded" as "a merge arrived" and replaced the whole state tier --
+`task`, `task_comment`, `task_attachment`, `branch`, `release`, every
+table but the three churn ones -- from the dump. The dump is whatever the
+last export wrote, so that deleted every row grain had written since:
+half a minute of them in the ordinary case, and an operator lands in that
+window by habit rather than by accident, merging a settings pull request
+and restarting grain to make it take effect. Nothing was gained by it
+either, since a merged edit to `task` only ever survived if the process
+happened to restart before the next tick pulled the same commit down and
+recorded it as loaded. The import a restart does is now the import a tick
+does.
+
+The whole-database import -- every table, churn included -- is left with
+the one case that needs it: a working tree with no marker, which is a
+clone onto a host that has never loaded it. That is the restore case,
+where the repository is the only copy there is and there is no database
+ahead of it to protect, and it is what makes a clone a whole deployment
+rather than a settings file.
 
 If a pull arrives that cannot be applied -- a dump stamped with a schema
 this build does not know, or rows that will not insert -- the daemon
@@ -3029,12 +3156,13 @@ at a `gc.auto` threshold set for a repository whose objects are database
 dumps rather than source files. On its own that is the 2.9 GiB → 18.9 MiB
 column above.
 
-**An import that does not roll churn back.** Since the database is now
-ahead of the repository on churn by up to an hour by design, a merged
-pull request arriving at startup imports only the state tier and leaves
-grain's own record of what it did alone. A clone with no marker -- the
-restore case, where the repository is the only copy there is -- still
-imports all of it.
+**An import that does not roll grain's own record back.** Since the
+database is ahead of the repository on churn by up to an hour by design,
+and ahead of it on everything else by up to an export interval for the
+same reason, a merged pull request arriving at startup imports the
+settings out of it and leaves grain's own record of what it did alone. A
+clone with no marker -- the restore case, where the repository is the
+only copy there is -- still imports all of it.
 
 Squashing history periodically was the other candidate and is not what
 happened: it means force-pushing a branch that people open pull requests
@@ -3218,17 +3346,40 @@ the check imports it back into. The image is grain's own container
 because grain publishes no bare binaries and that package is public, so
 the step needs no credential of any kind.
 
+*Which* of grain's containers is the part a deployment cannot be wrong
+about. The check only means anything against a build that knows the same
+schema as the deployment — `grain state check` refuses a dump stamped
+with any other, and says so in those words — so a workflow pointed at
+the tag that follows main is right for a deployment tracking main and
+wrong for every other one: a deployment held at an older tag got a check
+that failed every pull request against its own settings for a reason
+that had nothing to do with the change proposed in it, until an operator
+noticed and pinned it by hand. So the deployment answers it, out of the
+same trick that tells it which sandbox to run: the grain image carries
+its own reference, stamped in at link time
+(`cmd/grain/grainimage.go`, the Dockerfile's `GRAIN_IMAGE_REF` build
+arg, `grain image` to print it), and that is what it writes into the
+workflow. An unstamped build — `make build` on a laptop — falls back to
+the tag CI keeps pointed at main, which is a less precise answer than
+the stamp and a much better one than none.
+
 Unlike the README, which is grain's text and is rewritten on every sync,
-a workflow that is already there is never touched again. Pinning the
-image to the tag a deployment runs is the obvious edit -- the check only
-means anything against a build that knows the same schema (`grain state
-status` prints both numbers) -- and a runner, a trigger or a step of
-somebody's own are just as much theirs; a file grain rewrote every
-thirty seconds would be a file whose editor is fighting a timer, which
-is the same reason the export must not fight a hand edit to a table
-file. Deleting it is not an opt-out, because grain writes back what is
-missing: `"noWorkflow": true` in `state-repo.json` is, and
-`"checkImage"` pins the image from the host side.
+a workflow that is already there is never touched again — but for that
+one image line, which grain keeps in step with the build it is running.
+That line is a fact about the deployment rather than about the
+repository, and it goes stale on its own every time the deployment is
+upgraded, so a sync after an upgrade repoints it on a one-line commit of
+its own and the syncs after that have nothing to do. The rule that makes
+that safe is byte equality: grain only touches a file that is still word
+for word its own rendering, so a runner, a trigger or a step of
+somebody's own hands the whole file back to whoever wrote it, image
+included. A file grain rewrote every thirty seconds would be a file
+whose editor is fighting a timer, which is the same reason the export
+must not fight a hand edit to a table file. Deleting it is not an
+opt-out, because grain writes back what is missing: `"noWorkflow": true`
+in `state-repo.json` is, and `"checkImage"` pins the image from the host
+side — grain then writes and maintains that value instead of its own, so
+a pin made there is one a later sync does not take back.
 
 That leaves the reason grain did not commit this file until now, which
 is real: a push adding a file under `.github/workflows` is refused
@@ -3236,17 +3387,21 @@ unless the credential making it may write workflows, and grain's own
 installation token need not be able to. So the workflow is a commit of
 its own, pushed on its own, and a refusal -- GitHub says "refusing to
 allow ... to create or update workflow" -- is undone in full: the commit
-is dropped, the file removed, the export goes on untouched, and the
-journal says to run `grain state ci` in a clone and commit the file with
-a credential that may. grain tries again a day later, so granting the
-permission needs no restart. A local-only repository gets no workflow at
-all: there is no GitHub to run one.
+is dropped, the file put back as it was — removed when grain had just
+written it, restored when what was refused was the one-line repointing
+of a check the repository already had — the export goes on untouched,
+and the journal says to run `grain state ci` in a clone and commit the
+file with a credential that may. grain tries again a day later, so
+granting the permission needs no restart. A local-only repository gets
+no workflow at all: there is no GitHub to run one.
 
 `grain state ci DIR` is that manual path, and the one for a repository
 whose deployment cannot push workflows. It writes the same file into a
-clone of the state repository, with `-image` to pin and `-force` to
-replace one that is already there, and commits nothing: it runs in
-somebody's own checkout, and the commit is theirs to make.
+clone of the state repository, with `-image` to pin (defaulting, like
+everything else here, to the image the binary running it was published
+as) and `-force` to replace one that is already there, and commits
+nothing: it runs in somebody's own checkout, and the commit is theirs to
+make.
 
 `grain state format DIR` is the step before adopting: an operator has
 made an empty repository on GitHub and cloned it, and this lays out the
@@ -5113,6 +5268,15 @@ same question and pulls its sandbox before cutting over, so the two
 halves move together or not at all. The stamp names the immutable
 `sha-` tag rather than a branch, which is what makes a rollback ask for
 its own older sandbox rather than whatever that branch points at today.
+
+The same build stamps in the grain image's *own* reference
+(`cmd/grain/grainimage.go`, the `GRAIN_IMAGE_REF` build arg, printed by
+`grain image`), for the one place a deployment has to write down which
+build it is: the CI step it installs in its own state repository, whose
+`grain state check` refuses a dump stamped with a schema it does not
+know. Same rules, same reasons — the sha- tag, so a deployment held at
+an older one names itself rather than main, and the tag CI keeps pointed
+at main as the fallback for a build that was never stamped at all.
 
 The guest *disk* used to be the one thing a deployment still built, and
 that was not an oversight: `guest-setup.sh` baked the deployment's own

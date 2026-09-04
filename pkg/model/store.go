@@ -163,7 +163,7 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigCodexModelColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
-	if err := s.ensureTemplateNoTargetColumns(ctx); err != nil {
+	if err := s.ensureTemplateBindingColumns(ctx); err != nil {
 		return fmt.Errorf("migrating template: %w", err)
 	}
 	if err := s.ensureScheduleSuiteColumn(ctx); err != nil {
@@ -1199,34 +1199,36 @@ func (s *Store) ensureConfigEnvironmentNameColumn(ctx context.Context) error {
 	return err
 }
 
-// ensureTemplateNoTargetColumns drops template's old
-// target_owner/target_name/base columns (schema.go's own DDL comment on
-// the table has the reasoning: which repo and branch a firing targets
-// is a property of the caller using a template, not of the template
-// itself) from a database created before that split. Unlike every
-// ensure*Column migration above, which probes for a column's absence
-// and adds it, this probes for the old columns' presence and removes
-// them -- the same direction ensureConfigMaxConcurrentColumn's own
-// slots removal and ensureScheduleRecurrenceColumns' own interval_ms
-// removal already go, since target_owner and target_name are NOT NULL
-// and Init's own CREATE TABLE IF NOT EXISTS never alters a table that
-// already exists: left in place, they would fail every PutTemplate,
-// which stops supplying them.
-func (s *Store) ensureTemplateNoTargetColumns(ctx context.Context) error {
+// ensureTemplateBindingColumns adds template's optional
+// target_owner/target_name/base columns (model.Template's own doc
+// comment on what a binding is, schema.go's own DDL comment on how the
+// three are stored) to a database created while a template could carry
+// no target at all, the same probe-then-ALTER approach every other
+// ensure*Column migration here uses.
+//
+// Three shapes of database reach this, and all three come out the same:
+// a fresh one, whose CREATE TABLE above already has the columns; one
+// from the era when a template *had* to carry a target, which also
+// already has them and whose values are exactly the bindings they now
+// mean, kept as they are rather than dropped; and one from in between,
+// which gets them added here, empty, leaving every existing template
+// unbound -- which is what it was.
+func (s *Store) ensureTemplateBindingColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `target_owner` FROM `template` WHERE 1 = 0")
-	if err != nil {
-		// Already gone -- either a fresh database (Statements() above
-		// never created it) or one already migrated past this point.
-		return nil
+	if err == nil {
+		return rows.Close()
 	}
-	rows.Close()
-	for _, col := range []string{"target_owner", "target_name", "base"} {
+	for _, col := range []string{"target_owner", "target_name"} {
 		if _, err := s.db.ExecContext(ctx,
-			"ALTER TABLE `template` DROP COLUMN `"+col+"`"); err != nil {
+			"ALTER TABLE `template` ADD COLUMN `"+col+"` TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
 	}
-	return nil
+	// Nullable, unlike the two above: a database from the mandatory-target
+	// era has base NULL wherever a template pinned no branch, so
+	// scanTemplate already has to read it through a NullString either way.
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `template` ADD COLUMN `base` TEXT NULL")
+	return err
 }
 
 // renameSuitePrincipal carries the tasks an earlier build's suite runs
@@ -3669,13 +3671,24 @@ func newTemplateID(ctx context.Context, tx *sql.Tx) (string, error) {
 	return "template-" + strconv.FormatInt(n, 10), nil
 }
 
-const templateColumns = "`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"
+const templateColumns = "`id`,`name`,`title`,`body`," +
+	"`target_owner`,`target_name`,`base`,`auto_merge`,`created_at`"
 
 func scanTemplate(scan func(...any) error) (Template, error) {
 	var t Template
-	if err := scan(&t.ID, &t.Name, &t.Title, &t.Body, &t.AutoMerge, &t.CreatedAt); err != nil {
+	var target RepoRef
+	var base sql.NullString
+	if err := scan(&t.ID, &t.Name, &t.Title, &t.Body,
+		&target.Owner, &target.Name, &base, &t.AutoMerge, &t.CreatedAt); err != nil {
 		return Template{}, err
 	}
+	// An empty owner and name is an unbound template, not a binding to a
+	// repo with no name (schema.go's own DDL comment on why the pair is
+	// stored empty rather than NULL).
+	if target.Owner != "" || target.Name != "" {
+		t.Target = &target
+	}
+	t.Base = base.String
 	return t, nil
 }
 
@@ -3687,10 +3700,15 @@ func (s *Store) PutTemplate(ctx context.Context, t Template) error {
 }
 
 func putTemplate(ctx context.Context, tx *sql.Tx, t Template) error {
+	var targetOwner, targetName string
+	if t.Target != nil {
+		targetOwner, targetName = t.Target.Owner, t.Target.Name
+	}
 	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`template`"+` (
-  `+"`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"+`
-) VALUES (?,?,?,?,?,?)`,
-		t.ID, t.Name, t.Title, t.Body, t.AutoMerge, t.CreatedAt.UTC())
+  `+templateColumns+`
+) VALUES (?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Name, t.Title, t.Body,
+		targetOwner, targetName, t.Base, t.AutoMerge, t.CreatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("writing template %s: %w", t.ID, err)
 	}
