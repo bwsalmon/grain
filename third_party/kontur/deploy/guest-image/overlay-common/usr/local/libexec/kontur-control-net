@@ -1,13 +1,13 @@
 #!/bin/sh
-# Configure this guest's flat-mode control link.
+# Configure this guest's netshim control link.
 #
-# In flat mode (see the top-level README) the guest's first NIC is spliced
-# onto the container's own network segment and takes over the address the
-# container runtime assigned, which the kernel's "ip=" boot parameter
-# configures. That leaves nothing able to reach the guest from *inside*
-# the container's own network namespace -- dialing that address from there
-# reaches the local stack instead -- so netshim also builds a private
-# second segment, and this configures the guest's end of it.
+# The guest's first NIC is spliced onto the container's own network
+# segment and takes over the address the container runtime assigned,
+# which the kernel's "ip=" boot parameter configures. That leaves nothing
+# able to reach the guest from *inside* the container's own network
+# namespace -- dialing that address from there reaches the local stack
+# instead -- so netshim also builds a private second segment, and this
+# configures the guest's end of it.
 #
 # The kernel's ip= parameter only ever configures one interface, so this
 # cannot be derived from the boot command line the way the first NIC is.
@@ -15,8 +15,9 @@
 # kontur-mem-agent's own target is; override them here if netshim was
 # given a non-default NETSHIM_CONTROL_CIDR.
 #
-# A guest with no second NIC -- NAT mode, or flat mode with the control
-# link disabled -- has nothing to do here and exits successfully.
+# A guest with no second NIC -- one booted with the control link disabled,
+# or with no netshim in front of it at all -- has nothing to do here and
+# exits successfully.
 set -eu
 
 IFACE="${KONTUR_CONTROL_IFACE:-eth1}"
@@ -34,8 +35,7 @@ ip link set "${IFACE}" up
 ip addr replace "${ADDR}" dev "${IFACE}"
 
 # kontur-mem-agent signals whichever host address it is given, defaulting
-# to its own default route's gateway. That default is right in NAT mode,
-# where the gateway is the "kontur run" container's own bridge address,
-# and wrong in flat mode, where the default route leads out to the
-# container network instead. Point it at the control link.
+# to its own default route's gateway -- which is wrong here, since this
+# guest's default route leads out to the container network rather than to
+# the "kontur run" container beside it. Point it at the control link.
 printf 'KONTUR_MEM_AGENT_HOST=%s\n' "${GATEWAY}" > "${ENV_FILE}"

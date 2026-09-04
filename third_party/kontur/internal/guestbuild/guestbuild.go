@@ -62,11 +62,17 @@ const setupPath = "/tmp/kontur-guest-setup.sh"
 // correctness, and guessing at them would silently delete things a
 // caller meant to keep.
 //
-// Nor root's authorized_keys: kontur-authorized-key rewrites that file
-// wholesale on every boot from the key on the kernel command line, so
-// the build's own key cannot outlive the build, and removing it here
-// would only differ for a guest built with GUEST_SSH_AUTHORIZED_KEY --
-// where it would be deleting a key the operator deliberately baked in.
+// Nor any authorized_keys: kontur's own guest has none, since exec no
+// longer logs in (see internal/guestexec), and one on a derived guest is
+// there because a setup script deliberately put it there.
+//
+// The SSH host keys below are scrubbed even though the base image runs
+// no sshd, and that is not vestigial: a setup script is free to install
+// one, and a guest image that shipped the host keys openssh-server's
+// postinst generated would hand every VM cloned from it the same
+// identity -- the exact failure this list exists to prevent, and one
+// that would now arrive through a caller's own choice rather than
+// through anything kontur installed.
 const scrub = `set -eu
 rm -f /etc/ssh/ssh_host_*
 : > /etc/machine-id
@@ -103,17 +109,6 @@ type Options struct {
 	// credentials. The guest is a VM inside the container and inherits
 	// none of the builder's own network context by itself.
 	ExtraRunArgs []string
-
-	// GuestIP and HostPort are the build VM's address on the host's
-	// kontur bridge and the host port netshim forwards to its sshd.
-	// Nothing connects to either -- the build reaches the guest through
-	// `docker exec ... kontur exec`, on the guest's own address from
-	// inside the container -- but NAT mode requires both, and two builds
-	// running at once on one host share that bridge, so leaving them
-	// unset picks random values rather than a fixed pair that would make
-	// concurrent builds collide.
-	GuestIP  string
-	HostPort int
 
 	// ReadyTimeout bounds how long to wait for the guest to accept a
 	// command after the container starts. A guest that never becomes
@@ -160,14 +155,6 @@ func Build(ctx context.Context, opts Options) error {
 	if opts.ShutdownTimeout <= 0 {
 		opts.ShutdownTimeout = defaultShutdownTimeout
 	}
-	if opts.GuestIP == "" {
-		// Inside staticpod.Defaults' own bridge CIDR (169.254.100.1/24),
-		// avoiding .1 (the gateway) and .255.
-		opts.GuestIP = fmt.Sprintf("169.254.100.%d", 2+rand.Intn(252))
-	}
-	if opts.HostPort == 0 {
-		opts.HostPort = 20000 + rand.Intn(40000)
-	}
 	if opts.Stdout == nil {
 		opts.Stdout = io.Discard
 	}
@@ -181,8 +168,9 @@ func Build(ctx context.Context, opts Options) error {
 
 	// Booting through the docker backend rather than a bare `docker run`
 	// of the image, because a guest needs a network before any of this
-	// works: netshim has to create the tap and the NAT that give it an
-	// address, and that address is both how "kontur exec" reaches it and
+	// works: netshim has to create the tap, splice it onto the
+	// container's own interface, and stand up the control link "kontur
+	// exec" reaches the guest over -- while the guest's own address is
 	// how the setup script reaches a package mirror. A lone `docker run`
 	// leaves cloud-hypervisor with no --net at all and the guest
 	// unreachable.
@@ -202,8 +190,6 @@ func Build(ctx context.Context, opts Options) error {
 	// per-boot overlay would be discarded with the container and the
 	// committed image would be identical to its base.
 	spec.DiskMode = config.DiskModePersistent
-	spec.IP = opts.GuestIP
-	spec.Port = opts.HostPort
 	spec.GuestUser = "root"
 	spec.ShutdownTimeout = opts.ShutdownTimeout.String()
 	spec.DockerRunOpts = opts.ExtraRunArgs

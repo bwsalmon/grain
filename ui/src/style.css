@@ -398,6 +398,19 @@ main {
   font-variant-numeric: tabular-nums;
   flex: none;
 }
+/* The mark on a phrase grain wrote itself, while the run's sandbox was
+   still being built and there was no agent to write one (ui.Task.
+   ActivityBySetup). Small and upright against the italic status beside
+   it: it is an attribution, not part of the sentence, and it has to
+   survive the note being truncated -- so it never shrinks. */
+.task-activity-by {
+  flex: none;
+  color: var(--text-tertiary);
+  font-style: normal;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+}
 .chips {
   display: flex;
   gap: 0.35rem;
@@ -1219,6 +1232,21 @@ fieldset legend {
   text-align: right;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+/* .hint is styled above for the forms it started in, and the detail
+   pane's side column uses the same class for the same thing -- "No
+   dependencies.", the "None" an empty capability picker shows, and the
+   note under the read-only repos picker about what an edit made mid-run
+   does and does not reach. Without this they inherit body type in a
+   260px column, which reads as prose rather than as an aside. */
+.detail-side .hint {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  font-weight: normal;
+}
+.detail-side p.hint {
+  margin: 0.4rem 0 0;
 }
 
 .actions {

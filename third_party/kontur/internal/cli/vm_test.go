@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,8 +40,15 @@ func TestMain(m *testing.M) {
 
 func runVMArgs(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return runVMStdin(t, strings.NewReader(""), args...)
+}
+
+// runVMStdin is runVMArgs for the subcommands that have a stdin: "vm
+// exec" and friends proxy it to the guest command.
+func runVMStdin(t *testing.T, stdin io.Reader, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	var o, e bytes.Buffer
-	err = runVM(context.Background(), args, &o, &e)
+	err = runVM(context.Background(), args, stdin, &o, &e)
 	return o.String(), e.String(), err
 }
 
@@ -58,8 +66,6 @@ func TestVMLifecycle(t *testing.T) {
 	_, stderr, err := runVMArgs(t, "create", "web",
 		"--disk", "/images/disk.img",
 		"--kernel", "/images/vmlinux",
-		"--ip", "169.254.100.2",
-		"--port", "30080",
 		"--state-dir", stateDir,
 		"--static-pod-path", podDir,
 	)
@@ -77,7 +83,7 @@ func TestVMLifecycle(t *testing.T) {
 	}
 
 	// create again should fail without touching anything
-	if _, _, err := runVMArgs(t, "create", "web", "--disk", "x", "--ip", "169.254.100.2", "--port", "1",
+	if _, _, err := runVMArgs(t, "create", "web", "--disk", "x",
 		"--state-dir", stateDir, "--static-pod-path", podDir); err == nil {
 		t.Fatalf("create of existing VM = nil error, want it to fail")
 	}
@@ -91,7 +97,7 @@ func TestVMLifecycle(t *testing.T) {
 		t.Errorf("list output missing web VM:\n%s", out)
 	}
 
-	// update cpus only; disk/kernel/ip should be preserved
+	// update cpus only; disk and kernel should be preserved
 	if _, stderr, err := runVMArgs(t, "update", "web", "--cpus", "4", "--state-dir", stateDir); err != nil {
 		t.Fatalf("update error = %v, stderr = %s", err, stderr)
 	}
@@ -128,22 +134,56 @@ func TestVMLifecycle(t *testing.T) {
 	}
 }
 
-func TestVMUpdate_RecomputesAutoCmdlineOnIPChange(t *testing.T) {
+// TestVMCreate_DeprecatedNetFlags covers the flags the NAT mode left
+// behind: a caller's existing "vm create" line keeps working (the values
+// simply configure nothing now), except for -net nat, which asks for a
+// mode that no longer exists and so has to be refused rather than
+// silently reinterpreted.
+func TestVMCreate_DeprecatedNetFlags(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	podDir := filepath.Join(t.TempDir(), "manifests")
+
+	if _, stderr, err := runVMArgs(t, "create", "web",
+		"--disk", "/images/disk.img",
+		"--ip", "169.254.100.2",
+		"--port", "30080",
+		"--guest-port", "8080",
+		"--bridge-cidr", "169.254.100.1/24",
+		"--net", "flat",
+		"--state-dir", stateDir,
+		"--static-pod-path", podDir,
+	); err != nil {
+		t.Fatalf("create with deprecated flags error = %v, stderr = %s", err, stderr)
+	}
+
+	data, err := os.ReadFile(filepath.Join(podDir, "kontur-vm-web.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "169.254.100.2::") || strings.Contains(string(data), "30080") {
+		t.Errorf("deprecated flag values reached the manifest:\n%s", data)
+	}
+
+	if _, _, err := runVMArgs(t, "create", "other", "--disk", "/images/disk.img", "--net", "nat",
+		"--state-dir", stateDir, "--static-pod-path", podDir); err == nil {
+		t.Errorf("create with -net nat = nil error, want it refused rather than silently ignored")
+	}
+}
+
+func TestVMUpdate_RecomputesAutoCmdlineOnDiskModeChange(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	podDir := filepath.Join(t.TempDir(), "manifests")
 
 	if _, stderr, err := runVMArgs(t, "create", "web",
 		"--disk", "/images/disk.img",
 		"--kernel", "/images/vmlinux",
-		"--ip", "169.254.100.2",
-		"--port", "30080",
 		"--state-dir", stateDir,
 		"--static-pod-path", podDir,
 	); err != nil {
 		t.Fatalf("create error = %v, stderr = %s", err, stderr)
 	}
 
-	if _, stderr, err := runVMArgs(t, "update", "web", "--ip", "169.254.100.9", "--state-dir", stateDir); err != nil {
+	if _, stderr, err := runVMArgs(t, "update", "web", "--disk-mode", "overlay", "--state-dir", stateDir); err != nil {
 		t.Fatalf("update error = %v, stderr = %s", err, stderr)
 	}
 
@@ -151,11 +191,83 @@ func TestVMUpdate_RecomputesAutoCmdlineOnIPChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "ip=169.254.100.9::") {
-		t.Errorf("cmdline was not recomputed for the new IP:\n%s", data)
+	if !strings.Contains(string(data), "root=/dev/vda rw") {
+		t.Errorf("cmdline was not recomputed for the new disk mode:\n%s", data)
 	}
-	if strings.Contains(string(data), "169.254.100.2") {
-		t.Errorf("stale IP still present after update:\n%s", data)
+	if strings.Contains(string(data), "root=/dev/vda ro") {
+		t.Errorf("stale read-only root still present after update:\n%s", data)
+	}
+}
+
+// TestVMCreate_DefaultDiskModeIsBootable pins the default a VM gets when
+// no disk flag is passed at all. It used to be read-only, which the
+// reference guest never finishes booting from, so a create with defaults
+// produced a VM that could not come up.
+func TestVMCreate_DefaultDiskModeIsBootable(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	podDir := filepath.Join(t.TempDir(), "manifests")
+
+	if _, stderr, err := runVMArgs(t, "create", "web",
+		"--disk", "/images/disk.img",
+		"--state-dir", stateDir,
+		"--static-pod-path", podDir,
+	); err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+
+	data, err := os.ReadFile(filepath.Join(podDir, "kontur-vm-web.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "CHV_DISK_MODE") || !strings.Contains(string(data), `value: "overlay"`) {
+		t.Errorf("manifest does not ask for an overlay disk:\n%s", data)
+	}
+	if !strings.Contains(string(data), "root=/dev/vda rw") {
+		t.Errorf("manifest boots a read-only root:\n%s", data)
+	}
+}
+
+// TestVMDiskReadOnly_StillSelectsReadOnly covers the deprecated flag now
+// that -disk-mode has a real default rather than an empty one: passing
+// only -disk-readonly has to keep deciding the mode, on create and on
+// update alike, or the new default would silently override every caller
+// still using it.
+func TestVMDiskReadOnly_StillSelectsReadOnly(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	podDir := filepath.Join(t.TempDir(), "manifests")
+	manifest := filepath.Join(podDir, "kontur-vm-web.yaml")
+
+	if _, stderr, err := runVMArgs(t, "create", "web",
+		"--disk", "/images/disk.img",
+		"--disk-readonly=true",
+		"--state-dir", stateDir,
+		"--static-pod-path", podDir,
+	); err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `value: "readonly"`) {
+		t.Errorf("-disk-readonly=true did not ask for a read-only disk:\n%s", data)
+	}
+
+	// And back again, from the same flag on an update: the saved spec
+	// now records "readonly" as an explicit mode, so this only works if
+	// the flag the caller passed still wins over the saved value.
+	if _, stderr, err := runVMArgs(t, "update", "web",
+		"--disk-readonly=false",
+		"--state-dir", stateDir,
+	); err != nil {
+		t.Fatalf("update error = %v, stderr = %s", err, stderr)
+	}
+	data, err = os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `value: "overlay"`) {
+		t.Errorf("-disk-readonly=false did not ask for an overlay disk:\n%s", data)
 	}
 }
 
@@ -167,8 +279,6 @@ func TestVMUpdate_ExplicitCmdlineSurvivesLaterUpdates(t *testing.T) {
 		"--disk", "/images/disk.img",
 		"--kernel", "/images/vmlinux",
 		"--cmdline", "console=ttyS0 root=/dev/vda ro custom=1",
-		"--ip", "169.254.100.2",
-		"--port", "30080",
 		"--state-dir", stateDir,
 		"--static-pod-path", podDir,
 	); err != nil {
@@ -204,8 +314,6 @@ func TestVMLifecycle_WritableDiskNeedsNoHostState(t *testing.T) {
 		"--disk-readonly=false",
 		"--images-hostpath", imagesDir,
 		"--disk-hostpath", diskDir,
-		"--ip", "169.254.100.2",
-		"--port", "30080",
 		"--state-dir", stateDir,
 		"--static-pod-path", podDir,
 	)
@@ -263,8 +371,6 @@ func TestVMLifecycle_DockerBackend(t *testing.T) {
 		"--backend", "docker",
 		"--disk", "/images/disk.img",
 		"--kernel", "/images/vmlinux",
-		"--ip", "169.254.100.2",
-		"--port", "30080",
 		"--state-dir", stateDir,
 		"--static-pod-path", podDir,
 	)
@@ -284,8 +390,8 @@ func TestVMLifecycle_DockerBackend(t *testing.T) {
 	}
 
 	// create again should still fail, same as the static-pod backend.
-	if _, _, err := runVMArgs(t, "create", "web", "--backend", "docker", "--disk", "x", "--ip", "169.254.100.2",
-		"--port", "1", "--state-dir", stateDir); err == nil {
+	if _, _, err := runVMArgs(t, "create", "web", "--backend", "docker", "--disk", "x",
+		"--state-dir", stateDir); err == nil {
 		t.Fatalf("create of existing docker-backend VM = nil error, want it to fail")
 	}
 
@@ -317,13 +423,106 @@ func TestVMLifecycle_DockerBackend(t *testing.T) {
 	}
 }
 
-func TestVMLifecycle_FlatMode(t *testing.T) {
+// TestVMCreate_ImageDefaultFollowsTheBackend covers the other default a
+// docker-backend caller used to have to override: the image. Containerd
+// pulls the static-pod backend's image by reference, so that one has to
+// name the node-local registry -- but a docker daemon already holds the
+// image "docker build -t kontur:latest ." made, and naming a registry
+// that only exists after "konturctl setup" gave it nothing to pull.
+func TestVMCreate_ImageDefaultFollowsTheBackend(t *testing.T) {
+	withFakeDocker(t)
+
+	dockerState := filepath.Join(t.TempDir(), "state")
+	if _, stderr, err := runVMArgs(t, "create", "web",
+		"--backend", "docker",
+		"--state-dir", dockerState,
+	); err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+	saved, err := staticpod.Load(dockerState, "web")
+	if err != nil {
+		t.Fatalf("saved state not found: %v", err)
+	}
+	if saved.KonturImage != staticpod.DockerImage {
+		t.Errorf("KonturImage = %q, want the locally built %q", saved.KonturImage, staticpod.DockerImage)
+	}
+
+	// The static-pod backend keeps the registry reference: its images are
+	// resolved by containerd, which cannot see a local docker daemon's.
+	podState := filepath.Join(t.TempDir(), "state")
+	podDir := filepath.Join(t.TempDir(), "manifests")
+	if _, stderr, err := runVMArgs(t, "create", "web",
+		"--disk", "/images/disk.img",
+		"--state-dir", podState,
+		"--static-pod-path", podDir,
+	); err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+	saved, err = staticpod.Load(podState, "web")
+	if err != nil {
+		t.Fatalf("saved state not found: %v", err)
+	}
+	if saved.KonturImage != staticpod.StaticPodImage {
+		t.Errorf("KonturImage = %q, want %q", saved.KonturImage, staticpod.StaticPodImage)
+	}
+
+	// An explicit -kontur-image still wins under either backend.
+	namedState := filepath.Join(t.TempDir(), "state")
+	if _, stderr, err := runVMArgs(t, "create", "web",
+		"--backend", "docker",
+		"--kontur-image", "kontur:custom",
+		"--state-dir", namedState,
+	); err != nil {
+		t.Fatalf("create error = %v, stderr = %s", err, stderr)
+	}
+	saved, err = staticpod.Load(namedState, "web")
+	if err != nil {
+		t.Fatalf("saved state not found: %v", err)
+	}
+	if saved.KonturImage != "kontur:custom" {
+		t.Errorf("KonturImage = %q, want the explicitly named kontur:custom", saved.KonturImage)
+	}
+}
+
+// TestVMCreate_UnwritableStateDirFailsBeforeAnythingStarts is the order
+// that used to be wrong: the state directory was only written after the
+// containers had been started, so an unwritable one -- which the default
+// /var/lib/kontur/vms is for anyone who isn't root -- left a VM running
+// with no saved state to find it by again.
+func TestVMCreate_UnwritableStateDirFailsBeforeAnythingStarts(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write into any directory, so there is nothing to refuse here")
+	}
+	withFakeDocker(t)
+	calls := callLog(t)
+
+	readonly := filepath.Join(t.TempDir(), "readonly")
+	if err := os.Mkdir(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(readonly, "vms")
+
+	_, _, err := runVMArgs(t, "create", "web",
+		"--backend", "docker",
+		"--state-dir", stateDir,
+	)
+	if err == nil {
+		t.Fatal("create into an unwritable state directory = nil error, want one")
+	}
+	if !strings.Contains(err.Error(), stateDir) || !strings.Contains(err.Error(), "-state-dir") {
+		t.Errorf("error = %v, want it to name %q and the flag that fixes it", err, stateDir)
+	}
+	if got := calls(); len(got) != 0 {
+		t.Errorf("docker was called before the state directory was checked: %v", got)
+	}
+}
+
+func TestVMLifecycle_DockerRunOpts(t *testing.T) {
 	withFakeDocker(t)
 	stateDir := filepath.Join(t.TempDir(), "state")
 
 	_, stderr, err := runVMArgs(t, "create", "web",
 		"--backend", "docker",
-		"--net", "flat",
 		"--disk", "/images/disk.img",
 		"--kernel", "/images/vmlinux",
 		"--docker-run-opt", "--network",
@@ -340,23 +539,13 @@ func TestVMLifecycle_FlatMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("saved state not found: %v", err)
 	}
-	if !saved.IsFlat() {
-		t.Errorf("saved NetMode = %q, want flat", saved.NetMode)
-	}
 	want := []string{"--network", "mynet", "-p", "8080:80"}
 	if !reflect.DeepEqual(saved.DockerRunOpts, want) {
 		t.Errorf("saved DockerRunOpts = %v, want %v", saved.DockerRunOpts, want)
 	}
 
-	// -ip is a NAT-mode setting; in flat mode the runtime assigns the
-	// address, so passing one has to be rejected rather than ignored.
-	if _, _, err := runVMArgs(t, "create", "other", "--backend", "docker", "--net", "flat",
-		"--disk", "/images/disk.img", "--ip", "169.254.100.2", "--state-dir", stateDir); err == nil {
-		t.Errorf("create with -net flat and -ip = nil error, want it rejected")
-	}
-
-	// An update carries the mode forward, and repeating -docker-run-opt
-	// replaces the saved list rather than appending to it.
+	// Repeating -docker-run-opt replaces the saved list rather than
+	// appending to it.
 	if _, stderr, err := runVMArgs(t, "update", "web",
 		"--docker-run-opt", "-p",
 		"--docker-run-opt", "9090:80",
@@ -366,9 +555,6 @@ func TestVMLifecycle_FlatMode(t *testing.T) {
 	saved, err = staticpod.Load(stateDir, "web")
 	if err != nil {
 		t.Fatalf("saved state not found after update: %v", err)
-	}
-	if !saved.IsFlat() {
-		t.Errorf("saved NetMode after update = %q, want flat", saved.NetMode)
 	}
 	if want := []string{"-p", "9090:80"}; !reflect.DeepEqual(saved.DockerRunOpts, want) {
 		t.Errorf("saved DockerRunOpts after update = %v, want %v (replaced, not appended)", saved.DockerRunOpts, want)
@@ -410,8 +596,6 @@ func TestVMLifecycle_DiskSize(t *testing.T) {
 		"--disk", "/images/disk.img",
 		"--disk-mode", "overlay",
 		"--disk-size-mb", "8192",
-		"--ip", "169.254.100.2",
-		"--port", "30080",
 		"--state-dir", stateDir,
 		"--static-pod-path", podDir,
 	); err != nil {
@@ -469,8 +653,6 @@ func TestVMCreate_DiskSizeRejectedWithoutOverlayMode(t *testing.T) {
 		"--disk", "/images/disk.img",
 		"--disk-mode", "persistent",
 		"--disk-size-mb", "8192",
-		"--ip", "169.254.100.2",
-		"--port", "30080",
 		"--state-dir", stateDir,
 		"--static-pod-path", podDir,
 	)

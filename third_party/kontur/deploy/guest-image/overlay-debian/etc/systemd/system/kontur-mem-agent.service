@@ -4,12 +4,17 @@ After=kontur-control-net.service
 
 [Service]
 Type=simple
-# Written by kontur-control-net when this guest has a flat-mode control
-# link, naming the host address to signal. Absent in NAT mode, where the
-# agent's own default (this guest's default route's gateway) is correct.
+# Written by kontur-control-net when this guest has a control link,
+# naming the host address to signal. Absent on a guest booted without
+# one, which leaves the agent's own default (this guest's default route's
+# gateway) -- reaching the container network rather than the host side of
+# this VM, so nothing answers.
 EnvironmentFile=-/run/kontur-control-net.env
 ExecStart=/usr/local/bin/kontur-mem-agent
-Restart=always
+# on-failure, not always: the agent exits zero and stays exited on a
+# kernel with no CONFIG_PSI (nothing to poll, and no amount of restarting
+# grows a /proc/pressure), while a crash still comes back.
+Restart=on-failure
 RestartSec=5
 
 [Install]

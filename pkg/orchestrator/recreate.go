@@ -379,7 +379,13 @@ func (s *sandboxRecreation) restoreCheckout(ctx context.Context, out *SandboxRec
 				"so the fresh checkout has not been set up", err))
 		setup = ""
 	}
-	prepared, err := prepareCheckout(ctx, s.tools, s.cfg.GitRemoteBase, s.task, setup)
+	// setupNotes' zero value: a rebuild happens mid-run, inside a tool
+	// call the agent made, so the row's synopsis is the agent's own at
+	// that moment and grain does not talk over it. It would also be
+	// mis-attributed if it did -- agent_started_at is long since stamped,
+	// which is precisely what makes a note read as the run's own
+	// (model.RunActivity.BySetup).
+	prepared, err := prepareCheckout(ctx, s.tools, s.cfg.GitRemoteBase, s.task, setup, setupNotes{})
 	if err != nil {
 		out.Warnings = append(out.Warnings,
 			fmt.Sprintf("this task's repo could not be cloned again: %v", err))

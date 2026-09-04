@@ -18,8 +18,8 @@ const qdiscAddAttempts = 5
 
 // splice cross-connects two links so that every frame arriving on either
 // one is transmitted out the other: a wire, not a switch. It is what puts
-// a flat-mode guest directly onto the container's own network segment
-// without a bridge in between.
+// the guest directly onto the container's own network segment without a
+// bridge in between.
 //
 // Each direction is an ingress qdisc plus a match-everything filter whose
 // action is mirred/egress-redirect. "Ingress" selects frames *arriving*

@@ -1,0 +1,8 @@
+# `go build ./cmd/<name>` writes its output into the working directory,
+# so a plain build of any command in this repo leaves a binary at the
+# root. One of them (kontur-agent) reached a commit that way; these
+# entries are so the next one cannot.
+/kontur
+/kontur-agent
+/kontur-mem-agent
+/konturctl

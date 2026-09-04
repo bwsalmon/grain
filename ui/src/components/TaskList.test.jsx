@@ -1079,5 +1079,37 @@ describe("TaskList", () => {
       renderList({ tasks: [running()] });
       expect(document.querySelector(".task-activity")).not.toBeInTheDocument();
     });
+
+    // grain/task-295: the stretch before the agent's first turn -- the
+    // sandbox being built, the repo cloned -- is narrated by grain
+    // itself, since there is no agent yet to narrate it. Everything else
+    // that has ever appeared here was an agent's own words, so whose
+    // sentence this is is marked rather than left to the wording.
+    it("marks a status grain wrote during setup as grain's own", () => {
+      renderList({
+        tasks: [
+          running({ activity: "cloning acme/widgets", activityBySetup: true }),
+        ],
+      });
+      expect(screen.getByText("cloning acme/widgets")).toBeInTheDocument();
+      expect(document.querySelector(".task-activity-by")).toHaveTextContent(
+        "grain",
+      );
+      expect(document.querySelector(".task-activity")).toHaveAttribute(
+        "title",
+        expect.stringContaining("What grain is doing to get this run started"),
+      );
+    });
+
+    it("leaves the run's own status unmarked", () => {
+      renderList({ tasks: [running({ activity: "running the test suite" })] });
+      expect(
+        document.querySelector(".task-activity-by"),
+      ).not.toBeInTheDocument();
+      expect(document.querySelector(".task-activity")).toHaveAttribute(
+        "title",
+        expect.stringContaining("What this run says it is doing"),
+      );
+    });
   });
 });

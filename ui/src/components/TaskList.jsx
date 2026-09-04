@@ -627,8 +627,13 @@ export function TaskRow({
       {activity && (
         <span
           className="task-activity"
-          title={`What this run says it is doing${activity.age ? `, as of ${activity.age === "now" ? "just now" : `${activity.age} ago`}` : ""}`}
+          title={`${activity.bySetup ? "What grain is doing to get this run started" : "What this run says it is doing"}${activity.age ? `, as of ${activity.age === "now" ? "just now" : `${activity.age} ago`}` : ""}`}
         >
+          {/* Whose sentence this is, said out loud rather than left to
+              the phrasing: every status on this row until now was an
+              agent's own, and grain narrating a run's setup is a
+              different voice (state.js's runActivity). */}
+          {activity.bySetup && <span className="task-activity-by">grain</span>}
           <span className="task-activity-note">{activity.note}</span>
           {activity.age && (
             <span className="task-activity-age">{activity.age}</span>

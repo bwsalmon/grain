@@ -828,13 +828,22 @@ type Run struct {
 	// Store.SetRunTranscript/RunTranscript read and write it directly by
 	// task ID and attempt number instead.
 	Detail string
-	// Activity is the run's own one-line synopsis of what it is doing at
-	// the moment -- "waiting for CI on the third push", "reading
-	// pkg/orchestrator" -- written by the run itself through the
-	// update_status tool, and ActivityAt is when it last wrote one.
+	// Activity is the one-line synopsis of what this run is doing at the
+	// moment -- "waiting for CI on the third push", "reading
+	// pkg/orchestrator" -- and ActivityAt is when it was last written.
 	//
-	// Everything else on this type is grain's record of the run; this is
-	// the run's own account of itself, and nothing derives or infers it.
+	// Two hands write it, and which of them is answerable from the row
+	// rather than from the words. While task_run.agent_started_at is
+	// still unset it is grain's own narration of the run's setup, stamped
+	// from the dispatch path (orchestrator.setupNotes: "building a
+	// sandbox", "cloning acme/widgets"), because the stretch before the
+	// agent's first turn is exactly the one no run can narrate for
+	// itself. After it, it is the run's own account of itself, written
+	// through the update_status tool and nothing else -- the handover
+	// clears grain's last phrase in the same breath as
+	// Store.SetRunAgentStarted, so a note standing beside a stamped
+	// agent_started_at is always the agent's own (RunActivity.BySetup).
+	//
 	// Both are empty for a run that never said anything, which is no kind
 	// of signal: a framework with no route back to the daemon cannot carry
 	// the call at all (see mcp.NewStatusTools), and every run recorded
@@ -863,6 +872,23 @@ type Run struct {
 type RunActivity struct {
 	Note string
 	At   *time.Time
+	// BySetup says the phrase is grain's rather than the run's: one of
+	// orchestrator.setupNotes' own, stamped while the run's sandbox was
+	// still being built, its repo cloned or its credentials minted.
+	//
+	// It is read off the run rather than off the note -- true exactly
+	// while task_run.agent_started_at is unset, which is the moment
+	// grain hands the run over and clears whatever it last said (see
+	// Run.Activity). That is why no prefix or separate column is needed
+	// to tell the two apart, and why an agent cannot claim to be grain by
+	// writing "grain:" into its own status: the only notes standing
+	// before an agent exists are the ones grain wrote.
+	//
+	// Everything shown on a task row so far is something an agent said,
+	// so the distinction is worth carrying to the reader rather than
+	// quietly blurring: the UI marks such a phrase as grain's
+	// (ui.Task.ActivityBySetup, TaskList.jsx).
+	BySetup bool
 }
 
 // --- conversation ----------------------------------------------------

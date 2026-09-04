@@ -1,8 +1,8 @@
 # Static pod manifest for the standalone kubelet set up by install.sh:
 # drop this file into /etc/kubernetes/manifests (or wherever
 # STATIC_POD_PATH points) and kubelet picks it up directly, no apiserver
-# or `kubectl apply` involved. Copy of deploy/k8s/pod-example.yaml's
-# single-VM shape, adjusted for that standalone environment:
+# or `kubectl apply` involved. Copy of deploy/k8s/pod-example.yaml,
+# adjusted for that standalone environment:
 #
 #  - Images come from the local registry (localhost:5000) that
 #    local-registry.sh/build-and-push.sh set up, instead of ghcr.io.
@@ -15,7 +15,7 @@
 #    staying stopped. To actually stop it, remove this file from the
 #    static pod directory; kubelet then tears the pod down.
 #
-# Assumes disk images/kernel are already on the node under
+# Assumes disk image/kernel are already on the node under
 # /var/lib/vm-images, as in the ordinary example.
 apiVersion: v1
 kind: Pod
@@ -31,10 +31,10 @@ spec:
       image: localhost:5000/kontur:latest
       args: ["netshim"]
       env:
-        - name: NETSHIM_VMS
-          value: "web:169.254.100.2:30080"
-        - name: NETSHIM_GUEST_PORT
-          value: "8080"
+        - name: NETSHIM_VM
+          value: "web"
+        - name: NETSHIM_CONTROL_CIDR
+          value: "169.254.100.1/24"
       securityContext:
         privileged: true
   containers:
@@ -48,16 +48,34 @@ spec:
           value: "true"
         - name: CHV_KERNEL
           value: /images/vmlinux
+        # No "ip=" and no CHV_NET: the VM container derives both from the
+        # identity the CNI put on the pod's own interface, which is why
+        # it reads the same NETSHIM_* settings netshim did.
         - name: CHV_CMDLINE
-          value: "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"
-        - name: CHV_NET
-          value: "tap=tap-web"
+          value: "console=ttyS0 root=/dev/vda ro"
+        - name: NETSHIM_VM
+          value: "web"
+        - name: NETSHIM_CONTROL_CIDR
+          value: "169.254.100.1/24"
         - name: CHV_CPUS
           value: "2"
         - name: CHV_MEMORY_MB
           value: "2048"
         - name: CHV_SHUTDOWN_TIMEOUT
           value: "20s"
+      # Without this the pod's Ready condition reports on the container,
+      # which is up well before the guest inside it has booted. "kontur
+      # ready" is a mode of the same binary this image already runs: it
+      # dials the guest's own agent over the VM's vsock device and exits
+      # zero once the guest answers a command, so "kubectl wait
+      # --for=condition=Ready" waits for the guest. "-timeout 0" is a
+      # single attempt -- the kubelet does the retrying, on
+      # periodSeconds. See the top-level README's "Readiness".
+      readinessProbe:
+        exec:
+          command: ["/usr/local/bin/kontur", "ready", "-timeout", "0"]
+        periodSeconds: 5
+        timeoutSeconds: 5
       securityContext:
         privileged: true
       volumeMounts:

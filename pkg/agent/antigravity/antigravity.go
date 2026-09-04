@@ -996,15 +996,40 @@ func workDir(cfg agent.RunConfig, home string) string {
 // because this list is no longer only prose: permissionRules denies these
 // names in agy's settings and HookDecision blocks a call to one, so a
 // name missing from here is a tool nothing stops. Everything else agy
-// carries -- its browser, its subagents, its knowledge store -- is left
-// alone deliberately: those do not touch the controller's filesystem, and
-// a denial nobody has watched work is safest kept to the tools that
+// carries -- its browser, its knowledge store -- is left alone
+// deliberately: those do not touch the controller's filesystem, and a
+// denial nobody has watched work is safest kept to the tools that
 // motivate it.
+//
+// The two subagent tools are the exception to that last rule, and they
+// are here for what they delegate to rather than for what they do
+// themselves. define_subagent takes an enable_write_tools flag and
+// invoke_subagent runs the result, so "spawn a subagent and have it write
+// the file" would be a route to the controller's filesystem that never
+// calls a tool named above -- and whether a subagent's own calls are put
+// in front of this run's PreToolUse hook is a question the configuration
+// grain runs agy in cannot answer, because it has no subagent to ask.
+// Measured against 1.1.26 by capturing the function declarations agy
+// actually sends the model (agy honours HTTPS_PROXY, so a logging proxy
+// reads them; see the README): a run's model is offered 13 of agy's
+// native tools, and neither subagent tool is among them -- a live model
+// told in as many words to call define_subagent got agy's own `unknown
+// tool: "define_subagent"` back, and grain's hook was never asked about
+// it, agy refusing an unknown tool before any hook runs. So denying them
+// here changes nothing about a run today. It is written because what
+// prunes that roster is partly a server-side feature flag rather than
+// anything in this binary or this repository, so the tools can appear on
+// a day nobody changed either, and a deny list already carrying the name
+// is what makes that day uneventful. HookDecision's reason names grain's
+// file tools as the alternative, which is the wrong advice for a
+// delegation tool and the right refusal; a run that needs the work done
+// does it with grain's tools itself.
 var withheldNativeTools = []string{
 	"run_command", "command_status", "send_command_input",
 	"view_file", "write_to_file", "replace_file_content",
 	"multi_replace_file_content", "sed_file", "list_dir",
 	"grep_search", "find_by_name", "notebook_edit", "notebook_execution",
+	"define_subagent", "invoke_subagent",
 }
 
 // IsWithheldNativeTool reports whether name is one of agy's own tools

@@ -8,157 +8,34 @@ import (
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{envBridge, envBridgeCIDR, envExternalIface, envGuestPort, envVMs} {
+	for _, k := range []string{envVM, envBridge, envControlCIDR, envExternalIface} {
 		os.Unsetenv(k)
 	}
 }
 
 func TestFromEnv_Defaults(t *testing.T) {
 	clearEnv(t)
-	t.Setenv(envVMs, "web:169.254.100.2:30080")
-
-	cfg, err := FromEnv()
-	if err != nil {
-		t.Fatalf("FromEnv() error = %v", err)
-	}
-
-	if cfg.Bridge != defaultBridge {
-		t.Errorf("Bridge = %q, want default %q", cfg.Bridge, defaultBridge)
-	}
-	if cfg.ExternalIface != defaultExternalIface {
-		t.Errorf("ExternalIface = %q, want default %q", cfg.ExternalIface, defaultExternalIface)
-	}
-	if cfg.GuestPort != defaultGuestPort {
-		t.Errorf("GuestPort = %d, want default %d", cfg.GuestPort, defaultGuestPort)
-	}
-	if !cfg.BridgeAddr.Equal(net.ParseIP("169.254.100.1")) {
-		t.Errorf("BridgeAddr = %s, want 169.254.100.1", cfg.BridgeAddr)
-	}
-	if len(cfg.VMs) != 1 {
-		t.Fatalf("VMs = %+v, want exactly one", cfg.VMs)
-	}
-	vm := cfg.VMs[0]
-	if vm.Name != "web" || !vm.IP.Equal(net.ParseIP("169.254.100.2")) || vm.Port != 30080 {
-		t.Errorf("VMs[0] = %+v, want {web 169.254.100.2 30080}", vm)
-	}
-	if vm.TapName() != "tap-web" {
-		t.Errorf("TapName() = %q, want tap-web", vm.TapName())
-	}
-}
-
-func TestFromEnv_MultipleVMs(t *testing.T) {
-	clearEnv(t)
-	t.Setenv(envVMs, "a:169.254.100.2:8080, b:169.254.100.3:8081")
-
-	cfg, err := FromEnv()
-	if err != nil {
-		t.Fatalf("FromEnv() error = %v", err)
-	}
-	if len(cfg.VMs) != 2 {
-		t.Fatalf("VMs = %+v, want 2 entries", cfg.VMs)
-	}
-	if cfg.VMs[0].Name != "a" || cfg.VMs[1].Name != "b" {
-		t.Errorf("VMs = %+v, want order [a b]", cfg.VMs)
-	}
-}
-
-func TestFromEnv_MissingVMs(t *testing.T) {
-	clearEnv(t)
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want error for missing NETSHIM_VMS")
-	}
-}
-
-func TestFromEnv_DuplicateName(t *testing.T) {
-	clearEnv(t)
-	t.Setenv(envVMs, "a:169.254.100.2:8080,a:169.254.100.3:8081")
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want error for duplicate VM name")
-	}
-}
-
-func TestFromEnv_AddressOutsideSubnet(t *testing.T) {
-	clearEnv(t)
-	t.Setenv(envVMs, "a:10.0.0.2:8080")
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want error for address outside bridge subnet")
-	}
-}
-
-func TestFromEnv_NameTooLongForTap(t *testing.T) {
-	clearEnv(t)
-	// tapPrefix ("tap-") + 12 chars = 16, one over the 15-byte interface
-	// name limit.
-	t.Setenv(envVMs, "abcdefghijkl:169.254.100.2:8080")
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want error for VM name producing an overlong tap name")
-	}
-}
-
-func TestFromEnv_InvalidVMSpec(t *testing.T) {
-	clearEnv(t)
-	for _, spec := range []string{
-		"missing-parts",
-		"a:not-an-ip:8080",
-		"a:169.254.100.2:not-a-port",
-		"a:169.254.100.2:70000",
-		":169.254.100.2:8080",
-	} {
-		t.Run(spec, func(t *testing.T) {
-			clearEnv(t)
-			t.Setenv(envVMs, spec)
-			if _, err := FromEnv(); err == nil {
-				t.Fatalf("FromEnv() with %s: error = nil, want error", spec)
-			}
-		})
-	}
-}
-
-func TestFromEnv_InvalidGuestPort(t *testing.T) {
-	clearEnv(t)
-	t.Setenv(envVMs, "a:169.254.100.2:8080")
-	t.Setenv(envGuestPort, "0")
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want error for out-of-range guest port")
-	}
-}
-
-func TestFromEnv_CustomBridgeCIDR(t *testing.T) {
-	clearEnv(t)
-	t.Setenv(envBridgeCIDR, "10.200.0.1/24")
-	t.Setenv(envVMs, "a:10.200.0.5:8080")
-
-	cfg, err := FromEnv()
-	if err != nil {
-		t.Fatalf("FromEnv() error = %v", err)
-	}
-	if !cfg.BridgeAddr.Equal(net.ParseIP("10.200.0.1")) {
-		t.Errorf("BridgeAddr = %s, want 10.200.0.1", cfg.BridgeAddr)
-	}
-}
-
-func TestFromEnv_Flat(t *testing.T) {
-	t.Setenv(envMode, ModeFlat)
 	t.Setenv(envVM, "web")
 
 	cfg, err := FromEnv()
 	if err != nil {
 		t.Fatalf("FromEnv() error = %v", err)
 	}
-	if cfg.Mode != ModeFlat {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeFlat)
+
+	if cfg.VM != "web" {
+		t.Errorf("VM = %q, want web", cfg.VM)
 	}
-	if len(cfg.VMs) != 1 || cfg.VMs[0].Name != "web" {
-		t.Fatalf("VMs = %+v, want a single VM named web", cfg.VMs)
-	}
-	if got, want := cfg.VMs[0].TapName(), "tap-web"; got != want {
+	if got, want := cfg.TapName(), "tap-web"; got != want {
 		t.Errorf("TapName() = %q, want %q", got, want)
 	}
-	if got, want := cfg.VMs[0].ControlTapName(), "ctl-web"; got != want {
+	if got, want := cfg.ControlTapName(), "ctl-web"; got != want {
 		t.Errorf("ControlTapName() = %q, want %q", got, want)
 	}
-	if got, want := cfg.ExternalIface, defaultExternalIface; got != want {
-		t.Errorf("ExternalIface = %q, want %q", got, want)
+	if cfg.Bridge != defaultBridge {
+		t.Errorf("Bridge = %q, want default %q", cfg.Bridge, defaultBridge)
+	}
+	if cfg.ExternalIface != defaultExternalIface {
+		t.Errorf("ExternalIface = %q, want default %q", cfg.ExternalIface, defaultExternalIface)
 	}
 	if got, want := cfg.ControlAddr.String(), "169.254.100.1"; got != want {
 		t.Errorf("ControlAddr = %q, want %q", got, want)
@@ -168,11 +45,11 @@ func TestFromEnv_Flat(t *testing.T) {
 	}
 }
 
-// TestFromEnv_FlatControlDisabled covers the explicit opt-out: an empty
+// TestFromEnv_ControlDisabled covers the explicit opt-out: an empty
 // NETSHIM_CONTROL_CIDR means no control link at all, as opposed to an
 // unset one meaning "use the default".
-func TestFromEnv_FlatControlDisabled(t *testing.T) {
-	t.Setenv(envMode, ModeFlat)
+func TestFromEnv_ControlDisabled(t *testing.T) {
+	clearEnv(t)
 	t.Setenv(envVM, "web")
 	t.Setenv(envControlCIDR, "")
 
@@ -185,73 +62,20 @@ func TestFromEnv_FlatControlDisabled(t *testing.T) {
 	}
 }
 
-// The nameservers reach the guest on its own ip= parameter, which is
-// what makes a deployment able to name the resolver its network
-// actually has -- rather than every guest booting with whatever
-// /etc/resolv.conf the machine that built the image happened to have,
-// on an address nothing in the guest can route to.
-func TestFromEnv_FlatDNS(t *testing.T) {
-	tests := []struct {
-		name string
-		// set is whether NETSHIM_DNS is in the environment at all,
-		// which is a different thing from it being empty.
-		set   bool
-		value string
-		want  string
-	}{
-		{name: "unset means the default", want: ":" + DefaultDNS},
-		{name: "one", set: true, value: "10.0.0.53", want: ":10.0.0.53"},
-		{name: "two", set: true, value: "10.0.0.53,10.0.1.53", want: ":10.0.0.53:10.0.1.53"},
-		// Explicitly empty is the opt-out, the same shape
-		// NETSHIM_CONTROL_CIDR has: the guest keeps whatever resolver
-		// its image ships with, and the parameter stays the length it
-		// has always been.
-		{name: "explicitly empty", set: true, value: "", want: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(envMode, ModeFlat)
-			t.Setenv(envVM, "web")
-			if tc.set {
-				t.Setenv(envDNS, tc.value)
-			}
-			cfg, err := FromEnv()
-			if err != nil {
-				t.Fatalf("FromEnv() error = %v", err)
-			}
-			if got := DNSFields(cfg.DNS); got != tc.want {
-				t.Errorf("DNSFields(cfg.DNS) = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestParseDNS_Rejects(t *testing.T) {
-	// A third nameserver has nowhere to go (the ip= parameter has two
-	// fields), and neither a name nor an IPv6 address is something the
-	// parameter can carry -- all refused rather than quietly dropped,
-	// since the guest is where the mistake would otherwise surface, as
-	// lookups that hang.
-	for _, spec := range []string{"nameserver", "8.8.8.8,1.1.1.1,9.9.9.9", "2001:4860:4860::8888"} {
-		if _, err := ParseDNS(spec); err == nil {
-			t.Errorf("ParseDNS(%q) = nil error, want one", spec)
-		}
-	}
-}
-
-func TestFromEnv_FlatErrors(t *testing.T) {
+func TestFromEnv_Errors(t *testing.T) {
 	tests := []struct {
 		name string
 		env  map[string]string
 	}{
-		{"no VM name", map[string]string{envMode: ModeFlat}},
-		{"name too long", map[string]string{envMode: ModeFlat, envVM: "averylongvmname"}},
-		{"bad control CIDR", map[string]string{envMode: ModeFlat, envVM: "web", envControlCIDR: "nonsense"}},
-		{"bad DNS", map[string]string{envMode: ModeFlat, envVM: "web", envDNS: "nonsense"}},
-		{"unknown mode", map[string]string{envMode: "bridged", envVM: "web"}},
+		{"no VM name", map[string]string{}},
+		// tapPrefix ("tap-") + 12 chars = 16, one over the 15-byte
+		// interface name limit.
+		{"name too long", map[string]string{envVM: "abcdefghijkl"}},
+		{"bad control CIDR", map[string]string{envVM: "web", envControlCIDR: "nonsense"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -262,8 +86,22 @@ func TestFromEnv_FlatErrors(t *testing.T) {
 	}
 }
 
-func TestFlatGuestConfig(t *testing.T) {
-	t.Setenv(envMode, ModeFlat)
+// TestEnabled covers the gate the VM container uses to tell a
+// netshim-managed sandbox from a bare "kontur run", which has no tap to
+// attach to and no identity to take over.
+func TestEnabled(t *testing.T) {
+	clearEnv(t)
+	if Enabled() {
+		t.Errorf("Enabled() = true with %s unset, want false", envVM)
+	}
+	t.Setenv(envVM, "web")
+	if !Enabled() {
+		t.Errorf("Enabled() = false with %s set, want true", envVM)
+	}
+}
+
+func TestGuestConfig(t *testing.T) {
+	clearEnv(t)
 	t.Setenv(envVM, "web")
 	cfg, err := FromEnv()
 	if err != nil {
@@ -283,7 +121,7 @@ func TestFlatGuestConfig(t *testing.T) {
 		MTU:     1450,
 	}
 
-	g := FlatGuestConfig(cfg, id)
+	g := GuestConfig(cfg, id)
 
 	// The guest must present the MAC the runtime assigned, or the
 	// segment sees a second endpoint appear behind an authorized port.
@@ -297,9 +135,9 @@ func TestFlatGuestConfig(t *testing.T) {
 	if g.Nets[1] != "tap=ctl-web" {
 		t.Errorf("Nets[1] = %q, want tap=ctl-web", g.Nets[1])
 	}
-	// The trailing field is dns0: FromEnv filled DNS in from
-	// DefaultDNS, since NETSHIM_DNS is unset here. See
-	// TestFromEnv_FlatDNS for the rest of that.
+	// The trailing field is dns0: FromEnv filled DNS in from DefaultDNS,
+	// since NETSHIM_DNS is unset here. See TestFromEnv_DNS for the rest
+	// of that.
 	if wantIP := "ip=172.17.0.2::172.17.0.1:255.255.0.0::eth0:off:8.8.8.8"; g.IPParam != wantIP {
 		t.Errorf("IPParam = %q, want %q", g.IPParam, wantIP)
 	}
@@ -337,5 +175,58 @@ func TestWithIPParam(t *testing.T) {
 func TestControlGuestIP(t *testing.T) {
 	if got := ControlGuestIP(net.IPv4(169, 254, 100, 1)).String(); got != "169.254.100.2" {
 		t.Errorf("ControlGuestIP() = %q, want 169.254.100.2", got)
+	}
+}
+
+// The nameservers reach the guest on its own ip= parameter, which is what
+// makes a deployment able to name the resolver its network actually has
+// -- rather than every guest booting with whatever /etc/resolv.conf the
+// machine that built the image happened to have, on an address nothing in
+// the guest can route to.
+func TestFromEnv_DNS(t *testing.T) {
+	tests := []struct {
+		name string
+		// set is whether NETSHIM_DNS is in the environment at all, which
+		// is a different thing from it being empty.
+		set   bool
+		value string
+		want  string
+	}{
+		{name: "unset means the default", want: ":" + DefaultDNS},
+		{name: "one", set: true, value: "10.0.0.53", want: ":10.0.0.53"},
+		{name: "two", set: true, value: "10.0.0.53,10.0.1.53", want: ":10.0.0.53:10.0.1.53"},
+		// Explicitly empty is the opt-out, the same shape
+		// NETSHIM_CONTROL_CIDR has: the guest keeps whatever resolver its
+		// image ships with, and the parameter stays the length it has
+		// always been.
+		{name: "explicitly empty", set: true, value: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envVM, "web")
+			if tc.set {
+				t.Setenv(envDNS, tc.value)
+			}
+			cfg, err := FromEnv()
+			if err != nil {
+				t.Fatalf("FromEnv() error = %v", err)
+			}
+			if got := DNSFields(cfg.DNS); got != tc.want {
+				t.Errorf("DNSFields(cfg.DNS) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDNS_Rejects(t *testing.T) {
+	// A third nameserver has nowhere to go (the ip= parameter has two
+	// fields), and neither a name nor an IPv6 address is something the
+	// parameter can carry -- all refused rather than quietly dropped,
+	// since the guest is where the mistake would otherwise surface, as
+	// lookups that hang.
+	for _, spec := range []string{"nameserver", "8.8.8.8,1.1.1.1,9.9.9.9", "2001:4860:4860::8888"} {
+		if _, err := ParseDNS(spec); err == nil {
+			t.Errorf("ParseDNS(%q) = nil error, want one", spec)
+		}
 	}
 }

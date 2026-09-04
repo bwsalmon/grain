@@ -556,6 +556,15 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// Detached from ctx's cancellation for the same reason the release
 	// below is: a daemon shutting down mid-Acquire is exactly when this
 	// row would otherwise be stranded.
+	//
+	// Whatever setup phrase was standing when it broke is left standing on
+	// the finished row, deliberately: nothing renders a finished run's
+	// synopsis as current (Store.TaskActivity reads live runs only, and
+	// state.js's runActivity checks the task is still running), so it
+	// contradicts nothing, and where the run got to before it failed is
+	// exactly the context the detail beside it does not carry -- "this
+	// run's sandbox could not be prepared: ..." plus "cloning
+	// acme/widgets" is a better record than the detail alone.
 	ranAgent := false
 	defer func() {
 		if ranAgent || err == nil {
@@ -568,6 +577,11 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 			err = errors.Join(err, fmt.Errorf("orchestrator: finishing run %s after its setup failed: %w", d.RunID, ferr))
 		}
 	}()
+
+	// What grain itself is doing, on the task's own row, for the stretch
+	// before there is an agent to say it -- see setupNotes. Every call
+	// below is best-effort and none of them can fail this run.
+	notes := setupNotes{store: deps.Store, taskID: d.TaskID, now: deps.Config.now}
 
 	// The sandbox this run gets is named after the run itself. Nothing
 	// else is in a position to name it: it is built for this run and torn
@@ -592,6 +606,7 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// is built for this run, so its size is decided once, here, and goes
 	// away with it.
 	shape := Shape{CPUs: task.SandboxCPUs, MemoryMB: task.SandboxMemoryMB, DiskGB: task.SandboxDiskGB}
+	notes.say(ctx, buildingSandboxNote)
 	sandbox, err := deps.Sandboxes.Acquire(ctx, sandboxName, shape)
 	if err != nil {
 		return fmt.Errorf("orchestrator: acquiring a sandbox for run %s: %w", d.RunID, err)
@@ -653,6 +668,7 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	// until a run has a sandbox, and what is configured is destroyed with
 	// it.
 	if deps.MintSandboxToken != nil {
+		notes.say(ctx, sandboxCredentialsNote)
 		token, err := deps.MintSandboxToken(sandboxName)
 		if err != nil {
 			return fmt.Errorf("orchestrator: minting run %s's sandbox token: %w", d.RunID, err)

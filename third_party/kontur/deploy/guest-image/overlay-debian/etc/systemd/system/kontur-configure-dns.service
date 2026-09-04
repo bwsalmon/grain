@@ -10,7 +10,7 @@ Documentation=file:///usr/local/libexec/kontur-configure-dns
 DefaultDependencies=no
 After=kontur-net-cmdline.service
 Wants=network-pre.target
-Before=network-pre.target sshd.service ssh.service
+Before=network-pre.target
 
 [Service]
 Type=oneshot

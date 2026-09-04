@@ -187,7 +187,7 @@ func dockerInspect(ctx context.Context, format, name string) (string, error) {
 // (a bad disk/kernel path, cloud-hypervisor itself crashing, ...) still
 // makes kontur.Create return nil, and the container goes on to exit
 // within seconds -- confirmed by hand against a real docker daemon with a
-// deliberately broken disk path. KonturSandboxes.waitForGuestExec polls this
+// deliberately broken disk path. KonturSandboxes.waitForGuestReady polls this
 // so that case fails fast with the container's own status instead of
 // silently waiting out the full ReadyTimeout dialing a port nothing will
 // ever answer.

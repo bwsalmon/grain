@@ -102,9 +102,8 @@ export function completionPhase(t) {
   return null;
 }
 
-// runActivity is what a task's live run says it is doing right now
-// (ui.Task.Activity, written by the run itself through the update_status
-// tool), or null when there is nothing to show.
+// runActivity is what a task's live run is doing right now
+// (ui.Task.Activity), or null when there is nothing to show.
 //
 // The state check is the whole of the filtering. The API only ever
 // carries a synopsis for a task with a live run, but a poll's answer is
@@ -117,11 +116,19 @@ export function completionPhase(t) {
 // and only the age tells them apart. It is null for a synopsis with no
 // timestamp -- a row written by an older build -- in which case the note
 // is shown alone rather than with a made-up age.
+//
+// bySetup says the phrase is grain's own rather than the agent's: what
+// the dispatch path is doing to get this run started, over the minutes
+// before there is an agent to say anything (ui.Task.ActivityBySetup,
+// orchestrator.setupNotes). Everything else that appears here is
+// something an agent wrote, so the two are marked apart rather than left
+// to be told apart by their wording.
 export function runActivity(t, now = Date.now()) {
   if (!t.activity || t.state !== "running") return null;
   return {
     note: t.activity,
     age: t.activityAt ? relativeAge(t.activityAt, now) : null,
+    bySetup: !!t.activityBySetup,
   };
 }
 

@@ -7,7 +7,7 @@
 //
 // A pod's containers share a network namespace that's held open by the
 // pod sandbox for as long as the pod exists, which is what lets a
-// netshim-mode init container set up taps/bridge/NAT before the VM
+// netshim-mode init container set up the tap and the splice before the VM
 // container that uses them ever starts. Plain docker containers have no
 // such sandbox, and a container's network namespace disappears with it,
 // so this package starts a third, otherwise-idle container per VM --
@@ -27,31 +27,23 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bwsalmon/kontur/internal/netshim"
 	"github.com/bwsalmon/kontur/internal/staticpod"
 )
 
 // netshimPrivilegeArgs returns the docker flags netshim needs to do its
-// work, which differ by net mode.
+// work.
 //
-// NAT mode needs --privileged for one specific reason: it writes
-// net.ipv4.ip_forward, and docker masks /proc/sys/net read-only in a
-// container's mount namespace regardless of capabilities or --sysctl
-// (confirmed by hand: NET_ADMIN alone still gets "read-only file system"
-// on that write, without which its NAT/MASQUERADE rules never forward
-// anything). That turned out to be true of a real kubelet/containerd CRI
-// pod too, which is why the static pod manifest is privileged as well.
-//
-// Flat mode does no routing and installs no NAT rules, so it never makes
-// that write. What it does need is CAP_NET_ADMIN for the tap, the tc
-// splice and the control link, plus /dev/net/tun itself -- the netlink
-// library creates a tap by opening that device rather than over
-// rtnetlink, and docker's device cgroup denies it unless it is granted
-// explicitly.
-func netshimPrivilegeArgs(spec staticpod.VMSpec) []string {
-	if spec.NetModeOrDefault() == netshim.ModeNAT {
-		return []string{"--privileged"}
-	}
+// It does no routing and installs no NAT rules, so it never writes a
+// sysctl -- which is what would force --privileged, since docker masks
+// /proc/sys/net read-only in a container's mount namespace regardless of
+// capabilities or --sysctl (and so does a real kubelet/containerd CRI
+// pod, which is why the static pod manifest is privileged anyway: a pod
+// has no per-device grant to give). What it does need is CAP_NET_ADMIN
+// for the tap, the tc splice and the control link, plus /dev/net/tun
+// itself -- the netlink library creates a tap by opening that device
+// rather than over rtnetlink, and docker's device cgroup denies it unless
+// it is granted explicitly.
+func netshimPrivilegeArgs() []string {
 	return []string{
 		"--cap-add", "NET_ADMIN",
 		"--cap-add", "NET_RAW",
@@ -60,30 +52,20 @@ func netshimPrivilegeArgs(spec staticpod.VMSpec) []string {
 }
 
 // netshimEnvArgs returns the "-e" pairs describing this VM's networking,
-// passed to netshim itself and (in flat mode) to the VM container too, so
-// both read the same settings rather than keeping separate copies.
+// passed to netshim itself and to the VM container too, so both read the
+// same settings rather than keeping separate copies.
 func netshimEnvArgs(spec staticpod.VMSpec) []string {
-	if spec.NetModeOrDefault() == netshim.ModeNAT {
-		return []string{
-			"-e", "NETSHIM_VMS=" + fmt.Sprintf("%s:%s:%d", spec.Name, spec.IP, spec.Port),
-			"-e", "NETSHIM_BRIDGE=" + spec.Bridge,
-			"-e", "NETSHIM_BRIDGE_CIDR=" + spec.BridgeCIDR,
-			"-e", "NETSHIM_EXTERNAL_IFACE=" + spec.ExternalIface,
-			"-e", "NETSHIM_GUEST_PORT=" + strconv.Itoa(spec.GuestPort),
-		}
-	}
 	return []string{
-		"-e", "NETSHIM_MODE=" + netshim.ModeFlat,
 		"-e", "NETSHIM_VM=" + spec.Name,
 		"-e", "NETSHIM_BRIDGE=" + spec.Bridge,
 		"-e", "NETSHIM_CONTROL_CIDR=" + spec.ControlCIDR,
 		"-e", "NETSHIM_EXTERNAL_IFACE=" + spec.ExternalIface,
 		// Always passed, empty value included: the VM container is what
-		// assembles the guest's ip= parameter in flat mode (see
-		// cmd/kontur's applyFlatNet), so an unset variable there would
-		// mean netshim's own default rather than the nameservers this
-		// VM was created with -- and "-dns ''" is how a caller asks for
-		// the guest image's own resolv.conf to be left alone.
+		// assembles the guest's ip= parameter, so an unset variable
+		// there would mean netshim's own default rather than the
+		// nameservers this VM was created with -- and "-dns ''" is how a
+		// caller asks for the guest image's own resolv.conf to be left
+		// alone.
 		"-e", "NETSHIM_DNS=" + spec.DNS,
 	}
 }
@@ -121,9 +103,15 @@ func (d *Docker) run(ctx context.Context, stdout io.Writer, args ...string) erro
 
 // isNotFound reports whether err came from a docker CLI invocation that
 // failed because the named container doesn't exist -- the docker CLI's
-// only way of expressing that is this stderr substring.
+// only way of expressing that is a stderr substring, and it words it
+// differently per subcommand ("No such container" from stop/rm/exec, "No
+// such object" from inspect).
 func isNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "No such container")
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "No such container") || strings.Contains(msg, "No such object")
 }
 
 // remove force-removes a container, treating "already gone" as success.
@@ -200,7 +188,7 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 	netshimArgs := append([]string{
 		"run", "--rm",
 		"--network", "container:" + netnsName,
-	}, netshimPrivilegeArgs(spec)...)
+	}, netshimPrivilegeArgs()...)
 	netshimArgs = append(netshimArgs, netshimEnvArgs(spec)...)
 	netshimArgs = append(netshimArgs, spec.KonturImage, "netshim")
 	if err := d.run(ctx, stdout, netshimArgs...); err != nil {
@@ -245,33 +233,32 @@ func Create(ctx context.Context, d *Docker, spec staticpod.VMSpec, stdout io.Wri
 	if spec.Cmdline != "" {
 		vmArgs = append(vmArgs, "-e", "CHV_CMDLINE="+spec.Cmdline)
 	}
-	if spec.NetModeOrDefault() == netshim.ModeNAT {
-		vmArgs = append(vmArgs, "-e", "CHV_NET=tap=tap-"+spec.Name)
-	} else {
-		// Flat mode derives its own --net values (and the guest's ip=
-		// parameter) at boot from the identity on the namespace's
-		// external interface, so the VM container gets the same netshim
-		// settings rather than a precomputed CHV_NET. See cmd/kontur's
-		// applyFlatNet.
-		vmArgs = append(vmArgs, netshimEnvArgs(spec)...)
-	}
+	// The VM container derives its own --net values (and the guest's ip=
+	// parameter) at boot from the identity on the namespace's external
+	// interface, so it gets the same netshim settings rather than a
+	// precomputed CHV_NET. See cmd/kontur's applyNetshimNet.
+	vmArgs = append(vmArgs, netshimEnvArgs(spec)...)
 	vmArgs = append(vmArgs,
 		"-e", "CHV_CPUS="+strconv.Itoa(spec.CPUs),
 		"-e", "CHV_MEMORY_MB="+strconv.Itoa(spec.MemoryMB),
 		"-e", "CHV_SHUTDOWN_TIMEOUT="+spec.ShutdownTimeout,
 	)
-	// See staticpod's manifestTemplateSrc for why this is an address on
-	// the guest's own NIC at the fixed guest sshd port, not the external
-	// port NAT mode forwards. Flat mode with no control link has no such
-	// address at all, and so no exec path in.
-	if addr := spec.ExecAddr(); addr != "" {
-		vmArgs = append(vmArgs, "-e", "KONTUR_EXEC_ADDR="+addr)
+	// Only when asked for: zero means "no headroom", and passing the
+	// boot values through as their own ceilings is what kontur run
+	// already does with them unset. See VMSpec.CPUsMax.
+	if spec.CPUsMax != 0 {
+		vmArgs = append(vmArgs, "-e", "CHV_CPUS_MAX="+strconv.Itoa(spec.CPUsMax))
 	}
-	// Read twice inside the container, for the two halves of one fact:
-	// "kontur run" puts it on the guest's kernel command line so the
-	// generated key is authorized for this account, and "kontur exec"
-	// (which docker exec runs with the container's own environment) logs
-	// in as it. See VMSpec.GuestUser.
+	if spec.MemoryMaxMB != 0 {
+		vmArgs = append(vmArgs, "-e", "CHV_MEMORY_MAX_MB="+strconv.Itoa(spec.MemoryMaxMB))
+	}
+	// The account "kontur exec" runs commands as inside the guest (see
+	// VMSpec.GuestUser). It used to be read twice, because the old SSH
+	// transport also needed the guest told which account to authorize
+	// this boot's key for; over vsock the agent runs as root and drops
+	// to whatever account a request names, so this is now read only by
+	// "kontur exec" itself -- which docker exec runs with the
+	// container's own environment.
 	if spec.GuestUser != "" {
 		vmArgs = append(vmArgs, "-e", "KONTUR_EXEC_USER="+spec.GuestUser)
 	}

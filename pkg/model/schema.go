@@ -195,13 +195,23 @@ var Tables = []string{
 	// so NULL for a run that never reached its agent at all (a checkout
 	// that would not clone, a capability that would not mint) as well as
 	// for every run recorded before this column existed.
-	// activity and activity_at are the run's own synopsis of what it is
-	// doing right now -- one short phrase it writes for itself through the
-	// update_status tool ("waiting for CI on the third push", "reading
-	// pkg/orchestrator"), and the moment it last wrote one. Every other
-	// column here is grain's record of a run; this is the run's, which is
-	// why nothing derives it and nothing but Store.SetRunActivity writes
-	// it.
+	// activity and activity_at are the synopsis of what this run is doing
+	// right now -- one short phrase ("waiting for CI on the third push",
+	// "reading pkg/orchestrator") and the moment it was last written.
+	// Every other column here is grain's record of a run; this is mostly
+	// the run's own account of itself, written through the update_status
+	// tool and derived from nothing.
+	//
+	// Mostly, because a run cannot narrate the part of its life that
+	// happens before it: while its sandbox is being built, its repo
+	// cloned and its credentials minted there is no agent yet to call the
+	// tool, and on a kontur deployment that stretch is minutes long. So
+	// grain stamps its own phrases here over that stretch
+	// (orchestrator.setupNotes) through the same Store.SetTaskActivity,
+	// and clears the last of them as it hands the run to its agent.
+	// agent_started_at is what tells the two apart for a reader: a note
+	// standing while that column is still NULL is grain's
+	// (model.RunActivity.BySetup).
 	//
 	// It answers the question a list of live runs could not: a task has
 	// read 'running' for forty minutes and the only way to find out what

@@ -1719,8 +1719,10 @@ with the evidence:
   `skills`, `plugins` and `mcpServers`. None of them names the native
   tools an agent may use. The `enable_write_tools` / `enable_mcp_tools` /
   `enable_subagent_tools` gates that *do* read like that switch belong to
-  a *subagent* definition (`define_subagent`), and whether a main agent
-  honours them is unproven.
+  a *subagent* definition (`define_subagent`), and a grain run cannot
+  reach them at all: `define_subagent` is not among the tools agy offers
+  the model on the credential grain authenticates with (measured below,
+  "A subagent is not a way around the hook").
 - **Silence is the failure mode to watch.** An unknown key is ignored
   rather than rejected -- an unknown `settings.json` key still gets a run
   to its authentication check, and an unknown frontmatter key leaves an
@@ -1849,6 +1851,63 @@ against a real credential and reading the tool steps back off its
   own `run_command` on a path outside the sandbox and then looks at the
   controller's filesystem, at whether the hook denied any of grain's own
   tools, and at whether the run still reached its sandbox.
+- **A subagent is not a way around the hook, and not because the hook
+  covers one.** "Spawn a subagent and have *it* write the file" would
+  bypass every denial above if a subagent's own tool calls did not reach
+  `PreToolUse`, since `define_subagent` takes an `enable_write_tools`
+  flag and neither it nor `invoke_subagent` was on the deny list. That
+  question turns out to be unaskable in the configuration grain runs agy
+  in, because there is no subagent to ask: **a live model told in as many
+  words to call `define_subagent` got agy's own `unknown tool:
+  "define_subagent" — check spelling` back, and grain's hook was never
+  asked about the call** -- agy refuses an unknown tool before any hook
+  runs, so the payload log (`hook_payload_log_test.go`'s recorder) holds
+  nothing for it. The same run's `run_command` and `list_dir` were denied
+  by the hook as usual, so the instrument was working.
+- **The `init` event's roster is an upper bound, not the model's roster,
+  and this is where that matters.** That event advertises 57 tools on the
+  1.1.26 run captured here, `define_subagent`, `invoke_subagent`,
+  `manage_subagents` and the browser tools among them -- but what agy *declares to the model* is
+  a shorter list, and the two had never been compared. They can be:
+  **agy honours `HTTPS_PROXY`**, so a `mitmdump` holding a CA the machine
+  trusts reads the `streamGenerateContent` request bodies whole. A real
+  grain run (agy 1.1.26, `gemini-3.1-pro`, API-key auth, sandbox
+  host-rooted) declares 24 functions: agy's `view_file`, `run_command`,
+  `manage_task`, `write_to_file`, `replace_file_content`,
+  `generate_image`, `read_url_content`, `search_web`, `find_by_name`,
+  `grep_search`, `list_dir`, `list_resources` and `read_resource`, plus
+  grain's eleven `mcp_grain-sandbox_*` tools. No subagent tool, no
+  browser tool, and no `call_mcp_tool` (grain's tools being registered
+  eagerly instead). Six names in `withheldNativeTools` --
+  `command_status`, `send_command_input`, `multi_replace_file_content`,
+  `sed_file`, `notebook_edit`, `notebook_execution` -- are not offered
+  either, which costs nothing: the deny list is matched against a call
+  that happens, not against a roster.
+- **What prunes that roster is partly a server-side feature flag, which
+  is why the answer above is not a guarantee.** agy fetches its flags from
+  `antigravity-unleash.goog` at startup (449 of them on the run captured
+  here), and `cascade-enable-invoke-subagent-tool` -- an *experiment*,
+  described as "invoke_subagent tool" -- is enabled with a single strategy
+  constrained to `ide IN [jetski, jetski-insiders, jetski-dev]`, which the
+  CLI is not. Rewriting that response in the proxy (constraints removed,
+  rollout 100) did not by itself put the tools in front of the model, so
+  at least one further gate is in the binary and the flag alone is not the
+  switch. The point stands either way: **which tools a run's model may
+  call is decided partly off this machine**, on a service that owes this
+  repository nothing, so "agy does not offer subagent tools" is a fact
+  about today rather than a property to build on.
+- **So `withheldNativeTools` grew by two.** `define_subagent` and
+  `invoke_subagent` are now denied by `permissionRules` and by
+  `HookDecision` like the file and command tools, which changes nothing
+  about a run today -- they are refused before the hook, being unknown --
+  and closes the delegation route at the parent's call on the day that
+  flag or that gate moves. Denying the *spawn* rather than trying to
+  contain the subagent is the only stop that does not rest on the
+  unanswered question: it is upstream of whatever a subagent would have
+  done, and it needs no theory about whether a subagent's calls are
+  hooked. A deployment that wants the guarantee rather than the deny list
+  still wants a kontur sandbox, which is what this section has said all
+  along.
 
 So the prompt carries the rule, the permission rules say it again where
 agy stores policy but stop nothing, the `PreToolUse` hook is where a call
@@ -5121,6 +5180,53 @@ this is the only tool a run has whose whole value is to somebody
 would never go looking for. The paragraph also says when *not* to call it
 -- a status costs a turn like any other call, and a run narrating every
 file it opens has spent its budget on narration.
+
+### grain says what it is doing too
+
+A tool can only narrate the part of a run an agent is driving. Everything
+before the agent's first turn -- `orchestrator.RunDispatch`'s sandbox
+acquisition, the VM boot behind it, the clone, the repo's setup command,
+the capability mints -- is precisely the stretch a run *cannot* describe,
+because there is no run yet to describe it, and on a kontur deployment it
+is minutes long. A task that had just been dispatched therefore read
+`running` with nothing beside it for the one part of its life where "what
+is it doing?" has a precise, known answer, and the thing holding that
+answer is grain.
+
+So grain stamps its own phrases there (`orchestrator.setupNotes`), over
+the same `Store.SetTaskActivity` the tool reaches: "building a sandbox",
+"giving the sandbox its git credentials", "cloning acme/widgets",
+"running the repo's setup command", "minting the task's credentials".
+Same column, same row, same renderer -- there is nothing extra to read
+and nothing extra to show. Each is best-effort, like every other
+bookkeeping write on that path: a run must never fail because grain could
+not say what it was doing.
+
+Two things had to be decided rather than left to fall out:
+
+- **Whose sentence it is, is marked.** Everything that had ever appeared
+  in that field was something an agent wrote, and a reader who has learnt
+  to read the phrase in the agent's voice should not have to guess. It is
+  not a prefix in the text -- an agent could type that too. It is read
+  off the row: a phrase standing while `task_run.agent_started_at` is
+  still NULL is grain's, since no agent existed to have written it
+  (`model.RunActivity.BySetup`, `ui.Task.ActivityBySetup`), and the UI
+  puts a small "grain" mark before it. The other half of that is the
+  handover: `RunDispatch` clears grain's last phrase in the same breath
+  as `SetRunAgentStarted`, so nothing grain wrote is ever left standing
+  where it would read as the agent's -- and so an agent's first quiet
+  half-hour shows an empty row, which is the truth, rather than "minting
+  the task's credentials" from forty minutes ago.
+- **A failed setup keeps its last phrase.** A run whose sandbox never
+  came up finishes `setup-failed`, and whatever grain was doing when it
+  gave up stays on the finished row. Nothing renders it as current
+  (`Store.TaskActivity` reads live runs only), so it contradicts nothing
+  -- and beside a detail that says the sandbox could not be prepared,
+  "cloning acme/widgets" is the half the detail does not carry.
+
+A sandbox rebuilt mid-run (`recreate_sandbox`) is deliberately *not*
+narrated this way: the run is live, the row's phrase is the agent's own,
+and grain does not talk over it.
 
 ## Deploying it
 

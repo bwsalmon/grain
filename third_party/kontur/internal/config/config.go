@@ -33,6 +33,7 @@ const (
 	envMemoryShared     = "CHV_MEMORY_SHARED"
 	envNet              = "CHV_NET"
 	envAPISocket        = "CHV_API_SOCKET"
+	envVsockSocket      = "CHV_VSOCK_SOCKET"
 	envBinaryPath       = "CHV_BINARY_PATH"
 	envExtraArgs        = "CHV_EXTRA_ARGS"
 	envShutdownTimeout  = "CHV_SHUTDOWN_TIMEOUT"
@@ -51,10 +52,23 @@ const (
 	// defaultMemoryMaxMB on demand (see BuildArgs/Resize), so there is no
 	// need to pay for a large VMM memory footprint from the very first
 	// boot the way a fixed CHV_MEMORY_MB always did.
-	defaultMemoryMB        = 256
-	defaultMemoryMaxMB     = 2048
-	defaultMemoryHotplug   = true
-	defaultAPISocket       = "/run/cloud-hypervisor/api.sock"
+	defaultMemoryMB      = 256
+	defaultMemoryMaxMB   = 2048
+	defaultMemoryHotplug = true
+	defaultAPISocket     = "/run/cloud-hypervisor/api.sock"
+	// defaultVsockSocket is the host end of the guest's virtio-vsock
+	// device: a unix socket in this container that "kontur exec" dials
+	// to reach kontur-agent inside the guest (see internal/guestexec and
+	// cmd/kontur-agent). Under cloud-hypervisor's hybrid vsock the host
+	// side is a socket file rather than anything on a network, which is
+	// what lets exec work with no guest networking at all.
+	defaultVsockSocket = "/run/kontur/vsock.sock"
+	// defaultVsockCID is the guest's context id. Any value above the two
+	// reserved ones (0 is hypervisor, 2 is host) does, and nothing on
+	// either side reads it back: the guest binds VMADDR_CID_ANY and the
+	// host addresses the guest by connecting to the socket above, not by
+	// CID. cloud-hypervisor requires one anyway.
+	defaultVsockCID        = 3
 	defaultBinaryPath      = "/usr/local/bin/cloud-hypervisor"
 	defaultShutdownTimeout = 20 * time.Second
 
@@ -67,21 +81,21 @@ const (
 	// rather than on by default. See internal/memagent.
 	defaultMemAgent = false
 
-	// defaultMemAgentAddr matches netshim's own default bridge gateway
-	// (see internal/netshim's defaultBridgeCIDR): the guest-side agent
-	// (deploy/guest-image's kontur-mem-agent) has no way to learn a
-	// nonstandard listen address at boot, so it always signals its
-	// default route's gateway on this fixed port. Overriding
-	// NETSHIM_BRIDGE_CIDR's gateway therefore also requires overriding
-	// this to match, or the guest's signals go nowhere.
+	// defaultMemAgentAddr matches netshim's own default control link
+	// address (see internal/netshim's defaultControlCIDR): the
+	// guest-side agent (deploy/guest-image's kontur-mem-agent) is told
+	// that address by kontur-control-net at boot and signals it on this
+	// fixed port. Overriding NETSHIM_CONTROL_CIDR therefore also
+	// requires overriding this to match, or the guest's signals go
+	// nowhere.
 	defaultMemAgentAddr     = "169.254.100.1:30090"
 	defaultMemAgentStepMB   = 256
 	defaultMemAgentCooldown = 30 * time.Second
 
 	// defaultDiskImage is the guest disk image baked into the kontur OCI
 	// image itself (see the Dockerfile's guest-image stage): a minimal
-	// Debian system with sshd, usable out of the box without a
-	// separately-managed disk image. CHV_DISK_IMAGE overrides this for
+	// Debian system carrying kontur-agent, usable out of the box without
+	// a separately-managed disk image. CHV_DISK_IMAGE overrides this for
 	// any other guest.
 	defaultDiskImage = "/var/lib/kontur/guest/disk.img"
 
@@ -172,7 +186,9 @@ type Config struct {
 	//
 	// This sizes the block device the guest sees and nothing else --
 	// growing the partition table and filesystem inside it is the guest's
-	// own job.
+	// own job. The bundled reference guest does that for itself on every
+	// boot (kontur-growfs, see deploy/guest-image/README.md); a guest
+	// supplied via CHV_DISK_IMAGE has to arrange its own.
 	DiskSizeMB int
 
 	// Direct kernel boot. Kernel is mutually exclusive with Firmware:
@@ -216,13 +232,24 @@ type Config struct {
 
 	// Nets holds one --net value per guest NIC, each passed through
 	// verbatim, e.g. "tap=eth0,mac=02:00:00:00:00:01". CHV_NET supplies
-	// a single entry; flat mode (see cmd/kontur) replaces the whole list
-	// with values it derives from the namespace's own identity, which is
-	// how a flat-mode guest gets both its spliced NIC and its control
-	// NIC. Left empty, the VM boots with no network device.
+	// a single entry; a netshim-managed sandbox (see cmd/kontur)
+	// replaces the whole list with values it derives from the
+	// namespace's own identity, which is how the guest gets both its
+	// spliced NIC and its control NIC. Left empty, the VM boots with no
+	// network device.
 	Nets []string
 
-	APISocket  string
+	APISocket string
+
+	// VsockSocket is the host end of the guest's virtio-vsock device --
+	// the unix socket cloud-hypervisor creates and "kontur exec" dials.
+	// Empty attaches no vsock device at all, which leaves the guest with
+	// no way to be exec'd into.
+	VsockSocket string
+
+	// VsockCID is the guest's vsock context id. See defaultVsockCID for
+	// why its value does not matter.
+	VsockCID   int
 	BinaryPath string
 
 	// ExtraArgs is split on whitespace and appended to the
@@ -262,7 +289,7 @@ type Config struct {
 	MemAgent bool
 
 	// MemAgentAddr is the address the listener above binds -- reachable
-	// from the guest since it shares netshim's bridge network (see
+	// from the guest over netshim's control link (see
 	// defaultMemAgentAddr). Ignored unless MemAgent is set.
 	MemAgentAddr string
 
@@ -295,6 +322,8 @@ func FromEnv() (Config, error) {
 		Cmdline:      getEnvDefault(envCmdline, defaultCmdline),
 		Nets:         netsFromEnv(),
 		APISocket:    getEnvDefault(envAPISocket, defaultAPISocket),
+		VsockSocket:  getEnvDefault(envVsockSocket, defaultVsockSocket),
+		VsockCID:     defaultVsockCID,
 		BinaryPath:   getEnvDefault(envBinaryPath, defaultBinaryPath),
 		MemoryShared: true,
 	}

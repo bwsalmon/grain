@@ -115,7 +115,7 @@ const healthTimeout = 5 * time.Second
 // whole pane down with it.
 //
 // It does, within that short budget, retry a guest that is not answering
-// yet (waitForGuestExec): a sandbox becomes visible here the moment
+// yet (waitForGuestReady): a sandbox becomes visible here the moment
 // Acquire registers it, and a VM can still be finishing its boot then --
 // the same brief window Acquire itself waits out (bwsalmon/agents#478).
 // Without this, that transient state surfaced verbatim as a connection
@@ -153,7 +153,7 @@ func (k *KonturSandboxes) healthRunner(ctx context.Context, name string) (sandbo
 	if !ok {
 		deadline = time.Now().Add(healthTimeout)
 	}
-	if err := k.waitForGuestExec(ctx, name, deadline); err != nil {
+	if err := k.waitForGuestReady(ctx, name, deadline); err != nil {
 		return nil, fmt.Errorf("reaching guest: %w", err)
 	}
 	return k.execRunner(name), nil
