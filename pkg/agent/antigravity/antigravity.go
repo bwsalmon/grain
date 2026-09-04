@@ -206,6 +206,12 @@ type Framework struct {
 	githubHost      string
 	githubInsecure  bool
 	grainServerURL  string
+
+	// Set only by WithoutPermissionOverrideForTest, and only by the live
+	// probe that measures a run in agy's own permission mode. Every other
+	// Framework leaves it false, which is Run passing
+	// --dangerously-skip-permissions exactly as it always has.
+	withoutPermissionOverride bool
 }
 
 // Option configures a Framework at construction time.
@@ -661,6 +667,16 @@ func settingsJSON(apiKeyAuth bool) ([]byte, error) {
 //     A live run holding this exact block, asked to list a directory, ran
 //     agy's own list_dir -- one of the names denied below -- to completion.
 //     So these rules stop nothing as grain runs agy today.
+//   - Whether they could is being measured rather than argued about.
+//     Dropping that flag leaves a run in agy's own request-review mode,
+//     where a headless run soft-denies anything needing a confirmation --
+//     so a run whose allow rules are not matched in the spelling they are
+//     written in is a dispatch that can do nothing at all, grain's tools
+//     being the only ones that reach a sandbox. That takes a live model to
+//     settle, and tests/e2e's TestLiveRunWithoutThePermissionOverride
+//     settles it nightly, driving this framework minus the flag (see
+//     WithoutPermissionOverrideForTest). Until it comes back clean, Run
+//     keeps the override.
 //
 // So hookConfigJSON is the half with teeth -- it is the one that has been
 // watched stopping a live model -- and what contains a native tool that
@@ -1256,11 +1272,19 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
-		"--dangerously-skip-permissions",
+	}
+	// Every dispatch passes this. It is dropped only by the live probe
+	// that measures what a run does without it -- see
+	// WithoutPermissionOverrideForTest, and permissionRules for what the
+	// override overrides.
+	if !f.withoutPermissionOverride {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	args = append(args,
 		"--disable-slash-commands",
 		// Without this a run is over in five minutes; see printTimeout.
 		"--print-timeout", printTimeout(ctx).String(),
-	}
+	)
 	if f.model != "" {
 		args = append(args, "--model", f.model)
 	}

@@ -709,6 +709,58 @@ func TestDefaultModelNamesItsEffort(t *testing.T) {
 	}
 }
 
+// TestRunOverridesAgysPermissionPromptsByDefault pins the flag every
+// dispatch runs under, and the one seam that drops it.
+//
+// The default is the property: agy's own permission mode is
+// request-review, a headless run soft-denies anything that would need a
+// confirmation, and nothing in this repository has yet measured whether
+// permissionRules' allow list is enough to let grain's own tools through
+// in that mode. Until it has, a run without this flag is a run that may
+// be able to do nothing at all -- so a change that stopped passing it
+// should fail here rather than in a nightly, and
+// WithoutPermissionOverrideForTest is the only way to get a Framework
+// that does not.
+func TestRunOverridesAgysPermissionPromptsByDefault(t *testing.T) {
+	// One sandbox root for both runs below: --add-dir names it, and two
+	// TempDirs would make the two command lines differ for a reason that
+	// has nothing to do with the flag under test.
+	root := t.TempDir()
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: root}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !slices.Contains(r.args, "--dangerously-skip-permissions") {
+		t.Errorf("args = %v, want --dangerously-skip-permissions: without it agy runs in request-review mode, "+
+			"where a headless run soft-denies every call that needs a confirmation", r.args)
+	}
+
+	// And the probe's own Framework, which is the same run with that one
+	// argument gone. Everything else about the command line has to be
+	// untouched, or the live measurement it drives would be measuring
+	// some other run than the one a dispatch gets.
+	probe := &recordingRunner{stdout: okStream()}
+	pf := newFramework(probe, "/usr/local/bin/grain", WithoutPermissionOverrideForTest())
+	if _, err := pf.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: root}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if slices.Contains(probe.args, "--dangerously-skip-permissions") {
+		t.Errorf("args = %v, want the override dropped for WithoutPermissionOverrideForTest", probe.args)
+	}
+	var want []string
+	for _, a := range r.args {
+		if a != "--dangerously-skip-permissions" {
+			want = append(want, a)
+		}
+	}
+	if !slices.Equal(probe.args, want) {
+		t.Errorf("args without the override = %v, want %v: the probe differs from a dispatch in that flag alone",
+			probe.args, want)
+	}
+}
+
 // TestRunMirrorsTheRawStreamToTranscriptPath is what LiveTranscriptDir
 // reads: the bytes on disk while a run is still going, not a narrative
 // assembled once it ends.
