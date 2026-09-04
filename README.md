@@ -2898,29 +2898,36 @@ conflict in a database dump by guesswork.
 A change an agent makes arrives the other way: a pull request against
 the state repository, reviewed and merged like any other, which the
 daemon pulls on the same thirty-second timer it exports on. What it does
-with what arrives is asymmetric, and deliberately so. The whole-database
-import is a wholesale replacement of every row -- which is exactly what
-makes a merged deletion delete something -- and it happens only at
-startup, because clearing `task` and `task_run` underneath live runs
-holding those very ids is not something to do to a daemon that is
-working. On a tick, only the settings tables are imported
-(`staterepo.SettingsTables`: the deployment's config row, repo
-configuration, templates, suites, schedules, qualification plans), and
-they are imported the same wholesale way, so a merged deletion of a
-template still deletes it. Those are the tables an agent proposes
+with what arrives is asymmetric, and deliberately so. Only the settings
+tables are imported (`staterepo.SettingsTables`: the deployment's config
+row, repo configuration, templates, suites, schedules, qualification
+plans), and they are imported wholesale, so a merged deletion of a
+template really does delete it. Those are the tables an agent proposes
 changes to and the tables grain does not write for itself, which is what
 makes them safe to replace live. A merged change to a task or a run is
 not applied, and the next export writes the database's own version of it
 back out: the database is authoritative for what grain itself did.
 
-Even the startup import is only wholesale in the case that needs it to
-be. A working tree with no marker is a clone onto a host that has never
-loaded it -- the restore case, where the repository is the only copy
-there is -- and every table comes back. A marker that disagrees with
-HEAD is a repository that moved under a host which already has a
-database, and there only the state tier is replaced, because the
-database is by design ahead of the repository on grain's own churn
-(below).
+A restart imports exactly the same tables, and that is worth saying
+because it did not use to. `Load` read "HEAD is not the commit this host
+recorded" as "a merge arrived" and replaced the whole state tier --
+`task`, `task_comment`, `task_attachment`, `branch`, `release`, every
+table but the three churn ones -- from the dump. The dump is whatever the
+last export wrote, so that deleted every row grain had written since:
+half a minute of them in the ordinary case, and an operator lands in that
+window by habit rather than by accident, merging a settings pull request
+and restarting grain to make it take effect. Nothing was gained by it
+either, since a merged edit to `task` only ever survived if the process
+happened to restart before the next tick pulled the same commit down and
+recorded it as loaded. The import a restart does is now the import a tick
+does.
+
+The whole-database import -- every table, churn included -- is left with
+the one case that needs it: a working tree with no marker, which is a
+clone onto a host that has never loaded it. That is the restore case,
+where the repository is the only copy there is and there is no database
+ahead of it to protect, and it is what makes a clone a whole deployment
+rather than a settings file.
 
 If a pull arrives that cannot be applied -- a dump stamped with a schema
 this build does not know, or rows that will not insert -- the daemon
@@ -3025,12 +3032,13 @@ at a `gc.auto` threshold set for a repository whose objects are database
 dumps rather than source files. On its own that is the 2.9 GiB → 18.9 MiB
 column above.
 
-**An import that does not roll churn back.** Since the database is now
-ahead of the repository on churn by up to an hour by design, a merged
-pull request arriving at startup imports only the state tier and leaves
-grain's own record of what it did alone. A clone with no marker -- the
-restore case, where the repository is the only copy there is -- still
-imports all of it.
+**An import that does not roll grain's own record back.** Since the
+database is ahead of the repository on churn by up to an hour by design,
+and ahead of it on everything else by up to an export interval for the
+same reason, a merged pull request arriving at startup imports the
+settings out of it and leaves grain's own record of what it did alone. A
+clone with no marker -- the restore case, where the repository is the
+only copy there is -- still imports all of it.
 
 Squashing history periodically was the other candidate and is not what
 happened: it means force-pushing a branch that people open pull requests

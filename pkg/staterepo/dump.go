@@ -295,46 +295,23 @@ func base64Value(b []byte) map[string]string {
 // Import replaces every row in db with what dir holds.
 //
 // Destructive, and named that way in the doc rather than softened: this
-// is how a merged pull request against the state repository becomes the
-// running configuration, and a merge that deleted a row has to be able
-// to delete it here too. A caller that cannot afford to lose what is in
-// the database should export first.
+// is the restore -- a clone of the repository onto a host that has never
+// loaded it becoming that deployment's database -- and it is the only
+// direction in which the repository is allowed to say what grain itself
+// did. A merged change is not imported this way and never reaches
+// anything but the settings tables (ImportTables, below): the dump there
+// is always a little behind the database, so replacing a table from it
+// deletes rows rather than bringing any back. A caller that cannot
+// afford to lose what is in the database should export first.
 //
 // Everything happens in one transaction with foreign keys deferred, so
 // the dump's own table order does not matter and a dump that is
 // internally inconsistent (a task_link naming a task that is not in the
 // file) is rejected whole at COMMIT rather than applied halfway.
 func Import(ctx context.Context, db *sql.DB, dir string) error {
-	return ImportTier(ctx, db, dir, TierState, TierChurn)
-}
-
-// ImportTier is Import restricted to the named tiers: the tables outside
-// them are neither cleared nor rewritten, and keep whatever the database
-// already had.
-//
-// One caller wants this, and it is the reason it exists. When a merged
-// pull request arrives against the repository, the merge is about
-// settings -- nobody sends a pull request editing task_run -- and the
-// database is ahead of the repository on grain's own churn by up to a
-// churn interval (tier.go). Importing all of it would roll that hour
-// back; importing only the state tier keeps both halves authoritative
-// about the thing they are actually authoritative about. Load does that;
-// a fresh clone, which is the case where the repository is the only copy
-// there is, still imports the lot.
-func ImportTier(ctx context.Context, db *sql.DB, dir string, tiers ...Tier) error {
-	include := map[Tier]bool{}
-	for _, t := range tiers {
-		include[t] = true
-	}
-	all, err := tableNames(ctx, db)
+	tables, err := tableNames(ctx, db)
 	if err != nil {
 		return err
-	}
-	var tables []string
-	for _, t := range all {
-		if include[TierOf(t)] {
-			tables = append(tables, t)
-		}
 	}
 	return importInto(ctx, db, dir, tables)
 }

@@ -20,10 +20,12 @@
 // (see cmd/grain's daemon.go: the UI and the CLI reach it over REST), so
 // a sync cycle is "pull, write what the database says, commit it, push
 // it" with no merge to resolve. An agent's change arrives the other way,
-// as a merged pull request, and Pull brings it back down: Load imports
-// the whole of it at startup, and Apply imports the settings tables of
-// it into a daemon that is already running, which is as much of a
-// wholesale replacement as is safe to do underneath live runs.
+// as a merged pull request, and Pull brings it back down: Apply imports
+// the settings tables of it into a daemon that is already running, which
+// is as much of a wholesale replacement as is safe to do underneath live
+// runs, and Load imports the same tables at a start. The whole dump is
+// imported in one case only, a clone this host has never loaded, which
+// is the restore.
 //
 // The remote is optional, and that is not a fallback but a supported
 // deployment: Config.Remote left empty gives a repository with no origin
