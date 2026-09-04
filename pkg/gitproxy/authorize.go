@@ -69,7 +69,13 @@ type ModelAuthorizer struct {
 	// is therefore one no sandbox may clone, and saying so here is the
 	// only place that can be enforced. cmd/grain's startGitProxy decides
 	// which repo, if any, that is; see staterepo.Repo.HasSecrets.
-	Forbidden []model.RepoRef
+	//
+	// A holder rather than a slice because which repository that is can
+	// change under a running proxy: adopting a state repository points
+	// the installation at a different one without a restart, so the
+	// answer is re-read into this set rather than baked in at startup
+	// (ForbiddenSet's own doc comment). Nil forbids nothing.
+	Forbidden *ForbiddenSet
 }
 
 // ForbiddenReason is the message a request for a Forbidden repo is
@@ -82,14 +88,10 @@ const ForbiddenReason = "grain's own state repository holds (or once held) its e
 	"A state repository that has never held that file can be dispatched against normally"
 
 // forbids reports whether owner/repo is one of the repos no sandbox may
-// reach at all.
+// reach at all, as the set stands at this moment rather than as it stood
+// when this authorizer was built.
 func (a *ModelAuthorizer) forbids(owner, repo string) bool {
-	for _, r := range a.Forbidden {
-		if canonicalMatches(r, owner, repo) {
-			return true
-		}
-	}
-	return false
+	return a.Forbidden.forbids(owner, repo)
 }
 
 // Refusal implements Refuser: it is how the denial above reaches the

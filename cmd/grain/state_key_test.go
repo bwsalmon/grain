@@ -203,7 +203,7 @@ func TestTheBootstrapPaneCanRestoreAnInstallation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening the state repository: %v", err)
 	}
-	manager := newStateManager(host, db, repo, openSecrets(host))
+	manager := newStateManager(host, db, repo, openSecrets(host), nil)
 
 	status, err := manager.Adopt(ctx, ui.AdoptRequest{Remote: bareRemote(t)})
 	if err != nil {

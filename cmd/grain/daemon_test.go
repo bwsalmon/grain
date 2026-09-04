@@ -534,7 +534,7 @@ func TestStartGitProxyServesAndStops(t *testing.T) {
 	}
 	defer db.Close()
 
-	url, stop, err := startGitProxy(dataDir, store, "example.com", false, "")
+	url, stop, err := startGitProxy(dataDir, store, "example.com", false, "", nil)
 	if err != nil {
 		t.Fatalf("startGitProxy: %v", err)
 	}
@@ -571,7 +571,7 @@ func TestStartGitProxyAdvertisesHostOverLoopback(t *testing.T) {
 	}
 	defer db.Close()
 
-	url, stop, err := startGitProxy(dataDir, store, "example.com", false, "127.0.0.1")
+	url, stop, err := startGitProxy(dataDir, store, "example.com", false, "127.0.0.1", nil)
 	if err != nil {
 		t.Fatalf("startGitProxy: %v", err)
 	}

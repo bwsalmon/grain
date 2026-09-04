@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bwsalmon/grain/pkg/gitproxy"
 	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/secrets"
 	"github.com/bwsalmon/grain/pkg/staterepo"
@@ -36,6 +37,13 @@ type stateManager struct {
 	dataDir string
 	db      *sql.DB
 	secrets *secrets.Store
+	// forbidden is the live set of repos the git proxy refuses to every
+	// sandbox (gitproxy.ForbiddenSet). Held here because this is the one
+	// thing in a running daemon that changes which repository grain's
+	// state lives in, and therefore the one thing that changes the
+	// answer: refreshForbidden pushes the new one in. nil for a manager
+	// with no proxy behind it, which is a test and nothing else.
+	forbidden *gitproxy.ForbiddenSet
 
 	mu   sync.Mutex
 	repo *staterepo.Repo
@@ -45,8 +53,45 @@ type stateManager struct {
 	lastErr error
 }
 
-func newStateManager(dataDir string, db *sql.DB, repo *staterepo.Repo, secretStore *secrets.Store) *stateManager {
-	return &stateManager{dataDir: dataDir, db: db, repo: repo, secrets: secretStore}
+func newStateManager(dataDir string, db *sql.DB, repo *staterepo.Repo, secretStore *secrets.Store, forbidden *gitproxy.ForbiddenSet) *stateManager {
+	return &stateManager{dataDir: dataDir, db: db, repo: repo, secrets: secretStore, forbidden: forbidden}
+}
+
+// refreshForbidden re-reads which repositories the git proxy must refuse
+// to every sandbox and pushes the answer into the set it authorizes
+// against, so that a repository this deployment has just started using
+// is refused -- or served -- from the next request rather than from the
+// next restart.
+//
+// Called by everything here that changes where grain's state lives, in
+// both directions: forbiddenRepos answers about the repository the
+// settings now name, so adopting one that carries the encrypted secrets
+// file in its history forbids it, and adopting one that never held it
+// (or dropping the remote entirely) lifts a refusal that no longer
+// applies.
+//
+// remote is what was just adopted, and is only used if the question
+// cannot be answered at all -- a settings file that has gone unreadable
+// between saving it and reading it back. Then the repository is refused
+// rather than served, the same fail-closed rule forbiddenRepos itself
+// follows: "is grain's ciphertext reachable from here" unanswered is not
+// a no.
+func (m *stateManager) refreshForbidden(ctx context.Context, remote string) {
+	if m.forbidden == nil {
+		return
+	}
+	repos, err := forbiddenRepos(ctx, m.dataDir)
+	if err == nil {
+		m.forbidden.Set(repos)
+		return
+	}
+	log.Printf("grain: cannot tell which repositories the git proxy must refuse after pointing this "+
+		"installation at %q: %v", remote, err)
+	if owner, name, ok := repoFromRemote(remote); ok {
+		m.forbidden.Set([]model.RepoRef{{Owner: owner, Name: name}})
+		return
+	}
+	m.forbidden.Set(nil)
 }
 
 // sync is what the daemon's timer calls, through the manager rather than
@@ -202,6 +247,11 @@ func (m *stateManager) UseLocal(ctx context.Context) (ui.StateRepoStatus, error)
 	if err := m.repo.SetRemote(ctx, ""); err != nil {
 		return ui.StateRepoStatus{}, err
 	}
+	// A repository with no remote has no owner/repo for a sandbox to ask
+	// the proxy for, so there is nothing left to refuse -- and leaving a
+	// stale refusal in place would go on denying whoever now owns that
+	// name on GitHub.
+	m.refreshForbidden(ctx, "")
 	m.lastErr = nil
 	return m.status(ctx), nil
 }
@@ -264,6 +314,12 @@ func (m *stateManager) Adopt(ctx context.Context, req ui.AdoptRequest) (ui.State
 		return ui.StateRepoStatus{}, fmt.Errorf("opening %s: %w", remote, err)
 	}
 	m.repo = repo
+	// Before the import, which is the slow half and can fail: from the
+	// moment the settings name this repository it is the one a sandbox
+	// would be served, so the proxy has to know what to make of it now
+	// rather than after a step that may never finish. The clone above
+	// fetched every ref, so its history is all here to be asked about.
+	m.refreshForbidden(ctx, remote)
 	if req.SecretsKey != "" && m.secrets != nil {
 		if err := m.secrets.ImportKey(secretsKey); err != nil {
 			return ui.StateRepoStatus{}, err
