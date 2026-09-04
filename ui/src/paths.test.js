@@ -7,7 +7,7 @@ describe("parsePath", () => {
   });
 
   it("parses each sidebar destination", () => {
-    for (const view of ["repos", "schedules", "templates"]) {
+    for (const view of ["board", "repos", "schedules", "templates"]) {
       expect(parsePath(`/${view}`)).toEqual({ view });
     }
   });
@@ -77,6 +77,7 @@ describe("buildPath", () => {
 
   it("builds a plain path for the other sidebar views", () => {
     expect(buildPath({ view: "repos" })).toBe("/repos");
+    expect(buildPath({ view: "board" })).toBe("/board");
   });
 
   it("builds a repo's own path, and its releases pane's", () => {
@@ -130,6 +131,7 @@ describe("buildPath", () => {
   it("round-trips every path parsePath recognizes", () => {
     const paths = [
       "/",
+      "/board",
       "/repos",
       "/schedules",
       "/templates",

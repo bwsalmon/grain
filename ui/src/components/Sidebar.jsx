@@ -242,6 +242,33 @@ export default function Sidebar({
           />
         )}
         <Divider sx={{ my: 0.7 }} />
+        {/* The board (TaskBoard.jsx, grain/task-287) is the same tasks
+            as the entries above it, in columns of the operator's own
+            choosing -- so it sits here among the destinations rather
+            than in the state list, whose entries each answer "show me
+            this one state" and always land on the flat list.
+            No count beside it, unlike its neighbours: what a board is
+            showing is decided by its own columns, which live in the
+            board and not here, and "all tasks" is already counted at
+            the top of this rail. The board shows tasks, not a list of
+            its own kind of thing, so its marker is the state entries'
+            invisible `dot dot-all` rather than one of the four item
+            glyphs below -- in the same `nav-icon` column as both, so
+            every label in this rail still lines up. */}
+        <ListItemButton
+          selected={view === "board"}
+          onClick={() => onSetView("board")}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <span className="nav-icon">
+            <span className="dot dot-all" />
+          </span>
+          <ListItemText
+            primary="Board"
+            sx={{ ml: 1 }}
+            primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }}
+          />
+        </ListItemButton>
         {/* The four list entries carry their own glyph where the state
             entries above carry a coloured dot -- each one a Chladni
             figure off the same plate as the mark at the top of this

@@ -24,7 +24,11 @@
 // entry of its own (grain/task-173) and took /metrics with it, so the
 // report an operator reads weekly is a link they can keep.
 
-const VIEWS = ["tasks", "repos", "schedules", "templates", "suites"];
+// "board" is the same tasks as "tasks", laid out as a Kanban board
+// (TaskBoard.jsx, grain/task-287) -- a destination of its own rather
+// than a mode of the tasks view, so /board is a link somebody can keep
+// and a reload lands back on the board rather than on the flat list.
+const VIEWS = ["tasks", "board", "repos", "schedules", "templates", "suites"];
 
 // parsePath turns a URL path into the {view, taskId, repo, showReleases,
 // scheduleId, templateId, suiteId, showSettings, showDebug, showMetrics}
