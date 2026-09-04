@@ -1,10 +1,8 @@
 import { useState } from "react";
-import { Checkbox, Chip, FormControlLabel, IconButton } from "@mui/material";
+import { Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import NotesIcon from "@mui/icons-material/Notes";
 import { STATE_LABELS, capabilityName, completionPhase } from "../state.js";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
-import PromptOverlay from "./PromptOverlay.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
 const FILTER_TITLES = { all: "All tasks", blocked: "Blocked" };
@@ -226,6 +224,11 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // flat (groupByStack's own fallback for a stacked task whose parent is
 // filtered out or gone) leave it off and get the chip.
 //
+// A row carries no "show the prompt" button of its own any more: the
+// whole prompt an agent was handed is a detail about one task, so it is
+// reached from that task's own page (DetailOverlay's Prompt button)
+// rather than from every row of every list a task can appear in.
+//
 // dragPlaceholder is for a row with no handle of its own in a list where
 // the other rows have one -- a stacked merge fix, which is never
 // reordered because the merge queue always runs it ahead of the backlog.
@@ -292,44 +295,6 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       {t.blocked && (
         <Chip size="small" color="error" title={`Waiting on ${t.blockedBy.join(", ")}`} label="Blocked" />
       )}
-      <PromptButton taskId={t.id} />
     </div>
-  );
-}
-
-// PromptButton is the "what was this task's agent actually told?" button
-// every row carries (grain/task-91). A task's own title and description
-// are only part of the prompt a dispatch builds out of them, and the
-// rest -- the branch and repo sentences, the conversation so far, the
-// capability sections -- is visible nowhere else at all.
-//
-// It owns the overlay it opens rather than reporting the click upward,
-// so a row renders the same button wherever TaskRow is used (the task
-// list, the repo pane's own per-repo sublist) without every caller
-// needing state and a handler for it. The click is stopped here: the
-// row around it opens the task, and this button opens something else.
-function PromptButton({ taskId }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <IconButton
-        size="small"
-        className="task-prompt-button"
-        title="Show the full prompt given to the agent"
-        aria-label={`Show the prompt for ${taskId}`}
-        onClick={(e) => { e.stopPropagation(); setOpen(true); }}
-      >
-        <NotesIcon fontSize="small" />
-      </IconButton>
-      {open && (
-        // The overlay lives inside the row's own click target, so a
-        // click anywhere in it -- including its backdrop, which MUI
-        // renders outside this subtree but whose onClose fires from it
-        // -- must not also open the task behind it.
-        <div onClick={(e) => e.stopPropagation()}>
-          <PromptOverlay taskId={taskId} onClose={() => setOpen(false)} />
-        </div>
-      )}
-    </>
   );
 }

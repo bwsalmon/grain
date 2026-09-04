@@ -51,23 +51,25 @@ test("files a new task through the New task overlay", async ({ page }) => {
   await expect(row.locator(".badge-proposed")).toBeVisible();
 });
 
-// grain/task-91: every task row carries a button that shows the whole
-// prompt its agent was handed. The seeded running task is the one with a
-// recorded prompt (cmd/grain/demo.go builds it with the same
+// grain/task-91, grain/task-175: a task's own page carries the button
+// that shows the whole prompt its agent was handed -- the task list's
+// rows no longer do. The seeded running task is the one with a recorded
+// prompt (cmd/grain/demo.go builds it with the same
 // orchestrator.BuildPrompt a real dispatch uses), so this is the one
 // place the button, the route and the recorded prompt are exercised
 // together against a real server.
-test("shows the full prompt behind a task row's own button", async ({ page }) => {
+test("shows the full prompt from the task's own page", async ({ page }) => {
   await page.goto("/");
 
-  const row = page.locator(".task-row", { hasText: "Bump the Go toolchain to 1.24" });
-  await row.getByRole("button", { name: /^Show the prompt for/ }).click();
+  await page.locator(".task-row", { hasText: "Bump the Go toolchain to 1.24" }).click();
+  await expect(page.locator(".detail-header")).toBeVisible();
+  await page.getByRole("button", { name: "Prompt" }).click();
 
-  const dialog = page.locator(".MuiDialog-paper");
-  await expect(dialog.getByText(/Push your change to a new branch named/)).toBeVisible();
-  // The task itself must not have opened behind it: the button stops the
-  // row's own click (TaskList's PromptButton).
-  await expect(page.locator(".detail-header")).toHaveCount(0);
+  // The prompt opens as its own pane over the task's, so it is picked
+  // out by its own heading rather than by being the only dialog on
+  // screen -- the task page is still behind it.
+  const prompt = page.locator(".MuiDialog-paper", { has: page.getByRole("heading", { name: /^Prompt for/ }) });
+  await expect(prompt.getByText(/Push your change to a new branch named/)).toBeVisible();
 });
 
 // grain/task-94: a task opens into the whole content area beside the

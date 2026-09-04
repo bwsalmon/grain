@@ -1054,9 +1054,10 @@ describe("DetailOverlay", () => {
     expect(textarea).toHaveValue("");
   });
 
-  // grain/task-91: the title and description above are only part of
-  // what a dispatch hands the agent, so the whole prompt is a click away
-  // from the task itself as well as from its row in the list.
+  // grain/task-91, grain/task-175: the title and description above are
+  // only part of what a dispatch hands the agent, so the whole prompt is
+  // a click away from the task itself -- the only place it is offered,
+  // now that task rows no longer carry a button of their own.
   it("opens the full prompt the agent was given", async () => {
     const user = userEvent.setup();
     api.mockResolvedValueOnce({ prompt: "Fix the login bug\n\nWork in acme/widgets.", attempt: 2 });
