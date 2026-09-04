@@ -136,6 +136,7 @@ var Tables = []string{
   ` + "`pending_secret`" + `              TEXT     NULL,
   ` + "`merge_queue_blocked_at`" + `      DATETIME NULL,
   ` + "`merge_queue_refreshed_at`" + `    DATETIME NULL,
+  ` + "`merge_queue_repair_at`" + `       DATETIME NULL,
   ` + "`observed_at`" + `                 DATETIME NULL,
   ` + "`retry_requested_at`" + `          DATETIME NULL,
   ` + "`pr_opened_at`" + `                DATETIME NULL,
@@ -474,16 +475,28 @@ var Tables = []string{
 	// name/title/body/auto_merge are exactly the reusable-content
 	// fields a schedule already carried inline, now given a row of
 	// their own so more than one schedule (schedule.template_id) can
-	// point at the same one instead of repeating it. Deliberately no
-	// target_owner/target_name/base here (model.Template's own doc
-	// comment on why): which repo and branch a firing targets is a
-	// property of the caller using this template, not of the template
-	// itself.
+	// point at the same one instead of repeating it.
+	// target_owner/target_name/base are a template's optional binding
+	// (model.Template's own doc comment on why it is optional): which
+	// repo and branch a firing targets is by default a property of the
+	// caller using this template, and these carry a value only for a
+	// template deliberately bound to one repo (grain/task-285). Empty
+	// target_owner/target_name -- always both, since putTemplate writes
+	// the pair from one *RepoRef -- is an unbound template, the ordinary
+	// case; empty base alongside a set target is a repo binding that
+	// pins no branch. Empty strings rather than NULL so a database from
+	// before templates lost their target (when the same three columns
+	// were mandatory) upgrades by keeping its rows exactly as they are:
+	// what was a mandatory target reads back as a binding, which is what
+	// it meant.
 	`CREATE TABLE IF NOT EXISTS ` + "`template`" + ` (
   ` + "`id`" + `           TEXT     NOT NULL,
   ` + "`name`" + `         TEXT     NOT NULL,
   ` + "`title`" + `        TEXT     NOT NULL,
   ` + "`body`" + `         TEXT     NOT NULL,
+  ` + "`target_owner`" + ` TEXT     NOT NULL,
+  ` + "`target_name`" + `  TEXT     NOT NULL,
+  ` + "`base`" + `         TEXT     NULL,
   ` + "`auto_merge`" + `   INTEGER  NOT NULL,
   ` + "`created_at`" + `   DATETIME NOT NULL,
   PRIMARY KEY (` + "`id`" + `)

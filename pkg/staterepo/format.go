@@ -56,7 +56,7 @@ import (
 )
 
 // DefaultCheckImage is the container the generated CI step runs
-// `grain state check` out of.
+// `grain state check` out of when nothing names a better one.
 //
 // grain publishes no bare binaries -- one image per commit is the whole
 // of what CI releases (../../.github/workflows/build-artifacts.yml), and
@@ -70,7 +70,13 @@ import (
 // It is a default rather than a constant in the workflow because the
 // check is only meaningful against a build that knows the same schema as
 // the deployment (Check refuses any other), so a deployment pinned to an
-// older tag wants that tag here.
+// older tag wants that tag here. A deployment does not have to be told
+// which one it is: cmd/grain stamps its own image reference in at link
+// time and passes it as Config.CheckImage, exactly as it does for the
+// sandbox (cmd/grain/grainimage.go), and this value is what an unstamped
+// build -- a `make build` on a laptop, a `docker build` with no build arg
+// -- falls back to. Naming the tag CI keeps pointed at main is a less
+// precise answer than that stamp and a far better one than nothing.
 const DefaultCheckImage = "ghcr.io/bwsalmon/grain/grain:latest"
 
 // Formatted is what Format did, so its caller can print it: the files it
@@ -93,9 +99,10 @@ type Formatted struct {
 //
 // image names the container the workflow runs the check from;
 // DefaultCheckImage when empty. force replaces a workflow file that is
-// already there, which is otherwise left exactly as it is -- an operator
-// who has edited the runner, the trigger or the image has said something
-// this command does not know better than.
+// already there, which is otherwise left as it is but for the image line
+// of one that is still grain's own rendering (EnsureWorkflow) -- an
+// operator who has edited the runner, the trigger or a step has said
+// something this command does not know better than.
 //
 // Safe to run twice: nothing here is destructive, and a directory that
 // is already formatted comes out byte-identical.
@@ -126,8 +133,15 @@ func Format(dir, image string, force bool) (Formatted, error) {
 
 // EnsureWorkflow writes the validation step into dir, reporting whether
 // it wrote anything. A workflow that is already there is left alone
-// unless force, and reported as (false, nil) rather than as an error:
-// "the CI step is already installed" is an answer, not a failure.
+// unless force -- with the one exception below -- and reported as
+// (false, nil) rather than as an error: "the CI step is already
+// installed" is an answer, not a failure.
+//
+// The exception is the image. A file that is byte for byte grain's own
+// rendering, differing from what this build would write in nothing but
+// the image it names, is repointed at image rather than left: see
+// StaleImage for why that one line is grain's and the rest of the file
+// is not.
 //
 // Exported on its own because the two cases are different commands. A
 // repository being formatted has no CI step yet; a repository a
@@ -139,8 +153,13 @@ func EnsureWorkflow(dir, image string, force bool) (bool, error) {
 	}
 	path := filepath.Join(dir, filepath.FromSlash(WorkflowFile))
 	if !force {
-		if _, err := os.Stat(path); err == nil {
-			return false, nil
+		switch body, err := os.ReadFile(path); {
+		case err == nil:
+			if !StaleImage(body, image) {
+				return false, nil
+			}
+		case !os.IsNotExist(err):
+			return false, fmt.Errorf("staterepo: reading %s: %w", path, err)
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -150,6 +169,70 @@ func EnsureWorkflow(dir, image string, force bool) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// RenderedImage reports the image a workflow file runs the check from,
+// and whether that file is one grain rendered rather than one somebody
+// has since made their own.
+//
+// The test is byte equality with this build's own template: everything
+// before the image and everything after it has to be exactly what
+// Workflow would have written, and what is left in the middle is the
+// image. Nothing is parsed as YAML, because the question is not "what
+// does this workflow do" -- which grain has no business deciding for a
+// file an operator is entitled to own -- but the far narrower "is this
+// still grain's text, with only the one substitution in it".
+//
+// So a file with a runner, a trigger or a step of somebody's own in it
+// answers false, and so, deliberately, does one rendered by a grain
+// whose template read differently from this one. That direction is the
+// safe one: the cost of failing to recognise grain's own older file is
+// an image line that stops being maintained, which is where every one of
+// these files stood before this build; the cost of the other mistake is
+// grain overwriting something a human wrote.
+func RenderedImage(body []byte) (string, bool) {
+	prefix, suffix, ok := strings.Cut(workflow, workflowImagePlaceholder)
+	if !ok {
+		return "", false
+	}
+	s := string(body)
+	if len(s) < len(prefix)+len(suffix) || !strings.HasPrefix(s, prefix) || !strings.HasSuffix(s, suffix) {
+		return "", false
+	}
+	image := s[len(prefix) : len(s)-len(suffix)]
+	// A rendered image is one token on one line. Anything else means the
+	// file only looks like the template around an edit that happens to
+	// sit where the image goes.
+	if image == "" || strings.ContainsAny(image, "\n\"") {
+		return "", false
+	}
+	return image, true
+}
+
+// StaleImage reports whether a workflow file is grain's own rendering
+// pointed at some image other than want -- the one edit grain makes to a
+// file that is already there.
+//
+// Which needs saying, because "grain never rewrites this file" is
+// otherwise the rule, and it is the rule that keeps an operator's edit
+// from fighting a timer. The image is the exception because it is not
+// really a fact about the repository at all: it is a fact about the
+// deployment, the one that says which build's schema this dump was
+// written by, and it goes out of date on its own every time that
+// deployment is upgraded. A file written once with the tag of the day
+// fails every pull request the moment the schemas part company, for a
+// reason that has nothing to do with the change proposed in it -- so
+// grain keeps that line, and only that line, in step with the image it
+// is running.
+//
+// An operator who wants a different one says so where the deployment can
+// read it, in state-repo.json's "checkImage": grain then writes and
+// maintains *that* value, so the pin is stable rather than something a
+// later sync takes back. Editing anything else in the file hands the
+// whole of it back to whoever edited it, image included.
+func StaleImage(body []byte, want string) bool {
+	image, ok := RenderedImage(body)
+	return ok && image != want
 }
 
 // Workflow renders the GitHub Actions workflow that runs
@@ -173,11 +256,14 @@ const workflow = `# Written by grain. Checks that grain can still load this repo
 #
 # grain writes this file whenever it is not here -- on the sync after a
 # merge dropped it, or the first sync after a deployment adopted this
-# repository -- and never rewrites one that is. So an edit to it is
-# safe: pin the image below, change the runner, add a step of your own,
-# and grain leaves what you wrote alone. To have the check run somewhere
-# else instead, put your own file here; to stop grain offering it at
-# all, set "noWorkflow": true in the deployment's state-repo.json.
+# repository -- and afterwards changes nothing in it but IMAGE below,
+# which it keeps pointed at the build the deployment is actually
+# running. So an edit to it is safe: change the runner, add a step of
+# your own, and grain leaves the file alone from then on, image
+# included. To pin the image and keep the rest of this file grain's,
+# set "checkImage" in the deployment's state-repo.json -- that is what
+# IMAGE is written from. To stop grain offering the file at all, set
+# "noWorkflow": true there instead.
 #
 # This repository is a grain deployment's database, written out as text
 # (see README.md), so a pull request against it is a change to what that
@@ -207,8 +293,9 @@ const workflow = `# Written by grain. Checks that grain can still load this repo
 # same schema as the deployment: ` + "`grain state check`" + ` refuses a dump
 # stamped with any other, so a failure reading "repository is at schema
 # N, this build knows M" means this tag and the deployment have drifted
-# apart. Point IMAGE at the tag that deployment runs --
-# ` + "`grain state status`" + ` on its host prints both numbers.
+# apart. The deployment writes its own image reference here to keep them
+# together -- ` + "`grain image`" + ` on its host prints the tag it runs, and
+# ` + "`grain state status`" + ` prints both schema numbers.
 name: grain state check
 
 on:
@@ -260,7 +347,27 @@ const workflowCommitMessage = "Add the check that runs on pull requests against 
 	"Written by grain. `grain state check` imports this repository into a\n" +
 	"throwaway database, so a change that would not load fails here rather\n" +
 	"than on the deployment. Edit it freely -- grain writes this file only\n" +
-	"when it is missing, and never over one that is already here."
+	"when it is missing, and afterwards maintains nothing in it but the\n" +
+	"image the check runs, which is the one line that is about the\n" +
+	"deployment rather than about this repository."
+
+// workflowImageCommitMessage is what the commit that repoints an
+// already-installed check at this deployment's own image says.
+//
+// A reviewer of this repository sees a one-line diff arrive out of
+// nowhere, so it has to say what moved and why a machine is allowed to
+// move it: the check has to run a build that knows the same schema as
+// the deployment, the deployment is the only thing that knows which
+// build that is, and every other line in the file is still whoever
+// edited it last's.
+const workflowImageCommitMessage = "Point the check at the image this deployment runs\n\n" +
+	"Written by grain, and only this one line of it: `grain state check`\n" +
+	"refuses a dump stamped with a schema it does not know, so a check\n" +
+	"left pointing at the build of some earlier day fails every pull\n" +
+	"request here for a reason that has nothing to do with the change in\n" +
+	"it. Set \"checkImage\" in the deployment's state-repo.json to choose\n" +
+	"the image yourself, or edit anything else in the file to have grain\n" +
+	"leave the whole of it alone."
 
 // workflowRefusedFile records that this host's credential was refused a
 // push carrying the workflow.
@@ -296,11 +403,20 @@ const workflowRetryInterval = 24 * time.Hour
 // It writes the file only when it is missing, and there the README and
 // the workflow part company. The README is grain's own text and is
 // rewritten wholesale; this file is one an operator is entitled to own
-// -- pinning the image to the tag their deployment runs is the obvious
-// case, and running the check on their own infrastructure is another --
-// and a file grain rewrote on every tick would be a file whose editor is
-// fighting a timer. So an edit made here, or merged in through a pull
-// request, is final: grain notices there is a workflow and stops.
+// -- running the check on their own infrastructure is the obvious case
+// -- and a file grain rewrote on every tick would be a file whose editor
+// is fighting a timer. So an edit made here, or merged in through a pull
+// request, is final: grain notices there is a workflow that is not its
+// own text and stops.
+//
+// The image is the exception, and the only one: a file that is still
+// grain's rendering word for word gets its IMAGE line moved to whatever
+// this deployment is running (StaleImage). That line is a fact about the
+// deployment rather than about the repository, and a deployment that has
+// been upgraded since the file was written is a deployment whose check
+// now runs an older schema than its dump -- which fails every pull
+// request against it. Repointing it costs a one-line commit on the sync
+// after an upgrade, and nothing at all after that.
 //
 // Nothing at all happens without a remote. A workflow is GitHub's to
 // run, so a local-only repository has no use for one; more to the point,
@@ -319,18 +435,37 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	if empty, _ := r.isEmpty(ctx); empty {
 		return false, nil
 	}
+	image := r.cfg.CheckImage
+	if image == "" {
+		image = DefaultCheckImage
+	}
 	path := filepath.Join(r.cfg.Dir, filepath.FromSlash(WorkflowFile))
-	switch _, err := os.Stat(path); {
+	// present says which of the two commits this is -- installing a file
+	// that is not there, or moving the image line of one that is -- and
+	// the undo below needs it too: a file that was already committed is
+	// restored rather than deleted.
+	var present bool
+	switch body, err := os.ReadFile(path); {
 	case err == nil:
-		// The file is here -- grain wrote it, somebody ran `grain state
-		// ci` and committed it, or a merge brought it in -- so a refusal
-		// recorded earlier is a refusal that has been dealt with, and the
-		// marker goes. It is what WorkflowRefusedAt answers the State pane
-		// out of, and a pane that went on saying the check is missing
-		// after somebody installed it by hand would be telling an operator
-		// their own fix did not work.
-		r.clearWorkflowRefused(ctx)
-		return false, nil
+		if !StaleImage(body, image) {
+			// The file is here and points where it should -- grain wrote
+			// it, somebody ran `grain state ci` and committed it, or a
+			// merge brought it in -- so a refusal recorded earlier is a
+			// refusal that has been dealt with, and the marker goes. It is
+			// what WorkflowRefusedAt answers the State pane out of, and a
+			// pane that went on saying the check is missing after somebody
+			// installed it by hand would be telling an operator their own
+			// fix did not work.
+			//
+			// Only on this branch, and not on the stale-image one below:
+			// there the marker is still doing its other job, which is
+			// holding the retry down to one attempt a day, and a sync that
+			// cleared it on the way past would offer the same one-line
+			// commit to the same credential on every tick.
+			r.clearWorkflowRefused(ctx)
+			return false, nil
+		}
+		present = true
 	case !os.IsNotExist(err):
 		return false, fmt.Errorf("staterepo: looking for %s in %s: %w", WorkflowFile, r.cfg.Dir, err)
 	}
@@ -341,8 +476,12 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if _, err := EnsureWorkflow(r.cfg.Dir, r.cfg.CheckImage, false); err != nil {
+	if _, err := EnsureWorkflow(r.cfg.Dir, image, false); err != nil {
 		return false, err
+	}
+	message := workflowCommitMessage
+	if present {
+		message = workflowImageCommitMessage
 	}
 	// Staged and committed by path, so this commit holds the workflow and
 	// nothing but the workflow whatever else happens to be in the working
@@ -351,7 +490,7 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	if _, err := r.git(ctx, "add", "--", WorkflowFile); err != nil {
 		return false, err
 	}
-	if _, err := r.git(ctx, "commit", "--quiet", "-m", workflowCommitMessage, "--", WorkflowFile); err != nil {
+	if _, err := r.git(ctx, "commit", "--quiet", "-m", message, "--", WorkflowFile); err != nil {
 		return false, err
 	}
 	// The loaded-head marker moves with HEAD, here as everywhere else
@@ -389,7 +528,7 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	// the remote now holds a commit this tree has reset away: the next
 	// pull fast-forwards onto it, which is a merge arriving as far as
 	// Apply is concerned, and the dump it imports is the one it exported.
-	if err := r.undoWorkflowCommit(ctx, before, path); err != nil {
+	if err := r.undoWorkflowCommit(ctx, before, path, present); err != nil {
 		return false, err
 	}
 	// Back where the marker was, for the reason it was moved above: HEAD
@@ -410,6 +549,21 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 			"undone; grain offers it again on the next sync.", WorkflowFile, r.cfg.Remote, pushErr)
 		return false, nil
 	}
+	// The same refusal, in the words of whichever commit it was: a
+	// deployment that has no check at all and one whose check runs the
+	// wrong build read very differently to whoever is holding the
+	// journal, and `grain state ci` is the answer to both -- with -force
+	// and -image for the second, since the file that is in the way there
+	// is grain's own.
+	if present {
+		log.Printf("staterepo: this deployment's credential may not push %s to %s, so grain cannot "+
+			"point the check that runs on pull requests against its own state at %s, the image this "+
+			"deployment runs (%v). Until it does, that check runs an older build and may fail every "+
+			"pull request with a schema mismatch: run `grain state ci -force -image %s` in a clone "+
+			"and commit the file with a credential that may. grain will try again in %s.",
+			WorkflowFile, r.cfg.Remote, image, pushErr, image, workflowRetryInterval)
+		return false, r.recordWorkflowRefused(ctx, r.now())
+	}
 	log.Printf("staterepo: this deployment's credential may not push %s to %s, so grain cannot install "+
 		"the check that runs on pull requests against its own state (%v). Run `grain state ci` in a "+
 		"clone and commit the file with a credential that may, or set \"noWorkflow\": true in %s to "+
@@ -424,13 +578,29 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 // --soft, and the path unstaged by hand afterwards, rather than a --hard
 // reset: a --hard would also throw away whatever else is in the working
 // tree, and the caller's own export may have written half a dump into it
-// already. What is undone here is exactly the file this step added.
-func (r *Repo) undoWorkflowCommit(ctx context.Context, before, path string) error {
+// already. What is undone here is exactly the file this step wrote.
+//
+// present says the commit moved an image line rather than adding the
+// file, and the working tree is put back accordingly: the version at
+// `before` is checked back out instead of the file being deleted.
+// Deleting it would turn a refused one-line change into the loss of a CI
+// step the repository already had -- and, worse, into an offer to
+// reinstall the whole file on the next tick, which is a second commit for
+// the same credential to refuse.
+func (r *Repo) undoWorkflowCommit(ctx context.Context, before, path string, present bool) error {
 	if _, err := r.git(ctx, "reset", "--soft", before); err != nil {
 		return fmt.Errorf("staterepo: undoing the workflow commit in %s: %w", r.cfg.Dir, err)
 	}
+	// Resets the index entry to what `before` holds -- the old file, or
+	// nothing at all when there was none.
 	if _, err := r.git(ctx, "reset", "-q", "--", WorkflowFile); err != nil {
 		return fmt.Errorf("staterepo: unstaging %s in %s: %w", WorkflowFile, r.cfg.Dir, err)
+	}
+	if present {
+		if _, err := r.git(ctx, "checkout", "--", WorkflowFile); err != nil {
+			return fmt.Errorf("staterepo: restoring %s in %s: %w", WorkflowFile, r.cfg.Dir, err)
+		}
+		return nil
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("staterepo: removing %s: %w", path, err)

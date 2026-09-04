@@ -202,3 +202,61 @@ func TestPutQualificationPlanDefaultsANonPositiveRepeatToOne(t *testing.T) {
 		t.Fatalf("got items %+v, want repeat defaulted to 1", saved.Items)
 	}
 }
+
+// TestPutQualificationPlanRejectsATemplateBoundElsewhere is
+// PutQualificationPlan's own binding rule (grain/task-285): a
+// qualification run always targets its candidate's own repo and branch,
+// so a template bound to some other repo is one this plan could never
+// honour -- refused while a human is saving the plan rather than left to
+// fail that repo's next run.
+func TestPutQualificationPlanRejectsATemplateBoundElsewhere(t *testing.T) {
+	client, store, ctx := testClient(t)
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "template-a", Name: "Smoke test", Title: "Smoke test", Body: "run it",
+		Target: &model.RepoRef{Owner: "acme", Name: "gadgets"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
+		Items: []ui.QualificationItem{{TemplateID: "template-a", Repeat: 1}},
+	})
+	if _, ok := err.(*ui.ValidationError); !ok {
+		t.Fatalf("got %v (%T), want a ValidationError", err, err)
+	}
+}
+
+// A template bound to the very repo being qualified is fine: the
+// binding and the plan agree about where its tasks go, and the
+// candidate's branch still decides which branch they run against.
+func TestPutQualificationPlanAcceptsATemplateBoundToTheSameRepo(t *testing.T) {
+	client, store, ctx := testClient(t)
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "template-a", Name: "Smoke test", Title: "Smoke test", Body: "run it",
+		Target: &widgets, Base: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
+		Items: []ui.QualificationItem{{TemplateID: "template-a", Repeat: 1}},
+	}); err != nil {
+		t.Fatalf("saving a plan whose template is bound to this same repo: %v", err)
+	}
+}
+
+// The same rule the other way round: binding a template a plan already
+// schedules away from that plan's repo is refused by UpdateTemplate,
+// rather than leaving the plan holding a template it can no longer run.
+func TestUpdateTemplateRefusesToBindAwayFromAQualificationPlan(t *testing.T) {
+	client, store, ctx := testClient(t)
+	putTestTemplate(t, store, ctx, "template-a")
+	if _, err := client.PutQualificationPlan(ctx, widgets, ui.PutQualificationPlanRequest{
+		Items: []ui.QualificationItem{{TemplateID: "template-a", Repeat: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := "acme/gadgets"
+	_, err := client.UpdateTemplate(ctx, "template-a", ui.UpdateTemplateRequest{Repo: &elsewhere})
+	if _, ok := err.(*ui.ValidationError); !ok {
+		t.Fatalf("got %v (%T), want a ValidationError", err, err)
+	}
+}

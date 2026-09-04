@@ -19,7 +19,21 @@ BUILDVCS ?= auto
 # no answer. .github/workflows/build-artifacts.yml passes the exact
 # sha- tag of the sandbox image built from this same commit.
 SANDBOX_IMAGE ?=
-LDFLAGS := $(if $(SANDBOX_IMAGE),-X main.defaultSandboxImage=$(SANDBOX_IMAGE),)
+
+# This build's *own* image reference, stamped in for the same reason and
+# with the same rules -- empty here so an unstamped build keeps the
+# source default, CI passing the exact sha- tag it is publishing. It is
+# what a deployment writes into the CI step of its own state repository,
+# so that the check runs the build the deployment runs rather than
+# whatever main points at today. See cmd/grain/grainimage.go.
+#
+# GRAIN_IMAGE_REF rather than GRAIN_IMAGE because scripts/setup.sh
+# already means the repository with no tag on it by that second name, and
+# what is stamped here is a full reference, tag included.
+GRAIN_IMAGE_REF ?=
+LDFLAGS := $(strip \
+	$(if $(SANDBOX_IMAGE),-X main.defaultSandboxImage=$(SANDBOX_IMAGE),) \
+	$(if $(GRAIN_IMAGE_REF),-X main.defaultGrainImage=$(GRAIN_IMAGE_REF),))
 
 # --- Containerised build ----------------------------------------------
 #
@@ -219,12 +233,30 @@ soak: frontend
 	GRAIN_STATEREPO_SOAK_ROUNDS=$${GRAIN_STATEREPO_SOAK_ROUNDS:-2000} \
 		go test ./pkg/staterepo/ -run TestSoak -v -timeout 120m
 
-# CI has no equivalent fmt check; this just fails the way `go vet` does
-# when a file needs gofmt, instead of only listing it.
+# The formatting gate, run here and by the go job in
+# .github/workflows/tests.yml -- one definition, so a local `make fmt`
+# and a red build mean the same thing. It fails the way `go vet` does
+# when a file needs gofmt, instead of only listing it, and prints the
+# diff for each offender rather than leaving the reader to run gofmt
+# themselves (the terraform job's `fmt -check -diff` is the same idea).
+#
+# Plain gofmt, not `gofmt -s`. The point of this gate is that
+# `gofmt -l` stays a usable local signal: an editor that formats on save
+# should never produce a diff in a file the change did not otherwise
+# touch, and what those editors run is plain gofmt. (The tree is -s
+# clean today as well; that is not what is being promised here.)
+#
+# third_party/kontur is excluded. It is a separate module of vendored
+# upstream code -- `go vet ./...` and `go test ./...` do not reach into
+# it either -- and a red build over formatting we would not be the ones
+# to fix is a gate nobody can act on.
 fmt:
-	@unformatted="$$(gofmt -l .)"; \
+	@files="$$(find . -name '*.go' -not -path './third_party/*')"; \
+	unformatted="$$(gofmt -l $$files)"; \
 	if [ -n "$$unformatted" ]; then \
-		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
+		echo "gofmt needed on:"; echo "$$unformatted"; echo; \
+		gofmt -d $$unformatted; \
+		exit 1; \
 	fi
 
 clean:
@@ -236,4 +268,5 @@ image:
 		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg BUILDVCS=$(BUILDVCS) \
 		$(if $(SANDBOX_IMAGE),--build-arg SANDBOX_IMAGE=$(SANDBOX_IMAGE),) \
+		$(if $(GRAIN_IMAGE_REF),--build-arg GRAIN_IMAGE_REF=$(GRAIN_IMAGE_REF),) \
 		-t $(IMAGE) -f Dockerfile .

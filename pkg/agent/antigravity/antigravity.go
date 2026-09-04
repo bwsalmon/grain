@@ -747,7 +747,7 @@ var (
 // -p /permissions prints the loaded rules.
 func hookConfigJSON(grainBinaryPath string) ([]byte, error) {
 	return json.Marshal(map[string]any{
-		hookName: map[string]any{
+		HookName: map[string]any{
 			"PreToolUse": []any{map[string]any{
 				"matcher": "*",
 				"hooks": []any{map[string]any{
@@ -764,10 +764,15 @@ func hookConfigJSON(grainBinaryPath string) ([]byte, error) {
 	})
 }
 
-// hookName is what this run's hook is called in hooks.json. agy merges
+// HookName is what this run's hook is called in hooks.json. agy merges
 // hooks from every source it finds by name, so a name of grain's own
 // keeps this one distinct from anything a future agy ships built in.
-const hookName = "grain-native-tool-denial"
+//
+// Exported because it is also how a real agy reports the hook back
+// (`agy -p /hooks` prints this name in the first field of the record it
+// loaded), and the live test that reads that output should match on this
+// constant rather than on a second copy of the string.
+const HookName = "grain-native-tool-denial"
 
 // HookSubcommand is the argv[1] cmd/grain matches to run HookDecision.
 // Named here rather than there because this package is what writes it

@@ -291,6 +291,40 @@ func TestCreateSuiteRunFilesOneTaskPerItemInTheFirstPass(t *testing.T) {
 	}
 }
 
+// TestCreateSuiteRunSendsABoundItemToItsOwnRepo is fireSuitePass's own
+// binding rule (grain/task-285): a run's target and base are what its
+// items normally get, but an item whose template is bound to a repo of
+// its own goes there instead, so a suite can mix repo-agnostic items
+// with ones that only make sense against one repo.
+func TestCreateSuiteRunSendsABoundItemToItsOwnRepo(t *testing.T) {
+	store, _, ctx := openStore(t)
+	suite := putSuite(t, ctx, store, twoItemSuite())
+	bound := lintTemplate("template-lint")
+	bound.Target, bound.Base = &gadgets, "release"
+	if err := store.PutTemplate(ctx, bound); err != nil {
+		t.Fatalf("binding the lint template: %v", err)
+	}
+
+	run, err := store.CreateSuiteRun(ctx, suite, widgets, "release-1", now)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	for _, ts := range run.PassTasks(1) {
+		task, err := store.GetTask(ctx, ts.TaskID)
+		if err != nil || task == nil {
+			t.Fatalf("get task %s: (%+v, %v)", ts.TaskID, task, err)
+		}
+		wantTarget, wantBase := widgets, "release-1"
+		if ts.TemplateID == "template-lint" {
+			wantTarget, wantBase = gadgets, "release"
+		}
+		if task.Target == nil || *task.Target != wantTarget || task.Base != wantBase {
+			t.Errorf("%s: target/base = %v/%q, want %s/%q",
+				ts.TemplateID, task.Target, task.Base, wantTarget, wantBase)
+		}
+	}
+}
+
 func TestCreateSuiteRunLeavesTasksUnapprovedWhenTheSuiteAsks(t *testing.T) {
 	store, _, ctx := openStore(t)
 	suite := twoItemSuite()

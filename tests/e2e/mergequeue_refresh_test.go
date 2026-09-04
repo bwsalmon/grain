@@ -82,14 +82,12 @@ func TestMergeQueueMergesMainIntoAStaleHeadAndLandsItWithNoFixTask(t *testing.T)
 	if got := w.fileAt(owner, repoName, branch, "MAIN.md"); got != "unrelated work" {
 		t.Fatalf("MAIN.md on %s = %q, want main's own content carried in by the refresh", branch, got)
 	}
-	got, err := w.store.GetTask(w.ctx, "t1")
+	obs, err := w.store.GetObservation(w.ctx, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, l := range got.Links {
-		if l.Kind == model.LinkFixTask {
-			t.Fatalf("filed fix task %s for a head that was only behind main", l.Target)
-		}
+	if obs != nil && obs.MergeQueueRepairAt != nil {
+		t.Fatal("asked for a repair of a head that was only behind main")
 	}
 	// And no agent was dispatched for one either -- the whole saving.
 	tasks, err := w.store.ListTasks(w.ctx)
@@ -99,7 +97,7 @@ func TestMergeQueueMergesMainIntoAStaleHeadAndLandsItWithNoFixTask(t *testing.T)
 	if len(tasks) != 1 {
 		t.Fatalf("the store holds %d tasks, want only t1: the refresh should have cost no task at all", len(tasks))
 	}
-	obs, err := w.store.GetObservation(w.ctx, "t1")
+	obs, err = w.store.GetObservation(w.ctx, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,34 +192,27 @@ func TestMergeQueueFilesAFixNamingTheConflictWhenItsOwnMergeIsRefused(t *testing
 	if got := w.log1(owner, repoName, branch, "%H"); got != headBefore {
 		t.Fatalf("the head branch moved to %q: a conflicting merge landed anyway", got)
 	}
-	got, err := w.store.GetTask(w.ctx, "t1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixTaskID, hasFix := "", false
-	for _, l := range got.Links {
-		if l.Kind == model.LinkFixTask {
-			fixTaskID, hasFix = l.Target, true
-		}
-	}
-	if !hasFix {
-		t.Fatalf("no fix task filed for a head the queue could not merge, links: %+v", got.Links)
-	}
-	fixTask, err := w.store.GetTask(w.ctx, fixTaskID)
-	if err != nil || fixTask == nil {
-		t.Fatalf("GetTask(fix task): %v", err)
-	}
-	if !strings.Contains(fixTask.Body, "conflicted") || !strings.Contains(fixTask.Body, "real resolution") {
-		t.Errorf("the fix task body does not describe the merge the queue watched fail:\n%s", fixTask.Body)
-	}
-	if fixTask.Base != branch {
-		t.Fatalf("fix task base = %q, want %q (the branch it repairs)", fixTask.Base, branch)
-	}
 	obs, err := w.store.GetObservation(w.ctx, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if obs == nil || obs.MergeQueueRefreshedAt == nil {
+	if !obs.RepairInFlight() {
+		t.Fatalf("observation = %+v, want the head the queue could not merge sent back for repair", obs)
+	}
+	comments, err := w.store.Comments(w.ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected one comment asking for the repair, got %+v", comments)
+	}
+	if !strings.Contains(comments[0].Body, "conflicted") || !strings.Contains(comments[0].Body, "real resolution") {
+		t.Errorf("the repair comment does not describe the merge the queue watched fail:\n%s", comments[0].Body)
+	}
+	if !strings.Contains(comments[0].Body, branch) {
+		t.Errorf("the repair comment does not name the branch to work on:\n%s", comments[0].Body)
+	}
+	if obs.MergeQueueRefreshedAt == nil {
 		t.Fatal("the attempt was not recorded: the queue would re-try a conflict every cycle")
 	}
 }

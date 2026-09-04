@@ -19,6 +19,7 @@
 package deploy
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -628,6 +629,113 @@ func TestTheSmokeWorkflowRunsTheScriptsAsTheyAre(t *testing.T) {
 	}
 }
 
+// The introspection job is dispatch-only, holds nothing, and keeps the
+// token that can write a branch out of the job that runs agy.
+//
+// agy-surface.yml exists because a grain sandbox cannot answer questions
+// about agy -- no network beyond the git proxy, no agy in the image -- and
+// a runner can (docs/agy-surface.md, scripts/agy-surface.sh). Three things
+// about its shape are load-bearing rather than incidental.
+//
+// The trigger. A schedule would open a pull request a day whether or not
+// agy moved, and a `push` would re-answer a question about the *installed*
+// agy on every commit; dispatching, meanwhile, takes the same write access
+// that pushing this job's branch does, which is what makes `contents:
+// write` here no wider than the person who clicked it already has.
+//
+// The credential, of which there is none. live-agent.yml's header explains
+// at length why a repository secret is readable by any workflow on any
+// branch push whichever file declares it; nothing here needs one, and the
+// way to keep that true is to assert it.
+//
+// And the split. The job that runs a 200MB binary nobody in this
+// repository built has `contents: read` and hands its output on as an
+// artifact; the job that holds the write token never runs agy at all --
+// the same "hold the credential for the shortest span that gets the work
+// published" build-artifacts.yml applies to its GHCR login.
+func TestTheAgySurfaceJobIsDispatchOnlyAndHoldsNoCredential(t *testing.T) {
+	surface := stripComments(agySurfaceWorkflow(t))
+
+	triggers := upTo(t, surface, "jobs:")
+	contains(t, triggers, "workflow_dispatch:")
+	for _, forbidden := range []string{"push:", "pull_request:", "schedule:"} {
+		if strings.Contains(triggers, forbidden) {
+			t.Errorf("agy-surface.yml triggers on %s: it publishes a branch with the repository's own token, and dispatch is what keeps that behind somebody who already has write access", forbidden)
+		}
+	}
+	if strings.Contains(surface, "secrets.") || strings.Contains(surface, "environment:") {
+		t.Error("agy-surface.yml reads a credential: it installs and runs a third-party binary, and holding nothing worth stealing is the whole of its safety argument")
+	}
+
+	// By their indented job headers, not by bare names: `publish` is also
+	// the dispatch input that decides whether the branch is written at
+	// all, and it appears above both jobs.
+	capture := between(t, surface, "\n  capture:", "\n  publish:")
+	contains(t, capture, "contents: read")
+	contains(t, capture, "./scripts/agy-surface.sh")
+	if strings.Contains(capture, "contents: write") {
+		t.Error("the job that runs agy holds a write token; that token belongs to the publish job, which touches nothing but the artifact and git")
+	}
+
+	publish := from(t, surface, "\n  publish:")
+	contains(t, publish, "contents: write")
+	contains(t, publish, "needs: capture")
+	if strings.Contains(publish, "agy") && strings.Contains(publish, "install.sh") {
+		t.Error("the publish job installs agy: the point of the split is that the token is never in the job that runs it")
+	}
+
+	// The branch, not the ref it was dispatched from: a capture becomes a
+	// pull request somebody merges, never a commit that appears on main
+	// because a button was clicked.
+	contains(t, publish, "HEAD:refs/heads/agy-surface")
+	if strings.Contains(publish, "HEAD:refs/heads/main") || strings.Contains(publish, "push origin main") {
+		t.Error("agy-surface.yml pushes to main")
+	}
+}
+
+// The introspection job installs the agy an image would carry, and runs
+// the script that is in the tree.
+//
+// Unpinned in three places on purpose -- the Dockerfile, the nightly live
+// run and this one: what each is asking about is the agy a freshly built
+// image would have, not one a workflow file froze months ago. That only
+// holds while all three fetch the same installer, and a URL that moves in
+// one of them is invisible to everything else here.
+//
+// The script gets the same treatment gcp-smoke.yml's two get, and for the
+// same reason: this workflow fires only when somebody dispatches it, so a
+// renamed script or a lost +x bit would first be reported by the person
+// who dispatched it, at the moment they wanted an answer.
+func TestTheAgySurfaceJobInstallsTheAgyAnImageWouldAndRunsTheScriptAsItIs(t *testing.T) {
+	const installer = "https://antigravity.google/cli/install.sh"
+	surface := stripComments(agySurfaceWorkflow(t))
+
+	contains(t, read(t, "Dockerfile"), installer)
+	contains(t, stripComments(liveAgentWorkflow(t)), installer)
+	contains(t, surface, installer)
+	// Found, not assumed: agy's install path is documented only by
+	// Google, so a layout change on their side should move the symlink
+	// rather than fail this job for a binary that is actually there.
+	contains(t, surface, `-name agy -perm -u+x`)
+	contains(t, surface, "agy --version")
+
+	contains(t, surface, "./scripts/agy-surface.sh")
+	executable(t, "scripts", "agy-surface.sh")
+	out, err := exec.Command("bash", "-n", filepath.Join(repoRoot(t), "scripts", "agy-surface.sh")).CombinedOutput()
+	if err != nil {
+		t.Errorf("bash -n scripts/agy-surface.sh: %v\n%s", err, out)
+	}
+
+	// One path, agreed on by the script's invocation, the commit the
+	// publish job makes, and the file in the tree that a sandboxed agent
+	// reads instead of asking. The capture is worth committing only
+	// because it lands somewhere findable.
+	contains(t, surface, "docs/agy-surface.md")
+	if _, err := os.Stat(filepath.Join(repoRoot(t), "docs", "agy-surface.md")); err != nil {
+		t.Errorf("docs/agy-surface.md is missing: %v -- the workflow publishes over it, and README points at it", err)
+	}
+}
+
 // A deployment is told nothing about its sandbox image.
 //
 // One image, not two: the guest a task runs and the container it runs in
@@ -651,6 +759,23 @@ func TestTheSandboxReferenceIsStampedIntoTheGrainImage(t *testing.T) {
 	// forwards the build arg into that.
 	contains(t, read(t, "Makefile"), "-X main.defaultSandboxImage=$(SANDBOX_IMAGE)")
 	contains(t, read(t, "Dockerfile"), "SANDBOX_IMAGE=${SANDBOX_IMAGE}")
+}
+
+// The other half of the same trick: the grain image is told what it is
+// called, not only what sandbox goes with it.
+//
+// A deployment writes that reference into the CI step it installs in its
+// own state repository, whose `grain state check` refuses a dump stamped
+// with a schema it does not know -- so the check has to run the build the
+// deployment runs, and nothing but the deployment knows which that is.
+// The sha- tag again, never the branch tag: a deployment held at an older
+// one has to name itself rather than main, which is the whole point.
+func TestTheGrainImageIsStampedWithItsOwnReference(t *testing.T) {
+	job := from(t, workflow(t), "grain-container:")
+	contains(t, job, `GRAIN_IMAGE_REF="${image}:sha-${GITHUB_SHA:0:7}"`)
+
+	contains(t, read(t, "Makefile"), "-X main.defaultGrainImage=$(GRAIN_IMAGE_REF)")
+	contains(t, read(t, "Dockerfile"), "GRAIN_IMAGE_REF=${GRAIN_IMAGE_REF}")
 }
 
 // bwsalmon/agents#645: a deployment stopped building its sandbox.
@@ -963,6 +1088,29 @@ func TestEverySecretMetadataKeyIsBothIgnoredAndRedacted(t *testing.T) {
 			t.Errorf("%s is pushed onto the instance but terraform-apply.sh's redact does not cover it", k[1])
 		}
 	}
+}
+
+// The formatting gate lives in one place, and CI runs that place rather
+// than a second copy of it.
+//
+// Unformatted Go builds, vets and tests exactly like formatted Go, so
+// until the go job ran this nothing in CI could see the drift, and three
+// files sat unformatted on main long enough that `gofmt -l` was no use
+// as a local signal: it always had something to say about files the
+// change in hand had not touched, and an editor that formats on save
+// turned that into diff noise. `make fmt` rather than a gofmt line of
+// the workflow's own is what keeps the two from drifting apart -- a
+// contributor reproducing a red build locally has to be able to run the
+// same check.
+func TestTheGoJobRunsTheFormattingGate(t *testing.T) {
+	goJob := between(t, stripComments(testsWorkflow(t)), "go-test:", "\n  ui-e2e:")
+	contains(t, goJob, "run: make fmt")
+
+	// And the target it names has to be a check that fails, not one that
+	// lists offenders and exits 0 -- which is how this went unnoticed
+	// before there was a job running it at all.
+	contains(t, between(t, read(t, "Makefile"), "\nfmt:", "\n\n"), "gofmt -l")
+	contains(t, between(t, read(t, "Makefile"), "\nfmt:", "\n\n"), "exit 1")
 }
 
 // The sandbox guest image's toolchain, which three files have to agree

@@ -111,3 +111,29 @@ func TestScheduleCreatedFromATemplateOverHTTP(t *testing.T) {
 		t.Errorf("repo = %q, want the schedule request's own", sched.Repo)
 	}
 }
+
+// TestTemplateBindingOverHTTP checks the binding survives the JSON
+// surface in both directions (grain/task-285): repo/base go in on
+// create, come back on read, and an empty repo unbinds through PATCH.
+func TestTemplateBindingOverHTTP(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/templates",
+		`{"name":"Dependency bump","title":"Bump dependencies","repo":"acme/widgets","base":"release"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201: %s", rec.Code, rec.Body)
+	}
+	created := decode[ui.Template](t, rec)
+	if created.Repo != "acme/widgets" || created.Base != "release" {
+		t.Fatalf("binding = (%q, %q), want acme/widgets on release", created.Repo, created.Base)
+	}
+
+	rec = do(t, srv, http.MethodPatch, "/api/templates/"+created.ID, `{"repo":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unbind status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	unbound := decode[ui.Template](t, rec)
+	if unbound.Repo != "" || unbound.Base != "" {
+		t.Fatalf("binding = (%q, %q), want it cleared", unbound.Repo, unbound.Base)
+	}
+}

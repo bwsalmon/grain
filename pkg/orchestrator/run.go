@@ -258,8 +258,9 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 	// -- but the sentences above read as one final act, and a run that
 	// treats them that way has no reason to ever look at CI at all.
 	// Leaving that loop implicit is what left a red build to the merge
-	// queue's separate fix task (sync.go's fileFixTask) even when the run
-	// that caused it was still running.
+	// queue's own repair of the branch a whole dispatch later (sync.go's
+	// requeueForRepair) even when the run that caused it was still
+	// running.
 	//
 	// wait_for_checks is named first, and pull_request_status only as the
 	// thing it saves: a run told to "check CI" reaches for the status read
@@ -322,8 +323,8 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 		// merges however green its checks are (healthFrom reads
 		// PrConflicted off the pull request before it looks at a single
 		// check), which the run still holding the checkout can fix in a
-		// turn, rather than leaving it to the fix task the merge queue
-		// files minutes later in a cold sandbox (sync.go's fileFixTask).
+		// turn, rather than leaving it to the repair the merge queue asks
+		// for minutes later in a cold sandbox (sync.go's requeueForRepair).
 		base := baseDescription(task)
 		prompt += fmt.Sprintf(
 			"\n\nYour job is not done at the moment you push: it is done when those "+
@@ -740,9 +741,9 @@ func promptExtensionSection(text string) string {
 
 // baseDescription names the branch a run's own branch has to keep
 // merging into, for the sentence above -- task.Base when the task fixes
-// one (directives.go's `/base`, and every merge queue fix task, which
-// fileFixTask points back at the branch it repairs), and otherwise the
-// repo's default branch, which is whatever prepareCheckout's clone left
+// one (directives.go's `/base`, and the stacked fix tasks the merge
+// queue used to file, whose base was the branch they repaired), and
+// otherwise the repo's default branch, which is whatever prepareCheckout's clone left
 // at origin/HEAD. Unnamed rather than guessed in that second case:
 // grain does not know the repo's default branch here, and naming the
 // wrong one would send a run merging a branch that does not exist.
@@ -770,6 +771,15 @@ func baseDescription(task model.Task) string {
 // caps a proposal at the proposing task's own setting, so the sentence is
 // omitted, rather than negated, for a task that is not one -- there is
 // nothing an agent could usefully do with "you may not ask for this".
+//
+// An auto-merge task working against a base branch of its own is told
+// the opposite, and here the negation earns its place: relayProposedTasks
+// files a proposal against the repo's default branch, and auto-merge does
+// not cross from one branch to another (model.SameBranch), so a run told
+// only "this task is an auto-merge job" would split work out believing it
+// lands the same way the whole of it would have. What it can do with
+// that is real -- say in the proposal's body that it was meant to merge
+// unattended, so whoever approves it can decide.
 func proposalSection(task model.Task) string {
 	s := fmt.Sprintf(
 		"\n\nYou are running as task %s. Anything you split out with propose_task "+
@@ -781,7 +791,15 @@ func proposalSection(task model.Task) string {
 			"follow.",
 		task.ID, task.ID,
 	)
-	if task.AutoMerge {
+	switch {
+	case task.AutoMerge && task.Base != "":
+		s += fmt.Sprintf(" This task is an auto-merge job: its pull request merges on its "+
+			"own once its checks pass, with no human review. Nothing you propose inherits "+
+			"that, though, because this task lands on %s and a proposal is filed against "+
+			"the repository's default branch -- auto-merge is a permission for one branch, "+
+			"not for the run holding it. Say in a proposal's body if it was meant to merge "+
+			"unattended, and whoever approves it decides.", baseDescription(task))
+	case task.AutoMerge:
 		s += " This task is an auto-merge job: its pull request merges on its own " +
 			"once its checks pass, with no human review. A proposal that is a piece " +
 			"of this same task inherits that -- pass auto_merge: false on one that " +

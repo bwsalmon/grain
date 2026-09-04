@@ -105,12 +105,8 @@ func TestMergeQueueMergesTheBaseIntoAStaleHeadBeforeFilingAnyFix(t *testing.T) {
 	if !branchContains(t, sim.BareRepo, branch, "main") {
 		t.Fatal("the head branch does not contain main: the refresh never actually merged anything")
 	}
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fixID, ok := fixTaskLinkOf(got); ok {
-		t.Fatalf("filed fix task %s for a head that was only behind its base", fixID)
+	if repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("asked for a repair of a head that was only behind its base")
 	}
 	obs, err := store.GetObservation(ctx, task.ID)
 	if err != nil {
@@ -130,54 +126,43 @@ func TestMergeQueueMergesTheBaseIntoAStaleHeadBeforeFilingAnyFix(t *testing.T) {
 		t.Errorf("the comment does not name the branch that was merged in:\n%s", bodies[0])
 	}
 
-	// Still red once it is up to date: the failure is real, so the fix
-	// task is filed now -- against the current base -- and no second
-	// merge is attempted.
+	// Still red once it is up to date: the failure is real, so the repair
+	// is asked for now -- against the current base -- and no second merge
+	// is attempted.
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
 		t.Fatalf("SyncPullRequests after the refresh: %v", err)
 	}
 	if n := mergeWrites(sim, repo); n != 1 {
 		t.Fatalf("the queue made %d branch merges, want still exactly one", n)
 	}
-	got, err = store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
+	asked := repairAskedAt(t, ctx, store, task.ID)
+	bodies = commentBodies(t, ctx, store, task.ID)
+	if len(bodies) != 2 {
+		t.Fatalf("expected the merge comment plus the repair comment, got %q", bodies)
 	}
-	fixTaskID, ok := fixTaskLinkOf(got)
-	if !ok {
-		t.Fatalf("no fix task filed for a head that is up to date and still failing, links: %+v", got.Links)
-	}
-	fixTask, err := store.GetTask(ctx, fixTaskID)
-	if err != nil || fixTask == nil {
-		t.Fatalf("GetTask(fix task): %v", err)
-	}
-	if !strings.Contains(fixTask.Body, "its checks are failing (`go`)") {
-		t.Errorf("the fix task body does not name the failure it was filed for:\n%s", fixTask.Body)
+	if !strings.Contains(bodies[1], "its checks are failing (`go`)") {
+		t.Errorf("the repair comment does not name the failure it was asked for:\n%s", bodies[1])
 	}
 
-	// A third cycle changes nothing: one refresh, one fix, then it is a
-	// person's problem.
+	// A third cycle changes nothing: one refresh, one repair, then it is
+	// a person's problem.
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(2*time.Minute)); err != nil {
 		t.Fatalf("SyncPullRequests a cycle later: %v", err)
 	}
 	if n := mergeWrites(sim, repo); n != 1 {
 		t.Fatalf("the queue made %d branch merges, want still exactly one", n)
 	}
-	got, err = store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second, _ := fixTaskLinkOf(got); second != fixTaskID {
-		t.Fatalf("fix task link moved to %q: a second fix was filed", second)
+	if again := repairAskedAt(t, ctx, store, task.ID); !again.Equal(asked) {
+		t.Fatalf("MergeQueueRepairAt moved from %v to %v: a second repair was asked for", asked, again)
 	}
 }
 
 // GitHub's 204 is the whole answer to "is this failure genuine": if the
 // head branch already contains its base then whatever CI reported, it
-// reported about the tree that would actually merge. So the fix task is
-// filed in the very same cycle, exactly as it was before any of this
+// reported about the tree that would actually merge. So the repair is
+// asked for in the very same cycle, exactly as it was before any of this
 // existed -- and nothing is recorded as refreshed, because nothing was.
-func TestMergeQueueFilesTheFixAtOnceWhenTheHeadIsAlreadyUpToDate(t *testing.T) {
+func TestMergeQueueAsksForTheRepairAtOnceWhenTheHeadIsAlreadyUpToDate(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
@@ -197,27 +182,23 @@ func TestMergeQueueFilesTheFixAtOnceWhenTheHeadIsAlreadyUpToDate(t *testing.T) {
 	if n := mergeWrites(sim, repo); n != 1 {
 		t.Fatalf("the queue made %d branch merges, want exactly one (the ask that answered 204)", n)
 	}
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := fixTaskLinkOf(got); !ok {
-		t.Fatalf("no fix task filed for a genuine failure on an up-to-date head, links: %+v", got.Links)
+	if !repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("no repair was asked for a genuine failure on an up-to-date head")
 	}
 	obs, err := store.GetObservation(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if obs != nil && obs.MergeQueueRefreshedAt != nil {
+	if obs.MergeQueueRefreshedAt != nil {
 		t.Fatal("recorded a refresh for a branch nothing was merged into")
 	}
-	// The one comment is the fix-filed one -- there was no merge to
+	// The one comment is the repair one -- there was no merge to
 	// announce.
 	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 1 {
-		t.Fatalf("expected exactly the fix-filed comment, got %q", bodies)
+		t.Fatalf("expected exactly the repair comment, got %q", bodies)
 	}
 
-	// And the queue does not come back: the fix task already filed is
+	// And the queue does not come back: the repair already in flight is
 	// what stops it, so no second merge is asked for.
 	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
 		t.Fatalf("SyncPullRequests a cycle later: %v", err)
@@ -227,13 +208,13 @@ func TestMergeQueueFilesTheFixAtOnceWhenTheHeadIsAlreadyUpToDate(t *testing.T) {
 	}
 }
 
-// The case a fix task is genuinely for. The queue tries the merge, GitHub
-// refuses it with a real conflict, and the fix is filed straight away --
-// with the conflict named as something the queue watched happen rather
-// than inferred from a Mergeable flag, so the agent sent to repair it
-// starts from "resolve this" rather than "merge main in", which is what
-// the queue has just proved will not work.
-func TestMergeQueueFilesAFixNamingTheConflictItsOwnMergeHit(t *testing.T) {
+// The case a repair is genuinely for. The queue tries the merge, GitHub
+// refuses it with a real conflict, and the task is sent back straight
+// away -- with the conflict named as something the queue watched happen
+// rather than inferred from a Mergeable flag, so the agent sent to repair
+// it starts from "resolve this" rather than "merge main in", which is
+// what the queue has just proved will not work.
+func TestMergeQueueAsksForARepairNamingTheConflictItsOwnMergeHit(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
 	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
@@ -255,20 +236,15 @@ func TestMergeQueueFilesAFixNamingTheConflictItsOwnMergeHit(t *testing.T) {
 	if branchContains(t, sim.BareRepo, branch, "main") {
 		t.Fatal("a conflicting merge landed anyway")
 	}
-	got, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
+	if !repairInFlightNow(t, ctx, store, task.ID) {
+		t.Fatal("no repair was asked for a head the queue could not merge")
 	}
-	fixTaskID, ok := fixTaskLinkOf(got)
-	if !ok {
-		t.Fatalf("no fix task filed for a head the queue could not merge, links: %+v", got.Links)
+	bodies := commentBodies(t, ctx, store, task.ID)
+	if len(bodies) != 1 {
+		t.Fatalf("expected one comment asking for the repair, got %q", bodies)
 	}
-	fixTask, err := store.GetTask(ctx, fixTaskID)
-	if err != nil || fixTask == nil {
-		t.Fatalf("GetTask(fix task): %v", err)
-	}
-	if !strings.Contains(fixTask.Body, "conflicted") || !strings.Contains(fixTask.Body, "real resolution") {
-		t.Errorf("the fix task body does not say the queue's own merge conflicted:\n%s", fixTask.Body)
+	if !strings.Contains(bodies[0], "conflicted") || !strings.Contains(bodies[0], "real resolution") {
+		t.Errorf("the repair comment does not say the queue's own merge conflicted:\n%s", bodies[0])
 	}
 	obs, err := store.GetObservation(ctx, task.ID)
 	if err != nil {
@@ -289,12 +265,12 @@ func TestMergeQueueFilesAFixNamingTheConflictItsOwnMergeHit(t *testing.T) {
 
 // The refresh is the queue head's alone, and only while the queue is
 // still driving it. Everything else the sync loop passes over -- a head
-// whose fix is already in flight, a task waiting its turn behind one, a
-// fix task's own stacked pull request, a task the queue has given up on
-// -- is a branch this write has no business landing on: it would be a
-// merge commit nobody asked for on a branch the queue is not steering,
-// and for the fix task's own branch it would be a merge into a base that
-// is itself moving.
+// whose repair is already in flight, a task waiting its turn behind one,
+// a legacy fix task's own stacked pull request, a task the queue has
+// given up on -- is a branch this write has no business landing on: it
+// would be a merge commit nobody asked for on a branch the queue is not
+// steering, and for a fix task's own branch it would be a merge into a
+// base that is itself moving.
 func TestMergeQueueRefreshesNothingButTheHeadItIsStillDriving(t *testing.T) {
 	store, ctx := openStore(t)
 	sim, client := newSim(t, "acme", "widgets", "main")
@@ -305,11 +281,12 @@ func TestMergeQueueRefreshesNothingButTheHeadItIsStillDriving(t *testing.T) {
 	blocked, blockedBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t3", repo)
 	fix, fixBranch := queuedTaskWithPullRequest(t, ctx, store, sim, client, "t4", repo)
 
-	// The head already has its automatic fix in flight -- which is task
-	// t4's own pull request, itself a queue-ineligible fix task.
-	if err := store.UpdateTask(ctx, head.ID, func(tk *model.Task) error {
-		tk.Links = append(tk.Links, model.Link{Kind: model.LinkFixTask, Target: fix.ID})
-		return nil
+	// The head already has its automatic repair in flight, and t4 stands
+	// in for the queue-ineligible fix task an older database may still
+	// carry.
+	if err := store.ObserveField(ctx, head.ID, baseTime, func(o *model.Observation) {
+		o.MergeQueueRepairAt = &baseTime
+		o.CompletedAt = nil
 	}); err != nil {
 		t.Fatal(err)
 	}

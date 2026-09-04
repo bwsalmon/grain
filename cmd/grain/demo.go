@@ -256,7 +256,14 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 		return fmt.Errorf("seeding a task awaiting submit: %w", err)
 	}
 
-	stacked, err := create(ago(50*time.Minute), ui.CreateTaskRequest{
+	// A task the merge queue is repairing: its pull request went
+	// conflicted, so the queue commented and sent the task itself back to
+	// an agent on the very branch that pull request is open from
+	// (orchestrator.requeueForRepair). There is no second task and no
+	// second branch -- what a reader sees instead is the task running
+	// again with its mark in green, which is the whole point of seeding
+	// it here.
+	repairing, err := create(ago(50*time.Minute), ui.CreateTaskRequest{
 		Title:       "Add pagination to the tasks API",
 		Description: "GET /api/tasks returns everything at once; needs a page size and a cursor.",
 		Approved:    true,
@@ -264,63 +271,52 @@ func seedDemo(ctx context.Context, store *model.Store, cfg ui.Config) error {
 	if err != nil {
 		return err
 	}
-	stackedTask, err := store.GetTask(ctx, stacked.ID)
+	repairingTask, err := store.GetTask(ctx, repairing.ID)
 	if err != nil {
 		return err
 	}
-	stackedTask.Links = append(stackedTask.Links,
+	repairingTask.Links = append(repairingTask.Links,
 		model.Link{Kind: model.LinkFixes, Target: "https://github.com/acme/widgets/pull/104"})
 	// Submitted, like the completed card above and for a stronger reason:
-	// the merge queue only ever files a fix task for one of its own
-	// members (orchestrator.isQueueMember, which is AutoMerge), so a
-	// parent carrying a fix task and no AutoMerge would be a shape no
-	// real deployment produces.
-	stackedTask.AutoMerge = true
-	if err := store.PutTask(ctx, *stackedTask); err != nil {
-		return fmt.Errorf("seeding a task with a stacked fix: %w", err)
+	// the merge queue only ever repairs one of its own members
+	// (orchestrator.isQueueMember, which is AutoMerge), so a task being
+	// repaired with no AutoMerge would be a shape no real deployment
+	// produces.
+	repairingTask.AutoMerge = true
+	if err := store.PutTask(ctx, *repairingTask); err != nil {
+		return fmt.Errorf("seeding a task under repair: %w", err)
 	}
-	stackedCompletedAt := ago(40 * time.Minute)
-	if err := store.ObserveField(ctx, stacked.ID, stackedCompletedAt, func(o *model.Observation) {
-		o.CompletedAt = &stackedCompletedAt
+	repairAskedAt := ago(35 * time.Minute)
+	if err := store.ObserveField(ctx, repairing.ID, repairAskedAt, func(o *model.Observation) {
+		// Exactly what requeueForRepair writes: the record of the repair,
+		// and no CompletedAt, which is what put the task back to work.
+		o.MergeQueueRepairAt = &repairAskedAt
+		o.CompletedAt = nil
+		o.RetryRequestedAt = &repairAskedAt
 	}); err != nil {
-		return fmt.Errorf("seeding a task with a stacked fix: %w", err)
-	}
-	// The fix task itself, filed straight into the store already
-	// approved the same way orchestrator.fileFixTask files a real one --
-	// see model.LinkFixTask's doc comment -- so `grain demo` shows the
-	// nested-under-its-parent card bwsalmon/agents#378 asked for without
-	// needing a real merge queue cycle to produce one.
-	fixID, err := store.NewTaskID(ctx)
-	if err != nil {
-		return fmt.Errorf("seeding a stacked fix task: %w", err)
+		return fmt.Errorf("seeding a task under repair: %w", err)
 	}
 	queue := model.Principal{Kind: model.PrincipalAutomation, ID: "merge-queue"}
-	fixCreatedAt := ago(35 * time.Minute)
-	fixTask := model.Task{
-		ID:     fixID,
-		Intent: model.IntentImplement,
-		Title:  "Resolve: Add pagination to the tasks API",
-		Body:   "Task " + stacked.ID + " opened acme/widgets#104, but it has conflicts with `main`.",
-		Origin: model.Origin{
-			Attribution: model.Attribution{Actor: queue},
-			Reason:      model.ReasonFix,
-		},
-		Approval:  &model.Attribution{Actor: queue},
-		Target:    cfg.DefaultTarget,
-		Binding:   model.BindingDirective,
-		Base:      model.BranchName(stacked.ID),
-		AutoMerge: true,
-		Links:     []model.Link{{Kind: model.LinkProposedBy, Target: stacked.ID}},
-		CreatedAt: &fixCreatedAt,
-	}
-	if err := store.PutTask(ctx, fixTask); err != nil {
-		return fmt.Errorf("seeding a stacked fix task: %w", err)
-	}
-	if err := store.UpdateTask(ctx, stacked.ID, func(t *model.Task) error {
-		t.Links = append(t.Links, model.Link{Kind: model.LinkFixTask, Target: fixID})
-		return nil
+	if _, err := store.AddComment(ctx, model.Comment{
+		TaskID: repairing.ID,
+		Author: model.Attribution{Actor: queue},
+		Body: "acme/widgets#104 has conflicts with `main`, so the merge queue has sent " +
+			"this task back to an agent to repair it. No approval needed, and no separate " +
+			"task: the work happens on `" + model.BranchName(repairing.ID) + "` -- the " +
+			"branch this task's pull request is already open from -- so the resolution and " +
+			"the change share one pull request and one round of checks.",
+		CreatedAt: repairAskedAt,
 	}); err != nil {
-		return fmt.Errorf("seeding a stacked fix task: %w", err)
+		return fmt.Errorf("seeding a task under repair: %w", err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID:        "demo-run-" + repairing.ID,
+		TaskID:    repairing.ID,
+		Sandbox:   "demo-sandbox-repair",
+		Attempt:   2,
+		StartedAt: ago(30 * time.Minute),
+	}, model.Limits{}); err != nil {
+		return fmt.Errorf("seeding a task under repair: %w", err)
 	}
 
 	closed, err := create(ago(200*time.Hour), ui.CreateTaskRequest{

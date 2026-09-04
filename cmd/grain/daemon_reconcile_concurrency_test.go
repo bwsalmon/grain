@@ -73,12 +73,12 @@ func TestReconcileDispatchesWhileAnEarlierRunIsStillLive(t *testing.T) {
 	agentStub := &blockingAgent{entered: make(chan string, 4), release: make(chan struct{})}
 	runs := &orchestrator.InFlight{}
 	deps := orchestrator.Deps{
-		Store:         store,
-		Client:        github.NewClient(githubsim.New(owner, repoName, bare, "main"), nil),
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(agentStub),
+		Store:      store,
+		Client:     github.NewClient(githubsim.New(owner, repoName, bare, "main"), nil),
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  orchestrator.StaticFramework(agentStub),
 		MaxWorkers: 2,
-		Runs:          runs,
+		Runs:       runs,
 	}
 
 	seedReconcileTask(t, store, "t1", owner, repoName)
@@ -191,12 +191,12 @@ func TestDrainInFlightWaitsForACancelledRunToReleaseItsSandbox(t *testing.T) {
 	sandboxDir := t.TempDir()
 	runs := &orchestrator.InFlight{}
 	deps := orchestrator.Deps{
-		Store:         store,
-		Client:        github.NewClient(githubsim.New(owner, repoName, bare, "main"), nil),
-		Sandboxes:     orchestrator.NewHostSandboxes(sandboxDir),
-		Framework:     orchestrator.StaticFramework(agentStub),
+		Store:      store,
+		Client:     github.NewClient(githubsim.New(owner, repoName, bare, "main"), nil),
+		Sandboxes:  orchestrator.NewHostSandboxes(sandboxDir),
+		Framework:  orchestrator.StaticFramework(agentStub),
 		MaxWorkers: 1,
-		Runs:          runs,
+		Runs:       runs,
 	}
 
 	seedReconcileTask(t, store, "t1", owner, repoName)

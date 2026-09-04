@@ -184,6 +184,8 @@ describe("SuitesList", () => {
         name: "New template",
         title: "Bump dependencies",
         description: "",
+        repo: "",
+        base: "",
         autoMerge: false,
         reads: [],
         capabilities: [],
