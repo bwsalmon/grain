@@ -1113,6 +1113,41 @@ func TestTheGoJobRunsTheFormattingGate(t *testing.T) {
 	contains(t, between(t, read(t, "Makefile"), "\nfmt:", "\n\n"), "exit 1")
 }
 
+// The frontend's half of it, which has three moving parts in three files
+// -- the workflow step, the Makefile target it names and the npm script
+// that target names -- and one ordering constraint that is invisible in
+// any of them: prettier lives in ui/node_modules, so the step only works
+// where `make frontend` has already run `npm ci`. Moved up beside the Go
+// `Format` step, where it looks like it belongs, it would fail with
+// "prettier: not found" on a tree that is perfectly formatted.
+func TestTheGoJobRunsTheFrontendFormattingGateAfterInstallingIt(t *testing.T) {
+	goJob := between(t, stripComments(testsWorkflow(t)), "go-test:", "\n  ui-e2e:")
+	contains(t, goJob, "run: make fmt-frontend")
+
+	before(t, goJob, "run: make frontend", "run: make fmt-frontend",
+		"the go job would check frontend formatting before `make frontend` installs prettier, and fail on a formatted tree")
+
+	// The target, and the script it hands off to. `--check` rather than
+	// `--write`: a gate that silently rewrote the tree would pass on
+	// every commit and gate nothing.
+	target := between(t, read(t, "Makefile"), "\nfmt-frontend:", "\n\n")
+	contains(t, target, "npm run format:check")
+	pkg := read(t, "ui", "package.json")
+	contains(t, pkg, `"format:check": "prettier --check .`)
+
+	// And prettier has to be a locked devDependency, so that `npm ci`
+	// installs it and a new prettier release cannot redden a commit that
+	// touched nothing -- unlike gofmt, prettier's output does change
+	// between versions.
+	contains(t, between(t, pkg, `"devDependencies"`, "\n  }"), `"prettier"`)
+	contains(t, read(t, "ui", "package-lock.json"), `"node_modules/prettier"`)
+
+	// The config file is what pins the gate to prettier's defaults, and
+	// what stops prettier walking up out of the repository into whatever
+	// ~/.prettierrc the contributor happens to have.
+	read(t, "ui", ".prettierrc")
+}
+
 // The sandbox guest image's toolchain, which three files have to agree
 // on and none of them can see the others.
 //

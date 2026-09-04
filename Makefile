@@ -89,7 +89,7 @@ CONTAINER_USER ?= $(shell id -u):$(shell id -g)
 # from .git. GO_VERSION is passed for the same reason `builder` passes
 # it -- one version, read out of go.mod.
 IMAGE ?= grain:dev
-.PHONY: all build test test-e2e vet fmt clean builder container-build image frontend loadtest soak $(CMDS)
+.PHONY: all build test test-e2e vet fmt fmt-frontend clean builder container-build image frontend loadtest soak $(CMDS)
 
 all: vet test build
 
@@ -258,6 +258,30 @@ fmt:
 		gofmt -d $$unformatted; \
 		exit 1; \
 	fi
+
+# The same gate for the frontend, which until now had none of any kind:
+# no prettier, no eslint, no .editorconfig, so whatever each editor did
+# on save is what landed. That is the drift `fmt` above exists to stop,
+# and it is worse in JS than in Go, because format-on-save is the
+# default in a lot of JS setups and prettier's opinions are much larger
+# than gofmt's -- one contributor with that switch on silently rewrites
+# every file they open.
+#
+# Prettier at its defaults, configured by an empty ui/.prettierrc, for
+# the reason `fmt` runs plain gofmt: the promise is "whatever the
+# standard tool does", so there is no house style to remember and no
+# number of ours for a reviewer to argue with. `--check` prints the
+# files that differ; `npm run format` writes them.
+#
+# Kept out of `fmt`, and out of `all`, on purpose. `fmt` needs nothing
+# but the Go toolchain and runs in seconds, and hanging an npm install
+# off it would spoil exactly the property that makes it worth running
+# locally. This one needs ui/node_modules, so it installs them when they
+# are missing -- but only then: CI runs this after `make frontend` has
+# already done the install, and paying for a second `npm ci` there would
+# be pure waste.
+fmt-frontend:
+	cd ui && { [ -x node_modules/.bin/prettier ] || npm ci; } && npm run format:check
 
 clean:
 	rm -rf $(BIN) $(CONTAINER_CACHE)
