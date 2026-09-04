@@ -151,55 +151,82 @@ takes an `--id` even though a signal replies to nothing.
 
 ## The documents
 
-### The environment → the container
+### The environment and the mount → the container
 
-A grain is configured entirely by its environment, which is kontur's own
-convention — its README's "configured entirely from environment variables
-so it can be driven directly from a Kubernetes pod spec".
+A grain is configured before it starts, in two halves: **scalars in the
+environment, material as files.**
 
 ```sh
 GRAIN_WIRE_VERSION=v1
 GRAIN_FRAMEWORK=claude
-GRAIN_CREDENTIAL=sk-ant-oat01-...
-GRAIN_SETUP='git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh && git rev-parse HEAD'
 GRAIN_MAX_RUNTIME=2h0m0s
-GRAIN_PLACEMENTS='[{"path":"/home/agent/.git-credentials","content":"...","mode":"0600"}]'
 
 # kontur's own, set by grain and never read back by it
-CHV_CPUS=2
-CHV_MEMORY_MB=8192
-CHV_DISK_SIZE_MB=30720
+CHV_CPUS=2  CHV_MEMORY_MB=8192  CHV_DISK_SIZE_MB=30720
 ```
 
-**Material travels here too.** An earlier draft delivered the credential
-and placements over an exec's stdin, on the grounds that an environment
-variable shows up in a Kubernetes pod spec. That was wrong about how
-Kubernetes does this: `valueFrom.secretKeyRef` puts a *reference* in the
-pod spec while the value stays in a Secret, with its own RBAC — `get
-secrets` being a distinctly more privileged verb than `get pods` — and its
-own encryption at rest. The kubelet injects it at start, so it reaches
-`/proc/1/environ` inside the container, which is the trusted side of the
-vsock boundary anyway.
+```
+/grain/credential                                  0600
+/grain/setup                                       0755
+/grain/placements/home/agent/.git-credentials      0600
+/grain/placements/home/debian/.gemini-api-key      0600
+```
+
+The environment carries nothing with a shape and no material at all. That
+is what lets the file half be delivered by whatever a backend already has:
 
 ```yaml
-env:
-  - name: GRAIN_CREDENTIAL
-    valueFrom:
-      secretKeyRef: { name: grain-claude, key: credential }
+volumes:
+  - name: material
+    secret:
+      secretName: grain-task-311
+      items:
+        - { key: credential,       path: credential,                          mode: 0600 }
+        - { key: git-credentials,  path: placements/home/agent/.git-credentials, mode: 0600 }
+  - name: setup
+    configMap: { name: grain-task-311-setup, items: [{ key: setup, path: setup, mode: 0755 }] }
 ```
 
-Under docker the variables are set directly, where the exposure argument
-was always weak: reading them needs the docker socket, which is
-root-equivalent on that host and can read the process's memory regardless.
+A Kubernetes Secret or ConfigMap volume **is** this model already —
+`items: [{key, path, mode}]` gives files at chosen paths with chosen
+modes, injected by the kubelet before the container starts, with only a
+reference in the pod spec. So there is no encoding to invent, no ARG_MAX
+ceiling, nothing in `/proc/1/environ`, and a non-secret placement (a CA
+bundle, a config template) can come from a ConfigMap where an environment
+blob could not have told it apart from a secret.
 
-**`GRAIN_CREDENTIAL` is its own variable**, not a key inside the
-placements blob, so a deployment can point it at a Secret key rotated and
-scoped on its own.
+Under docker the same tree is populated however that backend does it. The
+shim's contract is the tree, not how it was filled.
 
-**`GRAIN_PLACEMENTS` is one JSON array**, not an enumerated
-`GRAIN_PLACEMENT_0_PATH` family: a list of objects has no good flat
-spelling, kontur has no precedent for one, and a single variable is what a
-Secret key holds naturally.
+**The placements tree is the mapping.** A placement bound for
+`/home/agent/.netrc` is mounted at
+`/grain/placements/home/agent/.netrc`, so nothing carries a manifest
+beside it and a Secret's own `items[].path` says where a key lands in the
+guest. `PlacementPath` refuses anything not already absolute and in
+simplest form — containment, not tidiness, since `/a/../../etc/shadow`
+under that root escapes the tree entirely — and `GuestPath` re-checks on
+the way out, because the shim walks a directory somebody else mounted.
+
+**`/grain/setup` is a script, not a string.** kontur's own
+`CHV_SETUP_SCRIPT` carries its script's text, and that is fine for a line
+or two; grain's is composed from a clone, a branch checkout, the repo's
+setup command and whatever the prompt needs read back. As a file it gets a
+shebang, an executable bit, and something a human can `cat` in an incident
+— rather than a multi-line string that has to survive shell quoting on its
+way through a runtime's env handling.
+
+**It must never embed a credential.** The clone reaches the proxy with a
+plain URL and git finds its token in the placement beside it.
+`Spec.Redacted()` blanks material for logging and leaves setup alone
+deliberately, since a failed run is diagnosed by reading exactly what its
+setup tried to do — so a secret in there is a secret in every log that
+quotes it.
+
+**`/grain/setup` is opaque to the shim**, which runs it and reports its
+exit code and output without reading either. That is also how the
+two-phase start gets its facts: the controller wrote the script, so it
+ends it with whatever the prompt needs read back — `git rev-parse HEAD`, a
+log of what earlier attempts pushed — and parses its own output.
 
 **`CHV_*` are kontur's, and grain never reads them back.** The shim starts
 the VMM as a child and kontur reads its own configuration
@@ -210,22 +237,9 @@ second opinion about numbers this side does not act on is worth nothing.
 **What is not here is the point.** No task, no repository, no branch, no
 capability model: a grain knows how to run an agent in a sandbox and
 nothing about why. Everything task-shaped arrives in the prompt (delivered
-by signal), in `GRAIN_SETUP`, or in a placement.
-`wire_test.go`'s `TestGrainEnvCarriesNoTaskModel` asserts on the rendered
-environment that none of it has crept back.
-
-**`GRAIN_SETUP` must never embed a credential.** The clone reaches the
-proxy with a plain URL and git finds its token in the placement beside it.
-`Spec.Redacted()` blanks material for logging and leaves setup alone
-deliberately, since a failed run is diagnosed by reading exactly what its
-setup tried to do — so a secret in there is a secret in every log that
-quotes it.
-
-**`GRAIN_SETUP` is opaque to the shim**, which runs it and reports its
-exit code and output without reading either. That is also how the
-two-phase start gets its facts: the controller wrote the script, so it
-ends it with whatever the prompt needs read back — `git rev-parse HEAD`, a
-log of what earlier attempts pushed — and parses its own output.
+by signal), in `/grain/setup`, or in a placement.
+`TestGrainEnvCarriesNoTaskModel` asserts on the rendered environment that
+none of it has crept back.
 
 **`GRAIN_MAX_RUNTIME` is the only limit, and the grain enforces it.** See
 "Who enforces a deadline" in `docs/grain.md` for why that is the opposite

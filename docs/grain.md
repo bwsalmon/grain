@@ -84,11 +84,12 @@ shipping every deployment's every credential into every container. It is
 not path-addressed, which is what distinguishes it from a placement and
 why dropping `dest` cost nothing.
 
-It travels as its own environment variable, which on Kubernetes a
-deployment points at a Secret key with `valueFrom.secretKeyRef` — so the
-pod spec holds a reference while the value keeps the Secret's own RBAC and
-encryption at rest. The sandbox cannot read it either way, for the
-structural reason above.
+It arrives as a file at `/grain/credential`, which on Kubernetes is a key
+in a mounted Secret — so the pod spec holds a reference, the value keeps
+the Secret's own RBAC and encryption at rest, and the container's own
+environment carries no material at all. The profile reads it and hands it
+to its CLI however that CLI wants it. The sandbox cannot read it either
+way, for the structural reason above.
 
 The residual: the agent process can read its own token and could write it
 into the guest. That is unchanged from today, and it is not what the VM
@@ -357,8 +358,10 @@ attempt.
 ## What a grain does not know
 
 The `Spec` carries four things — `framework`, `shape`, `setup` and
-`placements` — and reaches the container as its environment, which is
-kontur's own convention and means there is no configure step to wait in. There is no id — the container is the identity, and a
+`placements` — and reaches the container before it starts, in two halves:
+scalars in the environment (kontur's own convention) and material as files
+under `/grain`. There is no configure step to wait in, and on Kubernetes
+the file half is a Secret or ConfigMap volume unchanged. There is no id — the container is the identity, and a
 controller execs into one specific container, so a grain is never told a
 name it makes no use of. There is no task in it either, no
 repository, no branch, no git credential and no capability model —

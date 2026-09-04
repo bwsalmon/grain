@@ -1,0 +1,146 @@
+package grain
+
+import (
+	"fmt"
+	"path"
+	"strings"
+)
+
+// Where a grain's material is mounted in its container. Everything with
+// a shape -- a script, a file with a mode, a tree of them -- arrives as
+// files rather than as environment variables, and only scalars the shim
+// reads directly stay in the environment (env.go).
+//
+// The line is worth drawing because of what it opens. On Kubernetes a
+// Secret or a ConfigMap mounted as a volume *is* this model already:
+// `items: [{key, path, mode}]` gives files at chosen paths with chosen
+// modes, injected by the kubelet before the container starts, with the
+// pod spec holding only a reference. So placements need no encoding, no
+// size ceiling that ARG_MAX imposes, and no appearance in
+// /proc/1/environ at all -- and a non-secret placement (a CA bundle, a
+// config template) can come from a ConfigMap instead, which an
+// environment blob could not distinguish.
+//
+// Under docker the same tree is populated however that backend does it;
+// the shim's contract is the tree, not how it was filled.
+const (
+	// Root is the directory a grain's material is mounted under.
+	Root = "/grain"
+	// FileCredential holds what the agent authenticates to its model API
+	// with. A file rather than an environment variable so the container's
+	// own environment carries no material at all: the profile reads it
+	// and hands it to its CLI however that CLI wants it, which is often
+	// an environment variable on the *child* process and is the profile's
+	// business either way.
+	FileCredential = Root + "/credential"
+	// FileSetup is the setup script, run in the guest before the agent
+	// starts.
+	//
+	// A file rather than an environment variable, though kontur's own
+	// CHV_SETUP_SCRIPT carries its script's text: grain's is composed by
+	// the controller out of a clone, a branch checkout, the repo's own
+	// setup command and whatever the prompt needs read back, so it is
+	// multi-line and substantial where kontur's is a line or two. As a
+	// file it is a script -- a shebang, an executable bit, something a
+	// human can cat in an incident -- rather than a string that has to
+	// survive shell quoting on its way through a runtime's env handling.
+	FileSetup = Root + "/setup"
+	// DirPlacements holds the files to copy into the guest, in a tree
+	// that mirrors their guest paths: a placement at /home/agent/.netrc
+	// is mounted at /grain/placements/home/agent/.netrc.
+	//
+	// The tree *is* the mapping, so nothing carries a manifest beside it
+	// and a Secret volume's own `items[].path` says where a key lands in
+	// the guest without grain interpreting anything.
+	DirPlacements = Root + "/placements"
+)
+
+// ModeSetup is the mode FileSetup is written with. Executable, because a
+// script that has to be invoked through an interpreter cannot carry its
+// own shebang, and the controller composing it should be free to choose
+// one.
+const ModeSetup = "0755"
+
+// File is one piece of material and the mode it must be created with.
+type File struct {
+	Content string
+	Mode    string
+}
+
+// Files renders everything this Spec delivers as files, keyed by the
+// container path each lands at. A backend mounts or writes them; nothing
+// here says which.
+//
+// A placement with an unusable path is an error rather than something
+// skipped or sanitised: it means the controller composed something wrong,
+// and writing three of four credentials is a worse outcome than writing
+// none and saying so.
+func (s Spec) Files() (map[string]File, error) {
+	out := make(map[string]File, len(s.Placements)+2)
+	if s.Framework.Credential != "" {
+		out[FileCredential] = File{Content: s.Framework.Credential, Mode: "0600"}
+	}
+	if s.Setup != "" {
+		out[FileSetup] = File{Content: s.Setup, Mode: ModeSetup}
+	}
+	for _, p := range s.Placements {
+		at, err := PlacementPath(p.Path)
+		if err != nil {
+			return nil, err
+		}
+		if _, clash := out[at]; clash {
+			return nil, fmt.Errorf("grain: two placements both land at %s", p.Path)
+		}
+		out[at] = File{Content: p.Content, Mode: p.EffectiveMode()}
+	}
+	return out, nil
+}
+
+// EffectiveMode is Mode, defaulting to "0600" -- the safe answer, so a
+// placement that leaves it unset does not thereby get a wider one. It
+// mirrors model.Placement.EffectiveMode, whose own default this is.
+func (p Placement) EffectiveMode() string {
+	if p.Mode == "" {
+		return "0600"
+	}
+	return p.Mode
+}
+
+// PlacementPath maps a guest path to the container path its material is
+// mounted at.
+//
+// It refuses anything that is not already an absolute, cleaned path.
+// That is a containment check, not tidiness: a placement path is the one
+// part of this contract that names a location, and "/a/../../etc/shadow"
+// under DirPlacements escapes the tree entirely. Refusing here means a
+// controller cannot write outside the tree even by accident, and the shim
+// gets to trust what it walks.
+func PlacementPath(guest string) (string, error) {
+	if guest == "" {
+		return "", fmt.Errorf("grain: a placement has no path")
+	}
+	if !path.IsAbs(guest) {
+		return "", fmt.Errorf("grain: placement path %q is not absolute", guest)
+	}
+	if cleaned := path.Clean(guest); cleaned != guest {
+		return "", fmt.Errorf("grain: placement path %q is not in its simplest form (%q)", guest, cleaned)
+	}
+	return DirPlacements + guest, nil
+}
+
+// GuestPath is PlacementPath's inverse: where in the guest a file found
+// under DirPlacements belongs. It is what the shim walks the tree with.
+func GuestPath(container string) (string, error) {
+	rest, ok := strings.CutPrefix(container, DirPlacements+"/")
+	if !ok {
+		return "", fmt.Errorf("grain: %q is not under %s", container, DirPlacements)
+	}
+	guest := "/" + rest
+	// Validated on the way back too, not only on the way in: the shim
+	// walks a directory somebody else mounted, and a symlink or a stray
+	// file in it is not something PlacementPath ever saw.
+	if _, err := PlacementPath(guest); err != nil {
+		return "", err
+	}
+	return guest, nil
+}

@@ -24,38 +24,63 @@ func marshal(t *testing.T, v any) string {
 	return string(b)
 }
 
-func TestSpecEnv(t *testing.T) {
+func TestSpecEnvAndFiles(t *testing.T) {
 	spec := grain.Spec{
 		Version:    grain.Version,
 		Framework:  grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
 		Shape:      grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
-		Setup:      "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && ./scripts/setup.sh",
-		Placements: []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080", Mode: "0600"}},
+		Setup:      "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/grain.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
+		Placements: []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
 		MaxRuntime: grain.Duration(2 * time.Hour),
 	}
 
-	env, err := spec.Env()
-	if err != nil {
-		t.Fatalf("Env: %v", err)
-	}
-	want := map[string]string{
+	// Scalars only: no material in the environment at all.
+	wantEnv := map[string]string{
 		"GRAIN_WIRE_VERSION": "v1",
 		"GRAIN_FRAMEWORK":    "claude",
-		"GRAIN_CREDENTIAL":   "sk-ant-oat01-...",
-		"GRAIN_SETUP":        "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && ./scripts/setup.sh",
 		"GRAIN_MAX_RUNTIME":  "2h0m0s",
-		"GRAIN_PLACEMENTS":   `[{"path":"/home/agent/.git-credentials","content":"https://x:tok@10.0.2.1:8080","mode":"0600"}]`,
 		// kontur's own, passed through and never read back.
 		"CHV_CPUS":         "2",
 		"CHV_MEMORY_MB":    "8192",
 		"CHV_DISK_SIZE_MB": "30720",
 	}
-	if len(env) != len(want) {
-		t.Fatalf("Env produced %d variables, want %d:\n%#v", len(env), len(want), env)
+	env := spec.Env()
+	if len(env) != len(wantEnv) {
+		t.Fatalf("Env produced %d variables, want %d:\n%#v", len(env), len(wantEnv), env)
 	}
-	for k, v := range want {
+	for k, v := range wantEnv {
 		if env[k] != v {
 			t.Errorf("%s = %q, want %q", k, env[k], v)
+		}
+	}
+	for k, v := range env {
+		if strings.Contains(v, "sk-ant") || strings.Contains(v, "tok@") {
+			t.Errorf("%s carries material: the environment is scalars only", k)
+		}
+	}
+
+	files, err := spec.Files()
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	wantFiles := map[string]grain.File{
+		"/grain/credential": {Content: "sk-ant-oat01-...", Mode: "0600"},
+		"/grain/setup":      {Content: spec.Setup, Mode: "0755"},
+		"/grain/placements/home/agent/.git-credentials": {
+			Content: "https://x:tok@10.0.2.1:8080", Mode: "0600",
+		},
+	}
+	if len(files) != len(wantFiles) {
+		t.Fatalf("Files produced %d entries, want %d:\n%#v", len(files), len(wantFiles), files)
+	}
+	for at, want := range wantFiles {
+		got, ok := files[at]
+		if !ok {
+			t.Errorf("no file at %s", at)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %+v, want %+v", at, got, want)
 		}
 	}
 
@@ -63,18 +88,76 @@ func TestSpecEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpecFromEnv: %v", err)
 	}
-	if time.Duration(back.MaxRuntime) != 2*time.Hour {
-		t.Errorf("MaxRuntime round-tripped as %s", back.MaxRuntime)
+	if time.Duration(back.MaxRuntime) != 2*time.Hour || back.Framework.Name != "claude" {
+		t.Errorf("scalars round-tripped as %+v", back)
 	}
-	if back.Framework.Credential != spec.Framework.Credential {
-		t.Errorf("credential round-tripped as %q", back.Framework.Credential)
+	// The material half is files, so it is never recovered from env --
+	// which is also why an error from there can never quote it.
+	if back.Framework.Credential != "" || back.Setup != "" || len(back.Placements) != 0 {
+		t.Errorf("SpecFromEnv recovered material it should never see: %+v", back.Redacted())
 	}
-	if len(back.Placements) != 1 || back.Placements[0].Mode != "0600" {
-		t.Errorf("placements round-tripped as %#v", back.Placements)
-	}
-	// Shape is kontur's to read, never grain's to read back.
 	if !back.Shape.IsZero() {
 		t.Errorf("SpecFromEnv read shape back as %#v; those variables are kontur's", back.Shape)
+	}
+}
+
+// The placements tree *is* the mapping from container path to guest path,
+// so it has to round-trip exactly -- and it has to refuse anything that
+// would escape the tree, since that is the one part of this contract that
+// names a location.
+func TestPlacementPathContainment(t *testing.T) {
+	for _, guest := range []string{"/home/agent/.netrc", "/etc/pip.conf", "/a"} {
+		at, err := grain.PlacementPath(guest)
+		if err != nil {
+			t.Fatalf("PlacementPath(%q): %v", guest, err)
+		}
+		if !strings.HasPrefix(at, grain.DirPlacements+"/") {
+			t.Errorf("PlacementPath(%q) = %q, outside %s", guest, at, grain.DirPlacements)
+		}
+		back, err := grain.GuestPath(at)
+		if err != nil {
+			t.Fatalf("GuestPath(%q): %v", at, err)
+		}
+		if back != guest {
+			t.Errorf("round trip: %q -> %q -> %q", guest, at, back)
+		}
+	}
+
+	for _, bad := range []string{
+		"",                    // no path at all
+		"home/agent/.netrc",   // relative
+		"/a/../../etc/shadow", // escapes the tree
+		"/a/./b",              // not in simplest form
+		"/a//b",               // ditto
+	} {
+		if at, err := grain.PlacementPath(bad); err == nil {
+			t.Errorf("PlacementPath(%q) = %q, want an error", bad, at)
+		}
+	}
+
+	// A stray file the shim finds under the tree is refused on the way
+	// out too: it walks a directory somebody else mounted.
+	if _, err := grain.GuestPath("/grain/placements/a/../../../etc/shadow"); err == nil {
+		t.Error("GuestPath accepted a path escaping the placements tree")
+	}
+	if _, err := grain.GuestPath("/somewhere/else"); err == nil {
+		t.Error("GuestPath accepted a path outside the placements tree")
+	}
+}
+
+// Two placements landing at one path means the controller composed
+// something wrong; writing one of them silently is worse than writing
+// neither and saying so.
+func TestFilesRefusesClashingPlacements(t *testing.T) {
+	_, err := grain.Spec{
+		Version: grain.Version,
+		Placements: []grain.Placement{
+			{Path: "/home/agent/.netrc", Content: "a"},
+			{Path: "/home/agent/.netrc", Content: "b"},
+		},
+	}.Files()
+	if err == nil {
+		t.Fatal("Files accepted two placements at one path")
 	}
 }
 
@@ -97,26 +180,6 @@ func TestSpecFromEnvRefusesAnotherVersion(t *testing.T) {
 
 	if _, err := grain.SpecFromEnv(func(string) string { return "" }); err == nil {
 		t.Fatal("SpecFromEnv accepted an environment with no version at all")
-	}
-}
-
-// A malformed placements blob is material; its parse error must not quote
-// it.
-func TestSpecFromEnvDoesNotEchoMaterial(t *testing.T) {
-	_, err := grain.SpecFromEnv(func(k string) string {
-		switch k {
-		case grain.EnvVersion:
-			return grain.Version
-		case grain.EnvPlacements:
-			return `[{"path":"/p","content":"sk-ant-secret-value"`
-		}
-		return ""
-	})
-	if err == nil {
-		t.Fatal("SpecFromEnv accepted malformed placements")
-	}
-	if strings.Contains(err.Error(), "sk-ant-secret-value") {
-		t.Errorf("parse error quotes material: %v", err)
 	}
 }
 
