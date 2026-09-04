@@ -1658,9 +1658,57 @@ with the evidence:
   `DENIED` do not). Anything written here therefore has to be asserted
   live, not merely accepted by the binary.
 
-So the prompt still carries the rule, `--dangerously-skip-permissions`
-plus the permission system is the only place a real denial could come
-from, and a kontur sandbox is what actually contains a native tool.
+**Two of those answers were incomplete, and the second of them is a
+denial.** The settings file does carry a tool-level ruleset after all, and
+agy documents a hook that blocks a call outright. Both are written into
+every run's private `HOME` now (`permissionRules` and `hookConfigJSON` in
+`agent/antigravity`), and both were established the same way as the
+paragraphs above -- a throwaway CI job holding a real `agy` 1.1.26:
+
+- **`settings.json` takes `permissions.allow` / `permissions.deny`, and
+  they load.** Write the block, ask the binary what it read
+  (`agy -p /permissions`, which print mode answers without an agent turn
+  or a credential), and it prints one record per rule:
+  `global<TAB>deny<TAB>run_command`. Bare names, `run_command(*)` and
+  `regex:` forms all survive; a malformed value (`"deny": 12345`) is
+  dropped in silence, no rule and no complaint -- the failure mode this
+  section already warned about. What the rules do *not* do is change the
+  roster: the `init` event of a real stream-json session advertises the
+  same 55 native tools with the block and without it. And `Run` passes
+  `--dangerously-skip-permissions`, which that same event reports as
+  permission mode `always-proceed`, while agy's own prompt calls an
+  always-deny decision "overridden by dangerously-skip-permissions". So
+  the rules are written because they are the documented place to say what
+  a session may do and they cost a run nothing, not because a run without
+  a model credential could be made to prove they bite.
+- **A `PreToolUse` hook is a hard block, by agy's own account.** The
+  binary unpacks its customization guide into any fresh `HOME`
+  (`antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md`), and
+  it specifies `hooks.json` in the global customization root
+  `~/.gemini/config/` -- beside the `mcp_config.json` this package already
+  writes -- handing each hook `{"toolCall": {"name", "args"}}` on stdin
+  before the tool runs and reading a decision back on stdout, where
+  `"deny"` means "hard block the execution immediately". That is a
+  different mechanism from the permission prompt the flag auto-approves.
+  grain's hook is grain: `hooks.json` runs `grain agy-tool-hook`
+  (`cmd/grain/agyhook.go`), which answers from `HookDecision`.
+- **It denies by name, and never allows by name.** `HookDecision` denies
+  the tools in `withheldNativeTools` -- agy's own file and command tools,
+  now the whole of that set rather than a representative handful -- and
+  returns `{}`, no opinion, for everything else. Not "deny anything
+  without grain's prefix", because this hook stands in front of *every*
+  tool call a run makes: a surprise in the payload would then be a run
+  that can do nothing at all, whereas a deny list can only ever fail back
+  to the behaviour this repository already had. A missing hook, an
+  unparseable payload and a grain binary that is not there all land in the
+  same safe place.
+
+So the prompt still carries the rule, the permission rules say it again
+where agy stores policy, the `PreToolUse` hook is the one place a call can
+actually be stopped, and a kontur sandbox is still what contains a native
+tool that gets past all three. None of the three has been watched
+stopping a live model, because that needs the nightly credential
+(`live-agent.yml`) rather than a branch's own CI.
 
 How that was established is worth keeping, because the question keeps
 coming back and a grain sandbox cannot answer it: the agent sandbox has
