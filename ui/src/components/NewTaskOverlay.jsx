@@ -70,6 +70,15 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // queues at once, so that checkbox would just be a second control for
   // the same fact).
   const [interactive, setInteractive] = useState(false);
+  // atFront is which end of the backlog this task joins
+  // (ui.CreateTaskRequest.AtFront, grain/task-202): the front, ahead of
+  // everything already queued, or the end, behind it. Seeded from
+  // config.newestFirst, which is where the last task filed from here
+  // went -- the server remembers the choice on every filing that states
+  // one, so this form opens on it rather than on a fixed default nobody
+  // chose. App.jsx re-fetches the config after a task is created, so the
+  // next open of this form sees the choice this one just made.
+  const [atFront, setAtFront] = useState(!!config?.newestFirst);
 
   // handleRepoChange prefills Base branch from whatever the newly-picked
   // repo's own last task used (bwsalmon/agents#641), rather than
@@ -134,6 +143,11 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       // that case anyway.
       approved: interactive || form.elements.approved.checked,
       interactive,
+      // Left out entirely for an interactive task: one always dispatches
+      // ahead of the backlog whatever this says (the caption below the
+      // checkbox), so there is no end to pick and nothing about it worth
+      // remembering for the next task.
+      ...(interactive ? {} : { atFront }),
       attachments: await Promise.all(attachments.map((f) => fileToAttachment(f))),
     };
     try {
@@ -400,14 +414,35 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
         </Accordion>
         {interactive ? (
           <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
-            Interactive sessions always queue immediately.
+            Interactive sessions always queue immediately, ahead of the backlog.
           </Typography>
         ) : (
-          <FormControlLabel
-            control={<Checkbox name="approved" defaultChecked={!!config?.approvedByDefault} />}
-            label="Queue immediately (unchecked files it as a proposal, needing approval)"
-            sx={{ display: "flex", mt: 1 }}
-          />
+          <>
+            <FormControlLabel
+              control={<Checkbox name="approved" defaultChecked={!!config?.approvedByDefault} />}
+              label="Queue immediately (unchecked files it as a proposal, needing approval)"
+              sx={{ display: "flex", mt: 1 }}
+            />
+            {/* Which end of the backlog the task joins, and the choice
+                the next one will start from: the server stores it as it
+                files this task (ui.CreateTaskRequest.AtFront), so
+                somebody filing a run of urgent work picks "Front" once
+                rather than on every task -- or drags it there
+                afterwards, which is the same OrderKey either way. */}
+            <TextField
+              select
+              label="Add to backlog"
+              value={atFront ? "front" : "end"}
+              onChange={(e) => setAtFront(e.target.value === "front")}
+              helperText="Remembered: the next task you file starts at this end too."
+              fullWidth
+              margin="normal"
+              size="small"
+            >
+              <MenuItem value="end">End -- runs after everything already queued</MenuItem>
+              <MenuItem value="front">Front -- runs next, ahead of everything already queued</MenuItem>
+            </TextField>
+          </>
         )}
         <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
           <Button type="submit" variant="contained" disabled={!title.trim() || (!noRepo && !repo.trim())}>

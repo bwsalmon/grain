@@ -7,6 +7,7 @@ package staterepo_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,143 @@ func TestADivergenceMadeOfGrainsOwnExportsRecovers(t *testing.T) {
 	}
 }
 
+// The same recovery, reached from a start rather than from a tick, which
+// is the path cmd/grain/daemon.go takes: Load, and if that is a
+// divergence grain made itself, recover and Load again.
+//
+// The rows written while the pushes were failing exist only in the
+// database -- the commits that held them are exactly what the recovery
+// threw away, on the argument that the database still has them -- so
+// this is the one place that argument can be falsified. It was:
+// Load read "HEAD is not the commit we recorded" as "a merge arrived"
+// and replaced the whole state tier from a dump older than the database
+// by however long the remote had been unreachable, deleting every task
+// filed in that window.
+func TestAStartThatRecoversADivergenceKeepsWhatTheDatabaseHas(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+
+	diverge(t, ctx, repo, remote, dir, func() {
+		// Two ticks' worth of work that got as far as a commit and no
+		// further, which is what a remote that goes away for a few minutes
+		// leaves behind.
+		for _, id := range []string{"filed-first", "filed-second"} {
+			if err := store.PutTask(ctx, task(id)); err != nil {
+				t.Fatalf("putting: %v", err)
+			}
+			if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err == nil {
+				t.Fatal("the push against an unreachable remote reported success")
+			}
+		}
+	})
+
+	// The process restarts, and takes the daemon's own path.
+	reopened, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	if err := staterepo.Load(ctx, reopened, db, model.SchemaVersion); err != nil {
+		if !errors.Is(err, staterepo.ErrDiverged) {
+			t.Fatalf("loading over a divergence: got %v, want an ErrDiverged", err)
+		}
+		recovered, rerr := reopened.RecoverDiverged(ctx)
+		if rerr != nil || !recovered {
+			t.Fatalf("recovering a divergence made only of grain's own exports: %v %v", recovered, rerr)
+		}
+		if err := staterepo.Load(ctx, reopened, db, model.SchemaVersion); err != nil {
+			t.Fatalf("loading after the recovery: %v", err)
+		}
+	}
+
+	for _, id := range []string{"filed-first", "filed-second"} {
+		got, err := store.GetTask(ctx, id)
+		if err != nil {
+			t.Fatalf("reading %s: %v", id, err)
+		}
+		if got == nil {
+			t.Fatalf("%s was written while the push was failing and the start that "+
+				"recovered the divergence rolled it back", id)
+		}
+	}
+	// What was merged is live all the same -- the point of recovering at
+	// all is that both directions move again.
+	if _, err := os.Stat(filepath.Join(dir, "NOTES.md")); err != nil {
+		t.Fatalf("the merged change never arrived: %v", err)
+	}
+	// And the export that follows puts the database back on the remote,
+	// on top of the merge.
+	if _, err := staterepo.Sync(ctx, reopened, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after the recovery: %v", err)
+	}
+	out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json")
+	for _, id := range []string{"filed-first", "filed-second"} {
+		if !strings.Contains(out, id) {
+			t.Fatalf("%s never reached the remote:\n%s", id, out)
+		}
+	}
+}
+
+// A merge that arrives the ordinary way -- fast-forwarded, no divergence
+// -- still replaces the state tier at a start, which is what makes a
+// merged change to anything but the settings take effect at all. The
+// marker that makes the recovery above import less must not leak into
+// this case.
+func TestAnOrdinaryMergeStillLoadsWholeAtAStart(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	// Somebody edits the dump and merges it, with nothing stranded on
+	// this side.
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	path := filepath.Join(work, staterepo.TablesDir, "task.json")
+	edited := strings.Replace(read(t, path), "Rename the endpoint", "Retitled by a pull request", 1)
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatalf("editing the dump: %v", err)
+	}
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "Retitle")
+	git(t, work, "push", "--quiet", "origin", "main")
+
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading after the merge: %v", err)
+	}
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("reading the task: %v %v", got, err)
+	}
+	if got.Title != "Retitled by a pull request" {
+		t.Fatalf("the merged change did not reach the database: %q", got.Title)
+	}
+}
+
 // The other half of the rule: a commit that is not grain's own export is
 // never reset over, however inconvenient the divergence is. A hand edit
 // in the working tree exists nowhere else -- no export will write it back
@@ -155,6 +293,101 @@ func TestADivergenceSomebodyElseMadeIsRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "HAND-EDIT.md")); err != nil {
 		t.Fatalf("the commit grain refused to reset over was reset over anyway: %v", err)
+	}
+}
+
+// What the deployment does while that refusal stands, and what it does
+// when a human clears it.
+//
+// A divergence grain will not resolve is a deployment that has stopped
+// syncing until somebody looks at it. What it must not become is a
+// deployment that has stopped: the database is still the live state, so
+// tasks go on being filed and runs go on being recorded, and the state
+// that piles up in the meantime has to reach the remote once the way is
+// clear rather than having been thrown away in the interim.
+func TestADeploymentKeepsRunningThroughADivergenceItCannotResolve(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+
+	diverge(t, ctx, repo, remote, dir, func() {
+		if err := os.WriteFile(filepath.Join(dir, "HAND-EDIT.md"), []byte("by a human\n"), 0o644); err != nil {
+			t.Fatalf("writing: %v", err)
+		}
+		git(t, dir, "add", "--all", ".")
+		git(t, dir, "-c", "user.email=someone@example.com", "-c", "user.name=someone",
+			"commit", "-m", "Something a person did on the host")
+	})
+
+	// Several cycles of the daemon's loop over the stuck repository. Each
+	// one refuses in the same way, and none of them touches the database.
+	for tick := 0; tick < 3; tick++ {
+		if err := store.PutTask(ctx, task(fmt.Sprintf("filed-while-stuck-%d", tick))); err != nil {
+			t.Fatalf("putting: %v", err)
+		}
+		if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); !errors.Is(err, staterepo.ErrDiverged) {
+			t.Fatalf("tick %d: got %v, want an ErrDiverged", tick, err)
+		}
+		if recovered, err := repo.RecoverDiverged(ctx); recovered || !errors.Is(err, staterepo.ErrDiverged) {
+			t.Fatalf("tick %d: grain resolved a divergence it should not: %v %v", tick, recovered, err)
+		}
+		// The export refuses too, rather than committing this deployment's
+		// dump on top of a history the remote has moved past.
+		if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); !errors.Is(err, staterepo.ErrRemoteAhead) {
+			t.Fatalf("tick %d: exporting over a divergence: got %v, want an ErrRemoteAhead", tick, err)
+		}
+		// And the settings the deployment is running on are untouched: a
+		// stuck repository is not a reason to lose what is live.
+		tmpl, err := store.GetTemplate(ctx, "tpl-1")
+		if err != nil || tmpl == nil {
+			t.Fatalf("tick %d: reading the template: %v %v", tick, tmpl, err)
+		}
+		if tmpl.Title != "Run the nightly sweep" {
+			t.Fatalf("tick %d: the template changed while the repository was stuck: %q", tick, tmpl.Title)
+		}
+	}
+
+	// The operator does what the error told them to: keeps their own
+	// commit, on top of what was merged.
+	git(t, dir, "fetch", "--quiet", "origin", "main")
+	git(t, dir, "rebase", "--quiet", "FETCH_HEAD")
+	git(t, dir, "push", "--quiet", "origin", "main")
+
+	// And the deployment picks up where it left off, with everything it
+	// wrote while it was stuck.
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying once the divergence was resolved: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing once the divergence was resolved: %v", err)
+	}
+	out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json")
+	for tick := 0; tick < 3; tick++ {
+		if id := fmt.Sprintf("filed-while-stuck-%d", tick); !strings.Contains(out, id) {
+			t.Fatalf("%s never reached the remote once the divergence was cleared:\n%s", id, out)
+		}
+	}
+	if got := git(t, remote, "show", "main:NOTES.md"); !strings.Contains(got, "merged by somebody") {
+		t.Fatalf("the merged change was lost in the resolution:\n%s", got)
+	}
+	if got := git(t, remote, "show", "main:HAND-EDIT.md"); !strings.Contains(got, "by a human") {
+		t.Fatalf("the commit grain refused to reset over was lost in the resolution:\n%s", got)
 	}
 }
 

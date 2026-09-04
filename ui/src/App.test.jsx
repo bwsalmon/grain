@@ -337,6 +337,39 @@ describe("App", () => {
     expect(await screen.findByText("Ship it")).toBeInTheDocument();
   });
 
+  // grain/task-202: filing a task also writes which end of the backlog
+  // new work joins, and the new-task form seeds its picker from that
+  // (config.newestFirst). The config is otherwise fetched once, at
+  // mount, so creating a task has to re-read it -- or the choice just
+  // made would not show up until a reload.
+  it("re-reads the config after a task is filed, so the backlog-end picker keeps the last choice", async () => {
+    setupApi();
+    const inner = api.getMockImplementation();
+    let newestFirst = false;
+    api.mockImplementation((path, opts) => {
+      if (path === "/api/config") return Promise.resolve({ ...config, newestFirst });
+      if (path === "/api/tasks" && opts?.method === "POST") {
+        const body = JSON.parse(opts.body);
+        if (typeof body.atFront === "boolean") newestFirst = body.atFront;
+      }
+      return inner(path, opts);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "+ New task" }));
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByLabelText("Add to backlog"));
+    await user.click(screen.getByRole("option", { name: /^Front/ }));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+    await screen.findByText("Ship it");
+
+    await user.click(screen.getByRole("button", { name: "+ New task" }));
+    expect(screen.getByLabelText("Add to backlog")).toHaveTextContent(/^Front/);
+  });
+
   it("shows an error banner when the initial load fails, and clears it after 5s", async () => {
     setupApi();
     api.mockRejectedValueOnce(new Error("config unavailable"));

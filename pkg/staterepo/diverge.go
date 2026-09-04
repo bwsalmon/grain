@@ -34,6 +34,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -150,7 +151,60 @@ func (r *Repo) RecoverDiverged(ctx context.Context) (bool, error) {
 	// holds something the database has not taken up -- so the merge that
 	// caused all this is imported on the very next call rather than a
 	// restart later.
-	return true, nil
+	//
+	// And this second marker says *how* it is to be taken up, which is
+	// the half that used to be missing. Load reads "HEAD is not the
+	// commit we recorded" as "the repository moved under a host that has
+	// a database" and replaces the whole state tier from the dump. That
+	// is right for a merge this host fast-forwarded to, and wrong here:
+	// the dump on the other side of this reset is *older* than the
+	// database by every export that could not be pushed, so importing it
+	// would delete every task, comment, branch and release written since
+	// the pushes started failing -- the exact rows this function's own
+	// safety argument calls safe because the database still holds them.
+	// Recorded here, and only here, so the load that follows a recovery
+	// imports what a merge is actually about (SettingsTables) and leaves
+	// grain's own record alone.
+	return true, r.recordRecoveredHead(ctx)
+}
+
+// recoveredHeadFile records the commit RecoverDiverged last reset the
+// working tree onto. It sits inside the git directory beside the
+// loaded-head marker, for the same reason: it is a fact about what this
+// host did to its own working tree, not about the repository, and must
+// never be committed or travel to a remote.
+const recoveredHeadFile = "grain-recovered-head"
+
+// recordRecoveredHead writes wherever the reset left the working tree.
+func (r *Repo) recordRecoveredHead(ctx context.Context) error {
+	head, err := r.Head(ctx)
+	if err != nil {
+		return err
+	}
+	path, err := r.gitDirFile(ctx, recoveredHeadFile)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(head+"\n"), 0o600); err != nil {
+		return fmt.Errorf("staterepo: writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// recoveredHead reads that marker, reporting "" when there is none. An
+// unreadable one is a "" too rather than an error: the question it
+// answers is "was this exact commit arrived at by a reset", and the
+// answer a working tree with no marker gives is no.
+func (r *Repo) recoveredHead(ctx context.Context) string {
+	path, err := r.gitDirFile(ctx, recoveredHeadFile)
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // ownExport reports why commit is not one of grain's own exports, or ""

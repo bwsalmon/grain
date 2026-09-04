@@ -412,6 +412,19 @@ type configResponse struct {
 	// same reading of "no row yet" AgentFramework below takes.
 	ApprovedByDefault  bool `json:"approvedByDefault"`
 	AutoMergeByDefault bool `json:"autoMergeByDefault"`
+	// NewestFirst mirrors model.Config's own field of the same name --
+	// which end of the backlog a new task joins -- read from the store
+	// the same way the two above are. NewTaskOverlay.jsx seeds its
+	// "Add to backlog" picker from it, so the form opens on the end the
+	// last task added chose (ui.CreateTaskRequest.AtFront writes it back
+	// on every filing that states one, grain/task-202) rather than on a
+	// guess.
+	//
+	// Not omitempty, unlike the optional strings below: false is the
+	// meaningful answer "the end of the backlog", not the absence of one,
+	// and a picker that has to render one of two positions cannot tell an
+	// absent field from a chosen false.
+	NewestFirst bool `json:"newestFirst"`
 	// ReconcilerDown mirrors Config.ReconcilerDown's own doc comment:
 	// true means this deployment's reconcile loop has died and nothing is
 	// dispatching or reconciling tasks, even though this same API is
@@ -554,6 +567,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		resp.EnvironmentName = cfg.EnvironmentName
 		resp.ApprovedByDefault = cfg.ApprovedByDefault
 		resp.AutoMergeByDefault = cfg.AutoMergeByDefault
+		resp.NewestFirst = cfg.NewestFirst
 		resp.AgentFramework = model.NormalizeAgentFramework(cfg.AgentFramework)
 		resp.PromptExtension = cfg.PromptExtension
 		// Filtered to what this build actually offers, the same way

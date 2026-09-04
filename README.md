@@ -1192,6 +1192,24 @@ grain will work through it, merges at the very top, and `NewestFirst` now
 only decides which end of that list a newly filed task joins (the bottom
 by default, behind everything already queued; the top when it is on).
 
+And that end is now chosen where the task is filed, not in Settings
+(grain/task-202). The new-task form carries an "Add to backlog" picker —
+front, so it runs next, or end, behind everything already queued — and
+`grain create -position front|end` is the same choice from a shell;
+`ui.CreateTaskRequest.AtFront` carries it, and a request that names an
+end wins over whatever is stored. Naming one also *stores* it
+(`Store.SetNewestFirst`, which writes `grain_config.newest_first` alone
+rather than replacing the row the way a settings save does), so the next
+task filed with no opinion joins the same end and the form opens on the
+choice the last one made (`GET /api/config`'s `newestFirst`). That is the
+whole of the remembering: `NewestFirst` was always "where new work joins
+the backlog", and the only thing that changed is that filing a run of
+urgent work at the front no longer means opening Settings first and
+remembering to put it back. A filing that names no end changes nothing —
+a schedule, a proposal or a script cannot quietly reset what a human
+picked — and an interactive session is unaffected either way, since it
+dispatches ahead of the backlog regardless of what any of this says.
+
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
 and sandbox-token identity included. `grain/proxy`'s
@@ -1573,14 +1591,88 @@ child rather than an orphan.
 
 **It has no way to empty its native tool roster.** `claude` takes
 `--tools ''`, which is how `agent/claude` guarantees a run reaches the
-sandbox only through grain's own MCP tools. agy has no equivalent, so
-that guarantee is weaker here: what this package does instead is give the
-subprocess a `HOME` with exactly one MCP server in it and a working
-directory that is the sandbox, and report -- as a transcript line, on the
-run itself -- any tool agy's own `init` event advertises beyond the ones
-grain published. A deployment that needs a hard guarantee should run
-against a kontur sandbox, where the controller's filesystem is not
+sandbox only through grain's own MCP tools, and `codex` takes a read-only
+sandbox that leaves its own tools unable to do damage. agy takes neither,
+so a run always sees agy's `run_command`, `view_file`, `write_to_file` and
+the rest beside grain's, and those execute wherever agy does -- on the
+controller. Three things stand in for the switch. The private `HOME` holds
+exactly one MCP server, so grain's tools are the only MCP tools there are.
+They are registered eagerly, so the model sees them rather than having to
+go looking. And the run's prompt opens by naming *both* rosters: which
+`mcp_grain-sandbox_*` tools reach the sandbox, which of agy's own to treat
+as unavailable, and the fact that the two rosters share names -- so a
+model reaching for "run\_command" picks a tool by its prefix rather than by
+its verb, which is the mistake the bare rule ("use grain's tools") leaves
+available. `verifyToolRoster` then notes, on the run itself, a roster with
+no route to grain at all. A deployment that needs a hard guarantee should
+run against a kontur sandbox, where the controller's filesystem is not
 reachable from the guest at all.
+
+**agy 1.1.26 has no denylist for its own native tools, and this is now
+read off the binary rather than assumed.** The whole of what it offers,
+with the evidence:
+
+- **No flag.** `agy --help` lists `--add-dir`, `--agent`, `--continue`,
+  `--conversation`, `--dangerously-skip-permissions`,
+  `--disable-slash-commands`, `--effort`, `--input-format`,
+  `--json-schema`, `--log-file`, `--mode`, `--model`, `--new-project`,
+  `--output-format`, `--print`, `--print-timeout`, `--project`,
+  `--prompt`, `--prompt-interactive` and `--sandbox`. Nothing names a
+  tool. The subcommands are `agent`/`agents`, `changelog`, `help`,
+  `install`, `mcp`, `mic-serve`, `models`, `plugin`/`plugins`,
+  `remote-control` and `update`; `agy mcp` takes only
+  `add`/`remove`/`list`/`enable`/`disable`.
+- **`enabledTools` and `disabledTools` are an MCP server's, confirmed.**
+  They carry the same `json`/`yaml`/`mapstructure` tags as `command`,
+  `args`, `env`, `url`, `headers`, `timeoutSeconds` and `tools`, on the
+  server entry in `mcp_config.json` -- agy's own changelog names them as
+  fields of that file. Naming agy's tools there is a trap rather than a
+  near miss: grain's tools and agy's share names, so listing
+  `run_command` would deny the run *grain's* `run_command` and leave
+  agy's in place.
+- **The settings file is where the permission system lives, not a
+  roster.** `settings.json` carries `permissionPreset`,
+  `agentPermissions`, `fileAccessPolicy` and `toolConfirmation`
+  (`AgentPermissionPreset` and `AgentSettingPolicy` enums) -- machinery
+  for *approving* a tool call, which is exactly what `Run`'s
+  `--dangerously-skip-permissions` switches off. Nothing there removes a
+  tool from the roster.
+- **A custom agent replaces the prompt, not the toolset.** A Markdown
+  file with YAML frontmatter under `~/.gemini/antigravity-cli/agents/`
+  (or `~/.gemini/agents/`) is discovered even in an otherwise empty
+  private `HOME` -- the shape `writeAgyHome` builds -- and `--agent
+  <name>` selects it. Its frontmatter keys are `name`, `description`,
+  `mainAgent`, `subagent`, `hidden`, `inheritMcp`,
+  `inheritCustomizations`, `commandExecutionPolicy`, `model`, `rules`,
+  `skills`, `plugins` and `mcpServers`. None of them names the native
+  tools an agent may use. The `enable_write_tools` / `enable_mcp_tools` /
+  `enable_subagent_tools` gates that *do* read like that switch belong to
+  a *subagent* definition (`define_subagent`), and whether a main agent
+  honours them is unproven.
+- **Silence is the failure mode to watch.** An unknown key is ignored
+  rather than rejected -- an unknown `settings.json` key still gets a run
+  to its authentication check, and an unknown frontmatter key leaves an
+  agent discoverable -- but a *known* frontmatter key given a value that
+  does not parse drops the agent from `agy agents` without a word
+  (`commandExecutionPolicy: off` and `: auto` parse; `deny`, `manual` and
+  `DENIED` do not). Anything written here therefore has to be asserted
+  live, not merely accepted by the binary.
+
+So the prompt still carries the rule, `--dangerously-skip-permissions`
+plus the permission system is the only place a real denial could come
+from, and a kontur sandbox is what actually contains a native tool.
+
+How that was established is worth keeping, because the question keeps
+coming back and a grain sandbox cannot answer it: the agent sandbox has
+no network beyond the git proxy, and `agy` is a 200MB stripped Go binary
+that is not in it. A throwaway job on this repository's own CI installed
+agy with the same installer the Dockerfile runs, asked it (`agy --help`,
+`agy changelog`, `agy agents`), read its config schema out of the string
+table (`json:`/`yaml:`/`mapstructure:` struct tags, protobuf accessor
+names, `jsonschema_description` text), planted agent definitions in
+candidate directories to see which were read, and pushed the output to a
+branch. `agy changelog` in particular is the closest thing to
+documentation there is, since it ships in the binary.
 
 Two smaller notes. The prompt travels over stdin as a `stream-json` user
 event, not as the argument to `--print`: untrusted issue content must
@@ -2750,8 +2842,8 @@ Every one of those 2,880 commits touched `task_observation.json`; ten of
 them were about anything a human would want to read. Three things
 changed, and the numbers above are all three together.
 
-**A churn tier on a slower clock.** Four tables -- `task_run`,
-`task_observation`, `lease`, `task_read` -- are exported hourly rather
+**A churn tier on a slower clock.** Three tables -- `task_run`,
+`task_observation` and `lease` -- are exported hourly rather
 than every 30 seconds (`pkg/staterepo/tier.go` names them and says why
 each one is on the list). Everything else, which is everything anybody
 reads or reviews, is still exported on every sync and still commits
@@ -2759,6 +2851,14 @@ within 30 seconds of changing. They were not dropped from the dump: a
 clone is still a complete restore, just up to an hour behind on runs,
 which is the one real cost here and is what the alternative -- leaving
 them out entirely -- would have made permanent.
+
+`task_read` was a fourth, and it was a mistake read off the name: it is
+not a record of which tasks a human has looked at, it is the read-only
+repos a task may clone, written by `PutTask` in the same transaction as
+the task row. An hour behind, it made a dump that disagreed with itself
+and a restore that handed a task back with no read scope, so it is on
+the state clock with `task_grant`, `task_link` and `task_tag`, which are
+the rows it belongs beside.
 
 **Packing.** Every commit writes a whole new blob per file it touched, so
 a repository committed to on a timer accumulates loose objects that are
@@ -3044,6 +3144,43 @@ away, so the divergence is reported with the commit and its author named,
 and the pane says the thing an operator actually needs to hear -- that
 this deployment has diverged from its remote and is not syncing -- rather
 than leaving it to be read out of a git error.
+
+### The copying itself is soaked rather than reasoned about
+
+Everything above is a rule about *when* rows move. What was missing was a
+test of the thing underneath all of them -- that a value written into the
+database and read back out of a clone is the same value -- and of what
+happens when the rules meet each other in an order nobody chose.
+
+`pkg/staterepo/soak_test.go` is that: rounds of tasks filed, runs started
+and finished, observations stamped, settings edited in the UI, pull
+requests merged against the repository (a template retitled, added,
+deleted, a file that is not part of the dump), pushes that fail and
+strand grain's own export on the host, merges landing on top of those so
+the two diverge, restarts taking the daemon's own startup path, the clock
+crossing a churn interval, and restores onto a fresh clone with a fresh
+database. Every round it checks that the working tree is clean, that
+grain has made no merge commit, that the dump names no task it does not
+have, that every task ever filed is still in the database with the repos
+it may read, that the settings live are the ones last merged, that the
+repository's state tier is the database's, and that an export of an
+untouched database commits nothing. At the end it restores the remote
+into an empty database and compares the two row by row -- and storage
+class by storage class, since SQLite types values rather than columns and
+a round trip that turned the text `42` into the integer 42 would compare
+equal on the value alone.
+
+Sixty rounds run on every commit; `make soak` turns it up to a couple of
+thousand. It found, or would have found, four things that each produced a
+repository that looked right and handed back a database that was not the
+one exported: an export that was not a snapshot (a table read per
+statement, so a task filed between two of them left a run in the dump
+whose task was not there), text that was not valid UTF-8 silently
+replaced with U+FFFD by `encoding/json`, a start that recovered a
+divergence importing the remote's older dump over everything the failed
+pushes had stranded in the database, and `task_read` -- the repos a task
+may clone, not a record of what a human has read -- exported on the churn
+clock, an hour after the task it belongs to.
 
 ## Deployment configuration lives in the store too
 

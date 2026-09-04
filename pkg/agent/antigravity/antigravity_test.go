@@ -834,3 +834,81 @@ func TestCanOpenPullRequestTracksWithGrainServer(t *testing.T) {
 			"its runs' mcpserver registers no open_pull_request at all")
 	}
 }
+
+// TestToolPreambleNamesEveryToolThatReachesTheSandbox pins the half of
+// the preamble the model has to act on: the tools that do the work are
+// named, in agy's own spelling for them, and they are read off the
+// constructor rather than out of the prose -- a tool added to
+// mcp.NewSandboxTools that the prompt never mentions is one the model
+// has no reason to look for.
+func TestToolPreambleNamesEveryToolThatReachesTheSandbox(t *testing.T) {
+	preamble := toolPreamble(agent.RunConfig{SandboxRoot: "/w"})
+	t.Log(preamble)
+
+	for _, tool := range mcp.NewSandboxTools("") {
+		name := mcp.AgyQualifiedToolName(tool.Name)
+		if !strings.Contains(preamble, name) {
+			t.Errorf("preamble = %q, want %s named in it", preamble, name)
+		}
+	}
+}
+
+// TestToolPreambleTellsARunWhichOfItsOwnToolsNotToUse is the other half,
+// and the one agy gives grain no switch for: its native tools cannot be
+// withheld, so the prompt has to name them. Naming them matters more than
+// stating the rule, because the rule ("anything without grain's prefix")
+// leaves the model to work out which of the 57 tools in front of it that
+// covers, and the two rosters share names -- so the collision is called
+// out too.
+func TestToolPreambleTellsARunWhichOfItsOwnToolsNotToUse(t *testing.T) {
+	preamble := toolPreamble(agent.RunConfig{SandboxRoot: "/w"})
+
+	if !strings.Contains(preamble, strings.Join(withheldNativeTools, ", ")) {
+		t.Errorf("preamble = %q, want agy's own tools named in it: %s",
+			preamble, strings.Join(withheldNativeTools, ", "))
+	}
+	if !strings.Contains(preamble, "unavailable") {
+		t.Errorf("preamble = %q, want it to say what to do about them, not just that they exist", preamble)
+	}
+	// The rule that covers the tools this list does not name.
+	if !strings.Contains(preamble, "anything else whose name does not begin "+mcp.AgyQualifiedToolName("")) {
+		t.Errorf("preamble = %q, want the rule that covers the rest of agy's roster", preamble)
+	}
+	// agy's own run_command and grain's are different tools on different
+	// machines. A model that misses that picks the wrong one while
+	// believing it picked the right one.
+	if !strings.Contains(preamble, "collide") {
+		t.Errorf("preamble = %q, want the shared tool names called out", preamble)
+	}
+}
+
+// A kontur run's sandbox is a VM the forked mcpserver reaches over SSH,
+// so "your sandbox" and "the machine hosting this session" are two
+// different computers rather than two directories -- worth saying, since
+// that is the run where a native tool call lands nowhere near the work.
+func TestToolPreambleSaysAKonturSandboxIsAnotherMachine(t *testing.T) {
+	preamble := toolPreamble(agent.RunConfig{KonturVM: "vm-1"})
+	if !strings.Contains(preamble, "separate virtual machine") {
+		t.Errorf("preamble = %q, want a kontur run told its sandbox is another machine", preamble)
+	}
+}
+
+// joinNames is prose, not JSON: a model reads "a, b and c" as an
+// instruction and ["a","b","c"] as a data structure that wandered into
+// one.
+func TestJoinNamesReadsAsProse(t *testing.T) {
+	for names, want := range map[string]string{
+		"":      "",
+		"a":     "a",
+		"a,b":   "a and b",
+		"a,b,c": "a, b and c",
+	} {
+		var parts []string
+		if names != "" {
+			parts = strings.Split(names, ",")
+		}
+		if got := joinNames(parts); got != want {
+			t.Errorf("joinNames(%v) = %q, want %q", parts, got, want)
+		}
+	}
+}
