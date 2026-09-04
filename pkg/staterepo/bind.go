@@ -35,6 +35,30 @@ var ErrSchemaTooOld = errors.New("state repository was written by an older build
 // that (cmd/grain/statemanager.go).
 var ErrNotApplied = errors.New("state repository holds changes grain could not apply")
 
+// ErrNoLocalCopy is the one unreachable remote a Load will not carry on
+// from: a fetch that failed against a working tree with no commits in it
+// at all.
+//
+// The difference is what grain would be running on. A tree with commits
+// in it was cloned or fetched at some point, so the dump under it is
+// this repository's own content and the database beside it was loaded
+// from that -- the remote being unreachable now costs nothing but the
+// news, and the next tick asks again. A tree with no commits has never
+// held a byte of this repository, and nothing on this host can say
+// whether the remote holds a whole deployment's state or nothing at all.
+// Carrying on there means Seed: an export committed as a root commit
+// sharing no history with the remote's branch, which no push can ever
+// fast-forward and every later pull reports as divergence. Better to
+// stop and say why, and let the start after this one find the remote
+// back.
+//
+// Deliberately not wrapped around ErrUnreachable, even though that is
+// what caused it, so that errors.Is(err, ErrUnreachable) means exactly
+// one thing at a call site deciding whether to start: loaded, but out of
+// touch with the remote.
+var ErrNoLocalCopy = errors.New("the state repository's remote could not be reached and this host " +
+	"has no copy of it to fall back on")
+
 // SettingsTables names the tables Apply imports into a running daemon.
 //
 // The list is the whole of the "which rows may change underneath a live
@@ -198,12 +222,47 @@ func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) 
 //   - otherwise: the repository is exactly where we left it, so the
 //     database is authoritative and nothing is imported. The next sync
 //     exports whatever has happened since.
+//
+// A failure to reach the remote does not stop any of that. Everything
+// above is decided against the working tree, and a tree this host has
+// already loaded is still a tree this host can load again, so a fetch
+// that failed leaves the load going ahead on what is on disk and comes
+// back as an error marked ErrUnreachable -- loaded, but out of touch,
+// which a daemon reports and goes on running. The two exceptions are
+// ErrNoLocalCopy, where there is no tree to fall back on, and every
+// failure that is about the repository's contents rather than about
+// reaching it: a dump at a schema this build cannot read, rows that
+// would not import, a history that has diverged. Those come back
+// unmarked and are a deployment that must stop -- see cmd/grain's own
+// run() for the other half of that decision.
 func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
+	// unreachable, once set, is what this returns at the end of an
+	// otherwise successful load: the caller is owed the fact that the
+	// repository it is running on is however stale the last fetch left
+	// it, even though nothing here failed to do its job.
+	var unreachable error
 	if _, err := r.Pull(ctx); err != nil {
-		return err
+		if !errors.Is(err, ErrUnreachable) {
+			return err
+		}
+		if empty, _ := r.isEmpty(ctx); empty {
+			return fmt.Errorf("%w: %v", ErrNoLocalCopy, err)
+		}
+		unreachable = err
 	}
 	if !HasDump(r.Dir()) {
-		return Seed(ctx, r, db, version)
+		if err := Seed(ctx, r, db, version); err != nil {
+			// A seed ends in a push, and a push cannot land while the
+			// remote is out of reach. The commit it made is on disk either
+			// way and the sync loop puts it out with the first push that
+			// works, so this stays the unreachable remote it started as
+			// rather than becoming a failure to seed.
+			if unreachable == nil {
+				return err
+			}
+			return fmt.Errorf("%w (seeding it locally got as far as: %v)", unreachable, err)
+		}
+		return unreachable
 	}
 	// Checked before anything else, and whether or not this ends up
 	// importing: a dump at a schema this build does not know is a
@@ -229,7 +288,7 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 		return err
 	}
 	if marker != "" && marker == head {
-		return nil
+		return unreachable
 	}
 	// Which tables the import replaces depends on which of three cases
 	// this is, and the markers are what tell them apart.
@@ -271,7 +330,10 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 			return err
 		}
 	}
-	return r.setLoadedHead(ctx, head)
+	if err := r.setLoadedHead(ctx, head); err != nil {
+		return err
+	}
+	return unreachable
 }
 
 // Seed writes the database out as the repository's first content: the

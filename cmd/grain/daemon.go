@@ -102,7 +102,6 @@ import (
 	"github.com/bwsalmon/grain/pkg/model/sqlite"
 	"github.com/bwsalmon/grain/pkg/orchestrator"
 	"github.com/bwsalmon/grain/pkg/secrets"
-	"github.com/bwsalmon/grain/pkg/staterepo"
 	"github.com/bwsalmon/grain/pkg/sysstat"
 	"github.com/bwsalmon/grain/pkg/systemlog"
 	"github.com/bwsalmon/grain/pkg/ui"
@@ -612,20 +611,23 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return fmt.Errorf("opening the state repository: %w", err)
 	}
-	if err := staterepo.Load(ctx, stateRepo, db, model.SchemaVersion); err != nil {
-		// A repository that diverged from its remote is the one failure
-		// here worth a second attempt: a push that failed before somebody
-		// merged a change leaves a local commit that is nothing but this
-		// database's own dump, and refusing to start over it strands the
-		// deployment on a commit it could have thrown away. Anything else
-		// -- and any divergence that is not grain's own -- is still a
-		// start that stops and says so.
-		if !recoverDivergedStateRepo(ctx, stateRepo, err) {
-			return fmt.Errorf("loading the state repository: %w", err)
-		}
-		if err := staterepo.Load(ctx, stateRepo, db, model.SchemaVersion); err != nil {
-			return fmt.Errorf("loading the state repository: %w", err)
-		}
+	//
+	// Not every failure of that load is a reason not to start, and which
+	// ones are is written down in fatalStateRepoLoad (staterepo.go): a
+	// repository this build must not overwrite stops the process, an
+	// unreachable remote does not.
+	loadErr := loadStateRepo(ctx, stateRepo, db)
+	if fatalStateRepoLoad(loadErr) {
+		return fmt.Errorf("loading the state repository: %w", loadErr)
+	}
+	if loadErr != nil {
+		// grain's own sentence first and git's last: what git says about
+		// an unreachable remote runs to several lines, and a journal line
+		// whose point is buried under them is one an operator reads as a
+		// crash. This is a deployment that started.
+		log.Printf("grain: starting on the database this host already has: %s is as the last fetch left "+
+			"it, the sync loop retries every %s, and the UI's State pane says so until one works. "+
+			"The load reported: %v", stateRepo.Dir(), stateSyncInterval, loadErr)
 	}
 	// The repos the git proxy refuses to every sandbox, held live rather
 	// than resolved once. runDaemon's own startGitProxy fills it from
@@ -645,6 +647,10 @@ func run(ctx context.Context, cfg config) error {
 	// repository out from under the timer, so both go through the same
 	// lock rather than holding two handles on one working tree.
 	stateManager := newStateManager(cfg.dataDir, db, stateRepo, openSecrets(cfg.dataDir), forbidden)
+	// A start that carried on past a load it could not finish says so
+	// where an operator looks, not only in the journal of a process they
+	// would have to ssh to read.
+	stateManager.noteLoadFailure(loadErr)
 	syncStopped := make(chan struct{})
 	go func() {
 		defer close(syncStopped)

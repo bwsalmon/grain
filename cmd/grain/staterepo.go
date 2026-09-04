@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -233,6 +234,59 @@ func openStateRepo(ctx context.Context, dataDir string) (*staterepo.Repo, error)
 		return nil, err
 	}
 	return repo, nil
+}
+
+// loadStateRepo is the daemon's startup load: staterepo.Load, with the
+// one retry that is worth making, and nothing decided about what its
+// failure means -- that is fatalStateRepoLoad, immediately below.
+//
+// The retry is for divergence. A repository that diverged from its
+// remote is the one failure here worth a second attempt: a push that
+// failed before somebody merged a change leaves a local commit that is
+// nothing but this database's own dump, and refusing to start over it
+// strands the deployment on a commit it could have thrown away. Any
+// divergence that is not grain's own is left as it is, and reported.
+func loadStateRepo(ctx context.Context, repo *staterepo.Repo, db *sql.DB) error {
+	err := staterepo.Load(ctx, repo, db, model.SchemaVersion)
+	if recoverDivergedStateRepo(ctx, repo, err) {
+		err = staterepo.Load(ctx, repo, db, model.SchemaVersion)
+	}
+	return err
+}
+
+// fatalStateRepoLoad says which failures to load the state repository a
+// deployment must not start over.
+//
+// Two kinds of failure come out of staterepo.Load, and they are not the
+// same fact. One is the repository saying something this build must not
+// act on: a dump at a schema this build cannot read, rows that would not
+// import, a history that diverged and is somebody's to resolve. Starting
+// anyway would export today's database over it on the next tick and push
+// that, which loses whatever was in the way -- somebody's merged pull
+// request, or a newer build's rows. Those stop the process, loudly,
+// and systemd restarting into the same failure is the correct outcome:
+// nothing here can fix them and running would make them worse.
+//
+// The other is not reaching the remote at all -- a network blip, an
+// expired installation token, a repository renamed on GitHub. That says
+// nothing about what the repository holds, and the deployment has a
+// database on disk that is complete and a working tree it has already
+// loaded. Exiting over it takes the whole deployment down, UI included,
+// for a condition that may have cleared by the time anybody notices, and
+// takes with it the one interface an operator would fix it through. So
+// grain starts, on the database it has; the sync loop retries the fetch
+// every stateSyncInterval, and the State pane carries the reason until
+// one works (stateManager.noteLoadFailure).
+//
+// staterepo.ErrNoLocalCopy is the line between them. An unreachable
+// remote on a host with no copy of the repository at all is not a
+// deployment carrying on with what it has -- there is nothing to carry
+// on with, and seeding one would commit a history the remote can never
+// fast-forward onto. It is deliberately not marked ErrUnreachable, so
+// the test below is the whole of the rule rather than a rule with an
+// exception ordered before it.
+func fatalStateRepoLoad(err error) bool {
+	return err != nil && !errors.Is(err, staterepo.ErrUnreachable)
 }
 
 // recoverDivergedStateRepo answers one question for the two places that
