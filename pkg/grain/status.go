@@ -199,42 +199,19 @@ type Answer struct {
 	IsError bool   `json:"isError,omitempty"`
 }
 
-// SignalKind is what a Signal carries.
-type SignalKind string
-
-const (
-	// SignalAddenda folds comments a human added since the grain started
-	// into the conversation as fresh turns.
-	SignalAddenda SignalKind = "addenda"
-	// SignalCancel asks the grain to stop and report a terminal phase. If
-	// it does not, Release destroys it, which is why cancellation needs
-	// no cooperation to be effective.
-	SignalCancel SignalKind = "cancel"
-	// SignalPause stops the agent because the deployment met its own
-	// usage limit -- what orchestrator.Pause broadcasts today by
-	// cancelling every registered run's context.
-	SignalPause SignalKind = "pause"
-)
-
-// Signal is something the controller delivers unasked.
-type Signal struct {
-	// Contract is the wire version this document is written to.
-	Version string     `json:"version"`
-	Kind    SignalKind `json:"kind"`
-	Prompt  string     `json:"prompt,omitempty"`  // SignalPrompt
-	Addenda []string   `json:"addenda,omitempty"` // SignalAddenda, oldest first
-	Reason  string     `json:"reason,omitempty"`  // SignalCancel, SignalPause
-}
-
 // Outcome vocabulary, matching what model.Store.FinishRun already
 // records. It is open, the way metrics.Runs.Outcomes' own doc comment
 // says: task_streak counts anything that is not OutcomeSucceeded the same
 // way, so a new word here backs off and retries like the rest.
 const (
-	OutcomeSucceeded   = "succeeded"
-	OutcomeFailed      = "failed"
-	OutcomeCancelled   = "cancelled"
-	OutcomeNoAction    = "no_action"
+	OutcomeSucceeded = "succeeded"
+	OutcomeFailed    = "failed"
+	OutcomeCancelled = "cancelled"
+	OutcomeNoAction  = "no_action"
+	// OutcomeCancelled is also what a grain killed for a closed task or a
+	// paused deployment gets: the controller supplies it, because
+	// destroying the container is how those stop and there may be no
+	// Result to read.
 	OutcomeSetupFailed = "setup-failed"
 	// OutcomeLost is the container gone out from under a live run --
 	// distinct from "failed" because nothing was attempted that could

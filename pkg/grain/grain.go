@@ -125,14 +125,6 @@ type Grain interface {
 	// first is settled.
 	Answer(ctx context.Context, call CallID, ans Answer) error
 
-	// Signal delivers something the grain did not ask for: the prompt at
-	// the start of the second phase, a comment a human added mid-run, a
-	// cancellation, a usage-limit pause. One mechanism replacing three --
-	// orchestrator's addendaPoller, watchForTaskClosed and
-	// Pause.register, each of which exists because a run in flight had no
-	// address anything could deliver to.
-	Signal(ctx context.Context, sig Signal) error
-
 	// Transcript reads this run's trajectory from a cursor -- the
 	// sequence number of the last record the caller saw, Status.Seq's own
 	// counter -- and returns the next one. Nothing here touches the
@@ -155,9 +147,30 @@ type Grain interface {
 	Transcript(ctx context.Context, from int64) (chunk []byte, next int64, err error)
 
 	// Release destroys the grain: the container, the VMM inside it and
-	// the guest under that, in one operation. Idempotent, and safe on a
-	// grain that is still running -- destroying the container is how a
-	// cancellation that did not take gets enforced, rather than a
-	// detached context racing a deferred cleanup.
+	// the guest under that, in one operation. Idempotent.
+	//
+	// It is also how a grain is cancelled, and there is no separate
+	// mechanism for that. Stopping a container sends SIGTERM and waits
+	// out a grace period before SIGKILL, so the shim -- which is PID 1 --
+	// gets that window to stop the agent, write its Result, and power the
+	// guest down. That is the whole of a graceful cancellation, and it is
+	// the pattern kontur already holds to: its ShutdownTimeout bounds how
+	// long the runtime waits for a guest to power off after SIGTERM, and
+	// its pod manifest's terminationGracePeriodSeconds "must comfortably
+	// exceed" it.
+	//
+	// Being abrupt costs nothing that today does not already cost:
+	// watchForTaskClosed and Pause.register both just cancel the run's
+	// context, killing the agent mid-turn. And a pushed branch survives a
+	// SIGKILL, because salvagePushedBranch asks GitHub whether the branch
+	// is there rather than asking the run.
+	//
+	// **A grain must never be restarted.** A restarted one boots a fresh
+	// guest, re-runs its setup and starts the agent again on the same
+	// prompt while the controller still believes it is the same run: seq
+	// resets and the trajectory interleaves two runs. Kubernetes needs
+	// restartPolicy: Never said explicitly -- kontur's own static pod
+	// manifest says Always, which is right for a long-lived VM and wrong
+	// for this. Docker's default is already correct.
 	Release(ctx context.Context) error
 }

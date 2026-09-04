@@ -397,3 +397,82 @@ steady-state path and `grain status` the fallback for a grain gone quiet.
 It stays level-triggered (a full snapshot, not a delta) and absence stays
 detectable, so it does not reopen poll versus push. The place to go if exec
 cost ever matters.
+
+## Cancellation, and the signal verb that went with it
+
+Cancelling was a `Signal` the grain was expected to act on, after which
+the next poll would see a terminal phase and release it. **Killing the
+container does the same thing in one tick**, because stopping a container
+SIGTERMs the shim and waits out a grace period — so the graceful ending is
+what killing already does, and kontur's own `ShutdownTimeout` plus
+`terminationGracePeriodSeconds` already establish the pattern.
+
+That took `SignalCancel` and `SignalPause` with it, leaving `addenda` as
+the only signal — and `addenda` has no consumer.
+
+### How addenda would reach an agent, if it ever did
+
+Worth keeping, because the mechanism is not obvious and the analysis was
+done. A comment added mid-run has to become a new user turn, and there are
+three ways:
+
+1. **Piggyback on the next tool result.** The shim intercepts every MCP
+   call, so it can append a delimited note to the next result the agent
+   receives. Works with *every* CLI, needs no capability from any of them,
+   and arrives within seconds for an active agent. Out-of-band content on
+   an in-band channel, which is a hack — but a well-understood one, and it
+   crosses no new trust boundary, since that human's comments already
+   reach the agent through the prompt.
+2. **A built-in tool the agent calls** (`check_messages`). Universal, but
+   depends on the agent choosing to call it, and one deep in a task often
+   will not.
+3. **Streaming stdin.** Semantically cleanest — a real user turn. `claude`
+   supports it (`--input-format stream-json`, pairing with the
+   `--output-format stream-json` already at `claude.go:574`); today the
+   prompt goes in as `cmd.Stdin = strings.NewReader(stdin)`, which hits
+   EOF immediately, so grain is one-shot by construction rather than by
+   limitation. Unknown for `codex`, and unlikely for `agy`, which already
+   lacks `--mcp-config` and `--max-turns`.
+
+The shape would be (1) as the baseline with (3) as a per-framework
+upgrade, which is exactly what the framework profile is for — it already
+knows how to launch its CLI, so "and this one takes streaming input" is a
+fact of the same kind.
+
+**Not built**, because nothing consumes addenda today:
+`agent.RunConfig.Addenda`'s own doc comment says neither framework calls
+it, and a comment posted mid-run waits for the next dispatch. A verb for a
+capability nobody uses is dead surface on a contract between two
+separately released artifacts.
+
+**Cheap to reverse.** A new subcommand is additive: an old shim returns
+exit 2, which the controller already reads as version skew. Worth
+revisiting if a run ever needs to hear something without being restarted —
+and note it is *more* feasible in a grain than today, since the shim owns
+both the agent's stdin and the MCP channel, where today the MCP server is
+a forked subprocess on the controller and nothing owns stdin at all.
+
+## What Kubernetes gives natively, and what it does not
+
+Checked when asking whether any of this duplicates something k8s already
+does.
+
+**`.status.containerStatuses[]`** — `state`, `ready`, `restartCount`, and
+for terminated ones `exitCode`/`reason`/`message`. This is what `List`
+already reads; on docker it is `docker ps`/`docker inspect`, and the
+information is the same.
+
+**The termination message** is the one genuine addition: a container
+writes `/dev/termination-log` and Kubernetes surfaces it in the pod
+status, so a finished grain's outcome arrives with the listing rather than
+needing an exec. Taken.
+
+**Probes are the wrong tool.** They are binary, they exist for the kubelet
+to act on rather than for an external reader, and liveness in particular
+*restarts* — which a grain must never be. A readiness probe could surface
+"provisioned" in the pod listing for free, letting `List` skip the exec for
+still-provisioning grains; marginal, and recorded rather than built.
+
+**What Kubernetes does not give** is mid-run rich state — activity, the
+outstanding call, `seq`. There is no native "ask the container what it is
+doing" short of exec, so the poll stays.

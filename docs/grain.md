@@ -267,12 +267,13 @@ grain run
 
 grain status                       > status.json
 grain answer  --call <id>          < answer.json
-grain signal  --id <id>            < signal.json
 ```
 
-Three verbs on the control surface. Payloads go on stdin, never argv — a
-prompt-sized document crosses the runtime's API as JSON, and stdin has no
-size limit and no quoting hazard.
+**Two verbs on the control surface**: read the status, answer the one call
+it may be blocked on. Everything else a controller does to a grain is a
+container-runtime operation — create it, list it, tail its logs, destroy
+it. Payloads go on stdin, never argv, since stdin has no size limit and no
+quoting hazard.
 
 `run`'s stdout is the container log stream; a `status` started by `docker
 exec` writes to whoever called it. Different streams, which reads as a
@@ -295,13 +296,12 @@ is not running, as against propagating the command's code. The first means
 
 ### Delivery
 
-`answer` and `signal` cannot hand anything to the supervisor directly —
-different process — so they write into a spool directory it watches,
-atomically, named by the caller's id. The supervisor consumes each and
-echoes its id in `status.consumed`; the controller stops resending once it
-sees its own id there. At-least-once with dedupe by id, which is what makes
-both idempotent, and why `signal` takes an `--id` though it replies to
-nothing.
+`answer` cannot hand anything to the supervisor directly — different
+process — so it writes into a spool directory the supervisor watches,
+atomically, named by the call's id. The supervisor consumes it and echoes
+that id in `status.consumed`; the controller stops resending once it sees
+its own id there. At-least-once with dedupe by id, which is what makes
+`Answer` idempotent as the interface promises.
 
 ### Versioning
 
@@ -409,21 +409,47 @@ is a call it simply does not answer until CI has a verdict, and
 a human is watching, or refuse it to reproduce today's end-the-turn
 behaviour. Both are one tool result the agent reacts to.
 
-### `signal.json` → `grain signal --id sig-20`
+### Stopping a grain
 
-```json
-{ "version": "v1", "kind": "addenda", "addenda": ["Also fix the flake in TestMergeQueue."] }
-{ "version": "v1", "kind": "cancel", "reason": "the task was closed" }
-{ "version": "v1", "kind": "pause", "reason": "the deployment met its usage limit" }
-```
+There is no cancel verb. **Stopping a grain is destroying it**: stopping a
+container sends SIGTERM and waits out a grace period before SIGKILL, so
+the shim — PID 1 — gets that window to stop the agent, write its `Result`,
+and power the guest down. That is the whole of a graceful cancellation.
 
-One mechanism replacing three: `orchestrator`'s `addendaPoller`,
-`watchForTaskClosed` and `Pause.register` all exist because a run in flight
-has no address anything can deliver to.
+It is the pattern the stack already holds to: kontur's `ShutdownTimeout`
+bounds how long the runtime waits for a guest to power off after SIGTERM,
+and its manifest's `terminationGracePeriodSeconds` "must comfortably
+exceed" it.
 
-Signals are the half of this channel that is **not** MCP, and that split is
-the rule for anything added later: a tool is a declaration and costs grain
-nothing, where lifecycle is a change to this contract.
+Being abrupt costs nothing today does not already cost —
+`watchForTaskClosed` and `Pause.register` both just cancel the run's
+context, killing the agent mid-turn — and a pushed branch survives a
+SIGKILL, since `salvagePushedBranch` asks GitHub whether the branch is
+there rather than asking the run.
+
+**A grain must never be restarted.** A restarted one boots a fresh guest,
+re-runs its setup and starts the agent again on the same prompt while the
+controller still believes it is the same run: `seq` resets and the
+trajectory interleaves two runs. Kubernetes needs `restartPolicy: Never`
+said explicitly — kontur's own static pod manifest says `Always`
+(`internal/staticpod/manifest.go:92`), which is right for a long-lived VM
+and wrong for this. Docker's default is already correct.
+
+### `/dev/termination-log`
+
+On the way out the shim writes its `Result` to `/dev/termination-log` as
+well as to its status. Kubernetes surfaces that file in
+`.status.containerStatuses[].state.terminated.message`, so a finished
+grain's outcome arrives in the same pod listing that enumerates it, with
+no exec at all.
+
+That covers the read that must not be missed: a grain that finished but
+whose `status` exec fails is a run the controller cannot finish, and it
+holds a slot until something notices. Pair it with
+`terminationMessagePolicy: FallbackToLogsOnError` for a shim that died
+before writing one. The cap is a few kilobytes, so a `Result` belongs
+there and a trajectory does not; under docker nothing reads the file and
+writing it costs a few hundred bytes.
 
 ### Trajectory records ← `docker logs`
 
@@ -461,7 +487,6 @@ type Grain interface {
 	ID() ID
 	Observe(ctx context.Context) (Status, error)
 	Answer(ctx context.Context, call CallID, ans Answer) error
-	Signal(ctx context.Context, sig Signal) error
 	Transcript(ctx context.Context, from int64) (chunk []byte, next int64, err error)
 	Release(ctx context.Context) error
 }
@@ -470,7 +495,8 @@ type Grain interface {
 Half of it never reaches the shim: `Create` is `konturctl vm create` with
 the grain's environment and mount, `List` is `docker ps --filter
 label=grain.id`, `Transcript` is `docker logs --since`, `Release` is
-`docker rm -f`. A method that cannot be served by one subcommand or one
+`docker rm -f` (and is also how a grain is cancelled). Two methods are
+actual shim calls, matching the two verbs. A method that cannot be served by one subcommand or one
 runtime operation has drifted from what the transport can do.
 
 There is deliberately **no `Rebuild`**. Rebuilding the guest is internal to
@@ -506,10 +532,15 @@ whole per-grain policy is a table test. Its ordering is the decision:
 | 2 | `lost` (container gone) | live | `fail(lost)`, `release` |
 | 3 | terminal | live | `finish`, `release` |
 | 4 | `rebuilds > MaxRebuilds` | live | `fail(thrashing)`, `release` |
-| 5 | any | task closed | `signal(cancel)` |
-| 5 | any | paused | `signal(pause)` |
+| 5 | any | task closed | `fail(cancelled)`, `release` |
+| 5 | any | paused | `fail(cancelled)`, `release` |
 | 6 | `provisioning`, over budget | live | `fail(setup-failed)`, `release` |
-| 7 | `running` / `blocked` | live | `answer` the one call; `signal(addenda)`; mirror activity |
+| 7 | `running` / `blocked` | live | `answer` the one call; mirror activity |
+
+Row 5 is one tick, not two: signalling and then waiting for the next poll
+to see a terminal phase was the only place this table needed a follow-up
+round. The controller supplies the outcome rather than reading one back,
+because SIGKILL may win.
 
 Row 2 has no repair path, deliberately: a wedged *guest* never reaches the
 controller, because the shim rebuilds it. `PhaseLost` means the whole grain

@@ -80,6 +80,23 @@ const (
 	DirPlacements = Root + "/placements"
 )
 
+// FileTerminationLog is where a grain writes its final Result on the way
+// out, in addition to its status.
+//
+// Kubernetes surfaces this file's contents in the pod's own status --
+// .status.containerStatuses[].state.terminated.message -- so a finished
+// grain's outcome arrives in the same listing that enumerates it, with no
+// exec at all. That matters for the one read that must not be missed: a
+// grain that finished but whose status exec fails is a run the controller
+// cannot finish, and it holds a slot until something notices.
+//
+// The path is Kubernetes' own default and its cap is a few kilobytes, so
+// a Result belongs here and a trajectory does not. Pair it with
+// terminationMessagePolicy: FallbackToLogsOnError for the shim that died
+// before it could write one. Under docker nothing reads this file, and
+// writing it anyway costs a few hundred bytes.
+const FileTerminationLog = "/dev/termination-log"
+
 // ModeSetup is the mode FileSetup is written with. Executable, because a
 // script that has to be invoked through an interpreter cannot carry its
 // own shebang, and the controller composing it should be free to choose

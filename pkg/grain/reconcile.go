@@ -49,9 +49,6 @@ type RunRow struct {
 	// which stops every grain rather than letting each spend an agent's
 	// worth of wall clock discovering the same refusal.
 	Paused bool
-	// PendingAddenda are comments added since this grain started, oldest
-	// first, that have not been delivered yet.
-	PendingAddenda []string
 	// Activity is what the row currently says the grain is doing, so a
 	// tick that changes nothing writes nothing.
 	Activity string
@@ -74,8 +71,6 @@ type Observed struct {
 type ActionKind string
 
 const (
-	// ActionSignal delivers Action.Signal.
-	ActionSignal ActionKind = "signal"
 	// ActionAnswer serves Action.Call -- the one forwarded MCP tool call
 	// this grain is blocked on.
 	ActionAnswer ActionKind = "answer"
@@ -98,7 +93,6 @@ const (
 // next tick observes whatever actually happened and decides again.
 type Action struct {
 	Kind     ActionKind
-	Signal   Signal
 	Call     CallID
 	Outcome  string
 	Detail   string
@@ -126,7 +120,8 @@ type Action struct {
 //  4. Thrashing is checked before the budget: a grain rebuilding in a
 //     loop is failing for a reason worth naming, not merely slow.
 //  5. Cancellation and pause come before the ordinary steady state, so
-//     a grain being stopped is not also handed addenda.
+//     a grain being stopped is not also served. Both are a kill: there is
+//     no signal for either.
 //  6. A provisioning grain past its budget is failed. Nothing else about
 //     a grain that cannot finish booting is worth doing.
 //  7. Otherwise, keep it served: at most one forwarded call, because a
@@ -175,16 +170,26 @@ func Reconcile(o Observed, p Policy) []Action {
 		}
 	}
 
-	// 5. Stop it. Cancelling is a Signal rather than a Release so the
-	// grain gets to end on its own terms and report a Result; the next
-	// tick sees a terminal phase and releases through case 3. A grain
-	// that ignores it is released by case 6's budget or by the run's own
-	// MaxRuntime, so cooperation is preferred but not required.
+	// 5. Stop it, which is destroying it: stopping a container SIGTERMs
+	// the shim and waits out a grace period, so the graceful ending is
+	// what killing already does and there is nothing a separate signal
+	// would buy. The controller supplies the outcome rather than reading
+	// one back, because SIGKILL may win.
+	//
+	// One tick rather than two. Signalling and waiting for the next poll
+	// to see a terminal phase was the only place this table needed a
+	// follow-up round.
 	if o.Run.TaskClosed {
-		return []Action{{Kind: ActionSignal, Signal: Signal{Kind: SignalCancel, Reason: "the task was closed"}}}
+		return []Action{
+			{Kind: ActionFail, Outcome: OutcomeCancelled, Detail: "the task was closed"},
+			{Kind: ActionRelease},
+		}
 	}
 	if o.Run.Paused {
-		return []Action{{Kind: ActionSignal, Signal: Signal{Kind: SignalPause, Reason: "the deployment met its usage limit"}}}
+		return []Action{
+			{Kind: ActionFail, Outcome: OutcomeCancelled, Detail: "the deployment met its usage limit"},
+			{Kind: ActionRelease},
+		}
 	}
 
 	// 6. Stuck before there was ever an agent.
@@ -198,16 +203,12 @@ func Reconcile(o Observed, p Policy) []Action {
 		}
 	}
 
-	// 7. Steady state: serve the call it is blocked on, tell it what it
-	// missed, and keep its row honest. All three are independent, and a
-	// tick that has nothing to do returns nothing at all.
+	// 7. Steady state: serve the call it is blocked on and keep its row
+	// honest. Both are independent, and a tick with nothing to do returns
+	// nothing at all.
 	var out []Action
 	if st.Call != nil {
 		out = append(out, Action{Kind: ActionAnswer, Call: st.Call.ID})
-	}
-	if len(o.Run.PendingAddenda) > 0 {
-		out = append(out, Action{Kind: ActionSignal,
-			Signal: Signal{Kind: SignalAddenda, Addenda: o.Run.PendingAddenda}})
 	}
 	if st.Activity != o.Run.Activity {
 		out = append(out, Action{Kind: ActionRecordActivity, Activity: st.Activity})

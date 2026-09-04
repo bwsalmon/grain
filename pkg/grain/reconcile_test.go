@@ -128,13 +128,13 @@ func TestReconcile(t *testing.T) {
 	}, {
 		// Signalled, not released: the grain gets to end on its own terms
 		// and report a Result, and the next tick releases it via case 3.
-		name: "a closed task is signalled rather than destroyed",
+		name: "a closed task is failed and destroyed in one tick",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseRunning, Since: start},
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, TaskClosed: true},
 			Now:    start.Add(time.Minute),
 		},
-		want: []grain.ActionKind{grain.ActionSignal},
+		want: []grain.ActionKind{grain.ActionFail, grain.ActionRelease},
 	}, {
 		name: "a paused deployment stops its grains",
 		obs: grain.Observed{
@@ -142,17 +142,17 @@ func TestReconcile(t *testing.T) {
 			Run:    &grain.RunRow{ID: "task-7-1", Live: true, Paused: true},
 			Now:    start.Add(time.Minute),
 		},
-		want: []grain.ActionKind{grain.ActionSignal},
+		want: []grain.ActionKind{grain.ActionFail, grain.ActionRelease},
 	}, {
-		// A grain being stopped is not also handed addenda.
+		// A grain being stopped is not also served.
 		name: "a cancelled grain is not also served",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building"},
-			Run: &grain.RunRow{ID: "task-7-1", Live: true, TaskClosed: true,
-				PendingAddenda: []string{"one more thing"}},
+			Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building",
+				Call: &grain.Call{ID: "c1", Tool: "open_pull_request"}},
+			Run: &grain.RunRow{ID: "task-7-1", Live: true, TaskClosed: true},
 			Now: start.Add(time.Minute),
 		},
-		want: []grain.ActionKind{grain.ActionSignal},
+		want: []grain.ActionKind{grain.ActionFail, grain.ActionRelease},
 	}, {
 		name: "a boot within budget is waited on",
 		obs: grain.Observed{
@@ -191,17 +191,14 @@ func TestReconcile(t *testing.T) {
 		},
 		want: nil,
 	}, {
-		name: "a forwarded call is answered, addenda delivered and activity mirrored",
+		name: "a forwarded call is answered and activity mirrored",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseBlocked, Since: start, Activity: "waiting for CI",
 				Call: &grain.Call{ID: "c1", Tool: "open_pull_request"}},
-			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building",
-				PendingAddenda: []string{"also fix the flake"}},
+			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building"},
 			Now: start.Add(time.Minute),
 		},
-		want: []grain.ActionKind{
-			grain.ActionAnswer, grain.ActionSignal, grain.ActionRecordActivity,
-		},
+		want: []grain.ActionKind{grain.ActionAnswer, grain.ActionRecordActivity},
 	}}
 
 	for _, tc := range cases {
@@ -261,8 +258,7 @@ func TestReconcileAnswersAtMostOneCall(t *testing.T) {
 			Phase: grain.PhaseBlocked, Since: start, Activity: "waiting for CI",
 			Call: &grain.Call{ID: "c1", Tool: "wait_for_checks"},
 		},
-		Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "waiting for CI",
-			PendingAddenda: []string{"one more thing"}},
+		Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "waiting for CI"},
 		Now: start.Add(time.Minute),
 	}
 	answers := 0
