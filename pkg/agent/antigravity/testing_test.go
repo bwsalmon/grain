@@ -99,8 +99,12 @@ func TestScriptSeesThePrompt(t *testing.T) {
 	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: prompt, SandboxRoot: t.TempDir()}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if seen != prompt {
-		t.Errorf("Script saw prompt %q, want %q", seen, prompt)
+	// Contains rather than equals: Framework.Run prepends toolPreamble to
+	// what it sends, and a real agy sees that too. The generator matches
+	// the target repo and branch out of whatever arrives, so what this
+	// pins is that the task's own prompt reaches the script whole.
+	if !strings.Contains(seen, prompt) {
+		t.Errorf("Script saw prompt %q, want it to carry %q", seen, prompt)
 	}
 }
 

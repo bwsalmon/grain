@@ -1651,14 +1651,22 @@ credential comes up holding grain's tools.
 test that execs the real `agy`, and it now asserts the two things a
 scripted run cannot show, separately and in this order:
 
-- **the roster.** agy's opening `init` event names the tools it actually
-  loaded, so the test keeps the run's raw `stream-json`
+- **a route to grain at all.** agy's opening `init` event names the tools
+  it loaded, so the test keeps the run's raw `stream-json`
   (`RunConfig.TranscriptPath`) and reads that event back: the roster must
-  carry `mcp__grain-sandbox__*` names, `run_command` among them. This is
-  checked before the run's own error is, deliberately -- a run given no
-  tools fails later on anyway, and every one of those later failures
-  reads like a model that would not do as it was asked rather than like
-  one that was never handed a way to.
+  carry `call_mcp_tool` or an `mcp_grain-sandbox_*` name. This is checked
+  before the run's own error is, deliberately -- a run given no tools
+  fails later on anyway, and every one of those later failures reads like
+  a model that would not do as it was asked rather than like one that was
+  never handed a way to.
+
+  It asked a stronger question first, and got it wrong: it demanded
+  `mcp__grain-sandbox__*` names in that roster, on the theory that the
+  roster is the run's whole tool vocabulary. Running it proved otherwise.
+  agy's `init` event lists agy's own 57 native tools and *never* an MCP
+  tool, under either spelling, eagerly registered or not -- so the old
+  assertion would have failed every live run, and blamed a config file
+  that was in the right place all along.
 - **a call that landed.** At least one `run_command` call has to have
   returned without error, and the assertions already there -- the pushed
   branch, the line in `NOTES.md` -- are what say it reached this run's
@@ -1686,15 +1694,24 @@ skipping it, so nobody comes away believing the roster was checked when
 nothing checked it. The `-v` output logs the whole advertised roster,
 which is the line to read.
 
-**Last exercised: not yet, as of 2026-09-03.** The assertions above and
-this note landed together, written and reviewed without ever being run
-against a live agy: the sandbox they were written in had no
-`GEMINI_API_KEY`, no `agy`, and no route to the network either credential
-or binary would have come from. So the claim that a live run comes up
-holding grain's tools still rests on the binary analysis above and on an
-assertion nothing has yet executed. Whoever first runs the command above
-against a real key should replace this paragraph with the agy version
-they ran, the date, and what the roster came back as.
+**Last exercised: 2026-09-04, against agy 1.1.25 and a live Gemini API
+key.** It passed, and it had to be repaired first: the run was cut off
+five minutes in by agy's own `--print-timeout` default, its tools were
+loaded lazily behind agy's `call_mcp_tool` dispatcher rather than
+registered, and the names it did report were spellings grain did not
+recognize. Those are fixed; what the roster came back as is the 57 native
+tools quoted above, with `call_mcp_tool` among them and no grain tool at
+all -- which is what the assertion now looks for. The proof that the run
+reached its sandbox is the call that landed: `run_command`, recorded
+under its bare name, which cloned, branched, committed and pushed.
+
+The lesson to keep is the one that generalizes past this run: **every
+fault it found was a difference between what agy does and what
+`agent/antigravity` assumed it did, and every scripted test in this
+repository asserted the assumption.** A fake that speaks the protocol
+faithfully is still a fake of one's own beliefs about the protocol. Run
+this by hand after anything that changes how agy is invoked, and after an
+agy upgrade -- and when it fails, suspect the belief before the code.
 
 ## Letting a run watch its own CI
 

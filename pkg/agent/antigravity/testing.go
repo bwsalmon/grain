@@ -92,6 +92,23 @@ type scriptRunner struct {
 	script Script
 }
 
+// agyNativeRoster is what this fake advertises in its init event, and it
+// is agy's own native tools rather than grain's on purpose: that is what
+// a real agy advertises. Its roster never carries an MCP tool under any
+// spelling, eagerly registered or not -- only call_mcp_tool, the
+// dispatcher that reaches the lazily loaded ones. A fake that advertised
+// grain's tools there would describe a run nothing like the real thing,
+// and would have hidden that verifyToolRoster was asking a question the
+// roster cannot answer.
+//
+// A representative handful rather than all 57: the point is the shape --
+// agy's own tools, plus the bridge -- not the exact catalogue of an agy
+// version this repository does not pin.
+var agyNativeRoster = []string{
+	"call_mcp_tool", "run_command", "view_file", "write_to_file",
+	"replace_file_content", "grep_search", "find_by_name", "finish",
+}
+
 // Run implements runner. It reads the prompt back out of the stdin user
 // event Framework.Run wrote, finds the sandbox this run was pointed at in
 // the same --add-dir argument a real agy would have read, and plays the
@@ -142,7 +159,7 @@ func (r *scriptRunner) Run(ctx context.Context, args []string, stdin string, _ [
 
 	if err := emit(map[string]any{
 		"event": "init",
-		"init":  map[string]any{"cwd": root, "tools": allowedTools(), "permission_mode": "bypass"},
+		"init":  map[string]any{"cwd": root, "tools": agyNativeRoster, "permission_mode": "bypass"},
 	}); err != nil {
 		return out.String(), err
 	}
@@ -190,18 +207,22 @@ func (r *scriptRunner) Run(ctx context.Context, args []string, stdin string, _ [
 		}
 		idx++
 		// A script names a tool the way this package's registry does
-		// ("propose_task"); agy names it the way it loaded it from its MCP
-		// settings (mcp.QualifiedToolName's "mcp__grain-sandbox__
-		// propose_task"). The stream this fake emits has to use agy's
-		// spelling, or every test built on it exercises a name no real run
-		// ever produces -- which is exactly how a parser that recorded the
-		// reported name verbatim handed orchestrator.ProcessResult tool
-		// names it could never match, dropping a real agent's ask_question,
-		// comment_on_issue and propose_task calls on the floor while this
-		// whole suite passed (mcp.BareToolName's own doc comment has the
-		// full cost). The call itself still goes to the registry under the
-		// bare name, which is what the server registered it as.
-		reported := mcp.QualifiedToolName(next.Tool)
+		// ("propose_task"); agy names it the way it registered it from
+		// this run's MCP config -- mcp.AgyQualifiedToolName's
+		// "mcp_grain-sandbox_propose_task", single underscores, since
+		// Framework.Run asks for every grain tool eagerly. The stream this
+		// fake emits has to use agy's spelling, or every test built on it
+		// exercises a name no real run ever produces -- which is exactly
+		// how a parser that recorded the reported name verbatim handed
+		// orchestrator.ProcessResult tool names it could never match,
+		// dropping a real agent's ask_question, comment_on_issue and
+		// propose_task calls on the floor while this whole suite passed.
+		// It happened once with claude's spelling and again with agy's,
+		// and this fake carried the wrong one both times
+		// (mcp.BareToolName's own doc comment has the full cost). The call
+		// itself still goes to the registry under the bare name, which is
+		// what the server registered it as.
+		reported := mcp.AgyQualifiedToolName(next.Tool)
 		if err := emit(toolEvent(idx, stateActive, reported, next.Args, "", false)); err != nil {
 			return out.String(), err
 		}
