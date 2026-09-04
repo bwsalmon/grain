@@ -122,9 +122,7 @@ func relayReviewFeedback(ctx context.Context, store *model.Store, client github.
 		return 0, err
 	}
 	if !ok {
-		return 0, relayFindingsToConversation(ctx, store, task, findings,
-			"This run recorded review feedback, but it is not reviewing a pull request, so "+
-				"there was nothing to attach a review to. The findings are here instead:", now)
+		return 0, relayFindingsToConversation(ctx, store, task, findings, noPullRequestPreamble(task), now)
 	}
 
 	if _, err := client.CreateReview(ref.Repo.Owner, ref.Repo.Name, ref.Number,
@@ -194,6 +192,22 @@ func reviewedPullRequest(ctx context.Context, store *model.Store, task model.Tas
 		return reviewed, ref, true, nil
 	}
 	return nil, model.PullRequestRef{}, false, nil
+}
+
+// noPullRequestPreamble says why findings ended up in a conversation
+// rather than on a diff, and the two reasons are not the same thing to
+// whoever reads them. An ordinary task's run reached for a tool meant for
+// a review, which is worth knowing but is nobody's bug; a review with no
+// pull request behind it is something that should not happen, and saying
+// only "this run is not reviewing a pull request" about it would hide it.
+func noPullRequestPreamble(task model.Task) string {
+	if isReviewTask(task) {
+		return "This run recorded review feedback, but grain could not find the pull request " +
+			"it is reviewing -- the task it was filed against may have lost its own pull " +
+			"request link. The findings are here instead:"
+	}
+	return "This run recorded review feedback, but it is not reviewing a pull request, so " +
+		"there was nothing to attach a review to. The findings are here instead:"
 }
 
 // inlineComments is the half of the findings GitHub can anchor to the
