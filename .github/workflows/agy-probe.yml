@@ -38,7 +38,7 @@ jobs:
 
       - name: Schema, with adjacency
         run: |
-          set -uo pipefail
+          set +e +o pipefail
           out=/tmp/agy-evidence
           rm -rf "$out"; mkdir -p "$out"
           agy --version > "$out"/version.txt 2>&1
@@ -69,7 +69,7 @@ jobs:
 
       - name: What a print-mode run actually loads
         run: |
-          set -uo pipefail
+          set +e +o pipefail
           out=/tmp/agy-evidence
 
           probe() { # $1 = label, $2 = settings json, rest = extra agy args
@@ -123,7 +123,7 @@ jobs:
 
       - name: Digest
         run: |
-          set -uo pipefail
+          set +e +o pipefail
           cd /tmp/agy-evidence
           echo "===== print mode ====="; head -200 print-mode.txt
           echo "::error::probe job -- fails on purpose so its log is quoted back"
