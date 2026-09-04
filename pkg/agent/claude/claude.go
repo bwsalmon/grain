@@ -283,8 +283,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // allowedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
-// and NewTaskTools register, plus selfdebug.SourceTools', mcp__-prefixed
+// NewPullRequestTools, NewOpenPullRequestTools and
+// NewRecreateSandboxTools register, plus selfdebug.SourceTools', mcp__-prefixed
 // the way claude reports them once loaded from --mcp-config -- computed
 // from those constructors
 // directly rather than hand-copied, so this can never drift from what
@@ -330,12 +330,9 @@ func allowedTools() []string {
 	// again: mcpserver registers them only for a run whose task holds
 	// that grant (-self-debug), and this list only filters what it
 	// registers, so a run without the grant is unaffected by their being
-	// named here. "" is a source directory and nil a TaskReader no run
-	// ever gets -- this only wants the names.
+	// named here. "" is a source directory no run ever gets -- this only
+	// wants the names.
 	for _, t := range selfdebug.SourceTools("") {
-		names = append(names, mcp.QualifiedToolName(t.Name))
-	}
-	for _, t := range mcp.NewTaskTools(nil) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	return names
