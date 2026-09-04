@@ -277,17 +277,36 @@ func (p *parsedEvents) applyStep(s *rawStep) {
 	}
 }
 
+// mcpDispatcherTool is agy's own native tool for calling a *lazily*
+// loaded MCP tool: one call taking the server, the tool and the
+// arguments, rather than the tool itself appearing in the roster.
+// Framework.Run configures grain's tools eagerly precisely so a run does
+// not have to go through it (see eagerToolsConfig), but the dispatcher
+// remains in every roster and a model may still reach for it, so
+// unwrapDispatch below reads that shape too.
+const mcpDispatcherTool = "call_mcp_tool"
+
+// The three parameters mcpDispatcherTool takes. Capitalized as agy spells
+// them, which is not the casing MCP tools' own arguments use.
+const (
+	dispatchServerKey = "ServerName"
+	dispatchToolKey   = "ToolName"
+	dispatchArgsKey   = "Arguments"
+)
+
 // toolCall reads a tool step's name and arguments, preferring the nested
 // tool_info (where agy puts them) and falling back to the step's own
 // tool_name so a build that reports only the flat field still names the
 // call correctly.
 //
-// The name comes back bare rather than as agy reported it: agy names
-// every tool it loaded from its MCP settings "mcp__grain-sandbox__<tool>"
-// (this package's own allowedTools writes that prefix), and
-// agent.ToolCall.Name is the tool's identity rather than one CLI's
-// spelling of it. mcp.BareToolName's own doc comment has what recording
-// the prefixed name cost.
+// The name comes back bare rather than as agy reported it -- and a call
+// made through agy's MCP dispatcher comes back as the tool it dispatched
+// to. agent.ToolCall.Name is the tool's identity, not one CLI's spelling
+// of it, and agy has three spellings for the same call: the tool's own
+// name for a native tool, "mcp_grain-sandbox_<tool>" for an MCP tool it
+// registered eagerly, and "call_mcp_tool" with the real name in its
+// arguments for one it did not. mcp.BareToolName's own doc comment has
+// what recording the wrong one cost, twice.
 func (s *rawStep) toolCall() (string, map[string]any) {
 	name := s.ToolName
 	var args map[string]any
@@ -297,7 +316,37 @@ func (s *rawStep) toolCall() (string, map[string]any) {
 		}
 		args = s.ToolInfo.Parameters
 	}
+	if dispatched, dispatchedArgs, ok := unwrapDispatch(name, args); ok {
+		return dispatched, dispatchedArgs
+	}
 	return mcp.BareToolName(name), args
+}
+
+// unwrapDispatch reads a mcpDispatcherTool call as the call it actually
+// made: {"ServerName":"grain-sandbox","ToolName":"comment_on_issue",
+// "Arguments":{"comment":"..."}} is a comment_on_issue call with that
+// comment, and recording it as "call_mcp_tool" instead is what makes
+// orchestrator.ProcessResult -- which matches the bare name exactly --
+// relay nothing.
+//
+// A dispatch naming some other server is left alone: it is a call this
+// grain did not publish and has no business renaming. So is one naming no
+// tool, which cannot be attributed to anything.
+func unwrapDispatch(name string, args map[string]any) (string, map[string]any, bool) {
+	if name != mcpDispatcherTool || args == nil {
+		return "", nil, false
+	}
+	if server, ok := args[dispatchServerKey].(string); !ok || server != mcp.ToolNamespace {
+		return "", nil, false
+	}
+	tool, ok := args[dispatchToolKey].(string)
+	if !ok || tool == "" {
+		return "", nil, false
+	}
+	// Absent or of some other shape means a tool called with no
+	// arguments, which is ordinary -- open_pull_request takes none.
+	dispatched, _ := args[dispatchArgsKey].(map[string]any)
+	return mcp.BareToolName(tool), dispatched, true
 }
 
 // toolResult reads what a terminal tool step returned. agy nests both

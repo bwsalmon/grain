@@ -21,11 +21,27 @@ func QualifiedToolName(tool string) string {
 	return "mcp__" + ToolNamespace + "__" + tool
 }
 
-// BareToolName undoes QualifiedToolName: given whatever name a CLI
-// reported a call under, it returns the name this package actually
-// registered the tool as. A name without the prefix -- a CLI's own native
-// tool, or a framework whose runtime calls tools in-process -- comes back
-// unchanged.
+// AgyQualifiedToolName is QualifiedToolName in the other spelling a CLI
+// uses for the same tool: "mcp_<namespace>_<tool>", with single
+// underscores. That is what the Antigravity CLI (agy) names an MCP tool
+// it registered eagerly ("Eagerly loaded tools are registered as native
+// tools under the name `mcp_<server>_<tool>`", agy 1.1.25), and it is not
+// a variant of the claude spelling above -- it is a different string that
+// has to be recognized on its own, or every call an agy run makes reaches
+// BareToolName unchanged and matches nothing downstream.
+//
+// Only agent/antigravity has any use for it; it lives here beside its
+// sibling so the pair that BareToolName has to undo is written down in
+// one place.
+func AgyQualifiedToolName(tool string) string {
+	return "mcp_" + ToolNamespace + "_" + tool
+}
+
+// BareToolName undoes QualifiedToolName and AgyQualifiedToolName both:
+// given whatever name a CLI reported a call under, it returns the name
+// this package actually registered the tool as. A name carrying neither
+// prefix -- a CLI's own native tool, or a framework whose runtime calls
+// tools in-process -- comes back unchanged.
 //
 // Every Framework must put a call's name through this before recording it
 // as an agent.ToolCall, and agent.ToolCall.Name's own doc comment says so.
@@ -40,6 +56,16 @@ func QualifiedToolName(tool string) string {
 // run was recorded no_action, and the human who was supposed to be asked
 // was never asked. Every test of that path scripted the bare name, which
 // is why nothing caught it.
+//
+// Both spellings are stripped rather than only claude's, because the same
+// failure happened a second time with agy: it names an eagerly registered
+// MCP tool "mcp_grain-sandbox_ask_question", which is not the string this
+// function used to trim, so it came back unchanged and ProcessResult
+// matched nothing -- the identical silent loss, through a different CLI.
+// The two prefixes cannot be confused for one another: a name beginning
+// "mcp__grain-sandbox__" does not begin "mcp_grain-sandbox_", so trimming
+// both in turn removes exactly one of them.
 func BareToolName(reported string) string {
-	return strings.TrimPrefix(reported, "mcp__"+ToolNamespace+"__")
+	bare := strings.TrimPrefix(reported, "mcp__"+ToolNamespace+"__")
+	return strings.TrimPrefix(bare, "mcp_"+ToolNamespace+"_")
 }

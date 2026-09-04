@@ -302,56 +302,69 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 	return f
 }
 
-// allowedTools names the exact tools NewSandboxTools, NewMockTools,
+// publishedTools names the exact tools NewSandboxTools, NewMockTools,
 // NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
-// and NewTaskTools register, plus selfdebug.SourceTools', mcp__-prefixed
-// the way agy reports them
-// once loaded from its settings -- computed from those constructors
-// directly rather than hand-copied, so this can never drift from what
-// the "mcpserver" subcommand actually advertises the way v1's
+// and NewTaskTools register, plus selfdebug.SourceTools' -- bare, as the
+// "mcpserver" subcommand registers them. Computed from those
+// constructors directly rather than hand-copied, so this can never drift
+// from what that subcommand actually advertises the way v1's
 // hand-maintained _ALLOWED_TOOLS constant could (dispatch.py).
+//
+// It is what eagerToolsConfig asks agy to register eagerly, so the list
+// has to name every tool a run might have: a tool left out of it is not
+// merely unlisted, it is one the model can only reach through the
+// call_mcp_tool fallback.
 //
 // pull_request_status is named unconditionally rather than only for a
 // run that passed pullRequestArgs, for the reason agent/claude's own
 // allowedTools gives: this list is a property of the tool vocabulary,
 // not of one run's configuration, and mcpserver registers that tool
-// either way.
-func allowedTools() []string {
+// either way. Naming a tool this run's own mcpserver will not register
+// costs nothing -- agy only ever registers the intersection of this list
+// with what the server actually offers.
+func publishedTools() []string {
 	var names []string
 	for _, t := range mcp.NewSandboxTools("") {
-		names = append(names, mcp.QualifiedToolName(t.Name))
+		names = append(names, t.Name)
 	}
 	for _, t := range mcp.NewMockTools(&mcp.MockSink{}) {
-		names = append(names, mcp.QualifiedToolName(t.Name))
+		names = append(names, t.Name)
 	}
 	for _, t := range mcp.NewPullRequestTools(nil, mcp.PullRequestScope{}) {
-		names = append(names, mcp.QualifiedToolName(t.Name))
+		names = append(names, t.Name)
 	}
 	// open_pull_request is named unconditionally too, even for a run
-	// whose mcpserver will not register it (no -server/-task): this list
-	// only ever filters what the server actually advertises, so naming a
-	// tool that is not there costs nothing. nil is a PullRequestOpener no
-	// run ever gets -- this only wants the names.
+	// whose mcpserver will not register it (no -server/-task). nil is a
+	// PullRequestOpener no run ever gets -- this only wants the names.
 	for _, t := range mcp.NewOpenPullRequestTools(nil) {
-		names = append(names, mcp.QualifiedToolName(t.Name))
+		names = append(names, t.Name)
 	}
 	// recreate_sandbox is registered by the same -server/-task pair
 	// open_pull_request is, so it is named here on the same terms. nil
 	// is a SandboxRecreator no run ever gets -- this only wants the name.
 	for _, t := range mcp.NewRecreateSandboxTools(nil) {
-		names = append(names, mcp.QualifiedToolName(t.Name))
+		names = append(names, t.Name)
 	}
 	// The self-debug capability's own tools, named on the same terms
 	// again: mcpserver registers them only for a run whose task holds
-	// that grant (-self-debug), and this list only filters what it
-	// registers, so a run without the grant is unaffected by their being
-	// named here. "" is a source directory and nil a TaskReader no run
-	// ever gets -- this only wants the names.
+	// that grant (-self-debug). "" is a source directory and nil a
+	// TaskReader no run ever gets -- this only wants the names.
 	for _, t := range selfdebug.SourceTools("") {
-		names = append(names, mcp.QualifiedToolName(t.Name))
+		names = append(names, t.Name)
 	}
 	for _, t := range mcp.NewTaskTools(nil) {
-		names = append(names, mcp.QualifiedToolName(t.Name))
+		names = append(names, t.Name)
+	}
+	return names
+}
+
+// eagerToolNames is publishedTools spelled the way agy reports a call to
+// one of them once it has registered them eagerly -- what a transcript
+// reader and the roster check below both have to recognize.
+func eagerToolNames() []string {
+	names := publishedTools()
+	for i, name := range names {
+		names[i] = mcp.AgyQualifiedToolName(name)
 	}
 	return names
 }
@@ -475,6 +488,88 @@ func mcpToolTimeoutSeconds() int {
 	return int((mcp.MaxWaitForChecksTimeout + mcpToolTimeoutSlack).Seconds())
 }
 
+// printTimeoutSlack is how far past grain's own deadline for this run the
+// --print-timeout below is set: enough that agy is never the thing that
+// ends a run, and grain's own cancellation always gets there first.
+const printTimeoutSlack = 10 * time.Minute
+
+// defaultPrintTimeout is the cap for a run whose context carries no
+// deadline at all -- a test, or a caller that means a run to take as long
+// as it takes. Long rather than absent because agy's flag has no "never"
+// value, and a day is past any run grain would leave in flight.
+const defaultPrintTimeout = 24 * time.Hour
+
+// printTimeout is the value of agy's --print-timeout for this run, and
+// passing it at all is a bug fix rather than a tuning knob.
+//
+// agy's print mode caps a whole non-interactive run at five minutes by
+// default ("--print-timeout ... (default 5m0s)"). It is a wall-clock cap
+// on the run, not on a single model call: reaching it kills the run
+// mid-tool-call and emits a terminal result event of
+//
+//	{"status":"ERROR","error":"timeout waiting for response"}
+//
+// with exit status 1. grain never passed the flag, so every dispatched
+// antigravity run died five minutes in -- long enough to clone, read
+// around and start editing, and far short of pushing anything -- and
+// surfaced as this package's generic "run ended in status ERROR". The
+// ordinary shape of a grain task is dozens of turns over tens of minutes;
+// orchestrator.Config.MaxRunRuntime (two hours by default) is what is
+// meant to bound it.
+//
+// So the cap is put back where the rest of this package already puts a
+// deadline: on grain's side. The value tracks the deadline on the run's
+// own context -- the moment grain will cancel it -- plus enough slack
+// that agy's clock never runs out first. A run stopped by grain reports
+// what stopped it; a run stopped by agy reports only that something timed
+// out waiting.
+func printTimeout(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return defaultPrintTimeout
+	}
+	// A deadline already past (or nearly) still gets the slack rather
+	// than a zero or negative duration, which agy would reject: the run
+	// is about to be cancelled either way, and by grain.
+	return time.Until(deadline) + printTimeoutSlack
+}
+
+// eagerToolsConfig is the per-server "tools" map that decides how agy
+// puts grain's tools in front of the model, and it is not an
+// optimization: without it a run effectively has none of them.
+//
+// agy loads an MCP server's tools *lazily* by default. Lazily loaded
+// tools are not tools as far as the model is concerned -- they are
+// manifest files under ~/.gemini/antigravity-cli/mcp/<server>/, reachable
+// only by way of one native dispatcher, call_mcp_tool, taking
+// {"ServerName", "ToolName", "Arguments"}. Measured against agy 1.1.25
+// that has two consequences, and both of them break a grain run:
+//
+//   - The model prefers agy's own 57 native tools, which it can see. Told
+//     to run a command it calls agy's *native* run_command, which executes
+//     on the controller rather than through grain's mcpserver -- for a
+//     kontur-VM run, a machine the run was never meant to touch, and one
+//     where the work it does lands nowhere.
+//   - What grain records is the dispatcher. Every call comes back named
+//     "call_mcp_tool", so orchestrator.ProcessResult -- which matches
+//     ToolCall.Name against "ask_question", "comment_on_issue" and
+//     "propose_task" exactly -- sees none of them, and a run that asked a
+//     question or left a closing note is recorded as having done nothing.
+//     (transcript.go unwraps that shape as well, since a model may still
+//     take the dispatcher route, but the whole point here is that it
+//     should not have to.)
+//
+// "eager": true per tool registers each one as a native tool of agy's
+// own, named mcp_<server>_<tool> (mcp.AgyQualifiedToolName). The model
+// then sees grain's tools beside agy's, and calls them by name.
+func eagerToolsConfig() map[string]any {
+	tools := map[string]any{}
+	for _, name := range publishedTools() {
+		tools[name] = map[string]any{"eager": true}
+	}
+	return tools
+}
+
 // mcpConfigJSON is the content of the file agy reads its MCP servers
 // from: grainBinaryPath spawned with mcpArgs (built by mcpServerArgs
 // above) -- the "mcpserver" argument selects the same subcommand
@@ -482,7 +577,7 @@ func mcpToolTimeoutSeconds() int {
 // actually starts an MCP server, rather than needing a separately built
 // binary on disk. The schema is Gemini CLI's own mcpServers map, which
 // agy inherited along with the ~/.gemini config directory, plus the
-// per-server timeoutSeconds agy added to it.
+// per-server timeoutSeconds and tools keys agy added to it.
 func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"mcpServers": map[string]any{
@@ -490,6 +585,7 @@ func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 				"command":        grainBinaryPath,
 				"args":           mcpArgs,
 				"timeoutSeconds": mcpToolTimeoutSeconds(),
+				"tools":          eagerToolsConfig(),
 			},
 		},
 	})
@@ -563,6 +659,10 @@ func writeAgyHome(grainBinaryPath string, mcpArgs []string, apiKeyAuth bool) (ho
 		return "", nil, fmt.Errorf("antigravity: creating agy home: %w", err)
 	}
 	cleanup = func() { os.RemoveAll(home) }
+	if err := os.MkdirAll(agyWorkspaceDir(home), 0o700); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("antigravity: creating agy workspace: %w", err)
+	}
 	for rel, content := range files {
 		path := filepath.Join(home, rel)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -575,6 +675,71 @@ func writeAgyHome(grainBinaryPath string, mcpArgs []string, apiKeyAuth bool) (ho
 		}
 	}
 	return home, cleanup, nil
+}
+
+// agyWorkspaceDir is the empty directory inside a run's private HOME that
+// workDir hands a kontur run. See workDir.
+func agyWorkspaceDir(home string) string { return filepath.Join(home, "workspace") }
+
+// workDir is the directory agy is started in.
+//
+// For a host-rooted sandbox that is the sandbox itself, as it has always
+// been. For a kontur run there is no local path to name -- the sandbox is
+// a VM the forked mcpserver reaches over SSH -- and cfg.SandboxRoot is
+// empty, which used to leave the subprocess in whatever directory the
+// daemon itself was started in. That matters because agy brings its own
+// native file and command tools, which run wherever it runs: a model
+// reaching for run_command or write_to_file on a kontur run would act on
+// the controller, and in the daemon's own working directory at that. An
+// empty scratch directory inside the run's private HOME is somewhere
+// those tools can do no harm, and it disappears with the HOME.
+//
+// It is not a substitute for the guarantee: agy has no way to withhold
+// its own tools (no --tools, no --strict-mcp-config, and its disabledTools
+// setting applies to an MCP server's tools rather than its native ones),
+// so what steers a run to grain's tools is eager registration plus
+// toolPreamble, and what actually contains it is a kontur sandbox.
+func workDir(cfg agent.RunConfig, home string) string {
+	if cfg.SandboxRoot != "" {
+		return cfg.SandboxRoot
+	}
+	return agyWorkspaceDir(home)
+}
+
+// toolPreamble is the short note prepended to a run's prompt naming which
+// tools reach its sandbox, and it exists because agy cannot be told to
+// withhold its own.
+//
+// Every other framework grain drives can be handed an empty native tool
+// roster (claude's --tools ” plus --strict-mcp-config). agy offers no
+// equivalent, so a run always sees agy's own run_command, view_file,
+// write_to_file, replace_file_content and the rest alongside grain's --
+// and those execute wherever agy itself is running, which is the
+// controller. On a host-rooted sandbox that lands in the sandbox
+// directory by accident, because it is also agy's working directory; on a
+// kontur run it does not land in the sandbox at all. Either way the call
+// bypasses everything grain's own tools carry with them: the result caps,
+// the timeout reporting, the remaining-runtime announcements, and the
+// record of the call that orchestrator reads a run's outcome from.
+//
+// Saying so in the prompt is the only lever there is. It is stated as
+// what the tools do rather than as a rule, because a model that
+// understands why its native tools are the wrong ones here keeps choosing
+// correctly in situations this text did not anticipate.
+func toolPreamble(cfg agent.RunConfig) string {
+	where := "your sandbox"
+	if cfg.KonturVM != "" {
+		where = "your sandbox, which is a separate virtual machine"
+	}
+	return "Use the mcp_" + mcpServerName + "_* tools for everything you do to " + where + ".\n" +
+		"Your own built-in tools -- run_command, view_file, write_to_file, replace_file_content, " +
+		"grep_search, find_by_name and the rest -- do not run there. They run on the machine hosting " +
+		"this session, which is not the sandbox and is not where your work belongs, and grain does not " +
+		"see the calls, so anything you do with them is both in the wrong place and unrecorded. " +
+		"mcp_" + mcpServerName + "_run_command, mcp_" + mcpServerName + "_read_file, " +
+		"mcp_" + mcpServerName + "_edit_file and mcp_" + mcpServerName + "_write_file are the ones " +
+		"that reach " + where + "; the rest of the mcp_" + mcpServerName + "_* tools are how you " +
+		"report back, ask a question, or read CI.\n\n"
 }
 
 // userEvent is the one stdin line a `--input-format stream-json` run
@@ -692,6 +857,8 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		"--output-format", "stream-json",
 		"--dangerously-skip-permissions",
 		"--disable-slash-commands",
+		// Without this a run is over in five minutes; see printTimeout.
+		"--print-timeout", printTimeout(ctx).String(),
 	}
 	if f.model != "" {
 		args = append(args, "--model", f.model)
@@ -716,12 +883,12 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		env = append(env, "GEMINI_API_KEY="+apiKey, "GOOGLE_API_KEY=")
 	}
 
-	stdin, err := userEvent(cfg.Prompt)
+	stdin, err := userEvent(toolPreamble(cfg) + cfg.Prompt)
 	if err != nil {
 		return nil, err
 	}
 
-	stdout, runErr := f.run.Run(runCtx, args, stdin, env, cfg.SandboxRoot, io.MultiWriter(sinks...))
+	stdout, runErr := f.run.Run(runCtx, args, stdin, env, workDir(cfg, home), io.MultiWriter(sinks...))
 	result, parseErr := parseTranscript(stdout)
 	// Read once, from the terminal event's own text plus whatever the
 	// subprocess itself reported, because a quota refusal can arrive
@@ -802,37 +969,56 @@ func partialResult(parsed *agent.Result, stdout string) *agent.Result {
 	return &partial
 }
 
-// verifyToolRoster reports any tool agy's own init event advertised that
-// grain's "mcpserver" subcommand never published -- the check that stands
-// in for claude's --strict-mcp-config, which agy has no equivalent of.
-// It returns the unexpected names, if any; it does not fail a run over
-// them, since agy reporting a tool under a name this code does not
-// recognize is not by itself evidence that a run reached anything it
-// should not have.
-func verifyToolRoster(stdout string) []string {
-	expected := map[string]bool{}
-	for _, name := range allowedTools() {
-		expected[name] = true
+// verifyToolRoster reports whether agy's opening init event shows any way
+// for this run to reach grain's tools, and says so when it does not.
+//
+// This used to ask the opposite question -- which advertised tools grain
+// had not published -- on the theory that the roster was the run's whole
+// tool vocabulary and so a stand-in for claude's --strict-mcp-config.
+// Against the real binary that theory is simply wrong twice over. The
+// roster is agy's own native tools and nothing else: MCP tools never
+// appear in it, eagerly registered or not (measured on agy 1.1.25, which
+// advertises 57 native tools and no grain tool under either spelling). So
+// the old check both flagged all 57 of them on every single run, and
+// missed the one thing worth noticing -- a run whose MCP server failed to
+// load, which is invisible in that roster either way.
+//
+// What is visible is the bridge. call_mcp_tool is agy's dispatcher for
+// lazily loaded MCP tools; an eagerly registered one appears under its
+// own mcp_<server>_<tool> name (mcp.AgyQualifiedToolName). A roster with
+// neither is a run that cannot reach grain at all, which is worth a line
+// in the transcript -- as a note, not a failure, since the run may still
+// have said something useful about why.
+//
+// An empty roster -- no init event, a capture that starts mid-stream --
+// reports nothing: there is no roster to draw a conclusion from.
+func verifyToolRoster(stdout string) string {
+	roster := parseEvents(stdout).tools
+	if len(roster) == 0 {
+		return ""
 	}
-	var unexpected []string
-	for _, name := range parseEvents(stdout).tools {
-		if !expected[name] {
-			unexpected = append(unexpected, name)
+	eager := map[string]bool{}
+	for _, name := range eagerToolNames() {
+		eager[name] = true
+	}
+	for _, name := range roster {
+		if name == mcpDispatcherTool || eager[name] {
+			return ""
 		}
 	}
-	return unexpected
+	return fmt.Sprintf("! agy advertised %d tool(s), none of them grain's and no %s to reach them "+
+		"through: this run had no way to touch its sandbox or to report back",
+		len(roster), mcpDispatcherTool)
 }
 
 // appendRosterNote records verifyToolRoster's finding in the transcript,
 // where an operator reading a run will see it, rather than only in a log
 // this deployment may not be collecting.
-func appendRosterNote(transcript string, unexpected []string) string {
-	if len(unexpected) == 0 {
+func appendRosterNote(transcript, note string) string {
+	switch {
+	case note == "":
 		return transcript
-	}
-	note := fmt.Sprintf("! agy advertised %d tool(s) grain did not publish: %s",
-		len(unexpected), strings.Join(unexpected, ", "))
-	if transcript == "" {
+	case transcript == "":
 		return note
 	}
 	return transcript + "\n\n" + note
