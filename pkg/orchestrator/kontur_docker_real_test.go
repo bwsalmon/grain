@@ -515,7 +515,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	}
 
 	assertGuestHasEgress(t, byName["run_command"], name)
-	assertGuestResolvesNames(t, byName["run_command"])
+	assertGuestResolvesNames(t, byName["run_command"], name)
 	assertSandboxDiskSizeApplies(t, k, stateDir, byName["run_command"])
 
 	// A guest command's own exit status has to survive the guest's agent
@@ -875,7 +875,7 @@ func guestStdout(t *testing.T, text string) string {
 // kontur-configure-dns writes it into /etc/resolv.conf on each boot. Both
 // halves are asserted: the file, which is this repo's own contract, and
 // then a real lookup, which is the thing that was actually broken.
-func assertGuestResolvesNames(t *testing.T, runCommand *mcp.Tool) {
+func assertGuestResolvesNames(t *testing.T, runCommand *mcp.Tool, vmName string) {
 	t.Helper()
 
 	result := runCommand.Handler(context.Background(), map[string]any{
@@ -897,7 +897,7 @@ func assertGuestResolvesNames(t *testing.T, runCommand *mcp.Tool) {
 	})
 	if lookup.IsError || !strings.Contains(lookup.Text, "github.com") {
 		t.Errorf("resolving github.com inside the guest failed: %s\nthe guest has a resolver on paper (above) but cannot use it", lookup.Text)
-		dumpGuestNetwork(t, runCommand)
+		dumpGuestNetwork(t, vmName)
 	}
 }
 
@@ -908,23 +908,38 @@ func assertGuestResolvesNames(t *testing.T, runCommand *mcp.Tool) {
 // cause: `kontur exec` runs over vsock, so a guest whose NIC was never
 // configured at all answers commands perfectly well and fails only on
 // what needs the network -- the loud "unreachable guest" that used to
-// stand for a broken ip= parameter is gone. The address, the table and
-// the command line the two are derived from tell those cases apart:
-// no address at all (kontur-net-cmdline, klibc ipconfig), an address but
-// no default route (the gateway field of ip=, or kontur-configure-routes
-// pruning it), or neither derived because the parameter never arrived.
-func dumpGuestNetwork(t *testing.T, runCommand *mcp.Tool) {
+// stand for a broken ip= parameter is gone.
+//
+// The probes are chosen to separate the layers that can each produce the
+// same silence, from the bottom up: whether the NIC exists at all
+// (/sys/class/net, and the virtio_net module it needs, which on a distro
+// kernel is a module and not built in), whether the boot parameters that
+// describe it arrived, whether the units that act on them ran, and only
+// then what the address and routing table ended up as.
+func dumpGuestNetwork(t *testing.T, vmName string) {
 	t.Helper()
 
+	// Root, and through the container directly rather than through the
+	// sandbox's own run_command: these read /proc, the module list and
+	// the journal, none of which the unprivileged sandbox account can
+	// see, and half of them live in /usr/sbin, which is not on that
+	// account's PATH. KONTUR_EXEC_USER is what picks the guest account
+	// (pkg/mcp's DockerExecRunner passes the same variable).
 	for _, cmd := range []string{
-		"ip -4 addr show",
-		"ip -4 route show",
+		"ls -l /sys/class/net",
+		"ip -4 addr show; ip -4 route show",
 		"cat /proc/cmdline",
+		"cat /proc/1/comm; uname -r; ls /lib/modules",
+		"grep -E 'virtio' /proc/modules || echo 'no virtio module loaded'",
+		"ls -l /etc/systemd/system/sysinit.target.wants/",
+		"systemctl --no-pager --full is-active kontur-net-cmdline kontur-net-routes kontur-configure-dns kontur-agent",
+		"journalctl -b --no-pager -u kontur-net-cmdline -u kontur-net-routes -u kontur-configure-dns | tail -60",
 		"cat /etc/resolv.conf",
-		"systemctl --no-pager --full status kontur-net-cmdline kontur-net-routes kontur-configure-dns 2>&1 | tail -40",
 	} {
-		result := runCommand.Handler(context.Background(), map[string]any{"command": cmd})
-		t.Logf("guest %q:\n%s", cmd, result.Text)
+		out, err := exec.Command("docker", "exec",
+			"-e", "KONTUR_EXEC_USER=root", "kontur-vm-"+vmName,
+			"kontur", "exec", "--", "sh", "-c", cmd).CombinedOutput()
+		t.Logf("guest (root) %q: err=%v\n%s", cmd, err, out)
 	}
 }
 
@@ -963,6 +978,6 @@ func assertGuestHasEgress(t *testing.T, runCommand *mcp.Tool, vmName string) {
 	if !strings.Contains(result.Text, "default via "+gateway) {
 		t.Errorf("guest default route = %q, want it to carry %q -- without it the guest has no route off its own segment, and so no egress at all",
 			strings.TrimSpace(result.Text), "default via "+gateway)
-		dumpGuestNetwork(t, runCommand)
+		dumpGuestNetwork(t, vmName)
 	}
 }
