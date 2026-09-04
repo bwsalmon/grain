@@ -205,6 +205,41 @@ func TestAReviewThatPushedNothingStopsHoldingTheChangeItReviewed(t *testing.T) {
 	}
 }
 
+// A change that landed (or was abandoned) while its review was still
+// running has nothing left to hold, so the findings are still posted and
+// the task itself is left exactly as it is -- a note about withdrawing a
+// merge that already happened would only mislead whoever reads it.
+func TestFindingsOnAChangeThatHasAlreadyClosedLeaveTheTaskAlone(t *testing.T) {
+	store, ctx, sim, client, reviewed, review := reviewedAndReviewing(t)
+
+	closed := baseTime.Add(time.Minute)
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: reviewed.ID, CompletedAt: &baseTime, ClosedAt: &closed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := toolResult(reviewFinding("this needs a second look", "late.go", 9))
+	if err := orchestrator.ProcessResult(ctx, store, client, review, result, review.ID+"-1",
+		baseTime.Add(2*time.Minute)); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	if len(sim.Reviews) != 1 {
+		t.Fatalf("reviews on GitHub = %+v, want the findings posted anyway", sim.Reviews)
+	}
+	got, err := store.GetTask(ctx, reviewed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.AutoMerge {
+		t.Error("a change that has already closed must not be taken off automatic merge after the fact")
+	}
+	if bodies := commentBodies(t, ctx, store, reviewed.ID); len(bodies) != 1 {
+		t.Fatalf("comments = %q, want only the one announcing the review", bodies)
+	}
+}
+
 // The fallback, and the reason nothing here is conditional on being a
 // review: a run that reaches for this tool with no pull request behind it
 // has still said something, and agent.Result is not persisted anywhere

@@ -307,12 +307,20 @@ func noteFindingsOnReview(ctx context.Context, store *model.Store, task model.Ta
 // cost of the other way round is a merged change nobody read the review
 // of.
 //
+// Nothing else in its repo waits on that person. Auto-merge is what puts
+// a task in the queue at all (isQueueMember), so withdrawing it drops
+// this one out rather than parking it at the head: whatever was behind it
+// moves up the same cycle. That is what makes an open-ended hold
+// affordable here, where the deadline on a review that never finished
+// (defaultReviewTaskDeadline) exists precisely because a task waiting at
+// the head holds a whole repo behind it.
+//
 // It is deliberately not blockMergeQueue: that gives up the queue
 // position and then merges anyway on the next clean cycle, which is the
 // opposite of what findings ask for. And it is deliberately not a hold
 // that expires -- nothing here starts a clock, because the thing being
-// waited on is a person, and defaultReviewTaskDeadline exists for the
-// case where nobody was ever asked.
+// waited on is a person who has been asked, in their own conversation,
+// rather than one nobody ever told.
 //
 // A task that has already closed -- its pull request merged or closed
 // while the review was still running -- is left alone: there is nothing
