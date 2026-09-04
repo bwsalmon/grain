@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, repoRows, unionCapabilities } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, repoRows, stateLabel, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task whose run is not over", () => {
@@ -373,5 +373,32 @@ describe("closablePullRequest", () => {
   // orphanedPullRequest drives is what that task gets instead.
   it("names nothing on a task that is already closed", () => {
     expect(closablePullRequest({ state: "closed", pullRequest: "acme/widgets#1" })).toBeNull();
+  });
+});
+
+// A task the merge queue is repairing is running (or queued) like any
+// other attempt, and the state alone cannot say which kind of work it is
+// -- so the label does, and StateDot colours the mark to match.
+describe("stateLabel", () => {
+  it("uses the plain state label when nothing is being repaired", () => {
+    expect(stateLabel({ state: "running" })).toBe("Running");
+    expect(stateLabel({ state: "queued" })).toBe("Queued");
+    expect(stateLabel({ state: "completed" })).toBe("Queued for merge");
+  });
+
+  it("says what a merge-queue repair is doing instead", () => {
+    expect(stateLabel({ state: "running", repairing: true })).toBe("Repairing");
+    expect(stateLabel({ state: "queued", repairing: true })).toBe("Queued for repair");
+  });
+
+  // Only those two states are ever a repair in flight, so anything else
+  // arriving with the flag set keeps the badge honest rather than
+  // inventing a phrase for a combination the backend does not produce.
+  it("leaves any other state's label alone", () => {
+    expect(stateLabel({ state: "awaiting_reply", repairing: true })).toBe("Awaiting reply");
+  });
+
+  it("falls back to the raw state for one it has no label for", () => {
+    expect(stateLabel({ state: "invented" })).toBe("invented");
   });
 });

@@ -2282,6 +2282,87 @@ func TestTaskSurfacesMergeQueueBlockedAt(t *testing.T) {
 	}
 }
 
+// Repairing is the same shape of signal for the other thing the merge
+// queue does to a task it is driving: sends it back to an agent to repair
+// its own pull request branch (model.Observation.MergeQueueRepairAt).
+// Such a task reads 'running' or 'queued' like any other attempt, so
+// without this a list has no way to tell "still being written" from
+// "written, merged nowhere, and now being unstuck" -- which is what the
+// frontend colours the running mark on.
+//
+// The three projections take three different paths to it, exactly as
+// above, and the bulk one (Store.MergeQueueRepairing) is a second
+// implementation of model.Observation.RepairInFlight in SQL -- so all
+// three are worth covering rather than trusting they agree.
+func TestTaskSurfacesAMergeQueueRepairInFlight(t *testing.T) {
+	c, store, ctx := testClient(t)
+	task := create(t, c, ctx)
+
+	if err := store.Observe(ctx, model.Observation{TaskID: task.ID, CompletedAt: &baseTime}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Repairing {
+		t.Fatal("Repairing = true for a task the merge queue has not repaired")
+	}
+
+	// The requeue: what orchestrator.requeueForRepair writes.
+	askedAt := baseTime.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: task.ID, MergeQueueRepairAt: &askedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err = c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Repairing {
+		t.Fatal("Task: Repairing = false while a repair is in flight")
+	}
+	detail, err := c.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !detail.Repairing {
+		t.Fatal("GetTask: Repairing = false while a repair is in flight")
+	}
+	list, err := c.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !list[0].Repairing {
+		t.Fatalf("ListTasks: Repairing = %v, want true", list)
+	}
+
+	// The repair run finishes: the task completes again, and it is an
+	// ordinary completed task once more.
+	finished := askedAt.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: task.ID, MergeQueueRepairAt: &askedAt, CompletedAt: &finished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = c.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Repairing {
+		t.Fatal("Task: Repairing = true after the repair completed")
+	}
+	list, err = c.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].Repairing {
+		t.Fatalf("ListTasks: Repairing = %v after the repair completed, want false", list)
+	}
+}
+
 func TestTaskNotFound(t *testing.T) {
 	c, _, ctx := testClient(t)
 	_, err := c.Task(ctx, "404")

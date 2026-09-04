@@ -302,6 +302,70 @@ func TestAnUnsubmittedPullRequestIsItsOwnStateAndStillSynced(t *testing.T) {
 	}
 }
 
+// A task the merge queue has sent back to repair its own pull request
+// branch (orchestrator.requeueForRepair) has no completed_at at all --
+// it reads 'queued' or 'running' like any other attempt -- and yet its
+// pull request is exactly the one the queue is in the middle of driving.
+// Dropping it would hand its queue position to whatever is behind it and
+// leave the repair running with nothing watching the deadline it runs
+// against, so OpenPullRequestLinks keeps returning it until it completes
+// or closes.
+func TestOpenPullRequestLinksKeepsWatchingATaskBeingRepaired(t *testing.T) {
+	store, _, ctx := openStore(t)
+	tk := task("a1b2", true)
+	tk.AutoMerge = true
+	tk.Links = []model.Link{{Kind: model.LinkFixes, Target: "owner/payments-api#7"}}
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	done := now
+	if err := store.Observe(ctx, model.Observation{TaskID: "a1b2", CompletedAt: &done}); err != nil {
+		t.Fatal(err)
+	}
+	if links, err := store.OpenPullRequestLinks(ctx); err != nil || len(links) != 1 {
+		t.Fatalf("OpenPullRequestLinks for a completed task = %+v (err %v), want one", links, err)
+	}
+
+	// The requeue: completed_at cleared, merge_queue_repair_at written.
+	asked := now.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{TaskID: "a1b2", MergeQueueRepairAt: &asked}); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := store.State(ctx, "a1b2"); err != nil || st != model.StateQueued {
+		t.Fatalf("state = %q (%v), want queued: clearing completed_at is what requeues it", st, err)
+	}
+	links, err := store.OpenPullRequestLinks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 1 || links[0].PullRequest != "owner/payments-api#7" {
+		t.Fatalf("OpenPullRequestLinks while being repaired = %+v, want the pull request still watched", links)
+	}
+	// Once per task, however the two arms of the WHERE overlap.
+	repairing, err := store.MergeQueueRepairing(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repairing["a1b2"] {
+		t.Fatalf("MergeQueueRepairing = %+v, want a1b2", repairing)
+	}
+
+	// Closing still outranks it: a task nobody is watching any more.
+	closed := asked.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: "a1b2", MergeQueueRepairAt: &asked, ClosedAt: &closed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if links, err := store.OpenPullRequestLinks(ctx); err != nil || len(links) != 0 {
+		t.Fatalf("OpenPullRequestLinks after closing = %+v (err %v), want none", links, err)
+	}
+	if repairing, err := store.MergeQueueRepairing(ctx); err != nil || repairing["a1b2"] {
+		t.Fatalf("MergeQueueRepairing after closing = %+v (err %v), want none", repairing, err)
+	}
+}
+
 // Withdrawing approval is the one way a task moves back up the
 // precedence order rather than down it, so it is worth proving against a
 // real database rather than only against StateOf: the state comes out of
@@ -1624,6 +1688,67 @@ func fixTask(id string) model.Task {
 	return t
 }
 
+// A repair is a merger too, and it is not a ReasonFix task: it is
+// another attempt of whatever task the merge queue sent back to work on
+// its own branch, whose origin_reason is whatever it was filed as. The
+// store answers "is this run a merger" off both halves at once
+// (mergerTaskSQL), so a repair draws on the capacity kept back for
+// exactly this rather than queueing behind ordinary work.
+func TestARepairInFlightCountsAsAMergerThoughItsReasonIsNot(t *testing.T) {
+	store, _, ctx := openStore(t)
+	for _, id := range []string{"w1", "r1"} {
+		if err := store.PutTask(ctx, task(id, true)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	asked := now
+	if err := store.Observe(ctx, model.Observation{TaskID: "r1", MergeQueueRepairAt: &asked}); err != nil {
+		t.Fatal(err)
+	}
+
+	ready, err := store.ReadyMergers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ready) != 1 || ready[0] != "r1" {
+		t.Fatalf("ReadyMergers = %v, want just the task being repaired", ready)
+	}
+
+	limits := model.Limits{Workers: 1, Mergers: 1}
+	start := func(id string) error {
+		return store.StartRun(ctx, model.Run{
+			ID: id + "-1", TaskID: id, Sandbox: id + "-1", Attempt: 1, StartedAt: now,
+		}, limits)
+	}
+	if err := start("w1"); err != nil {
+		t.Fatalf("StartRun for the one worker slot: %v", err)
+	}
+	// The worker ceiling is full, so this only starts if the repair is
+	// classified as a merger.
+	if err := start("r1"); err != nil {
+		t.Fatalf("StartRun for a repair with the worker ceiling full: %v", err)
+	}
+	counts, err := store.LiveRunCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Workers != 1 || counts.Mergers != 1 {
+		t.Fatalf("LiveRunCounts = %+v, want one worker and one merger", counts)
+	}
+
+	// And once the repair has completed, the same task is ordinary work
+	// again -- nothing holds merger capacity open for a finished repair.
+	finished := now.Add(time.Hour)
+	if err := store.Observe(ctx, model.Observation{
+		TaskID: "r1", MergeQueueRepairAt: &asked, CompletedAt: &finished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if counts, err := store.LiveRunCounts(ctx); err != nil || counts.Mergers != 0 || counts.Workers != 2 {
+		t.Fatalf("LiveRunCounts once the repair completed = %+v (%v), want two workers", counts, err)
+	}
+}
+
 // TestStartRunCountsMergersAgainstTheirOwnHalfOfTheLimit is
 // grain/task-63 at the only place the limit is really enforced: inside
 // the transaction that records the run. Ordinary work stops at
@@ -2207,14 +2332,16 @@ func TestInitMigratesAnExistingDatabaseMissingPrompt(t *testing.T) {
 	}
 }
 
-// The merge queue's own record of having refreshed a stale head
-// (task_observation.merge_queue_refreshed_at) was added to a table every
-// existing deployment already has rows in, and CREATE TABLE IF NOT EXISTS
-// never alters one of those -- so this simulates a database built without
-// the column, directly, and checks Store.Init's own migration step
-// (ensureTaskObservationRefreshedColumn) both leaves the pre-existing
-// observation readable and makes the new field durable afterwards.
-func TestInitMigratesAnExistingDatabaseMissingMergeQueueRefreshedAt(t *testing.T) {
+// The merge queue's own two records -- having refreshed a stale head
+// (task_observation.merge_queue_refreshed_at) and having sent a task back
+// to repair its own branch (merge_queue_repair_at) -- were each added to
+// a table every existing deployment already has rows in, and CREATE TABLE
+// IF NOT EXISTS never alters one of those. So this simulates a database
+// built without either column, directly, and checks Store.Init's own
+// migration steps (ensureTaskObservationRefreshedColumn,
+// ensureTaskObservationRepairColumn) both leave the pre-existing
+// observation readable and make the new fields durable afterwards.
+func TestInitMigratesAnExistingDatabaseMissingTheMergeQueueColumns(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
 		t.Fatalf("opening embedded sqlite: %v", err)
@@ -2278,6 +2405,28 @@ func TestInitMigratesAnExistingDatabaseMissingMergeQueueRefreshedAt(t *testing.T
 	}
 	if got.MergeQueueRefreshedAt == nil || !got.MergeQueueRefreshedAt.Equal(refreshed) {
 		t.Fatalf("MergeQueueRefreshedAt = %+v, want %v", got.MergeQueueRefreshedAt, refreshed)
+	}
+
+	// The same for the repair record, whose direction of erring is the
+	// same: a pull request repaired the old way, through a separate fix
+	// task, reads back as never repaired rather than as already having
+	// had the one repair it gets.
+	if got.MergeQueueRepairAt != nil {
+		t.Fatalf("MergeQueueRepairAt after migrating = %+v, want nil", got.MergeQueueRepairAt)
+	}
+	asked := refreshed.Add(time.Minute)
+	if err := store.ObserveField(ctx, "a1b2", asked, func(o *model.Observation) {
+		o.MergeQueueRepairAt = &asked
+		o.CompletedAt = nil
+	}); err != nil {
+		t.Fatalf("observe a repair after migrating: %v", err)
+	}
+	got, err = store.GetObservation(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get observation: (%+v, %v)", got, err)
+	}
+	if !got.RepairInFlight() {
+		t.Fatalf("observation after recording a repair = %+v, want it in flight", got)
 	}
 }
 
