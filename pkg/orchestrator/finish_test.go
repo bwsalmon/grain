@@ -933,7 +933,7 @@ func TestRunCycleOpensAPullRequestForABranchAFailedRunAlreadyPushed(t *testing.T
 
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(ranOutOfTurns),
+		Framework:  orchestrator.StaticFramework(ranOutOfTurns),
 		MaxWorkers: 1,
 	}
 

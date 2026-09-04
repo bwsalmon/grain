@@ -141,7 +141,7 @@ func TestRunCycleSyncsPullRequestsEvenWhenDispatchFails(t *testing.T) {
 			inner:   orchestrator.NewHostSandboxes(t.TempDir()),
 			sandbox: "t2-1",
 		},
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 
@@ -165,10 +165,10 @@ func TestRunCycleDispatchesEvenWhenPullRequestSyncFails(t *testing.T) {
 	queued := filedTask(t, ctx, store, "t2", repo)
 
 	deps := orchestrator.Deps{
-		Store:         store,
-		Client:        failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     completesWithAComment(),
+		Store:      store,
+		Client:     failingClient{Client: client, getPRFor: pullRequestNumber(t, watched)},
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 
@@ -215,7 +215,7 @@ func TestRunCycleReportsEveryFailingReconcilerNotJustTheFirst(t *testing.T) {
 			inner:   orchestrator.NewHostSandboxes(t.TempDir()),
 			sandbox: "t2-1",
 		},
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 
@@ -277,7 +277,7 @@ func TestRunCycleRunsEveryDispatchWhenOneSandboxFails(t *testing.T) {
 			inner:   orchestrator.NewHostSandboxes(t.TempDir()),
 			sandbox: "t1-1",
 		},
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 2,
 	}
 
