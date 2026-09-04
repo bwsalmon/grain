@@ -78,6 +78,19 @@ type Config struct {
 	// a token that expires (a GitHub App installation token lasts an
 	// hour) is re-read rather than cached until it fails.
 	Token func(ctx context.Context) (string, error)
+	// CheckImage is the container image the CI workflow grain installs
+	// runs `grain state check` from; DefaultCheckImage when empty. A
+	// deployment pinned to an older build wants that build's tag here,
+	// since the check refuses a dump stamped with any other schema.
+	CheckImage string
+	// NoWorkflow stops grain from installing that workflow at all: the
+	// opt-out for a deployment whose state repository is checked
+	// somewhere else, or by something other than GitHub Actions. It is a
+	// switch rather than "delete the file", because deleting a file grain
+	// writes when it is missing is not a decision that stays made -- see
+	// installWorkflow in format.go, which also leaves a workflow somebody
+	// has edited exactly as they left it.
+	NoWorkflow bool
 	// ChurnInterval is how often the tier-churn tables are written out;
 	// DefaultChurnInterval if zero. Every other table is written out on
 	// every Sync. See tier.go for which tables those are and why they get

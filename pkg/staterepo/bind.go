@@ -258,8 +258,9 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 }
 
 // Seed writes the database out as the repository's first content: the
-// dump, the schema stamp, and the README that tells whoever opens the
-// repository next what they are looking at.
+// dump, the schema stamp, the README that tells whoever opens the
+// repository next what they are looking at, and the CI step that checks
+// what they propose to change in it.
 func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if err := writeReadme(r.Dir()); err != nil {
 		return err
@@ -282,7 +283,16 @@ func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if err := r.recordLoadedHead(ctx); err != nil {
 		return err
 	}
-	return r.Push(ctx)
+	if err := r.Push(ctx); err != nil {
+		return err
+	}
+	// After the seed's own commit has reached the remote, and as a commit
+	// of its own: a remote that will not take a file under
+	// .github/workflows (installWorkflow says why that happens) must not
+	// be able to take the dump down with it, and the undo that handles
+	// that case needs a commit to come back to.
+	_, err := r.installWorkflow(ctx)
+	return err
 }
 
 // ErrRemoteAhead is returned by Sync and SyncAll when the remote holds
@@ -342,13 +352,24 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	if ahead, err := r.RemoteAhead(ctx); err == nil && ahead {
 		return false, ErrRemoteAhead
 	}
+	// The CI step, before anything is exported and as a commit and a push
+	// of its own (installWorkflow, format.go). Every sync, not only at
+	// Seed, for the reason the README below is rewritten every sync: a
+	// repository an operator adopted, or one a merge dropped the file out
+	// of, has to end up with it anyway. Unlike the README it is written
+	// only when it is missing, because it is a file an operator may edit
+	// and grain must not fight them for.
+	installed, err := r.installWorkflow(ctx)
+	if err != nil {
+		return installed, err
+	}
 	// Rewritten on every sync, not only at Seed: a repository an operator
 	// adopted, or one whose README a merge dropped, still has to explain
 	// itself to whoever opens it next, and this is the cheapest place to
 	// make that true rather than a thing that is true only if the
 	// repository was created here.
 	if err := writeReadme(r.Dir()); err != nil {
-		return false, err
+		return installed, err
 	}
 	now := r.now()
 	churn := forceChurn || r.churnDue(ctx, now)
@@ -357,10 +378,10 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 		tiers = append(tiers, TierChurn)
 	}
 	if err := ExportTier(ctx, db, r.Dir(), tiers...); err != nil {
-		return false, err
+		return installed, err
 	}
 	if err := WriteSchemaVersion(r.Dir(), version); err != nil {
-		return false, err
+		return installed, err
 	}
 	// Recorded whether or not the export produced a commit: what the
 	// interval bounds is how often grain re-reads and re-renders every
@@ -368,16 +389,20 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	// when the answer turns out to be byte-identical to last time.
 	if churn {
 		if err := r.recordChurnExport(ctx, now); err != nil {
-			return false, err
+			return installed, err
 		}
 	}
+	// installed rides along in every answer from here on: a sync that
+	// committed the CI step and exported nothing has still changed the
+	// repository, and a caller that logs "nothing to do" over a commit it
+	// just pushed would be describing the wrong tick.
 	changed, err := r.Commit(ctx, "Update grain state\n\n"+
 		"Written by grain from its own database at "+now.UTC().Format(time.RFC3339)+".")
 	if err != nil {
-		return false, err
+		return installed, err
 	}
 	if !changed {
-		return false, nil
+		return installed, nil
 	}
 	// Recorded before the push, not after: the commit exists either way,
 	// and a push that fails (an expired credential, an unreachable
@@ -451,13 +476,21 @@ rows that run is working on. Editing one of those here while grain is
 running does nothing; the next export writes the database's version back
 over your change.
 
-Check it first. ` + "`" + `grain state check .` + "`" + ` loads the whole directory into a
-throwaway database and reports what breaks; without it, a malformed file
-or a row missing a required column fails when the daemon next starts,
-which is the worst place to find out. If ` + "`" + WorkflowFile + "`" + `
-is here, that check already runs on every pull request against this
-repository, and a red tick on yours means grain would not have loaded
-it. If it is not, ` + "`" + `grain state ci .` + "`" + ` writes it.
+That check already runs on your pull request. ` + "`" + WorkflowFile + "`" + `
+runs ` + "`" + `grain state check` + "`" + `, which loads this whole directory into a
+throwaway database and reports what breaks, so a red tick means grain
+would not have loaded your change -- and a malformed file or a row
+missing a required column is caught there rather than when the daemon
+next starts, which is the worst place to find out. ` + "`" + `grain state check .` + "`" + `
+is the same thing in a terminal.
+
+grain writes that workflow itself, whenever it is not here, and never
+rewrites one that is: edit it -- pin the image, change the runner, add a
+step -- and what you wrote is what stays. If it is missing and does not
+come back, the deployment's credential is not allowed to push files
+under ` + "`" + `.github/workflows` + "`" + ` (its journal says so, and
+` + "`" + `grain state ci .` + "`" + ` in a clone writes the file for a human to commit),
+or the operator has turned it off with ` + "`" + `"noWorkflow": true` + "`" + `.
 
 Do not hand-edit while grain is running unless you mean it: grain is the
 only writer, exports on a timer, and a local edit it did not make is

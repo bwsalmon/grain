@@ -1,0 +1,366 @@
+package staterepo_test
+
+// The CI step as a deployment gets it: not a command somebody ran, but a
+// file Seed and Sync put in the repository and keep there.
+//
+// Four properties, and each of them is a way this could have gone wrong.
+// A repository grain seeds ends up with the workflow without anybody
+// asking. A workflow a merge dropped comes back. A workflow somebody
+// edited is never touched again, because a file grain rewrote on a timer
+// would be a file whose editor is fighting one. And a remote that will
+// not accept a file under .github/workflows -- which is what GitHub says
+// to a credential without the permission -- costs the deployment the CI
+// step and nothing else: the commit is undone, the export goes on, and
+// grain tries again a day later rather than every thirty seconds.
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/staterepo"
+)
+
+// gitOutput is git without the t.Fatal: for the questions whose answer is
+// allowed to be "there is no such file".
+func gitOutput(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// remoteWorkflow is the workflow as the remote holds it, or "" if the
+// remote has none -- read out of the bare repository rather than out of
+// the working tree, because "grain pushed it" is the claim.
+func remoteWorkflow(t *testing.T, remote string) string {
+	t.Helper()
+	out, err := gitOutput(remote, "show", "main:"+staterepo.WorkflowFile)
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+func TestSeedingARepositoryInstallsTheCheck(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	body := remoteWorkflow(t, remote)
+	if !strings.Contains(body, "state check /state") {
+		t.Fatalf("the seed did not push a workflow that runs the check:\n%s", body)
+	}
+	if !strings.Contains(body, staterepo.DefaultCheckImage) {
+		t.Errorf("the workflow does not name the default image:\n%s", body)
+	}
+	// Its own commit, holding nothing but the workflow. That is what
+	// makes a remote's refusal survivable: there is a commit to drop, and
+	// dropping it takes no dump with it.
+	files := git(t, dir, "show", "--name-only", "--format=", "HEAD")
+	if strings.TrimSpace(files) != staterepo.WorkflowFile {
+		t.Errorf("the workflow commit carries more than the workflow: %q", files)
+	}
+}
+
+// Installing the workflow moves HEAD, and a HEAD this host's database
+// has not been loaded from is precisely what Apply reads as "a pull
+// request was merged": it imports the dump into the running database.
+// So a workflow commit that left the loaded-head marker behind would
+// roll every row written since the last export back -- the template
+// somebody created a moment ago, the task somebody filed -- for a commit
+// that carries no rows at all.
+func TestInstallingTheWorkflowDoesNotRollTheDatabaseBack(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	// Filed after the seed, so it is in the database and not in the dump
+	// -- which is the ordinary state of a deployment between two exports.
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying: %v", err)
+	}
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatalf("reading the task back: %v", err)
+	}
+	if got == nil {
+		t.Fatal("the workflow commit made Apply import the dump over a newer database")
+	}
+}
+
+// A merged pull request that dropped the file -- a rebase that lost it, a
+// change to .github that took it with it -- is the case the file being
+// rewritten exists for. Without it the check is installed once and
+// silently gone forever after.
+func TestSyncPutsBackAWorkflowAMergeDropped(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	git(t, work, "rm", "--quiet", staterepo.WorkflowFile)
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-m", "Drop the workflow")
+	git(t, work, "push", "--quiet", "origin", "main")
+
+	// The daemon pulls the merge down and syncs, as its timer does.
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying the merge: %v", err)
+	}
+	if _, err := os.Stat(workflowPath(dir)); err == nil {
+		t.Fatal("the merge did not actually remove the workflow; the test is not testing anything")
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	changed, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion)
+	if err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+	if !changed {
+		t.Error("a sync that reinstalled the workflow reported nothing changed")
+	}
+	if _, err := os.Stat(workflowPath(dir)); err != nil {
+		t.Fatalf("the workflow did not come back: %v", err)
+	}
+	if !strings.Contains(remoteWorkflow(t, remote), "state check /state") {
+		t.Error("the reinstalled workflow never reached the remote")
+	}
+}
+
+// The property the export cycle has to have about every file an agent can
+// send a pull request against: grain does not fight a hand edit. A
+// deployment pinning the image, a runner somebody changed, a step added
+// to the job -- all of it survives, and survives the sync after that too.
+func TestSyncLeavesAnEditedWorkflowAlone(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// Somebody's pull request pins the image to the tag their deployment
+	// runs, which is the edit the generated file invites.
+	const edited = "# ours\nname: grain state check\non:\n  pull_request:\njobs:\n  check:\n" +
+		"    runs-on: self-hosted\n    steps:\n      - uses: actions/checkout@v4\n"
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	if err := os.WriteFile(filepath.Join(work, filepath.FromSlash(staterepo.WorkflowFile)),
+		[]byte(edited), 0o644); err != nil {
+		t.Fatalf("editing the workflow: %v", err)
+	}
+	git(t, work, "add", "--all", ".")
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-m", "Run the check on our own runner")
+	git(t, work, "push", "--quiet", "origin", "main")
+
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying the merge: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.PutTask(ctx, task("a1b2")); err != nil {
+			t.Fatalf("putting: %v", err)
+		}
+		if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+			t.Fatalf("syncing: %v", err)
+		}
+	}
+	if got := read(t, workflowPath(dir)); got != edited {
+		t.Errorf("the export cycle rewrote a workflow somebody else wrote:\n%s", got)
+	}
+	if got := remoteWorkflow(t, remote); got != edited {
+		t.Errorf("grain pushed its own workflow over the merged one:\n%s", got)
+	}
+}
+
+// Two deployments that must end up with no workflow at all: one whose
+// operator has said so, and one with no remote, where there is no GitHub
+// to run anything and a workflow commit would only be waiting to be
+// refused by the first push after the repository is ever published.
+func TestNoWorkflowIsInstalledWhenThereIsNothingToRunIt(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		remote bool
+		cfg    staterepo.Config
+	}{
+		{name: "the operator turned it off", remote: true, cfg: staterepo.Config{NoWorkflow: true}},
+		{name: "local-only, with no remote at all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, db := openDB(t)
+			if err := store.PutTask(ctx, task("a1b2")); err != nil {
+				t.Fatalf("putting: %v", err)
+			}
+			cfg := tc.cfg
+			cfg.Dir = filepath.Join(t.TempDir(), "state")
+			if tc.remote {
+				cfg.Remote = bareRemote(t)
+			}
+			repo, err := staterepo.Open(ctx, cfg)
+			if err != nil {
+				t.Fatalf("opening: %v", err)
+			}
+			if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+				t.Fatalf("loading: %v", err)
+			}
+			if err := store.PutTask(ctx, task("c3d4")); err != nil {
+				t.Fatalf("putting: %v", err)
+			}
+			if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+				t.Fatalf("syncing: %v", err)
+			}
+			if _, err := os.Stat(workflowPath(cfg.Dir)); err == nil {
+				t.Error("a workflow was installed anyway")
+			}
+		})
+	}
+}
+
+// The failure this whole shape is built around. GitHub refuses a push
+// that adds a file under .github/workflows unless the credential making
+// it may write workflows, and grain's own installation token need not be
+// able to. A deployment that hit that has to come out of it with its
+// state pushed, its working tree clean, and no commit stranded in front
+// of every later push.
+func TestAWorkflowTheRemoteRefusesIsUndoneAndTriedAgainLater(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	remote := bareRemote(t)
+	refuseWorkflows(t, remote)
+	clock := now
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{
+		Dir: dir, Remote: remote, Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	// The seed still seeds: the dump reaches the remote, and the refusal
+	// of the workflow is not a failure the deployment sees.
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading against a remote that refuses workflows: %v", err)
+	}
+	if out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json"); !strings.Contains(out, "a1b2") {
+		t.Fatalf("the dump did not reach the remote:\n%s", out)
+	}
+	if _, err := os.Stat(workflowPath(dir)); err == nil {
+		t.Error("the workflow grain could not push was left in the working tree")
+	}
+	// Nothing stranded: the local branch is exactly what the remote has,
+	// so the next push is a fast-forward rather than a rejection.
+	if local, want := head(t, dir), head(t, remote); local != want {
+		t.Errorf("a commit that can never be pushed is in the way: local %s, remote %s", local, want)
+	}
+
+	// The permission arrives, but grain does not spend a commit per tick
+	// finding that out: within the retry interval it leaves the
+	// repository alone.
+	allowWorkflows(t, remote)
+	if err := store.PutTask(ctx, task("c3d4")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after the refusal: %v", err)
+	}
+	if _, err := os.Stat(workflowPath(dir)); err == nil {
+		t.Error("grain offered the workflow again on the very next tick")
+	}
+	if remoteWorkflow(t, remote) != "" {
+		t.Error("the remote holds a workflow grain was refused a moment ago")
+	}
+
+	// A day later it tries again, and this time it lands.
+	clock = clock.Add(25 * time.Hour)
+	if err := store.PutTask(ctx, task("e5f6")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing a day later: %v", err)
+	}
+	if !strings.Contains(remoteWorkflow(t, remote), "state check /state") {
+		t.Error("grain never tried the workflow again once the credential could push it")
+	}
+}
+
+func head(t *testing.T, dir string) string {
+	t.Helper()
+	return strings.TrimSpace(git(t, dir, "rev-parse", "HEAD"))
+}
+
+// refuseWorkflows makes a bare remote answer a push carrying a file under
+// .github/workflows the way GitHub answers one made with a credential
+// that has no workflows permission: rejected, with that sentence in the
+// output, which is the only thing git hands back and so the only thing
+// grain can recognise it by.
+func refuseWorkflows(t *testing.T, remote string) {
+	t.Helper()
+	const hook = "#!/bin/sh\n" +
+		"while read -r old new ref; do\n" +
+		"  if [ \"$old\" = \"0000000000000000000000000000000000000000\" ]; then\n" +
+		"    files=$(git ls-tree -r --name-only \"$new\")\n" +
+		"  else\n" +
+		"    files=$(git diff --name-only \"$old\" \"$new\")\n" +
+		"  fi\n" +
+		"  case \"$files\" in\n" +
+		"    *.github/workflows/*)\n" +
+		"      echo 'refusing to allow a GitHub App to create or update workflow " +
+		"`.github/workflows/grain-state-check.yml` without `workflows` permission' >&2\n" +
+		"      exit 1\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"done\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatalf("installing the pre-receive hook: %v", err)
+	}
+}
+
+func allowWorkflows(t *testing.T, remote string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(remote, "hooks", "pre-receive")); err != nil {
+		t.Fatalf("removing the pre-receive hook: %v", err)
+	}
+}
