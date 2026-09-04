@@ -1,5 +1,5 @@
 import CloseIcon from "@mui/icons-material/Close";
-import { Dialog, IconButton } from "@mui/material";
+import { Button, Dialog, IconButton } from "@mui/material";
 import { SIDEBAR_WIDTH } from "../theme.js";
 
 // Shared overlay chrome, now MUI's own Dialog: it already closes on a
@@ -28,7 +28,23 @@ import { SIDEBAR_WIDTH } from "../theme.js";
 // under them, so a pane the height of the screen never scrolls its own
 // tabs off the top. Panes without one (a task, a schedule) pass nothing
 // and scroll their whole body as before.
-export default function Overlay({ onClose, wide = false, pane = false, header = null, children }) {
+//
+// A pane leaves by a back button in its top-left corner, not by an X in
+// its top-right (grain/task-177). A pane is a destination -- opening a
+// task or a schedule fills the whole content area beside the sidebar and
+// puts its own URL in the address bar -- and the other destinations of
+// that kind, a repo's page (RepoPage) and a repo's releases
+// (RepoReleases), have always left by "← Repos" on the left. Two
+// gestures for the same "go back where I came from", in opposite corners
+// of the screen, was the inconsistency. `backLabel` names where that is
+// for the panes that only ever open from one list; the default says just
+// "Back", for the panes (a task, Settings, Debug, Metrics) that can be
+// opened from more than one place and so cannot honestly name one.
+//
+// The centered shape keeps its X: New task, Run a suite and an attempt's
+// transcript are single actions taken over the page you are already on,
+// not somewhere you navigated to, and there is nothing to go "back" to.
+export default function Overlay({ onClose, wide = false, pane = false, backLabel = "Back", header = null, children }) {
   if (pane) {
     return (
       <Dialog
@@ -50,14 +66,13 @@ export default function Overlay({ onClose, wide = false, pane = false, header = 
           },
         }}
       >
-        <IconButton
-          aria-label="Close dialog"
-          onClick={onClose}
-          size="small"
-          sx={{ position: "absolute", top: 8, right: 8, color: "text.secondary", zIndex: 1 }}
-        >
-          <CloseIcon fontSize="small" />
-        </IconButton>
+        {/* In the flow above the header rather than floating over the
+            corner, so it never lands on top of a title or a tab strip --
+            the same place, and the same negative margin pulling the
+            label out to the pane's own left edge, as RepoPage's. */}
+        <div className="overlay-pane-back">
+          <Button onClick={onClose} sx={{ ml: -0.9 }}>&larr; {backLabel}</Button>
+        </div>
         {header !== null && <div className="overlay-pane-header">{header}</div>}
         {/* The pane's own body scrolls, not the document: the paper is
             the viewport's full height and its content (a long timeline,

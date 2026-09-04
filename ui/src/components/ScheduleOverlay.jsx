@@ -217,7 +217,7 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
   };
 
   return (
-    <Overlay onClose={onClose} pane>
+    <Overlay onClose={onClose} pane backLabel="Schedules">
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New schedule" : "Edit schedule"}</Typography>
       <form className="pane-form" onSubmit={submit}>
         {isNew && (

@@ -57,7 +57,7 @@ export default function TemplateOverlay({ template, config, onClose, onSaved, sh
   };
 
   return (
-    <Overlay onClose={onClose} pane>
+    <Overlay onClose={onClose} pane backLabel="Templates">
       <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New template" : "Edit template"}</Typography>
       <form className="pane-form" onSubmit={submit}>
         <TextField name="name" label="Name" defaultValue={template?.name} required InputLabelProps={{ required: false }} helperText="shown wherever a template is picked" autoComplete="off" fullWidth margin="normal" />

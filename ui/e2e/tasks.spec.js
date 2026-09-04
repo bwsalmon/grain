@@ -94,6 +94,30 @@ test("opens a task into the pane beside the sidebar", async ({ page }) => {
   expect(Math.abs(box.height - viewport.height)).toBeLessThanOrEqual(1);
 });
 
+// grain/task-177: a pane and a repo's own page are both destinations
+// with their own URL, so both leave the same way -- a back button in the
+// top-left corner, not an X in the top-right that only the panes had.
+// Which corner a button is actually in is a question about where it
+// lands on screen, so it is asked here rather than of jsdom.
+test("leaves a task's pane by a back button in its top-left corner", async ({ page }) => {
+  await page.goto("/");
+  await page.locator(".task-row").first().click();
+  await expect(page.locator(".detail-header h2")).toBeVisible();
+
+  const paneBox = await page.locator(".MuiDialog-paper").boundingBox();
+  const back = page.getByRole("button", { name: "← Back" });
+  const backBox = await back.boundingBox();
+
+  // In the pane's own left half and its own top eighth: the corner, not
+  // merely somewhere on the page.
+  expect(backBox.x - paneBox.x).toBeLessThan(paneBox.width / 2);
+  expect(backBox.y - paneBox.y).toBeLessThan(paneBox.height / 8);
+
+  await back.click();
+  await expect(page.locator(".detail-header h2")).toHaveCount(0);
+  await expect(page).toHaveURL("/");
+});
+
 test("approves a proposed task from its detail view", async ({ page }) => {
   await page.goto("/");
   const title = `E2E approve me ${Date.now()}`;

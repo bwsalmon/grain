@@ -651,18 +651,33 @@ fieldset legend {
   padding: 1.5rem 1.75rem;
 }
 
+/* The pane's own way out: a back button in the top-left corner, above
+   everything else the pane draws, the way a repo's page wears one
+   (.repo-page-header, grain/task-177). Sized to its content and outside
+   .overlay-pane below, so it stays put rather than scrolling away with
+   the body. */
+.overlay-pane-back {
+  flex: none;
+  padding: 0.9rem 1.75rem 0;
+}
+
 /* The fixed chrome a pane can pin above that scrolling body (Overlay's
    own `header`): Settings' and Debugging's title and tab strip, which
    would otherwise scroll away the moment a tab's own content ran past
    the bottom of a full-height pane (grain/task-115). Sized to its
    content, so .overlay-pane above still takes the rest of the paper.
-   The right padding is what keeps a long tab strip clear of the close
-   button floating in that corner. */
+   Nothing floats in the top-right corner any more, so the tab strip
+   runs the full width and both paddings are the pane's own. */
 .overlay-pane-header {
   flex: none;
-  padding: 1.25rem 3rem 0 1.75rem;
+  padding: 0.75rem 1.75rem 0;
   border-bottom: 1px solid var(--border);
 }
+
+/* Whichever of the two the back button sits directly above starts
+   closer to it than it would to the top of the paper: the gap is
+   already there in the button's own row. */
+.overlay-pane-back + .overlay-pane { padding-top: 0.75rem; }
 .overlay-pane-header h2 { margin: 0 0 0.5rem; }
 
 /* A form is a single column of fields however wide the pane is: full
@@ -684,7 +699,8 @@ fieldset legend {
 .detail-side { width: 260px; flex: none; position: sticky; top: 0; }
 @media (max-width: 720px) {
   .overlay-pane { padding: 1.25rem 1rem; }
-  .overlay-pane-header { padding: 1rem 3rem 0 1rem; }
+  .overlay-pane-back { padding: 0.75rem 1rem 0; }
+  .overlay-pane-header { padding: 0.5rem 1rem 0; }
   .detail-layout { flex-direction: column; }
   .detail-side { width: 100%; position: static; }
 }
