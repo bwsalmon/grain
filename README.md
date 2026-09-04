@@ -3837,10 +3837,14 @@ depend on a grant nobody has made yet is not.
 made on every path out of themselves, Ctrl-C included, but a bash `EXIT`
 trap does not run when the runner kills the shell — which is what a
 cancelled job or a blown timeout does, and a leaked cluster bills all
-week. An `always()` step deletes any VM or cluster carrying the scripts'
-own labels and more than two hours old: old enough that it cannot take a
-cluster somebody is standing in front of with `--keep`, and by label
-rather than by name so tonight's run clears last night's leak.
+week. An `always()` step deletes anything carrying the scripts' own
+labels on either of two tests: created after this run minted its key, so
+it is this run's and goes now rather than billing until tomorrow; or more
+than two hours old, which no run of this job (about fifteen minutes) ever
+is, so that bound only ever decides about somebody else's leftovers — and
+is long enough not to take a cluster a human is standing in front of with
+`--keep`. By label rather than by name, so tonight's run clears last
+night's leak.
 
 `tests/deploy` holds the arrangement rather than trusting it — the
 trigger (no `push`, no `pull_request`), the `environment:`, both

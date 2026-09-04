@@ -248,8 +248,13 @@ jobs:
             exit 1
           fi
           # Recorded now so the revoke step can find the key even if the
-          # run below is cancelled halfway through.
-          echo "key-id=$(jq -r .private_key_id "$RUNNER_TEMP/agent.json")" >> "$GITHUB_OUTPUT"
+          # run below is cancelled halfway through, and so the cleanup step
+          # can tell what this run made from what it found: nothing this
+          # run creates predates the key it creates.
+          {
+            echo "key-id=$(jq -r .private_key_id "$RUNNER_TEMP/agent.json")"
+            echo "minted-at=$(date -u +%s)"
+          } >> "$GITHUB_OUTPUT"
 
           gcloud auth activate-service-account --key-file="$RUNNER_TEMP/agent.json"
           echo "active account: $(gcloud config get-value account)"
@@ -292,16 +297,29 @@ jobs:
       # what cleans up *last* night's leak: it deletes by label, so
       # anything either script ever created is in scope.
       #
-      # Two hours old, not "anything labelled": a run of this job takes
-      # about fifteen minutes, and the age bound is what keeps a sweep from
-      # deleting a cluster a human is standing in front of with --keep.
+      # Two tests, not one, and the reason is what a leaked *cluster*
+      # costs. Anything created after this run minted its key is this
+      # run's, and goes immediately -- waiting on an age bound would leave
+      # a control plane and two nodes billing until tomorrow's sweep.
+      # Anything else has to be two hours old, which a run of this job
+      # (about fifteen minutes) never is, so the age bound is only ever
+      # deciding about a cluster somebody else left: long enough that it
+      # cannot take one a human is standing in front of with --keep, since
+      # both scripts print the delete command and expect it to be run.
       - name: Delete anything left behind
         if: always()
+        env:
+          MINTED_AT: ${{ steps.agent-key.outputs.minted-at }}
         run: |
           set -uo pipefail
           cutoff=7200
           now="$(date -u +%s)"
-          old() { [ $(( now - $(date -u -d "$1" +%s) )) -ge "$cutoff" ]; }
+          ours_or_stale() {
+            local created
+            created="$(date -u -d "$1" +%s)" || return 1
+            [ -n "${MINTED_AT:-}" ] && [ "$created" -ge "$MINTED_AT" ] && return 0
+            [ $(( now - created )) -ge "$cutoff" ]
+          }
 
           # zone.basename(): `value(zone)` on an instance is the zone's full
           # resource URL, which `--zone` will not take.
@@ -309,7 +327,7 @@ jobs:
             --filter='labels.purpose=gce-vm-smoke' \
             --format='value(name,zone.basename(),creationTimestamp)' |
           while read -r name zone created; do
-            if old "$created"; then
+            if ours_or_stale "$created"; then
               echo "sweeping VM $name ($created)"
               gcloud compute instances delete "$name" --zone="$zone" --quiet || true
             fi
@@ -319,7 +337,7 @@ jobs:
             --filter='resourceLabels.purpose=gke-cluster-smoke' \
             --format='value(name,location,createTime)' |
           while read -r name zone created; do
-            if old "$created"; then
+            if ours_or_stale "$created"; then
               echo "sweeping cluster $name ($created)"
               gcloud container clusters delete "$name" --zone="$zone" --quiet || true
             fi
