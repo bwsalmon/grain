@@ -535,7 +535,7 @@ func TestRunPutsGrainInFrontOfEveryToolCall(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.hooksAtRun), &hooks); err != nil {
 		t.Fatalf("hook config was not JSON: %v (%q)", err, r.hooksAtRun)
 	}
-	groups := hooks[hookName].PreToolUse
+	groups := hooks[HookName].PreToolUse
 	if len(groups) != 1 || len(groups[0].Hooks) != 1 {
 		t.Fatalf("PreToolUse = %+v, want exactly one handler in one group", groups)
 	}

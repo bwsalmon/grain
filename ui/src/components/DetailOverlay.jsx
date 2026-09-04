@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, frameworkLabel, orphanedPullRequest, runActivity } from "../state.js";
+import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, frameworkLabel, orphanedPullRequest, runActivity, stateLabel } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -101,8 +101,8 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
         <div className="detail-side">
           <div className="detail-state">
             <span className={`badge badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}>
-              <StateDot state={t.state} title={STATE_LABELS[t.state] || t.state} />
-              {STATE_LABELS[t.state] || t.state}
+              <StateDot state={t.state} title={stateLabel(t)} repairing={t.repairing} />
+              {stateLabel(t)}
             </span>
             {/* Both chips read as annotations beside the state dot, not a
                 replacement for it -- a blocked task is still queued

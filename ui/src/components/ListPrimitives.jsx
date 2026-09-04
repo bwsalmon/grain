@@ -61,6 +61,33 @@ export function ListSortSelect({ id, value, onChange, options }) {
   );
 }
 
+// ListFilterSelect is ListSortSelect's counterpart for narrowing a list
+// rather than ordering it: one attribute, its own label, and a first
+// entry (value "") that leaves the attribute out of the question
+// altogether.
+//
+// Options are an array of { value, label } rather than ListSortSelect's
+// map, because a filter's values are read off whatever the list happens
+// to hold -- a repo name, a capability id, an author -- so the caller,
+// not an object literal's key order, decides what order they come in.
+export function ListFilterSelect({ id, label, anyLabel, value, onChange, options }) {
+  const labelId = `${id}-label`;
+  return (
+    <FormControl size="small" sx={{ minWidth: 150 }}>
+      <InputLabel id={labelId}>{label}</InputLabel>
+      <Select
+        labelId={labelId}
+        label={label}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        <MenuItem value="">{anyLabel}</MenuItem>
+        {options.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+      </Select>
+    </FormControl>
+  );
+}
+
 export function ListEmpty({ children }) {
   return <p className="empty">{children}</p>;
 }

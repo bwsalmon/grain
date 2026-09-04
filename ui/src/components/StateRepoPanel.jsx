@@ -126,6 +126,17 @@ export default function StateRepoPanel({ showError }) {
           <code>{status.dir}</code> to decide what happens to it.
         </Alert>
       )}
+      {status.workflowRefused && (
+        <Alert severity="warning" sx={{ mt: 2 }}>
+          Pull requests against this repository are not being checked. grain installs a workflow that runs{" "}
+          <code>grain state check</code> on every one of them, and this deployment&apos;s credential may not push
+          files under <code>.github/workflows</code>, so the file was never committed
+          {status.workflowRefusedAt && <> (last tried {new Date(status.workflowRefusedAt).toLocaleString()})</>}. grain
+          keeps syncing and tries again daily. To install it yourself, run <code>grain state ci</code> in a clone and
+          commit <code>{status.workflowFile}</code> with a credential that may write workflows &mdash; or set{" "}
+          <code>&quot;noWorkflow&quot;: true</code> in this host&apos;s state settings to stop grain offering it.
+        </Alert>
+      )}
       {status.error && (
         <Alert severity={status.diverged ? "info" : "warning"} sx={{ mt: 2 }}>{status.error}</Alert>
       )}

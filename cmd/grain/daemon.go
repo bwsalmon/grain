@@ -2538,10 +2538,10 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// The bootstrap pane: this process owns the state repository its
 		// store is exported to, so the UI it serves is the one place that
 		// can offer the choice of where state lives (pkg/ui/staterepo.go).
-		StateRepo: stateRepo,
-		Reboot:       rebootHost(cfg.rebootCmd),
-		TargetRepos:  cfg.targetRepos,
-		Credentials:  uiCredentials,
+		StateRepo:   stateRepo,
+		Reboot:      rebootHost(cfg.rebootCmd),
+		TargetRepos: cfg.targetRepos,
+		Credentials: uiCredentials,
 		// "daemon" reads back this same process's own journal (it always
 		// runs as grain-daemon.service -- scripts/setup.sh's own unit --
 		// under a real deployment); "git-proxy-audit" reads the audit log

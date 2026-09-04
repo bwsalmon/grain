@@ -193,10 +193,9 @@ func TestReconcileScheduleWaitsForThePreviousFiringToFinish(t *testing.T) {
 // not off whatever the schedule's own row last cached, so a template
 // edited between two firings changes what the second one files -- and
 // the schedule's own display cache (Title/Body/...) is kept in sync
-// with it too. The schedule's own Target is never touched: a template
-// carries no target of its own (model.Template's own doc comment on
-// why), so it is the schedule's own standing repo that every firing
-// targets.
+// with it too. The schedule's own Target is left alone here because
+// this template is unbound, which is the ordinary case; the bound one
+// is TestReconcileScheduleFiresABoundTemplateAtItsOwnRepo below.
 func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	store, ctx := openStore(t)
 	tmpl := model.Template{
@@ -283,6 +282,57 @@ func TestReconcileScheduleFiresFromATemplateResolvedFresh(t *testing.T) {
 	}
 	if second.Title != "Bump dependencies (patch only)" {
 		t.Errorf("second firing title = %q, want the freshly-edited template title", second.Title)
+	}
+}
+
+// TestReconcileScheduleFiresABoundTemplateAtItsOwnRepo is the other
+// half of grain/task-285: a template bound to a repo and branch decides
+// what its firings target, over the schedule's own standing repo -- and
+// the schedule's row is resynced to match, so what it says it fires and
+// what it actually fires stay the same thing.
+func TestReconcileScheduleFiresABoundTemplateAtItsOwnRepo(t *testing.T) {
+	store, ctx := openStore(t)
+	bound := model.RepoRef{Owner: "acme", Name: "gadgets"}
+	tmpl := model.Template{
+		ID: "template-1", Name: "Dependency bump", Title: "Bump dependencies",
+		Target: &bound, Base: "release",
+	}
+	if err := store.PutTemplate(ctx, tmpl); err != nil {
+		t.Fatal(err)
+	}
+	templateID := tmpl.ID
+	sched := model.Schedule{
+		ID:         "sched-1",
+		TemplateID: &templateID,
+		Target:     model.RepoRef{Owner: "acme", Name: "widgets"},
+		Base:       "main",
+		Recurrence: model.Recurrence{Kind: model.RecurrenceEveryNHours, EveryNHours: 24},
+		Enabled:    true,
+		NextRunAt:  baseTime.Add(-time.Minute),
+		CreatedAt:  baseTime,
+	}
+	if err := store.PutSchedule(ctx, sched); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runScheduleOnly(t, store, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	filed := scheduledTasksTagged(t, store, "schedule:"+sched.ID)
+	if len(filed) != 1 {
+		t.Fatalf("filed %d tasks, want 1", len(filed))
+	}
+	if filed[0].Target == nil || *filed[0].Target != bound || filed[0].Base != "release" {
+		t.Errorf("firing target/base = %+v/%q, want the template's binding %+v on release",
+			filed[0].Target, filed[0].Base, bound)
+	}
+
+	got, err := store.GetSchedule(ctx, sched.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Target != bound || got.Base != "release" {
+		t.Errorf("schedule row = %+v/%q after firing, want it resynced to the binding", got.Target, got.Base)
 	}
 }
 

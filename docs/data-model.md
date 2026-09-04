@@ -2324,32 +2324,50 @@ anyone. `PENDING` therefore has a deadline (`defaultCheckStallDeadline`,
 two hours, measured per head commit over one unbroken run of `PENDING`
 reads, so a re-run hours later is timed from the re-run). Past it the
 merge queue comments on the task naming the checks it was waiting for,
-sets `Observation.MergeQueueBlockedAt`, and moves on. No fix task is
-filed first, unlike a `CONFLICTED` or `FAILING` head: nothing has
+sets `Observation.MergeQueueBlockedAt`, and moves on. No repair is asked
+for first, unlike a `CONFLICTED` or `FAILING` head: nothing has
 reported a failure, and the usual causes sit outside the pull request
 entirely, so there may be nothing in it for an agent to repair. The
 pull request still merges the moment its checks do finish clean — what
-giving up costs is the queue position and the automatic fix, not the
+giving up costs is the queue position and the automatic repair, not the
 merge. `UNKNOWN` gets no such deadline: what produces it cycle after
 cycle is a credential that cannot read checks, which is one fact about
 the deployment rather than something wrong with each of the pull
 requests it would otherwise comment on one at a time.
 
-A `CONFLICTED` or `FAILING` head waits on the same clock for a different
-thing, and needs its own bound for the same reason. Once the queue has
-filed a fix task for it, it does nothing further until that task closes —
-and its own health stays `CONFLICTED`/`FAILING` throughout, so the
-`PENDING` deadline never applies to it, while the fix task's own pull
-request is not a queue member and is never timed either. A fix that never
-finishes (its checks wedged, an agent run that never comes back) would
-therefore hold the head, and everything behind it, forever. So the wait
-has a deadline too (`defaultFixTaskDeadline`, six hours, measured from
-when the fix task was filed): past it the queue says so on the task,
-naming the fix it was waiting for, and moves on the same way. Six hours
-rather than two, because a fix has to be dispatched, run an agent
-(capped at two hours itself) and get its own CI through before it can
-land, and giving up early throws away a repair that might have worked —
-the queue never files a second one.
+A `CONFLICTED` or `FAILING` head is repaired rather than waited on, and
+**the repair happens on the pull request's own branch**. The queue
+comments on the task saying what is broken and which branch to push to,
+clears `Observation.CompletedAt` and stamps
+`Observation.MergeQueueRepairAt`: the task reads `queued` again, the
+ordinary dispatch path picks it up, and the run continues the branch its
+pull request is already open from. One pull request, one round of CI. It
+used to file a separate task whose branch was stacked on the broken one
+and merged back once green, which bought the same resolution at the price
+of two full rounds of checks — the fix branch's own before it could
+merge, and the head branch's afterward — with the queue waiting out both.
+
+That wait needs its own bound for the reason the `PENDING` one does. The
+head's health stays `CONFLICTED`/`FAILING` while the repair runs, so the
+`PENDING` deadline never applies to it, and a repair that never finishes
+(a dispatch that never happens, an agent run that never comes back) would
+hold the head, and everything behind it, forever. So the wait has a
+deadline too (`defaultRepairDeadline`, six hours, measured from
+`MergeQueueRepairAt`): past it the queue says so on the task and moves on
+the same way. Six hours rather than two, because a repair has to be
+dispatched and run an agent (capped at two hours itself), and giving up
+early throws away a repair that might have worked — the queue never asks
+for a second one. A repair that *does* finish is judged a cycle later
+than the one it completed on, since dispatch runs before sync inside a
+tick and the verdict read on that tick describes the branch as it was
+before the repair's push.
+
+A repair in flight is also what makes the run a *merger*
+(`model.Limits`), so it draws on the capacity kept back for finishing
+work rather than queueing behind new work; and it is what
+`OpenPullRequestLinks` looks for to keep watching a task that is no
+longer in a post-run state, so the head keeps its queue position while
+being repaired.
 
 `PENDING` also covers the state before there is a check to read. GitHub
 creates a workflow run's check runs asynchronously, *after* it has
@@ -2368,8 +2386,8 @@ change in the seconds before its first check run appears.
 **One commit, from the read to the merge.** All of the above is reasoning
 about a *commit*, while a pull request is a moving branch, and the two
 part company whenever a push lands mid-cycle — a human's own "push a fix
-by hand", a fix task merging into the branch it repairs, a redispatched
-task pushing again. So the cycle names the commit at every step rather
+by hand", a repair run pushing to the branch it was sent to fix, a
+redispatched task pushing again. So the cycle names the commit at every step rather
 than letting any of them mean "whatever the branch points at now": the
 head sha comes off the pull-request read, the check runs are read for
 that sha (a branch-scoped Checks read would answer for a commit the cycle
@@ -2393,8 +2411,8 @@ record *about* a PR, and it is refreshed from a `PullRequestDetail` read.
 task can have — produced one, continues one (`/pr`), reviews one
 (`/review`) — are `TaskIntent`, above. `TrackedPullRequest` exists for
 the fourth thing: a PR grain opened and is still watching, so it can
-close the task when the PR closes, merge it if `auto_merge`, or file a
-fix task when it goes red.
+close the task when the PR closes, merge it if `auto_merge`, or send the
+task back to an agent to repair the branch when it goes red.
 
 ### Tasks from review comments
 

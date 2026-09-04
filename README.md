@@ -556,11 +556,12 @@ and become grain's, which means grain has to render them. That is what
   everything already queued, rather than at `OrderKey`'s zero value —
   which is not "no position" but a position ahead of every task filed
   since the backlog started.
-- The merge queue's own two voices moved too: `fileFixTask` files a store
-  task instead of an issue, and both it and `escalateToUser` comment
-  through `Store.AddComment` as the `merge-queue` principal, so a human
-  reading a task's conversation can tell the queue's remarks from a
-  relayed agent's.
+- The merge queue's own two voices moved too: it asks for a repair with a
+  store comment instead of an issue (`fileFixTask` then, `requeueForRepair`
+  now), and both it and `escalateToUser` comment through
+  `Store.AddComment` as the `merge-queue` principal, so a human reading a
+  task's conversation can tell the queue's remarks from a relayed
+  agent's.
 - **Closing out is one write.** It used to be two — close the task's
   GitHub issue, then record the closure — with the issue closed first and
   the store told second, so a crash in between left a closed issue that
@@ -1091,24 +1092,24 @@ merge a human withheld. `BuildPrompt` mentions `auto_merge` only to a task
 that is itself an auto-merge job, since there is nothing another task
 could do with it.
 
-Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
+Repairing a PR that goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
 task that asked for `/auto-merge` and still has a PR open. Only the
 queue's head — whichever of a repo's waiting tasks sits first in the
 backlog — is ever acted on in a
-cycle; a fix filed for the second task while the first is still being
-repaired would likely need refiling the moment the first merges and
-changes what the second is based against, so everything behind the head
-just waits. Nothing merges while CI is still
+cycle; a repair started for the second task while the first is still
+being repaired would likely need starting over the moment the first
+merges and changes what the second is based against, so everything behind
+the head just waits. Nothing merges while CI is still
 running: a check run GitHub has not finished reads `PrHealth.PENDING`
 (`healthFrom`), which is neither clean nor failing, so the head simply
 holds its place and the next cycle asks again — a queue that merged on
 "no failure reported yet" would land changes before their tests had said
 anything about them. Pending outranks failing on purpose, so a red job
-alongside a still-running one waits too: the queue files exactly one
-automatic fix per pull request, and it is worth a cycle to file that one
-against CI's whole verdict rather than against whichever job went red
-first. Nor does it merge before CI has said *anything*: an empty check
+alongside a still-running one waits too: the queue asks for exactly one
+automatic repair per pull request, and it is worth a cycle to ask for
+that one against CI's whole verdict rather than against whichever job
+went red first. Nor does it merge before CI has said *anything*: an empty check
 list is read `PENDING` too, until the head commit has carried it for
 `defaultCheckRegistrationWindow` (two minutes). GitHub creates a
 workflow run's check runs asynchronously after processing a push, so a
@@ -1123,9 +1124,9 @@ sha off the pull-request read (a branch-scoped read answers for a commit
 the cycle never saw), the window above is keyed on it, and the merge
 carries it in GitHub's own `sha` parameter, which refuses with `409` if
 the branch has moved since. That closes the gap a push landing mid-cycle
-would otherwise walk through — a human's own "push a fix by hand", a fix
-task merging into the branch it repairs, a redispatched task pushing
-again — and costs one cycle when it happens: the task keeps its queue
+would otherwise walk through — a human's own "push a fix by hand", a
+repair run pushing to the branch it was sent to fix, a redispatched task
+pushing again — and costs one cycle when it happens: the task keeps its queue
 position and the commit that landed is judged next cycle on its own CI.
 Nor does it wait for CI that is never coming: a head that
 has read `PENDING` for longer than `defaultCheckStallDeadline` (two
@@ -1134,10 +1135,10 @@ given up on — a comment naming the checks that never finished,
 `Observation.MergeQueueBlockedAt` set, the queue moved on — since a
 workflow waiting on an approval nobody gives, or a provider that posted
 "queued" and went away, would otherwise hold its repo's whole queue for
-the life of the deployment with nothing said to anyone. No fix task is
-filed for that one: nothing has failed, and a check that never finishes
-is usually waiting on something outside the pull request, so there may
-be nothing in it to repair. A conflicted or failing head is not taken at
+the life of the deployment with nothing said to anyone. No repair is
+asked for on that one: nothing has failed, and a check that never
+finishes is usually waiting on something outside the pull request, so
+there may be nothing in it to repair. A conflicted or failing head is not taken at
 its word, either. Before anything is filed for it, `refreshStaleHead`
 asks GitHub to merge the pull request's own base branch into its head
 branch (`POST /repos/{owner}/{repo}/merges`, `Client.MergeBranch`) —
@@ -1152,9 +1153,9 @@ case, and a check run names no base — it asks for the merge and lets the
 answer classify: `201` means it was behind and is not now, so CI re-runs,
 the head holds its queue position while it does, and the *next* cycle
 decides on a fresh verdict; `204` means the branch already contained its
-base, so the failure is genuine and the fix task is filed as it always
-was; `409` means it genuinely conflicts, which is the case a fix task is
-really for, filed immediately and now naming the conflict the queue
+base, so the failure is genuine and the repair is asked for as it always
+was; `409` means it genuinely conflicts, which is the case a repair is
+really for, asked for immediately and now naming the conflict the queue
 watched GitHub refuse rather than one inferred from a `Mergeable` flag.
 That is one API call in place of a full agent run for what has been the
 majority of this deployment's automatic fixes — every one of them
@@ -1163,26 +1164,53 @@ type. It happens once per pull request
 (`Observation.MergeQueueRefreshedAt`, persisted for the same reason the
 CI clocks are not: losing it would cost a repeated write to GitHub rather
 than another window of waiting), only for the queue head, and never for a
-fix task's own stacked branch or one the queue has given up on. It is a
+branch the queue is not steering or one it has given up on. It is a
 merge, never a rebase: nothing force-pushes a branch an agent may still
-hold a clone of, or moves the base out from under an in-flight stacked
-fix. A conflicted or failing head that survives all that gets a fix task filed straight
-into the store already approved (`Task.Approval` set by
-`PrincipalAutomation`, `LinkFixTask` recording which one) rather than
-`core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`
-issue and waited for a human to apply the trigger label or comment
-`/lgtm` — bwsalmon/agents#283 asked for exactly that human step to go
-away. The fix task carries `/base` the original PR's own branch and
-`/auto-merge true`, the same stacked-branch trick `_suggest_fix` used, so
-it dispatches on the very next `dispatch.Cycle` with no approval in
-between and, once clean, merges straight back into the branch it
-repairs. If it finishes and the original PR is still broken,
-`SyncPullRequests` gives up
-automatically rather than refiling: it comments explaining why, sets
-`Observation.MergeQueueBlockedAt`, and the queue moves on to the next
-task in that repo — a blocked task still merges the moment a human's own
-push makes it clean, it just stops being anyone's queue head, so it can
-no longer hold up what's behind it. No new record was needed for the
+hold a clone of.
+
+A conflicted or failing head that survives all that is **sent back to an
+agent on its own branch** (grain/task-271). The queue comments on the
+task saying what is broken, which branch to push to, and what CI printed
+if a job went red; clears `Observation.CompletedAt`, which is what makes
+`StateOf` read the task `queued` again; and stamps
+`Observation.MergeQueueRepairAt`. The next `dispatch.Cycle` picks it up
+through the ordinary path, the run continues the branch the pull request
+is already open from, and GitHub re-runs that one pull request's checks
+once. Until grain/task-271 the queue filed a *separate* task instead —
+pre-approved, `/base` the broken branch, `/auto-merge true`, stacked and
+merged back once green, which is `core.py`'s own `_suggest_fix` trick
+minus the human approval step bwsalmon/agents#283 asked to remove. It
+worked, and it cost two full rounds of CI for one resolution: the fix
+branch's own before it could merge, and the head branch's afterward, with
+the queue waiting out both and a second pull request left behind. A
+conflict resolved on the branch that has the conflict needs neither.
+`LinkFixTask` is still defined and such a task still merges if a database
+holds one in flight; nothing writes a new one.
+
+`MergeQueueRepairAt` is the whole record of a repair, and four things
+read it: the queue waits on it rather than on another task's state, it
+will not merge a branch an agent is still pushing to, the store spends
+the capacity `Limits.Mergers` keeps back on the repair run (`mergerTaskSQL`,
+which used to be the `ReasonFix` column alone), and never clearing it is
+what holds the deployment to one automatic repair per pull request. If
+the repair finishes and the PR is still broken, `SyncPullRequests` gives
+up automatically rather than asking again: it comments explaining why,
+sets `Observation.MergeQueueBlockedAt`, and the queue moves on to the
+next task in that repo — a blocked task still merges the moment a human's
+own push makes it clean, it just stops being anyone's queue head, so it
+can no longer hold up what's behind it. It judges that a cycle *after*
+the one the repair completed on, since dispatch runs before sync inside a
+tick and the verdict read on that tick describes the branch as it was
+before the repair pushed to it.
+
+The task goes visibly back to working while this happens, which is what
+a person watching the queue should see — so the frontend says which kind
+of work it is: `ui.Task.Repairing` carries it, a repairing row's grain
+mark animates in green rather than the accent's gold, and its badge reads
+"Repairing" instead of "Running". A row that has gone back to running has
+not gone back to the beginning.
+
+No new record was needed for the
 queue itself: `queueOrder` derives the whole queue from `Task.AutoMerge`,
 `Origin.Reason` and `MergeQueueBlockedAt` fresh every cycle, and
 `queueHeads` takes each repo's first entry from it — the same "derive it,
@@ -1190,14 +1218,15 @@ don't store it" discipline `TaskState` already holds to.
 
 What the queue does write down is where it is. Every cycle,
 `showQueueAtFrontOfBacklog` moves the tasks waiting to land to the front
-of the backlog in the order they will land, and `fileFixTask` files a
-repair at the very head of it (`Store.MoveToFrontOfBacklog`,
-`Store.OrderKeyForNewTask`) — so a task list answers "what is grain about
-to finish, and in what order" without anyone opening a task. It is the
-same order in both directions: `queueOrder` reads position back off the
-backlog rather than comparing `Task.CreatedAt` behind everyone's back, so
-dragging one waiting pull request above another really does change which
-merges first, and `Store.Ready` needs no carve-out for a fix task any
+of the backlog in the order they will land (`Store.MoveToFrontOfBacklog`)
+— so a task list answers "what is grain about to finish, and in what
+order" without anyone opening a task, and so a repair, being the head
+task itself going back to work, is dispatched ahead of new work without
+anything having to file it there. It is the same order in both
+directions: `queueOrder` reads position back off the backlog rather than
+comparing `Task.CreatedAt` behind everyone's back, so dragging one
+waiting pull request above another really does change which merges first,
+and `Store.Ready` needs no carve-out for the merge queue's own work any
 more — being at the head of the list is what dispatches it first, which
 is a thing a human can see and, if they disagree, undo.
 
@@ -1718,8 +1747,17 @@ against a real credential and reading the tool steps back off its
   `global<TAB>deny<TAB>run_command`. Bare names, `run_command(*)` and
   `regex:` forms all survive; a malformed value (`"deny": 12345`) is
   dropped in silence, no rule and no complaint -- the failure mode this
-  section already warned about. What the rules do *not* do is change the
-  roster: the `init` event of a real stream-json session advertises the
+  section already warned about, and the reason
+  `TestLiveAgyLoadsGrainsPermissionRules` (`tests/e2e`) now asks the
+  binary that question nightly, one assertion per rule
+  `permissionRules` wrote. They load for exactly the launch that finds
+  them: agy rewrites `settings.json` on *every* start, keeping the keys it
+  owns (`modelProvider`) and dropping the whole `permissions` block, so a
+  second `agy` in the same `HOME` has no rules at all. Harmless as grain
+  runs agy -- `writeAgyHome` builds a fresh `HOME` per run and `Run`
+  starts the binary once in it -- and a trap for any future change that
+  reuses one or starts agy again to resume a run. What the rules do *not*
+  do is change the roster: the `init` event of a real stream-json session advertises the
   same 55 native tools with the block and without it. And `Run` passes
   `--dangerously-skip-permissions`, which that same event reports as
   permission mode `always-proceed`, while agy's own prompt calls an
@@ -1748,6 +1786,34 @@ against a real credential and reading the tool steps back off its
   different mechanism from the permission prompt the flag auto-approves.
   grain's hook is grain: `hooks.json` runs `grain agy-tool-hook`
   (`cmd/grain/agyhook.go`), which answers from `HookDecision`.
+- **Whether it is loaded at all is a separate, cheaper question, and it
+  is now asked nightly.** `hooks.json` is not validated on load -- one agy
+  cannot make sense of leaves a run with no hooks and no complaint -- and
+  a live run only shows the hook working when the model happens to reach
+  for a native tool. `agy -p /hooks` needs neither: it prints one
+  tab-separated record per loaded hook,
+  `grain-native-tool-denial<TAB>enabled<TAB>PreToolUse<TAB>*<TAB>command<TAB>'/path/to/grain' agy-tool-hook`,
+  out of the config it just read and without an agent turn or a valid
+  credential. `TestLiveAgyLoadsGrainsHookConfig` (`tests/e2e`) asserts
+  each field of that record, and asserts as its control that the same
+  command names nothing when `hooks.json` is removed from the `HOME` --
+  without which "the output contains our hook's name" would not be
+  evidence of anything.
+- **What the hook is asked about is the name in the payload, and the
+  nightly now records it.** `HookDecision` matches `toolCall.name` against
+  agy's tool names, while agy's own hook guide describes matchers as
+  matching *step types* ("lowercasing the step type and removing the
+  `CORTEX_STEP_TYPE_` prefix") -- and a name arriving in a shape that deny
+  list is not written in would deny nothing, silently. A transcript cannot
+  answer it, since it reports the tool that ran rather than the name the
+  hook was handed, so `TestLiveNativeToolsAreDenied` points agy's config
+  at a stand-in for the grain binary that logs every payload before
+  passing it to the real one (`tests/e2e/hook_payload_log_test.go`, which
+  also covers the stand-in from the ordinary suite). Every name is logged,
+  split into the ones the deny list matches, grain's own qualified names,
+  and everything else; a run whose tool calls never reached the hook, or a
+  native call the hook was never asked about under a matchable name, fails
+  the test.
 - **It denies by name, and never allows by name.** `HookDecision` denies
   the tools in `withheldNativeTools` -- agy's own file and command tools,
   now the whole of that set rather than a representative handful -- and
@@ -1789,7 +1855,11 @@ agy stores policy but stop nothing, the `PreToolUse` hook is where a call
 is actually stopped, and a kontur sandbox is still what contains a native
 tool that gets past all three. Only the hook has been watched stopping a
 live model, and only nightly (`live-agent.yml`), since that is where the
-credential is.
+credential is -- though two of the three questions turn out not to need
+one: that agy loaded grain's hook, and that it loaded grain's permission
+rules, are both answered by print mode against any runner with `agy`
+installed, which is why the two tests that ask them fail on a laptop and
+in the nightly alike rather than waiting for a model turn.
 
 How that was established is worth keeping, because the question keeps
 coming back and a *locked-down* grain sandbox cannot answer it: a sandbox
@@ -1802,6 +1872,34 @@ accessor names, `jsonschema_description` text), planted agent definitions
 in candidate directories to see which were read, and pushed the output to
 a branch. `agy changelog` in particular is the closest thing to
 documentation there is, since it ships in the binary.
+
+**That job is not throwaway any more.** It is
+`.github/workflows/agy-surface.yml` and `scripts/agy-surface.sh`, and the
+next question about agy's flags, settings keys or on-disk layout costs one
+`workflow_dispatch` rather than a re-derivation -- roughly every other
+task that has touched `pkg/agent/antigravity` has needed one. It installs
+the *unpinned* agy the Dockerfile would install, so what it reads is the
+binary a freshly built image would carry rather than one a comment froze
+months ago; it asks the fixed set of questions above, plus what agy
+unpacks into a `HOME` it has never seen (its own customization guides
+included, which is where the hook contract is written down), which of six
+candidate directories its agents actually come from, which of six
+candidate files its MCP servers actually come from, and what the `init`
+event of a session opened with `Run`'s own argv advertises. It holds no
+credential and runs on no schedule; the token that writes a branch lives
+in a second job that never runs agy.
+
+The output is committed, at
+[`docs/agy-surface.md`](docs/agy-surface.md), rather than left as a
+workflow artifact -- for two reasons that are the same reason. A sandboxed
+agent cannot download an artifact and can read a file in its own checkout
+(or `git fetch origin agy-surface`, the branch each dispatch pushes as one
+commit on top of the ref it ran from, to be merged like any other pull
+request). And a capture nobody can compare against the last one only
+answers "what does agy do today", where the question behind every one of
+these dispatches is "what changed" -- so the script writes nothing
+run-specific, no dates and no temporary paths, every list sorted, and two
+runs against one agy produce identical bytes. A diff is drift.
 
 The behavioural half above went further only because a sandbox with
 general network access *and* a Gemini key can do the whole thing itself:
@@ -2002,6 +2100,15 @@ GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
   go test ./tests/e2e/ -run TestLiveIssueCompletesEndToEnd -v
 ```
 
+The two that ask agy what it *loaded* rather than what it does need no
+key, since print mode spends nothing (agy still refuses to start without
+`GEMINI_API_KEY` set to something, so they pass a placeholder when the
+environment has none):
+
+```
+GRAIN_LIVE_AGENT_TEST=1 go test ./tests/e2e/ -run TestLiveAgyLoads -v
+```
+
 with `agy` on `$PATH` and a Go toolchain to build `cmd/grain` with (agy
 reaches the sandbox by forking grain's own `mcpserver` subcommand, so a
 live run needs the binary as well as the key). `GRAIN_LIVE_AGENT_TEST` is
@@ -2038,9 +2145,10 @@ push to the task's own target (`gitproxy/authorize.go`), and
 `ConfigureGitCredentials` leaves a working identity and credential helper
 behind — but it had no way to find out what CI made of a push. The
 checks were read minutes later by a different process
-(`SyncPullRequests`), and a red build became a whole separate fix task
-(`fileFixTask`), dispatched into a cold sandbox, to repair something the
-run that broke it was still sitting there able to repair.
+(`SyncPullRequests`), and a red build became a whole further dispatch
+(`requeueForRepair`, a separate fix task before that), into a cold
+sandbox, to repair something the run that broke it was still sitting
+there able to repair.
 
 `pkg/mcp`'s `pull_request_status` closes that loop. It reports the branch
 tip, the pull request open for it if there is one, and every check run
@@ -2074,8 +2182,8 @@ base — `task.Base` where the task names one, described rather than
 guessed where it does not. A conflict is read off the pull request before
 any check is (`healthFrom`'s `PrConflicted`), so a green branch that
 conflicts still never merges, and the run holding the checkout can fetch
-and merge in a turn — which is cheaper than the fix task the merge queue
-would otherwise file for it minutes later in a cold sandbox.
+and merge in a turn — which is cheaper than the repair the merge queue
+would otherwise ask for minutes later in a cold sandbox.
 
 ## Waiting for CI instead of polling it
 
@@ -2150,18 +2258,18 @@ That is enough to know the build is red and not enough to do anything
 about it, so a run's next move was always to guess at what broke and try
 to reproduce it — in a sandbox that is not the runner and may not be able
 to run the failing suite at all. It is the same gap `github.JobLog`'s own
-doc comment describes and `fileFixTask` already closes for the merge
-queue's fix tasks, which carry the tail of each failing job's log in
-their body rather than a job name.
+doc comment describes and `requeueForRepair` already closes for the merge
+queue's own repairs, whose comment carries the tail of each failing job's
+log rather than a job name.
 
 So `pull_request_status` and `wait_for_checks` carry it too: under the
 check list, each failing job's own URL and the end of its log, fenced in
 four backticks so a log containing a fenced block cannot close the quote
 early. Rendered by `github.JobLogExcerpt` and bounded by
 `github.JobLogTailBytes` over the wire and `github.JobLogTailLines` on
-the page — the same excerpt `fileFixTask` builds, shared rather than
+the page — the same excerpt `requeueForRepair` builds, shared rather than
 copied so a run reading its own break cannot be shown a
-differently-bounded log than the fix task filed for that same break.
+differently-bounded log than the repair asked for that same break.
 
 Two things keep it cheap and keep it from taking the answer down with it.
 The logs are read only once something has actually failed — never per
@@ -2807,6 +2915,48 @@ X: New task, Run a suite and an attempt's transcript are actions taken
 over the page you are already on, not somewhere you navigated to, and
 there is nothing there to go back to.
 
+**A task list narrows on any attribute a task has (grain/task-288).**
+The toolbar could ask two questions -- a word in the title or the id, and
+one of four orders -- and the sidebar a third, the state. Everything else
+a row shows was visible but not askable: which repo, which base branch,
+which capabilities, who filed it, whether a schedule or the merge queue
+filed it rather than a person, whether it is a live chat, whether it
+merges itself. On a deployment with a few hundred tasks that is the
+difference between finding the four `gcp-key` tasks somebody filed last
+week and scrolling for them. So `TaskList.jsx` grows a `FILTERS` table --
+one entry per attribute, each saying only how to read that attribute off
+a task, what to call a value, and what "has none of these" is worth
+calling -- and everything else happens once for all of them: the menus
+are built from the tasks currently in view, so a menu never offers a
+repo whose every task the state filter is already hiding; an attribute
+every task in view shares is not offered at all, which is why a repo's
+own page shows no Repo menu; and a choice that goes out of range when
+the sidebar moves reads as "any" again rather than as a filter matching
+nothing. One "Clear" undoes the search and every menu together, since
+getting out of six of them one at a time is the same work as getting in.
+The sort menu grows state, repo and author alongside the orders it had,
+all of them stable, so an order groups the backlog rather than
+reshuffling it inside each group -- and dragging a row is still disabled
+outside backlog order, for the reason it always was.
+
+The same question is worth asking from a terminal, so `grain list` grew
+the same vocabulary (`cmd/grain/list.go`): `-state`, `-repo`,
+`-base`, `-capability`, `-author`, `-origin`, `-search`, `-blocked`,
+`-auto-merge`, `-interactive` and `-sort`, with the words meaning exactly
+what the menus mean -- `-origin schedule` is the Origin menu's
+"Scheduled". Three of those are tri-state rather than boolean, since
+"only the tasks that merge themselves", "only the ones that need a human"
+and "no opinion" are three answers and a Go bool flag is two: `FlagSet.
+Visit` is what tells a flag left at its default from one explicitly set
+to it. It narrows in the CLI rather than on the server because `GET
+/api/tasks` answers with the whole list either way and the frontend
+narrows that same answer in the browser -- a query parameter would move
+the loop across the wire without removing it from either caller, and
+leave two places to look for what a word like "origin" covers. A value
+nobody can act on (`-state in_progress`) stops the command with the list
+of values that work, before the request, rather than printing an empty
+listing that reads like a deployment with no such tasks.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to
@@ -2898,29 +3048,36 @@ conflict in a database dump by guesswork.
 A change an agent makes arrives the other way: a pull request against
 the state repository, reviewed and merged like any other, which the
 daemon pulls on the same thirty-second timer it exports on. What it does
-with what arrives is asymmetric, and deliberately so. The whole-database
-import is a wholesale replacement of every row -- which is exactly what
-makes a merged deletion delete something -- and it happens only at
-startup, because clearing `task` and `task_run` underneath live runs
-holding those very ids is not something to do to a daemon that is
-working. On a tick, only the settings tables are imported
-(`staterepo.SettingsTables`: the deployment's config row, repo
-configuration, templates, suites, schedules, qualification plans), and
-they are imported the same wholesale way, so a merged deletion of a
-template still deletes it. Those are the tables an agent proposes
+with what arrives is asymmetric, and deliberately so. Only the settings
+tables are imported (`staterepo.SettingsTables`: the deployment's config
+row, repo configuration, templates, suites, schedules, qualification
+plans), and they are imported wholesale, so a merged deletion of a
+template really does delete it. Those are the tables an agent proposes
 changes to and the tables grain does not write for itself, which is what
 makes them safe to replace live. A merged change to a task or a run is
 not applied, and the next export writes the database's own version of it
 back out: the database is authoritative for what grain itself did.
 
-Even the startup import is only wholesale in the case that needs it to
-be. A working tree with no marker is a clone onto a host that has never
-loaded it -- the restore case, where the repository is the only copy
-there is -- and every table comes back. A marker that disagrees with
-HEAD is a repository that moved under a host which already has a
-database, and there only the state tier is replaced, because the
-database is by design ahead of the repository on grain's own churn
-(below).
+A restart imports exactly the same tables, and that is worth saying
+because it did not use to. `Load` read "HEAD is not the commit this host
+recorded" as "a merge arrived" and replaced the whole state tier --
+`task`, `task_comment`, `task_attachment`, `branch`, `release`, every
+table but the three churn ones -- from the dump. The dump is whatever the
+last export wrote, so that deleted every row grain had written since:
+half a minute of them in the ordinary case, and an operator lands in that
+window by habit rather than by accident, merging a settings pull request
+and restarting grain to make it take effect. Nothing was gained by it
+either, since a merged edit to `task` only ever survived if the process
+happened to restart before the next tick pulled the same commit down and
+recorded it as loaded. The import a restart does is now the import a tick
+does.
+
+The whole-database import -- every table, churn included -- is left with
+the one case that needs it: a working tree with no marker, which is a
+clone onto a host that has never loaded it. That is the restore case,
+where the repository is the only copy there is and there is no database
+ahead of it to protect, and it is what makes a clone a whole deployment
+rather than a settings file.
 
 If a pull arrives that cannot be applied -- a dump stamped with a schema
 this build does not know, or rows that will not insert -- the daemon
@@ -3025,12 +3182,13 @@ at a `gc.auto` threshold set for a repository whose objects are database
 dumps rather than source files. On its own that is the 2.9 GiB → 18.9 MiB
 column above.
 
-**An import that does not roll churn back.** Since the database is now
-ahead of the repository on churn by up to an hour by design, a merged
-pull request arriving at startup imports only the state tier and leaves
-grain's own record of what it did alone. A clone with no marker -- the
-restore case, where the repository is the only copy there is -- still
-imports all of it.
+**An import that does not roll grain's own record back.** Since the
+database is ahead of the repository on churn by up to an hour by design,
+and ahead of it on everything else by up to an export interval for the
+same reason, a merged pull request arriving at startup imports the
+settings out of it and leaves grain's own record of what it did alone. A
+clone with no marker -- the restore case, where the repository is the
+only copy there is -- still imports all of it.
 
 Squashing history periodically was the other candidate and is not what
 happened: it means force-pushing a branch that people open pull requests
@@ -3214,17 +3372,40 @@ the check imports it back into. The image is grain's own container
 because grain publishes no bare binaries and that package is public, so
 the step needs no credential of any kind.
 
+*Which* of grain's containers is the part a deployment cannot be wrong
+about. The check only means anything against a build that knows the same
+schema as the deployment — `grain state check` refuses a dump stamped
+with any other, and says so in those words — so a workflow pointed at
+the tag that follows main is right for a deployment tracking main and
+wrong for every other one: a deployment held at an older tag got a check
+that failed every pull request against its own settings for a reason
+that had nothing to do with the change proposed in it, until an operator
+noticed and pinned it by hand. So the deployment answers it, out of the
+same trick that tells it which sandbox to run: the grain image carries
+its own reference, stamped in at link time
+(`cmd/grain/grainimage.go`, the Dockerfile's `GRAIN_IMAGE_REF` build
+arg, `grain image` to print it), and that is what it writes into the
+workflow. An unstamped build — `make build` on a laptop — falls back to
+the tag CI keeps pointed at main, which is a less precise answer than
+the stamp and a much better one than none.
+
 Unlike the README, which is grain's text and is rewritten on every sync,
-a workflow that is already there is never touched again. Pinning the
-image to the tag a deployment runs is the obvious edit -- the check only
-means anything against a build that knows the same schema (`grain state
-status` prints both numbers) -- and a runner, a trigger or a step of
-somebody's own are just as much theirs; a file grain rewrote every
-thirty seconds would be a file whose editor is fighting a timer, which
-is the same reason the export must not fight a hand edit to a table
-file. Deleting it is not an opt-out, because grain writes back what is
-missing: `"noWorkflow": true` in `state-repo.json` is, and
-`"checkImage"` pins the image from the host side.
+a workflow that is already there is never touched again — but for that
+one image line, which grain keeps in step with the build it is running.
+That line is a fact about the deployment rather than about the
+repository, and it goes stale on its own every time the deployment is
+upgraded, so a sync after an upgrade repoints it on a one-line commit of
+its own and the syncs after that have nothing to do. The rule that makes
+that safe is byte equality: grain only touches a file that is still word
+for word its own rendering, so a runner, a trigger or a step of
+somebody's own hands the whole file back to whoever wrote it, image
+included. A file grain rewrote every thirty seconds would be a file
+whose editor is fighting a timer, which is the same reason the export
+must not fight a hand edit to a table file. Deleting it is not an
+opt-out, because grain writes back what is missing: `"noWorkflow": true`
+in `state-repo.json` is, and `"checkImage"` pins the image from the host
+side — grain then writes and maintains that value instead of its own, so
+a pin made there is one a later sync does not take back.
 
 That leaves the reason grain did not commit this file until now, which
 is real: a push adding a file under `.github/workflows` is refused
@@ -3232,17 +3413,32 @@ unless the credential making it may write workflows, and grain's own
 installation token need not be able to. So the workflow is a commit of
 its own, pushed on its own, and a refusal -- GitHub says "refusing to
 allow ... to create or update workflow" -- is undone in full: the commit
-is dropped, the file removed, the export goes on untouched, and the
-journal says to run `grain state ci` in a clone and commit the file with
-a credential that may. grain tries again a day later, so granting the
-permission needs no restart. A local-only repository gets no workflow at
-all: there is no GitHub to run one.
+is dropped, the file put back as it was — removed when grain had just
+written it, restored when what was refused was the one-line repointing
+of a check the repository already had — the export goes on untouched,
+and the journal says to run `grain state ci` in a clone and commit the
+file with a credential that may. grain tries again a day later, so
+granting the permission needs no restart. A local-only repository gets
+no workflow at all: there is no GitHub to run one.
+
+The Settings pane's State tab says so too, and not only the journal. The
+refusal is not a sync failure -- everything about that deployment is
+working, one file aside -- so a pane that reported only failures would
+show a repository syncing perfectly happily with nothing validating a
+change to it, which is the failure the check exists to prevent, and the
+line naming `grain state ci` would have been seen only by whoever was
+reading the journal that minute. It says when grain was last refused,
+names the file, and offers the same two ways out: install it by hand, or
+set `"noWorkflow": true`. It stops saying it the moment the file is in
+the repository, however it got there.
 
 `grain state ci DIR` is that manual path, and the one for a repository
 whose deployment cannot push workflows. It writes the same file into a
-clone of the state repository, with `-image` to pin and `-force` to
-replace one that is already there, and commits nothing: it runs in
-somebody's own checkout, and the commit is theirs to make.
+clone of the state repository, with `-image` to pin (defaulting, like
+everything else here, to the image the binary running it was published
+as) and `-force` to replace one that is already there, and commits
+nothing: it runs in somebody's own checkout, and the commit is theirs to
+make.
 
 `grain state format DIR` is the step before adopting: an operator has
 made an empty repository on GitHub and cloned it, and this lays out the
@@ -5110,6 +5306,15 @@ halves move together or not at all. The stamp names the immutable
 `sha-` tag rather than a branch, which is what makes a rollback ask for
 its own older sandbox rather than whatever that branch points at today.
 
+The same build stamps in the grain image's *own* reference
+(`cmd/grain/grainimage.go`, the `GRAIN_IMAGE_REF` build arg, printed by
+`grain image`), for the one place a deployment has to write down which
+build it is: the CI step it installs in its own state repository, whose
+`grain state check` refuses a dump stamped with a schema it does not
+know. Same rules, same reasons — the sha- tag, so a deployment held at
+an older one names itself rather than main, and the tag CI keeps pointed
+at main as the fallback for a build that was never stamped at all.
+
 The guest *disk* used to be the one thing a deployment still built, and
 that was not an oversight: `guest-setup.sh` baked the deployment's own
 SSH public key into the image's `authorized_keys`, so a generically
@@ -5812,9 +6017,9 @@ CI waits (84 wait(s) across 18 run(s))
 
 mid-run pull requests (34 run(s) in the window could have opened one)
   opened one themselves        21  (62% of them, 48 call(s) in all)
-  fix task filed after         10% of the 21 that did, 31% of the 13 that did not
-  (a fix task is the merge queue cleaning up a red build the run left behind.
-   The link is on the task, not the attempt: read the difference, not either rate.)
+  repaired by the queue after  10% of the 21 that did, 31% of the 13 that did not
+  (a repair is the merge queue cleaning up a red build the run left behind.
+   It is recorded on the task, not the attempt: read the difference, not either rate.)
 ```
 
 **This is the one measurement that had to be stored,** and it is stored
@@ -5893,19 +6098,21 @@ paragraph and the sentence naming the tool inside `task.Target != nil`
 and a task with no target was never asked.
 
 The second is a comparison and is deliberately not reported as a rate.
-"A run opened its pull request and its task still needed a fix task"
-means nothing alone: some share of branches go red for reasons no amount
-of watching would have caught. So both cohorts are printed with their own
-denominators — the runs that called the tool and the runs that did not,
-each with the share whose task the merge queue later filed a fix task
-against (`model.LinkFixTask`, `fileFixTask`), which is the recorded form
-of a red build outliving the run that pushed it. Read the difference, not
-either number. The signal is coarse in two known ways, both stated where
-the number is read: the fix-task link is on the task rather than the
-attempt, so every finished attempt of a task that ever went red counts as
-having gone red; and a fix task can only exist for a task that got as far
-as a pull request, which flatters any cohort holding runs that pushed
-nothing.
+"A run opened its pull request and the merge queue still had to repair
+it" means nothing alone: some share of branches go red for reasons no
+amount of watching would have caught. So both cohorts are printed with
+their own denominators — the runs that called the tool and the runs that
+did not, each with the share whose task the merge queue later had to
+repair (`Observation.MergeQueueRepairAt`, or the older `model.LinkFixTask`
+for a task repaired before grain/task-271; both are counted, so a report
+spanning that change does not show the rate falling to zero on the day
+the recording moved), which is the recorded form of a red build outliving
+the run that pushed it. Read the difference, not either number. The
+signal is coarse in two known ways, both stated where the number is read:
+it is recorded on the task rather than the attempt, so every finished
+attempt of a task that ever went red counts as having gone red; and a
+repair can only happen to a task that got as far as a pull request, which
+flatters any cohort holding runs that pushed nothing.
 
 **The fine-grained version of that question is not counted in bulk, on
 purpose.** "Did a push follow the last failing report" is answerable by
@@ -5935,13 +6142,19 @@ Concurrency was one number: `max_concurrent`, the count of runs
 `dispatch.Cycle` would let be in flight. Every kind of run drew on it
 equally, which put the two least alike kinds in direct competition. Most
 runs are new work, at the start of its life. A few are the merge queue's
-own fix tasks (`Origin.Reason == ReasonFix`, `fileFixTask`), filed
-against a pull request that will not land — the last step of work that is
-already committed, pushed and reviewed. A saturated deployment starved
-exactly the second kind, and starving it is expensive twice over: the
-branch a fix targets keeps moving while the fix waits, so a repair
-delayed long enough has to be filed again, and the queue behind it waits
+own repairs of a pull request that will not land — the last step of work
+that is already committed, pushed and reviewed. A saturated deployment
+starved exactly the second kind, and starving it is expensive twice over:
+the branch a repair targets keeps moving while the repair waits, so one
+delayed long enough has to start over, and the queue behind it waits
 too.
+
+What counts as a merger is `Store.mergerTaskSQL`, written once and read
+by all three places that decide it. It has two arms: a task the queue has
+sent back to work on its own branch (`Observation.MergeQueueRepairAt`
+with no `completed_at`, which is what a repair is since grain/task-271),
+or one of the separate fix tasks the queue used to file for that
+(`Origin.Reason == ReasonFix`), which a database may still hold one of.
 
 `model.Limits` is that one number split in two — `MaxWorkers` and
 `MaxMergers`, in the store as `grain_config.max_workers`/`max_mergers`,
@@ -5968,7 +6181,7 @@ transaction that records the run, which is where the limit is actually
 enforced — two overlapping cycles cannot both spend the last slot. A
 candidate whose own half is full is passed over rather than ending the
 cycle, the same skip a task still backing off gets, so a queue of
-ordinary work at the head of the backlog no longer hides the fix task
+ordinary work at the head of the backlog no longer hides the repair
 behind it from the capacity kept for it.
 
 `-max-concurrent` still parses, as the former spelling of
@@ -5981,8 +6194,8 @@ watching. The stored column is migrated rather than reinterpreted
 `model.DefaultMaxMergers` — one — so an upgraded deployment keeps the
 ordinary concurrency it had and gains a single slot the merge queue
 cannot be shut out of. Setting it to 0 puts a deployment back exactly
-where it was: fix tasks contending for worker capacity like anything
-else.
+where it was: the merge queue's own repairs contending for worker
+capacity like anything else.
 
 ## Pausing when the agent runs out of budget
 

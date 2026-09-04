@@ -442,9 +442,14 @@ func resolveSuiteTemplates(ctx context.Context, s *Store, items []SuiteItem) (ma
 // repeats whole passes, not individual items, so nothing here needs one
 // item to wait on another within the same pass).
 //
-// Every task's Base is the run's own Base, unconditionally -- the
-// issue's own "stack against the source branch" -- and AutoMerge is the
-// run's own AutoMerge, not the template's: a suite's own switch is the
+// Every task targets the run's own target and base -- the issue's own
+// "stack against the source branch" -- except an item whose template is
+// bound to a repo of its own, which targets that instead
+// (Template.FiringTarget): a binding is the template saying its content
+// only makes sense against one repo, so a suite that mixes bound and
+// unbound items runs each item where it belongs rather than aiming them
+// all at whatever the run was started against. AutoMerge is the run's
+// own AutoMerge, not the template's: a suite's own switch is the
 // run's policy for every task it files, the same way
 // CreateQualificationRun instead trusts the template's AutoMerge because
 // a qualification task has no run-level policy of its own to override it
@@ -466,6 +471,7 @@ func fireSuitePass(ctx context.Context, tx *sql.Tx, runID int64, items []SuiteIt
 		if err != nil {
 			return err
 		}
+		itemTarget, itemBase := tmpl.FiringTarget(target, base)
 		task := Task{
 			ID:     id,
 			Intent: IntentImplement,
@@ -477,9 +483,9 @@ func fireSuitePass(ctx context.Context, tx *sql.Tx, runID int64, items []SuiteIt
 			},
 			Approval:   approval,
 			ApprovedAt: approvedAt,
-			Target:     &target,
+			Target:     &itemTarget,
 			Binding:    BindingDirective,
-			Base:       base,
+			Base:       itemBase,
 			Reads:      tmpl.Reads,
 			Grants:     tmpl.Grants,
 			AutoMerge:  autoMerge,
