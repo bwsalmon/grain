@@ -165,7 +165,8 @@ Global flags (must come before the command):
   -json           print machine-readable JSON instead of a human-readable table
 
 Commands:
-  list                                 list every task
+  list [flags]                         list tasks (-state/-repo/-capability/-author/-origin and
+                                       friends narrow the list, -sort orders it -- see list.go)
   get <id>                             show one task and its conversation
   create -title T [flags]              file a new task (-position front|end picks which end of
                                        the backlog it joins, and is remembered for the next one)
@@ -305,19 +306,6 @@ func respond(ctx context.Context, c *ui.HTTPClient, out *printer, id string) err
 		return err
 	}
 	out.task(task)
-	return nil
-}
-
-func cmdList(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
-	fs := flag.NewFlagSet("grain list", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	tasks, err := c.ListTasks(ctx)
-	if err != nil {
-		return err
-	}
-	out.tasks(tasks)
 	return nil
 }
 
