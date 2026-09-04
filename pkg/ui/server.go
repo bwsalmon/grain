@@ -57,6 +57,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/withdraw-approval", s.handleWithdrawApproval)
 	s.mux.HandleFunc("POST /api/tasks/{id}/submit", s.handleSubmit)
 	s.mux.HandleFunc("POST /api/tasks/{id}/comments", s.handleAddComment)
+	// PUT, not POST: setting the one secret a parked run asked for is an
+	// idempotent write of a value at a name the task already fixed --
+	// the same shape (and the same verb) /api/secrets/{secret}/{key}
+	// already uses for the write this one delegates to.
+	s.mux.HandleFunc("PUT /api/tasks/{id}/secret", s.handleSetTaskSecret)
 	s.mux.HandleFunc("GET /api/tasks/{id}/attachments/{attachmentId}", s.handleGetAttachment)
 	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
 	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)

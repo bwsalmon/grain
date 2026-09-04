@@ -223,6 +223,17 @@ type TaskDetail struct {
 	// posted alongside a comment -- see Comment.Attachments for those),
 	// bwsalmon/agents#522.
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// PendingSecret is the credential a parked run asked a human to set
+	// (mcp's request_secret, model.Observation.PendingSecret), resolved
+	// into the secret and key a write addresses -- what tells the task
+	// pane to offer a write-only box for it beside the reply box, and
+	// nil for the overwhelming majority of tasks, which are parked on
+	// nothing of the kind.
+	//
+	// A name and a location, never a value: nothing in this package can
+	// read a stored secret back, and PUT /api/tasks/{id}/secret is the
+	// one direction this travels (see task_secret.go).
+	PendingSecret *CapabilitySecret `json:"pendingSecret,omitempty"`
 }
 
 // PullRequestEvent is one moment in a task's own tracked pull request's

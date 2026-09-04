@@ -76,7 +76,10 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 // actions") so it is what the task ends up parked on, and is returned on
 // before anything else -- answering it is the whole reason the run
 // stopped, and no PR exists yet for an ask_question turn to have opened
-// regardless. Proposed tasks are relayed independent of how the run
+// regardless. A request_secret call parks the task on the same terms and
+// through the same field, and is relayed in the same step
+// (relayParkingCalls), which is what keeps a run that made both calls
+// from having one of them silently dropped. Proposed tasks are relayed independent of how the run
 // otherwise ended, since v1's own propose_task can accompany other work
 // rather than replacing it.
 //
@@ -135,14 +138,12 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		}
 	}
 
-	if question, ok := firstToolCallArg(result, "ask_question", "question"); ok && question != "" {
-		commentID, err := relayComment(ctx, store, task, question, now)
-		if err != nil {
-			return fmt.Errorf("orchestrator: posting question for %s: %w", task.ID, err)
-		}
-		return observeField(ctx, store, task.ID, now, func(o *model.Observation) {
-			o.PendingQuestionCommentID = &commentID
-		})
+	parked, err := relayParkingCalls(ctx, store, task, result, now)
+	if err != nil {
+		return err
+	}
+	if parked {
+		return nil
 	}
 
 	handled, err := salvagePushedBranch(ctx, store, client, task, now)
@@ -441,6 +442,84 @@ func branchExistsSettled(client github.Client, owner, repo, branch string) (bool
 			owner, repo, branch, err)
 	}
 	return false, nil
+}
+
+// relayParkingCalls relays the two escape hatches that park a task on a
+// human -- request_secret and ask_question -- and reports whether it
+// parked it. Both write a comment and both leave the task in
+// awaiting_reply through the same Observation.PendingQuestionCommentID,
+// so they are decided together rather than in two branches that would
+// each return past the other.
+//
+// A run is meant to call at most one of them: each says "after calling
+// this, do not take any further actions". A run that called both is
+// nonetheless relayed both, because a call that reached this far and is
+// dropped is dropped in silence -- agent.Result is never persisted, and
+// the words exist nowhere else (the same argument the comment_on_issue
+// relay above makes). The task then parks on the question, which is the
+// later of the two and the one that ended the run's turn, while the
+// secret is still recorded and its box still offered: setting it or
+// replying in words both un-park the task, and either is a human having
+// answered.
+//
+// Ordering inside is what a reader of the conversation gets: the secret
+// request first, the question after it, both stamped now.
+func relayParkingCalls(ctx context.Context, store *model.Store, task model.Task,
+	result *agent.Result, now time.Time) (bool, error) {
+
+	secret, _ := firstToolCallArg(result, "request_secret", "secret")
+	question, _ := firstToolCallArg(result, "ask_question", "question")
+	if secret == "" && question == "" {
+		return false, nil
+	}
+
+	var pending int64
+	if secret != "" {
+		reason, _ := firstToolCallArg(result, "request_secret", "reason")
+		commentID, err := relayComment(ctx, store, task, secretRequestBody(secret, reason), now)
+		if err != nil {
+			return false, fmt.Errorf("orchestrator: posting the secret request for %s: %w", task.ID, err)
+		}
+		pending = commentID
+	}
+	if question != "" {
+		commentID, err := relayComment(ctx, store, task, question, now)
+		if err != nil {
+			return false, fmt.Errorf("orchestrator: posting question for %s: %w", task.ID, err)
+		}
+		pending = commentID
+	}
+
+	if err := observeField(ctx, store, task.ID, now, func(o *model.Observation) {
+		o.PendingQuestionCommentID = &pending
+		if secret != "" {
+			o.PendingSecret = secret
+		}
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// secretRequestBody is what a request_secret call reads as in the task's
+// conversation: the run's own reason first, in its own words, then
+// grain's sentence about what the box underneath does with what is typed
+// into it.
+//
+// The second half is grain's to say and not the agent's, because it is
+// the part a human has to be able to trust: that the value is not going
+// into the thread they are reading, and not back to the run that asked.
+// An agent could claim it; only grain can mean it.
+func secretRequestBody(secret, reason string) string {
+	body := fmt.Sprintf(
+		"**This run asked for the secret `%s`.** Set it in the box on this task: the value "+
+			"goes straight into grain's encrypted secret store, is never shown to the agent "+
+			"that asked for it, and never appears in this conversation. Setting it -- or "+
+			"replying here instead -- puts this task back in the queue.", secret)
+	if reason == "" {
+		return body
+	}
+	return reason + "\n\n" + body
 }
 
 // relayComment records something a dispatched run said, attributed as

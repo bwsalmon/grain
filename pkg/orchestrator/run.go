@@ -548,6 +548,10 @@ func setupSection(r *SetupResult) string {
 // (pkg/staterepo) is told about the thing it has just been handed: not
 // source code but grain's own database, written out as text.
 //
+// What it deliberately does not say is whose database that is -- the
+// checkout cannot answer that, and settingsRepoSection below is where
+// this deployment's own answer to it goes.
+//
 // Every fact here is one the checkout does not volunteer. The files are
 // JSON, so their shape is discoverable, but nothing in them says that
 // grain rewrites all of them from its database on a timer -- which is
@@ -613,6 +617,101 @@ func stateRepoSection(prepared checkout) string {
 		"a settings table is pulled in and applied within the minute, without a restart; " +
 		"everything else waits for one. Either way the import is a replacement, so a row " +
 		"you delete is a row that is gone."
+}
+
+// settingsRepoSection answers the question stateRepoSection above cannot:
+// not "what is this tree" but "whose settings are these" -- which
+// repository the deployment that dispatched this run keeps its own
+// configuration in, and whether the checkout in front of the agent is it.
+//
+// The two are genuinely different facts, and the checkout only carries
+// one of them. checkout.StateRepo is read out of the cloned tree (a
+// tables/ directory beside a schema-version stamp), which is the same
+// shape whether the repository is this deployment's own state, another
+// installation's, or a copy somebody is editing offline -- its own doc
+// comment says as much, and that is the right answer for a section whose
+// subject is the layout. It is the wrong answer for a run that has been
+// asked to change what this grain runs on: an agent that cannot tell
+// this deployment's settings from some other grain's dump opens its pull
+// request against a repository that changes nothing here, and one
+// working in an ordinary repo has no way to discover where the settings
+// it wants changed even live. Neither is discoverable from inside the
+// sandbox: the git proxy serves every repo from the same address, and
+// nothing in a checkout says which grain reads it.
+//
+// So this is the deployment's own answer, from Config.StateRepo, stated
+// before the first turn for the reason every other fact in this prompt
+// is (BuildPrompt's own doc comment): a fact stated in the prompt is one
+// nobody spends a turn rediscovering, and one nobody rediscovers
+// wrongly.
+//
+// Three shapes, and the third is the one every ordinary dispatch gets:
+//
+//   - the checkout is this deployment's settings, so a merge here is a
+//     change to the grain running this task;
+//   - it is not, and the settings are named, so a run that wants one
+//     changed knows where they are and knows this is not it -- with the
+//     extra warning for a checkout that does hold a dump, which is
+//     exactly the tree an agent is most likely to mistake for this
+//     deployment's own;
+//   - the deployment named none, and nothing is said at all.
+//
+// That last case is silence rather than a hedge, and it covers two
+// deployments that cannot be told apart from here: one whose state is
+// local-only (no repository exists to name, so its settings are not
+// something any pull request can reach) and one whose caller wired no
+// answer in -- `grain demo`, a test, any embedding of this package that
+// has no state repository of its own. Naming nothing is right for both;
+// a paragraph saying grain does not know where its settings are would be
+// prompt spent on a fact no run can act on.
+//
+// Comparison is case-insensitive on both halves, the same way every
+// other repo comparison in grain is (gitproxy's canonicalMatches): a
+// task targeting Acme/Grain-State and a remote spelling it
+// acme/grain-state are the same repository to GitHub, and telling a run
+// working in this deployment's own settings that its settings are
+// somewhere else would be worse than saying nothing.
+func settingsRepoSection(prepared checkout, target *model.RepoRef, settings model.RepoRef) string {
+	if settings == (model.RepoRef{}) {
+		return ""
+	}
+	if sameRepo(target, settings) {
+		return "\n\nThe settings this deployment runs on are in this very repo: " +
+			settings.String() + " is where the grain that dispatched you reads its own " +
+			"configuration from. A change merged here is a change to the grain running this " +
+			"task, not to some other installation's copy of it."
+	}
+	// "not in this repo" for the ordinary dispatch, which has one, and
+	// the same fact without that clause for a task with no target at all
+	// -- BuildPrompt has just told such a run there is nothing checked
+	// out, and a sentence contrasting the settings with a repo it does
+	// not have would read as one it was supposed to find.
+	s := "\n\nThis deployment's own settings live in a repository of their own. The grain that " +
+		"dispatched you reads its configuration"
+	if target != nil {
+		s = "\n\nThis deployment's own settings are not in this repo. The grain that dispatched " +
+			"you reads its configuration"
+	}
+	s += " -- templates, suites, schedules, per-repo configuration " +
+		"and its own config row -- out of " + settings.String() + ", its database exported as " +
+		"text, and a change to any of that is a pull request against that repository rather " +
+		"than anything you can edit from here. If the work in front of you turns out to need " +
+		"one, say so in what you report."
+	if prepared.StateRepo {
+		s += " Note that what you have been handed does look like a grain state repository, " +
+			"but it is not this deployment's: nothing merged here reaches the grain running " +
+			"this task."
+	}
+	return s
+}
+
+// sameRepo reports whether target is settings, for settingsRepoSection's
+// one comparison. A task with no target at all is nobody's settings
+// repository, which is what the nil check answers.
+func sameRepo(target *model.RepoRef, settings model.RepoRef) bool {
+	return target != nil &&
+		strings.EqualFold(target.Owner, settings.Owner) &&
+		strings.EqualFold(target.Name, settings.Name)
 }
 
 // promptExtensionSection is how that text is handed to the agent: named
@@ -1086,7 +1185,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prepErr error
 	if checkoutErr == nil {
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, history,
-			attachments, prepared, frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
+			attachments, prepared, cfg.settingsRepo(), frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
 	}
 	// Told to the recreate path, which is registered one level up in
 	// runOne and so never sees this: what a rebuilt sandbox needs is
@@ -1534,6 +1633,14 @@ func erroredCallSuffix(result *agent.Result) string {
 // reads any of them, this being the one path that assembles a dispatch's
 // prompt.
 //
+// settingsRepo is the repository this deployment keeps its own settings
+// in (Config.StateRepo, resolved by the caller), and is read here rather
+// than passed on: it is half of a fact only this path holds both halves
+// of -- the other being what prepareCheckout found in the tree -- and
+// settingsRepoSection is where the two are turned into words. The zero
+// RepoRef says nothing, which is what a local-only deployment and a
+// caller that wired no answer both get.
+//
 // promptExtension is the standing instructions for this
 // run, already resolved across the three layers that can carry them
 // (resolvePromptExtension). It goes last, after the capability sections
@@ -1545,7 +1652,7 @@ func erroredCallSuffix(result *agent.Result) string {
 // -- leaves the prompt exactly as it was before any of this existed.
 func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	cc model.CapabilityContext, sandboxRoot string, placer SandboxPlacer, tools []mcp.Tool, history History,
-	attachments []model.Attachment, prepared checkout,
+	attachments []model.Attachment, prepared checkout, settingsRepo model.RepoRef,
 	canOpenPullRequest bool, promptExtension string, maxRuntime time.Duration) (materialized []model.Materialized, prompt string, err error) {
 
 	extension := promptExtensionSection(promptExtension)
@@ -1558,6 +1665,12 @@ func prepareCapabilities(ctx context.Context, reg *model.CapabilityRegistry,
 	// task at all -- it is what prepareCheckout found in the tree, which
 	// only this path has.
 	prompt += stateRepoSection(prepared)
+	// Immediately after it, and on the same terms: which grain's settings
+	// those files are (or, for the overwhelmingly common checkout that is
+	// not a dump at all, where this deployment's settings live instead).
+	// Neither half is in the checkout, so neither can be in BuildPrompt;
+	// see settingsRepoSection.
+	prompt += settingsRepoSection(prepared, cc.Task.Target, settingsRepo)
 	attachmentsSection, err := placeAttachments(ctx, tools, attachments)
 	if err != nil {
 		return nil, "", err

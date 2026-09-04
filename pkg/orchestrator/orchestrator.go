@@ -390,6 +390,29 @@ type Config struct {
 	// one-shot cycle. A deployment always sets one -- without it the
 	// next tick dispatches the next task straight into the same refusal.
 	Pause *Pause
+	// StateRepo answers which repository this deployment keeps its own
+	// settings in -- the state repository grain loads its configuration
+	// out of and exports its database back into (pkg/staterepo) -- so
+	// that every run dispatched can be told, in as many words, whether
+	// the checkout it has been handed is that repository or not. See
+	// settingsRepoSection in run.go for what is said and why nothing in
+	// a sandbox could work it out instead.
+	//
+	// A function rather than a value because the answer changes under a
+	// running daemon: adopting a different repository, from the Settings
+	// pane's State tab or from `grain state adopt`, swaps it out
+	// mid-process (cmd/grain's stateManager), and a value snapshotted
+	// when the daemon started would have every run dispatched afterwards
+	// naming the repository this deployment used to run on. That is a
+	// worse failure than naming none, since a run has no way to check it.
+	//
+	// nil, or a function returning the zero RepoRef, says nothing to any
+	// run. Both are honest answers rather than a gap: a deployment whose
+	// state is local-only has no repository to name -- its settings are
+	// not something a pull request can reach at all -- and a caller with
+	// no state repository of its own (`grain demo`, a test, anything
+	// embedding this package) has nothing to say either.
+	StateRepo func() model.RepoRef
 }
 
 func (c Config) cancelPollInterval() time.Duration {
@@ -417,6 +440,17 @@ func (c Config) maxRunRuntime() time.Duration {
 		return c.MaxRunRuntime
 	}
 	return DefaultMaxRunRuntime
+}
+
+// settingsRepo reads Config.StateRepo, or the zero RepoRef when a caller
+// wired none -- and also when the function it wired answers with one, so
+// that "no state repository" and "nobody asked" reach the prompt as the
+// same silence (settingsRepoSection).
+func (c Config) settingsRepo() model.RepoRef {
+	if c.StateRepo == nil {
+		return model.RepoRef{}
+	}
+	return c.StateRepo()
 }
 
 // now reads Config.Now, or the wall clock when a caller set none.

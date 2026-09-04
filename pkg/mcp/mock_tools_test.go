@@ -13,6 +13,7 @@ func escapeHatchText(t *testing.T) map[string]struct{ description, confirmation 
 	t.Helper()
 	args := map[string]map[string]any{
 		"ask_question":       {"question": "which config file?"},
+		"request_secret":     {"secret": "stripe-api-key", "reason": "the deploy script authenticates with it"},
 		"comment_on_issue":   {"comment": "the answer is 4"},
 		"propose_task":       {"title": "follow-up", "body": "the rest of it"},
 		"add_review_comment": {"body": "this loop is quadratic"},
@@ -86,6 +87,12 @@ func TestRelayedEscapeHatchesConfirmWhatGrainDoesWithTheCall(t *testing.T) {
 		// and ends the turn -- the contract ProcessResult's ordering
 		// depends on, and the one thing here that is unchanged from v1.
 		{"ask_question", []string{"relays", "conversation", "replies", "no further actions"}},
+		// A secret request parks the task the same way, and its
+		// confirmation has one more thing to be unambiguous about: the
+		// value is not coming back. A run told otherwise waits for it,
+		// or asks for it again in a question -- which is exactly the
+		// plain-text comment this tool exists to avoid.
+		{"request_secret", []string{"conversation", "parks", "never comes back to you", "no further actions"}},
 		// A comment is relayed whatever else the run did, and completes
 		// the task when it is all the run did.
 		{"comment_on_issue", []string{"relays", "conversation", "closing note"}},
@@ -100,6 +107,60 @@ func TestRelayedEscapeHatchesConfirmWhatGrainDoesWithTheCall(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRequestSecretRecordsTheNameAndNeverAValue pins the two halves of
+// the tool that make it worth having at all: what it records (a name and
+// a reason, which is everything grain relays) and what it refuses (a
+// name nothing could be stored under, caught in the turn that made the
+// call rather than by parking the task on a request no box can be built
+// for).
+func TestRequestSecretRecordsTheNameAndNeverAValue(t *testing.T) {
+	sink := &MockSink{}
+	tool := toolNamed(t, NewMockTools(sink), "request_secret")
+
+	res := tool.Handler(context.Background(), map[string]any{
+		"secret": "github-app/app-id", "reason": "the deploy needs to authenticate",
+	})
+	if res.IsError {
+		t.Fatalf("well-formed call errored: %s", res.Text)
+	}
+	got := sink.SecretRequest()
+	if got == nil || got.Secret != "github-app/app-id" || got.Reason != "the deploy needs to authenticate" {
+		t.Fatalf("SecretRequest() = %+v, want the name and reason as given", got)
+	}
+
+	// First call wins, matching what orchestrator.ProcessResult relays
+	// off agent.Result.ToolCalls.
+	tool.Handler(context.Background(), map[string]any{"secret": "other-key", "reason": "second thoughts"})
+	if sink.SecretRequest().Secret != "github-app/app-id" {
+		t.Fatalf("SecretRequest() = %+v, want the first call's own name", sink.SecretRequest())
+	}
+
+	for _, bad := range []map[string]any{
+		{"reason": "no name at all"},
+		{"secret": "stripe-api-key"},
+		{"secret": "stripe api key", "reason": "a name with a space in it"},
+		{"secret": "../etc/passwd", "reason": "a path, not a name"},
+		{"secret": "stripe//key", "reason": "an empty key"},
+	} {
+		if res := tool.Handler(context.Background(), bad); !res.IsError {
+			t.Errorf("Handler(%v) = %q, want an error", bad, res.Text)
+		}
+	}
+}
+
+// toolNamed picks one tool out of a constructor's roster, failing rather
+// than returning a zero Tool whose nil Handler would panic further down.
+func toolNamed(t *testing.T, tools []Tool, name string) Tool {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	t.Fatalf("no tool named %q in %d registered", name, len(tools))
+	return Tool{}
 }
 
 // TestAddReviewCommentSaysItGoesNowhere is the other half, and the

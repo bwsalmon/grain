@@ -70,17 +70,24 @@ type checkout struct {
 	// StateRepo reports that what was cloned is a grain state repository
 	// (pkg/staterepo): a dump of grain's own database as text, rather
 	// than source code. It decides whether the prompt carries
-	// stateRepoSection, which is the only thing that reads it.
+	// stateRepoSection, and qualifies what settingsRepoSection says
+	// beside it; nothing else reads it.
 	//
 	// Answered by what is in the checkout -- a tables/ directory beside
 	// a schema-version stamp -- rather than by comparing the target
 	// against this deployment's configured state remote. The layout is
 	// the thing the agent has to be told about, and it is the same
 	// layout whether the repository is this deployment's own state, some
-	// other grain's, or a copy somebody is editing offline; a check
-	// against one configured remote would say nothing about the other
-	// two, and would have to be threaded from the daemon through every
-	// caller of RunDispatch to say anything at all.
+	// other grain's, or a copy somebody is editing offline.
+	//
+	// Which of those three it is, is a separate question with a separate
+	// answer: Config.StateRepo, the repository this deployment actually
+	// reads its settings out of, compared against the task's target in
+	// settingsRepoSection. The two sit side by side in the prompt --
+	// what the tree is, and whose it is -- because neither substitutes
+	// for the other: a dump this deployment does not read still has to
+	// be described as a dump, and a settings repository grain has not
+	// exported into yet is still this deployment's settings.
 	StateRepo bool
 	// Setup is what model.RepoConfig.SetupCommand did in that directory,
 	// or nil when the repo configures none -- which is every repo until

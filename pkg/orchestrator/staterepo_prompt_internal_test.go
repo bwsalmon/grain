@@ -127,11 +127,126 @@ func TestPrepareCapabilitiesCarriesTheStateRepoSection(t *testing.T) {
 	task := model.Task{ID: "t1", Title: "Change a template", Target: &model.RepoRef{Owner: "acme", Name: "grain-state"}}
 	cc := model.CapabilityContext{Task: task}
 	_, prompt, err := prepareCapabilities(ctx, nil, cc, t.TempDir(), nil, nil, History{}, nil,
-		checkout{Dir: CheckoutDir, StateRepo: true}, false, "", DefaultMaxRunRuntime)
+		checkout{Dir: CheckoutDir, StateRepo: true}, model.RepoRef{}, false, "", DefaultMaxRunRuntime)
 	if err != nil {
 		t.Fatalf("prepareCapabilities: %v", err)
 	}
 	if !strings.Contains(prompt, "grain's own state") {
 		t.Fatalf("the dispatch prompt never says the repo is grain's state:\n%s", prompt)
+	}
+}
+
+// Which grain's settings the checkout holds, which is the fact the tree
+// itself cannot carry: a dump looks the same whoever exported it.
+func TestSettingsRepoSectionSaysTheCheckoutIsThisDeploymentsSettings(t *testing.T) {
+	settings := model.RepoRef{Owner: "acme", Name: "grain-state"}
+	target := settings
+	got := settingsRepoSection(checkout{Dir: CheckoutDir, StateRepo: true}, &target, settings)
+	for _, want := range []string{"acme/grain-state", "in this very repo", "the grain running this task"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the section never mentions %q:\n%s", want, got)
+		}
+	}
+}
+
+// The same repository named a different way round: GitHub does not
+// distinguish the two, and a run working in this deployment's own
+// settings must not be told they are somewhere else.
+func TestSettingsRepoSectionMatchesTheTargetCaseInsensitively(t *testing.T) {
+	target := model.RepoRef{Owner: "Acme", Name: "Grain-State"}
+	got := settingsRepoSection(checkout{Dir: CheckoutDir, StateRepo: true}, &target,
+		model.RepoRef{Owner: "acme", Name: "grain-state"})
+	if !strings.Contains(got, "in this very repo") {
+		t.Fatalf("a differently-cased spelling of this deployment's own state was taken for another repo:\n%s", got)
+	}
+}
+
+// An ordinary dispatch: not the settings repository, and told where the
+// settings actually are so that a run that wants one changed knows both
+// halves of it.
+func TestSettingsRepoSectionNamesTheSettingsRepoElsewhere(t *testing.T) {
+	target := model.RepoRef{Owner: "acme", Name: "widgets"}
+	got := settingsRepoSection(checkout{Dir: CheckoutDir}, &target,
+		model.RepoRef{Owner: "acme", Name: "grain-state"})
+	for _, want := range []string{"not in this repo", "acme/grain-state", "pull request against that repository"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the section never mentions %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "does look like a grain state repository") {
+		t.Errorf("a checkout with no dump in it was described as one:\n%s", got)
+	}
+}
+
+// The tree an agent is most likely to mistake for this deployment's own:
+// a state repository that belongs to some other grain.
+func TestSettingsRepoSectionWarnsAboutAnotherGrainsState(t *testing.T) {
+	target := model.RepoRef{Owner: "other", Name: "grain-state"}
+	got := settingsRepoSection(checkout{Dir: CheckoutDir, StateRepo: true}, &target,
+		model.RepoRef{Owner: "acme", Name: "grain-state"})
+	if !strings.Contains(got, "not this deployment's") {
+		t.Fatalf("another grain's dump was not distinguished from this deployment's own:\n%s", got)
+	}
+}
+
+// A task with no repo at all still gets the answer -- it may well be
+// the run being asked why this deployment is configured as it is -- but
+// not the clause contrasting the settings with a checkout it has not
+// been given.
+func TestSettingsRepoSectionSuitsATaskWithNoRepo(t *testing.T) {
+	got := settingsRepoSection(checkout{}, nil, model.RepoRef{Owner: "acme", Name: "grain-state"})
+	if !strings.Contains(got, "acme/grain-state") {
+		t.Fatalf("a task with no repo was not told where the settings are:\n%s", got)
+	}
+	if strings.Contains(got, "not in this repo") {
+		t.Fatalf("a task with no repo was told the settings are not in a repo it does not have:\n%s", got)
+	}
+}
+
+// A deployment whose state is local-only, and a caller that wired no
+// answer at all, are the same silence: there is no repository to name.
+func TestSettingsRepoSectionIsSilentWithoutASettingsRepo(t *testing.T) {
+	target := model.RepoRef{Owner: "acme", Name: "widgets"}
+	if got := settingsRepoSection(checkout{Dir: CheckoutDir}, &target, model.RepoRef{}); got != "" {
+		t.Fatalf("a deployment with no state repository still named one: %q", got)
+	}
+	if got := settingsRepoSection(checkout{Dir: CheckoutDir, StateRepo: true}, nil, model.RepoRef{}); got != "" {
+		t.Fatalf("a task with no target still got a settings section: %q", got)
+	}
+}
+
+// The section reaches a real prompt, and reaches it from the one field a
+// deployment sets: Config.StateRepo, read per dispatch.
+func TestPrepareCapabilitiesNamesTheSettingsRepo(t *testing.T) {
+	ctx := context.Background()
+	task := model.Task{ID: "t1", Title: "Fix a widget", Target: &model.RepoRef{Owner: "acme", Name: "widgets"}}
+	cc := model.CapabilityContext{Task: task}
+	settings := model.RepoRef{Owner: "acme", Name: "grain-state"}
+	_, prompt, err := prepareCapabilities(ctx, nil, cc, t.TempDir(), nil, nil, History{}, nil,
+		checkout{Dir: CheckoutDir}, settings, false, "", DefaultMaxRunRuntime)
+	if err != nil {
+		t.Fatalf("prepareCapabilities: %v", err)
+	}
+	if !strings.Contains(prompt, "acme/grain-state") {
+		t.Fatalf("the dispatch prompt never names this deployment's settings repo:\n%s", prompt)
+	}
+}
+
+// Config.StateRepo is a function so that adopting a different repository
+// mid-process reaches the next run dispatched, and nil is the caller
+// that has none.
+func TestConfigSettingsRepoReadsTheLiveAnswer(t *testing.T) {
+	var cfg Config
+	if got := cfg.settingsRepo(); got != (model.RepoRef{}) {
+		t.Fatalf("a Config with no StateRepo answered %v, want the zero RepoRef", got)
+	}
+	current := model.RepoRef{Owner: "acme", Name: "grain-state"}
+	cfg.StateRepo = func() model.RepoRef { return current }
+	if got := cfg.settingsRepo(); got != current {
+		t.Fatalf("settingsRepo() = %v, want %v", got, current)
+	}
+	current = model.RepoRef{Owner: "acme", Name: "adopted-state"}
+	if got := cfg.settingsRepo(); got != current {
+		t.Fatalf("settingsRepo() after an adopt = %v, want %v", got, current)
 	}
 }

@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
+	"unicode"
 )
 
 // ProposedTask is one propose_task call as this process recorded it.
@@ -37,6 +39,18 @@ type ReviewComment struct {
 	HasLocation bool
 }
 
+// SecretRequest is one request_secret call: the name of a credential a
+// run needs and cannot have, and what the run says it is for.
+//
+// No value is anywhere in this shape, and none ever passes through this
+// package. The whole point of the tool is that the human types the value
+// into grain's own UI and it goes straight into the secret store -- see
+// requestSecretTool.
+type SecretRequest struct {
+	Secret string
+	Reason string
+}
+
 // MockSink accumulates every escape-hatch tool call made during one run,
 // so a caller (a test, or an in-process client) can inspect what an agent
 // asked for. It is the whole of what *this process* does with such a
@@ -52,6 +66,7 @@ type MockSink struct {
 	mu             sync.Mutex
 	question       string
 	comment        string
+	secretRequest  *SecretRequest
 	proposedTasks  []ProposedTask
 	reviewComments []ReviewComment
 }
@@ -66,6 +81,18 @@ func (s *MockSink) Comment() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.comment
+}
+
+// SecretRequest is the credential this run asked a human to set, or nil
+// if it asked for none.
+func (s *MockSink) SecretRequest() *SecretRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.secretRequest == nil {
+		return nil
+	}
+	req := *s.secretRequest
+	return &req
 }
 
 func (s *MockSink) ProposedTasks() []ProposedTask {
@@ -84,10 +111,11 @@ func (s *MockSink) ReviewComments() []ReviewComment {
 	return out
 }
 
-// NewMockTools returns the four escape-hatch tools -- ask_question,
-// comment_on_issue, propose_task, add_review_comment -- under the names
-// v1 gave them, which is also the vocabulary
-// orchestrator.ProcessResult matches against (see toolnames.go).
+// NewMockTools returns the five escape-hatch tools -- ask_question,
+// request_secret, comment_on_issue, propose_task, add_review_comment --
+// four of them under the names v1 gave them, which is also the
+// vocabulary orchestrator.ProcessResult matches against (see
+// toolnames.go).
 //
 // "Mock" describes this process, not the effect. Nothing outside sink is
 // touched from here, but three of these four really do reach the human:
@@ -116,6 +144,7 @@ func (s *MockSink) ReviewComments() []ReviewComment {
 func NewMockTools(sink *MockSink) []Tool {
 	return []Tool{
 		askQuestionTool(sink),
+		requestSecretTool(sink),
 		commentOnIssueTool(sink),
 		proposeTaskTool(sink),
 		addReviewCommentTool(sink),
@@ -158,6 +187,129 @@ func askQuestionTool(sink *MockSink) Tool {
 				"your turn: stop here and take no further actions."}
 		},
 	}
+}
+
+// requestSecretTool is ask_question for the one answer a question must
+// never be used to get: a credential.
+//
+// It parks the task the same way, through the same
+// Observation.PendingQuestionCommentID, and for the same reason -- the
+// run cannot go on until a human acts. What differs is what the human is
+// offered. A parked question offers a reply box, and a reply is a
+// comment: stored in the task's conversation in plain text, shown to
+// everyone who opens the task, and fed back into the next run's own
+// prompt (orchestrator's commentThreadSection). A credential pasted
+// there is a credential handed to an agent and written into grain's
+// state repository as prose. So this call makes the UI offer a
+// write-only box instead, whose value goes straight into the secret
+// store (ui.Client.SetPendingSecret) and into no comment, no prompt and
+// no tool result.
+//
+// The agent therefore never learns the value it asked for -- deliberately,
+// and the description says so plainly rather than leaving a run to
+// discover it by asking for the secret back. What a later run gets is
+// not the material but the effect: whatever resolves that name -- a
+// capability's own credential (model.CredentialRef), grain's own
+// github/agent keys -- resolves where it previously did not.
+func requestSecretTool(sink *MockSink) Tool {
+	return Tool{
+		Name: "request_secret",
+		Description: "Ask the human to set a credential this deployment does not " +
+			"have and this work needs -- an API key, a token, a password. " +
+			"This ends your turn the way ask_question does: when this run " +
+			"finishes, grain relays the request into this task's own " +
+			"conversation, parks the task on it, and offers a box in the " +
+			"task pane for the value. Only the first request_secret call " +
+			"in a run is relayed. What the human types goes straight into " +
+			"grain's encrypted secret store and is never shown to you: not " +
+			"in this run, not in a later one, and there is nothing here " +
+			"that reads a stored value back. A later run gets the use of " +
+			"it, not the material -- whatever resolves that name resolves " +
+			"where it did not before. For the same reason, never ask for a " +
+			"credential through ask_question or comment_on_issue: a reply " +
+			"there is a plain-text comment on the task, and it is fed back " +
+			"to the agent. After calling this, do not take any further " +
+			"actions.",
+		InputSchema: map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"secret": map[string]any{
+					"type": "string",
+					"description": "The name to store it under, as grain resolves " +
+						"one: \"stripe-api-key\" for a secret holding a single " +
+						"value, or \"<secret>/<key>\" (\"github-app/app-id\") to " +
+						"name one key of a secret that holds several. Use the " +
+						"name whatever will consume it already looks up, if " +
+						"something does.",
+				},
+				"reason": map[string]any{
+					"type": "string",
+					"description": "What the credential is, where the human gets " +
+						"one, and what it will be used for -- this is all they " +
+						"have to go on when deciding what to paste, and it is " +
+						"relayed to them verbatim.",
+				},
+			},
+			"required": []string{"secret", "reason"},
+		},
+		Handler: func(_ context.Context, args map[string]any) Result {
+			secret, ok := argString(args, "secret")
+			if !ok || secret == "" {
+				return Result{Text: "secret is required", IsError: true}
+			}
+			if !validSecretName(secret) {
+				return Result{
+					Text: fmt.Sprintf("%q is not a name grain can store a secret under: "+
+						"give \"<secret>\" or \"<secret>/<key>\", each part non-empty and "+
+						"free of spaces, backslashes and path components like \".\".", secret),
+					IsError: true,
+				}
+			}
+			reason, ok := argString(args, "reason")
+			if !ok || reason == "" {
+				return Result{
+					Text: "reason is required: the human deciding what to paste is " +
+						"told nothing else about it",
+					IsError: true,
+				}
+			}
+			sink.mu.Lock()
+			// First call wins, matching what is actually relayed:
+			// orchestrator.ProcessResult reads the first non-error
+			// request_secret call off agent.Result.ToolCalls.
+			if sink.secretRequest == nil {
+				sink.secretRequest = &SecretRequest{Secret: secret, Reason: reason}
+			}
+			sink.mu.Unlock()
+			return Result{Text: fmt.Sprintf("Recorded. When this run finishes, grain asks for %s in the "+
+				"task's conversation and parks the task there until somebody sets it. The value "+
+				"goes into grain's secret store and never comes back to you. This ends your turn: "+
+				"stop here and take no further actions.", secret)}
+		},
+	}
+}
+
+// validSecretName reports whether name is one secrets.Store.Resolve
+// could take: "<secret>" or "<secret>/<key>", each part non-empty, not
+// "." or "..", and carrying no whitespace or backslash. It is the same
+// rule secrets.validComponent applies at the point of writing, checked
+// here so a run learns it named something unstorable in the turn it made
+// the call rather than by being parked on a request no box can be built
+// for.
+func validSecretName(name string) bool {
+	secret, key, explicit := strings.Cut(name, "/")
+	if !validSecretComponent(secret) {
+		return false
+	}
+	return !explicit || validSecretComponent(key)
+}
+
+func validSecretComponent(s string) bool {
+	if s == "" || s == "." || s == ".." || strings.ContainsAny(s, "/\\") {
+		return false
+	}
+	return !strings.ContainsFunc(s, unicode.IsSpace)
 }
 
 func commentOnIssueTool(sink *MockSink) Tool {

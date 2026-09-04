@@ -21,7 +21,7 @@ func newTestClient(t *testing.T, root string) *Client {
 	return client
 }
 
-func TestListToolsAdvertisesAllEightInOrder(t *testing.T) {
+func TestListToolsAdvertisesAllNineInOrder(t *testing.T) {
 	client := newTestClient(t, t.TempDir())
 	tools, err := client.ListTools(context.Background())
 	if err != nil {
@@ -29,7 +29,7 @@ func TestListToolsAdvertisesAllEightInOrder(t *testing.T) {
 	}
 	want := []string{
 		"run_command", "read_file", "edit_file", "write_file",
-		"ask_question", "comment_on_issue", "propose_task", "add_review_comment",
+		"ask_question", "request_secret", "comment_on_issue", "propose_task", "add_review_comment",
 	}
 	if len(tools) != len(want) {
 		t.Fatalf("got %d tools, want %d: %+v", len(tools), len(want), tools)

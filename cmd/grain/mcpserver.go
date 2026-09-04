@@ -1,9 +1,9 @@
 // mcpserver.go implements `grain mcpserver`, formerly its own
 // cmd/mcpserver binary before bwsalmon/agents#313 combined every mode
 // into one: it serves the sandbox tools and the escape hatches
-// (ask_question, comment_on_issue, propose_task, add_review_comment --
-// recorded here, relayed by orchestrator.ProcessResult once the run
-// finishes) over its own stdin/stdout, so anything that can spawn a
+// (ask_question, request_secret, comment_on_issue, propose_task,
+// add_review_comment -- recorded here, relayed by
+// orchestrator.ProcessResult once the run finishes) over its own stdin/stdout, so anything that can spawn a
 // subprocess and speak MCP -- not just an in-process
 // client -- can drive it. Real MCP clients (an actual `claude` or
 // `gemini` CLI's --mcp-config, for instance) can point at this same
@@ -374,7 +374,7 @@ func mcpserver(args []string) {
 	registry.Register(tools...)
 	// The sink is a throwaway because nothing reads an escape-hatch call
 	// back out of *this* process: orchestrator.ProcessResult recovers
-	// ask_question, comment_on_issue and propose_task from
+	// ask_question, request_secret, comment_on_issue and propose_task from
 	// agent.Result.ToolCalls once the run finishes, and relays each one
 	// for real. The sink is here so a call answers with a real Result
 	// rather than being a silent no-op, and the tools' own text describes
