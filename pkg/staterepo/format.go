@@ -111,7 +111,12 @@ func Format(dir, image string, force bool) (Formatted, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return out, fmt.Errorf("staterepo: preparing %s: %w", dir, err)
 	}
-	if err := writeReadme(dir); err != nil {
+	// Named from the dump if there is one under dir, since there is no
+	// database here to ask: formatting a clone of a deployment's
+	// repository has to leave its README saying whose state it is
+	// (deploymentNameFromDump), and formatting an empty directory has
+	// nothing to name until the deployment that adopts it seeds.
+	if err := writeReadme(dir, deploymentNameFromDump(dir)); err != nil {
 		return out, err
 	}
 	out.Wrote = append(out.Wrote, ReadmeFile)
