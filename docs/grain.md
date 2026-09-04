@@ -564,7 +564,7 @@ The first blocks the sandbox image; the other two are small and do not.
   Scope: bridge and tap (primitives exist in `ensureBridge`/`ensureTap`),
   the `ip_forward` write, nftables masquerade with idempotent teardown
   matching netshim's existing convergence discipline, and the egress rules
-  that keep the sandbox from inheriting the agent's reach. See "What it
+  that keep the sandbox from inheriting the agent's reach. See "What NAT
   costs" for what to get right.
 - Promote `internal/execwire` and a thin client to `pkg/`, so a
   co-located shim can dial the guest without forking `kontur exec`.
