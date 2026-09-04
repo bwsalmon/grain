@@ -729,3 +729,46 @@ func TestSyncRefusesToCommitOverAMergedChange(t *testing.T) {
 		t.Fatalf("syncing after loading the merge: %v", err)
 	}
 }
+
+// An empty remote whose HEAD advertises something other than the branch
+// grain wants -- `git init --bare` on a host with no init.defaultBranch,
+// or any repository old enough to have been created as master.
+//
+// bareRemote above always says --initial-branch=main, which is why every
+// other test here passes over the case that broke: Repo.clone renames
+// the branch it landed on to Config.Branch, and the rename was skipped
+// whenever the check for "which branch did we land on" failed -- which
+// it did on every clone of an empty repository, since HEAD there points
+// at a branch with no commit for rev-parse to resolve. The commits then
+// piled up on master while every push named main, and `grain state
+// adopt` ended at git's own "src refspec main does not match any"
+// (found by hand, task 244).
+func TestSyncPushesToAnEmptyRemoteWhoseHeadIsNotTheWantedBranch(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=master", remote).CombinedOutput(); err != nil {
+		t.Fatalf("creating a bare remote: %v: %s", err, out)
+	}
+
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening against a remote: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+
+	out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json")
+	if !strings.Contains(out, "a1b2") {
+		t.Fatalf("the remote's main does not hold the task:\n%s", out)
+	}
+}
