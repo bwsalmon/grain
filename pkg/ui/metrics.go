@@ -96,6 +96,42 @@ type MetricsReport struct {
 	// called nothing -- runs says which.
 	Tools  MetricsTools  `json:"tools"`
 	Checks MetricsChecks `json:"checks"`
+	// PullRequests is the end of that same loop: whether runs open their
+	// own pull request while they can still fix what its checks say.
+	PullRequests MetricsPullRequests `json:"pullRequests"`
+}
+
+// MetricsPullRequests is the mid-run pull request loop: how many of the
+// runs that were offered open_pull_request called it, and whether calling
+// it went with fewer red builds left behind.
+//
+// runs is the denominator and is worth reading first: it counts only runs
+// that recorded a census and whose task had a repo to push to, since a
+// task with no target never got the paragraph that names the tool.
+//
+// withTool and withoutTool are a comparison and only a comparison. Each
+// counts the runs whose task the merge queue later filed a fix task for,
+// and that link is on the task rather than the attempt -- so read the
+// difference between the two rates, not either rate on its own.
+type MetricsPullRequests struct {
+	Runs   int `json:"runs"`
+	Opened int `json:"opened"`
+	Calls  int `json:"calls"`
+	// AdoptionRate is opened/runs -- a rate, 0..1. It measures the tool's
+	// uptake overall and not prompt wording against a bare tool
+	// description: the tool and the prompt sentence naming it landed
+	// half an hour apart, so no run ever had one without the other.
+	AdoptionRate float64            `json:"adoptionRate"`
+	WithTool     MetricsFixTaskRate `json:"withTool"`
+	WithoutTool  MetricsFixTaskRate `json:"withoutTool"`
+}
+
+// MetricsFixTaskRate is one side of that comparison: of these runs, how
+// many belonged to a task the merge queue had to file a fix task for.
+type MetricsFixTaskRate struct {
+	Runs     int     `json:"runs"`
+	FixTasks int     `json:"fixTasks"`
+	Rate     float64 `json:"rate"`
 }
 
 // MetricsTools is the per-run tool census over the window: how much of a
@@ -319,6 +355,10 @@ func countOf(c metrics.Counts) MetricsCount {
 	}
 }
 
+func fixTaskRateOf(f metrics.FixTaskRate) MetricsFixTaskRate {
+	return MetricsFixTaskRate{Runs: f.Runs, FixTasks: f.FixTasks, Rate: f.Rate}
+}
+
 func distributionOf(d metrics.Distribution) MetricsDistribution {
 	return MetricsDistribution{
 		N:           d.N,
@@ -504,6 +544,14 @@ func metricsReportFrom(rep metrics.Report, cycles bool) MetricsReport {
 	}
 	if out.Checks.Verdicts == nil {
 		out.Checks.Verdicts = map[string]int{}
+	}
+	out.PullRequests = MetricsPullRequests{
+		Runs:         rep.PullRequests.Runs,
+		Opened:       rep.PullRequests.Opened,
+		Calls:        rep.PullRequests.Calls,
+		AdoptionRate: rep.PullRequests.AdoptionRate,
+		WithTool:     fixTaskRateOf(rep.PullRequests.WithTool),
+		WithoutTool:  fixTaskRateOf(rep.PullRequests.WithoutTool),
 	}
 
 	l := rep.Latency
