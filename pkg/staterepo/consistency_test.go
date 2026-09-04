@@ -111,11 +111,245 @@ func TestAnExportIsASnapshotOfOneDatabase(t *testing.T) {
 // _txlock=immediate, so a transaction begun without saying it is
 // read-only takes SQLite's write lock -- and an export of every
 // transcript grain has stored would hold it for as long as that takes.
+//
+// From the daemon's side that shows up as its writes stopping for the
+// length of the export, so what this measures is a writer's rate while
+// exports run against the same writer's rate a moment earlier with
+// nothing in its way. The test below holds the write lock across an
+// export on purpose and requires the same comparison to catch it, which
+// is what keeps the threshold here honest: it is a number shown to sit
+// between a blocking export and a well-behaved one, not one nothing can
+// fail.
 func TestAnExportDoesNotBlockTheDaemonFromWriting(t *testing.T) {
 	ctx := context.Background()
 	store, db := openDB(t)
-	// Enough rows, with transcripts on them, that the export is doing
-	// real work rather than finishing before the writer has started.
+	seedTranscripts(t, store)
+
+	dir := t.TempDir()
+	idle, busy := writerRates(t, store, func() {
+		if err := staterepo.Export(ctx, db, dir); err != nil {
+			t.Fatalf("exporting: %v", err)
+		}
+	})
+	t.Logf("the writer managed %.0f writes/s while exports ran, against %.0f/s with nothing "+
+		"in its way (wanted at least %.0f/s)", busy, idle, idle/allowedSlowdown)
+	if busy < idle/allowedSlowdown {
+		t.Fatalf("the writer managed %.0f writes/s while exports ran and %.0f/s with nothing "+
+			"in its way: the export is holding SQLite's write lock and the daemon is "+
+			"waiting on it", busy, idle)
+	}
+}
+
+// The test above can fail. An export that takes SQLite's write lock is
+// not a thing this suite can arrange -- ExportTier asks for a read-only
+// transaction and gets a read snapshot -- so this arranges the same
+// consequence a regression there would have: an export with a write
+// transaction held open across it, which is exactly what would happen if
+// that ReadOnly were dropped or if the driver stopped honouring it.
+//
+// It exists because the check above is a comparison of two measured
+// rates, and a comparison like that can rot into one that passes
+// whatever happens -- a threshold nudged down after a flake, a writer
+// that stopped writing, a window too short to hold a write. If the
+// writer keeps its rate up while the write lock is held, the failure is
+// in the measurement rather than in the database, and this says so.
+func TestABlockingExportFailsTheTestAbove(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	seedTranscripts(t, store)
+
+	dir := t.TempDir()
+	idle, busy := writerRates(t, store, func() {
+		// Begun without TxOptions.ReadOnly, so _txlock=immediate takes the
+		// write lock at BEGIN and holds it across the export.
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("taking the write lock: %v", err)
+		}
+		defer tx.Rollback()
+		if err := staterepo.Export(ctx, db, dir); err != nil {
+			t.Fatalf("exporting: %v", err)
+		}
+	})
+	t.Logf("with the write lock held across each export the writer managed %.0f writes/s, "+
+		"against %.0f/s with nothing in its way (wanted under %.0f/s)",
+		busy, idle, idle/allowedSlowdown)
+	if busy >= idle/allowedSlowdown {
+		t.Fatalf("the writer managed %.0f writes/s with SQLite's write lock held across every "+
+			"export and %.0f/s with nothing in its way: a blocked daemon is not far enough "+
+			"below an unblocked one for the test above to tell them apart", busy, idle)
+	}
+}
+
+// How far the writer is allowed to fall behind its own unobstructed rate
+// before the export is held to be blocking it.
+//
+// Both ends of this are measured, and the two tests above hold it to
+// both of them. An export that blocks nobody still competes for the same
+// disk and the same cores, so some slowdown is honest: over sixty runs
+// the writer kept ~100% of its rate through an export on an idle
+// four-core box, and never less than 36% of it in any loaded arrangement
+// tried -- three busy loops per core, `go test -race`, GOMAXPROCS pinned
+// to two and to one. An export holding the write lock left it 0-5%
+// across the same set. An eighth sits between the two with about three
+// times the margin on either side.
+const allowedSlowdown = 8
+
+// How long the writer waits between one task and the next.
+//
+// Ten milliseconds is far faster than grain's daemon files anything and
+// slow enough to leave the write lock free most of the time, which is
+// what makes the two rates comparable at all. At one millisecond the
+// writer holds the lock for most of every millisecond, and whatever else
+// wants it waits on SQLite's busy handler -- which backs off in sleeps
+// of up to 100ms, and the writer writes through every one of them.
+// Measured: a blocking export spent so long getting the lock that the
+// writer kept a quarter of its rate through it, which is what an
+// unblocked writer looks like, and the test above that exists to catch
+// exactly that missed it once in twenty runs. Backing the writer off to
+// ten milliseconds drops the same measurement to 0-5%.
+const writerPause = 10 * time.Millisecond
+
+// writerRates runs a writer doing what the daemon does -- filing a task,
+// pausing, filing the next -- and reports the rate it manages with
+// nothing in its way and the rate it manages while work runs, in writes
+// per second.
+//
+// The two are measured over windows of the same length, on the same
+// machine, seconds apart, and work is called over and over for the whole
+// of the second one. That is what makes the comparison mean something a
+// wall-clock threshold could not. The old form of this test asserted one
+// write per ten milliseconds of export, on the reasoning that a writer
+// sleeping a millisecond between tasks manages far more than that. It
+// does on an idle machine; on a loaded hosted runner a single PutTask
+// can take ten milliseconds by itself, and the test failed reporting a
+// write lock nobody was holding. Judging the writer against itself
+// removes the machine's speed from the answer -- and measuring over a
+// fixed window rather than over one export's duration removes the other
+// half of it, that a 25ms export leaves too little room for the
+// difference between one write and none to mean anything.
+func writerRates(t *testing.T, store *model.Store, work func()) (idle, busy float64) {
+	t.Helper()
+	ctx := context.Background()
+	var written atomic.Int64
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	failed := make(chan error, 1)
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := store.PutTask(ctx, task(fmt.Sprintf("during-%05d", i))); err != nil {
+				select {
+				case failed <- err:
+				default:
+				}
+				return
+			}
+			written.Add(1)
+			time.Sleep(writerPause)
+		}
+	}()
+
+	// Let the writer get going, so that a rate of nothing below means it
+	// was held up rather than that it had not started.
+	time.Sleep(20 * time.Millisecond)
+	from, start := written.Load(), time.Now()
+	window := time.Duration(0)
+	for {
+		time.Sleep(10 * time.Millisecond)
+		window = time.Since(start)
+		// Long enough to have watched the writer for a while, and to have
+		// counted enough of its writes that the same count taken again can
+		// differ by something other than one. A machine too slow to manage
+		// that many in measureFor gets a longer window rather than a
+		// verdict off two writes -- up to a cap, past which its rate is
+		// what it is.
+		if window >= measureFor && written.Load()-from >= enoughWrites {
+			break
+		}
+		if window >= measureAtMost {
+			break
+		}
+	}
+	idle = rate(written.Load()-from, window)
+
+	// The same stretch of the same machine, with work running for the
+	// whole of it -- and the writer counted only over the parts of it work
+	// was actually running.
+	//
+	// That last part matters, and it was measured rather than reasoned
+	// about. A writer held off by the write lock does not stay held off:
+	// the moment the lock is dropped, between one call and the next, every
+	// write that was queued behind it lands at once. Counting a whole
+	// window including those gaps credited a blocked writer with a quarter
+	// of its unobstructed rate, enough to pass a check meant to catch
+	// exactly that. Counted while the export is in flight, it manages a
+	// few percent, which is what being blocked looks like.
+	from, start = written.Load(), time.Now()
+	var during, running = int64(0), time.Duration(0)
+	calls := 0
+	for ; time.Since(start) < window; calls++ {
+		before, began := written.Load(), time.Now()
+		work()
+		running += time.Since(began)
+		during += written.Load() - before
+	}
+	busy = rate(during, running)
+	t.Logf("%d calls running %s of a %s window, against a %s window with nothing running",
+		calls, running.Round(time.Millisecond), time.Since(start).Round(time.Millisecond),
+		window.Round(time.Millisecond))
+
+	close(stop)
+	<-done
+	select {
+	case err := <-failed:
+		t.Fatalf("the writer failed, so these rates measure nothing: %v", err)
+	default:
+	}
+	if idle == 0 {
+		t.Fatalf("no write landed in %s with nothing in the writer's way, so this machine "+
+			"cannot say anything about what an export does to it", window)
+	}
+	return idle, busy
+}
+
+const (
+	// How long each of writerRates' two windows is, at least. A rate is
+	// only as good as the number of writes it is taken over: measuring
+	// across one export's own duration -- 25ms on the runner this test
+	// used to flake on -- is measuring whether one write landed or none,
+	// and the difference between those two is scheduling luck rather than
+	// anything about the export. This is short enough that two of them
+	// plus the seeding keep the test to a couple of seconds.
+	measureFor = 300 * time.Millisecond
+	// Writes that have to land in that window before its rate is taken as
+	// saying anything, and how far writerRates will stretch the window
+	// waiting for them.
+	enoughWrites  = 20
+	measureAtMost = 3 * time.Second
+)
+
+// rate is writes per second. Zero for a window in which nothing landed,
+// and for one of no duration -- neither says anything about a rate, and
+// writerRates checks for it rather than dividing by zero here.
+func rate(writes int64, over time.Duration) float64 {
+	if writes <= 0 || over <= 0 {
+		return 0
+	}
+	return float64(writes) / over.Seconds()
+}
+
+// seedTranscripts fills the store with enough rows, with transcripts on
+// them, that an export of it is doing real work rather than finishing
+// before the writer beside it has been scheduled.
+func seedTranscripts(t *testing.T, store *model.Store) {
+	t.Helper()
+	ctx := context.Background()
 	for i := 0; i < 150; i++ {
 		id := fmt.Sprintf("seed-%03d", i)
 		if err := store.PutTask(ctx, task(id)); err != nil {
@@ -126,93 +360,10 @@ func TestAnExportDoesNotBlockTheDaemonFromWriting(t *testing.T) {
 		}, model.Limits{}); err != nil {
 			t.Fatalf("starting a run: %v", err)
 		}
-		if err := store.SetRunTranscript(ctx, id+"-1", randomText(8*1024)); err != nil {
+		if err := store.SetRunTranscript(ctx, id+"-1", randomText(32*1024)); err != nil {
 			t.Fatalf("writing a transcript: %v", err)
 		}
 	}
-
-	var written atomic.Int64
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if err := store.PutTask(ctx, task(fmt.Sprintf("during-%04d", i))); err != nil {
-				return
-			}
-			written.Add(1)
-			time.Sleep(time.Millisecond)
-		}
-	}()
-	// Let the writer get going, so that "nothing landed" below means the
-	// export blocked it rather than that it had not started, and then
-	// measure how fast it actually goes on *this* machine with nothing in
-	// its way.
-	//
-	// Measured rather than assumed, because the assumption was wrong. The
-	// threshold used to be one write per ten milliseconds of export, on
-	// the reasoning that a writer sleeping a millisecond between tasks
-	// manages far more than that. It does on an idle machine and it does
-	// not on a busy one: under `make test`'s own `go test -race ./...`,
-	// with every other package's tests running beside it, one PutTask can
-	// take the whole ten milliseconds by itself, and the test fails
-	// reporting that the export holds the write lock when the export is
-	// holding nothing at all. A rate compared against a constant is a
-	// test of how fast the machine is; compared against the same writer's
-	// own rate a moment earlier, it is a test of what the export did to
-	// it, which is the thing this is about.
-	time.Sleep(20 * time.Millisecond)
-	baselineStart := time.Now()
-	baselineFrom := written.Load()
-	time.Sleep(200 * time.Millisecond)
-	baseline := rate(written.Load()-baselineFrom, time.Since(baselineStart))
-
-	before := written.Load()
-	start := time.Now()
-	dir := t.TempDir()
-	if err := staterepo.Export(ctx, db, dir); err != nil {
-		t.Fatalf("exporting: %v", err)
-	}
-	took := time.Since(start)
-	during := written.Load() - before
-	close(stop)
-	<-done
-
-	if baseline == 0 {
-		t.Fatalf("no write landed in %s with nothing in the writer's way, so this machine "+
-			"cannot say anything about what the export did to it", 200*time.Millisecond)
-	}
-	// A tenth of the writer's own unobstructed rate. Well under what an
-	// export that blocks nobody leaves -- it competes for the same disk
-	// and the same cores, so some slowdown is honest -- and well over
-	// what an export holding the write lock leaves behind, which is the
-	// single write that was blocked on it and landed as it let go.
-	got := rate(during, took)
-	want := baseline / 10
-	t.Logf("%d writes landed during an export that took %s: %.0f/s against the writer's own "+
-		"%.0f/s a moment earlier (wanted at least %.0f/s)",
-		during, took.Round(time.Millisecond), got, baseline, want)
-	if got < want {
-		t.Fatalf("the writer managed %.0f writes/s during the export and %.0f/s just before it: "+
-			"the export is holding SQLite's write lock and the daemon is waiting on it",
-			got, baseline)
-	}
-}
-
-// rate is writes per second, for the two windows the test above compares
-// against each other. Zero for a window in which nothing landed, and for
-// one of no duration -- neither says anything about a rate, and the
-// caller checks for it rather than dividing by zero here.
-func rate(writes int64, over time.Duration) float64 {
-	if writes <= 0 || over <= 0 {
-		return 0
-	}
-	return float64(writes) / over.Seconds()
 }
 
 // A task and the repos it may read are written in one transaction and
