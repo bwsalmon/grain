@@ -26,13 +26,18 @@ import (
 // of agy tools grain withholds and is where a reader looking for the
 // policy would go.
 //
-// It never exits non-zero. agy runs this as `sh -c` and reads its stdout;
-// an error status buys nothing a decision cannot say, and a hook that
-// fails noisily on a payload it did not expect would put a run's ability
-// to call any tool at all behind grain's ability to parse a shape agy has
-// not promised. Silence -- an empty decision -- is what agy reads as "no
-// opinion", which is this command's answer to anything it does not
-// recognise.
+// It never exits non-zero, and it writes nothing at all for a call it has
+// no opinion about. Both are load-bearing rather than tidy: measured
+// against agy 1.1.26, a hook that exits non-zero fails the tool call
+// ("JSON hook ... failed: command failed: exit status N") and so does one
+// whose stdout is not JSON, while an empty stdout is the one reply that
+// leaves the call exactly as agy would have handled it. An empty JSON
+// object is not that reply -- agy reads a decision-less object as a deny
+// -- which is why nothing here invents a payload. See
+// antigravity.noOpinion for the whole measured contract.
+//
+// So a payload this binary cannot parse, or a shape agy has not promised,
+// costs a run nothing: the write below is zero bytes and the tool runs.
 func agyToolHook(args []string) {
 	if len(args) > 0 {
 		fmt.Fprintf(os.Stderr, "grain %s: takes no arguments\n", antigravity.HookSubcommand)
