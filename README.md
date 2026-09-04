@@ -2885,6 +2885,48 @@ X: New task, Run a suite and an attempt's transcript are actions taken
 over the page you are already on, not somewhere you navigated to, and
 there is nothing there to go back to.
 
+**A task list narrows on any attribute a task has (grain/task-288).**
+The toolbar could ask two questions -- a word in the title or the id, and
+one of four orders -- and the sidebar a third, the state. Everything else
+a row shows was visible but not askable: which repo, which base branch,
+which capabilities, who filed it, whether a schedule or the merge queue
+filed it rather than a person, whether it is a live chat, whether it
+merges itself. On a deployment with a few hundred tasks that is the
+difference between finding the four `gcp-key` tasks somebody filed last
+week and scrolling for them. So `TaskList.jsx` grows a `FILTERS` table --
+one entry per attribute, each saying only how to read that attribute off
+a task, what to call a value, and what "has none of these" is worth
+calling -- and everything else happens once for all of them: the menus
+are built from the tasks currently in view, so a menu never offers a
+repo whose every task the state filter is already hiding; an attribute
+every task in view shares is not offered at all, which is why a repo's
+own page shows no Repo menu; and a choice that goes out of range when
+the sidebar moves reads as "any" again rather than as a filter matching
+nothing. One "Clear" undoes the search and every menu together, since
+getting out of six of them one at a time is the same work as getting in.
+The sort menu grows state, repo and author alongside the orders it had,
+all of them stable, so an order groups the backlog rather than
+reshuffling it inside each group -- and dragging a row is still disabled
+outside backlog order, for the reason it always was.
+
+The same question is worth asking from a terminal, so `grain list` grew
+the same vocabulary (`cmd/grain/list.go`): `-state`, `-repo`,
+`-base`, `-capability`, `-author`, `-origin`, `-search`, `-blocked`,
+`-auto-merge`, `-interactive` and `-sort`, with the words meaning exactly
+what the menus mean -- `-origin schedule` is the Origin menu's
+"Scheduled". Three of those are tri-state rather than boolean, since
+"only the tasks that merge themselves", "only the ones that need a human"
+and "no opinion" are three answers and a Go bool flag is two: `FlagSet.
+Visit` is what tells a flag left at its default from one explicitly set
+to it. It narrows in the CLI rather than on the server because `GET
+/api/tasks` answers with the whole list either way and the frontend
+narrows that same answer in the browser -- a query parameter would move
+the loop across the wire without removing it from either caller, and
+leave two places to look for what a word like "origin" covers. A value
+nobody can act on (`-state in_progress`) stops the command with the list
+of values that work, before the request, rather than printing an empty
+listing that reads like a deployment with no such tasks.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to
