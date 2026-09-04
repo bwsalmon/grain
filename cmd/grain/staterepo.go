@@ -168,6 +168,12 @@ func moveSecretsOutOfStateRepo(dataDir string) {
 // A repository whose history cannot be read fails closed, refused rather
 // than allowed: the question is "is grain's ciphertext reachable from
 // here", and an unanswered question is not a no.
+//
+// Asked when the proxy starts (startGitProxy) and again every time this
+// installation is pointed at a different state repository under a daemon
+// that is already running (stateManager.refreshForbidden), because that
+// is the one thing that changes the answer: the proxy holds the result
+// as a live set rather than a value read once (gitproxy.ForbiddenSet).
 func forbiddenRepos(ctx context.Context, dataDir string) ([]model.RepoRef, error) {
 	settings, err := staterepo.LoadSettings(dataDir)
 	if err != nil {

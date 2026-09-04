@@ -627,11 +627,24 @@ func run(ctx context.Context, cfg config) error {
 			return fmt.Errorf("loading the state repository: %w", err)
 		}
 	}
+	// The repos the git proxy refuses to every sandbox, held live rather
+	// than resolved once. runDaemon's own startGitProxy fills it from
+	// this deployment's state repository below and the proxy reads it per
+	// request; the manager built next replaces its contents whenever an
+	// adopt points the installation at a *different* state repository, so
+	// one that carries the encrypted secrets file in its history is
+	// refused from the next request rather than from the next restart
+	// (gitproxy.ForbiddenSet, and stateManager.refreshForbidden).
+	//
+	// Created here, before either holder exists, because the UI can adopt
+	// a repository before the proxy has even started: both write the same
+	// set, and whichever runs last wrote it from the same settings file.
+	forbidden := gitproxy.NewForbiddenSet()
 	// One manager over that repository, shared by the timer below and the
 	// UI's bootstrap pane: adopting a different repository swaps the
 	// repository out from under the timer, so both go through the same
 	// lock rather than holding two handles on one working tree.
-	stateManager := newStateManager(cfg.dataDir, db, stateRepo, openSecrets(cfg.dataDir))
+	stateManager := newStateManager(cfg.dataDir, db, stateRepo, openSecrets(cfg.dataDir), forbidden)
 	syncStopped := make(chan struct{})
 	go func() {
 		defer close(syncStopped)
@@ -749,7 +762,7 @@ func run(ctx context.Context, cfg config) error {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			if err := runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live); err != nil {
+			if err := runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live, forbidden); err != nil {
 				// reconcilerDown is what turns this log line into
 				// something GET /api/config (and, through it, the UI
 				// itself) can also see -- bwsalmon/agents#576: before
@@ -777,7 +790,7 @@ func run(ctx context.Context, cfg config) error {
 		return nil
 	}
 
-	return runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live)
+	return runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live, forbidden)
 }
 
 // orphanReaper is the startup sweep both sandbox backends implement:
@@ -808,7 +821,7 @@ type orphanReaper interface {
 // take the UI server run() already started down with it
 // (bwsalmon/agents#550). It returns once ctx is cancelled, the same as
 // reconcile itself does; a non-nil error means it never got that far.
-func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, transcriptDir string, live *liveConfig) (err error) {
+func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, transcriptDir string, live *liveConfig, forbidden *gitproxy.ForbiddenSet) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
@@ -829,7 +842,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	// SandboxTokens' own doc comment), which is what makes that safe.
 	tokens := gitproxy.NewSandboxTokenStore(filepath.Join(cfg.dataDir, "secrets", "sandbox-tokens.json"))
 
-	proxyURL, stopProxy, err := startGitProxy(cfg.dataDir, store, cfg.githubHost, cfg.githubInsecureHTTP, cfg.konturGitProxyHost)
+	proxyURL, stopProxy, err := startGitProxy(cfg.dataDir, store, cfg.githubHost, cfg.githubInsecureHTTP, cfg.konturGitProxyHost, forbidden)
 	if err != nil {
 		return fmt.Errorf("starting git proxy: %w", err)
 	}
@@ -2399,11 +2412,24 @@ func transcriptFramework(data string) string {
 // advertiseHost (typically the docker bridge gateway address the guest's
 // own outbound NAT routes through to reach this host) instead of the
 // address it actually bound.
-func startGitProxy(dataDir string, store *model.Store, githubHost string, insecureHTTP bool, advertiseHost string) (url string, stop func(context.Context) error, err error) {
-	forbidden, err := forbiddenRepos(context.Background(), dataDir)
+//
+// forbidden is the live set of repos the proxy refuses to every sandbox
+// (gitproxy.ForbiddenSet): this fills it with what this deployment's
+// state repository makes of it right now, and whoever else holds it --
+// stateManager, when an adopt points the installation at a different
+// repository -- replaces its contents from then on, so the proxy answers
+// for the repository grain's state is in now rather than the one it was
+// in when the process started. A nil set is a caller with nothing that
+// can change that answer, which gets one of its own.
+func startGitProxy(dataDir string, store *model.Store, githubHost string, insecureHTTP bool, advertiseHost string, forbidden *gitproxy.ForbiddenSet) (url string, stop func(context.Context) error, err error) {
+	repos, err := forbiddenRepos(context.Background(), dataDir)
 	if err != nil {
 		return "", nil, err
 	}
+	if forbidden == nil {
+		forbidden = gitproxy.NewForbiddenSet()
+	}
+	forbidden.Set(repos)
 	proxy, err := gitproxy.BuildProxy(gitproxy.BuildConfig{
 		DataDir: dataDir, Store: store, ForwardHost: githubHost, ForwardTLS: !insecureHTTP,
 		Forbidden: forbidden,
