@@ -16,6 +16,7 @@ const baseProps = {
   onSetFilter: noop,
   onOpenSettings: noop,
   onOpenDebug: noop,
+  onOpenMetrics: noop,
   onOpenNewTask: noop,
 };
 
@@ -61,6 +62,7 @@ describe("Sidebar", () => {
   it("routes the footer and new-task buttons to their own callbacks", async () => {
     const onOpenSettings = vi.fn();
     const onOpenDebug = vi.fn();
+    const onOpenMetrics = vi.fn();
     const onOpenNewTask = vi.fn();
     const user = userEvent.setup();
     render(
@@ -70,36 +72,50 @@ describe("Sidebar", () => {
         tasks={[]}
         onOpenSettings={onOpenSettings}
         onOpenDebug={onOpenDebug}
+        onOpenMetrics={onOpenMetrics}
         onOpenNewTask={onOpenNewTask}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "+ New task" }));
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    await user.click(screen.getByRole("button", { name: "Debugging" }));
+    await user.click(screen.getByRole("button", { name: "Debug" }));
+    await user.click(screen.getByRole("button", { name: "Metrics" }));
 
     expect(onOpenNewTask).toHaveBeenCalledTimes(1);
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(onOpenDebug).toHaveBeenCalledTimes(1);
+    expect(onOpenMetrics).toHaveBeenCalledTimes(1);
   });
 
-  // grain/task-115: Settings and Debugging open a pane beside this rail
-  // rather than a box over the middle of the screen, so the rail is
-  // still on screen while one is open and has to say which of the two
+  // grain/task-115: Settings, Debug and Metrics open a pane beside this
+  // rail rather than a box over the middle of the screen, so the rail is
+  // still on screen while one is open and has to say which of the three
   // it is -- the same way the nav entries above mark the current view.
   it("marks the footer entry whose pane is open", () => {
+    const footer = ["Settings", "Debug", "Metrics"];
+    const expectOnly = (open) => {
+      for (const name of footer) {
+        const button = screen.getByRole("button", { name });
+        if (name === open) {
+          expect(button).toHaveClass("Mui-selected");
+        } else {
+          expect(button).not.toHaveClass("Mui-selected");
+        }
+      }
+    };
     const { rerender } = render(<Sidebar {...baseProps} config={null} tasks={[]} />);
 
-    expect(screen.getByRole("button", { name: "Settings" })).not.toHaveClass("Mui-selected");
-    expect(screen.getByRole("button", { name: "Debugging" })).not.toHaveClass("Mui-selected");
+    expectOnly(null);
 
     rerender(<Sidebar {...baseProps} config={null} tasks={[]} showSettings />);
-    expect(screen.getByRole("button", { name: "Settings" })).toHaveClass("Mui-selected");
-    expect(screen.getByRole("button", { name: "Debugging" })).not.toHaveClass("Mui-selected");
+    expectOnly("Settings");
 
     rerender(<Sidebar {...baseProps} config={null} tasks={[]} showDebug />);
-    expect(screen.getByRole("button", { name: "Settings" })).not.toHaveClass("Mui-selected");
-    expect(screen.getByRole("button", { name: "Debugging" })).toHaveClass("Mui-selected");
+    expectOnly("Debug");
+
+    rerender(<Sidebar {...baseProps} config={null} tasks={[]} showMetrics />);
+    expectOnly("Metrics");
   });
 
   it("switches to the schedules view and shows its count when clicked", async () => {
@@ -170,13 +186,16 @@ describe("Sidebar", () => {
     expect(screen.queryByTitle(/^Running commit/)).not.toBeInTheDocument();
   });
 
-  // bwsalmon/agents#640: Logs and Sandbox health share the "Debugging"
-  // nav entry rather than having one each of their own.
+  // bwsalmon/agents#640: Logs and Sandbox health share the "Debug" nav
+  // entry rather than having one each of their own. Metrics does have
+  // one of its own (grain/task-173), since it is the question asked when
+  // nothing is wrong rather than one of these.
   it("does not show Logs or Sandbox health as their own nav entries", () => {
     render(<Sidebar {...baseProps} config={null} tasks={[]} />);
 
     expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Debugging" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Debug" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Metrics" })).toBeInTheDocument();
   });
 });

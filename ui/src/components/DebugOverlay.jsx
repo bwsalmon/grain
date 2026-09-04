@@ -3,7 +3,6 @@ import { Alert, Button, Tab, Tabs, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import LogsPage from "./LogsPage.jsx";
-import MetricsPage from "./MetricsPage.jsx";
 import SandboxHealthPage from "./SandboxHealthPage.jsx";
 import TopPage from "./TopPage.jsx";
 
@@ -11,7 +10,6 @@ const TABS = [
   { id: "logs", label: "Logs" },
   { id: "sandboxHealth", label: "Sandbox health" },
   { id: "top", label: "Top" },
-  { id: "metrics", label: "Metrics" },
   { id: "restart", label: "Restart" },
 ];
 
@@ -28,19 +26,13 @@ const TABS = [
 // daemon's machine is loaded, and only a per-process view says by what
 // (grain/task-120).
 //
-// Metrics (GET /api/metrics) joined them later rather than taking a
-// sidebar entry of its own: it is the same kind of thing the
-// other tabs are -- a read-only, deployment-wide view of how the machine
-// is behaving, reached when somebody is asking a question about the
-// deployment rather than about a task -- and "why is this slow" is
-// usually answered by looking at it next to sandbox health anyway.
-//
-// onOpenTask is threaded through for the one link out of these panels:
-// the metrics backlog names the oldest queued task, and the useful thing
-// to do with that is go and look at it. App closes this pane on the
-// way, since two stacked panes would put the task behind the one it
-// was opened from.
-export default function DebugOverlay({ config, onClose, onOpenTask, showError }) {
+// Metrics (GET /api/metrics) was a fourth tab here for a while, on the
+// reasoning that it is the same kind of read-only, deployment-wide view
+// the others are. It has its own sidebar entry now (MetricsOverlay.jsx,
+// grain/task-173): what is left in here is what an operator opens
+// because something is wrong right now, and a throughput report is the
+// opposite of that -- it is read when nothing is wrong at all.
+export default function DebugOverlay({ config, onClose, showError }) {
   const [tab, setTab] = useState("logs");
   // rebootHost is deliberately its own confirm/try, separate from any
   // settings-form save flow: it is not a settings field, and unlike a
@@ -84,7 +76,7 @@ export default function DebugOverlay({ config, onClose, onOpenTask, showError })
 
   // pane, and nothing capping the width inside it (grain/task-115):
   // every panel in here is either a table too many columns across for a
-  // dialog (sandbox health, metrics) or a <pre> of log lines that wraps
+  // dialog (sandbox health) or a <pre> of log lines that wraps
   // badly in one. This was the widest centered box Overlay draws and it
   // was still the wrong shape -- what these panels want is the whole
   // content area beside the sidebar, which is what a pane is.
@@ -93,7 +85,6 @@ export default function DebugOverlay({ config, onClose, onOpenTask, showError })
       {tab === "logs" && <LogsPage showError={showError} />}
       {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
       {tab === "top" && <TopPage showError={showError} />}
-      {tab === "metrics" && <MetricsPage showError={showError} onOpenTask={onOpenTask} />}
       {tab === "restart" && (
         config && config.rebootEnabled ? (
           <fieldset>

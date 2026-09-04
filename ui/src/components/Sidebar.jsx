@@ -19,17 +19,24 @@ import GrainMark from "./GrainMark.jsx";
 // entries/a "danger zone" on the general tab -- bwsalmon/agents#457,
 // bwsalmon/agents#536, bwsalmon/agents#395) went through Settings' own
 // Debug tab for a while too (bwsalmon/agents#623), but moved back out
-// to a "Debugging" entry of its own here, under Settings (bwsalmon/
+// to a "Debug" entry of its own here, under Settings (bwsalmon/
 // agents#640) -- diagnosing a deployment gone wrong wants faster reach
-// than a tab buried inside Settings' configuration form. The throughput
-// and latency report (GET /api/metrics) is a fourth tab in there, for
-// the same reason the other three are.
+// than a tab buried inside Settings' configuration form.
 //
-// Both footer entries open a full pane beside this rail rather than a
-// dialog over the middle of the screen (grain/task-115), which is why
-// they are nav entries carrying a selected state now rather than plain
-// buttons: the rail stays visible under the pane, so it has to say
-// which of the two is covering everything else.
+// Metrics (GET /api/metrics) was a fourth tab in there and is a third
+// footer entry now (grain/task-173): the throughput and latency report
+// is the standing question "how is this deployment doing", asked when
+// nothing is wrong at all, and it was the only thing behind Debug's tab
+// strip that was not about something being wrong right now. Two clicks
+// and a tab strip is the wrong price for a report somebody reads
+// weekly, and burying it under the word "debug" said the wrong thing
+// about when to open it.
+//
+// All three footer entries open a full pane beside this rail rather
+// than a dialog over the middle of the screen (grain/task-115), which is
+// why they are nav entries carrying a selected state now rather than
+// plain buttons: the rail stays visible under the pane, so it has to say
+// which of the three is covering everything else.
 // parseStampTime turns GET /api/config's committedAt into a Date, or
 // null for a build whose stamp carried no readable time -- the server
 // leaves the field off entirely in that case (pkg/ui/version.go), and a
@@ -68,7 +75,7 @@ function buildStampTitle(version) {
   return parts.join(", ");
 }
 
-export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, showSettings = false, showDebug = false, onOpenSettings, onOpenDebug, onOpenNewTask }) {
+export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, showSettings = false, showDebug = false, showMetrics = false, onOpenSettings, onOpenDebug, onOpenMetrics, onOpenNewTask }) {
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -188,15 +195,18 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
         </ListItemButton>
       </List>
 
-      {/* No dot beside either, unlike every nav entry above: those count
-          something, and these two are one destination each. */}
+      {/* No dot beside any of them, unlike every nav entry above: those
+          count something, and these three are one destination each. */}
       <List component="nav" disablePadding sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}>
         <Divider sx={{ mb: 0.9 }} />
         <ListItemButton selected={showSettings} onClick={onOpenSettings} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <ListItemText primary="Settings" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showSettings ? "text.primary" : "text.secondary" }} />
         </ListItemButton>
         <ListItemButton selected={showDebug} onClick={onOpenDebug} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <ListItemText primary="Debugging" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showDebug ? "text.primary" : "text.secondary" }} />
+          <ListItemText primary="Debug" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showDebug ? "text.primary" : "text.secondary" }} />
+        </ListItemButton>
+        <ListItemButton selected={showMetrics} onClick={onOpenMetrics} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <ListItemText primary="Metrics" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showMetrics ? "text.primary" : "text.secondary" }} />
         </ListItemButton>
       </List>
 

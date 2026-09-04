@@ -27,10 +27,10 @@ test("loads directly into each sidebar sub-page from its URL", async ({ page }) 
 
   // /logs and /sandboxes were sidebar destinations of their own until
   // both moved into Settings' Debug tab (bwsalmon/agents#623), then out
-  // again onto their own "Debugging" entry at /debug (bwsalmon/
-  // agents#640); paths.js never restored them as their own paths, so a
-  // stale bookmark to either is still just an unrecognized path and
-  // lands on the tasks view.
+  // again onto their own "Debug" entry at /debug (bwsalmon/agents#640);
+  // paths.js never restored them as their own paths, so a stale bookmark
+  // to either is still just an unrecognized path and lands on the tasks
+  // view.
   await page.goto("/logs");
   await expect(page.locator(".task-row").first()).toBeVisible();
 
@@ -39,6 +39,12 @@ test("loads directly into each sidebar sub-page from its URL", async ({ page }) 
 
   await page.goto("/debug");
   await expect(page.getByRole("heading", { name: "Debug" })).toBeVisible();
+
+  // Metrics left that pane for a sidebar entry of its own
+  // (grain/task-173), so the report has a URL an operator can bookmark
+  // rather than a tab they have to click through Debug to reach.
+  await page.goto("/metrics");
+  await expect(page.getByRole("heading", { name: "Metrics" })).toBeVisible();
 });
 
 // A repo's own page is two URL segments deep (grain/task-111), which is

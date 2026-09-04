@@ -38,8 +38,10 @@ describe("parsePath", () => {
     expect(parsePath("/suites/suite-1")).toEqual({ view: "suites", suiteId: "suite-1" });
   });
 
-  it("parses the settings path", () => {
+  it("parses the settings, debug and metrics paths", () => {
     expect(parsePath("/settings")).toEqual({ view: "tasks", showSettings: true });
+    expect(parsePath("/debug")).toEqual({ view: "tasks", showDebug: true });
+    expect(parsePath("/metrics")).toEqual({ view: "tasks", showMetrics: true });
   });
 
   it("falls back to tasks for an unknown path", () => {
@@ -88,9 +90,14 @@ describe("buildPath", () => {
     expect(buildPath({ view: "repos", taskId: "42", showSettings: true })).toBe("/settings");
   });
 
+  it("builds the debug and metrics panes' own paths", () => {
+    expect(buildPath({ view: "tasks", showDebug: true })).toBe("/debug");
+    expect(buildPath({ view: "repos", taskId: "42", showMetrics: true })).toBe("/metrics");
+  });
+
   it("round-trips every path parsePath recognizes", () => {
     const paths = [
-      "/", "/repos", "/schedules", "/templates", "/suites", "/tasks/42", "/settings",
+      "/", "/repos", "/schedules", "/templates", "/suites", "/tasks/42", "/settings", "/debug", "/metrics",
       "/repos/acme/widgets", "/repos/acme/widgets/releases",
       "/schedules/sched-1", "/templates/template-1", "/suites/suite-1",
     ];
