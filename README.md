@@ -2413,6 +2413,31 @@ flat list has instead of a poorer second list. That is also what retired
 the task view's `repoFilter` chip: "the tasks of one repo" is a place to
 go now, not a filter left standing on another place.
 
+**Everything you open leaves by a back button on the left
+(grain/task-177).** Those two halves grew their own way out. A repo's
+page and its releases were plain pages, so they took the obvious one: a
+"← Repos" button in the top-left corner, above the title. Every pane --
+a task, a schedule, a template, a suite, Settings, Debug, Metrics -- was
+a `Dialog` before it was a destination, so it kept the dialog's own X
+floating in the top-right. That left one product with two gestures for
+the same "go back where I came from", in opposite corners of the screen,
+chosen by which of the two you happened to open. They are the same kind
+of thing: each fills the content area beside the sidebar, and each has a
+URL of its own. So `Overlay.jsx`'s pane shape drops the X for a back
+button in the corner a repo page already puts one in, in the flow above
+the pane's `header` rather than floating over it -- which also gives a
+tab strip back the 3rem of right padding it needed to stay clear of the
+old button. `backLabel` names where the button lands for the panes that
+only ever open from one list ("← Schedules", "← Templates", "← Suites"),
+the way the repo page's own says "← Repos"; the panes reachable from
+more than one place -- a task opens from the flat list, from a repo's
+page and from the Metrics backlog -- say just "← Back" rather than
+naming a destination they cannot know. Escape and a backdrop click still
+close a pane, since it is still a `Dialog`. The centered shape keeps its
+X: New task, Run a suite and an attempt's transcript are actions taken
+over the page you are already on, not somewhere you navigated to, and
+there is nothing there to go back to.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to

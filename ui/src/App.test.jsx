@@ -316,7 +316,9 @@ describe("App", () => {
 
     expect(await screen.findByText("1 Fix bug")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Close dialog" }));
+    // A task's pane leaves by the back button in its top-left corner,
+    // the same as a repo's page does (grain/task-177).
+    await user.click(screen.getByRole("button", { name: "← Back" }));
 
     expect(screen.queryByText("1 Fix bug")).not.toBeInTheDocument();
   });
