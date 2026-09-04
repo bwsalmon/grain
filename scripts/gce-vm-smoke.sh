@@ -12,7 +12,8 @@
 # seconds, on its own, before blaming terraform or the agent.
 #
 # Usage:
-#   scripts/gce-vm-smoke.sh [--zone Z] [--network N] [--subnet S] [--iap] [--keep]
+#   scripts/gce-vm-smoke.sh [--zone Z] [--network N] [--subnet S]
+#                           [--service-account SA|default] [--iap] [--keep]
 #
 # It authenticates as whatever gcloud already has active. From inside a
 # grain sandbox holding the gcp-key capability, that means first:
@@ -31,6 +32,7 @@ ZONE="${ZONE:-us-central1-a}"
 NETWORK="${NETWORK:-default}"
 SUBNET="${SUBNET:-}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-micro}"
+SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-}"
 USE_IAP=0
 KEEP=0
 
@@ -52,6 +54,16 @@ while [[ $# -gt 0 ]]; do
     # "Network interface must specify a subnet if the network resource is in
     # custom subnet mode", naming a field the caller never set.
     --subnet)  SUBNET="$2"; shift 2 ;;
+    # Which identity the VM itself runs as. Unset -- the default -- means
+    # none at all (`--no-service-account`, see the create step for why that
+    # is what makes this work as a non-owner). `default` means "whatever
+    # gcloud would attach on its own", the project's default compute
+    # account and the shape a production workload has; anything else is
+    # taken as an account to attach by name. Both of those need
+    # roles/iam.serviceAccountUser **on the named account**, so they answer
+    # a different and larger question than the default does -- see
+    # .github/workflows/gcp-smoke.yml, which exposes exactly this choice.
+    --service-account) SERVICE_ACCOUNT="$2"; shift 2 ;;
     # Reach the VM over IAP TCP forwarding rather than an external IP. This
     # is the shape terraform/gcp actually deploys (network.tf gives the host
     # no external IP at all), so it is the leg worth checking before
@@ -63,7 +75,7 @@ while [[ $# -gt 0 ]]; do
     # Leave the VM running -- for poking at a failure by hand. It is then
     # yours to delete; the command is printed at the end.
     --keep)    KEEP=1; shift ;;
-    *) echo "usage: $0 [--zone Z] [--network N] [--subnet S] [--iap] [--keep]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--zone Z] [--network N] [--subnet S] [--service-account SA|default] [--iap] [--keep]" >&2; exit 2 ;;
   esac
 done
 
@@ -99,7 +111,6 @@ trap cleanup EXIT
 CREATE_ARGS=(--network="$NETWORK")
 [[ -n "$SUBNET" ]] && CREATE_ARGS+=(--subnet="$SUBNET")
 
-step "create $VM ($MACHINE_TYPE, $NETWORK${SUBNET:+/$SUBNET}, $ZONE)"
 # --no-service-account --no-scopes is not an optimisation, it is what makes
 # this work as a non-owner. gcloud otherwise attaches the project's default
 # compute service account to every VM it creates, and attaching *any*
@@ -114,13 +125,24 @@ step "create $VM ($MACHINE_TYPE, $NETWORK${SUBNET:+/$SUBNET}, $ZONE)"
 # credential itself is wrong. A smoke-test VM calls no Google API from
 # inside, so it needs no identity of its own; declining one sidesteps the
 # grant entirely.
+#
+# --service-account is how a caller asks for the larger question anyway:
+# `default` leaves gcloud to attach the account it would have, and a name
+# attaches that one. Either needs the actAs grant above, which is the
+# point of asking.
+if [[ -z "$SERVICE_ACCOUNT" ]]; then
+  CREATE_ARGS+=(--no-service-account --no-scopes)
+elif [[ "$SERVICE_ACCOUNT" != "default" ]]; then
+  CREATE_ARGS+=(--service-account="$SERVICE_ACCOUNT")
+fi
+
+step "create $VM ($MACHINE_TYPE, $NETWORK${SUBNET:+/$SUBNET}, $ZONE, running as ${SERVICE_ACCOUNT:-no service account})"
 gcloud compute instances create "$VM" \
   --zone="$ZONE" \
   --machine-type="$MACHINE_TYPE" \
   --image-family=debian-12 --image-project=debian-cloud \
   --boot-disk-size=10GB \
   "${CREATE_ARGS[@]}" \
-  --no-service-account --no-scopes \
   --labels=purpose=gce-vm-smoke
 
 SSH_ARGS=(--zone="$ZONE" --quiet)

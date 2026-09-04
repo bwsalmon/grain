@@ -62,6 +62,29 @@ func liveAgentWorkflow(t *testing.T) string {
 	return read(t, ".github", "workflows", "live-agent.yml")
 }
 
+// gcpSmokeWorkflow is the fourth, and the only one that holds a GCP
+// credential: the nightly GCE and GKE lifecycle runs
+// (scripts/gce-vm-smoke.sh, scripts/gke-cluster-smoke.sh).
+func gcpSmokeWorkflow(t *testing.T) string {
+	return read(t, ".github", "workflows", "gcp-smoke.yml")
+}
+
+// executable asserts a file in the checkout is one CI can run by path.
+// A script invoked as `./scripts/foo.sh` by a workflow nothing triggers
+// on a push is a script whose lost +x bit is found by the schedule, at
+// night, and by nobody else.
+func executable(t *testing.T, parts ...string) {
+	t.Helper()
+	path := filepath.Join(append([]string{repoRoot(t)}, parts...)...)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", filepath.Join(parts...), err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Errorf("%s is not executable (%s), and CI runs it by path", filepath.Join(parts...), info.Mode())
+	}
+}
+
 // setupCode is setup.sh with its comment lines dropped.
 //
 // That file is more comment than code, and much of that comment is about

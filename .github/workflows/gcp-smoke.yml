@@ -1,0 +1,370 @@
+# Runs scripts/gce-vm-smoke.sh and scripts/gke-cluster-smoke.sh against a
+# real GCP credential, nightly, so "is the credential still good enough to
+# stand something up?" stops being a question somebody has to remember to
+# ask.
+#
+# Both scripts existed and neither was run by anything (tasks 195 and
+# 215). They only ever answered when a human typed them, which is
+# reliably *after* a deployment or an agent has already failed in a way
+# that reads as something else -- README's "Debugging `gcp-key`" pair,
+# twice over. And the thing they check is precisely the thing that
+# changes with no commit to this repository at all: an org policy lands,
+# a role binding is dropped, `constraints/iam.disableServiceAccountKey
+# Creation` gets enforced, a quota moves. A green `go test ./...` says
+# nothing about any of it, and neither does Settings -> Capabilities: the
+# per-capability check button (README's "Testing a credential, from the
+# pane that calls it Ready") makes one cheap, harmless call -- for
+# `gcp-key`, listing the agent account's keys -- which is a different and
+# much weaker question than "may this account create a VM".
+#
+# # What runs, and what it costs
+#
+# One job, both legs, in order: the GCE lifecycle (create a VM, ssh into
+# it, delete it -- about ninety seconds) and then the GKE one (create a
+# cluster, run a workload on it, resize the pool, relabel it, delete it --
+# about twelve minutes, a control plane plus two e2-medium nodes). Real
+# money, and not much of it: a few cents a night, against a `tests.yml`
+# that already spends a 45-minute KVM job on every pull request.
+#
+# Nightly rather than weekly for the same reason live-agent.yml is
+# nightly: what this samples drifts on somebody else's schedule, so the
+# only thing a longer interval buys is a longer window in which every
+# `gcp-key` task fails for a reason nobody has been told. Nightly bounds
+# that at a day for about $10 a year.
+#
+# Twelve minutes is also why this is not a preflight step in
+# terraform/gcp/deploy, which was the other candidate home and the only
+# one that would *block* a deployment that is going to fail anyway. It
+# would put twelve minutes in front of an interactive deploy to re-answer
+# a question this job answered a few hours ago, and it would answer it
+# with the operator's own credential rather than with the agent account
+# whose drift is the actual risk.
+#
+# # What it holds, and why it is not in tests.yml
+#
+# A credential, which is the whole reason this is a fourth workflow file
+# rather than three more jobs somewhere. tests.yml deliberately holds
+# nothing: it triggers on `pull_request`, which runs code from a branch
+# no human has read. build-artifacts.yml holds a GITHUB_TOKEN on the
+# `push`-events-only-fire-for-a-branch-in-this-repository argument, which
+# live-agent.yml's header already explains is not sound for a credential
+# worth stealing -- in this repository nearly every branch is pushed by
+# one of grain's own agent runs, so a workflow file on a branch is code
+# nobody reviewed, and a *repository* secret is readable by any workflow
+# on any branch push whatever file declares it.
+#
+# So the boundary is the one GitHub enforces, and it is what a maintainer
+# has to create before this job can do anything:
+#
+#   - a `gcp-smoke` **environment**, with a deployment branch policy
+#     naming the default branch alone. A job on any other ref is refused
+#     the secret before it starts, whatever that branch's copy of this
+#     file says. No required reviewers: gating a nightly on somebody
+#     clicking approve is the same "runs when a human remembers" gap this
+#     exists to close.
+#   - `GCP_KEY_MINTER_KEY`, a **secret** on that environment: a JSON key
+#     for the same minter service account the deployment's
+#     `gcp-key-minter` secret holds (roles/iam.serviceAccountKeyAdmin on
+#     the agent account, and nothing wider -- pkg/capability/gcpkey's own
+#     doc comment explains why the minter is never the agent).
+#   - `GCP_PROJECT` and `GCP_AGENT_SERVICE_ACCOUNT`, **variables** on that
+#     environment: the project to build in, and the agent service account
+#     to run as (`grain-main-agent@...`, the daemon's
+#     `-gcp-agent-service-account`).
+#
+# # Why it mints its own key rather than being handed one
+#
+# The obvious arrangement is a long-lived key for the agent account,
+# pasted into a secret. This mints one instead, exactly the way
+# pkg/capability/gcpkey does for every task that asks for `gcp-key`, and
+# deletes it at the end of the run.
+#
+# Two reasons, and the first is the point of the whole job. Key creation
+# is one of the things that silently stops working:
+# `constraints/iam.disableServiceAccountKeyCreation` is an org policy
+# somebody else may enforce on a Tuesday, and the day it lands every
+# `gcp-key` grant starts failing while nothing in this repository has
+# changed. A workflow holding a static key would sail through that and
+# report green. Minting here means CI walks the same path a sandbox does,
+# beginning at the same minter credential.
+#
+# Second, it keeps CI's copy of the agent's power to the length of one
+# run rather than parking a never-expiring key in a GitHub secret. If the
+# revoke step never runs -- a runner that dies outright -- the key is
+# still bounded: `gcpkey.Provider.Reap` deletes agent keys older than
+# DefaultMaxKeyAge on the deployment's own hourly sweep, and does not care
+# who minted them.
+name: gcp-smoke
+
+on:
+  # Nightly, well away from the hour and away from live-agent.yml's,
+  # so a failure is at most a day old.
+  schedule:
+    - cron: "41 4 * * *"
+  # And on demand, which is what a role-binding change or a new project
+  # wants rather than waiting for the clock.
+  workflow_dispatch:
+    inputs:
+      legs:
+        description: "Which legs to run"
+        type: choice
+        options: [both, gce, gke]
+        default: both
+      # The one shape decision the scripts leave open, exposed here rather
+      # than inherited. Both of them default to attaching no service
+      # account to the VM (`--no-service-account`) or naming the calling
+      # account for the nodes, because the agent account has
+      # iam.serviceAccounts.actAs on itself alone, and attaching *any*
+      # other account -- including the project's default compute SA that
+      # gcloud reaches for on its own -- needs roles/iam.serviceAccountUser
+      # **on that account**. That is the self-acting shape, and it is what
+      # a real `gcp-key` sandbox can do, so it is what the nightly run
+      # samples.
+      #
+      # `default` is the production-shaped path: let GCP attach the default
+      # compute service account, the way a real deployment's workloads do.
+      # It fails with "The user does not have access to service account
+      # '<num>-compute@developer.gserviceaccount.com'" until somebody
+      # grants roles/iam.serviceAccountUser on that account -- which is
+      # exactly the question worth being able to ask on demand, and worth
+      # not making the nightly run depend on.
+      service_account:
+        description: "Identity the VM and the GKE nodes run as"
+        type: choice
+        options: [self, default]
+        default: self
+      zone:
+        description: "Zone to build in"
+        type: string
+        default: us-central1-a
+
+permissions:
+  contents: read
+
+# One run at a time, never cancelled. Two overlapping runs would each be
+# minting a key and sweeping the other's leftovers, and the cleanup step
+# below is the only thing standing between a cancelled run and a cluster
+# that bills all week.
+concurrency:
+  group: gcp-smoke
+  cancel-in-progress: false
+
+env:
+  # `inputs` is empty for a scheduled run, so this is also the schedule's
+  # zone. The scripts read ZONE from the environment for exactly this.
+  ZONE: ${{ inputs.zone || 'us-central1-a' }}
+
+jobs:
+  smoke:
+    name: GCE and GKE lifecycle
+    runs-on: ubuntu-latest
+    # The GKE leg is ~12 minutes of create-and-delete and the GCE leg ~2;
+    # the rest is the SDK install. Generous, because a cluster delete that
+    # is merely slow must not be cut off -- the cleanup below would then be
+    # deleting a cluster that was already going.
+    timeout-minutes: 45
+    # Where the minter key lives -- see this file's header. Not a
+    # repository secret: this environment's branch policy is the only thing
+    # that keeps a branch's own workflow from reading it.
+    environment: gcp-smoke
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # gcloud is not something to assume a runner image still has, and
+      # the GKE leg needs two pieces that are never on one: kubectl, and
+      # the gke-gcloud-auth-plugin exec credential provider that every
+      # kubeconfig GKE writes calls out to. Without the plugin, kubectl
+      # fails with "no Auth Provider found for name gcp", which names
+      # nothing that would tell you what to install.
+      #
+      # Deliberately unpinned, like the Dockerfile's own agy installer and
+      # for the same reason: a gcloud release that breaks these scripts is
+      # itself a finding this job should surface, not something to freeze
+      # out of view.
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "kubectl,gke-gcloud-auth-plugin"
+
+      # A missing credential must fail here, with the instructions, rather
+      # than three steps later as a gcloud error about an empty key file.
+      # Until a maintainer creates the environment, the secret and the two
+      # variables, this job is red every night on purpose: it blocks no
+      # merge, and a job that skipped quietly would be the gap this
+      # workflow exists to close, in a new place.
+      - name: Require a credential
+        env:
+          MINTER_KEY: ${{ secrets.GCP_KEY_MINTER_KEY }}
+          PROJECT: ${{ vars.GCP_PROJECT }}
+          AGENT_SA: ${{ vars.GCP_AGENT_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${MINTER_KEY:-}" ] || missing="$missing GCP_KEY_MINTER_KEY(secret)"
+          [ -n "${PROJECT:-}" ] || missing="$missing GCP_PROJECT(variable)"
+          [ -n "${AGENT_SA:-}" ] || missing="$missing GCP_AGENT_SERVICE_ACCOUNT(variable)"
+          if [ -n "$missing" ]; then
+            echo "::error::nothing reached this job for:$missing. All three belong to the 'gcp-smoke' environment (Settings -> Environments), with a deployment branch policy naming the default branch alone -- see this workflow's header for why they must not be repository-wide." >&2
+            exit 1
+          fi
+          echo "a minter credential is present (${#MINTER_KEY} characters), for $AGENT_SA in $PROJECT"
+
+      # Authenticate as the minter, mint a key for the agent account, and
+      # leave *that* as the active gcloud account: everything below runs as
+      # the agent, which is the identity whose drift this job is about.
+      #
+      # The secret goes through the environment rather than being
+      # interpolated into the script body: a `${{ }}` inside a `run:` is
+      # substituted before bash ever sees it, so a value containing a quote
+      # would be rewriting the script rather than being a string in it.
+      - name: Mint a key for the agent service account
+        id: agent-key
+        env:
+          MINTER_KEY: ${{ secrets.GCP_KEY_MINTER_KEY }}
+          PROJECT: ${{ vars.GCP_PROJECT }}
+          AGENT_SA: ${{ vars.GCP_AGENT_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$MINTER_KEY" > "$RUNNER_TEMP/minter.json"
+
+          minter="$(jq -r .client_email "$RUNNER_TEMP/minter.json")"
+          echo "minter=$minter" >> "$GITHUB_OUTPUT"
+          gcloud auth activate-service-account --key-file="$RUNNER_TEMP/minter.json"
+          # Activating a key does not select a project, and every gcloud
+          # after this one would fail with "The required property
+          # [project] is not currently set" -- which says nothing about
+          # the key and so gets read as the key being bad. Both smoke
+          # scripts say the same thing in their headers.
+          gcloud config set project "$PROJECT"
+
+          # The line this whole job is arranged around: if an org policy
+          # (constraints/iam.disableServiceAccountKeyCreation) has landed,
+          # this fails, and that failure is the finding -- every `gcp-key`
+          # grant on the deployment is failing the same way.
+          if ! gcloud iam service-accounts keys create "$RUNNER_TEMP/agent.json" \
+               --iam-account="$AGENT_SA"; then
+            echo "::error::$minter could not mint a key for $AGENT_SA. If this is a policy refusal (constraints/iam.disableServiceAccountKeyCreation) then pkg/capability/gcpkey cannot mint either, and every task granted gcp-key is failing on this deployment right now." >&2
+            exit 1
+          fi
+          # Recorded now so the revoke step can find the key even if the
+          # run below is cancelled halfway through, and so the cleanup step
+          # can tell what this run made from what it found: nothing this
+          # run creates predates the key it creates.
+          {
+            echo "key-id=$(jq -r .private_key_id "$RUNNER_TEMP/agent.json")"
+            echo "minted-at=$(date -u +%s)"
+          } >> "$GITHUB_OUTPUT"
+
+          gcloud auth activate-service-account --key-file="$RUNNER_TEMP/agent.json"
+          echo "active account: $(gcloud config get-value account)"
+
+      - name: GCE VM lifecycle
+        if: inputs.legs != 'gke'
+        env:
+          SERVICE_ACCOUNT_SHAPE: ${{ inputs.service_account }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "${SERVICE_ACCOUNT_SHAPE:-self}" = "default" ]; then
+            args+=(--service-account=default)
+          fi
+          ./scripts/gce-vm-smoke.sh "${args[@]}"
+
+      # success() || failure(): a failed GCE leg must not hide the GKE
+      # answer. They fail independently -- container.googleapis.com being
+      # disabled, or a node pool quota, has nothing to do with whether a
+      # VM comes up -- and a night that reports only the first of two
+      # answers is a night somebody has to go and get the second by hand,
+      # which is where this started. Excluded on cancellation, where the
+      # only thing left worth doing is the cleanup below.
+      - name: GKE cluster lifecycle
+        if: (success() || failure()) && inputs.legs != 'gce'
+        env:
+          SERVICE_ACCOUNT_SHAPE: ${{ inputs.service_account }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "${SERVICE_ACCOUNT_SHAPE:-self}" = "default" ]; then
+            args+=(--node-service-account=default)
+          fi
+          ./scripts/gke-cluster-smoke.sh "${args[@]}"
+
+      # Both scripts delete what they made, on every path out of themselves
+      # including a Ctrl-C -- but a bash EXIT trap does not run when the
+      # runner kills the shell outright, which is what a cancelled job or a
+      # blown timeout does. This is the backstop for that, and it is also
+      # what cleans up *last* night's leak: it deletes by label, so
+      # anything either script ever created is in scope.
+      #
+      # Two tests, not one, and the reason is what a leaked *cluster*
+      # costs. Anything created after this run minted its key is this
+      # run's, and goes immediately -- waiting on an age bound would leave
+      # a control plane and two nodes billing until tomorrow's sweep.
+      # Anything else has to be two hours old, which a run of this job
+      # (about fifteen minutes) never is, so the age bound is only ever
+      # deciding about a cluster somebody else left: long enough that it
+      # cannot take one a human is standing in front of with --keep, since
+      # both scripts print the delete command and expect it to be run.
+      - name: Delete anything left behind
+        if: always()
+        env:
+          MINTED_AT: ${{ steps.agent-key.outputs.minted-at }}
+        run: |
+          set -uo pipefail
+          cutoff=7200
+          now="$(date -u +%s)"
+          ours_or_stale() {
+            local created
+            created="$(date -u -d "$1" +%s)" || return 1
+            [ -n "${MINTED_AT:-}" ] && [ "$created" -ge "$MINTED_AT" ] && return 0
+            [ $(( now - created )) -ge "$cutoff" ]
+          }
+
+          # zone.basename(): `value(zone)` on an instance is the zone's full
+          # resource URL, which `--zone` will not take.
+          gcloud compute instances list \
+            --filter='labels.purpose=gce-vm-smoke' \
+            --format='value(name,zone.basename(),creationTimestamp)' |
+          while read -r name zone created; do
+            if ours_or_stale "$created"; then
+              echo "sweeping VM $name ($created)"
+              gcloud compute instances delete "$name" --zone="$zone" --quiet || true
+            fi
+          done
+
+          gcloud container clusters list \
+            --filter='resourceLabels.purpose=gke-cluster-smoke' \
+            --format='value(name,location,createTime)' |
+          while read -r name zone created; do
+            if ours_or_stale "$created"; then
+              echo "sweeping cluster $name ($created)"
+              gcloud container clusters delete "$name" --zone="$zone" --quiet || true
+            fi
+          done
+
+      # Last, because everything above needs the key it deletes. Deleting
+      # it takes the minter, not the agent: an account cannot be trusted to
+      # revoke its own credentials, which is the same asymmetry
+      # pkg/capability/gcpkey's doc comment sets out.
+      - name: Revoke the minted key
+        if: always()
+        env:
+          AGENT_SA: ${{ vars.GCP_AGENT_SERVICE_ACCOUNT }}
+          KEY_ID: ${{ steps.agent-key.outputs.key-id }}
+          MINTER: ${{ steps.agent-key.outputs.minter }}
+        run: |
+          set -uo pipefail
+          rm -f "$RUNNER_TEMP/agent.json" "$RUNNER_TEMP/minter.json"
+          if [ -z "${KEY_ID:-}" ]; then
+            echo "no key was minted, so there is nothing to revoke"
+            exit 0
+          fi
+          if ! gcloud iam service-accounts keys delete "$KEY_ID" \
+               --iam-account="$AGENT_SA" --account="$MINTER" --quiet; then
+            # Not a failure of this job: the key expires from GCP's side
+            # anyway once gcpkey.Provider.Reap next runs on the deployment,
+            # and reddening a run over cleanup would hide whatever the
+            # smoke legs actually said.
+            echo "::warning::could not delete key $KEY_ID on $AGENT_SA; gcpkey.Provider.Reap will remove it within DefaultMaxKeyAge"
+          fi
