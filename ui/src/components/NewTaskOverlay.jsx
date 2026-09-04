@@ -10,7 +10,7 @@ import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
 import RepoField from "./RepoField.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
-export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, onCreated, onOpenTask, showError }) {
+export default function NewTaskOverlay({ tasks, config, templates, defaultRepo, onClose, onCreated, onOpenTask, showError }) {
   const formRef = useRef(null);
   const repoOptions = knownRepos(config, tasks);
   // title and repo are lifted to state, unlike most of this form's other
@@ -138,6 +138,9 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       // it empty the run gets whatever the deployment and the repo say
       // (model.Task.PromptExtension).
       promptExtension: data.get("promptExtension") || "",
+      // "" is no review at all, which is what most tasks want and what
+      // the picker below starts on (model.Task.ReviewTemplateID).
+      reviewTemplateId: data.get("reviewTemplateId") || "",
       capabilities,
       dependsOn: dependsOn.map((t) => t.id),
       reads,
@@ -346,6 +349,37 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               <MenuItem value="antigravity">Antigravity</MenuItem>
               <MenuItem value="claude">Claude</MenuItem>
               <MenuItem value="codex">Codex</MenuItem>
+            </TextField>
+            {/* The review attached to this task (grain/task-284): once
+                its own work is done, a second agent is filed from this
+                template onto the same branch to read what it proposed
+                and fix what is wrong with it, and the task waits for
+                that before it merges. A template, not a box to type
+                instructions into, because those instructions are the
+                same on every task they are attached to -- write them
+                once in Templates and pick them here. */}
+            <TextField
+              select
+              name="reviewTemplateId"
+              label="Review"
+              defaultValue=""
+              // displayEmpty, for the reason Agent framework above needs
+              // it: "" is a real choice (no review), not a blank field.
+              SelectProps={{ displayEmpty: true }}
+              helperText={
+                (templates || []).length > 0
+                  ? "run a second agent over this task's own code before it merges, with instructions from a template"
+                  : "no templates yet -- write one in Templates to be able to attach a review here"
+              }
+              disabled={(templates || []).length === 0}
+              fullWidth
+              margin="normal"
+              size="small"
+            >
+              <MenuItem value="">No review</MenuItem>
+              {(templates || []).map((t) => (
+                <MenuItem key={t.id} value={t.id}>{t.name}</MenuItem>
+              ))}
             </TextField>
             {/* The task layer of model/prompt_extension.go's three, and
                 the only one that replaces rather than adds: what the

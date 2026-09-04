@@ -79,14 +79,35 @@ type Task struct {
 	// Omitted, like the fields above, for the common "no override" case,
 	// so a frontend reading it back gets the same empty-means-default it
 	// sent.
-	PromptExtension string   `json:"promptExtension,omitempty"`
-	Capabilities    []string `json:"capabilities"`
-	PullRequest     string   `json:"pullRequest,omitempty"`
-	GeneratedFrom   string   `json:"generatedFrom,omitempty"`
-	// Stacked is true for a task the merge queue filed automatically to
-	// repair another task's own pull request (model.ReasonFix) -- built
-	// on that task's own branch and merged straight back into it once
-	// green. Paired with GeneratedFrom, it is what tells the frontend
+	PromptExtension string `json:"promptExtension,omitempty"`
+	// ReviewTemplateID is the template a review of this task's own work
+	// is filed from once it is done -- model.Task.ReviewTemplateID.
+	// Omitted, like the overrides above, for the common case of a task
+	// with no review attached.
+	//
+	// ReviewTemplateName is that template's own Name, resolved by the
+	// caller (Client.ListTasks reads every template once for a whole
+	// list; Client.Task reads the one), so a task pane can say which
+	// review is attached without the frontend having to hold the whole
+	// template list to look an id up in. Empty when the id names a
+	// template that is no longer there, which is the one thing worth
+	// telling a reader apart from "no review".
+	ReviewTemplateID   string `json:"reviewTemplateId,omitempty"`
+	ReviewTemplateName string `json:"reviewTemplateName,omitempty"`
+	// ReviewTask is the ID of the task actually filed to review this one
+	// (model.LinkReviewTask), empty until orchestrator.SyncReviews has
+	// filed it. Paired with ReviewTemplateID it is what tells a reader
+	// whether the review is still owed or already in flight -- and it is
+	// what a task pane links to.
+	ReviewTask    string   `json:"reviewTask,omitempty"`
+	Capabilities  []string `json:"capabilities"`
+	PullRequest   string   `json:"pullRequest,omitempty"`
+	GeneratedFrom string   `json:"generatedFrom,omitempty"`
+	// Stacked is true for a task filed automatically onto another task's
+	// own branch and merged straight back into it once green -- a repair
+	// of a broken pull request (model.ReasonFix) or a review of one
+	// (model.ReasonReview). Paired with GeneratedFrom, it is what tells
+	// the frontend
 	// to nest a task under the one that generated it (bwsalmon/agents#378)
 	// rather than list it as a separate task: unlike an ordinary
 	// propose_task child, a stacked task is not new work, just a
@@ -280,9 +301,12 @@ type Attempt struct {
 // this function stays free of the store itself. activity is the same
 // arrangement for the task's live run's own synopsis, resolved by the
 // caller for the same reason and nil for a task with no live run or one
-// whose run has said nothing.
+// whose run has said nothing. reviewTemplateName is the same again for
+// the review attached to the task (Client.ListTasks reads every template
+// once for a whole list; Client.Task reads the one it needs), empty for
+// a task with no review and for one whose template has since gone.
 func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueueBlockedAt *time.Time,
-	activity *model.RunActivity) Task {
+	activity *model.RunActivity, reviewTemplateName string) Task {
 	out := Task{
 		ID:                  t.ID,
 		Title:               t.Title,
@@ -298,8 +322,10 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		SandboxDiskGB:       t.SandboxDiskGB,
 		AgentFramework:      t.AgentFramework,
 		PromptExtension:     t.PromptExtension,
+		ReviewTemplateID:    t.ReviewTemplateID,
+		ReviewTemplateName:  reviewTemplateName,
 		Capabilities:        []string{},
-		Stacked:             t.Origin.Reason == model.ReasonFix,
+		Stacked:             t.Origin.Reason == model.ReasonFix || t.Origin.Reason == model.ReasonReview,
 		Scheduled:           t.Origin.Reason == model.ReasonSchedule,
 		SuiteRun:            t.Origin.Reason == model.ReasonSuite,
 		CreatedAt:           t.CreatedAt,
@@ -323,6 +349,9 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		}
 		if l.Kind == model.LinkProposedBy {
 			out.GeneratedFrom = l.Target
+		}
+		if l.Kind == model.LinkReviewTask {
+			out.ReviewTask = l.Target
 		}
 		if l.Kind == model.LinkDependsOn {
 			out.DependsOn = append(out.DependsOn, l.Target)

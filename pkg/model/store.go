@@ -3859,6 +3859,39 @@ func (s *Store) SchedulesUsingTemplate(ctx context.Context, id string) ([]Schedu
 	return s.schedulesUsing(ctx, "`template_id`", "template", id)
 }
 
+// TasksReviewedByTemplate returns the ID of every still-open task whose
+// ReviewTemplateID is id -- what ui.Client.DeleteTemplate checks before
+// deleting a template out from under a task that is still going to be
+// reviewed from it, SchedulesUsingTemplate's own reasoning applied to
+// the third thing that can point at a template.
+//
+// Closed tasks are deliberately excluded, unlike the schedule, plan and
+// suite queries beside this one: those name standing declarations that
+// go on firing, where a task is a single piece of work, and one that has
+// closed will never be reviewed again however long its
+// review_template_id keeps naming a row. Counting them would make a
+// template used once, months ago, undeletable forever.
+func (s *Store) TasksReviewedByTemplate(ctx context.Context, id string) ([]string, error) {
+	var out []string
+	err := each(ctx, s.db,
+		"SELECT `t`.`id` FROM `task` AS `t` "+
+			"JOIN `task_state` AS `st` ON `st`.`task_id` = `t`.`id` "+
+			"WHERE `t`.`review_template_id` = ? AND `st`.`state` != ? ORDER BY `t`.`id`",
+		[]any{id, string(StateClosed)},
+		func(rows *sql.Rows) error {
+			var taskID string
+			if err := rows.Scan(&taskID); err != nil {
+				return err
+			}
+			out = append(out, taskID)
+			return nil
+		})
+	if err != nil {
+		return nil, fmt.Errorf("listing tasks reviewed by template %s: %w", id, err)
+	}
+	return out, nil
+}
+
 // SchedulesUsingSuite returns every schedule whose SuiteID is id -- what
 // ui.Client.DeleteSuite checks before deleting a suite out from under a
 // schedule that still runs it, SchedulesUsingTemplate's own reasoning

@@ -109,6 +109,32 @@ describe("DetailOverlay", () => {
     expect(screen.queryByText("Prompt extension")).not.toBeInTheDocument();
   });
 
+  // grain/task-284: the review attached to a task, named by the
+  // template it comes from -- and saying which task is carrying it out
+  // once one has been filed, since "this will be reviewed" and "task 91
+  // is reviewing it" are different facts to whoever is watching it.
+  it("names the attached review, and the task filed for it once there is one", () => {
+    const { rerender } = render(
+      <DetailOverlay
+        task={{ ...baseTask, reviewTemplateId: "7", reviewTemplateName: "Security pass" }}
+        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Review")).toBeInTheDocument();
+    expect(screen.getByText("Security pass")).toBeInTheDocument();
+
+    rerender(
+      <DetailOverlay
+        task={{ ...baseTask, reviewTemplateId: "7", reviewTemplateName: "Security pass", reviewTask: "91" }}
+        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Security pass (task 91)")).toBeInTheDocument();
+
+    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    expect(screen.queryByText("Review")).not.toBeInTheDocument();
+  });
+
   // bwsalmon/agents#534: a per-task sandbox shape override.
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(
@@ -1110,11 +1136,52 @@ describe("DetailOverlay", () => {
     act.mock.calls[0][0]();
     expect(api).toHaveBeenCalledWith("/api/tasks/12", {
       method: "PATCH",
-      body: JSON.stringify({ title: "Fix the login bug for real", description: "New repro steps" }),
+      body: JSON.stringify({ title: "Fix the login bug for real", description: "New repro steps", reviewTemplateId: "" }),
     });
     // Back to the read-only view once saved.
     expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
     expect(screen.getByText("12 Fix the login bug")).toBeInTheDocument();
+  });
+
+  // grain/task-284: attaching a review to a task that already exists is
+  // the flow that matters most -- somebody decides, part-way through,
+  // that this change wants a second agent over it before it merges.
+  it("attaches a review to an existing task from the edit form", async () => {
+    const act = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={baseTask} tasks={[]} config={config}
+        templates={[{ id: "7", name: "Security pass" }]}
+        onClose={() => {}} onOpenTask={() => {}} act={act}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    await user.click(screen.getByLabelText("Review"));
+    await user.click(screen.getByRole("option", { name: "Security pass" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    act.mock.calls[0][0]();
+    expect(JSON.parse(api.mock.calls[0][1].body).reviewTemplateId).toBe("7");
+  });
+
+  // Once the review task exists there is nothing left to choose: exactly
+  // one review is filed per task, so the picker says which task is
+  // carrying it out rather than offering an edit that would do nothing.
+  it("locks the review picker once the review task has been filed", async () => {
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, reviewTemplateId: "7", reviewTemplateName: "Security pass", reviewTask: "91" }}
+        tasks={[]} config={config}
+        templates={[{ id: "7", name: "Security pass" }]}
+        onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.getByText(/Task 91 is already reviewing this one/)).toBeInTheDocument();
   });
 
   it("leaves the task unchanged when editing is cancelled", async () => {

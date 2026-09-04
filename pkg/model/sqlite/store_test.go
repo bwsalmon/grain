@@ -3486,6 +3486,88 @@ func TestInitMigratesAnExistingDatabaseMissingTaskPromptExtension(t *testing.T) 
 	}
 }
 
+// task.review_template_id (grain/task-284) is the same again, and would
+// fail as loudly for the same reason: scanTask selects every column by
+// name, so a database missing this one fails every task read rather than
+// only the review feature's own.
+func TestInitMigratesAnExistingDatabaseMissingTaskReviewTemplate(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task`"+` (
+  `+"`id`"+`                    TEXT    NOT NULL,
+  `+"`intent`"+`                TEXT    NOT NULL,
+  `+"`title`"+`                 TEXT    NOT NULL,
+  `+"`body`"+`                  TEXT    NOT NULL,
+  `+"`origin_actor_kind`"+`     TEXT    NOT NULL,
+  `+"`origin_actor_id`"+`       TEXT    NOT NULL,
+  `+"`origin_behalf_kind`"+`    TEXT    NULL,
+  `+"`origin_behalf_id`"+`      TEXT    NULL,
+  `+"`origin_reason`"+`         TEXT    NOT NULL,
+  `+"`approval_actor_kind`"+`   TEXT    NULL,
+  `+"`approval_actor_id`"+`     TEXT    NULL,
+  `+"`approval_behalf_kind`"+`  TEXT    NULL,
+  `+"`approval_behalf_id`"+`    TEXT    NULL,
+  `+"`approved_at`"+`           DATETIME NULL,
+  `+"`target_owner`"+`          TEXT    NULL,
+  `+"`target_name`"+`           TEXT    NULL,
+  `+"`binding`"+`               TEXT    NOT NULL,
+  `+"`base`"+`                  TEXT    NULL,
+  `+"`folder`"+`                TEXT    NULL,
+  `+"`auto_merge`"+`            INTEGER  NOT NULL,
+  `+"`created_at`"+`            DATETIME NULL,
+  `+"`order_key`"+`             REAL     NOT NULL DEFAULT 0,
+  `+"`sandbox_cpus`"+`          INTEGER  NOT NULL DEFAULT 0,
+  `+"`sandbox_memory_mb`"+`     INTEGER  NOT NULL DEFAULT 0,
+  `+"`sandbox_disk_gb`"+`       INTEGER  NOT NULL DEFAULT 0,
+  `+"`interactive`"+`           INTEGER  NOT NULL DEFAULT 0,
+  `+"`agent_framework`"+`       TEXT     NOT NULL DEFAULT '',
+  `+"`prompt_extension`"+`      TEXT     NOT NULL DEFAULT '',
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-284 task table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task` (`id`,`intent`,`title`,`body`,`origin_actor_kind`,`origin_actor_id`,"+
+			"`origin_reason`,`binding`,`auto_merge`,`created_at`) "+
+			"VALUES ('a1b2','implement','Rename the endpoint','','human','bwsalmon','direct','directive',0,?)",
+		now); err != nil {
+		t.Fatalf("seeding a pre-task-284 task row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task.review_template_id: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", got, err)
+	}
+	// '' is Task.ReviewTemplateID's own "no review attached": work that
+	// finished before the feature existed must not suddenly acquire a
+	// review, or start waiting on one before it can merge.
+	if got.ReviewTemplateID != "" {
+		t.Fatalf("ReviewTemplateID after migrating = %q, want empty", got.ReviewTemplateID)
+	}
+
+	got.ReviewTemplateID = "tmpl-7"
+	if err := store.PutTask(ctx, *got); err != nil {
+		t.Fatalf("put after migrating: %v", err)
+	}
+	reread, err := store.GetTask(ctx, "a1b2")
+	if err != nil || reread == nil {
+		t.Fatalf("get: (%+v, %v)", reread, err)
+	}
+	if reread.ReviewTemplateID != got.ReviewTemplateID {
+		t.Fatalf("ReviewTemplateID = %q, want %q", reread.ReviewTemplateID, got.ReviewTemplateID)
+	}
+}
+
 // TestInitMigratesAnExistingDatabaseMissingTaskDefaults is the same
 // pattern, applied to the pair grain_config.approved_by_default/
 // auto_merge_by_default (bwsalmon/agents#612) -- except that what an
