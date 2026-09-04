@@ -45,6 +45,25 @@ describe("DetailOverlay", () => {
     expect(document.querySelector(".overlay-pane .detail-layout")).toBeInTheDocument();
   });
 
+  // The page somebody opens *because* the list said "running" must not
+  // answer with less than the list did: the same status line, under the
+  // badge that only says it is running (grain/task-240).
+  it("shows what a running task's agent says it is doing", () => {
+    render(<DetailOverlay
+      task={{ ...baseTask, state: "running", activity: "running the test suite", activityAt: new Date().toISOString() }}
+      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+    />);
+    expect(screen.getByText("running the test suite")).toBeInTheDocument();
+  });
+
+  it("shows no status line for a task that is not running", () => {
+    render(<DetailOverlay
+      task={{ ...baseTask, state: "completed", activity: "running the test suite" }}
+      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+    />);
+    expect(document.querySelector(".detail-activity")).not.toBeInTheDocument();
+  });
+
   it("shows a placeholder when there is no description", () => {
     render(<DetailOverlay task={{ ...baseTask, description: "" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.getByText("(no description)")).toBeInTheDocument();
@@ -1143,7 +1162,7 @@ describe("DetailOverlay", () => {
     render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
 
     const file = new File(["fake"], "screenshot.png", { type: "image/png" });
-    await user.upload(screen.getByLabelText("Attach files"), file);
+    await user.upload(document.querySelector('input[type="file"]'), file);
     await user.click(screen.getByRole("button", { name: "Comment" }));
 
     expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
@@ -1250,5 +1269,77 @@ describe("DetailOverlay", () => {
     const row = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-item");
     expect(row).not.toHaveClass("timeline-item-attempt");
     expect(row).not.toHaveAttribute("tabindex");
+  });
+
+  // grain/task-230: a run that called request_secret parks its task the
+  // way a question does, and the pane offers a box for the one
+  // credential it asked for. The value must not go anywhere near the
+  // conversation -- these three pin that it is sent to the task's own
+  // secret endpoint, and that a task nobody asked a secret of is offered
+  // nothing.
+  it("offers a write-only box for the secret a parked run asked for", async () => {
+    const act = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "awaiting_reply",
+          pendingSecret: { name: "stripe-api-key", secret: "stripe-api-key", key: "value", set: false },
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+        showError={vi.fn()}
+      />
+    );
+
+    const box = screen.getByLabelText("Value for stripe-api-key");
+    expect(box).toHaveAttribute("type", "password");
+    await user.type(box, "sk_live_1");
+    await user.click(screen.getByRole("button", { name: "Set secret" }));
+
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/secret", {
+      method: "PUT",
+      body: JSON.stringify({ value: "sk_live_1" }),
+    });
+    // Never as a comment: that is the whole distinction this box exists
+    // to draw.
+    expect(api).not.toHaveBeenCalledWith("/api/tasks/12/comments", expect.anything());
+  });
+
+  it("keeps a rejected value in the box rather than clearing it", async () => {
+    const showError = vi.fn();
+    const user = userEvent.setup();
+    api.mockRejectedValueOnce(new Error("no secrets store"));
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "awaiting_reply",
+          pendingSecret: { name: "stripe-api-key", secret: "stripe-api-key", key: "value", set: false },
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={showError}
+      />
+    );
+
+    await user.type(screen.getByLabelText("Value for stripe-api-key"), "sk_live_1");
+    await user.click(screen.getByRole("button", { name: "Set secret" }));
+
+    expect(showError).toHaveBeenCalled();
+    expect(screen.getByLabelText("Value for stripe-api-key")).toHaveValue("sk_live_1");
+  });
+
+  it("offers no secret box on a task with no pending secret", () => {
+    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} showError={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "Set secret" })).not.toBeInTheDocument();
   });
 });

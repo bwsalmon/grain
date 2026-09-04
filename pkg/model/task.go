@@ -118,12 +118,72 @@ type RepoRef struct {
 
 func (r RepoRef) String() string { return r.Owner + "/" + r.Name }
 
+// ParseRepo reads the one written form of a repository: owner/name.
+//
+// It also accepts the two shapes an operator most often has in the
+// clipboard instead -- a browser URL (https://github.com/owner/name,
+// with or without a trailing .git or /) and an SSH remote
+// (git@github.com:owner/name.git) -- and normalises both to owner/name,
+// because the alternative was worse than either accepting or rejecting
+// them: a bare strings.Cut on the first "/" took
+// "https://github.com/owner/name" as owner "https:", name
+// "/github.com/owner/name", stored it, and left the task to fail much
+// later at clone time with an error naming neither the paste nor the
+// field it went into.
+//
+// Everything else is refused here rather than downstream. What comes out
+// of this function is used to build clone URLs, GitHub API paths and
+// branch refs, so a segment carrying a slash, a space, a colon or a
+// control character is not a repository grain can act on however it was
+// typed.
 func ParseRepo(text string) (RepoRef, error) {
-	owner, name, ok := strings.Cut(text, "/")
-	if !ok || owner == "" || name == "" {
-		return RepoRef{}, fmt.Errorf("repo must be owner/name, got %q", text)
+	trimmed := strings.TrimSpace(text)
+	spec := trimmed
+	// scp-style SSH remotes: everything up to the colon is the host.
+	if at := strings.Index(spec, "@"); at >= 0 && !strings.Contains(spec, "://") {
+		if colon := strings.Index(spec[at:], ":"); colon >= 0 {
+			spec = spec[at+colon+1:]
+		}
+	}
+	if scheme := strings.Index(spec, "://"); scheme >= 0 {
+		spec = spec[scheme+len("://"):]
+		// Drop the host (and any userinfo already folded into it), which
+		// is everything up to the first slash.
+		if slash := strings.Index(spec, "/"); slash >= 0 {
+			spec = spec[slash+1:]
+		} else {
+			spec = ""
+		}
+	}
+	spec = strings.TrimSuffix(strings.TrimSuffix(strings.Trim(spec, "/"), ".git"), "/")
+
+	owner, name, ok := strings.Cut(spec, "/")
+	if !ok || !validRepoSegment(owner) || !validRepoSegment(name) {
+		return RepoRef{}, fmt.Errorf("repo must be owner/name, got %q", trimmed)
 	}
 	return RepoRef{Owner: owner, Name: name}, nil
+}
+
+// validRepoSegment reports whether one half of an owner/name pair is a
+// segment grain can safely put in a URL or a ref. GitHub is stricter
+// than this (its own owner names are alphanumerics and hyphens); the
+// point here is not to re-implement its rules but to refuse anything
+// that would change the *shape* of a URL built from it, plus the two
+// path segments that would escape it.
+func validRepoSegment(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for _, r := range s {
+		switch r {
+		case '/', '\\', ':', '?', '#', '@', '[', ']', '%', '~', '^':
+			return false
+		}
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 type RepoBinding string
@@ -224,6 +284,41 @@ func GrantsSubsetOf(grants, allowed []Grant) bool {
 		}
 	}
 	return true
+}
+
+// SameBranch reports whether two tasks' work lands in the same place:
+// the same write target, and the same base branch within it.
+//
+// It is the second half of the trust gate GrantsSubsetOf opens, for the
+// same "sub-tasks are tasks" reason. Auto-merge is a human's standing
+// permission for one branch to take commits nobody reviewed, not a
+// property of the run that happens to hold it: a task whose pull
+// requests merge themselves into a release branch has been told nothing
+// at all about the default branch, so a proposal it makes that lands
+// somewhere else is work a human still has to look at.
+//
+// Base compares as written, with "" -- the repo's default branch -- left
+// unresolved, because nothing in this package can reach the remote to
+// ask which branch that is. So a task that names its default branch
+// explicitly reads as a different branch from one that leaves Base
+// empty, and a proposal from it does not inherit auto-merge. That errs
+// toward withholding a permission that would in fact have been the same
+// one, which is the direction a trust gate should fail in.
+//
+// Owner and name compare case-insensitively, the way GitHub itself
+// resolves them. Two tasks with no
+// write target at all are on the same branch of the same nowhere:
+// neither opens a pull request, so there is no unreviewed merge here to
+// guard.
+func SameBranch(a, b Task) bool {
+	if a.Base != b.Base {
+		return false
+	}
+	if a.Target == nil || b.Target == nil {
+		return a.Target == nil && b.Target == nil
+	}
+	return strings.EqualFold(a.Target.Owner, b.Target.Owner) &&
+		strings.EqualFold(a.Target.Name, b.Target.Name)
 }
 
 // GitCredentialCapabilityPrefix marks a capability id as a per-task git
@@ -549,6 +644,29 @@ type Observation struct {
 	// a fresh read is compared. Losing one degrades rather than corrupts.
 	PendingQuestionCommentID *int64
 	BaselineCommentID        *int64
+	// PendingSecret is the credential a parked run asked a human to set
+	// -- mcp's request_secret escape hatch, relayed by
+	// orchestrator.ProcessResult exactly the way a question is. It holds
+	// a *name* in the form secrets.Store.Resolve takes ("stripe-api-key",
+	// or "github-app/app-id"), never material: docs/data-model.md's "no
+	// secret store in the model" is about values, and this is the same
+	// kind of pointer a CredentialRef already is.
+	//
+	// It is set alongside PendingQuestionCommentID rather than instead of
+	// it, because the parking is the same parking: the task sits in
+	// awaiting_reply, out of task_ready, until a human acts. What this
+	// field adds is *what* to offer them -- a UI holding it renders a
+	// write-only box addressed at that name (ui.TaskDetail.PendingSecret)
+	// instead of only a reply box, and the value it takes goes straight
+	// into the secret store, never through the conversation and never
+	// back to the run that asked.
+	//
+	// Cleared when the secret is set (ui.Client.SetPendingSecret) and
+	// when a human replies in words instead (ui.Client.AddComment): both
+	// un-park the task, and an input left offered on a task nobody is
+	// waiting to hear from would be an offer to write a value nothing
+	// asked for.
+	PendingSecret string
 	// MergeQueueBlockedAt is set once the merge queue has stopped driving
 	// this task, for any of the three reasons it ever does: the repair
 	// run it asked for finished and the PR is still conflicted or
@@ -710,7 +828,41 @@ type Run struct {
 	// Store.SetRunTranscript/RunTranscript read and write it directly by
 	// task ID and attempt number instead.
 	Detail string
-	Leases []Lease
+	// Activity is the run's own one-line synopsis of what it is doing at
+	// the moment -- "waiting for CI on the third push", "reading
+	// pkg/orchestrator" -- written by the run itself through the
+	// update_status tool, and ActivityAt is when it last wrote one.
+	//
+	// Everything else on this type is grain's record of the run; this is
+	// the run's own account of itself, and nothing derives or infers it.
+	// Both are empty for a run that never said anything, which is no kind
+	// of signal: a framework with no route back to the daemon cannot carry
+	// the call at all (see mcp.NewStatusTools), and every run recorded
+	// before the columns existed reads the same way.
+	//
+	// ActivityAt is what makes the phrase readable. "Waiting for CI" said
+	// ten seconds ago and the same words left standing for an hour mean
+	// opposite things, and only the timestamp tells them apart.
+	Activity   string
+	ActivityAt *time.Time
+	Leases     []Lease
+}
+
+// RunActivity is Run.Activity and Run.ActivityAt on their own -- what a
+// live run says it is doing, without the run around them.
+//
+// It exists because that pair is what a reader of a *task* wants: the
+// task list asks "what is each running task up to?" and has no use for
+// the attempt number, the sandbox or the outcome that would come with a
+// whole Run (Store.TaskActivity, ui.Task.Activity).
+//
+// At is a pointer for the same reason it is on Run: a row written before
+// the columns existed, or by a build that only set one of them, has a
+// note and no time, and a zero time.Time rendered as "written in year 1"
+// would be worse than showing nothing at all.
+type RunActivity struct {
+	Note string
+	At   *time.Time
 }
 
 // --- conversation ----------------------------------------------------

@@ -322,8 +322,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // publishedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools, NewOpenPullRequestTools and
-// NewRecreateSandboxTools register, plus selfdebug.SourceTools' and
+// NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
+// and NewStatusTools register, plus selfdebug.SourceTools' and
 // bootstrap.PlaybookTools' -- bare, as the "mcpserver" subcommand
 // registers them. Computed from those
 // constructors directly rather than hand-copied, so this can never drift
@@ -363,6 +363,12 @@ func publishedTools() []string {
 	// open_pull_request is, so it is named here on the same terms. nil
 	// is a SandboxRecreator no run ever gets -- this only wants the name.
 	for _, t := range mcp.NewRecreateSandboxTools(nil) {
+		names = append(names, t.Name)
+	}
+	// update_status comes from that same pair, and is named here on those
+	// same terms. nil is a StatusReporter no run ever gets -- this only
+	// wants the name.
+	for _, t := range mcp.NewStatusTools(nil) {
 		names = append(names, t.Name)
 	}
 	// The capability grants' own tools, named on the same terms again:
@@ -638,29 +644,30 @@ func settingsJSON(apiKeyAuth bool) ([]byte, error) {
 // agent turn), the reply is one tab-separated record per rule --
 // "global<TAB>deny<TAB>run_command" -- so the key is parsed, kept, and
 // carried at global scope, and a malformed value (`"deny": 12345`) is
-// dropped in silence with no rule and no complaint. That is the whole of
-// what has been proven, and it is deliberately less than "agy cannot run
-// these tools":
+// dropped in silence with no rule and no complaint. What they do not do
+// is stop a tool, and that is now settled rather than left open:
 //
 //   - Nothing here changes the roster. The same probe read the `init`
 //     event of a real (if unauthenticated) stream-json session with and
 //     without this block, and both advertise the identical 55 native
 //     tools. A denied tool is one the model still sees and still calls;
 //     the denial, if it lands at all, lands on the call.
-//   - Run passes --dangerously-skip-permissions, which puts the session in
+//   - The override wins, and that is now measured rather than suspected.
+//     Run passes --dangerously-skip-permissions, which puts the session in
 //     agy's "always-proceed" permission mode (that same `init` event
 //     reports permission_mode "always-proceed" with the flag and
 //     "request-review" without it), and agy's own interactive prompt calls
 //     an always-deny decision "overridden by dangerously-skip-permissions".
-//     Whether that override reaches a rule written here is not something a
-//     run without a model credential can be made to answer, so this
-//     package does not claim it either way.
+//     A live run holding this exact block, asked to list a directory, ran
+//     agy's own list_dir -- one of the names denied below -- to completion.
+//     So these rules stop nothing as grain runs agy today.
 //
-// So this block is the cheap half of the answer and hookConfigJSON is the
-// half with teeth; what actually contains a native tool is still a kontur
-// sandbox. It is written anyway because it costs a run nothing, because
-// it is the documented place to say what a session may do, and because a
-// deny rule that starts being enforced is a deny rule already in place.
+// So hookConfigJSON is the half with teeth -- it is the one that has been
+// watched stopping a live model -- and what contains a native tool that
+// gets past it is still a kontur sandbox. This block is written anyway
+// because it costs a run nothing, because it is the documented place to
+// say what a session may do, and because a deny rule that starts being
+// enforced is a deny rule already in place.
 //
 // The names are spelled bare (`run_command`, not `run_command(*)`), which
 // is how agy's own allow rules read for a whole tool rather than one
@@ -711,7 +718,12 @@ var (
 // HookDecision (cmd/grain's "agy-tool-hook" subcommand, the same
 // fork-myself trick mcpConfigJSON plays for the MCP server).
 //
-// This is the one denial agy documents as a denial. Its own shipped guide
+// This is the one denial agy documents as a denial, and the one that has
+// been watched working: a live agy 1.1.26 driving gemini-3.1-pro-high,
+// told in as many words to run `echo ... > /tmp/agyprobe.txt` as a shell
+// command, called its own run_command and then its own write_to_file and
+// find_by_name, had all three blocked by this hook, and gave up with the
+// file never created. Its own shipped guide
 // (builtin/skills/agy-customizations/docs/hooks.md, unpacked into any
 // fresh HOME) gives PreToolUse the contract "use to gate, block, or audit
 // tool executions": the hook is handed {"toolCall": {"name": ..., "args":
@@ -735,7 +747,7 @@ var (
 // -p /permissions prints the loaded rules.
 func hookConfigJSON(grainBinaryPath string) ([]byte, error) {
 	return json.Marshal(map[string]any{
-		hookName: map[string]any{
+		HookName: map[string]any{
 			"PreToolUse": []any{map[string]any{
 				"matcher": "*",
 				"hooks": []any{map[string]any{
@@ -752,10 +764,15 @@ func hookConfigJSON(grainBinaryPath string) ([]byte, error) {
 	})
 }
 
-// hookName is what this run's hook is called in hooks.json. agy merges
+// HookName is what this run's hook is called in hooks.json. agy merges
 // hooks from every source it finds by name, so a name of grain's own
 // keeps this one distinct from anything a future agy ships built in.
-const hookName = "grain-native-tool-denial"
+//
+// Exported because it is also how a real agy reports the hook back
+// (`agy -p /hooks` prints this name in the first field of the record it
+// loaded), and the live test that reads that output should match on this
+// constant rather than on a second copy of the string.
+const HookName = "grain-native-tool-denial"
 
 // HookSubcommand is the argv[1] cmd/grain matches to run HookDecision.
 // Named here rather than there because this package is what writes it
@@ -785,10 +802,8 @@ func shellQuote(s string) string {
 // does not recognise gets no decision, and the call proceeds exactly as
 // it does today.
 //
-// The same reasoning covers a broken hook. An unparseable payload, a
-// missing name, a grain binary that is not there: agy takes an empty
-// decision as no opinion, so the failure mode is the behaviour this
-// repository already had, not a stalled run.
+// Saying "no decision" is the part that has to be got exactly right, and
+// the first version of this got it exactly wrong. See noOpinion.
 func HookDecision(payload []byte) []byte {
 	var in struct {
 		ToolCall struct {
@@ -803,7 +818,7 @@ func HookDecision(payload []byte) []byte {
 	// the deny list as "run_command", which is precisely the name
 	// collision toolPreamble spends a paragraph on -- here it would deny
 	// the run the one tool that does reach its sandbox.
-	if !slices.Contains(withheldNativeTools, in.ToolCall.Name) {
+	if !IsWithheldNativeTool(in.ToolCall.Name) {
 		return noOpinion
 	}
 	reply, err := json.Marshal(map[string]any{
@@ -811,9 +826,17 @@ func HookDecision(payload []byte) []byte {
 		// Read by the model, so it says what to do instead rather than
 		// only what it may not do -- the same argument toolPreamble makes
 		// at greater length.
+		//
+		// The alternatives are named from the constructor rather than
+		// derived from the denied tool's own name. Prefixing that name
+		// was the obvious thing and it is wrong: agy's roster and
+		// grain's are not the same roster, so write_to_file became
+		// "use mcp_grain-sandbox_write_to_file", a tool that does not
+		// exist, and a denial whose advice is a dead end is a denial
+		// the model works around instead of following.
 		"reason": in.ToolCall.Name + " runs on the machine hosting this session rather than in your " +
 			"sandbox, so grain neither sees the call nor keeps what it does. Use " +
-			mcp.AgyQualifiedToolName(in.ToolCall.Name) + " instead, or another " +
+			joinNames(sandboxToolNames()) + " instead, or another " +
 			mcp.AgyQualifiedToolName("") + "* tool.",
 	})
 	if err != nil {
@@ -823,9 +846,39 @@ func HookDecision(payload []byte) []byte {
 }
 
 // noOpinion is the reply that leaves a tool call to whatever agy would
-// have done with it. It is what HookDecision returns for every name it
-// was not asked to deny, and for every payload it could not read.
-var noOpinion = []byte(`{}`)
+// have done with it: nothing at all, written on a stdout the hook closes
+// empty. It is what HookDecision returns for every name it was not asked
+// to deny, and for every payload it could not read.
+//
+// It used to be `{}`, on the reading that an object carrying no decision
+// carries no opinion. Against a real agy 1.1.26 driving a real model that
+// is precisely backwards, and it denied every tool call a run made --
+// grain's own included, so a run so configured could do nothing at all
+// except say why. The whole measured contract, since agy's own guide
+// documents only the four decision values and not what it does with
+// anything else:
+//
+//   - no output at all, exit 0: the call proceeds. This is "no opinion",
+//     and it is the only spelling of it that is not also something else.
+//   - {"decision":"allow"}: proceeds, skipping the permission prompt.
+//   - {"decision":"ask"}: proceeds, the prompt being auto-approved by
+//     Run's --dangerously-skip-permissions.
+//   - {"decision":"deny","reason":r}: "tool call denied by pre-tool hook:
+//     r", and the tool does not run. This is the one grain wants.
+//   - {} or any object with no "decision": denied, with an empty reason.
+//     An absent decision is not an abstention; it is a deny nobody
+//     explained.
+//   - output that is not JSON: the call fails with "failed to unmarshal
+//     result from hook ... via protojson".
+//   - a hook command that exits non-zero, or is not there at all: the
+//     call fails with "JSON hook ... failed: command failed: exit status
+//     N".
+//
+// The last two are why cmd/grain's subcommand exits 0 whatever happens
+// and writes only this or a decision: a hook that errors does not fail
+// open, it fails the tool call, so a broken grain binary would take the
+// run's tools with it.
+var noOpinion []byte
 
 // apiKeyModelProvider is the "modelProvider" value that turns
 // GEMINI_API_KEY into a working credential. agy's other providers are
@@ -952,6 +1005,20 @@ var withheldNativeTools = []string{
 	"view_file", "write_to_file", "replace_file_content",
 	"multi_replace_file_content", "sed_file", "list_dir",
 	"grep_search", "find_by_name", "notebook_edit", "notebook_execution",
+}
+
+// IsWithheldNativeTool reports whether name is one of agy's own tools
+// this package refuses -- spelled as agy spells it in a hook payload,
+// which is bare rather than prefixed (see HookDecision on why the raw
+// name is what matters).
+//
+// Exported for the live test that watches a real agy honour the refusal
+// (tests/e2e/live_native_tools_test.go). That test has to tell a native
+// call apart from grain's own in agy's own vocabulary, and a second copy
+// of this list written out there would go stale the first time a name is
+// added here.
+func IsWithheldNativeTool(name string) bool {
+	return slices.Contains(withheldNativeTools, name)
 }
 
 // sandboxToolNames is the handful of grain tools that actually act on the

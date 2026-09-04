@@ -16,9 +16,9 @@ import TemplateOverlay from "./TemplateOverlay.jsx";
 // would otherwise mean leaving this overlay for the templates page and
 // back -- "+ New template" opens TemplateOverlay right on top of this
 // one instead, and the template it saves is both added to the picker
-// and preselected, config/onTemplatesChanged existing only to make that
-// nested overlay work.
-export default function SuiteOverlay({ suite, templates = [], config, onClose, onSaved, onTemplatesChanged, showError }) {
+// and preselected, config/repoOptions/onTemplatesChanged existing only
+// to make that nested overlay work.
+export default function SuiteOverlay({ suite, templates = [], repoOptions = [], config, onClose, onSaved, onTemplatesChanged, showError }) {
   const isNew = !suite;
   const [templateIds, setTemplateIds] = useState((suite?.items || []).map((it) => it.templateId));
   const [mode, setMode] = useState(suite?.mode || "until_clean");
@@ -85,7 +85,10 @@ export default function SuiteOverlay({ suite, templates = [], config, onClose, o
             {templates.map((t) => (
               <MenuItem key={t.id} value={t.id}>
                 <Checkbox checked={templateIds.includes(t.id)} size="small" />
-                <ListItemText primary={t.name} secondary={t.title} />
+                {/* A bound template runs against its own repo wherever
+                    this suite is run (grain/task-285), so the picker
+                    says which rather than leaving that to a click. */}
+                <ListItemText primary={t.name} secondary={t.repo ? `${t.title} -- ${t.repo}` : t.title} />
               </MenuItem>
             ))}
           </Select>
@@ -139,7 +142,7 @@ export default function SuiteOverlay({ suite, templates = [], config, onClose, o
         </Stack>
       </form>
       {showNewTemplate && (
-        <TemplateOverlay config={config} onClose={() => setShowNewTemplate(false)} onSaved={templateCreated} showError={showError} />
+        <TemplateOverlay repoOptions={repoOptions} config={config} onClose={() => setShowNewTemplate(false)} onSaved={templateCreated} showError={showError} />
       )}
     </Overlay>
   );

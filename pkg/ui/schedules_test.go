@@ -316,9 +316,9 @@ func TestDeleteScheduleOnAnUnknownIDIsNotFound(t *testing.T) {
 // TestCreateScheduleFromATemplateCopiesItsContent is
 // bwsalmon/agents#516's whole point: a schedule created with TemplateID
 // needs no Title of its own, and reads it off the template instead.
-// Repo and Base are never among the fields a template supplies
-// (model.Template's own doc comment on why), so they always come from
-// this same request.
+// Repo and Base are not among the fields an ordinary, unbound template
+// supplies, so they come from this same request -- the bound case is
+// TestCreateScheduleFromABoundTemplateTakesItsRepoAndBranch below.
 func TestCreateScheduleFromATemplateCopiesItsContent(t *testing.T) {
 	c, _, ctx := testClient(t)
 	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
@@ -373,9 +373,10 @@ func TestCreateScheduleRejectsAnUnknownTemplate(t *testing.T) {
 // that template outright, ignoring any other content field on the same
 // request (CreateScheduleRequest's own doc comment explains why -- a
 // template and per-field overrides is a combination this API does not
-// support) -- except Repo and Base, which a template never carries and
-// so are always left exactly as they already are unless this same
-// request also gives a new one.
+// support) -- except Repo and Base, which an unbound template does not
+// carry and so are left exactly as they already are unless this same
+// request also gives a new one (a bound one does overwrite them:
+// TestUpdateScheduleAttachToABoundTemplateTakesItsRepoAndBranch).
 func TestUpdateScheduleAttachToATemplateOverridesInlineContent(t *testing.T) {
 	c, _, ctx := testClient(t)
 	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
@@ -404,7 +405,91 @@ func TestUpdateScheduleAttachToATemplateOverridesInlineContent(t *testing.T) {
 		t.Errorf("title = %q, want the template's own, not %q", updated.Title, ignoredTitle)
 	}
 	if updated.Repo != "acme/widgets" {
-		t.Errorf("repo = %q, want it left alone (a template carries no target)", updated.Repo)
+		t.Errorf("repo = %q, want it left alone (an unbound template carries no target)", updated.Repo)
+	}
+}
+
+// TestCreateScheduleFromABoundTemplateTakesItsRepoAndBranch is the
+// binding half of grain/task-285: a template bound to a repo already
+// answers what a schedule fired from it targets, so the schedule needs
+// no repo of its own and takes the template's instead.
+func TestCreateScheduleFromABoundTemplateTakesItsRepoAndBranch(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name: "Dependency bump", Title: "Bump dependencies",
+		Repo: "acme/widgets", Base: "release",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		TemplateID: tmpl.ID, Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating a schedule from a bound template with no repo of its own: %v", err)
+	}
+	if sched.Repo != "acme/widgets" || sched.Base != "release" {
+		t.Errorf("repo/base = %q/%q, want the template's own binding", sched.Repo, sched.Base)
+	}
+}
+
+// A binding wins over a repo the same request also named: it is the
+// template saying its content belongs to one repo, so a schedule cannot
+// quietly aim it at another.
+func TestCreateScheduleFromABoundTemplateOverridesTheRequestsOwnRepo(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name: "x", Title: "x", Repo: "acme/widgets", Base: "release",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		TemplateID: tmpl.ID, Repo: "acme/gadgets", Base: "main", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("creating: %v", err)
+	}
+	if sched.Repo != "acme/widgets" || sched.Base != "release" {
+		t.Errorf("repo/base = %q/%q, want the template's binding to win", sched.Repo, sched.Base)
+	}
+}
+
+// A schedule that fires no bound template still needs a repo -- nothing
+// else can say where its firings go.
+func TestCreateScheduleStillRequiresARepoWithoutABinding(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.CreateSchedule(ctx, ui.CreateScheduleRequest{TemplateID: tmpl.ID, Recurrence: everyDay})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+func TestUpdateScheduleAttachToABoundTemplateTakesItsRepoAndBranch(t *testing.T) {
+	c, _, ctx := testClient(t)
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Title: "old title", Repo: "acme/gadgets", Base: "main", Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name: "x", Title: "x", Repo: "acme/widgets", Base: "release",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{TemplateID: &tmpl.ID})
+	if err != nil {
+		t.Fatalf("attaching: %v", err)
+	}
+	if updated.Repo != "acme/widgets" || updated.Base != "release" {
+		t.Errorf("repo/base = %q/%q, want the template's own binding", updated.Repo, updated.Base)
 	}
 }
 

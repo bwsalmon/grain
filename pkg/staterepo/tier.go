@@ -42,10 +42,11 @@ const (
 //     that changes on literally every tick of a deployment with anything
 //     open at all.
 //   - task_run: a row per attempt, plus the transcript and prompt columns
-//     -- tens of kilobytes each -- written after the fact. It is the
-//     largest file in the dump by an order of magnitude on any deployment
-//     that has been running a while, so every commit that touches it
-//     costs a rewrite of the whole thing.
+//     -- tens of kilobytes each -- written after the fact, and the
+//     activity columns a live run rewrites whenever it says what it is
+//     doing (update_status). It is the largest file in the dump by an
+//     order of magnitude on any deployment that has been running a while,
+//     so every commit that touches it costs a rewrite of the whole thing.
 //   - lease: a row per capability minted for a run, so it moves with
 //     task_run and for the same reasons.
 //

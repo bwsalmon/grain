@@ -248,13 +248,24 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// And once more for what each running task says it is doing: one
+	// query over the live runs that have a synopsis, rather than a read
+	// per task, on the same reasoning as the three above.
+	activity, err := c.Store.TaskActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Task, 0, len(tasks))
 	for _, t := range tasks {
 		var blockedAt *time.Time
 		if at, ok := mergeQueueBlocked[t.ID]; ok {
 			blockedAt = &at
 		}
-		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, repairing[t.ID]))
+		var doing *model.RunActivity
+		if a, ok := activity[t.ID]; ok {
+			doing = &a
+		}
+		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, repairing[t.ID], doing))
 	}
 	return out, nil
 }
@@ -312,7 +323,11 @@ func (c *Client) Task(ctx context.Context, id string) (Task, error) {
 	if obs != nil {
 		blockedAt = obs.MergeQueueBlockedAt
 	}
-	return taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight()), nil
+	activity, err := c.Store.TaskActivityOf(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	return taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity), nil
 }
 
 // closedTargets resolves whether each of a task's own blocking-link
@@ -383,8 +398,12 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	if obs != nil {
 		blockedAt = obs.MergeQueueBlockedAt
 	}
+	activity, err := c.Store.TaskActivityOf(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
+	}
 	detail := TaskDetail{
-		Task:        taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight()),
+		Task:        taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity),
 		Comments:    make([]Comment, 0, len(comments)),
 		Attachments: taskAttachments,
 	}
@@ -428,6 +447,7 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 		detail.Transitions = append(detail.Transitions, transitionFrom(tr))
 	}
 	detail.PullRequestEvents = pullRequestEventsFrom(obs)
+	detail.PendingSecret = c.pendingSecretFor(obs)
 	return detail, nil
 }
 
@@ -1430,6 +1450,24 @@ func (c *Client) Reorder(ctx context.Context, req ReorderRequest) error {
 	if len(req.IDs) == 0 {
 		return validationErrorf("ids is required")
 	}
+	// A drop naming a task nothing exists behind is a stale list in
+	// somebody's browser, not a broken server -- so it reports as this
+	// package's own NotFoundError, which the server answers 404, rather
+	// than falling out of the store as "reordering: no such task 999"
+	// and being reported as a 500 (found by hand, task 244). The same
+	// translation Client.mutate does for every single-task edit.
+	for _, id := range append(append([]string{}, req.IDs...), req.AfterID, req.BeforeID) {
+		if id == "" {
+			continue
+		}
+		task, err := c.Store.GetTask(ctx, id)
+		if err != nil {
+			return err
+		}
+		if task == nil {
+			return &NotFoundError{ID: id}
+		}
+	}
 	var afterID, beforeID *string
 	if req.AfterID != "" {
 		afterID = &req.AfterID
@@ -1579,8 +1617,16 @@ func (c *Client) AddComment(ctx context.Context, id, body string, uploads []Atta
 	if obs == nil || obs.PendingQuestionCommentID == nil {
 		return nil
 	}
+	// PendingSecret goes with it. A run's request_secret call parks the
+	// task through the very field above (orchestrator.relayParkingCalls),
+	// so a reply un-parks a task that was waiting for a credential just
+	// as surely as one that was waiting for an answer -- and a task back
+	// in the queue must not still be offering a box that writes a value
+	// nothing is waiting for. Answering "not this one, use the staging
+	// key" in words is a legitimate answer to a request for a secret.
 	return c.Store.ObserveField(ctx, id, now, func(o *model.Observation) {
 		o.PendingQuestionCommentID = nil
+		o.PendingSecret = ""
 	})
 }
 

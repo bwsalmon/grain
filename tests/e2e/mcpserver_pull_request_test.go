@@ -323,7 +323,7 @@ func TestMCPServerServesPullRequestStatusOverStdio(t *testing.T) {
 		names := toolNames(t, p)
 		for _, want := range []string{
 			"run_command", "read_file", "write_file", "edit_file",
-			"ask_question", "comment_on_issue", "propose_task", "add_review_comment",
+			"ask_question", "request_secret", "comment_on_issue", "propose_task", "add_review_comment",
 			"pull_request_status", "wait_for_checks",
 		} {
 			if !names[want] {

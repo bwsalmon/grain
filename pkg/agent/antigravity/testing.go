@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/bwsalmon/grain/pkg/mcp"
@@ -66,6 +67,35 @@ func Steps(steps ...Step) Script {
 		return s, true
 	})
 }
+
+// WriteRunHomeForTest builds the private HOME a real run is given -- the
+// mcp_config.json, settings.json and hooks.json of writeAgyHome, in the
+// three places agy reads them from -- and hands back the directory and
+// the cleanup a caller defers.
+//
+// Exported for the live test that asks a real agy what it loaded out of
+// that HOME (tests/e2e/live_hook_config_test.go). Nothing about those
+// files can be checked by writing them somewhere a test chooses: what is
+// under test is agy reading them where this package puts them, which
+// takes the real binary and the real layout. The three paths below are
+// exported for the same test, and for the same reason.
+//
+// mcpArgs is what Framework.mcpServerArgs would have produced for the run
+// in question; a probe that never starts the MCP server can pass any
+// plausible value, since what it is checking is agy's own config
+// loading rather than the server's arguments.
+func WriteRunHomeForTest(grainBinaryPath string, mcpArgs []string, apiKeyAuth bool) (home string, cleanup func(), err error) {
+	return writeAgyHome(grainBinaryPath, mcpArgs, apiKeyAuth)
+}
+
+// HooksConfigPathForTest is where in that HOME agy reads this run's
+// PreToolUse hook from.
+func HooksConfigPathForTest(home string) string { return filepath.Join(home, hooksConfigRelPath) }
+
+// CLISettingsPathForTest is where in that HOME agy reads this run's
+// permission rules from -- and, as of 1.1.26, where it writes them back
+// out without them; see permissionRules.
+func CLISettingsPathForTest(home string) string { return filepath.Join(home, cliSettingsRelPath) }
 
 // NewForTest returns a Framework that runs script instead of the real agy
 // binary, for callers outside this package that need to drive the

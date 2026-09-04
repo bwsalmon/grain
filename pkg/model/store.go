@@ -112,6 +112,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskRunPromptColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_run: %w", err)
 	}
+	if err := s.ensureTaskRunActivityColumns(ctx); err != nil {
+		return fmt.Errorf("migrating task_run: %w", err)
+	}
 	if err := s.ensureScheduleRecurrenceColumns(ctx); err != nil {
 		return fmt.Errorf("migrating schedule: %w", err)
 	}
@@ -160,7 +163,7 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureConfigCodexModelColumn(ctx); err != nil {
 		return fmt.Errorf("migrating grain_config: %w", err)
 	}
-	if err := s.ensureTemplateNoTargetColumns(ctx); err != nil {
+	if err := s.ensureTemplateBindingColumns(ctx); err != nil {
 		return fmt.Errorf("migrating template: %w", err)
 	}
 	if err := s.ensureScheduleSuiteColumn(ctx); err != nil {
@@ -182,6 +185,9 @@ func (s *Store) Init(ctx context.Context) error {
 		return fmt.Errorf("migrating task_observation: %w", err)
 	}
 	if err := s.ensureTaskObservationRepairColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_observation: %w", err)
+	}
+	if err := s.ensureTaskObservationPendingSecretColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_observation: %w", err)
 	}
 	if err := s.ensureConfigPromptExtensionColumn(ctx); err != nil {
@@ -421,6 +427,47 @@ func (s *Store) ensureTaskRunPromptColumn(ctx context.Context) error {
 	return err
 }
 
+// ensureTaskRunActivityColumns adds task_run.activity and
+// task_run.activity_at (schema.go's own DDL comment on the table has the
+// reasoning) to a database created before they existed, the same
+// probe-then-ALTER approach ensureTaskRunPromptColumn already uses for
+// the same reason: CREATE TABLE IF NOT EXISTS never alters a table that
+// is already there.
+//
+// Each column is probed on its own rather than both together, unlike
+// every single-column migration above: SQLite adds columns one ALTER at a
+// time, so a process that died between the two would leave a database
+// with the first and not the second, and a joint probe would then try to
+// add the first again and fail every startup from then on.
+//
+// No SchemaVersion bump goes with them, for the reason the prompt column
+// takes none: both are nullable and added here, so an existing database
+// migrates into the new shape rather than being one this build "cannot
+// simply be re-created into" (SchemaVersion's own doc comment). Every run
+// recorded before they existed reads back with no synopsis, which is
+// already how a run that never called update_status reads.
+func (s *Store) ensureTaskRunActivityColumns(ctx context.Context) error {
+	if err := s.ensureColumn(ctx, "task_run", "activity", "TEXT NULL"); err != nil {
+		return err
+	}
+	return s.ensureColumn(ctx, "task_run", "activity_at", "DATETIME NULL")
+}
+
+// ensureColumn is the probe-then-ALTER above, once, for callers with no
+// reason to spell it out: a SELECT that cannot run is taken as "the
+// column is not there", which is the same reading every ensure*Column
+// here makes of the same failure.
+func (s *Store) ensureColumn(ctx context.Context, table, column, decl string) error {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `"+column+"` FROM `"+table+"` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `"+table+"` ADD COLUMN `"+column+"` "+decl)
+	return err
+}
+
 // ensureTaskObservationRefreshedColumn adds
 // task_observation.merge_queue_refreshed_at (Observation's own field has
 // the reasoning) to a database created before it existed, the same
@@ -464,6 +511,29 @@ func (s *Store) ensureTaskObservationRepairColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task_observation` ADD COLUMN `merge_queue_repair_at` DATETIME NULL")
+	return err
+}
+
+// ensureTaskObservationPendingSecretColumn adds
+// task_observation.pending_secret (Observation's own field has the
+// reasoning) to a database created before it existed -- the same
+// probe-then-ALTER ensureTaskObservationRefreshedColumn above already
+// does for its own column, and for the identical reason: CREATE TABLE IF
+// NOT EXISTS never alters a table that is already there.
+//
+// No SchemaVersion bump goes with it, on the same terms: the column is
+// nullable, so an existing database migrates into the new shape rather
+// than being one this build "cannot simply be re-created into". Every
+// row written before it reads back NULL, which getObservation reads as
+// the empty string -- no secret pending, which is exactly right for a
+// task parked before the tool that asks for one existed.
+func (s *Store) ensureTaskObservationPendingSecretColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `pending_secret` FROM `task_observation` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task_observation` ADD COLUMN `pending_secret` TEXT NULL")
 	return err
 }
 
@@ -1129,34 +1199,36 @@ func (s *Store) ensureConfigEnvironmentNameColumn(ctx context.Context) error {
 	return err
 }
 
-// ensureTemplateNoTargetColumns drops template's old
-// target_owner/target_name/base columns (schema.go's own DDL comment on
-// the table has the reasoning: which repo and branch a firing targets
-// is a property of the caller using a template, not of the template
-// itself) from a database created before that split. Unlike every
-// ensure*Column migration above, which probes for a column's absence
-// and adds it, this probes for the old columns' presence and removes
-// them -- the same direction ensureConfigMaxConcurrentColumn's own
-// slots removal and ensureScheduleRecurrenceColumns' own interval_ms
-// removal already go, since target_owner and target_name are NOT NULL
-// and Init's own CREATE TABLE IF NOT EXISTS never alters a table that
-// already exists: left in place, they would fail every PutTemplate,
-// which stops supplying them.
-func (s *Store) ensureTemplateNoTargetColumns(ctx context.Context) error {
+// ensureTemplateBindingColumns adds template's optional
+// target_owner/target_name/base columns (model.Template's own doc
+// comment on what a binding is, schema.go's own DDL comment on how the
+// three are stored) to a database created while a template could carry
+// no target at all, the same probe-then-ALTER approach every other
+// ensure*Column migration here uses.
+//
+// Three shapes of database reach this, and all three come out the same:
+// a fresh one, whose CREATE TABLE above already has the columns; one
+// from the era when a template *had* to carry a target, which also
+// already has them and whose values are exactly the bindings they now
+// mean, kept as they are rather than dropped; and one from in between,
+// which gets them added here, empty, leaving every existing template
+// unbound -- which is what it was.
+func (s *Store) ensureTemplateBindingColumns(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, "SELECT `target_owner` FROM `template` WHERE 1 = 0")
-	if err != nil {
-		// Already gone -- either a fresh database (Statements() above
-		// never created it) or one already migrated past this point.
-		return nil
+	if err == nil {
+		return rows.Close()
 	}
-	rows.Close()
-	for _, col := range []string{"target_owner", "target_name", "base"} {
+	for _, col := range []string{"target_owner", "target_name"} {
 		if _, err := s.db.ExecContext(ctx,
-			"ALTER TABLE `template` DROP COLUMN `"+col+"`"); err != nil {
+			"ALTER TABLE `template` ADD COLUMN `"+col+"` TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
 	}
-	return nil
+	// Nullable, unlike the two above: a database from the mandatory-target
+	// era has base NULL wherever a template pinned no branch, so
+	// scanTemplate already has to read it through a NullString either way.
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `template` ADD COLUMN `base` TEXT NULL")
+	return err
 }
 
 // renameSuitePrincipal carries the tasks an earlier build's suite runs
@@ -1912,11 +1984,12 @@ func (s *Store) Observe(ctx context.Context, o Observation) error {
 func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
 	_, err := tx.ExecContext(ctx,
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
-			"`pending_question_comment_id`,`baseline_comment_id`,`merge_queue_blocked_at`,"+
+			"`pending_question_comment_id`,`baseline_comment_id`,`pending_secret`,"+
+			"`merge_queue_blocked_at`,"+
 			"`merge_queue_refreshed_at`,`merge_queue_repair_at`,`observed_at`,"+
-			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
-		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID),
+		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID), o.PendingSecret,
 		timeOf(o.MergeQueueBlockedAt), timeOf(o.MergeQueueRefreshedAt),
 		timeOf(o.MergeQueueRepairAt),
 		timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt),
@@ -1931,7 +2004,7 @@ func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation
 func getObservation(ctx context.Context, q querier, taskID string) (*Observation, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
-			"`baseline_comment_id`,`merge_queue_blocked_at`,`merge_queue_refreshed_at`,"+
+			"`baseline_comment_id`,`pending_secret`,`merge_queue_blocked_at`,`merge_queue_refreshed_at`,"+
 			"`merge_queue_repair_at`,`observed_at`,`retry_requested_at`,"+
 			"`pr_opened_at`,`pr_merged_at`,`pr_closed_at` "+
 			"FROM `task_observation` WHERE `task_id` = ?", taskID)
@@ -1939,7 +2012,12 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	var closed, completed, blocked, refreshed, repaired sql.NullTime
 	var observed, retried, prOpened, prMerged, prClosed sql.NullTime
 	var pending, baseline sql.NullInt64
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &blocked, &refreshed, &repaired,
+	// pendingSecret is scanned as a NullString rather than into the
+	// string field directly: a row written before the column existed
+	// carries NULL there, which is the same "nothing pending" an empty
+	// string means (ensureTaskObservationPendingSecretColumn).
+	var pendingSecret sql.NullString
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &pendingSecret, &blocked, &refreshed, &repaired,
 		&observed, &retried, &prOpened, &prMerged, &prClosed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -1948,6 +2026,7 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	}
 	o.ClosedAt, o.CompletedAt, o.ObservedAt = timePtr(closed), timePtr(completed), timePtr(observed)
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
+	o.PendingSecret = pendingSecret.String
 	o.MergeQueueBlockedAt, o.MergeQueueRefreshedAt = timePtr(blocked), timePtr(refreshed)
 	o.MergeQueueRepairAt = timePtr(repaired)
 	o.RetryRequestedAt = timePtr(retried)
@@ -2209,6 +2288,93 @@ func (s *Store) RunPrompt(ctx context.Context, taskID string, attempt int) (prom
 	return p.String, true, nil
 }
 
+// SetTaskActivity records what taskID's live run says it is doing right
+// now -- one short phrase the run wrote for itself, and the moment it
+// wrote it (Run.Activity). It reports whether there was a live run to
+// record it against at all: false, with no error, means the task has
+// nothing in flight, which is not a failure of the write but the answer
+// to a call that arrived after its run was over.
+//
+// Keyed by task rather than by run because the caller is the task's own
+// run reaching back through the daemon (ui.Client.SetTaskActivity, over
+// the update_status tool), and a run identifies itself by the task it was
+// dispatched for -- the same handle every other write an agent can reach
+// takes. The WHERE clause is what makes that safe: at most one run per
+// task is ever open (schema.go's task_run_open_task index), so "the live
+// run of this task" names exactly one row, and a call that arrives late
+// cannot overwrite the synopsis a finished run ended on.
+func (s *Store) SetTaskActivity(ctx context.Context, taskID, activity string, at time.Time) (live bool, err error) {
+	err = s.write(ctx, "set task "+taskID+" activity", func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `activity` = ?, `activity_at` = ? "+
+				"WHERE `task_id` = ? AND `finished_at` IS NULL",
+			nullable(activity), at.UTC(), taskID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		live = n > 0
+		return nil
+	})
+	return live, err
+}
+
+// TaskActivity is what every task with a live run currently says it is
+// doing, keyed by task ID -- one query for a whole list, the same trade
+// MergeQueueBlocked above makes for the merge queue's own signal rather
+// than a read per task.
+//
+// Only live runs are here, and deliberately: a synopsis is a fact about
+// what is happening now, and a finished run's last words describe a
+// moment that is over and would read on a task list as work still in
+// progress. The rows keep it (nothing clears the columns at FinishRun),
+// so a caller that wants the last thing a finished run said can still
+// read it off the run itself.
+//
+// A live run that has never called the tool is absent rather than present
+// and empty: "said nothing" and "is not running" are different, but
+// neither gives a caller anything to show.
+func (s *Store) TaskActivity(ctx context.Context) (map[string]RunActivity, error) {
+	out := map[string]RunActivity{}
+	err := each(ctx, s.db,
+		"SELECT `task_id`,`activity`,`activity_at` FROM `task_run` "+
+			"WHERE `finished_at` IS NULL AND `activity` IS NOT NULL", nil,
+		func(rows *sql.Rows) error {
+			var taskID string
+			var note sql.NullString
+			var at sql.NullTime
+			if err := rows.Scan(&taskID, &note, &at); err != nil {
+				return err
+			}
+			out[taskID] = RunActivity{Note: note.String, At: timePtr(at)}
+			return nil
+		})
+	return out, err
+}
+
+// TaskActivityOf is TaskActivity for one task -- what its live run says
+// it is doing, or nil for a task with nothing in flight or a run that has
+// said nothing yet. A caller rendering one task uses this rather than
+// reading a map of the whole store, the same split Client.Task and
+// Client.ListTasks already make over MergeQueueBlocked.
+func (s *Store) TaskActivityOf(ctx context.Context, taskID string) (*RunActivity, error) {
+	var note sql.NullString
+	var at sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		"SELECT `activity`,`activity_at` FROM `task_run` "+
+			"WHERE `task_id` = ? AND `finished_at` IS NULL", taskID).Scan(&note, &at)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !note.Valid) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &RunActivity{Note: note.String, At: timePtr(at)}, nil
+}
+
 // DropLease forgets a lease once its resource is actually revoked.
 // Idempotent by construction — a DELETE matching nothing is not an error,
 // which is what lets release and the expiry reaper both reach the same
@@ -2239,17 +2405,19 @@ func (s *Store) Attempts(ctx context.Context, taskID string) (int, error) {
 func (s *Store) Runs(ctx context.Context, taskID string) ([]Run, error) {
 	var out []Run
 	err := each(ctx, s.db,
-		"SELECT `id`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail` "+
+		"SELECT `id`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail`,"+
+			"`activity`,`activity_at` "+
 			"FROM `task_run` WHERE `task_id` = ? ORDER BY `attempt` ASC", taskID,
 		func(rows *sql.Rows) error {
 			r := Run{TaskID: taskID}
-			var unit, outcome, detail sql.NullString
-			var finishedAt sql.NullTime
+			var unit, outcome, detail, activity sql.NullString
+			var finishedAt, activityAt sql.NullTime
 			if err := rows.Scan(&r.ID, &r.Sandbox, &unit, &r.Attempt,
-				&r.StartedAt, &finishedAt, &outcome, &detail); err != nil {
+				&r.StartedAt, &finishedAt, &outcome, &detail, &activity, &activityAt); err != nil {
 				return err
 			}
 			r.Unit, r.Outcome, r.Detail = unit.String, outcome.String, detail.String
+			r.Activity, r.ActivityAt = activity.String, timePtr(activityAt)
 			r.FinishedAt = timePtr(finishedAt)
 			out = append(out, r)
 			return nil
@@ -3567,13 +3735,24 @@ func newTemplateID(ctx context.Context, tx *sql.Tx) (string, error) {
 	return "template-" + strconv.FormatInt(n, 10), nil
 }
 
-const templateColumns = "`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"
+const templateColumns = "`id`,`name`,`title`,`body`," +
+	"`target_owner`,`target_name`,`base`,`auto_merge`,`created_at`"
 
 func scanTemplate(scan func(...any) error) (Template, error) {
 	var t Template
-	if err := scan(&t.ID, &t.Name, &t.Title, &t.Body, &t.AutoMerge, &t.CreatedAt); err != nil {
+	var target RepoRef
+	var base sql.NullString
+	if err := scan(&t.ID, &t.Name, &t.Title, &t.Body,
+		&target.Owner, &target.Name, &base, &t.AutoMerge, &t.CreatedAt); err != nil {
 		return Template{}, err
 	}
+	// An empty owner and name is an unbound template, not a binding to a
+	// repo with no name (schema.go's own DDL comment on why the pair is
+	// stored empty rather than NULL).
+	if target.Owner != "" || target.Name != "" {
+		t.Target = &target
+	}
+	t.Base = base.String
 	return t, nil
 }
 
@@ -3585,10 +3764,15 @@ func (s *Store) PutTemplate(ctx context.Context, t Template) error {
 }
 
 func putTemplate(ctx context.Context, tx *sql.Tx, t Template) error {
+	var targetOwner, targetName string
+	if t.Target != nil {
+		targetOwner, targetName = t.Target.Owner, t.Target.Name
+	}
 	_, err := tx.ExecContext(ctx, `REPLACE INTO `+"`template`"+` (
-  `+"`id`,`name`,`title`,`body`,`auto_merge`,`created_at`"+`
-) VALUES (?,?,?,?,?,?)`,
-		t.ID, t.Name, t.Title, t.Body, t.AutoMerge, t.CreatedAt.UTC())
+  `+templateColumns+`
+) VALUES (?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Name, t.Title, t.Body,
+		targetOwner, targetName, t.Base, t.AutoMerge, t.CreatedAt.UTC())
 	if err != nil {
 		return fmt.Errorf("writing template %s: %w", t.ID, err)
 	}

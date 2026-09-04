@@ -1907,7 +1907,7 @@ func testConfig() model.Config {
 		AgentFramework: model.AgentFrameworkAntigravity,
 		GeminiModel:    "gemini-2.5-pro", ClaudeModel: "claude-sonnet-5", CodexModel: "gpt-5.1-codex",
 		MaxAgentTurns: 40,
-		GitHubHost: "github.com", GitHubInsecureHTTP: false,
+		GitHubHost:    "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
 		TargetRepos:         []string{"acme/widgets", "acme/gadgets"},
 		SandboxCPUs:         4,
@@ -2426,6 +2426,76 @@ func TestInitMigratesAnExistingDatabaseMissingTheMergeQueueColumns(t *testing.T)
 	}
 	if !got.RepairInFlight() {
 		t.Fatalf("observation after recording a repair = %+v, want it in flight", got)
+	}
+}
+
+// task_observation.pending_secret -- the credential a run's
+// request_secret call asked a human to set (grain/task-230) -- was added
+// to the same table, on the same terms, and gets the same test: a
+// database built without the column, migrated by Store.Init's own
+// ensureTaskObservationPendingSecretColumn, keeps its existing
+// observations readable and makes the new field durable.
+func TestInitMigratesAnExistingDatabaseMissingPendingSecret(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_observation`"+` (
+  `+"`task_id`"+`                     TEXT     NOT NULL,
+  `+"`closed_at`"+`                   DATETIME NULL,
+  `+"`completed_at`"+`                DATETIME NULL,
+  `+"`pending_question_comment_id`"+` INTEGER  NULL,
+  `+"`baseline_comment_id`"+`         INTEGER  NULL,
+  `+"`merge_queue_blocked_at`"+`      DATETIME NULL,
+  `+"`merge_queue_refreshed_at`"+`    DATETIME NULL,
+  `+"`observed_at`"+`                 DATETIME NULL,
+  `+"`retry_requested_at`"+`          DATETIME NULL,
+  `+"`pr_opened_at`"+`                DATETIME NULL,
+  `+"`pr_merged_at`"+`                DATETIME NULL,
+  `+"`pr_closed_at`"+`                DATETIME NULL,
+  PRIMARY KEY (`+"`task_id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the pre-task-230 task_observation table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_observation` (`task_id`,`completed_at`,`observed_at`) VALUES ('a1b2',?,?)",
+		now, now); err != nil {
+		t.Fatalf("seeding a pre-task-230 observation row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task_observation.pending_secret: %v", err)
+	}
+
+	// NULL in the new column reads as "no secret pending", which is the
+	// right answer for every task parked before the tool that asks for
+	// one existed.
+	got, err := store.GetObservation(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get observation after migrating: (%+v, %v)", got, err)
+	}
+	if got.CompletedAt == nil || !got.CompletedAt.Equal(now) {
+		t.Fatalf("CompletedAt after migrating = %+v, want the seeded row's own %v", got.CompletedAt, now)
+	}
+	if got.PendingSecret != "" {
+		t.Fatalf("PendingSecret after migrating = %q, want empty", got.PendingSecret)
+	}
+
+	if err := store.ObserveField(ctx, "a1b2", now, func(o *model.Observation) {
+		o.PendingSecret = "stripe-api-key"
+	}); err != nil {
+		t.Fatalf("observe after migrating: %v", err)
+	}
+	got, err = store.GetObservation(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("get observation: (%+v, %v)", got, err)
+	}
+	if got.PendingSecret != "stripe-api-key" {
+		t.Fatalf("PendingSecret = %q, want it durable after the migration", got.PendingSecret)
 	}
 }
 
@@ -3166,10 +3236,10 @@ func TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault(t *testing.T) 
 // same pattern, applied to grain_config.default_capabilities
 // (grain/task-14): a database from before a deployment could say
 // which capabilities every new task starts with gets the column added by
-// ensureConfigDefaultCapabilitiesColumn, defaulted to '' -- which
-// splitCSV reads back as no defaults, so an upgraded deployment keeps
-// filing tasks with exactly what whoever files them asks for until an
-// operator chooses otherwise.
+// ensureConfigDefaultCapabilitiesColumn, defaulted to the empty
+// string -- which splitCSV reads back as no defaults, so an upgraded
+// deployment keeps filing tasks with exactly what whoever files them
+// asks for until an operator chooses otherwise.
 func TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
@@ -3233,9 +3303,9 @@ func TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities(t *testing.T) 
 // TestInitMigratesAnExistingDatabaseMissingEnvironmentName is the same
 // pattern, applied to grain_config.environment_name (grain/task-69): a
 // database from before a deployment could be named gets the column added
-// by ensureConfigEnvironmentNameColumn, defaulted to '' -- an unnamed
-// deployment, whose UI looks exactly as it did before the upgrade until
-// an operator names it.
+// by ensureConfigEnvironmentNameColumn, defaulted to the empty
+// string -- an unnamed deployment, whose UI looks exactly as it did
+// before the upgrade until an operator names it.
 func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
@@ -3307,9 +3377,10 @@ func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
 
 // TestInitMigratesAnExistingDatabaseMissingConfigPromptExtension is the
 // same pattern as the environment-name migration above, applied to
-// grain_config.prompt_extension: the column arrives defaulted to '',
-// which adds nothing to any prompt -- exactly what an upgraded
-// deployment was doing until somebody writes standing instructions.
+// grain_config.prompt_extension: the column arrives defaulted to the
+// empty string, which adds nothing to any prompt -- exactly what an
+// upgraded deployment was doing until somebody writes standing
+// instructions.
 func TestInitMigratesAnExistingDatabaseMissingConfigPromptExtension(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {

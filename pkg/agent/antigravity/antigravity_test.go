@@ -535,7 +535,7 @@ func TestRunPutsGrainInFrontOfEveryToolCall(t *testing.T) {
 	if err := json.Unmarshal([]byte(r.hooksAtRun), &hooks); err != nil {
 		t.Fatalf("hook config was not JSON: %v (%q)", err, r.hooksAtRun)
 	}
-	groups := hooks[hookName].PreToolUse
+	groups := hooks[HookName].PreToolUse
 	if len(groups) != 1 || len(groups[0].Hooks) != 1 {
 		t.Fatalf("PreToolUse = %+v, want exactly one handler in one group", groups)
 	}
@@ -553,8 +553,15 @@ func TestRunPutsGrainInFrontOfEveryToolCall(t *testing.T) {
 // and the second half of it matters more than the first: this hook sees
 // every tool call a run makes, so a decision it gets wrong about grain's
 // own tools is a run that cannot do anything at all.
+//
+// "No opinion" is asserted as an empty reply rather than as an empty
+// decision field, because those are not the same answer to agy: a live
+// 1.1.26 denies a call whose hook returned `{}` and runs one whose hook
+// returned nothing (see noOpinion). The first version of this test read
+// the decision out of parsed JSON, which cannot tell the two apart, and
+// passed on a hook that blocked every tool a run had.
 func TestHookDecisionDeniesAgysToolsAndOnlyAgysTools(t *testing.T) {
-	decision := func(name string) string {
+	reply := func(name string) []byte {
 		payload, err := json.Marshal(map[string]any{
 			"toolCall": map[string]any{"name": name, "args": map[string]any{"CommandLine": "ls"}},
 			"stepIdx":  3,
@@ -562,11 +569,18 @@ func TestHookDecisionDeniesAgysToolsAndOnlyAgysTools(t *testing.T) {
 		if err != nil {
 			t.Fatalf("building payload: %v", err)
 		}
+		return HookDecision(payload)
+	}
+	decision := func(name string) string {
 		var out struct {
 			Decision string `json:"decision"`
+			Reason   string `json:"reason"`
 		}
-		if err := json.Unmarshal(HookDecision(payload), &out); err != nil {
+		if err := json.Unmarshal(reply(name), &out); err != nil {
 			t.Fatalf("hook reply for %q was not JSON: %v", name, err)
+		}
+		if out.Reason == "" {
+			t.Errorf("decision(%q) carries no reason; agy shows it to the model, which is the only thing that redirects the next call", name)
 		}
 		return out.Decision
 	}
@@ -578,8 +592,8 @@ func TestHookDecisionDeniesAgysToolsAndOnlyAgysTools(t *testing.T) {
 	}
 	// Grain's own, including the ones whose names collide with agy's.
 	for _, tool := range publishedTools() {
-		if got := decision(mcp.AgyQualifiedToolName(tool)); got != "" {
-			t.Errorf("decision(%q) = %q, want no opinion -- this is the tool that reaches the sandbox",
+		if got := reply(mcp.AgyQualifiedToolName(tool)); len(got) != 0 {
+			t.Errorf("HookDecision(%q) = %s, want nothing at all -- this is the tool that reaches the sandbox",
 				mcp.AgyQualifiedToolName(tool), got)
 		}
 	}
@@ -588,13 +602,48 @@ func TestHookDecisionDeniesAgysToolsAndOnlyAgysTools(t *testing.T) {
 	// at all. Every one of them leaves the call alone rather than
 	// stopping a run over a surprise.
 	for _, name := range []string{"browser_click_element", "finish", "call_mcp_tool", "", "run_command "} {
-		if got := decision(name); got != "" {
-			t.Errorf("decision(%q) = %q, want no opinion for a name this hook does not know", name, got)
+		if got := reply(name); len(got) != 0 {
+			t.Errorf("HookDecision(%q) = %s, want nothing at all for a name this hook does not know", name, got)
 		}
 	}
 	for _, junk := range [][]byte{nil, []byte(""), []byte("not json"), []byte(`{"toolCall":7}`)} {
-		if got := string(HookDecision(junk)); got != `{}` {
-			t.Errorf("HookDecision(%q) = %s, want {} -- an unreadable payload must not stop a run", junk, got)
+		if got := HookDecision(junk); len(got) != 0 {
+			t.Errorf("HookDecision(%q) = %s, want nothing at all -- an unreadable payload must not stop a run", junk, got)
+		}
+	}
+}
+
+// TestHookDenialPointsAtToolsThatExist: the reason travels back to the
+// model, so every tool it names has to be one this run actually holds.
+// Prefixing the denied tool's own name is what this guards against --
+// grain has no write_to_file, so "use mcp_grain-sandbox_write_to_file"
+// sent a live model looking for a tool that is not there.
+func TestHookDenialPointsAtToolsThatExist(t *testing.T) {
+	published := map[string]bool{}
+	for _, tool := range publishedTools() {
+		published[mcp.AgyQualifiedToolName(tool)] = true
+	}
+	prefix := mcp.AgyQualifiedToolName("")
+
+	for _, native := range withheldNativeTools {
+		payload, err := json.Marshal(map[string]any{"toolCall": map[string]any{"name": native}})
+		if err != nil {
+			t.Fatalf("building payload: %v", err)
+		}
+		var out struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(HookDecision(payload), &out); err != nil {
+			t.Fatalf("hook reply for %q was not JSON: %v", native, err)
+		}
+		for _, word := range strings.FieldsFunc(out.Reason, func(r rune) bool { return r == ' ' || r == ',' || r == '.' }) {
+			if !strings.HasPrefix(word, prefix) || word == prefix+"*" {
+				continue
+			}
+			if !published[word] {
+				t.Errorf("denying %q suggests %q, which this run does not have; name tools from the constructor rather than from the denied name",
+					native, word)
+			}
 		}
 	}
 }

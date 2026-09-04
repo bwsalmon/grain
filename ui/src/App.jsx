@@ -553,6 +553,7 @@ export default function App() {
             <TemplatesList
               templates={templates}
               config={config}
+              tasks={tasks}
               openTemplateId={openTemplateId}
               onOpenTemplate={setOpenTemplateId}
               onRefresh={refreshTemplates}

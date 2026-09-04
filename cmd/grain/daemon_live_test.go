@@ -295,13 +295,23 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 		t.Fatalf("branch %s was never pushed to %s within the timeout -- the live agent did not complete the dispatch", branch, bare)
 	}
 
-	// openPullRequest runs synchronously right after a successful push,
-	// in the same tick (cycle.go's runOne, through finish.go's
-	// ProcessResult), so give it a
-	// short grace window rather than assuming it already happened the
-	// instant the branch appeared.
+	// openPullRequest runs when the *run* ends, not when the push lands:
+	// cycle.go's runOne reaches finish.go's ProcessResult once
+	// framework.Run has returned. A live agy keeps taking turns after
+	// its push -- confirming what it did, writing its final answer --
+	// so the branch routinely appears tens of seconds before the run
+	// that pushed it is over, and this window is the whole of what the
+	// test allows for that. Twenty seconds was not enough of it against
+	// agy 1.1.26: a run that had already done everything asked of it
+	// failed here with "pushed but no pull request", which reads like
+	// grain's finish path is broken rather than like a test that stopped
+	// watching too early.
+	//
+	// Bounded by ctx as well as by its own deadline, so a push that took
+	// most of the wait above cannot spend the daemon's remaining time
+	// here and leave the shutdown assertions below with none.
 	prOpened := false
-	for deadline2 := time.Now().Add(20 * time.Second); time.Now().Before(deadline2); {
+	for deadline2 := time.Now().Add(120 * time.Second); time.Now().Before(deadline2) && ctx.Err() == nil; {
 		if sim.pullRequestCount() > 0 {
 			prOpened = true
 			break

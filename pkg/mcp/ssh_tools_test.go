@@ -243,3 +243,35 @@ func TestSSHEditFileAmbiguousMatchRequiresReplaceAll(t *testing.T) {
 		t.Errorf("read_file after replace_all = %q, want %q", res.Text(), want)
 	}
 }
+
+// The sandbox-guest half of the same guard NewSandboxTools got: an empty
+// old_string is refused rather than interleaved through the file (task
+// 244).
+func TestSSHEditFileRefusesAnEmptyOldString(t *testing.T) {
+	client := newSSHTestClient(t, t.TempDir())
+	ctx := context.Background()
+
+	if _, err := client.CallTool(ctx, "write_file", map[string]any{
+		"file_path": "f.txt", "content": "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := client.CallTool(ctx, "edit_file", map[string]any{
+		"file_path": "f.txt", "old_string": "", "new_string": "X", "replace_all": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatalf("empty old_string was accepted: %s", res.Text())
+	}
+
+	res, err = client.CallTool(ctx, "read_file", map[string]any{"file_path": "f.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "     1\tabc"; res.Text() != want {
+		t.Errorf("read_file after the refused edit = %q, want %q", res.Text(), want)
+	}
+}

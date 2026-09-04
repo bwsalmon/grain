@@ -78,11 +78,9 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 		sandbox, ok = p.Tokens.Authenticate(token)
 	}
 	if !hasToken || !ok {
-		return ProxyResponse{
-			Status:  401,
-			Headers: map[string]string{"WWW-Authenticate": `Basic realm="grain-git-proxy"`},
-			Body:    ErrPkt("authentication required"),
-		}
+		unauthenticated := Denial(401, "authentication required")
+		unauthenticated.Headers["WWW-Authenticate"] = `Basic realm="grain-git-proxy"`
+		return unauthenticated
 	}
 
 	// A repo that is refused to every sandbox, checked ahead of the
@@ -97,7 +95,7 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 				Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
 				Action: req.Action, Outcome: "denied: forbidden repository",
 			})
-			return ProxyResponse{Status: 403, Body: ErrPkt(fmt.Sprintf("%s/%s: %s", req.Owner, req.Repo, reason))}
+			return Denial(403, fmt.Sprintf("%s/%s: %s", req.Owner, req.Repo, reason))
 		}
 	}
 
@@ -107,17 +105,14 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 			Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
 			Action: req.Action, Outcome: fmt.Sprintf("error: %v", err),
 		})
-		return ProxyResponse{Status: 500, Body: ErrPkt("authorization check failed")}
+		return Denial(500, "authorization check failed")
 	}
 	if !allowed {
 		p.audit().Record(AuditEntry{
 			Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
 			Action: req.Action, Outcome: "denied: not in scope",
 		})
-		return ProxyResponse{
-			Status: 403,
-			Body:   ErrPkt(fmt.Sprintf("%s/%s is not in scope for this sandbox", req.Owner, req.Repo)),
-		}
+		return Denial(403, fmt.Sprintf("%s/%s is not in scope for this sandbox", req.Owner, req.Repo))
 	}
 
 	credential, notConfigured, err := p.selectCredential(ctx, sandbox, req.Owner, req.Repo)
@@ -126,14 +121,14 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 			Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
 			Action: req.Action, Outcome: fmt.Sprintf("error: %v", err),
 		})
-		return ProxyResponse{Status: 500, Body: ErrPkt("resolving credential override failed")}
+		return Denial(500, "resolving credential override failed")
 	}
 	if notConfigured != "" {
 		p.audit().Record(AuditEntry{
 			Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,
 			Action: req.Action, Outcome: "error: " + notConfigured,
 		})
-		return ProxyResponse{Status: 500, Body: ErrPkt(notConfigured)}
+		return Denial(500, notConfigured)
 	}
 
 	upstream, err := p.Forwarder.Forward(
@@ -146,7 +141,7 @@ func (p *GitProxy) Handle(ctx context.Context, method, path, query string, heade
 			Action: req.Action, Credential: credential.Name,
 			Outcome: fmt.Sprintf("error: forwarding failed: %v", err),
 		})
-		return ProxyResponse{Status: 502, Body: ErrPkt("upstream request failed")}
+		return Denial(502, "upstream request failed")
 	}
 	p.audit().Record(AuditEntry{
 		Time: p.now(), Sandbox: sandbox, Owner: req.Owner, Repo: req.Repo,

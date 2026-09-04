@@ -167,3 +167,90 @@ func TestDeleteTemplateRefusesWhileASchedulePointsAtIt(t *testing.T) {
 		t.Fatalf("error = %v, want a ValidationError", err)
 	}
 }
+
+// --- binding (grain/task-285) --------------------------------------------
+
+func TestCreateTemplateBindsARepoAndBranch(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name: "x", Title: "x", Repo: "acme/widgets", Base: "release",
+	})
+	if err != nil {
+		t.Fatalf("creating a bound template: %v", err)
+	}
+	if tmpl.Repo != "acme/widgets" || tmpl.Base != "release" {
+		t.Errorf("binding = (%q, %q), want acme/widgets on release", tmpl.Repo, tmpl.Base)
+	}
+}
+
+// Binding is optional, and a template created without one says so:
+// blank repo and base, not a repo nobody named.
+func TestCreateTemplateLeavesTheBindingEmptyByDefault(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tmpl.Repo != "" || tmpl.Base != "" {
+		t.Errorf("binding = (%q, %q), want an unbound template", tmpl.Repo, tmpl.Base)
+	}
+}
+
+func TestCreateTemplateRejectsAMalformedRepo(t *testing.T) {
+	c, _, ctx := testClient(t)
+	_, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x", Repo: "widgets"})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}
+
+func TestUpdateTemplateBindsAndUnbinds(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, base := "acme/widgets", "release"
+	bound, err := c.UpdateTemplate(ctx, tmpl.ID, ui.UpdateTemplateRequest{Repo: &repo, Base: &base})
+	if err != nil {
+		t.Fatalf("binding: %v", err)
+	}
+	if bound.Repo != "acme/widgets" || bound.Base != "release" {
+		t.Fatalf("binding = (%q, %q), want acme/widgets on release", bound.Repo, bound.Base)
+	}
+
+	// A branch on its own moves within the same binding.
+	main := "main"
+	rebased, err := c.UpdateTemplate(ctx, tmpl.ID, ui.UpdateTemplateRequest{Base: &main})
+	if err != nil {
+		t.Fatalf("repinning the branch: %v", err)
+	}
+	if rebased.Repo != "acme/widgets" || rebased.Base != "main" {
+		t.Fatalf("binding = (%q, %q), want the repo left alone on main", rebased.Repo, rebased.Base)
+	}
+
+	// An empty repo unbinds, and takes the pinned branch with it.
+	none := ""
+	unbound, err := c.UpdateTemplate(ctx, tmpl.ID, ui.UpdateTemplateRequest{Repo: &none})
+	if err != nil {
+		t.Fatalf("unbinding: %v", err)
+	}
+	if unbound.Repo != "" || unbound.Base != "" {
+		t.Fatalf("binding = (%q, %q), want it cleared", unbound.Repo, unbound.Base)
+	}
+}
+
+func TestUpdateTemplateRejectsABranchWithNoRepo(t *testing.T) {
+	c, _, ctx := testClient(t)
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{Name: "x", Title: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "release"
+	_, err = c.UpdateTemplate(ctx, tmpl.ID, ui.UpdateTemplateRequest{Base: &base})
+	var ve *ui.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error = %v, want a ValidationError", err)
+	}
+}

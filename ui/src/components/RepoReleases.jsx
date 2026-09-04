@@ -171,6 +171,9 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
   const canCut = current && current.status === "active" && (!currentCandidate || currentCandidate.status === "promoted");
   const canPromote = current && current.status === "active" && currentCandidate && currentCandidate.status === "active";
   const canRequestMerge = current && current.status === "active";
+  // Every template this repo's plan is allowed to schedule: the unbound
+  // ones, plus any bound to this very repo (grain/task-285).
+  const qualifiableTemplates = templates.filter((tmpl) => !tmpl.repo || tmpl.repo === repo);
 
   return (
     <main>
@@ -284,9 +287,11 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
         <p className="hint">
           Templates a fresh, active release candidate schedules automatically -- run this many
           times each, in dependency order, against the candidate's own branch. Pick from any
-          template declared under Templates.
+          template declared under Templates, except ones bound to another repo -- a
+          qualification run always targets this repo's own candidate, so the API refuses
+          those (ui.Client.PutQualificationPlan) and this picker leaves them out.
         </p>
-        <QualificationPlanEditor plan={qualificationPlan} templates={templates} onSave={savePlan} />
+        <QualificationPlanEditor plan={qualificationPlan} templates={qualifiableTemplates} onSave={savePlan} />
       </Box>
     </main>
   );
@@ -414,7 +419,7 @@ function QualificationPlanEditor({ plan, templates, onSave }) {
 
       {templates.length === 0 && (
         <Alert severity="info" sx={{ mt: 2 }}>
-          No templates exist yet -- create one under Templates first.
+          No templates this repo can qualify yet -- create one under Templates first.
         </Alert>
       )}
 

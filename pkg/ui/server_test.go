@@ -186,6 +186,26 @@ func TestReorderRouteRejectsEmptyIDs(t *testing.T) {
 	}
 }
 
+// A drop naming a task that is not there any more -- a list left open in
+// another tab while the task was closed -- is the caller's stale view,
+// not a broken server. It used to fall out of the store as a 500 (found
+// by hand, task 244).
+func TestReorderRouteWithAnUnknownIDIs404(t *testing.T) {
+	srv, _ := testServer(t)
+
+	rec := do(t, srv, http.MethodPost, "/api/tasks", `{"title":"t","approved":true}`)
+	id := decode[ui.Task](t, rec).ID
+
+	if rec := do(t, srv, http.MethodPost, "/api/tasks/reorder", `{"ids":["999"]}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
+	}
+	// The neighbour a drop lands against counts the same way.
+	if rec := do(t, srv, http.MethodPost, "/api/tasks/reorder",
+		`{"ids":["`+id+`"],"beforeId":"999"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("status with an unknown beforeId = %d, want 404: %s", rec.Code, rec.Body)
+	}
+}
+
 func TestGetUnknownTaskIs404(t *testing.T) {
 	srv, _ := testServer(t)
 	if rec := do(t, srv, http.MethodGet, "/api/tasks/404", ""); rec.Code != http.StatusNotFound {
