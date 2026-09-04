@@ -24,58 +24,99 @@ func marshal(t *testing.T, v any) string {
 	return string(b)
 }
 
-func TestSpecWireFormat(t *testing.T) {
+func TestSpecEnv(t *testing.T) {
 	spec := grain.Spec{
-		Version:   grain.Version,
-		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
-		Shape:     grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
-		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh",
-		Placements: []grain.Placement{
-			{Path: "/home/agent/.git-credentials", Content: "https://x:sbx_9f3c1a@10.0.2.1:8080", Mode: "0600"},
-			{Path: "/home/debian/.gemini-api-key", Content: "AIza...", Mode: "0600"},
-		},
+		Version:    grain.Version,
+		Framework:  grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+		Shape:      grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
+		Setup:      "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && ./scripts/setup.sh",
+		Placements: []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080", Mode: "0600"}},
 		MaxRuntime: grain.Duration(2 * time.Hour),
 	}
 
-	want := `{
-  "version": "v1",
-  "framework": {
-    "name": "claude",
-    "credential": "sk-ant-oat01-..."
-  },
-  "shape": {
-    "cpus": 2,
-    "memoryMB": 8192,
-    "diskGB": 30
-  },
-  "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w \u0026\u0026 cd /w \u0026\u0026 ./scripts/setup.sh",
-  "placements": [
-    {
-      "path": "/home/agent/.git-credentials",
-      "content": "https://x:sbx_9f3c1a@10.0.2.1:8080",
-      "mode": "0600"
-    },
-    {
-      "path": "/home/debian/.gemini-api-key",
-      "content": "AIza...",
-      "mode": "0600"
-    }
-  ],
-  "maxRuntime": "2h0m0s"
-}`
-	if got := marshal(t, spec); got != want {
-		t.Fatalf("Spec wire format changed.\n got:\n%s\nwant:\n%s", got, want)
+	env, err := spec.Env()
+	if err != nil {
+		t.Fatalf("Env: %v", err)
+	}
+	want := map[string]string{
+		"GRAIN_WIRE_VERSION": "v1",
+		"GRAIN_FRAMEWORK":    "claude",
+		"GRAIN_CREDENTIAL":   "sk-ant-oat01-...",
+		"GRAIN_SETUP":        "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && ./scripts/setup.sh",
+		"GRAIN_MAX_RUNTIME":  "2h0m0s",
+		"GRAIN_PLACEMENTS":   `[{"path":"/home/agent/.git-credentials","content":"https://x:tok@10.0.2.1:8080","mode":"0600"}]`,
+		// kontur's own, passed through and never read back.
+		"CHV_CPUS":         "2",
+		"CHV_MEMORY_MB":    "8192",
+		"CHV_DISK_SIZE_MB": "30720",
+	}
+	if len(env) != len(want) {
+		t.Fatalf("Env produced %d variables, want %d:\n%#v", len(env), len(want), env)
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("%s = %q, want %q", k, env[k], v)
+		}
 	}
 
-	var back grain.Spec
-	if err := json.Unmarshal([]byte(want), &back); err != nil {
-		t.Fatalf("unmarshalling: %v", err)
+	back, err := grain.SpecFromEnv(func(k string) string { return env[k] })
+	if err != nil {
+		t.Fatalf("SpecFromEnv: %v", err)
 	}
 	if time.Duration(back.MaxRuntime) != 2*time.Hour {
-		t.Errorf("MaxRuntime round-tripped as %s, want 2h0m0s", back.MaxRuntime)
+		t.Errorf("MaxRuntime round-tripped as %s", back.MaxRuntime)
 	}
-	if back.Placements[1].Path != "/home/debian/.gemini-api-key" {
-		t.Errorf("Placement round-tripped as %q", back.Placements[1].Path)
+	if back.Framework.Credential != spec.Framework.Credential {
+		t.Errorf("credential round-tripped as %q", back.Framework.Credential)
+	}
+	if len(back.Placements) != 1 || back.Placements[0].Mode != "0600" {
+		t.Errorf("placements round-tripped as %#v", back.Placements)
+	}
+	// Shape is kontur's to read, never grain's to read back.
+	if !back.Shape.IsZero() {
+		t.Errorf("SpecFromEnv read shape back as %#v; those variables are kontur's", back.Shape)
+	}
+}
+
+// A shim that half-understands its environment starts an agent that does
+// the wrong thing quietly. Refusing costs one run and names the
+// disagreement.
+func TestSpecFromEnvRefusesAnotherVersion(t *testing.T) {
+	_, err := grain.SpecFromEnv(func(k string) string {
+		if k == grain.EnvVersion {
+			return "v2"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("SpecFromEnv accepted wire version v2")
+	}
+	if !strings.Contains(err.Error(), "v2") || !strings.Contains(err.Error(), grain.Version) {
+		t.Errorf("error should name both versions, got: %v", err)
+	}
+
+	if _, err := grain.SpecFromEnv(func(string) string { return "" }); err == nil {
+		t.Fatal("SpecFromEnv accepted an environment with no version at all")
+	}
+}
+
+// A malformed placements blob is material; its parse error must not quote
+// it.
+func TestSpecFromEnvDoesNotEchoMaterial(t *testing.T) {
+	_, err := grain.SpecFromEnv(func(k string) string {
+		switch k {
+		case grain.EnvVersion:
+			return grain.Version
+		case grain.EnvPlacements:
+			return `[{"path":"/p","content":"sk-ant-secret-value"`
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("SpecFromEnv accepted malformed placements")
+	}
+	if strings.Contains(err.Error(), "sk-ant-secret-value") {
+		t.Errorf("parse error quotes material: %v", err)
 	}
 }
 
@@ -84,12 +125,12 @@ func TestSpecWireFormat(t *testing.T) {
 // knows nothing about why. Everything task-shaped reaches it as a prompt,
 // as the setup script, or as a placement.
 //
-// Asserted on the marshalled document rather than the type, because what
-// matters is that none of it is on the wire between two separately
+// Asserted on the rendered environment rather than the type, because
+// what matters is that none of it crosses between two separately
 // released artifacts -- and because a field added back would round-trip
 // perfectly and still put grain's task model into the sandbox image's
 // contract.
-func TestSpecCarriesNoTaskModel(t *testing.T) {
+func TestGrainEnvCarriesNoTaskModel(t *testing.T) {
 	full := marshal(t, grain.Spec{
 		Version:   grain.Version,
 		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},

@@ -2,9 +2,11 @@ package grain
 
 import "fmt"
 
-// Spec is the whole declaration of one grain's work, written into the
-// container once at create and never updated -- what changes after that
-// arrives as a Signal.
+// Spec is the whole declaration of one grain's work, delivered as the
+// container's environment at create and never updated -- what changes
+// after that arrives as a Signal. See Env and SpecFromEnv for how it
+// crosses, and env.go's own comment for why it crosses that way rather
+// than as a document on some stdin.
 //
 // It is deliberately small, and what it leaves out is the point: **a
 // grain knows how to run an agent in a sandbox, and nothing about why.**
@@ -29,14 +31,13 @@ import "fmt"
 // guest has to be given back is right here, beside the thing being
 // rebuilt.
 type Spec struct {
-	// Version is the wire format this document is written to. See
-	// Version's own doc comment for what a receiver does with a version it
-	// does not recognise.
+	// Version is the wire format this Spec is written to. See Version's
+	// own doc comment for what a receiver does with one it does not
+	// recognise.
 	Version string `json:"version"`
 
-	// There is no id here. The container is the identity: a controller
-	// execs into one specific container to configure it, and the shim
-	// never needs to be told a name it makes no use of.
+	// There is no id here. The container is the identity, and a grain is
+	// never told a name it makes no use of.
 
 	// Framework is which agent to run, and the credential it runs as.
 	Framework FrameworkSpec `json:"framework"`
@@ -44,6 +45,12 @@ type Spec struct {
 	// Shape is the guest this grain gets. A create-time argument and
 	// nothing resizes it: the root disk is a qcow2 overlay made with the
 	// VM, and a grain lives exactly as long as one run.
+	//
+	// Grain never interprets these numbers. Env renders them as kontur's
+	// own CHV_CPUS/CHV_MEMORY_MB/CHV_DISK_SIZE_MB and the VMM reads them
+	// itself, so they pass through in kontur's vocabulary; SpecFromEnv
+	// does not read them back, because a second opinion about numbers
+	// this side does not act on is worth nothing.
 	Shape Shape `json:"shape"`
 
 	// Setup is a script run in the guest once it answers, before the
@@ -173,16 +180,18 @@ type FrameworkSpec struct {
 	// this CLI wants a file at a particular path, an environment
 	// variable, or a login already performed.
 	//
-	// It travels in the Spec rather than reaching the container as
-	// configuration at create, for two reasons. Which credential a grain
-	// needs follows from the framework its *task* chose
-	// (model.Task.AgentFramework, and Deps.Framework resolving it), so
-	// static container config would mean shipping every deployment's
-	// every credential into every container. And container configuration
-	// is readable where this is not: an environment variable is in
-	// `docker inspect` and /proc/1/environ, and on Kubernetes it is in
-	// the pod spec, which means etcd and any `kubectl describe`. Handed
-	// over `grain configure`'s stdin it is in none of those.
+	// Per-grain rather than baked into the image or set once on the
+	// deployment, because which credential a grain needs follows from the
+	// framework its *task* chose (model.Task.AgentFramework, and
+	// Deps.Framework resolving it): static configuration would mean
+	// shipping every deployment's every credential into every container.
+	//
+	// It reaches the container as its own environment variable
+	// (EnvCredential), which on Kubernetes a deployment points at a
+	// Secret key with valueFrom.secretKeyRef -- so the pod spec holds a
+	// reference and the value keeps the Secret's own RBAC and encryption
+	// at rest. Its own variable rather than a key inside the placements
+	// blob, so it can be rotated and scoped by itself.
 	//
 	// It is not a Placement, and that is why removing Placement.Dest cost
 	// nothing: a placement is path-addressed, written where the

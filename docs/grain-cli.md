@@ -47,9 +47,9 @@ the best-effort interpretation the rule forbids.
 
 **Not taken: `kind`.** Kubernetes needs it because an API server decodes an
 object without having been told what it asked for. Here the subcommand is
-the kind: `grain configure` takes a spec and nothing else. The one channel
-that really does carry mixed documents is the trajectory stream, and
-`src` already says which is which there.
+the kind: `grain answer` takes an answer and nothing else. The one channel
+that really does carry mixed documents is the trajectory stream, and `src`
+already says which is which there.
 
 **Not taken: the group prefix, or per-kind versions.** A group routes
 between vendors and there is one of those here; and Kubernetes versions
@@ -72,7 +72,7 @@ Half of `pkg/grain`'s Go interface never reaches the shim:
 
 | Go method | mechanism |
 | --- | --- |
-| `Grains.Create` | `konturctl vm create`, then `grain configure` |
+| `Grains.Create` | `konturctl vm create` with the grain's environment |
 | `Grains.List` | `docker ps --filter label=grain.id` |
 | `Grains.Get` | name derivation — no call at all |
 | `Grain.Transcript` | `docker logs --since` |
@@ -92,21 +92,25 @@ grain run
         prompt, runs the agent, reports terminal. Writes trajectory
         records to its own stdout. Does not exit until the grain is done.
 
-grain configure                    < spec.json
 grain status                                     > status.json
 grain answer   --request <id>      < answer.json
 grain signal   --id <id>           < signal.json
 grain version                                     > version.json
 ```
 
-**Payloads go on stdin, never argv.** An assembled prompt carries a task's
-whole conversation, and `docker exec` argv crosses the runtime's API as
-JSON — stdin has no size limit and no quoting hazard.
+**Payloads go on stdin, never argv.** A prompt carries a task's whole
+conversation, and `docker exec` argv crosses the runtime's API as JSON —
+stdin has no size limit and no quoting hazard.
 
 **`run`'s stdout and `status`'s stdout are different streams**, which
 reads as a conflict and is not. `run` is PID 1, so its stdout is the
 container log stream; a `status` started by `docker exec` writes to
 whoever called it.
+
+There is no `configure`. A grain is configured by its environment, so a
+container starts knowing what it is — no window between create and
+configure for a failure to fall into, and no "not configured yet" for a
+poll to mean.
 
 **`status` is a verb, not `cat`.** The supervisor writes
 `/run/grain/status.json` and the subcommand could just print it, but going
@@ -122,7 +126,6 @@ A CLI's exit codes are its error type, so they are part of the contract:
 | 0 | ok | parses stdout |
 | 1 | failed; stderr is the detail | reports it |
 | 2 | unknown subcommand or flag | **version skew** — image predates this controller |
-| 3 | not configured yet | retries next tick; still `provisioning` |
 | 4 | unrecognised wire version | fails the run `setup-failed`, naming both |
 
 The distinction the controller must not lose is **exec-failed versus
@@ -148,105 +151,86 @@ takes an `--id` even though a signal replies to nothing.
 
 ## The documents
 
-### `spec.json` → `grain configure`
+### The environment → the container
 
-Written once, at create. Four things:
+A grain is configured entirely by its environment, which is kontur's own
+convention — its README's "configured entirely from environment variables
+so it can be driven directly from a Kubernetes pod spec".
 
-```json
-{
-  "version": "v1",
-  "framework": { "name": "claude", "credential": "sk-ant-oat01-..." },
-  "shape": { "cpus": 2, "memoryMB": 8192, "diskGB": 30 },
-  "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && git checkout -b grain/task-311 && ./scripts/setup.sh && git rev-parse HEAD",
-  "placements": [
-    { "path": "/home/agent/.git-credentials", "content": "https://x:sbx_9f3c1a@10.0.2.1:8080", "mode": "0600" },
-    { "path": "/home/debian/.gemini-api-key", "content": "AIza...", "mode": "0600" }
-  ],
-  "maxRuntime": "2h0m0s"
-}
+```sh
+GRAIN_WIRE_VERSION=v1
+GRAIN_FRAMEWORK=claude
+GRAIN_CREDENTIAL=sk-ant-oat01-...
+GRAIN_SETUP='git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh && git rev-parse HEAD'
+GRAIN_MAX_RUNTIME=2h0m0s
+GRAIN_PLACEMENTS='[{"path":"/home/agent/.git-credentials","content":"...","mode":"0600"}]'
+
+# kontur's own, set by grain and never read back by it
+CHV_CPUS=2
+CHV_MEMORY_MB=8192
+CHV_DISK_SIZE_MB=30720
 ```
 
+**Material travels here too.** An earlier draft delivered the credential
+and placements over an exec's stdin, on the grounds that an environment
+variable shows up in a Kubernetes pod spec. That was wrong about how
+Kubernetes does this: `valueFrom.secretKeyRef` puts a *reference* in the
+pod spec while the value stays in a Secret, with its own RBAC — `get
+secrets` being a distinctly more privileged verb than `get pods` — and its
+own encryption at rest. The kubelet injects it at start, so it reaches
+`/proc/1/environ` inside the container, which is the trusted side of the
+vsock boundary anyway.
+
+```yaml
+env:
+  - name: GRAIN_CREDENTIAL
+    valueFrom:
+      secretKeyRef: { name: grain-claude, key: credential }
+```
+
+Under docker the variables are set directly, where the exposure argument
+was always weak: reading them needs the docker socket, which is
+root-equivalent on that host and can read the process's memory regardless.
+
+**`GRAIN_CREDENTIAL` is its own variable**, not a key inside the
+placements blob, so a deployment can point it at a Secret key rotated and
+scoped on its own.
+
+**`GRAIN_PLACEMENTS` is one JSON array**, not an enumerated
+`GRAIN_PLACEMENT_0_PATH` family: a list of objects has no good flat
+spelling, kontur has no precedent for one, and a single variable is what a
+Secret key holds naturally.
+
+**`CHV_*` are kontur's, and grain never reads them back.** The shim starts
+the VMM as a child and kontur reads its own configuration
+(`internal/config`), so a grain's `Shape` passes straight through in
+kontur's vocabulary. `SpecFromEnv` deliberately does not parse them: a
+second opinion about numbers this side does not act on is worth nothing.
+
 **What is not here is the point.** No task, no repository, no branch, no
-git credential field and no capability model: a grain knows how to run an
-agent in a sandbox and nothing about why. Everything task-shaped arrives
-in one of three shapes — in the prompt (delivered by signal), in `setup`
-(a script the controller composes, clone included), or in a `placement`
-(which is where a credential goes, git's among them).
+capability model: a grain knows how to run an agent in a sandbox and
+nothing about why. Everything task-shaped arrives in the prompt (delivered
+by signal), in `GRAIN_SETUP`, or in a placement.
+`wire_test.go`'s `TestGrainEnvCarriesNoTaskModel` asserts on the rendered
+environment that none of it has crept back.
 
-A shim that understood repositories would have to agree with the
-controller about branch naming, proxy URLs, what to do with a half-made
-checkout and what a task is — grain's whole task model, crossing an
-interface between two separately released artifacts. A shim that runs a
-script and places files has no opinions to keep in sync.
-`wire_test.go`'s `TestSpecCarriesNoTaskModel` asserts on the marshalled
-document that none of it has crept back.
+**`GRAIN_SETUP` must never embed a credential.** The clone reaches the
+proxy with a plain URL and git finds its token in the placement beside it.
+`Spec.Redacted()` blanks material for logging and leaves setup alone
+deliberately, since a failed run is diagnosed by reading exactly what its
+setup tried to do — so a secret in there is a secret in every log that
+quotes it.
 
-**Placements are all guest-side, and carry no side.** Every capability
-grain has that places anything places it in the sandbox —
-`githubsandbox`, `gcpkey`, `geminikey`, all `model.SideSandbox` — and each
-is material the *work* needs; `geminikey` mints a key for a task and names
-its path in the prompt so the work can find it. `model.SideController`
-exists and nothing produces one, and `run.go:1832` skips it, "not written
-anywhere". A discriminator whose second value has never occurred is not
-worth carrying across a versioned wire.
+**`GRAIN_SETUP` is opaque to the shim**, which runs it and reports its
+exit code and output without reading either. That is also how the
+two-phase start gets its facts: the controller wrote the script, so it
+ends it with whatever the prompt needs read back — `git rev-parse HEAD`, a
+log of what earlier attempts pushed — and parses its own output.
 
-The agent's own credential is the case that looks like it wants the other
-side and does not: it is deployment-wide, not per-run, so it reaches the
-container as configuration at create and never travels in a Spec. The
-sandbox cannot read it because of where the agent runs, not because of a
-field here.
-
-**`framework` is a name, a credential, and nothing else.** How that CLI is
-launched, which flags it takes, whether it needs a private HOME and —
-the reason this is an object rather than a string — *where its credential
-goes* are facts about the binary, and the binary is in this image. The
-controller hands over an opaque key; the profile knows whether claude
-wants a file at a path, agy wants a private HOME, or codex wants an
-environment variable. `grain version` reports which profiles an image
-carries, so a task naming one it lacks fails at create rather than inside
-a guest.
-
-The credential travels here rather than as container configuration for two
-reasons. Which one a grain needs follows from the framework its *task*
-chose (`model.Task.AgentFramework`), so static config would mean shipping
-every credential into every container. And container configuration is
-readable where this is not: an environment variable shows in `docker
-inspect` and `/proc/1/environ`, and on Kubernetes it is in the pod spec,
-which means etcd and any `kubectl describe`. Over `grain configure`'s
-stdin it is in none of those.
-
-It is not a placement, which is why dropping `dest` cost nothing: a
-placement is path-addressed, written where the controller says because
-something else expects it there — a prompt naming `geminikey`'s
-`KeyPath`, a git command. This has no path the controller could name.
-
-**`setup` must never embed a credential.** The clone above reaches the
-proxy with a plain URL and git finds its token in the placement beside it
-— which is why that token is a placement rather than interpolated into
-the script. `Spec.Redacted()` blanks material for logging and leaves
-`setup` alone deliberately, since a failed run is diagnosed by reading
-exactly what its setup tried to do, so a secret in here is a secret in
-every log that quotes it.
-
-**`setup` is opaque to the shim**, which runs it and reports its exit code
-and output without reading either. That is also how the two-phase start
-gets its facts: the controller wrote the script, so it ends it with
-whatever the prompt needs read back — `git rev-parse HEAD`, a log of what
-earlier attempts pushed — and parses its own output.
-
-**`maxRuntime` is the only limit, and the grain enforces it.** Turns are a
-framework's own flag, and `Config.MaxAgentTurns`' doc comment already
-concedes both frameworks default to no cap; rebuilds are
-`Policy.MaxRebuilds`' alone. This one is decided by the controller and
-enforced by the grain because a running agent is spending money, and money
-should not keep leaving while a controller is down — see "Who enforces a
-deadline" in `docs/grain.md` for why that is the opposite side from
-`ProvisionBudget` on purpose, and for what it still does not cover. A
-stopped run reports `cancelled` with the limit named.
-
-Durations cross as strings. Go's own marshalling gives nanoseconds as an
-integer, which is correct and unreadable, and these get read by people
-during incidents.
+**`GRAIN_MAX_RUNTIME` is the only limit, and the grain enforces it.** See
+"Who enforces a deadline" in `docs/grain.md` for why that is the opposite
+side from `ProvisionBudget` on purpose, and for what it still does not
+cover. A stopped run reports `cancelled` with the limit named.
 
 ### `status.json` ← `grain status`
 
