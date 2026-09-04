@@ -757,6 +757,31 @@ main.board {
   border-bottom: 1px solid var(--border);
 }
 
+/* The List/Board switch (grain/task-321), in the gap between that
+   divider and the pane's own .content-header: pushed to the right, so
+   the heading below it ("Tasks 3", "Board 3") keeps the left edge every
+   other page's heading has. */
+.repo-tasks-switch {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.75rem 1.75rem 0;
+  flex: none;
+}
+
+/* The board on a repo's page. main.board hands its own scrolling to its
+   columns, which only works if it has a height to divide -- on the
+   tasks view it takes one from the shell, but here it sits under a
+   header block that can be taller than the window itself, which would
+   leave flex: 1 dividing nothing and squash the columns to their
+   headers. The floor is what it gets instead, and the page scrolls to
+   it. */
+.repo-board {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 26rem;
+}
+
 .empty {
   color: var(--text-tertiary);
   padding: 1.5rem 1.75rem;

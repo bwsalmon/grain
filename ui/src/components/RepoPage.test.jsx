@@ -1,8 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RepoPage from "./RepoPage.jsx";
 import api from "../api.js";
+import { loadRepoView, saveRepoView } from "../board.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
@@ -91,7 +92,11 @@ function renderPage(overrides = {}) {
     onOpenReleases: vi.fn(),
     onRefreshConfig: vi.fn(),
     showError: vi.fn(),
-    children: <div>task list</div>,
+    // App hands the page both views and the page picks: here each one
+    // is a line saying which it is, so a test can tell them apart.
+    children: (view) => (
+      <div>{view === "board" ? "task board" : "task list"}</div>
+    ),
     ...overrides,
   };
   render(<RepoPage {...props} />);
@@ -99,6 +104,12 @@ function renderPage(overrides = {}) {
 }
 
 describe("RepoPage", () => {
+  // The List/Board switch is stored per browser (board.js), so one
+  // test's choice would otherwise be the next test's starting view.
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   afterEach(() => {
     api.mockReset();
   });
@@ -115,6 +126,41 @@ describe("RepoPage", () => {
     expect(screen.getByText("Blocked 1")).toBeInTheDocument();
     expect(screen.getByText("3 tasks")).toBeInTheDocument();
     // The repo's own tasks are App's scoped TaskList, passed in.
+    expect(screen.getByText("task list")).toBeInTheDocument();
+    await screen.findByLabelText("Default capabilities");
+  });
+
+  it("shows the repo's tasks as a board when the switch is moved, and remembers it", async () => {
+    routeApi();
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "Board" }));
+    expect(screen.getByText("task board")).toBeInTheDocument();
+    expect(screen.queryByText("task list")).not.toBeInTheDocument();
+    expect(loadRepoView()).toBe("board");
+
+    await userEvent.click(screen.getByRole("button", { name: "List" }));
+    expect(screen.getByText("task list")).toBeInTheDocument();
+    expect(loadRepoView()).toBe("list");
+    await screen.findByLabelText("Default capabilities");
+  });
+
+  it("opens on the view this browser last left a repo page on", async () => {
+    saveRepoView("board");
+    routeApi();
+    renderPage();
+
+    expect(screen.getByText("task board")).toBeInTheDocument();
+    await screen.findByLabelText("Default capabilities");
+  });
+
+  // A ToggleButtonGroup reports null when the chosen button is pressed
+  // again; there is no third view to fall to.
+  it("stays put when the view it is already showing is pressed", async () => {
+    routeApi();
+    renderPage();
+
+    await userEvent.click(screen.getByRole("button", { name: "List" }));
     expect(screen.getByText("task list")).toBeInTheDocument();
     await screen.findByLabelText("Default capabilities");
   });

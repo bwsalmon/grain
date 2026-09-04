@@ -43,9 +43,28 @@
 // no drop that could put a queued task into "Running". Dragging a card
 // reorders the backlog within its own column and nothing else -- see
 // TaskBoard.jsx.
+//
+// # One layout, every board
+//
+// A repo's own page can show its tasks as a board too (RepoPage.jsx,
+// grain/task-321), and that board reads the same stored columns as the
+// board in the rail rather than keeping a layout of its own. The columns
+// describe how this operator works -- which states they approve, which
+// ones they treat as "waiting on me" -- and none of that changes with
+// which repo is on screen. Per-repo layouts would mean editing the same
+// board once per repo, and the columns silently disagreeing between two
+// pages showing the same tasks.
 import { STATE_LABELS, STATE_ORDER } from "./state.js";
 
 export const BOARD_STORAGE_KEY = "grain.board.columns";
+
+// REPO_VIEW_STORAGE_KEY is the other half of that: whether a repo's page
+// shows its tasks as the list or as the board. It is kept here, in this
+// browser, beside the columns and for the same reason -- it is how one
+// person wants to look at a repo, not a fact about the deployment, so it
+// is neither a settings key nor part of the URL. Somebody linking a repo
+// page sends the repo, not their own choice of view.
+export const REPO_VIEW_STORAGE_KEY = "grain.repo.view";
 
 // DEFAULT_COLUMNS is the board somebody who has never opened the editor
 // sees. It is grain's own life-cycle read left to right -- what an agent
@@ -181,6 +200,36 @@ function isDefault(columns) {
   const a = columns.map((c) => ({ title: c.title, states: c.states }));
   const b = DEFAULT_COLUMNS.map((c) => ({ title: c.title, states: c.states }));
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// loadRepoView is which of the two views a repo's page opens on: "board"
+// only if this browser last left it there, and "list" for everything
+// else -- nothing stored, a value from a build that spelled the views
+// differently, or a browser that refuses to hand the value back at all.
+// The list is the default because it is the view the page has always
+// had, and because it is the one that answers "what is the backlog, in
+// order" for a repo somebody has just clicked into.
+export function loadRepoView() {
+  try {
+    return localStorage.getItem(REPO_VIEW_STORAGE_KEY) === "board"
+      ? "board"
+      : "list";
+  } catch {
+    return "list";
+  }
+}
+
+// saveRepoView remembers the switch, and clears the key rather than
+// storing "list" -- the same treatment saveColumns gives the default
+// layout, so a browser that has never chosen the board carries nothing.
+export function saveRepoView(view) {
+  try {
+    if (view === "board") localStorage.setItem(REPO_VIEW_STORAGE_KEY, "board");
+    else localStorage.removeItem(REPO_VIEW_STORAGE_KEY);
+  } catch {
+    // Same as saveColumns: the switch still moves, this browser just
+    // forgets it on reload. Not worth an error banner over a preference.
+  }
 }
 
 // columnOf is the column a task belongs to, or null when no column
