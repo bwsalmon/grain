@@ -97,9 +97,17 @@ type Status struct {
 	// Result is set exactly when Phase is terminal.
 	Result *Result
 	Health Health
-	// Bytes is how much transcript there is, so a poller knows whether
-	// there is anything new to tail without tailing.
-	Bytes int64
+	// Seq is the sequence number of the last trajectory record this grain
+	// emitted, so a poller knows whether there is anything new without
+	// reading it.
+	//
+	// A sequence rather than a byte offset because the trajectory is
+	// carried by the container runtime's own log stream (docs/grain.md,
+	// "The trajectory goes to stdout"), and `docker logs`/`kubectl logs`
+	// are addressed by time and line rather than by byte. A monotonic
+	// per-record sequence is the one cursor both a log stream and a plain
+	// file can honour.
+	Seq int64
 }
 
 // CheckoutFacts is what the controller learns from a grain's working tree.

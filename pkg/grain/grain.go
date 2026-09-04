@@ -120,19 +120,25 @@ type Grain interface {
 	// address anything could deliver to.
 	Signal(ctx context.Context, sig Signal) error
 
-	// Transcript tails this run's output from a byte offset, for a UI
-	// watching a grain live, and returns the next offset. It reads a
-	// container-local file: no guest hop, so tailing costs one exec and
-	// does not touch the sandbox at all.
+	// Transcript reads this run's trajectory from a cursor -- the
+	// sequence number of the last record the caller saw, Status.Seq's own
+	// counter -- and returns the next one. Nothing here touches the
+	// sandbox: the trajectory is the shim's own output, not the guest's.
 	//
-	// This is the one place the polled control plane is not enough: tick
-	// granularity reads as lag to a human watching a run work. A backend
-	// may therefore serve a watched grain from an exec held open for as
-	// long as somebody is watching, rather than one exec per call --
-	// still the same transport and still no credential in the container,
-	// and nothing at all when nobody is watching. The offsets make the
-	// two indistinguishable to a caller, which is why the seam is a
-	// cursor rather than a stream.
+	// It is a cursor rather than a stream because the trajectory is
+	// carried on the container's stdout and read back with the runtime's
+	// own log stream (docs/grain.md, "The trajectory goes to stdout").
+	// That lets a backend serve a UI watching a grain live from a
+	// `docker logs -f` held open for as long as somebody is watching, and
+	// serve everyone else one call at a time, without the two being
+	// different interfaces. The runtime buffers, so a caller that goes
+	// away -- a controller restarting mid-run -- resumes from its cursor
+	// rather than losing what it missed, and a caller that stops reading
+	// never applies backpressure to the agent.
+	//
+	// The trajectory a run is judged by is still the controller's to
+	// keep: container logs rotate, so this is how a transcript is
+	// *carried*, never where it is stored.
 	Transcript(ctx context.Context, from int64) (chunk []byte, next int64, err error)
 
 	// Release destroys the grain: the container, the VMM inside it and

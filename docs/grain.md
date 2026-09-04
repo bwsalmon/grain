@@ -194,13 +194,75 @@ because it stopped needing a daemon hop; making push the architecture
 reinstates daemon hops as the norm and grows `pkg/ui` an ingest surface
 rather than shrinking it.
 
-### The one exception: live transcript
+### The trajectory goes to stdout
 
-The transcript is the only latency-sensitive signal, and it is not
-control-plane data — it is a UI convenience. So it gets option 3, narrowly:
-an exec held open **only while a human has that grain open**, with the
-shim tailing its transcript file into it, torn down when nobody is
-watching. Same transport, no credential, and nothing at all when idle.
+The trajectory is the one signal that genuinely wants low latency, and it
+is not control-plane data — it is an append-only stream a human watches.
+So it does not go through `Observe` at all: **the shim writes it to the
+container's stdout, and the controller reads it back with the runtime's
+own log stream** — `docker logs -f`, `kubectl logs -f`.
+
+This extends a convention kontur already holds to rather than inventing
+one. `internal/hypervisor/args.go:108` routes the guest's serial console
+to kontur's own stdio with `--serial tty`, in its own words "so it shows
+up under `kubectl logs`". Container stdout is already this stack's
+observability channel; the shim is a second writer to it.
+
+It is better than the held-open exec it replaces on four counts:
+
+- **The runtime buffers and retains.** A controller that restarts mid-run
+  resumes from `--since` rather than losing what it missed. A dropped exec
+  loses the stream outright.
+- **No backpressure onto the agent.** The daemon drains stdout
+  continuously. A controller that stopped reading a held-open exec would
+  eventually block the shim's write, which means a UI tab left open could
+  stall a run.
+- **Replay is free.** History comes from the same call as the tail, with
+  no separate seek path.
+- **Log collection gets it for nothing.** Wherever a deployment already
+  ships container logs, the trajectory arrives with them.
+
+**Records must be tagged, and this is not optional.** kontur already
+writes the guest console to that stream, so without tags the trajectory
+and the console interleave unreadably. Stream separation is not available
+either: `kubectl logs` merges stdout and stderr, so splitting by fd works
+under docker and not on Kubernetes. So the shim emits structured lines
+carrying their own source and a monotonic sequence number, and the
+controller demultiplexes.
+
+That tagging turns the interleaving problem into a feature: **the guest
+console arrives on the same channel**, which is exactly what is missing
+when diagnosing a grain that never finished booting. A
+`PhaseProvisioning` run killed by `Policy.ProvisionBudget` can quote the
+last console lines in its `setup-failed` detail rather than reporting only
+that time ran out.
+
+Two limits worth stating plainly:
+
+- **Logs are transport, not storage.** The kubelet rotates container logs
+  (10 MB across 5 files by default) and docker's drivers have their own
+  caps, so a long run's early trajectory can age out. The controller
+  consumes the stream and persists it; the transcript of record stays
+  `Config.TranscriptDir`'s, exactly as it is today. `Grain.Transcript`'s
+  doc comment says this too, because it is the kind of thing that gets
+  forgotten precisely once.
+- **It widens where the trajectory lands.** Prompts, model output and
+  whatever the agent read go wherever that deployment's container logs go
+  — local disk under docker, Cloud Logging by default on GKE. Today they
+  reach only `TranscriptDir` on the controller. Worth a deliberate
+  decision per deployment rather than a discovery.
+
+The cursor follows from the transport: a **sequence number, not a byte
+offset**, since `docker logs` and `kubectl logs` are addressed by time and
+line. A monotonic per-record sequence is the one cursor both a log stream
+and a plain file can honour, which is why `Status.Seq` is what it is.
+
+So the split is cleaner than "an exception to polling":
+
+> **Snapshot state → exec poll. Append-only stream → container logs.**
+
+Both are still the controller reaching in. The grain never dials out under
+either.
 
 ### Transport is not the interface
 
@@ -604,12 +666,13 @@ own control channel.
 
 ## Costs and open items
 
-1. **Live transcript needs its own channel.** Poll-tailing at tick
-   granularity feels laggy to a human watching a run, which is why it is
-   the one exception to "poll, not push" above: an exec held open only
-   while a grain is being watched. It reads a container-local file, so it
-   costs nothing in the sandbox and nothing at all when nobody is
-   watching.
+1. **The trajectory rides the container's log stream**, so it needs
+   tagged records to share stdout with the guest console, and the
+   controller must persist what it reads — container logs rotate, so they
+   carry a transcript and never store one. It also puts prompts and model
+   output wherever that deployment ships container logs, which is a
+   per-deployment decision rather than a detail. See "The trajectory goes
+   to stdout".
 2. **grain needs its own image.** kontur's final stage is `FROM scratch`
    with `ENTRYPOINT ["/usr/local/bin/kontur"]` — a node-based CLI cannot
    run there. grain ships a sandbox image: a real base, `COPY --from=kontur`
