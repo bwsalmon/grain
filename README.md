@@ -37,7 +37,7 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
                 escape-hatch tools (ask_question, comment_on_issue,
-                propose_task, add_review_comment) -- plus two tools whose
+                propose_task, add_review_comment) -- plus three tools whose
                 effect is real and immediate rather than mocked and
                 deferred. open_pull_request
                 (NewOpenPullRequestTools): a run
@@ -56,7 +56,16 @@ pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 failing in a sandbox no tool it holds can repair -- the
                 same hop, to pkg/ui's
                 POST /api/tasks/{id}/sandbox/recreate, and see "A run can
-                rebuild its own sandbox" below. NewSandboxTools runs
+                rebuild its own sandbox" below. And update_status
+                (NewStatusTools): a run can put one short phrase on its
+                own task's row -- "waiting for CI", "running the test
+                suite" -- so a task that has read 'running' for half an
+                hour says what that half hour is going on, over the same
+                hop again (POST /api/tasks/{id}/activity) and for the
+                plainest of reasons: the row lives in the daemon's store.
+                It is the only one of the three that changes nothing --
+                grain shows the phrase and never reads it back -- see "A
+                run can say what it is doing" below. NewSandboxTools runs
                 those four locally, confined to a directory; NewSSHSandboxTools
                 (DockerExecRunner) runs the same four tools inside a
                 kontur-managed sandbox VM's guest instead, by exec'ing
@@ -4829,6 +4838,59 @@ one an agent cannot miss and does not have to be taught to look for, and
 the description is where it reads what the tool costs. Whether that holds
 is worth watching: the failure mode to look for is a run that grinds on
 against a wedged sandbox without ever trying it.
+
+## A run can say what it is doing
+
+A dispatched task reads `running` and nothing else for as long as its run
+lasts. That is the honest state -- `task_state` derives it from a live
+`task_run` row and nothing more -- but it is the same word whether the
+last half hour went on a slow test suite, a wait for CI, or an agent
+going in circles, and the only way to tell was to open the transcript
+once the run was over, by which point the question had answered itself.
+
+`update_status` (`pkg/mcp`'s `NewStatusTools`) lets the run answer it. It
+takes one short phrase -- "waiting for CI on the second push", "running
+the test suite", "reading the dispatch path" -- and grain shows it on
+that task's row for as long as the run lasts, replaced each time the run
+calls it again. It travels the same hop `open_pull_request` and
+`recreate_sandbox` take, to `POST /api/tasks/{id}/activity`, and for the
+plainest of their reasons: the row being written is in the daemon's
+store, and the `mcpserver` process holds nothing but a transport into a
+sandbox. Which task it lands on is fixed by `-task` at process start, so
+a run can only ever narrate itself.
+
+Four decisions shape it, and each is a way it is *less* than the two
+tools beside it:
+
+- **It changes nothing.** grain shows the phrase and never reads it back:
+  no dispatch decision, no state, no merge gate consults it. That is what
+  makes it the one tool here safe to call as often as the run has
+  something new to say -- and what makes the tool's own description say
+  so, since a run that mistook it for `comment_on_issue` would put its
+  answer somewhere nobody is served it.
+- **It is a fact about now, not a log.** The phrase and the moment it was
+  written are two nullable columns on `task_run`, and each call replaces
+  the last. `Store.TaskActivity` reads only *live* runs, so a finished
+  run keeps whatever it last said -- which is how a cancelled run leaves a
+  record of where it got to -- while nothing renders it as current.
+- **The age travels with it.** "Waiting for CI" ten seconds old and the
+  same words an hour old mean opposite things, so the task row renders
+  `activityAt` beside the phrase (`state.js`'s `runActivity`). A run that
+  says one thing and goes quiet is legible as exactly that, rather than
+  as a run still doing what it said.
+- **A call that arrives late is not an error.** A run whose task grain
+  has already finished gets a plain answer saying nothing is listening,
+  not a failure: it raced the end of its own run, which is nobody's
+  mistake, and the phrase is the one thing here whose loss costs the work
+  nothing.
+
+Unlike `recreate_sandbox`, `BuildPrompt` does name this one, on exactly
+the condition that registers it. The reason is the mirror of that tool's:
+this is the only tool a run has whose whole value is to somebody
+*outside* the run, which makes it the one a run working on its own task
+would never go looking for. The paragraph also says when *not* to call it
+-- a status costs a turn like any other call, and a run narrating every
+file it opens has spent its budget on narration.
 
 ## Deploying it
 
