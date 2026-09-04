@@ -1672,13 +1672,73 @@ scripted run cannot show, separately and in this order:
   branch, the line in `NOTES.md` -- are what say it reached this run's
   own sandbox rather than merely existing on a roster.
 
-**CI cannot run this, by design.** `tests.yml` holds no credential at
-all: it triggers on `pull_request`, which runs code from an unreviewed
-branch, and is only safe to trigger that way for as long as there is
-nothing in it worth stealing. Giving that job a `GEMINI_API_KEY` to make
-this one test run would hand every PR branch the deployment's own model
-credential. So the test stays gated and stays skipped there, and this is
-a check a **maintainer runs by hand**:
+**A nightly job runs it now, and no push-triggered job ever will.**
+`.github/workflows/live-agent.yml` runs this one test on a `schedule`
+(and on `workflow_dispatch`), on a runner it installs `agy` onto from the
+same unpinned installer the Dockerfile uses, holding a `GEMINI_API_KEY`.
+Leaving it to whoever remembers was the same shape of gap that let
+`~/.gemini/settings.json` survive in the first place. Three alternatives
+were weighed and rejected:
+
+- **Not `tests.yml`.** That workflow holds no credential at all: it
+  triggers on `pull_request`, which runs code from an unreviewed branch,
+  and is only safe to trigger that way for as long as there is nothing in
+  it worth stealing. Giving that job a key would hand every PR branch the
+  deployment's own model credential.
+- **Not every push to `main`** (nor `build-artifacts.yml`, which already
+  holds a credential and triggers on `push`). The cadence settles it:
+  `main` took 787 merges in the two weeks to 2026-09-04 -- about 56 a
+  day, 170 on its busiest. What this test catches is agy's own layout,
+  flags and event shape drifting, and that drifts when agy ships, not
+  when grain commits, so re-asking it 56 times a day buys nothing over
+  asking it once. The model is also free to decline, or to be
+  rate-limited: per-push means a regularly red `main`, on the very
+  workflow whose green tick otherwise means "the image published from
+  this commit came up".
+- **Not weekly either.** The Dockerfile installs `agy` from its vendor's
+  installer with nothing pinned, so the agent a freshly built image
+  carries can change on a day nobody touched this repository. Nightly
+  costs six more model runs a week than weekly and cuts the worst-case
+  detection window from seven days to one.
+
+**`push`-triggered-therefore-trusted is not sound here**, which is the
+part worth writing down. `build-artifacts.yml` makes that argument for
+its `GITHUB_TOKEN`: a `push` event only fires for a branch in this
+repository, which takes write access to create. True, and insufficient
+for a model credential -- nearly every branch here is pushed by one of
+grain's *own agent runs*, so a workflow file on a branch is code no human
+has read. And a *repository* secret is readable by any workflow on any
+branch push, whichever file declares it, so an `if: github.ref ==
+'refs/heads/main'` guard would be a convention written in a file the
+branch gets to rewrite, not a boundary.
+
+So the boundary is the one GitHub enforces, and it is what a maintainer
+has to create for this job to work:
+
+- `GEMINI_API_KEY` as a secret on a **`live-agent` environment**, not a
+  repository secret, with a deployment branch policy naming the default
+  branch alone. A job on any other ref is then refused the secret before
+  it starts, whatever that branch's copy of the workflow says.
+- **No required reviewers** on that environment. Gating a nightly on
+  someone clicking approve is the same "runs when a human remembers" gap
+  this job exists to close. Bound the blast radius the other way instead:
+  give it a key of its own, restricted to
+  `generativelanguage.googleapis.com` -- the restriction
+  `pkg/capability/geminikey` puts on every key it mints -- and rotate it
+  independently of the daemon's operating key.
+
+Until both exist the job's "Require a credential" step fails every night,
+on purpose and with the instructions in the error: it blocks no merge,
+and a job that skipped quietly would be this same gap in a new place. The
+job runs the test twice before reporting a failure, because the
+regression it exists for (a live agy holding none of grain's tools) fails
+both attempts while a model that declined once usually does not decline
+twice. `tests/deploy` asserts the arrangement rather than trusting it:
+that the two branch-triggered workflows read no `secrets.*` at all, and
+that this one triggers on nothing but the schedule and a manual dispatch.
+
+**A maintainer can still run it by hand**, which is what a change to
+`pkg/agent/antigravity` wants rather than waiting for the clock:
 
 ```
 GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
@@ -1691,8 +1751,9 @@ live run needs the binary as well as the key). `GRAIN_LIVE_AGENT_TEST` is
 there because a skip and a pass are the same `ok` in `go test`'s summary:
 with it set, an unset key or a missing `agy` fails the run instead of
 skipping it, so nobody comes away believing the roster was checked when
-nothing checked it. The `-v` output logs the whole advertised roster,
-which is the line to read.
+nothing checked it -- and it is what the nightly job sets for the same
+reason. The `-v` output logs the whole advertised roster, which is the
+line to read.
 
 **Last exercised: 2026-09-04, against agy 1.1.25 and a live Gemini API
 key.** It passed, and it had to be repaired first: the run was cut off

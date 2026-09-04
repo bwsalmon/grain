@@ -2,14 +2,20 @@ package e2e
 
 // TestLiveIssueCompletesEndToEnd is agent/antigravity's own live gating,
 // one layer up: it exercises the real agy binary against the same real
-// store/gitproxy/git rig e2e_test.go's scripted tests do, so it runs in
-// CI (where neither GEMINI_API_KEY nor agy is present) without failing,
-// but proves -- wherever both are available -- that an unscripted model,
-// left to decide its own tool calls, actually completes an issue the way
-// the scripted tests assume a model would:
+// store/gitproxy/git rig e2e_test.go's scripted tests do, so it skips
+// harmlessly wherever neither GEMINI_API_KEY nor agy is present (the
+// pull-request suite, a laptop), but proves -- wherever both are -- that
+// an unscripted model, left to decide its own tool calls, actually
+// completes an issue the way the scripted tests assume a model would:
 //
 //	GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
 //	  go test ./tests/e2e/... -run TestLiveIssueCompletesEndToEnd -v
+//
+// .github/workflows/live-agent.yml runs exactly that, nightly, with a
+// credential of its own -- so this is a check something remembers rather
+// than only a maintainer. It is scheduled rather than pushed for reasons
+// worth reading before moving it: see that file's header and README's
+// "Proving a live run actually gets the tools".
 //
 // # Why this test is the only one that can see the config file's name
 //
@@ -32,13 +38,15 @@ package e2e
 //
 // # GRAIN_LIVE_AGENT_TEST
 //
-// The two gates below skip, so this file costs CI nothing (no credential
-// is available there, deliberately -- see .github/workflows/tests.yml).
-// A skip is also indistinguishable from a pass in `go test`'s summary
-// line, which is a bad property for the one test standing between this
-// package and a config file agy never opens. Setting
-// GRAIN_LIVE_AGENT_TEST turns both gates into failures, so a maintainer
-// running this by hand finds out that it did not run.
+// The two gates below skip, so this file costs the pull-request suite
+// nothing (no credential is available there, deliberately -- see
+// .github/workflows/tests.yml). A skip is also indistinguishable from a
+// pass in `go test`'s summary line, which is a bad property for the one
+// test standing between this package and a config file agy never opens.
+// Setting GRAIN_LIVE_AGENT_TEST turns both gates into failures, so a run
+// that could not do the one thing this test exists for says so -- which
+// is why the nightly job sets it, and why a maintainer running this by
+// hand should too.
 
 import (
 	"context"
