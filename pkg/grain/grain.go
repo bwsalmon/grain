@@ -155,13 +155,32 @@ type Grain interface {
 	// A controller reattaches on any tick that finds Upstream.Attached
 	// false, and the shim holds calls in between (see Upstream).
 	//
-	// A grain waits for the first attach before starting its agent,
-	// because a tool list is fixed at MCP's initialize and the shim
-	// cannot advertise what it has not yet been told about. So a grain
-	// cannot *start* without a controller, though it survives one dying
-	// mid-run on the list it cached. A controller that dies before
-	// attaching leaves the grain in PhaseProvisioning until
-	// Policy.ProvisionBudget, which is an ending that already has a rule.
+	// A grain waits for the first attach before starting its agent, and
+	// says so in Status.Activity (AwaitingUpstreamNote) while it does.
+	//
+	// It waits rather than starting with only the built-ins because **an
+	// absent tool is not an error**. An agent never told that
+	// open_pull_request exists does not call it and fail; it finishes its
+	// work, pushes a branch with run_command, and opens no pull request.
+	// The run looks fine and nothing is wrong until somebody looks. To
+	// return errors instead, the shim would have to advertise tools it
+	// has not been told about -- which means being configured with their
+	// names and schemas, the mounted declarations this replaced. MCP's
+	// notifications/tools/list_changed does not close the gap either: it
+	// is gated on a client capability, support across CLIs is uneven, and
+	// a client that ignores it loses those tools silently, which is the
+	// same failure with more machinery.
+	//
+	// It is barely a wait in practice. The agent does not start until the
+	// guest has booted and Setup has run, which is minutes; the attach
+	// lands milliseconds after create and runs concurrently with all of
+	// it. What the rule really buys is that a genuinely absent controller
+	// fails loudly -- the grain sits in PhaseProvisioning until
+	// Policy.ProvisionBudget, an ending that already has a rule -- rather
+	// than producing a run that quietly did less than it should have.
+	//
+	// A grain survives a controller dying *mid*-run on the list it
+	// cached; only the first attach is required.
 	//
 	// Held calls are replayed on reattach, so an upstream server must
 	// tolerate seeing one twice: the connection can drop after it acted

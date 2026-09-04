@@ -54,6 +54,19 @@ func (p Phase) Terminal() bool {
 	return false
 }
 
+// AwaitingUpstreamNote is what a grain puts in Activity while it waits
+// for its first attach.
+//
+// Named here because a controller reads it to tell "this grain is
+// booting" from "this grain is booted and nobody has connected to it" --
+// the difference between waiting and a controller that will never
+// arrive. A grain that has read "provisioning" for ten minutes should not
+// need its logs consulted to say which.
+//
+// The ordinary state for a fraction of a second, and a diagnosis after
+// that.
+const AwaitingUpstreamNote = "waiting for the controller to attach"
+
 // Status is the whole of what one poll returns. Every field is here
 // rather than behind its own call because the poll is the only read: a
 // field split out is a second exec per grain per tick.

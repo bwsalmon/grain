@@ -1,6 +1,7 @@
 package grain_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -277,5 +278,34 @@ func TestReconcileAttachesADetachedGrain(t *testing.T) {
 	obs.Status.Upstream = attached()
 	if got := kinds(grain.Reconcile(obs, grain.DefaultPolicy())); len(got) != 0 {
 		t.Fatalf("Reconcile on an attached grain = %v, want nothing", got)
+	}
+}
+
+// A grain waits for its first attach before starting its agent, because
+// an absent tool is not an error: an agent never told open_pull_request
+// exists finishes without opening one and reports success. So the wait
+// has to be visible, and it has to end -- loudly -- rather than becoming
+// a run that quietly did less than it should have.
+func TestAGrainNeverAttachedToIsAttachedThenEventuallyFailed(t *testing.T) {
+	waiting := grain.Observed{
+		Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start,
+			Activity: grain.AwaitingUpstreamNote},
+		Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: grain.AwaitingUpstreamNote},
+		Now: start.Add(time.Minute),
+	}
+	if got := kinds(grain.Reconcile(waiting, grain.DefaultPolicy())); !equal(got, []grain.ActionKind{grain.ActionAttach}) {
+		t.Fatalf("Reconcile = %v, want [attach] for a grain nobody has connected to", got)
+	}
+
+	// Past the budget it is failed and released, and the detail carries
+	// the phrase -- which is what turns "provisioning timed out" into
+	// "nobody ever attached".
+	waiting.Now = start.Add(11 * time.Minute)
+	actions := grain.Reconcile(waiting, grain.DefaultPolicy())
+	if got := kinds(actions); !equal(got, []grain.ActionKind{grain.ActionFail, grain.ActionRelease}) {
+		t.Fatalf("Reconcile = %v, want [fail release] past the provision budget", got)
+	}
+	if !strings.Contains(actions[0].Detail, grain.AwaitingUpstreamNote) {
+		t.Errorf("the failure detail does not say what it was waiting for: %q", actions[0].Detail)
 	}
 }

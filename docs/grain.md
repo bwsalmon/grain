@@ -146,13 +146,30 @@ other stall.
 
 Two consequences worth naming rather than discovering:
 
-- **A grain cannot start without a controller.** A tool list is fixed at
-  `initialize`, so the shim must be told the upstream tools before the
-  agent runs. It waits for the first attach — milliseconds, since the
-  controller just created it — and a controller that dies before attaching
-  leaves the grain in `provisioning` until `ProvisionBudget`, an ending
-  that already has a rule. It *can* survive a controller dying mid-run, on
-  the list it cached.
+- **A grain waits for its first attach before starting its agent**, saying
+  `waiting for the controller to attach` in `activity` while it does.
+
+  It waits rather than starting with only the built-ins because **an
+  absent tool is not an error**. An agent never told `open_pull_request`
+  exists does not call it and fail — it finishes its work, pushes a branch
+  with `run_command`, and opens no pull request. The run looks fine, and
+  nothing is wrong until somebody looks. Returning errors instead would
+  need the shim to advertise tools it has not been told about, which means
+  configuring it with their names and schemas — the mounted declarations
+  this design just removed. MCP's `notifications/tools/list_changed` does
+  not close the gap either: it is gated on a client capability, support
+  across CLIs is uneven, and a client that ignores it loses those tools
+  silently — the same failure with more machinery.
+
+  It is barely a wait. The agent does not start until the guest has booted
+  and `setup` has run, which is minutes; the attach lands milliseconds
+  after create and runs concurrently with all of it. What the rule buys is
+  that a genuinely absent controller fails **loudly** — the grain sits in
+  `provisioning` until `ProvisionBudget`, with the phrase in its detail —
+  rather than producing a run that quietly did less than it should have.
+
+  A grain survives a controller dying *mid*-run on the list it cached;
+  only the first attach is required.
 - **An upstream server must tolerate seeing a call twice.** A connection
   can drop after the server acted and before its answer arrived, and held
   calls are replayed on reattach. Grain's own pull request path already
