@@ -703,3 +703,74 @@ position onto the new ones -- and, for suites, that the run's own tasks
 and the unique index over them come across too. A third test seeds a
 task carrying the old `task-suite` actor and checks `Init` brings it
 onto `suite`.
+
+## Update: a template may be bound to a repo and branch, optionally (grain/task-285)
+
+The "templates carry no target repo or branch" section above went one
+step too far. It was right that a template *had* to carry a target and
+that every caller had to honour it: a qualification plan and a suite
+were already built the other way, and schedules were the one caller
+where a template overrode a repo the schedule had been pointed at.
+Making a target impossible, though, left the many templates that only
+make sense against one repo -- "cut this repo's release", "run this
+repo's nightly sweep" -- with no way to say so, and their repo had to be
+re-named (and could be mis-named) at every point of use.
+
+So the target is back, optional this time. `model.Template` carries
+`Target *RepoRef` and `Base string`: nil is unbound, which is what every
+existing template is and what a template created without a repo stays,
+and a non-nil Target binds the template to that repo, with Base pinning
+a branch within it or staying empty for the repo's default.
+`Template.FiringTarget(target, base)` is the whole rule in one place --
+the binding when there is one, the caller's own when there is not --
+and a bound template's empty Base is passed through rather than falling
+back to the caller's, since a caller's base names a branch of the repo
+the binding has just replaced.
+
+Every caller that turns a template into a task goes through it:
+
+- `orchestrator.fireTaskSchedule` targets the binding over the
+  schedule's own Target/Base, and resyncs the schedule's row to it,
+  alongside the Title/Body/AutoMerge/Reads/Grants display cache it
+  already kept there.
+- `ui.CreateSchedule`/`UpdateSchedule` apply the same rule at the point
+  a schedule is created or attached to a template, so a schedule reads
+  as what it will actually fire rather than only after its first firing.
+  `repo` stops being required outright on `CreateScheduleRequest`: a
+  schedule fired from a bound template needs none, every other schedule
+  still does.
+- `fireSuitePass` resolves target and base per item, so a suite can mix
+  repo-agnostic items with ones bound to a repo of their own and each
+  lands where it belongs.
+
+Qualification is the one caller a binding cannot move, and the check the
+earlier section deleted comes back with it. A qualification run exists
+to test one candidate's own branch, so its tasks still target
+`candidate.Repo`/`candidate.Branch` -- a bound template's branch never
+moves one. A template bound to a *different* repo is instead refused
+entry to that repo's plan: by `ui.Client.PutQualificationPlan` when a
+plan is saved, by `ui.Client.UpdateTemplate` when a template a plan
+already schedules is bound away from it (`DeleteTemplate`'s own "do not
+strand a caller that points at this" care), and by
+`CreateQualificationRun` as the backstop for a template bound after the
+fact.
+
+`template` gets `target_owner`/`target_name`/`base` back. They are
+stored empty rather than NULL, which is what makes
+`ensureTemplateBindingColumns` a plain probe-then-`ALTER TABLE ADD
+COLUMN` in the direction every other migration in `store.go` goes: a
+database from before templates could carry a target has the columns
+already, and its values are exactly the bindings they now mean, so it
+keeps them instead of dropping them, while one from the era in between
+gets them added empty and every template in it stays unbound.
+`ensureTemplateNoTargetColumns`, which dropped them, is gone -- left in
+place it would have dropped the new ones on the next start.
+
+Frontend: `TemplateOverlay` gains the two fields, optional and labelled
+so, with a cleared repo meaning "unbind"; `TemplatesList` chips the
+binding on the rows that have one and searches it; `ScheduleOverlay`
+replaces its repo and base fields with a line naming where the schedule
+will fire once a bound template is chosen; `SuiteOverlay`'s picker
+labels a bound item with its repo; and `RepoReleases`' qualification
+picker leaves out templates bound elsewhere, matching what the API will
+accept.

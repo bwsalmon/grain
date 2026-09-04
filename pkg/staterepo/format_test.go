@@ -160,6 +160,59 @@ func TestTheWorkflowIsNotOverwrittenWithoutForce(t *testing.T) {
 	}
 }
 
+// The one line of the file grain keeps for itself. A workflow written
+// yesterday names yesterday's build, and `grain state check` refuses a
+// dump stamped with a schema it does not know -- so a check nobody
+// repoints fails every pull request against the repository the day the
+// schema moves, over nothing in the change at all.
+//
+// The rule that makes that safe is byte equality with grain's own
+// rendering: the image moves only in a file that is otherwise word for
+// word what grain would have written.
+func TestTheImageIsRepointedAndTheRestOfTheFileIsNot(t *testing.T) {
+	dir := t.TempDir()
+	const was = "ghcr.io/bwsalmon/grain/grain:sha-0000000"
+	if _, err := staterepo.Format(dir, was, false); err != nil {
+		t.Fatalf("formatting: %v", err)
+	}
+	if got, ok := staterepo.RenderedImage([]byte(read(t, workflowPath(dir)))); !ok || got != was {
+		t.Fatalf("grain does not recognise its own rendering: %q, %v", got, ok)
+	}
+
+	const now = "ghcr.io/bwsalmon/grain/grain:sha-abc1234"
+	wrote, err := staterepo.EnsureWorkflow(dir, now, false)
+	if err != nil {
+		t.Fatalf("ensuring the workflow: %v", err)
+	}
+	if !wrote {
+		t.Error("the check was left pointing at a build this deployment does not run")
+	}
+	if got := read(t, workflowPath(dir)); !strings.Contains(got, now) || strings.Contains(got, was) {
+		t.Errorf("the image was not repointed:\n%s", got)
+	}
+	// And having been repointed it stays put: the next tick has nothing
+	// to do, which is what keeps this from being a commit per sync.
+	if wrote, err := staterepo.EnsureWorkflow(dir, now, false); err != nil || wrote {
+		t.Errorf("the workflow was rewritten a second time (%v, %v)", wrote, err)
+	}
+
+	// A file with anything else of somebody's own in it is theirs whole,
+	// image included -- there is no telling which line they meant.
+	edited := strings.Replace(read(t, workflowPath(dir)), "runs-on: ubuntu-latest", "runs-on: self-hosted", 1)
+	if err := os.WriteFile(workflowPath(dir), []byte(edited), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := staterepo.RenderedImage([]byte(edited)); ok {
+		t.Error("a workflow somebody edited is still read as grain's own")
+	}
+	if wrote, err := staterepo.EnsureWorkflow(dir, "ghcr.io/bwsalmon/grain/grain:sha-9999999", false); err != nil || wrote {
+		t.Errorf("grain rewrote a workflow somebody had edited (%v, %v)", wrote, err)
+	}
+	if got := read(t, workflowPath(dir)); got != edited {
+		t.Errorf("an edited workflow was overwritten:\n%s", got)
+	}
+}
+
 // What the generated step has to say for it to do anything at all: which
 // image it runs, that it runs the check against the checkout, and that
 // it does not run on grain's own pushes.

@@ -72,7 +72,7 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // SCHEDULED special case dissolves" is why -- a schedule is itself a
 // human's standing approval, written once and editable like any other
 // declaration, so a firing needs no approval flag of its own the way
-// fileFixTask's own automatic fix needs none either.
+// the merge queue's own automatic repair needs none either.
 //
 // sched.TemplateID (bwsalmon/agents#516), if set, is resolved here --
 // fresh, against the store, not against whatever sched.Title/Body/
@@ -85,10 +85,14 @@ func firingTag(scheduleID string) string { return "schedule:" + scheduleID }
 // comment already tolerates -- not treated as reason to disable the
 // schedule outright.
 //
-// sched.Target and sched.Base are never taken from the template, set or
-// not -- a template carries no target of its own (model.Template's own
-// doc comment on why), so the schedule's own standing repo and branch
-// are what every firing targets, template-backed or not.
+// sched.Target and sched.Base are the schedule's own, unless the
+// template it fires from is bound to a repo of its own, in which case
+// the binding wins (model.Template.FiringTarget). A binding is the
+// template saying "this content only makes sense against this repo", so
+// it has to beat a repo the schedule was pointed at separately -- and
+// ui.scheduleContentFromTemplate applies the same rule when a schedule
+// is created or repointed, so a schedule's own Target/Base are already
+// the bound ones long before this fires.
 func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Schedule, now time.Time) error {
 	tag := firingTag(sched.ID)
 	open, err := store.HasOpenTaskWithTag(ctx, tag)
@@ -110,6 +114,7 @@ func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Sched
 		}
 		content.Title, content.Body, content.AutoMerge, content.Reads, content.Grants =
 			tmpl.Title, tmpl.Body, tmpl.AutoMerge, tmpl.Reads, tmpl.Grants
+		content.Target, content.Base = tmpl.FiringTarget(sched.Target, sched.Base)
 	}
 
 	id, err := store.NewTaskID(ctx)
@@ -148,6 +153,11 @@ func fireTaskSchedule(ctx context.Context, store *model.Store, sched model.Sched
 		if sched.TemplateID != nil {
 			s.Title, s.Body, s.AutoMerge, s.Reads, s.Grants =
 				content.Title, content.Body, content.AutoMerge, content.Reads, content.Grants
+			// Target and Base are part of that cache only while the
+			// template is bound: an unbound one leaves content.Target
+			// and content.Base as the schedule's own, so this assignment
+			// writes back what was already there.
+			s.Target, s.Base = content.Target, content.Base
 		}
 	})
 }

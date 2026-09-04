@@ -691,6 +691,83 @@ func TestProcessResultProposedTaskDoesNotInheritAutoMergeFromANonAutoMergeParent
 	}
 }
 
+// An auto-merge job that works against a base branch of its own passes
+// that on to nothing: a proposal is filed against the repo's default
+// branch, and the human who let one branch take unreviewed commits said
+// nothing about the trunk (model.SameBranch). The proposal says so in
+// its body rather than arriving as ordinary work with a decision quietly
+// made about it.
+func TestProcessResultWithholdsAutoMergeFromAProposalOnAnotherBranch(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.AutoMerge = true
+	task.Base = "release/2.0"
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatalf("marking t1 an auto-merge job on a release branch: %v", err)
+	}
+
+	result := toolResult(agent.ToolCall{
+		Name:      "propose_task",
+		Arguments: map[string]any{"title": "follow-up work", "body": "do more of this"},
+	})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposal, ok := proposalsByTitle(t, ctx, store, task.ID)["follow-up work"]
+	if !ok {
+		t.Fatal("the proposed task was never filed")
+	}
+	if proposal.AutoMerge {
+		t.Error("AutoMerge = true, want false -- this proposal lands on a branch its parent was told nothing about")
+	}
+	if !strings.Contains(proposal.Body, "release/2.0") {
+		t.Errorf("proposal body does not say why auto-merge was withheld: %q", proposal.Body)
+	}
+	// The agent's own words are still the top of the body.
+	if !strings.HasPrefix(proposal.Body, "do more of this") {
+		t.Errorf("proposal body no longer starts with what the run wrote: %q", proposal.Body)
+	}
+}
+
+// The note is only for a proposal that would otherwise have auto-merged:
+// a run that opted its proposal out itself has had no decision made for
+// it, and nothing to explain.
+func TestProcessResultDoesNotExplainAutoMergeAProposalOptedOutOf(t *testing.T) {
+	store, ctx := openStore(t)
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "t1", repo)
+	task.AutoMerge = true
+	task.Base = "release/2.0"
+	if err := store.PutTask(ctx, task); err != nil {
+		t.Fatalf("marking t1 an auto-merge job on a release branch: %v", err)
+	}
+
+	result := toolResult(agent.ToolCall{
+		Name: "propose_task",
+		Arguments: map[string]any{
+			"title": "separate work", "body": "unrelated, review it", "auto_merge": false,
+		},
+	})
+	if err := orchestrator.ProcessResult(ctx, store, client, task, result, "t1-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	proposal, ok := proposalsByTitle(t, ctx, store, task.ID)["separate work"]
+	if !ok {
+		t.Fatal("the proposed task was never filed")
+	}
+	if proposal.AutoMerge {
+		t.Error("AutoMerge = true, want false -- the run asked for false")
+	}
+	if proposal.Body != "unrelated, review it" {
+		t.Errorf("proposal body = %q, want the run's own words alone", proposal.Body)
+	}
+}
+
 // proposalsByTitle collects every task in the store except the one that
 // proposed them, keyed by title: ListTasks' own order is the queue's, not
 // the order a run made its propose_task calls in, and a title is the only
@@ -933,7 +1010,7 @@ func TestRunCycleOpensAPullRequestForABranchAFailedRunAlreadyPushed(t *testing.T
 
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(ranOutOfTurns),
+		Framework:  orchestrator.StaticFramework(ranOutOfTurns),
 		MaxWorkers: 1,
 	}
 

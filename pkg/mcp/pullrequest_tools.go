@@ -11,9 +11,10 @@ package mcp
 // (gitproxy/authorize.go) and ConfigureGitCredentials leaves a usable
 // identity and credential helper behind -- but what CI made of that push
 // was invisible until long after the run had finished, when
-// orchestrator.SyncPullRequests read the checks and the merge queue filed
-// a whole separate fix task for them (orchestrator/sync.go's
-// fileFixTask). Repairing a red build therefore always cost a second
+// orchestrator.SyncPullRequests read the checks and the merge queue sent
+// the task back for a whole further attempt over them
+// (orchestrator/sync.go's requeueForRepair). Repairing a red build
+// therefore always cost a second
 // dispatch, starting from a cold sandbox, to fix something the run that
 // caused it was still sitting there able to fix. With this, the run can
 // push, look, repair and push again inside its own turn budget.
