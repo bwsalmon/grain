@@ -623,12 +623,13 @@ type sandboxRunner interface {
 // is actually reachable over it -- so a caller holding a runner has
 // already waited out the VM's boot.
 //
-// The wait is waitForGuestExec rather than anything watching a port,
+// The wait is waitForGuestReady rather than anything watching a port,
 // because there is no port out here to watch: reaching this guest means
-// exec'ing into its own container, and the first thing that can be
-// observed succeeding is a whole command running inside the guest.
+// exec'ing into its own container. What that wait asks for is a command
+// running inside the guest *and* a default route under it -- see
+// guestReadyProbe for why answering alone stopped being enough.
 func (k *KonturSandboxes) runnerFor(ctx context.Context, name string) (sandboxRunner, error) {
-	if err := k.waitForGuestExec(ctx, name, time.Now().Add(k.cfg.readyTimeout())); err != nil {
+	if err := k.waitForGuestReady(ctx, name, time.Now().Add(k.cfg.readyTimeout())); err != nil {
 		return nil, fmt.Errorf("orchestrator: waiting for kontur VM %q's guest to become reachable: %w", name, err)
 	}
 	return k.execRunner(name), nil
@@ -648,10 +649,36 @@ func (k *KonturSandboxes) execRunner(name string) *mcp.DockerExecRunner {
 	}
 }
 
-// waitForGuestExec polls a trivial command through the docker-exec
-// transport until it succeeds or deadline passes: a VM whose container is
-// up is not yet a VM whose guest has finished booting, and everything
-// short of that looks like a failure to reach it.
+// guestReadyProbe is the command waitForGuestReady runs in the guest,
+// and it asks for a default route rather than for nothing.
+//
+// Answering at all stopped being enough when `kontur exec` moved from
+// SSH to vsock (bwsalmon/kontur#46). The agent is deliberately the
+// earliest service a guest starts -- ordered Before=sysinit.target, so
+// that a guest whose networking failed is still one that can be got into
+// to find out why -- and it needs no network to answer. So `true`
+// succeeds a second into the boot, while the units that configure the
+// NIC from the ip= parameter and install the container's routes
+// (kontur-net-cmdline, kontur-net-routes) are still running. Under SSH
+// that gap could not exist: reaching the guest at all *was* the network
+// coming up.
+//
+// A dispatched task is the thing that pays for the difference. It clones
+// through the git proxy and installs packages within seconds of the
+// sandbox being handed over, and a guest that is reachable but has no
+// route off its own segment fails all of it in a way that reads as a
+// blocked network rather than as a sandbox handed over too early.
+//
+// /proc/net/route rather than `ip route`: it is a file read, so this
+// does not depend on iproute2 being installed in a guest image or on
+// /usr/sbin being on the PATH of the unprivileged account these commands
+// run as. Destination 00000000 is the default route.
+const guestReadyProbe = `awk '$2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route`
+
+// waitForGuestReady polls the guest through the docker-exec transport
+// until it answers *and* has a default route, or deadline passes: a VM
+// whose container is up is not yet a VM whose guest has finished booting,
+// and a guest that answers is not yet one a task can be dispatched into.
 //
 // It probes with a runner of its own whose ConnectTimeout is one poll
 // interval, so a probe against a guest that is not up yet gives up and
@@ -662,12 +689,12 @@ func (k *KonturSandboxes) execRunner(name string) *mcp.DockerExecRunner {
 // It fails immediately on a VM container that has already exited rather
 // than waiting out the rest of deadline exec'ing into something that will
 // never answer.
-func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, deadline time.Time) error {
+func (k *KonturSandboxes) waitForGuestReady(ctx context.Context, name string, deadline time.Time) error {
 	probe := k.execRunner(name)
 	probe.ConnectTimeout = k.cfg.readyPollInterval()
 	var lastErr error
 	for {
-		_, stderr, exitCode := probe.Run(ctx, []string{"true"}, "")
+		_, stderr, exitCode := probe.Run(ctx, []string{"sh", "-c", guestReadyProbe}, "")
 		if exitCode == 0 {
 			return nil
 		}
@@ -686,7 +713,7 @@ func (k *KonturSandboxes) waitForGuestExec(ctx context.Context, name string, dea
 	}
 }
 
-// guestContainerDeadError is what waitForGuestExec returns when it gives
+// guestContainerDeadError is what waitForGuestReady returns when it gives
 // up specifically because the VM's own container has already exited or
 // died, never for any other probe failure (a timeout, a guest still
 // booting, ...) -- see dockerExitedEarly. Acquire matches on this type
@@ -698,15 +725,26 @@ type guestContainerDeadError struct{ err error }
 func (e *guestContainerDeadError) Error() string { return e.err.Error() }
 func (e *guestContainerDeadError) Unwrap() error { return e.err }
 
-// guestExecProbeError renders one failed waitForGuestExec probe as the
+// guestExecProbeError renders one failed waitForGuestReady probe as the
 // error a caller sees if the deadline runs out on it, naming the command
 // an operator can run by hand to see the same thing.
+//
+// The two ways it fails are worth telling apart, because they point at
+// different halves of the boot. A probe that never ran (exitCode < 0)
+// means the guest could not be reached; one that ran and exited non-zero
+// means the guest is answering and simply has no default route yet,
+// which is the network units still coming up -- or, past the deadline,
+// not coming up at all.
 func guestExecProbeError(container, stderr string, exitCode int) error {
 	detail := strings.TrimSpace(stderr)
 	if detail == "" {
 		detail = fmt.Sprintf("exited %d with no output", exitCode)
 	}
-	return fmt.Errorf("`docker exec %s kontur exec -- true`: %s", container, detail)
+	if exitCode > 0 {
+		return fmt.Errorf("the guest in %s answers but has no default route yet (`docker exec %s kontur exec -- sh -c %q`: %s)",
+			container, container, guestReadyProbe, detail)
+	}
+	return fmt.Errorf("`docker exec %s kontur exec -- sh -c %q`: %s", container, guestReadyProbe, detail)
 }
 
 // dockerContainerDead is the set of docker State.Status values
@@ -723,7 +761,7 @@ var dockerContainerDead = map[string]bool{"exited": true, "dead": true}
 // this can't happen. Errors from the status lookup itself (e.g. a
 // transient docker daemon hiccup) are treated as "not dead" rather than
 // propagated: this is only ever a fast-fail optimization layered on top
-// of waitForGuestExec's own deadline, which still applies regardless.
+// of waitForGuestReady's own deadline, which still applies regardless.
 func dockerExitedEarly(ctx context.Context, name string) (status string, dead bool) {
 	status, err := kontur.DockerContainerStatus(ctx, name)
 	if err != nil {

@@ -6,18 +6,24 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 `main` and reaches here by a resync, not by being applied to this copy
 (see "Local patches" below).
 
-**This copy is no longer byte-for-byte upstream.** It carries two local
-patches -- flat mode's default-route discovery, which every sandbox's
-egress depends on, and a guest resolver, which every sandbox's DNS
-depends on -- so a resync has to re-apply both until they land upstream.
-"Local patches" at the bottom is the whole account.
+**This copy is byte-for-byte upstream again**, verified with `diff -r`
+against a fresh checkout (which reports only this file). All three local
+patches this file has listed across the last two resyncs have landed on
+kontur's `main` and come back here as ordinary upstream code -- see
+"Local patches" at the bottom, which is back to saying "None". Keep it
+that way.
 
 This snapshot is kontur's `main` at
-`dc9230b44c7a582b25d6e73992c6495ef0b532d3` (2026-09-03), the merge of
-[bwsalmon/kontur#39](https://github.com/bwsalmon/kontur/pull/39) on top of
-[#38](https://github.com/bwsalmon/kontur/pull/38),
-[#37](https://github.com/bwsalmon/kontur/pull/37) and
-[#36](https://github.com/bwsalmon/kontur/pull/36).
+`0aaceac19e4e4ed47737c47bea6a0551bd7d920c` (2026-09-04), the merge of
+[kontur#70].
+
+Deliberately that commit rather than whatever `main`'s tip is as this
+lands. #70 is the last change grain needed, and the tip has since moved
+several times over things grain did not ask for (a `-state-dir` default,
+`vm status`, `kontur resize` idempotency). Vendoring those too would put
+changes through this repo's CI that nothing here is waiting on, and a
+snapshot is a commit rather than a moving reference in the first place.
+Take the tip on the next resync, when something wants what is in it.
 
 The guest base image grain builds on comes from this same tree:
 `scripts/kontur/build-guest.sh` builds it out of the Dockerfile here,
@@ -57,7 +63,65 @@ fully re-synced to `e475be0e24f4c08217bdce2e80383d4daf9a82b3`
 (2026-09-03, container-capable guests built by booting one,
 bwsalmon/kontur#36, #37 and #38).
 
-## This resync: a VM can be given the disk size it needs
+## This resync: the last two local patches go upstream, and exec leaves SSH
+
+The headline is what this copy stops carrying. Both local patches are
+upstream now, so "Local patches" is back to "None" and a future resync is
+a plain `git archive` again rather than a re-diff.
+
+**Flat mode's default-route discovery** ([kontur#40]) -- the fix that gave
+every sandbox its egress back, previously applied here directly. The file
+it lives in moved (`flat.go` -> `guest.go`) when NAT mode was dropped, so
+this was never going to survive another resync as a patch.
+
+**The guest resolver** ([kontur#67]) -- `kontur-configure-dns`, the
+`GUEST_DNS` build arg and the `NETSHIM_DNS`/`-dns` plumbing, upstreamed
+whole. Nothing about it was grain-specific: a resolver with a public
+default is what any kontur guest wants, and `debootstrap` copying the
+build host's unroutable resolver into the image is a kontur bug rather
+than a grain one. konturctl's own `-dns` is how a deployment on a network
+where `8.8.8.8` is wrong names its own.
+
+Everything else here is what upstream did while those two were away:
+
+**`kontur exec` no longer goes over SSH** ([kontur#46]). It reaches the
+guest over the VM's own virtio-vsock device, where a new `kontur-agent`
+answers. The guest runs no sshd at all now -- no daemon, no host keys, no
+`authorized_keys`, no per-boot keypair, no account to log into. What that
+buys is not tidiness: exec used to depend on the control link being up,
+so a guest whose networking had come up wrong was one kontur could not
+get into to find out why. vsock is carried by the virtio device, so exec
+works with a broken network, no address, or no NIC at all.
+
+For this directory it also retires `GUEST_CONSOLE_WRAP=0`
+(`scripts/kontur/build-guest.sh` no longer passes it) and, with it, the
+pty that used to rewrite newlines and merge stderr into stdout on every
+`read_file`. A session is byte-transparent by default now.
+
+**NAT mode is gone** ([kontur#41]): one VM per pod, flat mode only. Its
+flags are still accepted and ignored, so nothing here has to change.
+
+**`-disk-size-mb`** ([kontur#39]), which `pkg/orchestrator` already
+passes, and a guest that grows its filesystem onto the disk at boot
+([kontur#43]) -- note this overlaps `guest-setup.sh`'s own `grain-growfs`
+unit, which is now redundant rather than wrong; both run, the second
+finds nothing to do. Worth removing once something covers disk growth in
+a test.
+
+And a good deal else that grain does not use yet but which is worth
+knowing exists: `kontur cp`, `kontur ready` / `konturctl vm wait`,
+`konturctl vm exec`/`shell`/`run`, per-command `-h`, and the CNI's routes
+being carried into the guest rather than just its netmask.
+
+[kontur#39]: https://github.com/bwsalmon/kontur/pull/39
+[kontur#40]: https://github.com/bwsalmon/kontur/pull/40
+[kontur#41]: https://github.com/bwsalmon/kontur/pull/41
+[kontur#43]: https://github.com/bwsalmon/kontur/pull/43
+[kontur#46]: https://github.com/bwsalmon/kontur/pull/46
+[kontur#67]: https://github.com/bwsalmon/kontur/pull/67
+[kontur#70]: https://github.com/bwsalmon/kontur/pull/70
+
+## Previous resync: a VM can be given the disk size it needs
 
 One upstream commit on top of the previous snapshot, `652c32c`
 (bwsalmon/kontur#39), and the one this repo asked for: `konturctl vm
@@ -256,88 +320,35 @@ safety- or correctness-critical should be confirmed against a live
 
 ## Local patches
 
-Two, and both belong upstream.
+**None.** All three this file has listed are upstream now, and the way
+they got there is the point of this section rather than a footnote:
 
-### A guest with a nameserver it can reach
+- **The root exec session's PATH** landed as [kontur#70]. It is the one
+  that shows the process working under time pressure: it was written
+  upstream, copied in here byte-for-byte ahead of its merge because it
+  was the fix for a red build, recorded in this section as the one
+  in-flight patch with instructions to drop it by re-vendoring, and then
+  dropped by re-vendoring. A patch is allowed to exist here for the
+  length of a round trip. It is not allowed to be undocumented, and it is
+  not allowed to be re-applied by hand on the next resync.
 
-`deploy/guest-image/overlay-common/usr/local/libexec/kontur-configure-dns`
-and its two service units, the `GUEST_DNS` build arg and the
-`NETSHIM_DNS`/`-dns` plumbing behind it (`internal/netshim/config.go`,
-`flat.go`, `internal/staticpod`, `internal/dockervm`, `internal/cli`),
-plus their tests and the two READMEs.
+- **Flat mode's default-route discovery** landed as [kontur#40]. It was
+  applied here directly first, and the file it lived in has since been
+  renamed (`flat.go` -> `guest.go`, when NAT mode went), which is exactly
+  the drift that makes a local patch expensive: it would not have
+  re-applied cleanly.
+- **The guest resolver** landed as [kontur#67], upstreamed whole from
+  this copy. It spanned fourteen files, and the resync that would have
+  dropped it is the one that found it -- a wholesale `git archive` over
+  this directory deletes a local patch silently, and the only thing that
+  catches it is this file saying the patch is there.
 
-*What breaks without it.* Every guest resolved through whatever
-`/etc/resolv.conf` the machine that built the image happened to have --
-`debootstrap` copies the build host's in, and a build host's resolver is
-routinely an address that only exists in its own network namespace (on
-the Azure VMs GitHub's runners are, the host-only wireserver
-`168.63.129.16`; on a docker build, `127.0.0.11`). From a guest on a tap
-it is simply unroutable, so a sandbox came up with completely open IP
-egress and no DNS at all, and every name lookup hung until it timed out.
-Nothing kontur or grain does noticed: `kontur exec` reaches a guest by
-address, the git proxy and the UI are literal IPs, and the failure
-surfaced only inside a dispatched task, as `apt`/`npm`/`gcloud`/`curl`
-timing out -- which reads as a blocked network rather than as a missing
-resolver. It also meant the image was not reproducible: whichever machine
-built it contributed its own unreachable resolver to every sandbox booted
-from it.
-
-*How it was confirmed.* On a live grain sandbox guest (grain/task-195,
-grain/task-200): `getent hosts github.com` returned nothing and
-`curl https://github.com` timed out, while `8.8.8.8:53` and public `:443`
-addresses connected immediately;
-`sudo sh -c 'echo "nameserver 8.8.8.8" > /etc/resolv.conf'` restored
-resolution on the spot, after which HTTPS to GitHub and to the Google
-APIs both worked. `pkg/orchestrator`'s real-VM suite
-(`assertGuestResolvesNames`) now asserts both halves against a guest built
-from this tree.
-
-*Getting rid of it.* Nothing here is grain-specific -- the resolver is a
-setting with a public default, which is what any kontur guest wants -- so
-this should land on `bwsalmon/kontur`'s `main` and come back by a resync.
-Re-apply it on any resync that predates that, and check
-`internal/netshim/config.go` and `deploy/guest-image/` after every one.
-
-### Flat mode's default-route discovery
-
-In `internal/netshim/flat.go` (`DiscoverIdentity`, `defaultGateway`,
-`isDefaultDst`) plus its coverage in `flat_test.go`.
-
-*What breaks without it.* A flat-mode guest takes over the identity the
-container runtime assigned its namespace, and the last piece of that
-identity is the namespace's default route -- passed to the guest as the
-gateway field of the `ip=` kernel parameter `FlatGuestConfig` derives.
-`DiscoverIdentity` found that route by testing `r.Dst == nil`, which no
-route read back off the kernel ever satisfies: the kernel omits `RTA_DST`
-on a route whose prefix length is zero, and `vishvananda/netlink` fills
-that absence back in the way iproute2 does, synthesizing `0.0.0.0/0`
-(`deserializeRoute`). So the gateway came out nil for every guest, the
-`ip=` parameter carried an empty gateway field, and every sandbox VM
-booted with a routing table that stopped at its own subnet -- no route to
-the git proxy's host, a package registry, GitHub or anything else. The
-guest is otherwise perfectly healthy, which is why this went unnoticed:
-address, MAC and MTU are all correct, `kontur exec` reaches it over the
-control link, and every tool call a run makes succeeds. Only the network
-is gone. NAT mode is unaffected -- there `konturctl` fills the gateway in
-itself, from the bridge CIDR it already knows (`staticpod.VMSpec`).
-
-*How it was confirmed.* On a live grain sandbox guest: `/proc/cmdline`
-carried `ip=172.17.0.4:::255.255.0.0::eth0:off` (an empty third field)
-and `ip route` had no default route; re-running the guest's own
-`/usr/lib/klibc/bin/ipconfig` with the gateway filled in installed
-`default via 172.17.0.1 dev eth0`, after which DNS and HTTPS to the
-internet both worked. `TestDiscoverIdentity_Gateway` reproduces it
-without a VM, against the real kernel: it fails on the old condition and
-passes on the new one.
-
-*Getting rid of it.* This is upstream's bug, not something specific to
-how grain drives kontur, so it should land on `bwsalmon/kontur`'s `main`
-and come back here by a resync -- at which point this section loses an
-entry. The patch is deliberately shaped to make that easy: two
-small unexported helpers, one doc comment and their tests, no
-grain-specific behaviour.
-Until then, re-apply it on any resync that predates the upstream fix, and
-check `internal/netshim/flat.go` after every resync.
+So the rule below is not theory. It cost three round trips to kontur to
+get this directory back to a plain copy, and all three were cheaper than
+the alternative: a patch nobody re-applies is a sandbox with no DNS, or
+no route off its own segment, or a setup script that dies on "useradd:
+not found" -- discovered weeks later inside a dispatched task as
+something that reads like a blocked network.
 
 Otherwise: keep this section at "None". grain is kontur's primary
 consumer, so "upstream wouldn't want this" is rarely true here, and a fix

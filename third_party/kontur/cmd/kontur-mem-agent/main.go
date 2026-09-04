@@ -1,10 +1,9 @@
 // Command kontur-mem-agent is a minimal guest-side daemon: it polls
 // /proc/pressure/memory for this guest's own memory pressure and, when it
-// crosses a threshold, signals the host's internal/memagent listener (by
-// default at its own default route's gateway -- the "kontur run"
-// container this guest belongs to, reachable directly since they share
-// netshim's bridge network, see the top-level README's "Pod-local
-// networking") to grow this VM's memory via cloud-hypervisor's
+// crosses a threshold, signals the host's internal/memagent listener --
+// the "kontur run" container this guest belongs to, reachable over
+// netshim's control link, see the top-level README's "Container
+// networking" -- to grow this VM's memory via cloud-hypervisor's
 // virtio-mem hotplug device. This is the guest-side half of the flow an
 // operator's "kontur resize" drives manually, but automatic and observed
 // from inside the guest, where memory pressure is actually visible.
@@ -26,7 +25,9 @@ package main
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -52,6 +53,19 @@ func main() {
 	threshold := envFloat("KONTUR_MEM_AGENT_THRESHOLD", defaultThreshold)
 	port := envInt("KONTUR_MEM_AGENT_PORT", defaultPort)
 	host := os.Getenv("KONTUR_MEM_AGENT_HOST")
+
+	// A kernel built without CONFIG_PSI has no /proc/pressure at all,
+	// and never grows one later -- the kernel cloud-hypervisor publishes
+	// for its own CI, which is the one kontur's reference guests boot,
+	// is such a kernel. Polling it anyway means the same ENOENT in the
+	// guest's journal every interval for the life of the VM, saying
+	// nothing about why. Say it once, plainly, and stop: there is
+	// nothing for this daemon to do on this kernel, and the host's own
+	// "kontur resize" is unaffected.
+	if _, err := os.Stat(pressurePath); errors.Is(err, fs.ErrNotExist) {
+		log.Printf("no %s: this guest's kernel is built without CONFIG_PSI, so it cannot report memory pressure and this agent has nothing to poll -- the host can still resize this VM with \"kontur resize\"", pressurePath)
+		return
+	}
 
 	log.Printf("polling %s every %s, signalling port %d when \"some avg10\" >= %.2f", pressurePath, interval, port, threshold)
 
@@ -111,10 +125,9 @@ func readPressure(path string) (float64, error) {
 // otherwise ignored: this is just the next poll's problem too.
 //
 // An empty host falls back to this guest's default route's gateway (see
-// defaultGateway), which is the "kontur run" container's own bridge
-// address in NAT mode. That fallback is wrong in flat mode, where the
-// default route leads out to the container network rather than to the
-// host side of this VM, so the guest's control link is configured with
+// defaultGateway), which is wrong here: the guest is spliced onto the
+// container network, so its default route leads out there rather than to
+// the host side of this VM. The guest's control link is configured with
 // an explicit host instead -- see deploy/guest-image's
 // kontur-control-net.
 func signalPressure(host string, port int, avg10 float64) {
@@ -145,10 +158,11 @@ func signalPressure(host string, port int, avg10 float64) {
 
 // defaultGateway returns this guest's default route's gateway address --
 // the same address CHV_CMDLINE's "ip=guest::gateway:..." boot parameter
-// already configured on this guest, i.e. the "kontur run" container that
-// is this guest's host, reachable directly since it shares the pod's
-// bridge network with it (see the top-level README's "Pod-local
-// networking"). Parsed from /proc/net/route instead of shelling out to
+// already configured on this guest. It is only a fallback for a
+// KONTUR_MEM_AGENT_HOST nothing supplied: a netshim-managed guest is
+// spliced onto the container network, so this gateway is that network's,
+// not the "kontur run" container beside it (see the top-level README's
+// "Container networking"). Parsed from /proc/net/route instead of shelling out to
 // "ip route" so this binary needs nothing beyond a kernel with /proc --
 // neither guest rootfs variant otherwise needs iproute2 as of this
 // writing (only the host side does), so pulling it in just for this
