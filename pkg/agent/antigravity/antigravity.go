@@ -714,9 +714,14 @@ func agyWorkspaceDir(home string) string { return filepath.Join(home, "workspace
 // those tools can do no harm, and it disappears with the HOME.
 //
 // It is not a substitute for the guarantee: agy has no way to withhold
-// its own tools (no --tools, no --strict-mcp-config, and its disabledTools
-// setting applies to an MCP server's tools rather than its native ones),
-// so what steers a run to grain's tools is eager registration plus
+// its own tools. Measured against 1.1.26 by reading the shipped binary
+// (see the README): no flag names a tool at all, enabledTools and
+// disabledTools are keys on an MCP *server's* entry in mcp_config.json,
+// a custom agent definition can replace the system prompt but not the
+// tool roster, and settings.json holds the permission system --
+// machinery for approving a call, which Run's
+// --dangerously-skip-permissions switches off -- rather than a roster.
+// So what steers a run to grain's tools is eager registration plus
 // toolPreamble, and what actually contains it is a kontur sandbox.
 func workDir(cfg agent.RunConfig, home string) string {
 	if cfg.SandboxRoot != "" {
@@ -725,40 +730,111 @@ func workDir(cfg agent.RunConfig, home string) string {
 	return agyWorkspaceDir(home)
 }
 
+// withheldNativeTools names the agy built-in tools a run is told to treat
+// as unavailable, and it is the list toolPreamble spells out by name.
+//
+// These are the ones that overlap what grain's own tools do -- run a
+// command, read a file, write one, search the tree -- which is exactly
+// why a model reaches for them: they are the obvious tool for the job it
+// was given, and they are the wrong one here because they execute
+// wherever agy does. They were observed on agy 1.1.25's own init roster
+// (tests/e2e/live_test.go logs the whole of it), which is where a name
+// added to this list should come from too.
+//
+// It is deliberately not the whole roster. agy advertises 57 native
+// tools and pins none of them, so a hand-copied catalogue would drift
+// silently and read as authoritative while doing so; what the prompt
+// says after this list -- anything whose name does not carry grain's
+// prefix -- is the rule, and these are the examples that make it
+// concrete.
+var withheldNativeTools = []string{
+	"run_command", "view_file", "write_to_file",
+	"replace_file_content", "grep_search", "find_by_name",
+}
+
+// sandboxToolNames is the handful of grain tools that actually act on the
+// sandbox -- run_command, read_file, write_file, edit_file -- spelled the
+// way agy names them once eagerly registered.
+//
+// Taken from the constructor rather than written out, for the reason
+// publishedTools is: a tool added to (or renamed in) mcp.NewSandboxTools
+// should change what the prompt tells a run it has, and nobody remembers
+// to edit prose. The rest of the published tools are described by
+// category instead of by name, because which of them a given run actually
+// holds depends on its configuration (pull_request_status needs a repo,
+// open_pull_request and recreate_sandbox a -server/-task pair, the
+// selfdebug tools a grant), and a prompt that named a tool this run does
+// not have would send it looking for one.
+func sandboxToolNames() []string {
+	var names []string
+	for _, t := range mcp.NewSandboxTools("") {
+		names = append(names, mcp.AgyQualifiedToolName(t.Name))
+	}
+	return names
+}
+
 // toolPreamble is the short note prepended to a run's prompt naming which
-// tools reach its sandbox, and it exists because agy cannot be told to
-// withhold its own.
+// tools reach its sandbox and which ones it must not use, and it exists
+// because agy cannot be told to withhold its own.
 //
 // Every other framework grain drives can be handed an empty native tool
-// roster (claude's --tools ” plus --strict-mcp-config). agy offers no
-// equivalent, so a run always sees agy's own run_command, view_file,
-// write_to_file, replace_file_content and the rest alongside grain's --
-// and those execute wherever agy itself is running, which is the
-// controller. On a host-rooted sandbox that lands in the sandbox
-// directory by accident, because it is also agy's working directory; on a
-// kontur run it does not land in the sandbox at all. Either way the call
-// bypasses everything grain's own tools carry with them: the result caps,
-// the timeout reporting, the remaining-runtime announcements, and the
-// record of the call that orchestrator reads a run's outcome from.
+// roster (claude's --tools ” plus --strict-mcp-config), or one that can
+// do no damage (codex's read-only sandbox_mode). agy offers neither, so a
+// run always sees agy's own run_command, view_file, write_to_file,
+// replace_file_content and the rest alongside grain's -- and those
+// execute wherever agy itself is running, which is the controller. On a
+// host-rooted sandbox that lands in the sandbox directory by accident,
+// because it is also agy's working directory; on a kontur run it does not
+// land in the sandbox at all. Either way the call bypasses everything
+// grain's own tools carry with them: the result caps, the timeout
+// reporting, the remaining-runtime announcements, and the record of the
+// call that orchestrator reads a run's outcome from.
 //
-// Saying so in the prompt is the only lever there is. It is stated as
-// what the tools do rather than as a rule, because a model that
-// understands why its native tools are the wrong ones here keeps choosing
-// correctly in situations this text did not anticipate.
+// Saying so in the prompt is the only lever there is, so it says three
+// things rather than one: which tools do the work here (by name, from the
+// constructor), that the built-in ones are to be treated as unavailable
+// (by name, so the model is not left to work out which of its own tools
+// the rule covers), and that the two rosters share names -- agy's own
+// run_command and grain's mcp_<server>_run_command are different tools on
+// different machines, and a model that has both in front of it and
+// notices neither the prefix nor the collision picks the wrong one while
+// believing it picked the right one.
+//
+// Each is stated as what the tools do rather than as a rule for its own
+// sake, because a model that understands why its native tools are the
+// wrong ones here keeps choosing correctly in situations this text did
+// not anticipate.
 func toolPreamble(cfg agent.RunConfig) string {
 	where := "your sandbox"
 	if cfg.KonturVM != "" {
 		where = "your sandbox, which is a separate virtual machine"
 	}
-	return "Use the mcp_" + mcpServerName + "_* tools for everything you do to " + where + ".\n" +
-		"Your own built-in tools -- run_command, view_file, write_to_file, replace_file_content, " +
-		"grep_search, find_by_name and the rest -- do not run there. They run on the machine hosting " +
-		"this session, which is not the sandbox and is not where your work belongs, and grain does not " +
-		"see the calls, so anything you do with them is both in the wrong place and unrecorded. " +
-		"mcp_" + mcpServerName + "_run_command, mcp_" + mcpServerName + "_read_file, " +
-		"mcp_" + mcpServerName + "_edit_file and mcp_" + mcpServerName + "_write_file are the ones " +
-		"that reach " + where + "; the rest of the mcp_" + mcpServerName + "_* tools are how you " +
-		"report back, ask a question, or read CI.\n\n"
+	prefix := mcp.AgyQualifiedToolName("")
+	return "Use the " + prefix + "* tools for everything you do to " + where + ". " +
+		joinNames(sandboxToolNames()) + " are the ones that reach " + where + "; " +
+		"the rest of the " + prefix + "* tools are how you report back, ask a question, " +
+		"read CI, or ask grain to open your pull request.\n" +
+		"Treat every one of your own built-in tools as unavailable -- " +
+		strings.Join(withheldNativeTools, ", ") + ", and anything else whose name does not begin " +
+		prefix + ". They do not run in " + where + ": they run on the machine hosting this " +
+		"session, which is not the sandbox and is not where your work belongs, and grain does " +
+		"not see the calls, so anything you do with them is both in the wrong place and " +
+		"unrecorded. The names collide, which is the trap -- your own run_command and " +
+		mcp.AgyQualifiedToolName("run_command") + " are different tools on different machines, " +
+		"and only the prefixed one does what you were asked to do.\n\n"
+}
+
+// joinNames renders a tool list as prose: "a, b and c". A plain
+// strings.Join would read as a fragment of JSON in the middle of a
+// sentence the model is meant to take as an instruction.
+func joinNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // userEvent is the one stdin line a `--input-format stream-json` run
@@ -826,9 +902,11 @@ func userEvent(prompt string) (string, error) {
 // HOME holds exactly one MCP server, so grain's tools are the only MCP
 // tools there are. Those tools are registered eagerly, so the model can
 // see them rather than having to go looking. And toolPreamble opens the
-// prompt by saying which tools reach the sandbox and that agy's own do
-// not. verifyToolRoster then reports -- as a transcript line, not a
-// failure -- a roster with no route to grain's server at all.
+// prompt by naming both rosters: the grain tools that reach the sandbox,
+// and the agy tools to treat as unavailable (withheldNativeTools),
+// including the names the two rosters share. verifyToolRoster then
+// reports -- as a transcript line, not a failure -- a roster with no
+// route to grain's server at all.
 //
 // None of that is a guarantee, and it is not offered as one. A deployment
 // that needs one should run agy against a kontur sandbox (cfg.KonturVM),
