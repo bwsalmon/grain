@@ -1658,9 +1658,57 @@ with the evidence:
   `DENIED` do not). Anything written here therefore has to be asserted
   live, not merely accepted by the binary.
 
-So the prompt still carries the rule, `--dangerously-skip-permissions`
-plus the permission system is the only place a real denial could come
-from, and a kontur sandbox is what actually contains a native tool.
+**Two of those answers were incomplete, and the second of them is a
+denial.** The settings file does carry a tool-level ruleset after all, and
+agy documents a hook that blocks a call outright. Both are written into
+every run's private `HOME` now (`permissionRules` and `hookConfigJSON` in
+`agent/antigravity`), and both were established the same way as the
+paragraphs above -- a throwaway CI job holding a real `agy` 1.1.26:
+
+- **`settings.json` takes `permissions.allow` / `permissions.deny`, and
+  they load.** Write the block, ask the binary what it read
+  (`agy -p /permissions`, which print mode answers without an agent turn
+  or a credential), and it prints one record per rule:
+  `global<TAB>deny<TAB>run_command`. Bare names, `run_command(*)` and
+  `regex:` forms all survive; a malformed value (`"deny": 12345`) is
+  dropped in silence, no rule and no complaint -- the failure mode this
+  section already warned about. What the rules do *not* do is change the
+  roster: the `init` event of a real stream-json session advertises the
+  same 55 native tools with the block and without it. And `Run` passes
+  `--dangerously-skip-permissions`, which that same event reports as
+  permission mode `always-proceed`, while agy's own prompt calls an
+  always-deny decision "overridden by dangerously-skip-permissions". So
+  the rules are written because they are the documented place to say what
+  a session may do and they cost a run nothing, not because a run without
+  a model credential could be made to prove they bite.
+- **A `PreToolUse` hook is a hard block, by agy's own account.** The
+  binary unpacks its customization guide into any fresh `HOME`
+  (`antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md`), and
+  it specifies `hooks.json` in the global customization root
+  `~/.gemini/config/` -- beside the `mcp_config.json` this package already
+  writes -- handing each hook `{"toolCall": {"name", "args"}}` on stdin
+  before the tool runs and reading a decision back on stdout, where
+  `"deny"` means "hard block the execution immediately". That is a
+  different mechanism from the permission prompt the flag auto-approves.
+  grain's hook is grain: `hooks.json` runs `grain agy-tool-hook`
+  (`cmd/grain/agyhook.go`), which answers from `HookDecision`.
+- **It denies by name, and never allows by name.** `HookDecision` denies
+  the tools in `withheldNativeTools` -- agy's own file and command tools,
+  now the whole of that set rather than a representative handful -- and
+  returns `{}`, no opinion, for everything else. Not "deny anything
+  without grain's prefix", because this hook stands in front of *every*
+  tool call a run makes: a surprise in the payload would then be a run
+  that can do nothing at all, whereas a deny list can only ever fail back
+  to the behaviour this repository already had. A missing hook, an
+  unparseable payload and a grain binary that is not there all land in the
+  same safe place.
+
+So the prompt still carries the rule, the permission rules say it again
+where agy stores policy, the `PreToolUse` hook is the one place a call can
+actually be stopped, and a kontur sandbox is still what contains a native
+tool that gets past all three. None of the three has been watched
+stopping a live model, because that needs the nightly credential
+(`live-agent.yml`) rather than a branch's own CI.
 
 How that was established is worth keeping, because the question keeps
 coming back and a grain sandbox cannot answer it: the agent sandbox has
@@ -2981,9 +3029,8 @@ An empty repository is worth formatting before it is adopted:
 `grain state format`, in a clone of it, writes the README, the
 `.gitignore` and the CI step that validates every later pull request
 against it (see "A task can change the settings" below). It is optional
--- grain seeds a repository that has had nothing done to it just the same
--- and it is the only way that CI step gets there, since grain's own
-pushes deliberately never carry a workflow file.
+-- grain seeds a repository that has had nothing done to it just the
+same, and installs that CI step itself on the first sync after it does.
 
 Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
@@ -3043,20 +3090,48 @@ deployment. As a CI step in the state repository (`grain state check .`
 needs no `-data-dir`, no store and no daemon) it fails the pull request
 instead.
 
-`grain state ci DIR` is what puts it there. It writes
-`.github/workflows/grain-state-check.yml` into a clone of the state
-repository: a checkout and one `docker run` of grain's own published
-image, on pull requests alone -- grain commits to that repository itself
-every time its database changes, and validating those pushes would spend
-a CI run per task state change on a dump grain had just written out of
-the database the check imports it back into. The image is a flag, because
-the check only means anything against a build that knows the same schema
-as the deployment (`grain state status` prints both numbers). Neither
-this nor `format` below commits anything, and that is deliberate: a push
-adding a file under `.github/workflows` is refused unless the credential
-making it may write workflows, and a commit sitting in the deployment's
-own working tree that its sync loop can never push would wedge every
-later sync behind it.
+grain installs that step itself, so it runs whether or not anybody
+remembered to add it. `Seed` and every `Sync` write
+`.github/workflows/grain-state-check.yml` when it is not there -- a
+repository grain seeds gets it on the way in, and one a merged pull
+request dropped it out of gets it back on the next tick -- and the file
+is a checkout and one `docker run` of grain's own published image, on
+pull requests alone: grain commits to that repository every time its
+database changes, and validating those pushes would spend a CI run per
+task state change on a dump grain had just written out of the database
+the check imports it back into. The image is grain's own container
+because grain publishes no bare binaries and that package is public, so
+the step needs no credential of any kind.
+
+Unlike the README, which is grain's text and is rewritten on every sync,
+a workflow that is already there is never touched again. Pinning the
+image to the tag a deployment runs is the obvious edit -- the check only
+means anything against a build that knows the same schema (`grain state
+status` prints both numbers) -- and a runner, a trigger or a step of
+somebody's own are just as much theirs; a file grain rewrote every
+thirty seconds would be a file whose editor is fighting a timer, which
+is the same reason the export must not fight a hand edit to a table
+file. Deleting it is not an opt-out, because grain writes back what is
+missing: `"noWorkflow": true` in `state-repo.json` is, and
+`"checkImage"` pins the image from the host side.
+
+That leaves the reason grain did not commit this file until now, which
+is real: a push adding a file under `.github/workflows` is refused
+unless the credential making it may write workflows, and grain's own
+installation token need not be able to. So the workflow is a commit of
+its own, pushed on its own, and a refusal -- GitHub says "refusing to
+allow ... to create or update workflow" -- is undone in full: the commit
+is dropped, the file removed, the export goes on untouched, and the
+journal says to run `grain state ci` in a clone and commit the file with
+a credential that may. grain tries again a day later, so granting the
+permission needs no restart. A local-only repository gets no workflow at
+all: there is no GitHub to run one.
+
+`grain state ci DIR` is that manual path, and the one for a repository
+whose deployment cannot push workflows. It writes the same file into a
+clone of the state repository, with `-image` to pin and `-force` to
+replace one that is already there, and commits nothing: it runs in
+somebody's own checkout, and the commit is theirs to make.
 
 `grain state format DIR` is the step before adopting: an operator has
 made an empty repository on GitHub and cloned it, and this lays out the

@@ -34,6 +34,24 @@ type Settings struct {
 	// and a credential written into it would be a credential in
 	// plaintext in the data directory with nothing marking it as one.
 	TokenFile string `json:"tokenFile,omitempty"`
+	// CheckImage is the container image the CI workflow grain installs in
+	// the state repository runs `grain state check` from, and empty is
+	// DefaultCheckImage. A deployment held at an older tag wants that tag
+	// here: the check refuses a dump stamped with a schema it does not
+	// know, so a workflow pointed at a newer build fails every pull
+	// request for a reason that has nothing to do with the change.
+	CheckImage string `json:"checkImage,omitempty"`
+	// NoWorkflow stops grain installing that workflow at all -- the
+	// operator whose state repository is checked by something else.
+	//
+	// It is here rather than expressed by deleting the file, because
+	// grain writes the file back whenever it is missing (that is what
+	// makes a merge that dropped it recoverable), so deleting it is not a
+	// decision that stays made. Editing it is: a workflow that is already
+	// there is never rewritten, so the operator who only wants a
+	// different image or a different runner changes the file and leaves
+	// this alone.
+	NoWorkflow bool `json:"noWorkflow,omitempty"`
 }
 
 // SettingsFileName is what the file is called in the data directory.

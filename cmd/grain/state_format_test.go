@@ -71,6 +71,35 @@ func TestStateCIAddsTheCheckToARepositoryThatIsAlreadyInUse(t *testing.T) {
 	}
 }
 
+// Adopting is about a repository; whether grain installs the CI step and
+// which image it runs are about this deployment -- its credential, its
+// build. An operator who turned the step off, or pinned it, has not said
+// something about the repository they happened to be pointed at, so
+// pointing the deployment somewhere else must not silently undo it.
+func TestAdoptingADifferentRepositoryKeepsWhatWasSaidAboutTheCheck(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := staterepo.SaveSettings(dataDir, staterepo.Settings{
+		Remote:     "https://example.invalid/old-state.git",
+		TokenFile:  filepath.Join(dataDir, "old-token"),
+		CheckImage: "ghcr.io/bwsalmon/grain/grain:sha-abc1234",
+		NoWorkflow: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := adoptedSettings(dataDir, staterepo.Settings{
+		Remote: "https://example.invalid/new-state.git", Branch: "main",
+	})
+	if got.CheckImage != "ghcr.io/bwsalmon/grain/grain:sha-abc1234" || !got.NoWorkflow {
+		t.Errorf("adopting forgot what this deployment said about the CI step: %+v", got)
+	}
+	// And the fields that do describe the repository are the new ones: a
+	// deployment that carried the old token file across would be pushing
+	// to one repository with the credential for another.
+	if got.Remote != "https://example.invalid/new-state.git" || got.TokenFile != "" {
+		t.Errorf("adopting carried the old repository's own settings across: %+v", got)
+	}
+}
+
 func TestStateCIAcceptsAnImageToPinTheCheckTo(t *testing.T) {
 	dir := exportedState(t)
 	const image = "ghcr.io/bwsalmon/grain/grain:sha-abc1234"

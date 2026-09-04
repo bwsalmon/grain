@@ -60,8 +60,9 @@ Commands:
                             a clone you commit and push yourself. Needs no
                             -data-dir
   ci [DIR] [-image I] [-force]
-                            write just that CI step, into a repository a
-                            deployment is already using. Needs no -data-dir
+                            write just that CI step, by hand, for a deployment
+                            whose own credential may not push workflows -- grain
+                            installs it itself otherwise. Needs no -data-dir
   key show                  print this installation's secrets public key
   key path                  print where the private key is read from
   key import [-key-file F]  install a secrets private key this operator holds,
@@ -309,9 +310,9 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 	if archived != "" {
 		fmt.Printf("moved the previous state repository to %s\n", archived)
 	}
-	if err := staterepo.SaveSettings(dataDir, staterepo.Settings{
+	if err := staterepo.SaveSettings(dataDir, adoptedSettings(dataDir, staterepo.Settings{
 		Remote: *remote, Branch: *branch, TokenFile: *tokenFile,
-	}); err != nil {
+	})); err != nil {
 		return err
 	}
 	repo, err := openStateRepo(ctx, dataDir)
@@ -463,13 +464,14 @@ func stateCheck(ctx context.Context, args []string) error {
 //
 // It is the step before `grain state adopt`, and it runs somewhere else
 // -- in a clone the operator made, not in the deployment's own working
-// tree. That is not squeamishness about touching the tree. A push that
-// adds a file under .github/workflows is refused unless the credential
-// making it may write workflows, and grain's own installation token need
-// not be able to: a commit sitting in the deployment's tree that its
-// sync loop can never push would wedge every later sync behind it, so
-// the one file that carries that risk is committed by a human with a
-// credential of their own. Nothing here commits anything.
+// tree -- so nothing here commits anything: the commit belongs to
+// whoever is standing in that clone.
+//
+// It is optional now that the deployment installs the CI step itself
+// (staterepo.installWorkflow), and it is still worth running: a
+// repository formatted before it is adopted explains itself from its
+// first commit, and a deployment whose credential may not push files
+// under .github/workflows will never install the step on its own.
 //
 // It writes no dump, and that is what keeps the bootstrap's two cases
 // apart. A repository with a dump in it is one `adopt` imports over the
@@ -507,9 +509,8 @@ func stateFormat(args []string) error {
 	for _, path := range formatted.Left {
 		fmt.Printf("  left    %s alone; it is already there (-force replaces it)\n", path)
 	}
-	fmt.Printf("\nCommit and push these yourself: a push that adds a file under\n"+
-		".github/workflows needs a credential that may write workflows, and grain's\n"+
-		"own pushes deliberately never carry one.\n\n"+
+	fmt.Printf("\nCommit and push these yourself -- this is your clone, not the deployment's\n"+
+		"working tree, and nothing here has committed anything:\n\n"+
 		"  git -C %s add .\n"+
 		"  git -C %s commit -m 'Format this repository for grain'\n"+
 		"  git -C %s push\n\n"+
@@ -521,14 +522,19 @@ func stateFormat(args []string) error {
 	return nil
 }
 
-// stateCI writes the validation workflow into a repository that already
-// has one of everything else -- the case `format` cannot cover, because
-// a deployment has been pushing to this repository since before the
-// workflow existed and formatting it would mean nothing.
+// stateCI writes the validation workflow into a clone of a repository by
+// hand.
 //
-// The same warning applies to the commit as it does above, and for the
-// same reason, which is why this writes the file and stops rather than
-// committing into a deployment's working tree.
+// A deployment installs the step itself now
+// (staterepo.installWorkflow), so this is the path for the case that
+// cannot: a push adding a file under .github/workflows is refused unless
+// the credential making it may write workflows, and grain's own
+// installation token need not be able to. A deployment that hit that
+// says so in its journal and names this command, which writes the file
+// where a human with a credential of their own can commit it.
+//
+// Like `format`, it writes the file and stops: this runs in somebody's
+// clone, and the commit is theirs.
 func stateCI(args []string) error {
 	fs := flag.NewFlagSet("grain state ci", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -553,9 +559,9 @@ func stateCI(args []string) error {
 		return nil
 	}
 	fmt.Printf("wrote %s\n", filepath.Join(dir, filepath.FromSlash(staterepo.WorkflowFile)))
-	fmt.Printf("\nCommit and push it yourself: a push that adds a file under\n" +
-		".github/workflows needs a credential that may write workflows, and grain's\n" +
-		"own pushes deliberately never carry one.\n")
+	fmt.Printf("\nCommit and push it yourself, with a credential that may write workflows:\n" +
+		"a deployment whose own credential may not is the reason this command exists,\n" +
+		"and grain leaves a workflow that is already there exactly as it finds it.\n")
 	return nil
 }
 

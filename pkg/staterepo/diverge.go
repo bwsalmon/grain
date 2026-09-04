@@ -57,12 +57,21 @@ var ErrDiverged = errors.New("the state repository and its remote have diverged"
 // the one an older build left behind is grain's own too, and a deployment
 // that diverged across that upgrade would otherwise be stuck forever on a
 // commit whose only content is a deletion it will happily make again.
+//
+// WorkflowFile is on it for the same reason and with the same argument
+// as the dump: the commit that installs the CI step (installWorkflow,
+// format.go) is grain's own, its content is generated, and a sync that
+// finds the file gone writes it again -- so a workflow commit that was
+// committed but never pushed is one a reset destroys no information by
+// throwing away. Left off, a deployment whose workflow push was overtaken
+// by a merge would sit diverged until somebody went to the host.
 var exportedPaths = []string{
 	TablesDir + "/",
 	SchemaVersionFile,
 	ReadmeFile,
 	IgnoreFile,
 	SecretsFile,
+	WorkflowFile,
 }
 
 // RecoverDiverged clears a divergence that is grain's own to clear, by

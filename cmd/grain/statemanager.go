@@ -305,7 +305,9 @@ func (m *stateManager) Adopt(ctx context.Context, req ui.AdoptRequest) (ui.State
 			return ui.StateRepoStatus{}, err
 		}
 	}
-	settings := staterepo.Settings{Remote: remote, Branch: strings.TrimSpace(req.Branch)}
+	settings := adoptedSettings(m.dataDir, staterepo.Settings{
+		Remote: remote, Branch: strings.TrimSpace(req.Branch),
+	})
 	if req.Token != "" {
 		path, err := writeStateRepoToken(m.dataDir, req.Token)
 		if err != nil {
