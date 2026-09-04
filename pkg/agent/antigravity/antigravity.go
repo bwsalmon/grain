@@ -807,7 +807,7 @@ func HookDecision(payload []byte) []byte {
 	// the deny list as "run_command", which is precisely the name
 	// collision toolPreamble spends a paragraph on -- here it would deny
 	// the run the one tool that does reach its sandbox.
-	if !slices.Contains(withheldNativeTools, in.ToolCall.Name) {
+	if !IsWithheldNativeTool(in.ToolCall.Name) {
 		return noOpinion
 	}
 	reply, err := json.Marshal(map[string]any{
@@ -994,6 +994,20 @@ var withheldNativeTools = []string{
 	"view_file", "write_to_file", "replace_file_content",
 	"multi_replace_file_content", "sed_file", "list_dir",
 	"grep_search", "find_by_name", "notebook_edit", "notebook_execution",
+}
+
+// IsWithheldNativeTool reports whether name is one of agy's own tools
+// this package refuses -- spelled as agy spells it in a hook payload,
+// which is bare rather than prefixed (see HookDecision on why the raw
+// name is what matters).
+//
+// Exported for the live test that watches a real agy honour the refusal
+// (tests/e2e/live_native_tools_test.go). That test has to tell a native
+// call apart from grain's own in agy's own vocabulary, and a second copy
+// of this list written out there would go stale the first time a name is
+// added here.
+func IsWithheldNativeTool(name string) bool {
+	return slices.Contains(withheldNativeTools, name)
 }
 
 // sandboxToolNames is the handful of grain tools that actually act on the

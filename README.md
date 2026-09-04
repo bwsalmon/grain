@@ -1604,9 +1604,12 @@ as unavailable, and the fact that the two rosters share names -- so a
 model reaching for "run\_command" picks a tool by its prefix rather than by
 its verb, which is the mistake the bare rule ("use grain's tools") leaves
 available. `verifyToolRoster` then notes, on the run itself, a roster with
-no route to grain at all. A deployment that needs a hard guarantee should
-run against a kontur sandbox, where the controller's filesystem is not
-reachable from the guest at all.
+no route to grain at all. And a fourth thing does more than stand in for
+the switch: a `PreToolUse` hook refuses the call outright, which a live
+model has been watched running into (the next-but-one paragraph). A
+deployment that needs a hard guarantee should still run against a kontur
+sandbox, where the controller's filesystem is not reachable from the guest
+at all.
 
 **agy 1.1.26 has no denylist for its own native tools, and this is now
 read off the binary rather than assumed.** The whole of what it offers,
@@ -1662,8 +1665,11 @@ with the evidence:
 denial.** The settings file does carry a tool-level ruleset after all, and
 agy documents a hook that blocks a call outright. Both are written into
 every run's private `HOME` now (`permissionRules` and `hookConfigJSON` in
-`agent/antigravity`), and both were established the same way as the
-paragraphs above -- a throwaway CI job holding a real `agy` 1.1.26:
+`agent/antigravity`). Their schemas were established the way the
+paragraphs above were -- a throwaway CI job holding a real `agy` 1.1.26 --
+and what they *do* was established afterwards, by running that binary
+against a real credential and reading the tool steps back off its
+`stream-json`:
 
 - **`settings.json` takes `permissions.allow` / `permissions.deny`, and
   they load.** Write the block, ask the binary what it read
@@ -1677,11 +1683,21 @@ paragraphs above -- a throwaway CI job holding a real `agy` 1.1.26:
   same 55 native tools with the block and without it. And `Run` passes
   `--dangerously-skip-permissions`, which that same event reports as
   permission mode `always-proceed`, while agy's own prompt calls an
-  always-deny decision "overridden by dangerously-skip-permissions". So
-  the rules are written because they are the documented place to say what
-  a session may do and they cost a run nothing, not because a run without
-  a model credential could be made to prove they bite.
-- **A `PreToolUse` hook is a hard block, by agy's own account.** The
+  always-deny decision "overridden by dangerously-skip-permissions". That
+  override wins, and it has now been watched winning: a live run holding
+  this exact block, asked to list a directory, ran agy's own `list_dir` --
+  one of the names it denies -- to completion. So the rules stop nothing
+  as grain runs agy. They are written because they are the documented
+  place to say what a session may do and they cost a run nothing, and the
+  hook below is what actually blocks a call.
+- **A `PreToolUse` hook is a hard block, and this one has been watched
+  blocking.** A live `agy` 1.1.26 driving `gemini-3.1-pro-high`, told in
+  as many words to run `echo ... > /tmp/agyprobe.txt` as a shell command,
+  called its own `run_command`, then its own `write_to_file`, then
+  `find_by_name`, had all three refused by grain's hook, and gave up with
+  the file never created. That is the property this whole section is
+  about, and `TestLiveNativeToolsAreDenied` (`tests/e2e`) is it as a test,
+  run nightly by `live-agent.yml`. Where the mechanism comes from: the
   binary unpacks its customization guide into any fresh `HOME`
   (`antigravity-cli/builtin/skills/agy-customizations/docs/hooks.md`), and
   it specifies `hooks.json` in the global customization root
@@ -1695,32 +1711,66 @@ paragraphs above -- a throwaway CI job holding a real `agy` 1.1.26:
 - **It denies by name, and never allows by name.** `HookDecision` denies
   the tools in `withheldNativeTools` -- agy's own file and command tools,
   now the whole of that set rather than a representative handful -- and
-  returns `{}`, no opinion, for everything else. Not "deny anything
-  without grain's prefix", because this hook stands in front of *every*
-  tool call a run makes: a surprise in the payload would then be a run
-  that can do nothing at all, whereas a deny list can only ever fail back
-  to the behaviour this repository already had. A missing hook, an
-  unparseable payload and a grain binary that is not there all land in the
-  same safe place.
+  says nothing at all about everything else. Not "deny anything without
+  grain's prefix", because this hook stands in front of *every* tool call
+  a run makes: a surprise in the payload would then be a run that can do
+  nothing at all, whereas a deny list can only ever fail back to the
+  behaviour this repository already had.
+- **Saying nothing is the part that has to be exact, and the first
+  version of this got it wrong.** It replied `{}` for a call it had no
+  opinion about, reading a decision-less object as an abstention. agy
+  reads it as a deny -- so every tool call every agy run made, grain's own
+  MCP tools included, came back "tool call denied by pre-tool hook:" with
+  an empty reason, and a run could do nothing but explain why. The whole
+  contract, measured by running a real agy against a real credential with
+  a hook replying to order: **no output at all** lets the call proceed and
+  is the only spelling of "no opinion"; `"allow"` proceeds; `"ask"`
+  proceeds, the prompt being auto-approved by
+  `--dangerously-skip-permissions`; `"deny"` blocks and shows its reason
+  to the model; `{}` or any object without a `decision` blocks with no
+  reason; stdout that is not JSON fails the call (`failed to unmarshal
+  result from hook ... via protojson`); and a hook command that exits
+  non-zero, or is not there at all, fails the call too. The last two are
+  why `grain agy-tool-hook` exits 0 whatever happens and writes either
+  nothing or a decision: **a broken hook does not fail open**, it takes
+  the run's tools with it.
+- **The unit test could not see any of that, and the live test can.**
+  Asserting the bytes grain emits is a check that grain says what it meant
+  to say, not that agy listens -- and the `{}` bug passed it, because the
+  test read the decision field out of parsed JSON, where `{}` and no
+  output are the same thing. It now asserts the bytes; the property itself
+  is `TestLiveNativeToolsAreDenied`, which tells a live model to use agy's
+  own `run_command` on a path outside the sandbox and then looks at the
+  controller's filesystem, at whether the hook denied any of grain's own
+  tools, and at whether the run still reached its sandbox.
 
-So the prompt still carries the rule, the permission rules say it again
-where agy stores policy, the `PreToolUse` hook is the one place a call can
-actually be stopped, and a kontur sandbox is still what contains a native
-tool that gets past all three. None of the three has been watched
-stopping a live model, because that needs the nightly credential
-(`live-agent.yml`) rather than a branch's own CI.
+So the prompt carries the rule, the permission rules say it again where
+agy stores policy but stop nothing, the `PreToolUse` hook is where a call
+is actually stopped, and a kontur sandbox is still what contains a native
+tool that gets past all three. Only the hook has been watched stopping a
+live model, and only nightly (`live-agent.yml`), since that is where the
+credential is.
 
 How that was established is worth keeping, because the question keeps
-coming back and a grain sandbox cannot answer it: the agent sandbox has
-no network beyond the git proxy, and `agy` is a 200MB stripped Go binary
-that is not in it. A throwaway job on this repository's own CI installed
-agy with the same installer the Dockerfile runs, asked it (`agy --help`,
-`agy changelog`, `agy agents`), read its config schema out of the string
-table (`json:`/`yaml:`/`mapstructure:` struct tags, protobuf accessor
-names, `jsonschema_description` text), planted agent definitions in
-candidate directories to see which were read, and pushed the output to a
-branch. `agy changelog` in particular is the closest thing to
+coming back and a *locked-down* grain sandbox cannot answer it: a sandbox
+with no network beyond the git proxy cannot fetch `agy`, a 200MB stripped
+Go binary that is not in the image. A throwaway job on this repository's
+own CI installed agy with the same installer the Dockerfile runs, asked it
+(`agy --help`, `agy changelog`, `agy agents`), read its config schema out
+of the string table (`json:`/`yaml:`/`mapstructure:` struct tags, protobuf
+accessor names, `jsonschema_description` text), planted agent definitions
+in candidate directories to see which were read, and pushed the output to
+a branch. `agy changelog` in particular is the closest thing to
 documentation there is, since it ships in the binary.
+
+The behavioural half above went further only because a sandbox with
+general network access *and* a Gemini key can do the whole thing itself:
+install agy, write the private `HOME` this package builds, point its hook
+at a script that replies to order, and drive real model runs until each
+decision value has an observed outcome. A task that needs to re-answer any
+of this should be given those two capabilities rather than a CI job --
+each measurement is one model run of a few seconds, and the answers land
+in the same session as the change they justify.
 
 Two smaller notes. The prompt travels over stdin as a `stream-json` user
 event, not as the argument to `--print`: untrusted issue content must

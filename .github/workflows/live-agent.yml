@@ -1,7 +1,9 @@
-# The one check in this repository that runs a real model: tests/e2e's
-# TestLiveIssueCompletesEndToEnd, driving the real `agy` binary against a
-# real Gemini API key and asserting that the run comes up holding grain's
-# MCP tools and reaches its sandbox through one.
+# The checks in this repository that run a real model: tests/e2e's
+# TestLive* -- driving the real `agy` binary against a real Gemini API
+# key, asserting that a run comes up holding grain's MCP tools and
+# reaches its sandbox through one (TestLiveIssueCompletesEndToEnd), and
+# that agy honours the denial grain writes into every run's HOME for
+# agy's own file and command tools (TestLiveNativeToolsAreDenied).
 #
 # It exists because nothing else can see what it sees. Every other test
 # of that wiring drives a scripted runner or a stub CLI, which reads
@@ -70,9 +72,9 @@ jobs:
   live-agy:
     name: live agy run
     runs-on: ubuntu-latest
-    # The test's own run is capped at 120s by its context and 15 turns by
+    # Each test's own run is capped by its context (120s and 180s) and by
     # MaxTurns; the rest is checkout, a Go build and the agy install, and
-    # this job runs the test twice when the first attempt fails.
+    # this job runs the tests twice when the first attempt fails.
     timeout-minutes: 25
     # Where GEMINI_API_KEY lives -- see this file's header. Not a
     # repository secret: the deployment branch policy on this environment
@@ -146,7 +148,7 @@ jobs:
           set -uo pipefail
           for attempt in 1 2; do
             echo "::group::live agy run, attempt $attempt of 2"
-            if go test ./tests/e2e/ -run TestLiveIssueCompletesEndToEnd \
+            if go test ./tests/e2e/ -run 'TestLive' \
                  -count=1 -v -timeout 10m; then
               echo "::endgroup::"
               exit 0
