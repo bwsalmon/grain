@@ -1576,20 +1576,71 @@ no route to grain at all. A deployment that needs a hard guarantee should
 run against a kontur sandbox, where the controller's filesystem is not
 reachable from the guest at all.
 
-**Whether agy can be told to deny its native tools outright is open**, and
-this is where the answer belongs when someone has the binary in front of
-them. What is established, against agy 1.1.25: there is no `--tools` and
-no `--strict-mcp-config`, and the `disabledTools` key in the MCP config
-governs an MCP *server's* tools rather than agy's own. That key is a trap
-rather than a near miss -- grain's tools and agy's share names, so listing
-`run_command` there would deny the run grain's `run_command` and leave
-agy's in place, which is the exact opposite of what it looks like it does.
-Guessing at anything else is worse than leaving it: an unknown key goes
-into the same `settings.json` a run authenticates from, and an unknown
-flag fails every run before it starts. So the prompt carries the rule
-until a mechanism is confirmed live, and confirming it is a job for the
-nightly live test (below), which is the only thing here that runs a real
-agy.
+**agy 1.1.26 has no denylist for its own native tools, and this is now
+read off the binary rather than assumed.** The whole of what it offers,
+with the evidence:
+
+- **No flag.** `agy --help` lists `--add-dir`, `--agent`, `--continue`,
+  `--conversation`, `--dangerously-skip-permissions`,
+  `--disable-slash-commands`, `--effort`, `--input-format`,
+  `--json-schema`, `--log-file`, `--mode`, `--model`, `--new-project`,
+  `--output-format`, `--print`, `--print-timeout`, `--project`,
+  `--prompt`, `--prompt-interactive` and `--sandbox`. Nothing names a
+  tool. The subcommands are `agent`/`agents`, `changelog`, `help`,
+  `install`, `mcp`, `mic-serve`, `models`, `plugin`/`plugins`,
+  `remote-control` and `update`; `agy mcp` takes only
+  `add`/`remove`/`list`/`enable`/`disable`.
+- **`enabledTools` and `disabledTools` are an MCP server's, confirmed.**
+  They carry the same `json`/`yaml`/`mapstructure` tags as `command`,
+  `args`, `env`, `url`, `headers`, `timeoutSeconds` and `tools`, on the
+  server entry in `mcp_config.json` -- agy's own changelog names them as
+  fields of that file. Naming agy's tools there is a trap rather than a
+  near miss: grain's tools and agy's share names, so listing
+  `run_command` would deny the run *grain's* `run_command` and leave
+  agy's in place.
+- **The settings file is where the permission system lives, not a
+  roster.** `settings.json` carries `permissionPreset`,
+  `agentPermissions`, `fileAccessPolicy` and `toolConfirmation`
+  (`AgentPermissionPreset` and `AgentSettingPolicy` enums) -- machinery
+  for *approving* a tool call, which is exactly what `Run`'s
+  `--dangerously-skip-permissions` switches off. Nothing there removes a
+  tool from the roster.
+- **A custom agent replaces the prompt, not the toolset.** A Markdown
+  file with YAML frontmatter under `~/.gemini/antigravity-cli/agents/`
+  (or `~/.gemini/agents/`) is discovered even in an otherwise empty
+  private `HOME` -- the shape `writeAgyHome` builds -- and `--agent
+  <name>` selects it. Its frontmatter keys are `name`, `description`,
+  `mainAgent`, `subagent`, `hidden`, `inheritMcp`,
+  `inheritCustomizations`, `commandExecutionPolicy`, `model`, `rules`,
+  `skills`, `plugins` and `mcpServers`. None of them names the native
+  tools an agent may use. The `enable_write_tools` / `enable_mcp_tools` /
+  `enable_subagent_tools` gates that *do* read like that switch belong to
+  a *subagent* definition (`define_subagent`), and whether a main agent
+  honours them is unproven.
+- **Silence is the failure mode to watch.** An unknown key is ignored
+  rather than rejected -- an unknown `settings.json` key still gets a run
+  to its authentication check, and an unknown frontmatter key leaves an
+  agent discoverable -- but a *known* frontmatter key given a value that
+  does not parse drops the agent from `agy agents` without a word
+  (`commandExecutionPolicy: off` and `: auto` parse; `deny`, `manual` and
+  `DENIED` do not). Anything written here therefore has to be asserted
+  live, not merely accepted by the binary.
+
+So the prompt still carries the rule, `--dangerously-skip-permissions`
+plus the permission system is the only place a real denial could come
+from, and a kontur sandbox is what actually contains a native tool.
+
+How that was established is worth keeping, because the question keeps
+coming back and a grain sandbox cannot answer it: the agent sandbox has
+no network beyond the git proxy, and `agy` is a 200MB stripped Go binary
+that is not in it. A throwaway job on this repository's own CI installed
+agy with the same installer the Dockerfile runs, asked it (`agy --help`,
+`agy changelog`, `agy agents`), read its config schema out of the string
+table (`json:`/`yaml:`/`mapstructure:` struct tags, protobuf accessor
+names, `jsonschema_description` text), planted agent definitions in
+candidate directories to see which were read, and pushed the output to a
+branch. `agy changelog` in particular is the closest thing to
+documentation there is, since it ships in the binary.
 
 Two smaller notes. The prompt travels over stdin as a `stream-json` user
 event, not as the argument to `--print`: untrusted issue content must

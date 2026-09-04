@@ -708,9 +708,14 @@ func agyWorkspaceDir(home string) string { return filepath.Join(home, "workspace
 // those tools can do no harm, and it disappears with the HOME.
 //
 // It is not a substitute for the guarantee: agy has no way to withhold
-// its own tools (no --tools, no --strict-mcp-config, and its disabledTools
-// setting applies to an MCP server's tools rather than its native ones),
-// so what steers a run to grain's tools is eager registration plus
+// its own tools. Measured against 1.1.26 by reading the shipped binary
+// (see the README): no flag names a tool at all, enabledTools and
+// disabledTools are keys on an MCP *server's* entry in mcp_config.json,
+// a custom agent definition can replace the system prompt but not the
+// tool roster, and settings.json holds the permission system --
+// machinery for approving a call, which Run's
+// --dangerously-skip-permissions switches off -- rather than a roster.
+// So what steers a run to grain's tools is eager registration plus
 // toolPreamble, and what actually contains it is a kontur sandbox.
 func workDir(cfg agent.RunConfig, home string) string {
 	if cfg.SandboxRoot != "" {
