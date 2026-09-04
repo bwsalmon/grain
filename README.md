@@ -3551,22 +3551,43 @@ the tag CI keeps pointed at main, which is a less precise answer than
 the stamp and a much better one than none.
 
 Unlike the README, which is grain's text and is rewritten on every sync,
-a workflow that is already there is never touched again — but for that
-one image line, which grain keeps in step with the build it is running.
-That line is a fact about the deployment rather than about the
-repository, and it goes stale on its own every time the deployment is
-upgraded, so a sync after an upgrade repoints it on a one-line commit of
-its own and the syncs after that have nothing to do. The rule that makes
-that safe is byte equality: grain only touches a file that is still word
-for word its own rendering, so a runner, a trigger or a step of
-somebody's own hands the whole file back to whoever wrote it, image
-included. A file grain rewrote every thirty seconds would be a file
-whose editor is fighting a timer, which is the same reason the export
-must not fight a hand edit to a table file. Deleting it is not an
+a workflow somebody has edited is never touched again. The rule that
+makes that safe is byte equality: grain only touches a file that is
+still word for word one of its own renderings, so a runner, a trigger or
+a step of somebody's own hands the whole file back to whoever wrote it,
+image included. A file grain rewrote every thirty seconds would be a
+file whose editor is fighting a timer, which is the same reason the
+export must not fight a hand edit to a table file. Deleting it is not an
 opt-out, because grain writes back what is missing: `"noWorkflow": true`
 in `state-repo.json` is, and `"checkImage"` pins the image from the host
 side — grain then writes and maintains that value instead of its own, so
 a pin made there is one a later sync does not take back.
+
+What grain does maintain in a file nobody has edited is the image line,
+which it keeps in step with the build it is running. That line is a fact
+about the deployment rather than about the repository, and it goes stale
+on its own every time the deployment is upgraded, so a sync after an
+upgrade repoints it on a one-line commit of its own and the syncs after
+that have nothing to do.
+
+Byte equality against *this build's* template alone would have made that
+promise good only until the next time the template was reworded: a
+comment edited here and every file grain had already installed stops
+being recognised, keeps whatever image it was installed with, and is
+never maintained again — no worse than a grain that never repointed
+anything, but a fix that reaches no deployment that already exists. So
+`pkg/staterepo/workflow_history.go` keeps the renderings earlier grains
+wrote, and a file matching one of them word for word is adopted: grain
+replaces it with this build's wording, on one commit that says as much,
+and maintains its image from then on. The whole file rather than its
+image line, because the comment block of an older rendering describes
+rules grain has since changed. Nothing is loosened by this — each entry
+is still an exact match against text grain itself wrote, and a file with
+one character of anybody else's in it matches none of them — and the
+list only grows: a template edited here goes into that file, and
+`TestTheCurrentTemplateIsRecorded` fails until it does, because the
+alternative is stranding every repository already carrying the old text
+with nothing to say so.
 
 That leaves the reason grain did not commit this file until now, which
 is real: a push adding a file under `.github/workflows` is refused
@@ -3575,8 +3596,8 @@ installation token need not be able to. So the workflow is a commit of
 its own, pushed on its own, and a refusal -- GitHub says "refusing to
 allow ... to create or update workflow" -- is undone in full: the commit
 is dropped, the file put back as it was — removed when grain had just
-written it, restored when what was refused was the one-line repointing
-of a check the repository already had — the export goes on untouched,
+written it, restored when what was refused was a change to a check the
+repository already had — the export goes on untouched,
 and the journal says to run `grain state ci` in a clone and commit the
 file with a credential that may. grain tries again a day later, so
 granting the permission needs no restart. A local-only repository gets

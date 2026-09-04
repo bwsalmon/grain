@@ -587,7 +587,7 @@ func stateCI(args []string) error {
 	fmt.Printf("wrote %s\n", filepath.Join(dir, filepath.FromSlash(staterepo.WorkflowFile)))
 	fmt.Printf("\nCommit and push it yourself, with a credential that may write workflows:\n" +
 		"a deployment whose own credential may not is the reason this command exists,\n" +
-		"and grain leaves a workflow that is already there exactly as it finds it.\n")
+		"and grain leaves a workflow anybody has edited exactly as it finds it.\n")
 	return nil
 }
 
