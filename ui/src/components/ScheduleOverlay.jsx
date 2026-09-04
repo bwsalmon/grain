@@ -110,9 +110,12 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
 // content over entirely (ui.CreateScheduleRequest's own doc comment on
 // why a template and per-field overrides do not mix), so this form hides
 // them rather than showing fields the request would silently ignore.
-// Repo and base branch are never among them -- a template carries no
-// target of its own (model.TaskTemplate's own doc comment on why) -- so
-// those two always render, template selected or not.
+// Repo and base branch normally are not among them -- a template
+// usually carries no target of its own -- so those two render whether a
+// template is selected or not. The exception is a template bound to a
+// repo (grain/task-285): that binding is what its firings target, over
+// anything this form could say, so the two fields give way to a line
+// naming where the schedule will actually fire.
 //
 // "Fires" (fires/suiteId) is the same idea one step out: a schedule can
 // run a whole suite on its cadence instead of filing one task, in
@@ -134,6 +137,12 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
   const [fires, setFires] = useState(schedule?.suiteId ? "suite" : "task");
   const [suiteId, setSuiteId] = useState(schedule?.suiteId || "");
   const firesSuite = fires === "suite";
+  // The selected template, when it is one bound to a repo of its own --
+  // undefined for no template, an unbound one, or a suite schedule. Its
+  // binding replaces this form's own repo and base fields.
+  const boundTemplate = firesSuite
+    ? undefined
+    : templates.find((t) => t.id === templateId && t.repo);
 
   const submit = async (evt) => {
     evt.preventDefault();
@@ -164,10 +173,11 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
     // which is exactly what re-submitting this form with "None" selected
     // should do. A suite schedule sends suiteId in its place and nothing
     // else: the suite decides the content, the passes, the approval and
-    // the auto-merge of everything a firing runs. repo/base are always
-    // sent either way -- neither a template nor a suite carries a target
-    // of its own, so they are this schedule's own fields whatever it
-    // fires.
+    // the auto-merge of everything a firing runs. repo/base are this
+    // schedule's own fields either way -- a suite carries no target, and
+    // neither does a template unless it is bound, in which case the
+    // fields are not rendered at all and these two go up empty for the
+    // API to fill in from the binding.
     const payload = {
       ...(firesSuite ? { suiteId } : { templateId }),
       recurrence,
@@ -267,24 +277,34 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
             </Select>
           </FormControl>
         )}
-        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-            Target repo <span className="hint">owner/name</span>
+        {boundTemplate ? (
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 2, mb: 1 }}>
+            Fires against {boundTemplate.repo}
+            {boundTemplate.base ? ` on ${boundTemplate.base}` : ""} -- the selected
+            template is bound to that repo, so this schedule does not choose one.
           </Typography>
-          <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
-        </Box>
-        <TextField
-          name="base"
-          label="Base branch"
-          defaultValue={schedule?.base}
-          helperText={firesSuite ? "required: a suite run stacks its tasks against one branch" : "optional"}
-          placeholder="main"
-          required={firesSuite}
-          InputLabelProps={{ required: false }}
-          autoComplete="off"
-          fullWidth
-          margin="normal"
-        />
+        ) : (
+          <>
+            <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+                Target repo <span className="hint">owner/name</span>
+              </Typography>
+              <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
+            </Box>
+            <TextField
+              name="base"
+              label="Base branch"
+              defaultValue={schedule?.base}
+              helperText={firesSuite ? "required: a suite run stacks its tasks against one branch" : "optional"}
+              placeholder="main"
+              required={firesSuite}
+              InputLabelProps={{ required: false }}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+            />
+          </>
+        )}
         {firesSuite ? (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
             Every firing starts one run of the selected suite against this repo
