@@ -275,9 +275,12 @@ type GuestHealth struct {
 	// the agent when the table is under pressure, which is the difference
 	// between a failure it can reason about and one it cannot.
 	//
-	// 0/0 on a backend with no such table -- HostGrains, and a kontur
-	// deployment still running the spliced flat mode, which puts no
-	// guest traffic through netfilter at all.
+	// 0/0 on a backend with no such table -- HostGrains, and any kontur
+	// deployment running flat mode, whose spliced datapath puts no guest
+	// traffic through netfilter at all. Flat is not a legacy here: it
+	// stays the right mode wherever nothing at the container layer needs
+	// network (docs/grain.md), so 0/0 is an ordinary reading and not a
+	// backend that failed to report.
 	ConntrackCount int
 	ConntrackMax   int
 }

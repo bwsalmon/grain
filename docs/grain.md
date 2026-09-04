@@ -4,7 +4,7 @@
 > the interface and the controller's decision table (`Reconcile`) as
 > compiling, tested Go; everything else here is the argument for them and
 > the work they imply. The network decision is recorded in "The network:
-> NAT mode", with the alternatives kept beside it.
+> NAT or flat", with the alternatives kept beside it.
 
 ## What runs today
 
@@ -239,15 +239,43 @@ whole grain is gone and there is nothing left to ask.
 The `pkg/orchestrator` equivalent is `runOne` plus `RunDispatch`, ~730
 lines whose behaviour can only be observed by dispatching a real run.
 
-## The network: NAT mode
+## The network: NAT or flat, by what the container layer needs
 
-**Decision: NAT.** It is the only option with one story in every
-environment — docker, kontur's standalone kubelet, and a managed cluster
-alike — needing no cluster provisioning and no bespoke component. That
-uniformity is the deciding property: a deployment consuming grain gets an
-ordinary network, with nothing to set up beside it and nothing to operate.
-The two alternatives below are each cheaper in one environment and absent
-in another.
+**Decision: both modes, selected by a property of the deployment rather
+than by preference.**
+
+> **Flat where nothing at the container layer needs network. NAT where
+> something does.**
+
+Flat is the better mode wherever it applies, and it stays kontur's
+default. It puts *zero* netfilter in the guest's path, keeps the guest an
+ordinary endpoint on the segment with the pod's own address and MAC, and
+has no state to exhaust. A plain kontur VM — anything whose container is
+just a VMM wrapper — should keep it, and nothing in this proposal asks
+those deployments to change.
+
+NAT is what a grain needs *because* it puts an agent in the container, and
+that agent needs the model API. Of the ways to give the container a
+working stack it is the only one with a single story in every environment
+— docker, kontur's standalone kubelet, and a managed cluster alike —
+needing no cluster provisioning and no bespoke component beside it. That
+uniformity is what selects it over the alternatives below, which are each
+cheaper in one environment and absent in another.
+
+Making this a mode rather than a migration matters for what the costs
+below actually mean: they are paid only by deployments that select NAT.
+A kontur user running a VM keeps the spliced datapath exactly as it is,
+with no conntrack, no nftables and no lost pod identity. It also keeps the
+ask of kontur honest — restoring a mode beside the default, not reversing
+a simplification for everybody.
+
+One pairing worth noting up front, because it is not obvious: **the exec
+tunnel below is the option that lets a grain keep flat mode.** If the
+agent's egress goes over the controller's exec channel, nothing at the
+container layer needs network, the rule at the top selects flat, and
+neither cost in "What NAT costs" is paid at all. That is a real argument
+for the tunnel beyond portability, and the reason it is kept rather than
+merely recorded.
 
 ### Why the container has no network today
 
@@ -311,7 +339,7 @@ write it directly.
 | netfilter modules on the host | yes | yes | yes — kube-proxy needs them |
 | **cluster-level provisioning** | none | none | **none** |
 
-### What it costs
+### What NAT costs
 
 **1. No infrastructure-level differentiation.** Agent traffic and sandbox
 traffic leave with the same source address, so a cloud firewall, VPC flow
@@ -374,7 +402,7 @@ sysctl and installs no nftables rules, so under docker it runs with
 CAP_NET_ADMIN and an explicitly granted `/dev/net/tun`". That stops being
 true. No change under Kubernetes, where it is privileged already.
 
-### What it does not cost
+### What NAT does not cost
 
 - **Guest egress is unaffected** — git proxy, package registries and
   module proxies all work identically through masquerade.
@@ -464,9 +492,12 @@ cluster every model call — full prompts and streamed responses, for every
 grain at once — traverses the API server, which has its own timeouts and
 connection limits. That is the opposite of simple to consume.
 
-**Take this if NAT's conntrack behaviour bites in practice**, or wherever
-a cluster's CNI cannot be modified and NAT's privileged path is
-unavailable.
+**Take this if NAT's conntrack behaviour bites in practice**, wherever a
+cluster's CNI cannot be modified and NAT's privileged path is unavailable,
+or wherever keeping flat mode is worth a bespoke data plane. That last is
+the strongest case for it: a tunnelled grain needs no network at the
+container layer at all, so the rule at the top of the network section
+selects flat, and neither of NAT's two costs is paid.
 
 ### Routing the container's egress through the guest
 
@@ -500,25 +531,41 @@ own control channel.
    `setup-failed` naming both, never interpret it on a best effort.
 5. **`HostGrains` is not optional.** Without a backend that runs the agent
    as a plain subprocess against a directory, every test needs a VM.
-6. **grain's own `-kontur-net` handling is broken today.**
+6. **The mode is derived, not configured.** With both modes supported,
+   which one a grain gets follows from the rule at the top of the network
+   section: `KonturGrains` selects NAT when the shim needs its own egress
+   and flat when it does not — so a deployment running the exec tunnel, or
+   any future shape with nothing at the container layer needing network,
+   gets flat without anyone choosing it. `-kontur-net` stays as an
+   override for the case the derivation is wrong, not as the thing a
+   deployment is expected to set.
+7. **grain's own `-kontur-net` handling is broken today.**
    `cmd/grain/daemon.go:310` still offers the flag and `createArgs` passes
    it through, so `-kontur-net nat` would make *every* `vm create` fail
    against current kontur; `-kontur-base-ip` and `-kontur-base-port` feed
-   flags that are now silently ignored. Worth fixing regardless — and
-   under the decision above they come back to life, though the base-ip/
-   base-port pair stays unnecessary (one VM per namespace, so every guest
-   can share a private subnet).
+   flags that are now silently ignored. Worth fixing regardless of any of
+   this — and the base-ip/base-port pair stays unnecessary even once NAT
+   returns (one VM per namespace, so every guest can share a private
+   subnet).
 
 ### Asks of kontur
 
 The first blocks the sandbox image; the other two are small and do not.
 
-- **Re-add a NAT network mode.** This is the network decision above, and
-  it is the one piece of this proposal that cannot be built entirely
-  inside grain. Scope: bridge and tap (primitives exist), the `ip_forward`
-  write, nftables masquerade with idempotent teardown, and the egress
-  rules that keep the sandbox from inheriting the agent's reach. See "What
-  it costs" for what to get right.
+- **Restore NAT as a selectable mode, beside flat rather than instead of
+  it.** This is the network decision above, and the one piece of this
+  proposal that cannot be built entirely inside grain. Flat stays the
+  default and stays unchanged: a VM whose container needs no network of
+  its own should keep the spliced datapath, and this asks nothing of those
+  deployments. `-net` already exists and already rejects `nat`
+  (`internal/cli/vm.go:245`), so this restores meaning to a flag rather
+  than adding one.
+
+  Scope: bridge and tap (primitives exist in `ensureBridge`/`ensureTap`),
+  the `ip_forward` write, nftables masquerade with idempotent teardown
+  matching netshim's existing convergence discipline, and the egress rules
+  that keep the sandbox from inheriting the agent's reach. See "What it
+  costs" for what to get right.
 - Promote `internal/execwire` and a thin client to `pkg/`, so a
   co-located shim can dial the guest without forking `kontur exec`.
 - Document whether the VMM run mode is PID-1-agnostic (item 3 above).
@@ -534,10 +581,10 @@ path and the agent's location, not of the task model.
    and the decision table against the existing suite.
 3. The controller loop — `Tick` over `List` + `Reconcile`, alongside the
    existing dispatch path behind a flag.
-4. kontur's NAT mode (the blocking ask above), then `grain-shim` and the
-   sandbox image. Steps 1–3 do not wait on it: `HostGrains` needs no
-   network of its own, so the interface and the controller loop can be
-   proven while that lands.
+4. kontur's NAT mode as a second selectable mode (the blocking ask
+   above), then `grain-shim` and the sandbox image. Steps 1–3 do not wait
+   on it: `HostGrains` needs no network of its own, so the interface and
+   the controller loop can be proven while that lands.
 5. `KonturGrains`.
 6. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`,
    `runOne`, `RunDispatch`'s sandbox half, `pkg/ui/sandbox_recreate.go`.
