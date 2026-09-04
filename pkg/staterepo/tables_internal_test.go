@@ -228,7 +228,10 @@ func TestTheReadmeNamesTablesTheSchemaHas(t *testing.T) {
 		"tables":        true, // TablesDir, the directory the files are in
 		"qualification": true, // the family, naming its tables collectively
 	}
-	for _, quoted := range regexp.MustCompile("`([^`]+)`").FindAllStringSubmatch(readme, -1) {
+	// Rendered for a named deployment, which is the longer of the two
+	// READMEs: the naming line is prose about the dump like any other and
+	// names grain_config in it (bind.go's deploymentParagraph).
+	for _, quoted := range regexp.MustCompile("`([^`]+)`").FindAllStringSubmatch(readme("staging"), -1) {
 		// tables/task_run.json and task_run both mean the table; a path
 		// with a placeholder in it, a filename that is not a table's and
 		// anything with a space in it mean something else and are skipped

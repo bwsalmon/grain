@@ -3,10 +3,12 @@ package staterepo
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -350,7 +352,7 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 // repository next what they are looking at, and the CI step that checks
 // what they propose to change in it.
 func Seed(ctx context.Context, r *Repo, db *sql.DB, version int) error {
-	if err := writeReadme(r.Dir()); err != nil {
+	if err := writeReadme(r.Dir(), deploymentName(ctx, db)); err != nil {
 		return err
 	}
 	if err := Export(ctx, db, r.Dir()); err != nil {
@@ -470,7 +472,13 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	// itself to whoever opens it next, and this is the cheapest place to
 	// make that true rather than a thing that is true only if the
 	// repository was created here.
-	if err := writeReadme(r.Dir()); err != nil {
+	//
+	// Read from the database on every sync for the same reason it is
+	// written on every sync: a deployment that has just been named, or
+	// renamed, says so in the README on the next tick rather than at the
+	// next restart. The name only ever changes through a settings change,
+	// which is a commit of its own anyway, so this costs no churn.
+	if err := writeReadme(r.Dir(), deploymentName(ctx, db)); err != nil {
 		return installed, err
 	}
 	now := r.now()
@@ -543,14 +551,131 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	return installed || changed, nil
 }
 
-func writeReadme(dir string) error {
-	return writeFileIfChanged(filepath.Join(dir, ReadmeFile), []byte(readme))
+// deploymentName is what this deployment calls itself, for the README:
+// grain_config.environment_name, read out of the very database the dump
+// is written from.
+//
+// Every way of not having an answer is "" -- the unnamed deployment,
+// whose README is the one grain has always written. A build whose schema
+// predates the column, a deployment with no config row because nobody
+// has opened Settings yet, a NULL left by a hand-edited dump, a read
+// that lost to something else holding the database: none of those is a
+// reason to fail an export over a line of documentation, and each of
+// them means the same thing to a reader anyway.
+//
+// Queried rather than taken through model.Store because this package
+// deliberately knows the database as tables and columns rather than as
+// grain's types (dump.go) -- and because Seed and sync are handed the
+// *sql.DB and nothing else.
+func deploymentName(ctx context.Context, db *sql.DB) string {
+	var name string
+	if err := db.QueryRowContext(ctx,
+		"SELECT `environment_name` FROM `grain_config` WHERE `id` = 1").Scan(&name); err != nil {
+		return ""
+	}
+	return name
 }
 
-const readme = `# grain state
+// deploymentNameFromDump is deploymentName for the caller that has no
+// database to ask: `grain state format` runs in a clone (format.go),
+// where the config row is a file like every other table.
+//
+// Without this, formatting a clone of a named deployment's repository
+// would write the unnamed README over the named one -- a diff for a
+// human to commit, and grain putting it straight back on its next sync
+// -- and Format's own promise that a directory already formatted comes
+// out byte-identical would stop being true there. A directory with no
+// dump in it (the bootstrap case: format an empty repository, then point
+// a deployment at it) has nothing to name, and the seed that follows
+// writes the name in.
+func deploymentNameFromDump(dir string) string {
+	data, err := os.ReadFile(filepath.Join(dir, TablesDir, "grain_config.json"))
+	if err != nil {
+		return ""
+	}
+	var rows []struct {
+		EnvironmentName string `json:"environment_name"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil || len(rows) == 0 {
+		return ""
+	}
+	return rows[0].EnvironmentName
+}
+
+func writeReadme(dir, deployment string) error {
+	return writeFileIfChanged(filepath.Join(dir, ReadmeFile), []byte(readme(deployment)))
+}
+
+// readme is the README's text for a deployment called deployment, which
+// is model.Config.EnvironmentName -- free text an operator sets, and
+// what the pane already labels itself with.
+//
+// "" is the unnamed deployment, and renders the README grain has always
+// written, byte for byte. That matters more here than the naming line
+// does: this file is rewritten on every sync, so a rendering that moved
+// so much as a space for a deployment with nothing to say would be a
+// commit and a push on the next tick of every installation that upgrades
+// past this build.
+func readme(deployment string) string {
+	return readmeIntro + deploymentParagraph(deployment) + readmeBody
+}
+
+// deploymentParagraph names the deployment whose database this is, or
+// says nothing at all.
+//
+// It is what nothing else in the tree says. The dump is the same files
+// with the same tables in the same shape whoever wrote it, so a clone,
+// or a checkout handed to an agent that never saw the deployment it came
+// from, cannot tell one installation's state from another's -- which is
+// the reading a human is most likely to get wrong on a fleet of them,
+// and the one an agent has no way of checking. A run dispatched by grain
+// itself is told separately (orchestrator's settingsRepoSection); this
+// is for every other way somebody ends up looking at these files.
+//
+// The name is quoted rather than pasted in, and both bounds below are
+// about what can reach this function. environment_name is validated on
+// the way through the UI (ui.UpdateSettings: trimmed, 32 runes, no line
+// breaks or tabs), but grain_config is a settings table, so a merged
+// pull request against this very repository can put anything at all in
+// that column and grain will write it back out here on the next sync.
+// strconv.Quote is what keeps a newline or a control character in that
+// value from turning one line of this file into several, and the
+// truncation is what keeps a pasted paragraph from taking the README
+// over. Neither is markdown-aware and neither needs to be: what is left
+// is a quoted string on a line of its own, where the worst a stray
+// backtick or asterisk can do is italicise some prose.
+func deploymentParagraph(deployment string) string {
+	name := strings.TrimSpace(deployment)
+	if name == "" {
+		return ""
+	}
+	if rs := []rune(name); len(rs) > maxDeploymentNameRunes {
+		name = string(rs[:maxDeploymentNameRunes])
+	}
+	return `
+This is the deployment called ` + strconv.Quote(name) + `.
+` + "`grain_config.environment_name`" + ` is where that name comes from -- the
+same name the deployment's own pane shows. Nothing else in this tree
+says whose rows these are: every deployment exports the same files,
+holding the same tables in the same shape, so a clone of this repository
+-- or a checkout of it handed to somebody who did not clone it -- is
+otherwise indistinguishable from any other deployment's.
+`
+}
+
+// maxDeploymentNameRunes bounds what deploymentParagraph will print,
+// deliberately the same bound ui.maxEnvironmentNameLen applies on the
+// way in rather than a second opinion about how long a name may be: a
+// value longer than this did not come through the UI, and a README is
+// no better a place for a paragraph than the sidebar badge is.
+const maxDeploymentNameRunes = 32
+
+const readmeIntro = `# grain state
 
 This repository is grain's database, written out as text.
+`
 
+const readmeBody = `
 grain runs against an embedded SQLite database, and exports every table
 here after each change: ` + "`" + TablesDir + `/<table>.json` + "`" + `, one file per table,
 rows sorted by primary key and columns in the table's declared order so
