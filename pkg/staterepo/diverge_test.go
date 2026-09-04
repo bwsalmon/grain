@@ -204,11 +204,18 @@ func TestAStartThatRecoversADivergenceKeepsWhatTheDatabaseHas(t *testing.T) {
 }
 
 // A merge that arrives the ordinary way -- fast-forwarded, no divergence
-// -- still replaces the state tier at a start, which is what makes a
-// merged change to anything but the settings take effect at all. The
-// marker that makes the recovery above import less must not leak into
-// this case.
-func TestAnOrdinaryMergeStillLoadsWholeAtAStart(t *testing.T) {
+// -- is imported exactly as the recovery above is: the settings out of
+// it, and nothing else. The two cases differ only in how far behind the
+// database the dump is, and neither is a reason to let a dump say what
+// grain itself did.
+//
+// So a hand edit to task.json is not applied at a start. It used to be,
+// and that is what made a restart with any merge pending roll every task
+// filed since the last export back (staterepo_test.go's own
+// TestARestartWithAMergePendingKeepsWhatTheDatabaseHas). What happens to
+// the edit instead is the second half of this test: the next export
+// writes the database's version straight back over it.
+func TestAnOrdinaryMergeImportsOnlyTheSettingsAtAStart(t *testing.T) {
 	ctx := context.Background()
 	store, db := openDB(t)
 	remote := bareRemote(t)
@@ -220,30 +227,43 @@ func TestAnOrdinaryMergeStillLoadsWholeAtAStart(t *testing.T) {
 	if err := store.PutTask(ctx, task("a1b2")); err != nil {
 		t.Fatalf("putting: %v", err)
 	}
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
 	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("loading: %v", err)
 	}
 	// Somebody edits the dump and merges it, with nothing stranded on
-	// this side.
-	work := filepath.Join(t.TempDir(), "clone")
-	git(t, "", "clone", "--quiet", remote, work)
-	path := filepath.Join(work, staterepo.TablesDir, "task.json")
-	edited := strings.Replace(read(t, path), "Rename the endpoint", "Retitled by a pull request", 1)
-	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
-		t.Fatalf("editing the dump: %v", err)
-	}
-	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "Retitle")
-	git(t, work, "push", "--quiet", "origin", "main")
+	// this side: a settings change and, in the same breath, a change to
+	// grain's own record of what it did.
+	mergeIntoRemote(t, remote, "template.json", "Run the nightly sweep", "Retitled by a pull request")
+	mergeIntoRemote(t, remote, "task.json", "Rename the endpoint", "Retitled by a pull request")
 
 	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("loading after the merge: %v", err)
+	}
+	tpl, err := store.GetTemplate(ctx, "tpl-1")
+	if err != nil || tpl == nil {
+		t.Fatalf("reading the template: %v %v", tpl, err)
+	}
+	if tpl.Title != "Retitled by a pull request" {
+		t.Fatalf("the merged settings change did not reach the database: %q", tpl.Title)
 	}
 	got, err := store.GetTask(ctx, "a1b2")
 	if err != nil || got == nil {
 		t.Fatalf("reading the task: %v %v", got, err)
 	}
-	if got.Title != "Retitled by a pull request" {
-		t.Fatalf("the merged change did not reach the database: %q", got.Title)
+	if got.Title != "Rename the endpoint" {
+		t.Fatalf("a merged edit to grain's own record was imported: %q", got.Title)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after the merge: %v", err)
+	}
+	if out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json"); !strings.Contains(
+		out, "Rename the endpoint") {
+		t.Fatalf("the export did not write the database's own version back out:\n%s", out)
 	}
 }
 

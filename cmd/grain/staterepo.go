@@ -8,13 +8,15 @@
 // the store, which is this file's whole reason for being able to say "no
 // merges" -- so the outward half is a commit and a push, never a
 // resolve. The inward half is a fast-forward pull, and what it may do
-// with what arrives depends on which rows changed: the whole database is
-// replaced only at startup (staterepo.Load), because that replacement is
-// what makes a merged deletion delete something and is not an operation
-// to run underneath runs holding task and run ids. On a tick, only the
-// settings tables an agent actually proposes changes to are imported
+// with what arrives is narrower than the pull itself: only the settings
+// tables an agent actually proposes changes to are imported
 // (staterepo.Apply and its SettingsTables), which is enough for a merged
-// settings change to take effect without a restart.
+// settings change to take effect without a restart, and a start imports
+// exactly the same tables (staterepo.Load). The whole database is
+// replaced in one case only, a clone this host has never loaded -- the
+// restore -- because the dump is otherwise always a little behind the
+// database on grain's own record of what it did, and importing it there
+// deletes rows rather than bringing any back.
 package main
 
 import (
