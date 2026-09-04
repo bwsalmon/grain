@@ -126,6 +126,79 @@ func TestSetTaskActivityOnAFinishedRunRecordsNothing(t *testing.T) {
 	}
 }
 
+// Two hands write this column and the row says which: grain's own
+// narration of a run's setup, before its agent exists to say anything
+// (orchestrator.setupNotes), and the run's own once it does. BySetup is
+// read off agent_started_at rather than off the words, so nothing an
+// agent can write makes its own status read as grain's.
+func TestTaskActivityBeforeTheAgentStartedIsGrainsOwn(t *testing.T) {
+	store, _, ctx := openStore(t)
+	startedTask(t, store, ctx, "a1b2")
+
+	if _, err := store.SetTaskActivity(ctx, "a1b2", "building a sandbox", now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.TaskActivityOf(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("TaskActivityOf = (%+v, %v), want the setup's own phrase", got, err)
+	}
+	if !got.BySetup {
+		t.Errorf("BySetup = false for %q, want true: no agent has started yet", got.Note)
+	}
+	if all, err := store.TaskActivity(ctx); err != nil || !all["a1b2"].BySetup {
+		t.Errorf("TaskActivity = (%+v, %v), want the same attribution in the list read", all, err)
+	}
+
+	if err := store.SetRunAgentStarted(ctx, "run-a1b2", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetTaskActivity(ctx, "a1b2", "reading pkg/orchestrator", now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.TaskActivityOf(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("TaskActivityOf = (%+v, %v), want the run's own phrase", got, err)
+	}
+	if got.BySetup {
+		t.Errorf("BySetup = true for %q, want false: the agent is driving now", got.Note)
+	}
+	if all, err := store.TaskActivity(ctx); err != nil || all["a1b2"].BySetup {
+		t.Errorf("TaskActivity = (%+v, %v), want it unmarked in the list read too", all, err)
+	}
+}
+
+// An empty note clears the row rather than leaving an empty phrase on it
+// -- how the dispatch path hands a run over to its agent without leaving
+// "minting the task's credentials" standing over the agent's first turns
+// (orchestrator.setupNotes.handOver). Both columns go, so nothing is left
+// holding a timestamp for a phrase that is not there.
+func TestSetTaskActivityToNothingClearsIt(t *testing.T) {
+	store, _, ctx := openStore(t)
+	startedTask(t, store, ctx, "a1b2")
+	if _, err := store.SetTaskActivity(ctx, "a1b2", "building a sandbox", now); err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := store.SetTaskActivity(ctx, "a1b2", "", now.Add(time.Minute))
+	if err != nil || !live {
+		t.Fatalf("clearing the synopsis = (%v, %v), want (true, nil)", live, err)
+	}
+	if got, err := store.TaskActivityOf(ctx, "a1b2"); err != nil || got != nil {
+		t.Errorf("TaskActivityOf after clearing = (%+v, %v), want (nil, nil)", got, err)
+	}
+	if all, err := store.TaskActivity(ctx); err != nil || len(all) != 0 {
+		t.Errorf("TaskActivity after clearing = (%v, %v), want the task gone from it", all, err)
+	}
+	runs, err := store.Runs(ctx, "a1b2")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("Runs = (%v, %v)", runs, err)
+	}
+	if runs[0].Activity != "" || runs[0].ActivityAt != nil {
+		t.Errorf("run = (%q, %v), want both columns cleared together",
+			runs[0].Activity, runs[0].ActivityAt)
+	}
+}
+
 // A task nobody has dispatched, and a live run that has never called the
 // tool, both read as "nothing to show" -- absent from the map rather than
 // present and empty, so a caller never has to tell an empty note from a

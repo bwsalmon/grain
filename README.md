@@ -5111,6 +5111,53 @@ would never go looking for. The paragraph also says when *not* to call it
 -- a status costs a turn like any other call, and a run narrating every
 file it opens has spent its budget on narration.
 
+### grain says what it is doing too
+
+A tool can only narrate the part of a run an agent is driving. Everything
+before the agent's first turn -- `orchestrator.RunDispatch`'s sandbox
+acquisition, the VM boot behind it, the clone, the repo's setup command,
+the capability mints -- is precisely the stretch a run *cannot* describe,
+because there is no run yet to describe it, and on a kontur deployment it
+is minutes long. A task that had just been dispatched therefore read
+`running` with nothing beside it for the one part of its life where "what
+is it doing?" has a precise, known answer, and the thing holding that
+answer is grain.
+
+So grain stamps its own phrases there (`orchestrator.setupNotes`), over
+the same `Store.SetTaskActivity` the tool reaches: "building a sandbox",
+"giving the sandbox its git credentials", "cloning acme/widgets",
+"running the repo's setup command", "minting the task's credentials".
+Same column, same row, same renderer -- there is nothing extra to read
+and nothing extra to show. Each is best-effort, like every other
+bookkeeping write on that path: a run must never fail because grain could
+not say what it was doing.
+
+Two things had to be decided rather than left to fall out:
+
+- **Whose sentence it is, is marked.** Everything that had ever appeared
+  in that field was something an agent wrote, and a reader who has learnt
+  to read the phrase in the agent's voice should not have to guess. It is
+  not a prefix in the text -- an agent could type that too. It is read
+  off the row: a phrase standing while `task_run.agent_started_at` is
+  still NULL is grain's, since no agent existed to have written it
+  (`model.RunActivity.BySetup`, `ui.Task.ActivityBySetup`), and the UI
+  puts a small "grain" mark before it. The other half of that is the
+  handover: `RunDispatch` clears grain's last phrase in the same breath
+  as `SetRunAgentStarted`, so nothing grain wrote is ever left standing
+  where it would read as the agent's -- and so an agent's first quiet
+  half-hour shows an empty row, which is the truth, rather than "minting
+  the task's credentials" from forty minutes ago.
+- **A failed setup keeps its last phrase.** A run whose sandbox never
+  came up finishes `setup-failed`, and whatever grain was doing when it
+  gave up stays on the finished row. Nothing renders it as current
+  (`Store.TaskActivity` reads live runs only), so it contradicts nothing
+  -- and beside a detail that says the sandbox could not be prepared,
+  "cloning acme/widgets" is the half the detail does not carry.
+
+A sandbox rebuilt mid-run (`recreate_sandbox`) is deliberately *not*
+narrated this way: the run is live, the row's phrase is the agent's own,
+and grain does not talk over it.
+
 ## Deploying it
 
 `scripts/setup.sh` (bwsalmon/agents#355) is the first real answer to "how

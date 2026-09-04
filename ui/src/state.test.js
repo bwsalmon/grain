@@ -409,7 +409,16 @@ describe("runActivity", () => {
 
   it("gives back what a running task's own agent said, and how old it is", () => {
     expect(runActivity({ state: "running", activity: "waiting for CI", activityAt: at(4 * 60_000) }, now))
-      .toEqual({ note: "waiting for CI", age: "4m" });
+      .toEqual({ note: "waiting for CI", age: "4m", bySetup: false });
+  });
+
+  // grain writes this field too, for the stretch before the agent's
+  // first turn (orchestrator.setupNotes) -- and says so, since every
+  // other phrase that appears here is something an agent wrote.
+  it("carries whether the phrase is grain's own rather than the run's", () => {
+    expect(runActivity({
+      state: "running", activity: "building a sandbox", activityAt: at(30_000), activityBySetup: true,
+    }, now)).toEqual({ note: "building a sandbox", age: "now", bySetup: true });
   });
 
   // The API only carries a synopsis for a live run, but a poll's answer
@@ -428,7 +437,7 @@ describe("runActivity", () => {
   // time; showing the note alone beats inventing an age for it.
   it("shows a note with no timestamp on its own", () => {
     expect(runActivity({ state: "running", activity: "reading the code" }, now))
-      .toEqual({ note: "reading the code", age: null });
+      .toEqual({ note: "reading the code", age: null, bySetup: false });
   });
 });
 

@@ -56,6 +56,18 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("running the test suite")).toBeInTheDocument();
   });
 
+  // The same attribution the list makes (grain/task-295): a phrase
+  // written while the run's sandbox was still being built is grain's,
+  // not the agent's, and the page says so rather than passing it off.
+  it("marks a setup status as grain's own", () => {
+    render(<DetailOverlay
+      task={{ ...baseTask, state: "running", activity: "building a sandbox", activityBySetup: true }}
+      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+    />);
+    expect(screen.getByText("building a sandbox")).toBeInTheDocument();
+    expect(document.querySelector(".task-activity-by")).toHaveTextContent("grain");
+  });
+
   it("shows no status line for a task that is not running", () => {
     render(<DetailOverlay
       task={{ ...baseTask, state: "completed", activity: "running the test suite" }}

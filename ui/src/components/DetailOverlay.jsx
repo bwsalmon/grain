@@ -112,14 +112,16 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             {phase && <Chip size="small" color={phase.color} title={phase.title} label={phase.label} />}
             {t.blocked && <Chip size="small" color="error" label="Blocked" />}
           </div>
-          {/* What the run says it is doing, under the badge that says
-              only that it is running (state.js's runActivity, written by
-              the run through update_status). The same line the task list
-              shows, kept here so the page somebody opens *because* the
-              list said "running" does not answer with less than the list
-              did. */}
+          {/* What the run is doing, under the badge that says only that
+              it is running (state.js's runActivity) -- the run's own
+              words through update_status, or grain's own account of the
+              setup it is still doing before the agent's first turn. The
+              same line the task list shows, kept here so the page
+              somebody opens *because* the list said "running" does not
+              answer with less than the list did. */}
           {activity && (
             <div className="detail-activity">
+              {activity.bySetup && <span className="task-activity-by">grain</span>}
               {activity.note}
               {activity.age && <span className="task-activity-age">{activity.age}</span>}
             </div>

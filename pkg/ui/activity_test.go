@@ -169,6 +169,54 @@ func TestSetTaskActivityAfterTheRunIsOver(t *testing.T) {
 	}
 }
 
+// A run's setup has a status too, and it is grain's own: the dispatch
+// path writes through the same store while the sandbox is being built
+// and the repo cloned (orchestrator.setupNotes), and a reader is told
+// which of the two voices they are hearing. The row answers it -- a
+// phrase standing before the agent ever started is grain's -- so it must
+// reach every shape a person reads a task through, not just the list.
+func TestActivityWrittenBeforeTheAgentStartedReadsAsGrainsOwn(t *testing.T) {
+	client, store, ctx := testClient(t)
+	task := create(t, client, ctx)
+	running(t, store, ctx, task.ID)
+
+	if _, err := store.SetTaskActivity(ctx, task.ID, "cloning acme/widgets", baseTime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := client.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Activity != "cloning acme/widgets" || !got.ActivityBySetup {
+		t.Errorf("task = %+v, want the setup's own phrase, marked as grain's", got)
+	}
+	list, err := client.ListTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || !list[0].ActivityBySetup {
+		t.Errorf("ListTasks = %+v, want the same attribution on the listed task", list)
+	}
+
+	// Once the agent has started, everything on the row is the agent's:
+	// grain clears its own last phrase in the same breath (RunDispatch),
+	// so anything standing here is something the run wrote.
+	if err := store.SetRunAgentStarted(ctx, "run-"+task.ID, baseTime.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SetTaskActivity(ctx, task.ID, "reading pkg/orchestrator"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = client.Task(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Activity != "reading pkg/orchestrator" || got.ActivityBySetup {
+		t.Errorf("task = %+v, want the agent's own phrase, unmarked", got)
+	}
+}
+
 // A task id nothing was filed under is a 404, the same as every other
 // route that names one -- so a misconfigured -task on an mcpserver reads
 // as the mistake it is rather than as a status that went nowhere.

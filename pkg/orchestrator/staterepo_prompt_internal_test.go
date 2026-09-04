@@ -49,7 +49,7 @@ func TestPrepareCheckoutRecognisesAStateRepository(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
-	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "")
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{})
 	if err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestPrepareCheckoutLeavesAnOrdinaryRepoAlone(t *testing.T) {
 
 	root := t.TempDir()
 	task := model.Task{ID: "t1", Target: &repo}
-	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "")
+	prepared, err := prepareCheckout(context.Background(), mcp.NewSandboxTools(root), remoteBase, task, "", setupNotes{})
 	if err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}

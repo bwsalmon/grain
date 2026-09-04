@@ -101,7 +101,7 @@ func TestRecreateDestroysTheSandboxAndClonesTheRepoAgain(t *testing.T) {
 	}
 
 	task := model.Task{ID: "12", Title: "Do the thing", Target: &repo}
-	if _, err := prepareCheckout(ctx, tools, remoteBase, task, ""); err != nil {
+	if _, err := prepareCheckout(ctx, tools, remoteBase, task, "", setupNotes{}); err != nil {
 		t.Fatalf("prepareCheckout: %v", err)
 	}
 	// What the agent broke: a file of its own beside the checkout, and
