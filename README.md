@@ -410,7 +410,14 @@ controller has" coupling ICU used to cause one layer up. Forcing it off
 produces a genuinely static binary with nothing left to carry to the
 controller. `make test`/`make vet` deliberately leave `CGO_ENABLED`
 alone, since `go test -race` needs cgo for the race detector and nothing
-about testing this module ships anywhere.
+about testing this module ships anywhere. `tests.yml`'s `go-test` job
+runs that same `go test -race ./...`, character for character — for a
+long time it ran a plain `go test ./...` instead, so the detector never
+saw a commit that a developer had not happened to run `make test` over,
+which for a daemon of this shape (a reconcile loop, a goroutine per
+dispatch, an addendum poller each, a `ForbiddenSet` swapped under a
+serving proxy) is the coverage worth having. `tests/deploy` compares the
+two commands now, so neither file can be changed on its own.
 
 `make container-build` still runs that same `make build`, out of this
 same Makefile, inside `Dockerfile.build`'s pinned Debian 12 toolchain --

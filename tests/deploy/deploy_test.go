@@ -1113,6 +1113,67 @@ func TestTheGoJobRunsTheFormattingGate(t *testing.T) {
 	contains(t, between(t, read(t, "Makefile"), "\nfmt:", "\n\n"), "exit 1")
 }
 
+// The Go suite is one command, and the two files that run it run the
+// same one.
+//
+// The Makefile's own header promises it "mirrors the steps
+// .github/workflows/tests.yml's go-test job runs", and for that promise's
+// whole life it did not: `make test` ran `go test -race ./...` while the
+// workflow ran `go test ./...`, so the race detector -- the one check
+// that can see a data race between the reconcile loop, a goroutine per
+// dispatch, the addenda pollers, an atomic ForbiddenSet swapped under a
+// serving proxy and a stateManager lock shared by a UI handler and a
+// timer -- had never run in CI at all. Neither file can see the other,
+// and both read like the whole story on their own, which is exactly the
+// kind of drift this package exists to catch.
+//
+// Compared as one string rather than by asserting -race twice: any
+// divergence at all -- a flag, a package pattern, a timeout on one side
+// only -- means a red build locally and a green one in CI, or the
+// reverse, and either way `make test` stops being how a contributor
+// reproduces this job.
+func TestTheGoJobRunsTheSameSuiteCommandTheMakefileDoes(t *testing.T) {
+	// The recipe's `go test` line, without the leading tab make needs.
+	var recipe string
+	for _, line := range strings.Split(between(t, read(t, "Makefile"), "\ntest: frontend", "\n\n"), "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "go test") {
+			recipe = trimmed
+			break
+		}
+	}
+	if recipe == "" {
+		t.Fatal("the Makefile's test target runs no `go test` line")
+	}
+
+	// The workflow's, which is the "Test" step and not the "Test frontend"
+	// one below it -- hence the newline in the marker.
+	goJob := between(t, stripComments(testsWorkflow(t)), "go-test:", "\n  ui-e2e:")
+	step := strings.TrimSpace(between(t, goJob, "- name: Test\n", "\n\n"))
+	_, command, ok := strings.Cut(step, "run:")
+	if !ok {
+		t.Fatalf("the go job's Test step runs nothing: %q", step)
+	}
+	command = strings.TrimSpace(command)
+
+	if command != recipe {
+		t.Errorf("CI runs %q and `make test` runs %q; the Makefile says it mirrors CI, so they have to be the same command", command, recipe)
+	}
+	// Naming the flag as well, so that dropping it from *both* files --
+	// which the comparison above would happily accept -- is still a
+	// failure someone has to argue with rather than a silent loss of the
+	// only race coverage this repository has.
+	contains(t, recipe, "-race")
+
+	// The detector is a cgo library. Disabling cgo for this job would not
+	// quietly drop the coverage -- `go test -race` refuses to build
+	// without it -- but it would turn the whole suite red for a reason
+	// that reads like a toolchain fault, so keep the two apart: only the
+	// binary that ships is built with CGO_ENABLED=0.
+	if regexp.MustCompile(`CGO_ENABLED[=:]\s*["']?0`).MatchString(goJob) {
+		t.Error("the go job disables cgo somewhere, and `go test -race` needs it")
+	}
+}
+
 // The sandbox guest image's toolchain, which three files have to agree
 // on and none of them can see the others.
 //
