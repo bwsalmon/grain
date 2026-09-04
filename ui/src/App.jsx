@@ -3,6 +3,7 @@ import api from "./api.js";
 import { buildPath, parsePath } from "./paths.js";
 import Sidebar from "./components/Sidebar.jsx";
 import TaskList from "./components/TaskList.jsx";
+import TaskBoard from "./components/TaskBoard.jsx";
 import RepoList from "./components/RepoList.jsx";
 import RepoPage from "./components/RepoPage.jsx";
 import SchedulesList from "./components/SchedulesList.jsx";
@@ -573,6 +574,27 @@ export default function App() {
               onRefreshTemplates={refreshTemplates}
               showError={showError}
             />
+          ) : view === "board" ? (
+            /* The board is the same tasks and the same batch-actions
+               bar as the list below, laid out in columns (TaskBoard.jsx):
+               a card's checkbox feeds the same selection, so "select
+               everything queued and run it" works from either view.
+               It is handed every task rather than the sidebar's current
+               state filter -- the board's columns *are* its answer to
+               which states it is about, and a board pre-filtered to one
+               state would be a single column. */
+            <div className="main-column">
+              <TaskBoard
+                tasks={tasks}
+                config={config}
+                onOpenTask={openTask}
+                selected={selected}
+                onToggleSelect={toggleSelect}
+                onSelectAll={setSelection}
+                onReorder={reorderTasks}
+              />
+              <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
+            </div>
           ) : (
             <div className="main-column">
               {taskListPane(tasks, stateFilter)}

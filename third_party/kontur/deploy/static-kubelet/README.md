@@ -1,8 +1,8 @@
 # Static kubelet
 
 Scripts to turn a single Debian node into a minimal place to run kontur's
-pods — a `netshim`-mode init container plus one or more `run`-mode VM
-containers, both from the same `kontur` image — without standing up a
+pods — a `netshim`-mode init container plus one `run`-mode VM
+container, both from the same `kontur` image — without standing up a
 full Kubernetes cluster. There's no apiserver, no scheduler, no node
 registration: just `containerd` and a `kubelet` running in **standalone
 mode**, watching a directory of "static pod" manifests and running
@@ -22,7 +22,7 @@ cluster credentials or CI access to a cloud project.
 | `containerd-config.toml` | containerd config: CRI enabled, `SystemdCgroup`, and a mirror for the local registry below. |
 | `kubelet-config.yaml` | `KubeletConfiguration`: static pod path, no apiserver auth, matching cgroup driver. |
 | `kubelet.service` | systemd unit for kubelet (no `--kubeconfig`, which is what makes it standalone). |
-| `cni/10-kontur.conflist` | Basic bridge CNI config so pods get a normal network namespace/IP; separate from and a prerequisite for `netshim`-mode's in-pod bridge. |
+| `cni/10-kontur.conflist` | Basic bridge CNI config so pods get a normal network namespace/IP; a prerequisite for `netshim` mode, which splices the guest onto exactly that interface. |
 | `local-registry.sh` | Runs a local, unauthenticated image registry on `localhost:5000`. |
 | `build-and-push.sh` | Builds `kontur` from this repo and pushes it to that registry. |
 | `manifests/kontur-static-pod.yaml` | A static-pod version of `../k8s/pod-example.yaml`, pointed at the local registry. |
@@ -169,3 +169,11 @@ netshim init container now completes successfully, and the VM container
 boots a real guest under KVM (console output visible via
 `/var/log/pods/.../*.log`, since `crictl` isn't installed by `install.sh`
 itself -- see "Usage" above for that caveat).
+
+`netshim` no longer makes that `/proc/sys/net` write at all: the NAT mode
+that needed it is gone, and what is left splices the guest onto the pod's
+own interface without routing anything (see the top-level README's
+"Container networking"). It stays `privileged: true` in a pod all the
+same, for a different reason -- the netlink library creates a tap by
+opening `/dev/net/tun`, and a pod has no per-device grant to give it the
+way `docker run --device` does.

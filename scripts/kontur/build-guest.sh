@@ -49,14 +49,21 @@ cd "$(dirname "$0")"
 # construction: there is no second version to keep in step, and a resync
 # moves both because they are the same files.
 #
-# The three build args are the ones kontur's CI publishes its "debian12"
+# The two build args are the ones kontur's CI publishes its "debian12"
 # variant with. A distro kernel, because docker and kind inside the guest
 # need overlayfs, cgroup v2, bridge netfilter and veth, which a kernel
-# built for cloud-hypervisor's own CI does not promise; no console
-# wrapper, because it runs every SSH session under a pty, which rewrites
-# newlines and merges stderr into stdout -- corrupting every file grain's
-# sandbox tools read back; and disk headroom, without which
-# guest-setup.sh below cannot install anything at all.
+# built for cloud-hypervisor's own CI does not promise; and disk
+# headroom, without which guest-setup.sh below cannot install anything at
+# all.
+#
+# There used to be a third, GUEST_CONSOLE_WRAP=0, and it is worth knowing
+# where it went rather than wondering. kontur's guest wrapped every SSH
+# session in a pty so its output could be mirrored to the serial console,
+# which rewrote newlines and merged stderr into stdout -- corrupting
+# every file grain's sandbox tools read back. `kontur exec` does not go
+# over SSH any anymore (bwsalmon/kontur#46: it reaches the guest over its
+# vsock device), so there is no session wrapper to switch off and the arg
+# is gone from the Dockerfile.
 #
 # That last one is the consequence of provisioning a booted guest rather
 # than a rootfs mid-build. kontur sizes the filesystem to what it packs
@@ -106,7 +113,6 @@ if [ -z "$KONTUR_GUEST_BASE" ]; then
   echo "building ${KONTUR_GUEST_BASE} from third_party/kontur"
   DOCKER_BUILDKIT=1 docker build \
     --build-arg GUEST_KERNEL_PACKAGE=linux-image-amd64 \
-    --build-arg GUEST_CONSOLE_WRAP=0 \
     --build-arg GUEST_DISK_EXTRA_MB=6144 \
     -t "$KONTUR_GUEST_BASE" \
     ../../third_party/kontur

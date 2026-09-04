@@ -159,23 +159,26 @@ does **not** enable it, so nothing acts on `ip=` without the klibc
 renames away from without the link file beside it. Neither has any
 equivalent in kontur's overlays.
 
-**kontur's ForceCommand console wrapper breaks grain's sandbox tools.**
-`overlay-common/etc/ssh/sshd_config.d/10-console.conf` forces every SSH
-session on the guest through `kontur-ssh-console-wrap`, which runs the
-session's command under `script` so its output is mirrored to the serial
-console. `script` runs the command under a **pty**, and a pty is not a
-transparent pipe. Measured against the real wrapper:
+**kontur's SSH console wrapper used to break grain's sandbox tools, and
+is gone.** For the record of why this directory once cared: the guest
+forced every SSH session through `kontur-ssh-console-wrap`, which ran it
+under `script` -- i.e. under a pty, which is not a transparent pipe.
+Measured against the real wrapper at the time:
 
 | | through the wrapper |
 |---|---|
-| `cat` of a file with `\n` endings | comes back `\r\n` -- `read_file` corrupts every file it reads |
-| stdout vs stderr | merged onto the one pty -- `run_command` loses the split, and a failed `cat`/`dd` reports an empty error |
-| exit status | survives (`script --return`) |
-| stdin | survives byte-for-byte |
+| `cat` of a file with `\n` endings | came back `\r\n` -- `read_file` corrupted every file it read |
+| stdout vs stderr | merged onto the one pty -- `run_command` lost the split, and a failed `cat`/`dd` reported an empty error |
+| exit status | survived (`script --return`) |
+| stdin | survived byte-for-byte |
 
-So `guest-setup.sh` replaces that drop-in, keeping its two hardening lines
-and dropping the `ForceCommand`. This is the one place where building on
-kontur's guest actively breaks something rather than merely not helping.
+`guest-setup.sh` used to undo that drop-in, and then the base was built
+with `GUEST_CONSOLE_WRAP=0` so there was nothing to undo. Neither is
+needed now: `kontur exec` does not go over SSH at all
+(bwsalmon/kontur#46), the guest runs no sshd, and a session is
+byte-transparent with stdout and stderr as separate frames on the wire.
+A pty is allocated only when a caller asks for one by running
+`kontur exec` with a terminal on stdin.
 
 ### Wiring: done, then superseded
 
@@ -185,8 +188,7 @@ For a while `build-guest.sh` ran exactly one `docker build` against
 `initrd.img` through `--target guest-artifacts --output type=local`. That
 is no longer what happens here, but it is still how the *base* image this
 directory derives from gets built -- kontur's CI runs it, with
-`GUEST_KERNEL_PACKAGE=linux-image-amd64` and `GUEST_CONSOLE_WRAP=0`, and
-publishes the result. See "How the image gets built and published" below
+`GUEST_KERNEL_PACKAGE=linux-image-amd64`, and publishes the result. See "How the image gets built and published" below
 for what this directory does on top of it.
 
 Two variables that shaped this directory's history are worth recording

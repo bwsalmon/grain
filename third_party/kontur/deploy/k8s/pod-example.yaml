@@ -1,18 +1,20 @@
-# Example Pod running two cloud-hypervisor VMs, "web" and "worker", that
-# share the pod's single IP via the netshim init container. Each VM gets
-# its own external port on the pod IP (30080 / 30081) which netshim
-# forwards to the same fixed port inside the guest (8080); each guest is
-# expected to configure the IP given to it here (e.g. via a kernel `ip=`
-# boot parameter, as below) and listen on that port.
+# Example Pod running one cloud-hypervisor VM that takes over the pod's
+# own IP. The netshim init container splices the VM's tap onto the pod's
+# interface, so the guest boots with the address and MAC the CNI assigned
+# and the pod behaves like any other single-container pod from outside:
+# Services, readiness probes and DNS all address it the ordinary way,
+# with no per-VM port forwarding to arrange.
 #
-# The init container and both VM containers all use the same kontur image
+# One VM per pod is the model -- there is exactly one identity in a
+# network namespace to take over -- so a second VM belongs in a second
+# pod.
+#
+# The init container and the VM container both use the same kontur image
 # -- one Go binary with two modes, selected by args ("netshim" for the
-# init container, "run" for the VM containers).
-#
-# Both VMs boot the same disk image read-only (CHV_DISK_READONLY): a
-# cloud-hypervisor VM takes an exclusive lock on any disk it opens
-# read-write, so two VMs can only share one underlying image file
-# concurrently when both open it read-only.
+# init container, "run" for the VM container) -- and both read the same
+# NETSHIM_* settings, so they cannot disagree about the tap: netshim
+# creates it, and the VM container derives its own --net and the guest's
+# "ip=" boot parameter from what it reads off the pod's interface.
 #
 # Assumes:
 #  - the node has /dev/kvm exposed as the allocatable resource
@@ -20,20 +22,21 @@
 #    https://github.com/kubevirt/kubernetes-device-plugins. Without that,
 #    drop the "devices.kubevirt.io/kvm" resource below and instead set
 #    securityContext.privileged: true plus a hostPath volume for /dev/kvm.
-#  - the disk images and kernel are already present on the node under
+#  - the disk image and kernel are already present on the node under
 #    /var/lib/vm-images, e.g. pre-populated by a node-local image cache.
 #    Omitting CHV_DISK_IMAGE/CHV_KERNEL instead boots the reference guest
 #    disk image and kernel baked into the kontur image itself (see the
-#    main README's "Guest disk image and kernel"), but that image can't
-#    be shared read-only between VMs the way a hostPath image can, so
-#    this example still uses its own node-local ones.
+#    main README's "Guest disk image and kernel"), which is what
+#    deploy/k8s/gke-pod-example.yaml does.
 #
-# KONTUR_EXEC_ADDR below (see the top-level README's "Execing into a VM")
-# lets `kubectl exec -it chv-vm-example -c web -- kontur exec -- <command>`
-# run <command> inside the "web" VM's guest itself, over SSH to its
-# already-running sshd, rather than in this otherwise-empty container --
-# `kubectl exec ... -- kontur exec` alone (no `-- <command>`) opens an
-# interactive login shell instead.
+# `kubectl exec -it chv-vm-example -- kontur exec -- <command>` runs
+# <command> inside the VM's guest itself, rather than in this otherwise-
+# empty container -- `kubectl exec ... -- kontur exec` alone (no `--
+# <command>`) opens an interactive login shell instead. It needs nothing
+# configured here: exec reaches the guest over the VM's own vsock device
+# (see the top-level README's "Execing into a VM"), not over the control
+# link below, which is why there is no exec address to set and why a VM
+# with no netshim in front of it is still one you can exec into.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -51,20 +54,19 @@ spec:
       image: ghcr.io/bwsalmon/kontur:latest
       args: ["netshim"]
       env:
-        - name: NETSHIM_VMS
-          value: "web:169.254.100.2:30080,worker:169.254.100.3:30081"
-        - name: NETSHIM_GUEST_PORT
-          value: "8080"
+        - name: NETSHIM_VM
+          value: "web"
+        - name: NETSHIM_CONTROL_CIDR
+          value: "169.254.100.1/24"
       securityContext:
-        # netshim creates network interfaces and nftables rules in the
-        # pod's network namespace (NET_ADMIN/NET_RAW would cover that much
-        # on their own) and also has to flip on net.ipv4.ip_forward via
-        # /proc/sys/net, which the container runtime's default runc-style
-        # OCI spec mounts read-only regardless of capabilities granted --
-        # confirmed against both a real standalone kubelet/containerd CRI
-        # pod and plain `docker run` (see the top-level README's "Docker
-        # backend" section), so privileged: true is needed here on any of
-        # these runtimes, not just as a fallback for less-capable ones.
+        # netshim creates a tap and programs tc filters in the pod's
+        # network namespace, which NET_ADMIN/NET_RAW would cover -- but
+        # the netlink library creates a tap by opening /dev/net/tun, and
+        # a pod has no per-device grant to hand it the way `docker run
+        # --device` does. Hence privileged here. It writes no sysctl and
+        # installs no nftables rules, which is why the same setup under
+        # `docker run` needs only those two capabilities plus the device
+        # (see the top-level README's "Docker backend" section).
         privileged: true
   containers:
     - name: web
@@ -77,57 +79,35 @@ spec:
           value: "true"
         - name: CHV_KERNEL
           value: /images/vmlinux
+        # No "ip=" here, and no CHV_NET: both are derived at boot from
+        # the address, MAC and MTU the CNI put on the pod's interface,
+        # which is why this container reads the same NETSHIM_* settings
+        # the init container did.
         - name: CHV_CMDLINE
-          value: "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"
-        - name: CHV_NET
-          value: "tap=tap-web"
+          value: "console=ttyS0 root=/dev/vda ro"
+        - name: NETSHIM_VM
+          value: "web"
+        - name: NETSHIM_CONTROL_CIDR
+          value: "169.254.100.1/24"
         - name: CHV_CPUS
           value: "2"
         - name: CHV_MEMORY_MB
           value: "2048"
         - name: CHV_SHUTDOWN_TIMEOUT
           value: "20s"
-        - name: KONTUR_EXEC_ADDR
-          value: "169.254.100.2:22"
-      resources:
-        requests:
-          cpu: "2"
-          memory: 3Gi
-          devices.kubevirt.io/kvm: "1"
-        limits:
-          cpu: "2"
-          memory: 3Gi
-          devices.kubevirt.io/kvm: "1"
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop: ["ALL"]
-      volumeMounts:
-        - name: images
-          mountPath: /images
-          readOnly: true
-    - name: worker
-      image: ghcr.io/bwsalmon/kontur:latest
-      args: ["run"]
-      env:
-        - name: CHV_DISK_IMAGE
-          value: /images/disk.img
-        - name: CHV_DISK_READONLY
-          value: "true"
-        - name: CHV_KERNEL
-          value: /images/vmlinux
-        - name: CHV_CMDLINE
-          value: "console=ttyS0 root=/dev/vda ro ip=169.254.100.3::169.254.100.1:255.255.255.0::eth0:off"
-        - name: CHV_NET
-          value: "tap=tap-worker"
-        - name: CHV_CPUS
-          value: "2"
-        - name: CHV_MEMORY_MB
-          value: "2048"
-        - name: CHV_SHUTDOWN_TIMEOUT
-          value: "20s"
-        - name: KONTUR_EXEC_ADDR
-          value: "169.254.100.3:22"
+      # Without this the pod's Ready condition reports on the container,
+      # which is up well before the guest inside it has booted. "kontur
+      # ready" dials the guest's own agent over the VM's vsock device and
+      # exits zero once the guest answers a command, so "kubectl wait
+      # --for=condition=Ready" waits for the guest rather than for the
+      # container wrapping it. "-timeout 0" is a single attempt; the
+      # kubelet does the retrying, on periodSeconds. See the top-level
+      # README's "Readiness".
+      readinessProbe:
+        exec:
+          command: ["/usr/local/bin/kontur", "ready", "-timeout", "0"]
+        periodSeconds: 5
+        timeoutSeconds: 5
       resources:
         requests:
           cpu: "2"

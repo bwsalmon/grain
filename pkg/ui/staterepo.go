@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // The bootstrap: where this installation's state actually lives.
@@ -93,6 +94,21 @@ type StateRepoStatus struct {
 	// reaching this pane, so a deployment that reports one is reporting a
 	// commit that is somebody's to resolve. Error, alongside, says which.
 	Diverged bool `json:"diverged,omitempty"`
+	// WorkflowRefused reports that this deployment could not install the
+	// check that runs on pull requests against its own state: GitHub
+	// refuses a push adding a file under .github/workflows unless the
+	// credential making it may write workflows, and grain's own need not
+	// be able to. Its own field for the same reason SecretsError is one
+	// -- it is a condition and not a failed sync, and grain deliberately
+	// goes on syncing without the check rather than stopping over it --
+	// and it is here at all because the alternative is a repository that
+	// looks perfectly healthy in this pane while nothing validates a
+	// change to it. WorkflowRefusedAt is when grain was last refused,
+	// absent when the host recorded it and can no longer read it back,
+	// and WorkflowFile the path an operator installs by hand.
+	WorkflowRefused   bool       `json:"workflowRefused,omitempty"`
+	WorkflowRefusedAt *time.Time `json:"workflowRefusedAt,omitempty"`
+	WorkflowFile      string     `json:"workflowFile,omitempty"`
 	// Error is a last-sync failure worth showing (an expired credential,
 	// an unreachable remote), rather than one this pane's own request
 	// caused. Empty when the last sync was fine.

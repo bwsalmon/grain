@@ -6,15 +6,12 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/kontur/internal/config"
-	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
 func baseSpec() VMSpec {
 	s := Defaults()
 	s.Name = "web"
 	s.DiskImage = "/images/disk.img"
-	s.IP = "169.254.100.2"
-	s.Port = 30080
 	return s
 }
 
@@ -77,17 +74,11 @@ func TestValidate_RequiresCore(t *testing.T) {
 	}{
 		{"name", func(s *VMSpec) { s.Name = "" }},
 		{"name too long for tap device", func(s *VMSpec) { s.Name = "way-too-long-a-name" }},
-		{"ip", func(s *VMSpec) { s.IP = "" }},
-		{"bad ip", func(s *VMSpec) { s.IP = "not-an-ip" }},
-		{"ipv6", func(s *VMSpec) { s.IP = "::1" }},
-		{"port low", func(s *VMSpec) { s.Port = 0 }},
-		{"port high", func(s *VMSpec) { s.Port = 70000 }},
-		{"guest port", func(s *VMSpec) { s.GuestPort = 0 }},
 		{"cpus", func(s *VMSpec) { s.CPUs = 0 }},
 		{"memory", func(s *VMSpec) { s.MemoryMB = 1 }},
 		{"kernel+firmware", func(s *VMSpec) { s.Kernel = "/images/vmlinux"; s.Firmware = "/images/CLOUDHV.fd" }},
 		{"bad shutdown timeout", func(s *VMSpec) { s.ShutdownTimeout = "banana" }},
-		{"bad bridge cidr", func(s *VMSpec) { s.BridgeCIDR = "not-a-cidr" }},
+		{"bad control cidr", func(s *VMSpec) { s.ControlCIDR = "not-a-cidr" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,10 +142,10 @@ func TestValidate_Minimal(t *testing.T) {
 	// kernel boot, via kontur run's own baked-in CHV_KERNEL default (see
 	// internal/config's defaultKernel) -- so Cmdline is still
 	// auto-derived here, the same as if Kernel had been given explicitly.
-	// The trailing field is the dns0 the guest resolves through --
-	// Defaults()' netshim.DefaultDNS, since baseSpec names none of its
-	// own. See TestValidate_AutoCmdlineDNS.
-	want := "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:8.8.8.8"
+	//
+	// "rw", because the default disk mode is the overlay: the root a
+	// stock guest boots is its own writable copy.
+	want := "console=ttyS0 root=/dev/vda rw"
 	if s.Cmdline != want {
 		t.Errorf("Cmdline = %q, want %q", s.Cmdline, want)
 	}
@@ -180,65 +171,15 @@ func TestValidate_FirmwareSkipsAutoCmdline(t *testing.T) {
 func TestValidate_AutoCmdline(t *testing.T) {
 	s := baseSpec()
 	s.Kernel = "/images/vmlinux"
-	s.BridgeCIDR = "169.254.100.1/24"
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	// The trailing field is the dns0 the guest resolves through --
-	// Defaults()' netshim.DefaultDNS, since baseSpec names none of its
-	// own. See TestValidate_AutoCmdlineDNS.
-	want := "console=ttyS0 root=/dev/vda ro ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:8.8.8.8"
+	want := "console=ttyS0 root=/dev/vda rw"
 	if s.Cmdline != want {
 		t.Errorf("Cmdline = %q, want %q", s.Cmdline, want)
 	}
 	if !s.CmdlineAuto {
 		t.Errorf("CmdlineAuto = false, want true")
-	}
-}
-
-// The nameservers a guest is given ride on the same ip= parameter that
-// carries its address, in the dns0/dns1 fields past the ones that
-// configure the interface -- which is what makes the resolver a per-VM
-// setting rather than something baked into a guest image (see
-// deploy/guest-image/overlay-common's kontur-configure-dns).
-func TestValidate_AutoCmdlineDNS(t *testing.T) {
-	tests := []struct {
-		name string
-		dns  string
-		want string
-	}{
-		{"default", Defaults().DNS, "ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:8.8.8.8"},
-		{"two", "1.1.1.1, 9.9.9.9", "ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off:1.1.1.1:9.9.9.9"},
-		// The empty string is how a deployment says "leave the guest's
-		// own /etc/resolv.conf alone", and it has to come out as the
-		// seven-field parameter this always was rather than as one with
-		// empty fields hanging off it.
-		{"none", "", "ip=169.254.100.2::169.254.100.1:255.255.255.0::eth0:off"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			s := baseSpec()
-			s.DNS = tc.dns
-			if err := s.Validate(); err != nil {
-				t.Fatalf("Validate() error = %v", err)
-			}
-			if !strings.Contains(s.Cmdline, tc.want) {
-				t.Errorf("Cmdline = %q, want it to carry %q", s.Cmdline, tc.want)
-			}
-		})
-	}
-}
-
-// Rejected at "vm create" time, where the operator is standing there to
-// read it, rather than by a guest that boots with a resolver it cannot
-// use and hangs on every lookup.
-func TestValidate_RejectsBadDNS(t *testing.T) {
-	for _, dns := range []string{"not-an-address", "8.8.8.8,1.1.1.1,9.9.9.9", "2001:4860:4860::8888"} {
-		s := baseSpec()
-		s.DNS = dns
-		if err := s.Validate(); err == nil {
-			t.Errorf("Validate() = nil for DNS %q, want an error", dns)
-		}
 	}
 }
 
@@ -276,15 +217,28 @@ func TestValidate_RejectsUnknownBackend(t *testing.T) {
 	}
 }
 
-func TestValidate_AutoCmdlineUsesRWWhenNotReadOnly(t *testing.T) {
+func TestValidate_AutoCmdlineUsesROInReadOnlyMode(t *testing.T) {
+	// The mirror of TestValidate_AutoCmdline, which gets "rw" from the
+	// default overlay mode: read-only is now the mode that has to be
+	// asked for, and asking for it is what still mounts the root "ro".
 	s := baseSpec()
 	s.Kernel = "/images/vmlinux"
-	s.DiskReadOnly = false
+	s.DiskMode = config.DiskModeReadOnly
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
-	if got := s.Cmdline; !strings.Contains(got, "root=/dev/vda rw") {
-		t.Errorf("Cmdline = %q, want it to contain %q", got, "root=/dev/vda rw")
+	if got := s.Cmdline; !strings.Contains(got, "root=/dev/vda ro") {
+		t.Errorf("Cmdline = %q, want it to contain %q", got, "root=/dev/vda ro")
+	}
+}
+
+// TestDefaults_BootableDiskMode pins the default a VM gets when nothing
+// is passed: the overlay, the only mode a stock guest finishes booting
+// from. It defaulted to read-only until this was fixed, so every docker
+// caller had to pass -disk-mode overlay to get a VM that came up at all.
+func TestDefaults_BootableDiskMode(t *testing.T) {
+	if got, want := Defaults().DiskModeOrDerived(), config.DiskModeOverlay; got != want {
+		t.Errorf("Defaults() disk mode = %q, want %q", got, want)
 	}
 }
 
@@ -333,8 +287,6 @@ func TestList(t *testing.T) {
 	web := baseSpec()
 	worker := baseSpec()
 	worker.Name = "worker"
-	worker.IP = "169.254.100.3"
-	worker.Port = 30081
 	if err := Save(dir, web); err != nil {
 		t.Fatal(err)
 	}
@@ -351,81 +303,29 @@ func TestList(t *testing.T) {
 	}
 }
 
-// flatBaseSpec is baseSpec in flat mode: the container runtime assigns
-// the address the guest takes over, so there is no -ip to give.
-func flatBaseSpec() VMSpec {
+// TestValidate_NeedsNoAddressOrPort covers what the spec deliberately no
+// longer carries: the container runtime assigns the address the guest
+// takes over, and ports are published on the sandbox itself.
+func TestValidate_NeedsNoAddressOrPort(t *testing.T) {
 	s := baseSpec()
-	s.NetMode = netshim.ModeFlat
-	s.IP = ""
-	s.Port = 0
-	return s
-}
-
-func TestValidate_FlatRejectsIP(t *testing.T) {
-	s := flatBaseSpec()
-	s.IP = "169.254.100.2"
-	if err := s.Validate(); err == nil {
-		t.Errorf("Validate() = nil, want an error: flat mode takes its address from the runtime, so -ip would be silently ignored")
-	}
-}
-
-func TestValidate_FlatNeedsNoAddressOrPort(t *testing.T) {
-	s := flatBaseSpec()
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
 	// The address is only knowable once the sandbox exists, so the
 	// derived cmdline must leave ip= out for the VM container to append.
 	if strings.Contains(s.Cmdline, "ip=") {
-		t.Errorf("Cmdline = %q, want no ip= parameter in flat mode", s.Cmdline)
+		t.Errorf("Cmdline = %q, want no ip= parameter", s.Cmdline)
 	}
 	if !s.CmdlineAuto {
 		t.Errorf("CmdlineAuto = false, want the derived cmdline to be marked automatic")
 	}
 }
 
-func TestValidate_RejectsUnknownNetMode(t *testing.T) {
+func TestValidate_RejectsNameTooLongForControlTap(t *testing.T) {
 	s := baseSpec()
-	s.NetMode = "bridged"
-	if err := s.Validate(); err == nil {
-		t.Errorf("Validate() = nil, want an error for an unknown net mode")
-	}
-}
-
-func TestValidate_FlatRejectsBadControlCIDR(t *testing.T) {
-	s := flatBaseSpec()
-	s.ControlCIDR = "nonsense"
-	if err := s.Validate(); err == nil {
-		t.Errorf("Validate() = nil, want an error for an unparseable control CIDR")
-	}
-}
-
-func TestValidate_FlatRejectsNameTooLongForControlTap(t *testing.T) {
-	s := flatBaseSpec()
 	s.Name = "twelvechars1"
 	if err := s.Validate(); err == nil {
 		t.Errorf("Validate() = nil, want an error: %q would exceed the 15-character interface name limit", "ctl-"+s.Name)
-	}
-}
-
-func TestExecAddr(t *testing.T) {
-	nat := baseSpec()
-	if got, want := nat.ExecAddr(), "169.254.100.2:22"; got != want {
-		t.Errorf("NAT ExecAddr() = %q, want %q", got, want)
-	}
-
-	// In flat mode the guest holds the namespace's own address, so
-	// dialing it from inside the namespace reaches the local stack; the
-	// control link is the only way back in.
-	flat := flatBaseSpec()
-	if got, want := flat.ExecAddr(), "169.254.100.2:22"; got != want {
-		t.Errorf("flat ExecAddr() = %q, want the control link address %q", got, want)
-	}
-
-	none := flatBaseSpec()
-	none.ControlCIDR = ""
-	if got := none.ExecAddr(); got != "" {
-		t.Errorf("ExecAddr() = %q, want empty with no control link: there is no path to the guest", got)
 	}
 }
 
@@ -463,5 +363,27 @@ func TestValidate_DiskSizeNeedsOverlayMode(t *testing.T) {
 	s.DiskSizeMB = -1
 	if err := s.Validate(); err == nil {
 		t.Error("Validate() = nil for a negative disk size, want an error")
+	}
+}
+
+// The nameservers are validated on this side even though the ip=
+// parameter carrying them is assembled inside the VM container. An
+// address rejected there would fail a VM that "vm create" had already
+// reported as started, which is a much worse place to learn about a typo.
+func TestValidate_RejectsNameserversTheGuestCannotBeGiven(t *testing.T) {
+	for _, dns := range []string{"nameserver", "8.8.8.8,1.1.1.1,9.9.9.9", "2001:4860:4860::8888"} {
+		s := baseSpec()
+		s.DNS = dns
+		if err := s.Validate(); err == nil {
+			t.Errorf("Validate() with dns %q = nil, want an error", dns)
+		}
+	}
+
+	// Empty is not a mistake: it is how a caller keeps whatever resolver
+	// the guest image ships with.
+	s := baseSpec()
+	s.DNS = ""
+	if err := s.Validate(); err != nil {
+		t.Errorf("Validate() with no dns = %v, want it accepted", err)
 	}
 }

@@ -5,11 +5,10 @@
 // the standalone kubelet set up under deploy/static-kubelet/ watches (see
 // its README). BackendDocker's equivalent (running the same containers
 // directly against a local docker daemon instead) lives in
-// internal/dockervm. Each VM gets its own single-container pod (plus the
-// shared netshim init container pattern documented in the top-level
-// README) rather than grouping several VMs into one pod, trading the
-// port-sharing trick the hand-written multi-VM examples show for a simple,
-// independent create/update/delete-by-name lifecycle.
+// internal/dockervm. Each VM gets its own pod -- one netshim init
+// container plus one VM container, as documented in the top-level README
+// -- which is what lets the guest take over the pod's own address, and
+// gives a simple, independent create/update/delete-by-name lifecycle.
 package staticpod
 
 import (
@@ -21,6 +20,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/kontur/internal/config"
+
 	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
@@ -77,19 +77,32 @@ type VMSpec struct {
 	Cmdline   string `json:"cmdline,omitempty"`
 
 	// CmdlineAuto records whether Cmdline was derived automatically (from
-	// IP/DiskReadOnly/BridgeCIDR) rather than given explicitly, so a later
-	// "konturctl vm update" that changes one of those inputs without also
-	// passing --cmdline knows to recompute it instead of keeping the now
-	// stale value.
+	// DiskMode) rather than given explicitly, so a later "konturctl vm
+	// update" that changes one of those inputs without also passing
+	// --cmdline knows to recompute it instead of keeping the now stale
+	// value.
 	CmdlineAuto bool `json:"cmdlineAuto,omitempty"`
 
-	CPUs            int    `json:"cpus"`
-	MemoryMB        int    `json:"memoryMB"`
-	ShutdownTimeout string `json:"shutdownTimeout"`
+	CPUs     int `json:"cpus"`
+	MemoryMB int `json:"memoryMB"`
 
-	IP        string `json:"ip"`
-	Port      int    `json:"port"`
-	GuestPort int    `json:"guestPort"`
+	// CPUsMax and MemoryMaxMB are the ceilings CPUs and MemoryMB can be
+	// grown to later with "kontur resize" (CHV_CPUS_MAX and
+	// CHV_MEMORY_MAX_MB -- see the top-level README's "CPU hotplug" and
+	// "Memory hotplug"). cloud-hypervisor sizes both hotplug windows once,
+	// at boot, so a VM created without them can never be resized upward
+	// at all: the vCPU half is refused outright ("Requested vCPUs exceed
+	// maximum") and the memory half silently does nothing.
+	//
+	// Zero means "no headroom": omitted from the VM container's
+	// environment entirely, leaving kontur run's own defaults (CHV_CPUS
+	// for the vCPU ceiling, and CHV_MEMORY_MB or 2048 -- whichever is
+	// larger -- for memory), which is what every spec saved before these
+	// existed gets.
+	CPUsMax     int `json:"cpusMax,omitempty"`
+	MemoryMaxMB int `json:"memoryMaxMB,omitempty"`
+
+	ShutdownTimeout string `json:"shutdownTimeout"`
 
 	// GuestUser is an account inside the guest, besides root, that
 	// "kontur exec" may log in as -- KONTUR_EXEC_USER on the VM
@@ -106,28 +119,28 @@ type VMSpec struct {
 	// Empty means root, which is always authorized.
 	GuestUser string `json:"guestUser,omitempty"`
 
+	// Bridge holds the host end of the control link (see ControlCIDR);
+	// nothing on the guest's own data path goes through it. ExternalIface
+	// is the sandbox interface whose address, MAC and MTU the guest takes
+	// over.
 	Bridge        string `json:"bridge"`
-	BridgeCIDR    string `json:"bridgeCIDR"`
 	ExternalIface string `json:"externalIface"`
 
-	// NetMode selects how the guest reaches the network: netshim.ModeNAT
-	// (the default) puts it behind a private subnet on Bridge, sharing
-	// the namespace's IP through Port. netshim.ModeFlat instead splices
-	// it straight onto the namespace's own segment, where it takes over
-	// the address and MAC the container runtime assigned -- so IP, Port,
-	// GuestPort and BridgeCIDR are all unused, and ports are published
-	// on the sandbox itself (see DockerRunOpts) like any other
-	// container's.
-	NetMode string `json:"netMode,omitempty"`
+	// ControlCIDR is the address netshim holds on the control link, the
+	// private second NIC that keeps "kontur exec" and the memory agent
+	// able to reach a guest that now answers to the namespace's own
+	// address. Set to the empty string to omit the control link
+	// entirely.
+	ControlCIDR string `json:"controlCIDR,omitempty"`
 
 	// DNS is the nameserver(s) the guest resolves through, comma
 	// separated, at most two of them (netshim.ParseDNS). They reach the
 	// guest on its ip= boot parameter's own dns0/dns1 fields, where
-	// kontur-configure-dns writes them into /etc/resolv.conf -- derived
-	// here in NAT mode, where this side builds the whole parameter, and
-	// handed to the VM container as NETSHIM_DNS in flat mode, where the
-	// parameter is only assembled at boot from the identity the runtime
-	// assigned (see internal/netshim.FlatGuestConfig).
+	// kontur-configure-dns writes them into /etc/resolv.conf. This side
+	// only carries the value: the parameter itself is assembled inside
+	// the VM container, from the identity the container runtime assigned
+	// (see internal/netshim.GuestConfig), so this reaches it as
+	// NETSHIM_DNS.
 	//
 	// netshim.DefaultDNS is what "vm create" fills in when the flag is
 	// left alone, and it is a public resolver on purpose: neither the
@@ -137,13 +150,6 @@ type VMSpec struct {
 	// empty string leaves the guest with whatever /etc/resolv.conf its
 	// image ships.
 	DNS string `json:"dns,omitempty"`
-
-	// ControlCIDR is the address netshim holds on the flat-mode control
-	// link, the private second NIC that keeps "kontur exec" and the
-	// memory agent able to reach a guest that now answers to the
-	// namespace's own address. Set to the empty string to omit the
-	// control link entirely. Unused in NAT mode.
-	ControlCIDR string `json:"controlCIDR,omitempty"`
 
 	// DockerRunOpts are extra options passed verbatim to the "docker
 	// run" that creates the network namespace holder (-backend docker
@@ -201,33 +207,70 @@ const (
 // Defaults returns a VMSpec with every field the CLI defaults if left
 // unset, matching the defaults documented for kontur in the top-level
 // README wherever konturctl's own architecture doesn't force a stricter
-// choice. DiskReadOnly is the one field that diverges from kontur run's
-// own CHV_DISK_READONLY=false default: both backends mount -images-hostpath
-// read-only into the container (a shared node-local image cache several
-// VMs may read at once), so a writable disk is never actually possible
-// through konturctl regardless of this flag -- defaulting it to true
-// avoids a boot failure ("Read-only file system") on the flag's own
-// default value.
+// choice.
+//
+// DiskMode is config.DiskModeOverlay, which is what "kontur run" itself
+// defaults to and the only one of the three modes a stock guest actually
+// finishes booting from: a read-only root leaves systemd unable to write
+// the state it needs and the boot never completes, so defaulting to it
+// gave a VM nobody could use. The overlay is a thin qcow2 created inside
+// the VM's own container (see config.PrepareOverlay), so this costs
+// neither a host directory nor a write to the shared image -- the reason
+// this used to default to read-only (that both backends mount
+// -images-hostpath read-only, so a writable disk was impossible) stopped
+// applying when the overlay moved into the container.
 func Defaults() VMSpec {
 	return VMSpec{
-		DiskReadOnly:                  true,
+		DiskMode:                      config.DiskModeOverlay,
 		CPUs:                          2,
 		MemoryMB:                      2048,
 		ShutdownTimeout:               "20s",
-		GuestPort:                     80,
-		NetMode:                       netshim.ModeNAT,
-		DNS:                           netshim.DefaultDNS,
 		ControlCIDR:                   "169.254.100.1/24",
+		DNS:                           netshim.DefaultDNS,
 		Bridge:                        "kontur0",
-		BridgeCIDR:                    "169.254.100.1/24",
 		ExternalIface:                 "eth0",
 		ImagesHostPath:                "/var/lib/vm-images",
 		DiskHostPath:                  "/var/lib/kontur/vm-disks",
-		KonturImage:                   "localhost:5000/kontur:latest",
+		KonturImage:                   StaticPodImage,
 		TerminationGracePeriodSeconds: 40,
 		StaticPodPath:                 "/etc/kubernetes/manifests",
 		Backend:                       BackendStaticPod,
 	}
+}
+
+const (
+	// StaticPodImage is the default KonturImage under BackendStaticPod:
+	// the node-local registry "konturctl setup" installs and
+	// deploy/static-kubelet/build-and-push.sh pushes to. Containerd pulls
+	// by reference and cannot see an image that only exists in a local
+	// docker daemon, so a registry reference is the only kind that works
+	// there.
+	StaticPodImage = "localhost:5000/kontur:latest"
+
+	// DockerImage is the default KonturImage under BackendDocker: the tag
+	// the top-level README's own "docker build -t kontur:latest ." makes,
+	// which is an image the daemon already has and never tries to pull.
+	// StaticPodImage names a registry that only exists once "konturctl
+	// setup" has run, so using it here made every docker-backend caller
+	// pass -kontur-image by hand.
+	DockerImage = "kontur:latest"
+)
+
+// DefaultsForBackend is Defaults with the defaults that differ per
+// backend applied -- currently KonturImage, whose sensible value depends
+// entirely on who is going to resolve it (see StaticPodImage and
+// DockerImage).
+//
+// An unrecognized backend gets the static-pod defaults, the same way
+// BackendOrDefault treats an unset one; Validate is what rejects it,
+// after the flags have been parsed and can say so properly.
+func DefaultsForBackend(backend string) VMSpec {
+	d := Defaults()
+	if backend == BackendDocker {
+		d.Backend = BackendDocker
+		d.KonturImage = DockerImage
+	}
+	return d
 }
 
 // BackendOrDefault returns s.Backend, treating an empty value (a spec
@@ -245,21 +288,28 @@ func sortByName(specs []VMSpec) {
 }
 
 // Validate checks that spec is complete and internally consistent, filling
-// in a default Cmdline (derived from IP/BridgeCIDR) unless Firmware is set
-// -- Cmdline only applies to direct kernel boot, which is still what
-// happens even with Kernel left empty (kontur run's own CHV_KERNEL
-// default then applies, see internal/config's defaultKernel).
+// in a default Cmdline unless Firmware is set -- Cmdline only applies to
+// direct kernel boot, which is still what happens even with Kernel left
+// empty (kontur run's own CHV_KERNEL default then applies, see
+// internal/config's defaultKernel).
 func (s *VMSpec) Validate() error {
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	// netshim names each VM's tap device "tap-<name>" and Linux interface
+	// netshim names the VM's tap device "tap-<name>" and Linux interface
 	// names are capped at 15 characters (IFNAMSIZ-1); catch an
 	// over-length name here, at "vm create"/"vm update" time, rather than
 	// as a netshim init container crash loop once the pod's already been
 	// submitted.
 	if tapName := "tap-" + s.Name; len(tapName) > 15 {
 		return fmt.Errorf("name %q too long: tap device name %q would exceed 15 characters", s.Name, tapName)
+	}
+	// Parsed here even though nothing on this side renders it: the value
+	// is assembled into an ip= parameter inside the VM container, and an
+	// address rejected there would fail a VM that "vm create" had
+	// already reported as started.
+	if _, err := netshim.ParseDNS(s.DNS); err != nil {
+		return fmt.Errorf("invalid dns %q: %w", s.DNS, err)
 	}
 	// An empty DiskImage means the guest disk baked into the kontur
 	// image itself (internal/config's defaultDiskImage), rather than one
@@ -301,40 +351,15 @@ func (s *VMSpec) Validate() error {
 		return fmt.Errorf("disk-size-mb needs -disk-mode=%s: only the VM's own overlay is resized, never the shared disk image (got %q)",
 			config.DiskModeOverlay, s.DiskMode)
 	}
-	s.NetMode = s.NetModeOrDefault()
-	switch s.NetMode {
-	case netshim.ModeNAT:
-		if s.IP == "" {
-			return fmt.Errorf("ip is required")
+	// The control link's tap is named from the VM's name too, and a VM
+	// whose control tap cannot be named is a VM with no exec path in.
+	if ctlTap := "ctl-" + s.Name; len(ctlTap) > 15 {
+		return fmt.Errorf("name %q too long: control tap device name %q would exceed 15 characters", s.Name, ctlTap)
+	}
+	if s.ControlCIDR != "" {
+		if _, _, err := net.ParseCIDR(s.ControlCIDR); err != nil {
+			return fmt.Errorf("invalid control CIDR %q: %w", s.ControlCIDR, err)
 		}
-		ip := net.ParseIP(s.IP)
-		if ip == nil || ip.To4() == nil {
-			return fmt.Errorf("invalid IPv4 address %q", s.IP)
-		}
-		if s.Port < 1 || s.Port > 65535 {
-			return fmt.Errorf("port %d out of range 1-65535", s.Port)
-		}
-		if s.GuestPort < 1 || s.GuestPort > 65535 {
-			return fmt.Errorf("guest port %d out of range 1-65535", s.GuestPort)
-		}
-	case netshim.ModeFlat:
-		// Flat mode takes its address from the container runtime rather
-		// than from -ip, so passing one is a sign the caller expects
-		// netshim to assign it. Reject it rather than silently ignoring
-		// it and handing them a guest on a different address entirely.
-		if s.IP != "" {
-			return fmt.Errorf("ip must not be set in %q net mode: the container runtime assigns the address the guest takes over (pass -ip \"\" when switching an existing VM over)", netshim.ModeFlat)
-		}
-		if ctlTap := "ctl-" + s.Name; len(ctlTap) > 15 {
-			return fmt.Errorf("name %q too long: control tap device name %q would exceed 15 characters", s.Name, ctlTap)
-		}
-		if s.ControlCIDR != "" {
-			if _, _, err := net.ParseCIDR(s.ControlCIDR); err != nil {
-				return fmt.Errorf("invalid control CIDR %q: %w", s.ControlCIDR, err)
-			}
-		}
-	default:
-		return fmt.Errorf("net mode must be %q or %q, got %q", netshim.ModeNAT, netshim.ModeFlat, s.NetMode)
 	}
 	if s.CPUs < 1 {
 		return fmt.Errorf("cpus must be at least 1, got %d", s.CPUs)
@@ -342,26 +367,20 @@ func (s *VMSpec) Validate() error {
 	if s.MemoryMB < 128 {
 		return fmt.Errorf("memory-mb must be at least 128, got %d", s.MemoryMB)
 	}
+	// Caught here rather than left to the VM container, where it would
+	// surface as a container that crash-loops on kontur run's own
+	// validation after the VM has already been submitted.
+	if s.CPUsMax != 0 && s.CPUsMax < s.CPUs {
+		return fmt.Errorf("cpus-max (%d) must be at least cpus (%d)", s.CPUsMax, s.CPUs)
+	}
+	if s.MemoryMaxMB != 0 && s.MemoryMaxMB < s.MemoryMB {
+		return fmt.Errorf("memory-max-mb (%d) must be at least memory-mb (%d)", s.MemoryMaxMB, s.MemoryMB)
+	}
 	if s.Kernel != "" && s.Firmware != "" {
 		return fmt.Errorf("kernel and firmware are mutually exclusive")
 	}
 	if _, err := time.ParseDuration(s.ShutdownTimeout); err != nil {
 		return fmt.Errorf("invalid shutdown timeout %q: %w", s.ShutdownTimeout, err)
-	}
-	// Parsed in both modes, though only NAT mode renders it here: flat
-	// mode's own copy is assembled inside the VM container from
-	// NETSHIM_DNS, and an address rejected there would fail a VM that
-	// "vm create" had already reported as started.
-	dns, err := netshim.ParseDNS(s.DNS)
-	if err != nil {
-		return fmt.Errorf("invalid dns %q: %w", s.DNS, err)
-	}
-	var gateway, netmask string
-	if s.NetMode == netshim.ModeNAT {
-		gateway, netmask, err = gatewayAndNetmask(s.BridgeCIDR)
-		if err != nil {
-			return fmt.Errorf("invalid bridge CIDR %q: %w", s.BridgeCIDR, err)
-		}
 	}
 	s.Backend = s.BackendOrDefault()
 	if s.Backend != BackendStaticPod && s.Backend != BackendDocker {
@@ -373,55 +392,14 @@ func (s *VMSpec) Validate() error {
 		if s.DiskMode == config.DiskModeReadOnly {
 			root = "ro"
 		}
-		// Flat mode leaves the ip= parameter off: the address is only
-		// knowable once the sandbox exists, so the VM container appends
-		// it at boot from what it reads off the namespace itself (see
-		// cmd/kontur's applyFlatNet).
-		if s.NetMode == netshim.ModeFlat {
-			s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s", root)
-		} else {
-			s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s ip=%s::%s:%s::eth0:off%s",
-				root, s.IP, gateway, netmask, netshim.DNSFields(dns))
-		}
+		// No ip= parameter: the address is only knowable once the
+		// sandbox exists, so the VM container appends it at boot from
+		// what it reads off the namespace itself (see cmd/kontur's
+		// applyNetshimNet).
+		s.Cmdline = fmt.Sprintf("console=ttyS0 root=/dev/vda %s", root)
 		s.CmdlineAuto = true
 	}
 	return nil
-}
-
-// NetModeOrDefault returns s.NetMode, treating an empty value (a spec
-// saved before this field existed) as netshim.ModeNAT.
-func (s VMSpec) NetModeOrDefault() string {
-	if s.NetMode == "" {
-		return netshim.ModeNAT
-	}
-	return s.NetMode
-}
-
-// IsFlat reports whether this VM is attached in flat mode.
-func (s VMSpec) IsFlat() bool {
-	return s.NetModeOrDefault() == netshim.ModeFlat
-}
-
-// ExecAddr is the address "kontur exec" dials to reach this VM's guest
-// sshd, as seen from inside the shared network namespace.
-//
-// In NAT mode that is the guest's own address on the private bridge. In
-// flat mode the guest holds the *namespace's* address, so dialing it from
-// in here would reach the local stack instead -- the control link's
-// address is the only way back in, and without a control link there is
-// no path at all.
-func (s VMSpec) ExecAddr() string {
-	if s.NetModeOrDefault() == netshim.ModeNAT {
-		return net.JoinHostPort(s.IP, "22")
-	}
-	if s.ControlCIDR == "" {
-		return ""
-	}
-	addr, _, err := net.ParseCIDR(s.ControlCIDR)
-	if err != nil {
-		return ""
-	}
-	return net.JoinHostPort(netshim.ControlGuestIP(addr).String(), "22")
 }
 
 // DiskModeOrDerived returns s.DiskMode, deriving it from DiskReadOnly
@@ -442,21 +420,6 @@ func (s VMSpec) DiskModeOrDerived() string {
 		return config.DiskModeReadOnly
 	}
 	return config.DiskModeOverlay
-}
-
-// gatewayAndNetmask returns the address and dotted-decimal netmask encoded
-// by a CIDR string such as "169.254.100.1/24" -- the address netshim itself
-// binds to the bridge, which every VM guest uses as its default gateway.
-func gatewayAndNetmask(cidr string) (gateway, netmask string, err error) {
-	addr, ipnet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return "", "", err
-	}
-	mask := net.IP(ipnet.Mask).To4()
-	if mask == nil {
-		return "", "", fmt.Errorf("%s is not an IPv4 CIDR", cidr)
-	}
-	return addr.String(), mask.String(), nil
 }
 
 // specPath returns where a VM's spec JSON lives within stateDir.

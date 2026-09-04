@@ -370,6 +370,25 @@ describe("TaskList", () => {
     expect(runningDot.querySelector(".grain-mark-sheet")).toHaveAttribute("title", "Running");
   });
 
+  // A run that is the merge queue repairing this task's own pull request
+  // branch, rather than writing the change: the same mark, moving the
+  // same way, in green instead of the accent (.grain-mark-repair), and a
+  // badge that says which kind of work it is. A row that has gone back to
+  // running has not gone back to the beginning.
+  it("marks a task the merge queue is repairing apart from one merely running", () => {
+    renderList({
+      tasks: [
+        { ...tasks[1], state: "running", repairing: true },
+      ],
+    });
+    const dot = rowFor("Ship the other thing").querySelector(".badge");
+    const mark = dot.querySelector(".grain-mark-sheet");
+
+    expect(dot).toHaveClass("badge-mark");
+    expect(mark).toHaveClass("grain-mark-repair");
+    expect(mark).toHaveAttribute("title", "Repairing");
+  });
+
   describe("search (bwsalmon/agents#460)", () => {
     it("filters down to tasks whose title matches the search text", async () => {
       const user = userEvent.setup();
@@ -744,6 +763,28 @@ describe("TaskList", () => {
     it("says nothing at all for a run that has not said anything", () => {
       renderList({ tasks: [running()] });
       expect(document.querySelector(".task-activity")).not.toBeInTheDocument();
+    });
+
+    // grain/task-295: the stretch before the agent's first turn -- the
+    // sandbox being built, the repo cloned -- is narrated by grain
+    // itself, since there is no agent yet to narrate it. Everything else
+    // that has ever appeared here was an agent's own words, so whose
+    // sentence this is is marked rather than left to the wording.
+    it("marks a status grain wrote during setup as grain's own", () => {
+      renderList({
+        tasks: [running({ activity: "cloning acme/widgets", activityBySetup: true })],
+      });
+      expect(screen.getByText("cloning acme/widgets")).toBeInTheDocument();
+      expect(document.querySelector(".task-activity-by")).toHaveTextContent("grain");
+      expect(document.querySelector(".task-activity")).toHaveAttribute(
+        "title", expect.stringContaining("What grain is doing to get this run started"));
+    });
+
+    it("leaves the run's own status unmarked", () => {
+      renderList({ tasks: [running({ activity: "running the test suite" })] });
+      expect(document.querySelector(".task-activity-by")).not.toBeInTheDocument();
+      expect(document.querySelector(".task-activity")).toHaveAttribute(
+        "title", expect.stringContaining("What this run says it is doing"));
     });
   });
 });

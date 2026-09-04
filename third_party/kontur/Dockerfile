@@ -25,23 +25,18 @@ ARG KONTUR_KERNEL_VERSION=ch-release-v6.16.9-20260508
 # GUEST_DISTRO selects the guest disk image baked into the final kontur
 # image (not the kontur image's own base, which is always Alpine -- see
 # the "final" stage below): "debian" (the default, via debootstrap) or
-# "alpine" (via apk). Both produce a minimal rootfs with sshd and acpid;
-# see deploy/guest-image/README.md for what else differs between them.
+# "alpine" (via apk). Both produce a minimal rootfs carrying acpid and
+# kontur-agent; see deploy/guest-image/README.md for what else differs
+# between them.
 ARG GUEST_DISTRO=debian
 # GUEST_SUITE only applies when GUEST_DISTRO=debian.
 ARG GUEST_SUITE=bookworm
 # GUEST_ALPINE_VERSION only applies when GUEST_DISTRO=alpine.
 ARG GUEST_ALPINE_VERSION=3.20
-# GUEST_SSH_AUTHORIZED_KEY is an SSH *public* key (see
-# deploy/guest-image/README.md), not a secret, so baking it into the image
-# history via a plain ARG is fine.
-ARG GUEST_SSH_AUTHORIZED_KEY=""
-
 # GUEST_SETUP_SCRIPT, if set, is a shell script run inside the guest rootfs
 # at build time -- the build-time counterpart to CHV_SETUP_SCRIPT, for
 # customization that belongs in the image rather than in every boot of it.
-# It holds the script's own text, not a path, the same way
-# GUEST_SSH_AUTHORIZED_KEY holds a key rather than a filename.
+# It holds the script's own text, not a path.
 #
 # deploy/guest-image/README.md's "Running a custom setup script" points at
 # CHV_SETUP_SCRIPT instead, on the grounds that a build-time chroot has no
@@ -76,12 +71,6 @@ ARG GUEST_SETUP_SCRIPT=""
 # stage's own comment.
 ARG GUEST_KERNEL_PACKAGE=""
 
-# GUEST_CONSOLE_WRAP=0 leaves out the sshd drop-in that mirrors every SSH
-# session onto the serial console. On by default, as it has always been;
-# see overlay-common/etc/ssh/sshd_config.d/20-console-wrap.conf for what
-# it costs a caller that parses command output rather than reading it.
-ARG GUEST_CONSOLE_WRAP=1
-
 # GUEST_DISK_EXTRA_MB adds headroom to the guest disk, on top of the 20%
 # the guest-image stage sizes it with.
 #
@@ -106,23 +95,26 @@ ARG GUEST_CONSOLE_WRAP=1
 # rather than against what feels safe.
 #
 # The way to get real headroom without paying for it in the image is to
-# grow the disk at boot instead: `truncate` the raw file larger before
-# cloud-hypervisor opens it and let the guest `resize2fs` onto it. That
-# keeps the image sized to its rootfs and makes headroom a per-VM
-# setting. Worth doing if the amounts here ever get large.
+# grow the disk at boot instead, which CHV_DISK_SIZE_MB (konturctl's
+# -disk-size-mb) now does end to end: it sizes the qcow2 overlay before
+# cloud-hypervisor opens it, and kontur-growfs resize2fs's the guest's
+# ext4 onto that space on the next boot. That keeps the image sized to
+# its rootfs and makes headroom a per-VM setting, so what is left for
+# this build arg is space that has to be inside the image itself --
+# which is what `konturctl guest build` needs: it provisions the guest
+# in CHV_DISK_MODE=persistent, writing through to disk.img, and
+# CHV_DISK_SIZE_MB is overlay-only by design.
 ARG GUEST_DISK_EXTRA_MB=0
 
-# The nameserver(s) the guest's own /etc/resolv.conf ships with, comma
-# separated, or the empty string to leave whatever the rootfs build left
-# behind.
+# GUEST_DNS is the resolver baked into the guest image's own
+# /etc/resolv.conf.
 #
-# It has to be written by hand because debootstrap copies the *build
-# host's* resolv.conf into the rootfs, and a build host's resolver is
-# routinely an address that only exists in its own network namespace (a
-# cloud metadata resolver, docker's own 127.0.0.11). A guest booted with
-# that file has open IP egress and no working DNS at all, and every
-# lookup in it hangs rather than failing -- so an image built on one
-# machine silently resolves and one built on another silently does not.
+# It exists because debootstrap copies the *build host's* resolv.conf into
+# the rootfs, and a build host's resolver is routinely an address that
+# only exists in its own network namespace -- docker's embedded
+# 127.0.0.11, a cloud metadata service, a link-local stub. From a guest on
+# a tap that is unroutable, so the image came out with open IP egress and
+# no working DNS, differently broken depending on which machine built it.
 # Naming a resolver here makes the image the same wherever it was built.
 #
 # This is only the baseline the image carries. What a guest actually
@@ -149,11 +141,18 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # binary rather than folded into kontur's mode dispatch.
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kontur-mem-agent ./cmd/kontur-mem-agent
+# kontur-agent is what "kontur exec" talks to (see internal/guestexec and
+# cmd/kontur-agent): it listens on the guest's vsock port and runs one
+# command per connection. It ships inside the guest disk image for the
+# same reason kontur-mem-agent does, and is built the same way -- static,
+# CGO-free, so one binary runs on both the Debian and the Alpine guest.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/kontur-agent ./cmd/kontur-agent
 # Symlinks (not copies, so the final stage's own /usr/local/bin/kontur is
 # the only copy of the binary that ships) standing in for /bin/sh,
 # /bin/bash and their /usr/bin equivalents -- see cmd/kontur's own doc
 # comment and internal/guestexec's ShellCommandLine for why: kontur
-# itself tells these two apart from its four real modes by argv[0], so
+# itself tells these two apart from its six real modes by argv[0], so
 # all that's needed image-side is for the names a shell would normally
 # live at to resolve to it.
 RUN mkdir -p /out/shims/bin /out/shims/usr/bin \
@@ -215,95 +214,119 @@ RUN set -eux; \
     echo "${sha256}  vmlinux" | sha256sum -c -
 
 # Builds the Debian variant of the guest rootfs baked into the final
-# kontur image: a minimal Debian rootfs with sshd, via `debootstrap`. See
-# the "alpine" variant below and deploy/guest-image/README.md for how the
-# two compare.
+# kontur image: a minimal Debian rootfs via `debootstrap`. See the
+# "alpine" variant below and deploy/guest-image/README.md for how the two
+# compare.
+#
+# There is deliberately no sshd here any more. It was only ever installed
+# so that "kontur exec" had a way in, and exec reaches the guest over its
+# vsock device now (internal/guestexec) -- so the whole apparatus that
+# served it goes with it: the daemon, its host keys, the account to log
+# into, the authorized_keys file and the per-boot keypair that filled it.
+# A guest that wants sshd for an operator's own interactive access
+# installs it the way it installs anything else, in a setup script run by
+# `konturctl guest build`.
 FROM debian:bookworm-slim AS guest-rootfs-debian
 ARG GUEST_SUITE
-ARG GUEST_SSH_AUTHORIZED_KEY
 ARG GUEST_DNS
 RUN apt-get update && apt-get install -y --no-install-recommends \
       debootstrap ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+# kmod is listed for the same kind of reason udev is: --variant=minbase
+# installs priority-required packages and nothing else, and /sbin/modprobe
+# is not among them. kontur-agent.service loads the virtio-vsock driver
+# with it before starting, and while udev would eventually autoload the
+# module from the device's own modalias, the agent starts early in boot
+# on purpose -- ahead of udev settling -- so relying on that would mean
+# every guest's exec path racing its own boot. The RUN below fails the
+# build if it is missing rather than leaving that to be discovered.
 RUN debootstrap --variant=minbase \
-      --include=openssh-server,systemd-sysv,iproute2,acpid,udev \
+      --include=systemd-sysv,iproute2,acpid,udev,kmod \
       "${GUEST_SUITE}" /rootfs http://deb.debian.org/debian
 
 COPY deploy/guest-image/overlay-common/ /rootfs/
 COPY deploy/guest-image/overlay-debian/ /rootfs/
 COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontur-mem-agent
+COPY --from=build --chmod=0755 /out/kontur-agent /rootfs/usr/local/bin/kontur-agent
 
-# - The console wrapper and ACPI power-button handler need their
+# - The ACPI power-button handler and the libexec scripts need their
 #   executable bit set (COPY doesn't preserve it from build context
 #   permissions reliably across git).
-# - kontur-ssh-host-keys.service is enabled by hand (a symlink into
-#   multi-user.target.wants) rather than via `systemctl enable`, since
-#   systemd isn't running in this chroot to do it for us. acpid's own
-#   postinst already enables acpid.socket/acpid.path the same way (via
-#   deb-systemd-helper, which just writes symlinks and doesn't need a
-#   running systemd), so no equivalent hand-enabling is needed for it --
-#   only the event handler itself (overlay-common/etc/acpi/) is ours to
-#   add.
-# - openssh-server's postinst already generated host keys during
-#   debootstrap; they're removed so every VM booted from this image
-#   doesn't share the same ones -- kontur-ssh-host-keys.service
-#   regenerates them on first boot instead.
-# - No key is authorized at build time. "kontur exec" gets in with a
-#   keypair "kontur run" generates for each boot and passes to the guest
-#   on the kernel command line, which kontur-authorized-key.service
-#   installs before sshd starts (see internal/guestkey) -- so this image
-#   carries no secret and can be published. GUEST_SSH_AUTHORIZED_KEY, if
-#   given, is still baked in for an operator's own interactive access.
-#   Root has no password at all either way (see
-#   overlay-common/etc/ssh/sshd_config.d).
+# - Units are enabled by hand (a symlink into a .wants directory) rather
+#   than via `systemctl enable`, since systemd isn't running in this
+#   chroot to do it for us. acpid's own postinst already enables
+#   acpid.socket/acpid.path the same way (via deb-systemd-helper, which
+#   just writes symlinks and doesn't need a running systemd), so no
+#   equivalent hand-enabling is needed for it -- only the event handler
+#   itself (overlay-common/etc/acpi/) is ours to add.
+# - kontur-agent.service goes into sysinit.target, and is the one unit
+#   here whose ordering is the point rather than a detail: it is what
+#   answers "kontur exec", and a guest is worth being able to exec into
+#   precisely when something later in its boot has gone wrong. Nothing it
+#   needs comes from the network, so nothing orders it after one.
 # - kontur-net-cmdline.service is enabled into sysinit.target rather than
-#   multi-user.target, unlike every other unit here: it establishes the
-#   guest's address, so it has to have run before sshd starts. It is a
-#   no-op on a guest booting the bundled kernel, which handles "ip="
-#   itself -- see overlay-debian/usr/local/libexec/kontur-configure-net
-#   for when it is not, and why.
-# - kontur-configure-dns.service is enabled into sysinit.target for the
-#   same reason, and /etc/resolv.conf is written here rather than left as
-#   debootstrap copied it off the build host -- see GUEST_DNS at the top
-#   of this file, and overlay-common/usr/local/libexec/kontur-configure-dns
-#   for the per-boot half.
+#   multi-user.target, since it establishes the guest's address and other
+#   units expect one. It is a no-op on a guest booting the bundled
+#   kernel, which handles "ip=" itself -- see
+#   overlay-debian/usr/local/libexec/kontur-configure-net for when it is
+#   not, and why.
+# - kontur-net-routes.service joins it there, immediately after: an
+#   address is not a working guest on a point-to-point CNI, where the
+#   routes are the half of the identity "ip=" cannot carry (see
+#   overlay-common/usr/local/libexec/kontur-configure-routes). It no-ops
+#   on a command line with no routes on it, which is every guest with no
+#   netshim in front of it.
+# - kontur-growfs.service goes into sysinit.target for a related reason:
+#   CHV_DISK_SIZE_MB grows the block device the guest boots from, and the
+#   filesystem has to be grown onto it before anything starts writing
+#   into the space. resize2fs comes from e2fsprogs, which debootstrap
+#   already installs (priority: required) -- checked here rather than
+#   discovered as a guest that quietly never grows.
 # - systemd-udevd's own /lib/udev/rules.d/80-net-setup-link.rules renames
 #   NICs to "predictable" names (e.g. virtio-pci's second NIC becomes
 #   "ens3", not "eth1") based on each device's PCI slot -- masked here by
 #   symlinking the same filename under /etc/udev/rules.d (which
 #   overrides it) to /dev/null, so every NIC keeps the kernel's own
 #   enumeration order (eth0, eth1, ...) instead. Both the "ip=" kernel
-#   parameter flat mode's first NIC boots with (see
-#   internal/netshim.FlatGuestConfig) and kontur-control-net's own
+#   parameter the guest's first NIC boots with (see
+#   internal/netshim.GuestConfig) and kontur-control-net's own
 #   default second-NIC name assume that naming; without this, the
 #   control link silently never comes up, since udev has already renamed
 #   "eth1" to "ens3" by the time kontur-control-net.service runs and
 #   checks for it.
 RUN set -eux; \
-    chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
-    chmod 0755 /rootfs/usr/local/libexec/kontur-authorized-key; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-configure-net; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-configure-dns; \
-    for t in sed base64 awk mkdir chmod chown; do \
-      [ -e "/rootfs/bin/$t" ] || [ -e "/rootfs/usr/bin/$t" ] || \
-        { echo "kontur-authorized-key execs $t, which this rootfs does not have" >&2; exit 1; }; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-configure-routes; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-growfs; \
+    [ -x /rootfs/sbin/resize2fs ] || [ -x /rootfs/usr/sbin/resize2fs ] || \
+      { echo "kontur-growfs runs resize2fs, which this rootfs does not have" >&2; exit 1; }; \
+    found_modprobe=""; \
+    for p in /rootfs/sbin/modprobe /rootfs/usr/sbin/modprobe /rootfs/bin/modprobe /rootfs/usr/bin/modprobe; do \
+      if [ -e "$p" ] || [ -L "$p" ]; then found_modprobe="$p"; break; fi; \
     done; \
+    if [ -z "$found_modprobe" ]; then \
+      echo "kontur-agent.service modprobes the vsock driver, and this rootfs has no modprobe" >&2; \
+      echo "what is in the rootfs's sbin directories:" >&2; \
+      ls -l /rootfs/sbin /rootfs/usr/sbin 2>&1 | head -40 >&2; \
+      exit 1; \
+    fi; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
     ln -sf /dev/null /rootfs/etc/udev/rules.d/80-net-setup-link.rules; \
-    ln -sf /etc/systemd/system/kontur-ssh-host-keys.service \
-      /rootfs/etc/systemd/system/multi-user.target.wants/kontur-ssh-host-keys.service; \
     ln -sf /etc/systemd/system/kontur-mem-agent.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-mem-agent.service; \
     ln -sf /etc/systemd/system/kontur-control-net.service \
       /rootfs/etc/systemd/system/multi-user.target.wants/kontur-control-net.service; \
-    ln -sf /etc/systemd/system/kontur-authorized-key.service \
-      /rootfs/etc/systemd/system/multi-user.target.wants/kontur-authorized-key.service; \
     install -d /rootfs/etc/systemd/system/sysinit.target.wants; \
+    ln -sf /etc/systemd/system/kontur-agent.service \
+      /rootfs/etc/systemd/system/sysinit.target.wants/kontur-agent.service; \
     ln -sf /etc/systemd/system/kontur-net-cmdline.service \
       /rootfs/etc/systemd/system/sysinit.target.wants/kontur-net-cmdline.service; \
     ln -sf /etc/systemd/system/kontur-configure-dns.service \
       /rootfs/etc/systemd/system/sysinit.target.wants/kontur-configure-dns.service; \
+    ln -sf /etc/systemd/system/kontur-net-routes.service \
+      /rootfs/etc/systemd/system/sysinit.target.wants/kontur-net-routes.service; \
     if [ -n "${GUEST_DNS}" ]; then \
       : > /rootfs/etc/resolv.conf; \
       echo "${GUEST_DNS}" | tr ',' '\n' | while read -r ns; do \
@@ -311,13 +334,8 @@ RUN set -eux; \
       done; \
       chmod 0644 /rootfs/etc/resolv.conf; \
     fi; \
-    rm -f /rootfs/etc/ssh/ssh_host_*; \
-    install -d -m0700 /rootfs/root/.ssh; \
-    : > /rootfs/root/.ssh/authorized_keys; \
-    if [ -n "${GUEST_SSH_AUTHORIZED_KEY}" ]; then \
-      printf '%s\n' "${GUEST_SSH_AUTHORIZED_KEY}" >> /rootfs/root/.ssh/authorized_keys; \
-    fi; \
-    chmod 0600 /rootfs/root/.ssh/authorized_keys
+    ln -sf /etc/systemd/system/kontur-growfs.service \
+      /rootfs/etc/systemd/system/sysinit.target.wants/kontur-growfs.service
 
 # Builds the Alpine variant of the guest rootfs, via `apk --root` instead
 # of `debootstrap` -- the same technique Alpine's own official base image
@@ -325,14 +343,10 @@ RUN set -eux; \
 # `/etc/apk`) targeting a fresh directory. `openrc`/`busybox` (both pulled
 # in by alpine-base) stand in for `systemd-sysv` as PID 1 and service
 # manager; see deploy/guest-image/README.md for how the two variants'
-# overlays differ as a result -- notably, unlike Debian's openssh-server,
-# Alpine's doesn't generate host keys at package-install time, and its own
-# sshd OpenRC init script (checkconfig -> generate_host_keys) already
-# fills in whatever's missing on every start, so there's no
-# Alpine equivalent of kontur-ssh-host-keys.service needed at all.
+# overlays differ as a result. Neither carries sshd any more: exec
+# reaches the guest over its vsock device (see the Debian stage above).
 FROM alpine:${GUEST_ALPINE_VERSION} AS guest-rootfs-alpine
 ARG GUEST_ALPINE_VERSION
-ARG GUEST_SSH_AUTHORIZED_KEY
 ARG GUEST_DNS
 # --root only changes where packages are installed; apk still reads its
 # own trusted keys and repository list from this stage's own /etc/apk
@@ -340,15 +354,25 @@ ARG GUEST_DNS
 # --keys-dir/--repositories-file are pinned explicitly here rather than
 # relying on the default (which is this stage's own /etc/apk, correct by
 # accident, not by being told to).
+#
+# e2fsprogs-extra, not just e2fsprogs: Alpine splits resize2fs (and
+# dumpe2fs, e2image, ...) out of the base package, so `apk add e2fsprogs`
+# alone would leave kontur-growfs with nothing to run and every guest
+# silently stuck at the size it was built with. Both are named rather
+# than relying on the dependency between them, and the RUN below fails
+# the build if resize2fs still isn't there. Debian needs no equivalent --
+# debootstrap installs e2fsprogs unsplit, at priority required.
 RUN apk add --no-cache --initdb --root /rootfs \
       --keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories \
-      alpine-base openssh-server acpid iproute2 util-linux
+      alpine-base acpid iproute2 util-linux \
+      e2fsprogs e2fsprogs-extra
 RUN printf 'http://dl-cdn.alpinelinux.org/alpine/v%s/main\nhttp://dl-cdn.alpinelinux.org/alpine/v%s/community\n' \
       "${GUEST_ALPINE_VERSION}" "${GUEST_ALPINE_VERSION}" > /rootfs/etc/apk/repositories
 
 COPY deploy/guest-image/overlay-common/ /rootfs/
 COPY deploy/guest-image/overlay-alpine/ /rootfs/
 COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontur-mem-agent
+COPY --from=build --chmod=0755 /out/kontur-agent /rootfs/usr/local/bin/kontur-agent
 
 # Nothing enables OpenRC services on install the way Debian's
 # deb-systemd-helper does (see the Debian stage above), so every service
@@ -358,27 +382,44 @@ COPY --from=build --chmod=0755 /out/kontur-mem-agent /rootfs/usr/local/bin/kontu
 # - sysinit/boot: the baseline a busybox-init/OpenRC system needs to reach
 #   a usable state at all (device nodes, /proc & /sys, hostname, cleaning
 #   /tmp, syslog) -- Debian's systemd does the equivalent internally, with
-#   nothing to enable by hand for it.
-# - default: sshd and acpid, this guest's actual raison d'etre.
+#   nothing to enable by hand for it. kontur-growfs joins that runlevel
+#   rather than "default": the filesystem has to be grown onto the disk
+#   CHV_DISK_SIZE_MB gave it before anything starts writing into the
+#   space, and by "default" the guest is already running.
+#   kontur-agent joins it for a related reason: it answers "kontur exec",
+#   and a guest is worth being able to exec into precisely when something
+#   later in its boot has gone wrong. kontur-net-routes joins it because
+#   the kernel has already addressed the interface by then ("ip=") and
+#   the routes it could not carry are what makes that address usable off
+#   the guest's own segment -- so they belong before anything that talks
+#   to the network, not after it.
+# - default: acpid and the control-link services.
 RUN set -eux; \
-    chmod 0755 /rootfs/usr/local/libexec/kontur-ssh-console-wrap; \
     chmod 0755 /rootfs/usr/local/libexec/kontur-control-net; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-configure-dns; \
+    chmod 0755 /rootfs/etc/init.d/kontur-configure-dns; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-configure-routes; \
     chmod 0755 /rootfs/etc/acpi/powerbtn.sh; \
     chmod 0755 /rootfs/etc/init.d/kontur-mem-agent; \
     chmod 0755 /rootfs/etc/init.d/kontur-control-net; \
-    chmod 0755 /rootfs/usr/local/libexec/kontur-authorized-key; \
-    chmod 0755 /rootfs/etc/init.d/kontur-authorized-key; \
-    chmod 0755 /rootfs/usr/local/libexec/kontur-configure-dns; \
-    chmod 0755 /rootfs/etc/init.d/kontur-configure-dns; \
-    for t in sed base64 awk mkdir chmod chown; do \
-      [ -e "/rootfs/bin/$t" ] || [ -e "/rootfs/usr/bin/$t" ] || \
-        { echo "kontur-authorized-key execs $t, which this rootfs does not have" >&2; exit 1; }; \
-    done; \
+    chmod 0755 /rootfs/etc/init.d/kontur-net-routes; \
+    chmod 0755 /rootfs/etc/init.d/kontur-agent; \
+    chmod 0755 /rootfs/usr/local/libexec/kontur-growfs; \
+    chmod 0755 /rootfs/etc/init.d/kontur-growfs; \
+    [ -x /rootfs/sbin/resize2fs ] || [ -x /rootfs/usr/sbin/resize2fs ] || \
+      { echo "kontur-growfs runs resize2fs, which this rootfs does not have" >&2; exit 1; }; \
+    { [ -e /rootfs/sbin/modprobe ] || [ -L /rootfs/sbin/modprobe ] || \
+      [ -e /rootfs/usr/sbin/modprobe ] || [ -L /rootfs/usr/sbin/modprobe ] || \
+      [ -e /rootfs/bin/modprobe ] || [ -L /rootfs/bin/modprobe ]; } || \
+      { echo "kontur-agent's init script modprobes the vsock driver, and this rootfs has no modprobe" >&2; exit 1; }; \
     for svc in devfs dmesg mdev hwdrivers; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/sysinit/"${svc}"; \
     done; \
-    for svc in hwclock modules sysctl hostname bootmisc syslog kontur-configure-dns; do \
+    for svc in hwclock modules sysctl hostname bootmisc syslog kontur-growfs kontur-net-routes kontur-agent kontur-configure-dns; do \
       ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/boot/"${svc}"; \
+    done; \
+    for svc in local acpid kontur-control-net kontur-mem-agent; do \
+      ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/default/"${svc}"; \
     done; \
     if [ -n "${GUEST_DNS}" ]; then \
       : > /rootfs/etc/resolv.conf; \
@@ -386,16 +427,7 @@ RUN set -eux; \
         if [ -n "$ns" ]; then printf 'nameserver %s\n' "$ns" >> /rootfs/etc/resolv.conf; fi; \
       done; \
       chmod 0644 /rootfs/etc/resolv.conf; \
-    fi; \
-    for svc in local sshd acpid kontur-control-net kontur-mem-agent kontur-authorized-key; do \
-      ln -sf /etc/init.d/"${svc}" /rootfs/etc/runlevels/default/"${svc}"; \
-    done; \
-    install -d -m0700 /rootfs/root/.ssh; \
-    : > /rootfs/root/.ssh/authorized_keys; \
-    if [ -n "${GUEST_SSH_AUTHORIZED_KEY}" ]; then \
-      printf '%s\n' "${GUEST_SSH_AUTHORIZED_KEY}" >> /rootfs/root/.ssh/authorized_keys; \
-    fi; \
-    chmod 0600 /rootfs/root/.ssh/authorized_keys
+    fi
 
 # Selects between the two guest-rootfs-* stages above -- an indirection
 # forced by BuildKit not resolving ARGs in COPY --from, only FROM.
@@ -425,10 +457,8 @@ COPY --from=guest-rootfs /rootfs/ /
 # explicitly rather than left to that fallback.
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Installs GUEST_KERNEL_PACKAGE, and drops the console-mirroring sshd
-# drop-in when GUEST_CONSOLE_WRAP=0. Both are done here, in the one stage
-# where the rootfs is a running container rather than a directory, and
-# for the kernel that is not incidental:
+# Installs GUEST_KERNEL_PACKAGE, in the one stage where the rootfs is a
+# running container rather than a directory. That is not incidental:
 #
 #   - debootstrap's --include would install the package while the
 #     overlays are not in place yet, so the initramfs its postinst
@@ -450,11 +480,7 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # `apk add linux-virt` and a different initramfs tool, so it fails here
 # with a message rather than a missing-binary error further on.
 ARG GUEST_KERNEL_PACKAGE
-ARG GUEST_CONSOLE_WRAP
 RUN set -eux; \
-    if [ "${GUEST_CONSOLE_WRAP}" = "0" ]; then \
-      rm -f /etc/ssh/sshd_config.d/20-console-wrap.conf; \
-    fi; \
     if [ -n "${GUEST_KERNEL_PACKAGE}" ]; then \
       command -v apt-get >/dev/null 2>&1 || \
         { echo "GUEST_KERNEL_PACKAGE needs GUEST_DISTRO=debian; this rootfs has no apt-get" >&2; exit 1; }; \
@@ -514,13 +540,13 @@ COPY --from=guest-image /disk.img /disk.img
 COPY --from=guest-image /out/ /
 
 # netshim mode still needs CAP_NET_ADMIN/CAP_NET_RAW at runtime (creating
-# the bridge/taps and nftables NAT rules), but as of `internal/netshim`
-# talking to the kernel directly via netlink/nftables Go libraries instead
-# of exec'ing the `ip`/`iptables` CLIs, it no longer needs a userland that
-# provides those binaries -- so unlike before, this image doesn't need a
-# real distro base at all. `scratch` (literally nothing but the two
-# binaries and the guest disk image below) is the smallest possible base;
-# it costs the `iptables`/`ip`-based debuggability a real userland gave
+# the tap, the tc splice and the control link), but as of
+# `internal/netshim` talking to the kernel directly via the netlink Go
+# library instead of exec'ing the `ip`/`tc` CLIs, it no longer needs a
+# userland that provides those binaries -- so unlike before, this image
+# doesn't need a real distro base at all. `scratch` (literally nothing
+# but the two binaries and the guest disk image below) is the smallest
+# possible base; it costs the `ip`-based debuggability a real userland gave
 # (no shell, no coreutils, no package manager to `apk add` a debug tool
 # into), traded for the smaller image and attack surface. Both `kontur`
 # and `cloud-hypervisor` are statically linked (see the "build" and

@@ -6,7 +6,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
 )
 
@@ -16,11 +15,17 @@ import (
 // misconfigured environment reports itself instead of quietly passing.
 const requireNetnsTestsEnv = "KONTUR_NETNS_TESTS"
 
-// requireRoot skips tests that need to create real network interfaces,
-// nftables rules and tc filters, which requires CAP_NET_ADMIN (in
-// practice, root) and access to /dev/net/tun -- the netlink library
-// creates a tap by opening that device rather than over rtnetlink, so a
-// root run without it fails deep inside link creation rather than here.
+// requireRoot skips tests that need to create real network interfaces and
+// tc filters, which requires CAP_NET_ADMIN (in practice, root) and access
+// to /dev/net/tun -- the netlink library creates a tap by opening that
+// device rather than over rtnetlink, so a root run without it fails deep
+// inside link creation rather than here.
+//
+// It also requires the private network namespace TestMain re-execs into.
+// That is what lets every test below name its interfaces plainly instead
+// of deriving them from a pid, so running one in a shared namespace is
+// not a degraded mode to fall back on: it would create "splice-tap" on
+// whatever machine happens to be running the tests.
 //
 // Skipping is the right default: these tests cannot run on a developer's
 // machine without sudo. It is also a trap, because `go test ./...`
@@ -35,6 +40,8 @@ func requireRoot(t *testing.T) {
 	switch {
 	case os.Geteuid() != 0:
 		reason = fmt.Sprintf("requires root/CAP_NET_ADMIN to manipulate network interfaces (euid %d)", os.Geteuid())
+	case !inOwnNetns():
+		reason = fmt.Sprintf("requires a network namespace of its own: %v", netnsSetupErr)
 	case !tunDeviceAvailable():
 		reason = "requires /dev/net/tun, which the netlink library opens to create a tap"
 	default:
@@ -56,96 +63,192 @@ func tunDeviceAvailable() bool {
 	return true
 }
 
-// TestSetup_Idempotent exercises Setup against the real network stack,
-// using a throwaway bridge/subnet name derived from the test's own PID so
-// concurrent runs (e.g. on a shared CI host) don't collide. It runs Setup
-// twice to confirm the second run is a safe no-op, then tears everything
-// down.
-func TestSetup_Idempotent(t *testing.T) {
+// TestSetup exercises the whole setup against the real network stack: a
+// veth pair stands in for the interface a container runtime would have
+// created and addressed, and Setup has to discover that identity, build a
+// tap matching its MTU, splice the two, and stand up the control link
+// beside them. Run twice, to confirm a retried init container converges
+// rather than erroring or stacking duplicate filters.
+func TestSetup(t *testing.T) {
 	requireRoot(t)
 
-	bridge := fmt.Sprintf("nst-%d", os.Getpid()%10000)
+	const (
+		extName    = "setup-ext"
+		peerName   = "setup-net"
+		vmName     = "setup"
+		bridgeName = "setup-br"
+
+		mtu = 1450
+	)
+
 	t.Cleanup(func() {
-		conn := &nftables.Conn{}
-		if tables, err := conn.ListTables(); err == nil {
-			for _, tbl := range tables {
-				if tbl.Name == natTable {
-					conn.DelTable(tbl)
-				}
+		names := []string{extName, bridgeName, "tap-" + vmName, "ctl-" + vmName}
+		for _, n := range names {
+			if link, err := netlink.LinkByName(n); err == nil {
+				netlink.LinkDel(link)
 			}
-			conn.Flush()
 		}
-		netlink.LinkDel(&netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: bridge}})
-		netlink.LinkDel(&netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: tapPrefix + "vm1"}})
 	})
 
+	veth := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{Name: extName, MTU: mtu},
+		PeerName:  peerName,
+	}
+	if err := netlink.LinkAdd(veth); err != nil {
+		t.Fatalf("creating veth pair: %v", err)
+	}
+	ext, err := netlink.LinkByName(extName)
+	if err != nil {
+		t.Fatalf("looking up %s: %v", extName, err)
+	}
+	addr, err := netlink.ParseAddr("172.31.253.2/24")
+	if err != nil {
+		t.Fatalf("ParseAddr: %v", err)
+	}
+	if err := netlink.AddrAdd(ext, addr); err != nil {
+		t.Fatalf("addressing %s: %v", extName, err)
+	}
+	if err := netlink.LinkSetUp(ext); err != nil {
+		t.Fatalf("bringing up %s: %v", extName, err)
+	}
+
+	_, ctlNet, err := net.ParseCIDR("169.254.111.1/24")
+	if err != nil {
+		t.Fatalf("ParseCIDR: %v", err)
+	}
 	cfg := Config{
-		Bridge:        bridge,
-		ExternalIface: "lo",
-		GuestPort:     8080,
-		VMs: []VM{
-			{Name: "vm1", IP: net.ParseIP("169.254.100.2"), Port: 30080},
-		},
-	}
-	_, subnet, err := net.ParseCIDR("169.254.100.1/24")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.BridgeAddr = net.ParseIP("169.254.100.1")
-	cfg.BridgeNet = subnet
-
-	if err := Setup(cfg); err != nil {
-		t.Fatalf("Setup() first run error = %v", err)
-	}
-	if !linkExists(bridge) {
-		t.Errorf("bridge %s was not created", bridge)
-	}
-	if !linkExists(tapPrefix + "vm1") {
-		t.Errorf("tap %s was not created", tapPrefix+"vm1")
+		VM:            vmName,
+		Bridge:        bridgeName,
+		ExternalIface: extName,
+		ControlAddr:   net.IPv4(169, 254, 111, 1).To4(),
+		ControlNet:    ctlNet,
 	}
 
-	// Re-running must not error on "already exists" conditions.
-	if err := Setup(cfg); err != nil {
-		t.Fatalf("Setup() second run error = %v", err)
-	}
-
-	conn := &nftables.Conn{}
-	tables, err := conn.ListTables()
-	if err != nil {
-		t.Fatalf("ListTables(): %v", err)
-	}
-	var found int
-	for _, tbl := range tables {
-		if tbl.Name == natTable && tbl.Family == nftables.TableFamilyIPv4 {
-			found++
+	for i := 0; i < 2; i++ {
+		if err := Setup(cfg); err != nil {
+			t.Fatalf("Setup (run %d) error = %v", i+1, err)
 		}
 	}
-	// Setup rebuilds the table from scratch each run, so re-running must
-	// not leave a duplicate table (or duplicate rules within it) behind.
-	if found != 1 {
-		t.Errorf("found %d %q nftables tables, want exactly 1", found, natTable)
+
+	// The identity the guest will take over has to be what the runtime
+	// actually put on the interface.
+	id, err := DiscoverIdentity(extName)
+	if err != nil {
+		t.Fatalf("DiscoverIdentity: %v", err)
+	}
+	if got := id.IP.String(); got != "172.31.253.2" {
+		t.Errorf("Identity.IP = %q, want 172.31.253.2", got)
+	}
+	if id.MTU != mtu {
+		t.Errorf("Identity.MTU = %d, want %d", id.MTU, mtu)
+	}
+	if got := id.Netmask(); got != "255.255.255.0" {
+		t.Errorf("Identity.Netmask() = %q, want 255.255.255.0", got)
 	}
 
-	chains, err := conn.ListChainsOfTableFamily(nftables.TableFamilyIPv4)
+	// The tap's MTU must match the segment's exactly: a splice is a
+	// wire, with nothing in between to fragment an oversized frame.
+	tap, err := netlink.LinkByName("tap-" + vmName)
 	if err != nil {
-		t.Fatalf("ListChainsOfTableFamily(): %v", err)
+		t.Fatalf("looking up tap: %v", err)
 	}
-	var preroutingChain *nftables.Chain
-	for _, c := range chains {
-		if c.Table.Name == natTable && c.Name == "prerouting" {
-			preroutingChain = c
+	if tap.Attrs().MTU != mtu {
+		t.Errorf("tap MTU = %d, want %d (the external interface's)", tap.Attrs().MTU, mtu)
+	}
+
+	for _, name := range []string{extName, "tap-" + vmName} {
+		link, err := netlink.LinkByName(name)
+		if err != nil {
+			t.Fatalf("looking up %s: %v", name, err)
+		}
+		filters, err := netlink.FilterList(link, netlink.MakeHandle(0xffff, 0))
+		if err != nil {
+			t.Fatalf("listing filters on %s: %v", name, err)
+		}
+		if len(filters) != 1 {
+			t.Errorf("%s has %d ingress filters, want exactly 1", name, len(filters))
 		}
 	}
-	if preroutingChain == nil {
-		t.Fatal("prerouting chain not found in kontur table")
-	}
-	rules, err := conn.GetRules(preroutingChain.Table, preroutingChain)
+
+	// The control link is a separate segment reachable from this
+	// namespace, since the guest now answers to the namespace's own
+	// address.
+	bridge, err := netlink.LinkByName(bridgeName)
 	if err != nil {
-		t.Fatalf("GetRules(prerouting): %v", err)
+		t.Fatalf("looking up control bridge: %v", err)
 	}
-	// One DNAT rule per protocol (tcp, udp) for vm1, and no more, even
-	// though Setup ran twice.
-	if len(rules) != 2 {
-		t.Errorf("prerouting chain has %d rules, want exactly 2 (Setup should be idempotent)", len(rules))
+	addrs, err := netlink.AddrList(bridge, netlink.FAMILY_V4)
+	if err != nil {
+		t.Fatalf("listing control bridge addresses: %v", err)
+	}
+	if len(addrs) != 1 || addrs[0].IP.String() != "169.254.111.1" {
+		t.Errorf("control bridge addresses = %v, want [169.254.111.1]", addrs)
+	}
+	ctlTap, err := netlink.LinkByName("ctl-" + vmName)
+	if err != nil {
+		t.Fatalf("looking up control tap: %v", err)
+	}
+	if ctlTap.Attrs().MasterIndex != bridge.Attrs().Index {
+		t.Errorf("control tap master = %d, want the control bridge (%d)",
+			ctlTap.Attrs().MasterIndex, bridge.Attrs().Index)
+	}
+}
+
+// TestSetup_NoControlLink covers the opt-out path: everything on the
+// data path still gets built, and nothing of the control link does.
+func TestSetup_NoControlLink(t *testing.T) {
+	requireRoot(t)
+
+	const (
+		extName    = "noctl-ext"
+		peerName   = "noctl-net"
+		vmName     = "noctl"
+		bridgeName = "noctl-br"
+	)
+
+	t.Cleanup(func() {
+		for _, n := range []string{extName, "tap-" + vmName, "ctl-" + vmName} {
+			if link, err := netlink.LinkByName(n); err == nil {
+				netlink.LinkDel(link)
+			}
+		}
+	})
+
+	veth := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{Name: extName},
+		PeerName:  peerName,
+	}
+	if err := netlink.LinkAdd(veth); err != nil {
+		t.Fatalf("creating veth pair: %v", err)
+	}
+	ext, err := netlink.LinkByName(extName)
+	if err != nil {
+		t.Fatalf("looking up %s: %v", extName, err)
+	}
+	addr, err := netlink.ParseAddr("172.31.254.2/24")
+	if err != nil {
+		t.Fatalf("ParseAddr: %v", err)
+	}
+	if err := netlink.AddrAdd(ext, addr); err != nil {
+		t.Fatalf("addressing %s: %v", extName, err)
+	}
+	if err := netlink.LinkSetUp(ext); err != nil {
+		t.Fatalf("bringing up %s: %v", extName, err)
+	}
+
+	cfg := Config{
+		VM:            vmName,
+		Bridge:        bridgeName,
+		ExternalIface: extName,
+	}
+	if err := Setup(cfg); err != nil {
+		t.Fatalf("Setup() error = %v", err)
+	}
+
+	if _, err := netlink.LinkByName("tap-" + vmName); err != nil {
+		t.Errorf("spliced tap missing: %v", err)
+	}
+	if _, err := netlink.LinkByName("ctl-" + vmName); err == nil {
+		t.Errorf("control tap exists, want none when the control link is disabled")
 	}
 }

@@ -94,10 +94,11 @@ func reviewDue(task model.Task) bool {
 }
 
 // reviewTaskLink returns the ID task's own LinkReviewTask names, if a
-// review has already been filed for it -- fixTaskLink's counterpart, and
-// read the same two ways: SyncReviews checks it so exactly one review is
-// ever filed, and syncEntry checks it to know whose landing it is
-// waiting on.
+// review has already been filed for it -- the counterpart of the
+// LinkFixTask read the merge queue kept while it still filed a separate
+// repair task, and read the same two ways: SyncReviews checks it so
+// exactly one review is ever filed, and syncEntry checks it to know
+// whose landing it is waiting on.
 func reviewTaskLink(task model.Task) (string, bool) {
 	for _, l := range task.Links {
 		if l.Kind == model.LinkReviewTask {
@@ -116,9 +117,11 @@ func isReviewTask(task model.Task) bool { return task.Origin.Reason == model.Rea
 
 // fileReviewTask files one review of task, from the template task names.
 //
-// The shape is fileFixTask's, because the situation is the same one: a
-// second agent is wanted on a branch a first agent has already pushed,
-// and what it does there has to end up back on that branch. So the
+// The shape is the one the merge queue's own repair task had while it
+// was still filed separately (model.LinkFixTask), because the situation
+// is the same one: a second agent is wanted on a branch a first agent
+// has already pushed, and what it does there has to end up back on that
+// branch. So the
 // review task's Base is task's own branch (model.BranchName -- derived,
 // never self-reported, so this and the checkout agree without either
 // asking the other), its AutoMerge is set, and the pull request it opens
@@ -134,9 +137,10 @@ func isReviewTask(task model.Task) bool { return task.Origin.Reason == model.Rea
 // is itself a human's standing instruction to run it, and asking them to
 // approve the thing they asked for would leave every review sitting as a
 // proposal until somebody noticed. It is filed at the head of the
-// backlog for the reason fileFixTask files a repair there: the change it
-// reviews is waiting on it, and everything behind that change in the
-// repo's merge queue is waiting on both.
+// backlog for the reason the merge queue's own repairs reach the head of
+// it (Store.Ready): the change it reviews is waiting on it, and
+// everything behind that change in the repo's merge queue is waiting on
+// both.
 //
 // Three of the template's fields are used and three are deliberately
 // not. Title, Body and Grants (plus Reads) are the reusable content --
@@ -295,7 +299,7 @@ func reviewComment(ctx context.Context, store *model.Store, taskID, body string,
 
 // defaultReviewTaskDeadline bounds how long a task's own merge waits on
 // the review filed for it, and exists for the reason
-// defaultFixTaskDeadline exists: without it the wait is unbounded, and
+// defaultRepairDeadline exists: without it the wait is unbounded, and
 // by the same route. A task holding its merge for a review reads
 // PrClean, not PrPending, so defaultCheckStallDeadline never times it,
 // and the review task's own pull request is never a queue head itself
@@ -305,7 +309,7 @@ func reviewComment(ctx context.Context, store *model.Store, taskID, body string,
 // otherwise hold its parent at the head of the repo's queue
 // indefinitely, with everything behind it waiting.
 //
-// Six hours, the same as a fix task's, and chosen against the same
+// Six hours, the same as a repair's, and chosen against the same
 // budget: a review waits briefly to be dispatched (it is filed at the
 // head of the backlog), runs an agent (capped at DefaultMaxRunRuntime,
 // two hours), opens a pull request and gets its own CI through. Erring

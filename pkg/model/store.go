@@ -184,6 +184,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskObservationRefreshedColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_observation: %w", err)
 	}
+	if err := s.ensureTaskObservationRepairColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task_observation: %w", err)
+	}
 	if err := s.ensureTaskObservationPendingSecretColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_observation: %w", err)
 	}
@@ -489,6 +492,28 @@ func (s *Store) ensureTaskObservationRefreshedColumn(ctx context.Context) error 
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task_observation` ADD COLUMN `merge_queue_refreshed_at` DATETIME NULL")
+	return err
+}
+
+// ensureTaskObservationRepairColumn adds
+// task_observation.merge_queue_repair_at (Observation's own field has the
+// reasoning) to a database created before it existed, the same
+// probe-then-ALTER approach ensureTaskObservationRefreshedColumn above
+// uses for the same reason, and with the same "no SchemaVersion bump for
+// a nullable column added here" argument.
+//
+// A task the merge queue repaired the old way -- through a separate fix
+// task, LinkFixTask -- reads back as never repaired, which is the
+// direction that errs toward offering one repair rather than toward
+// refusing every future one on the strength of a fix task that ran months
+// ago. The link itself is what Store.TaskTimings goes on counting.
+func (s *Store) ensureTaskObservationRepairColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `merge_queue_repair_at` FROM `task_observation` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task_observation` ADD COLUMN `merge_queue_repair_at` DATETIME NULL")
 	return err
 }
 
@@ -1805,6 +1830,31 @@ func (s *Store) MergeQueueBlocked(ctx context.Context) (map[string]time.Time, er
 	return out, err
 }
 
+// MergeQueueRepairing reads, in one query, every task the merge queue has
+// sent back to an agent to repair its own pull request branch and which
+// has not completed since -- Observation.MergeQueueRepairAt set with no
+// completed_at and no closed_at, the store's own spelling of
+// orchestrator.repairInFlight. MergeQueueBlocked's trade, for the other
+// signal a task list has to show without opening every task: a repair
+// looks exactly like an ordinary attempt from the state alone, and the
+// two are worth telling apart on sight.
+func (s *Store) MergeQueueRepairing(ctx context.Context) (map[string]bool, error) {
+	out := map[string]bool{}
+	err := each(ctx, s.db,
+		"SELECT `task_id` FROM `task_observation` "+
+			"WHERE `merge_queue_repair_at` IS NOT NULL "+
+			"AND `completed_at` IS NULL AND `closed_at` IS NULL", nil,
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			out[id] = true
+			return nil
+		})
+	return out, err
+}
+
 func hydrate(ctx context.Context, q querier, t *Task) error {
 	if err := each(ctx, q,
 		"SELECT `owner`,`name` FROM `task_read` WHERE `task_id` = ? ORDER BY `owner`,`name`",
@@ -1961,11 +2011,12 @@ func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
 		"REPLACE INTO `task_observation` (`task_id`,`closed_at`,`completed_at`,"+
 			"`pending_question_comment_id`,`baseline_comment_id`,`pending_secret`,"+
 			"`merge_queue_blocked_at`,"+
-			"`merge_queue_refreshed_at`,`observed_at`,"+
-			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+			"`merge_queue_refreshed_at`,`merge_queue_repair_at`,`observed_at`,"+
+			"`retry_requested_at`,`pr_opened_at`,`pr_merged_at`,`pr_closed_at`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		o.TaskID, timeOf(o.ClosedAt), timeOf(o.CompletedAt),
 		int64Of(o.PendingQuestionCommentID), int64Of(o.BaselineCommentID), o.PendingSecret,
 		timeOf(o.MergeQueueBlockedAt), timeOf(o.MergeQueueRefreshedAt),
+		timeOf(o.MergeQueueRepairAt),
 		timeOf(o.ObservedAt), timeOf(o.RetryRequestedAt),
 		timeOf(o.PrOpenedAt), timeOf(o.PrMergedAt), timeOf(o.PrClosedAt))
 	return err
@@ -1979,19 +2030,20 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	row := q.QueryRowContext(ctx,
 		"SELECT `closed_at`,`completed_at`,`pending_question_comment_id`,"+
 			"`baseline_comment_id`,`pending_secret`,`merge_queue_blocked_at`,`merge_queue_refreshed_at`,"+
-			"`observed_at`,`retry_requested_at`,"+
+			"`merge_queue_repair_at`,`observed_at`,`retry_requested_at`,"+
 			"`pr_opened_at`,`pr_merged_at`,`pr_closed_at` "+
 			"FROM `task_observation` WHERE `task_id` = ?", taskID)
 	o := Observation{TaskID: taskID}
-	var closed, completed, blocked, refreshed, observed, retried, prOpened, prMerged, prClosed sql.NullTime
+	var closed, completed, blocked, refreshed, repaired sql.NullTime
+	var observed, retried, prOpened, prMerged, prClosed sql.NullTime
 	var pending, baseline sql.NullInt64
 	// pendingSecret is scanned as a NullString rather than into the
 	// string field directly: a row written before the column existed
 	// carries NULL there, which is the same "nothing pending" an empty
 	// string means (ensureTaskObservationPendingSecretColumn).
 	var pendingSecret sql.NullString
-	if err := row.Scan(&closed, &completed, &pending, &baseline, &pendingSecret, &blocked, &refreshed, &observed, &retried,
-		&prOpened, &prMerged, &prClosed); err != nil {
+	if err := row.Scan(&closed, &completed, &pending, &baseline, &pendingSecret, &blocked, &refreshed, &repaired,
+		&observed, &retried, &prOpened, &prMerged, &prClosed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -2001,6 +2053,7 @@ func getObservation(ctx context.Context, q querier, taskID string) (*Observation
 	o.PendingQuestionCommentID, o.BaselineCommentID = int64Ptr(pending), int64Ptr(baseline)
 	o.PendingSecret = pendingSecret.String
 	o.MergeQueueBlockedAt, o.MergeQueueRefreshedAt = timePtr(blocked), timePtr(refreshed)
+	o.MergeQueueRepairAt = timePtr(repaired)
 	o.RetryRequestedAt = timePtr(retried)
 	o.PrOpenedAt, o.PrMergedAt, o.PrClosedAt = timePtr(prOpened), timePtr(prMerged), timePtr(prClosed)
 	return &o, nil
@@ -2054,26 +2107,28 @@ func (s *Store) StartRun(ctx context.Context, r Run, limits Limits) error {
 	})
 }
 
-// taskIsMerger answers OriginReason.Merger for one task id, from the
-// column rather than from a whole Task: this runs inside StartRun's own
-// transaction, where the only thing worth reading is the one field the
-// capacity check turns on.
+// taskIsMerger answers mergerTaskSQL for one task id, from the columns
+// rather than from a whole Task: this runs inside StartRun's own
+// transaction, where the only thing worth reading is what the capacity
+// check turns on.
 //
 // A task id with no row is not a merger. StartRun has no business being
 // called for one, and a foreign key on task_run.task_id is what actually
 // rejects it a statement later -- guessing "merger" for a task nobody can
 // see would be the one reading that spends the reserved capacity.
 func taskIsMerger(ctx context.Context, tx *sql.Tx, taskID string) (bool, error) {
-	var reason string
+	var merger bool
 	err := tx.QueryRowContext(ctx,
-		"SELECT `origin_reason` FROM `task` WHERE `id` = ?", taskID).Scan(&reason)
+		"SELECT "+mergerTaskSQL+" FROM `task` AS `t` "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `t`.`id` "+
+			"WHERE `t`.`id` = ?", string(ReasonFix), taskID).Scan(&merger)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("reading task %s's origin reason: %w", taskID, err)
+		return false, fmt.Errorf("reading whether task %s's run is a merger: %w", taskID, err)
 	}
-	return OriginReason(reason).Merger(), nil
+	return merger, nil
 }
 
 // startRun uses INSERT rather than REPLACE, unlike most writes in this
@@ -2273,12 +2328,27 @@ func (s *Store) RunPrompt(ctx context.Context, taskID string, attempt int) (prom
 // task is ever open (schema.go's task_run_open_task index), so "the live
 // run of this task" names exactly one row, and a call that arrives late
 // cannot overwrite the synopsis a finished run ended on.
+//
+// The agent is not the only caller. grain narrates the run's own setup
+// through this same write, before there is an agent to call anything
+// (orchestrator.setupNotes), which is why nothing here is agent-specific
+// and why "" is a meaningful argument: it stores NULL, clearing whatever
+// stood, and is how the dispatch path hands a clean row to the agent it
+// is about to start. ui.Client.SetTaskActivity refuses "" on the way in
+// from the tool, so an agent cannot blank its own row by accident.
 func (s *Store) SetTaskActivity(ctx context.Context, taskID, activity string, at time.Time) (live bool, err error) {
+	// Both columns go, not just the note: activity_at is the note's own
+	// timestamp and nothing else reads it, so a cleared row that kept one
+	// would only offer a later reader a time with nothing it belongs to.
+	var stamp any = at.UTC()
+	if activity == "" {
+		stamp = nil
+	}
 	err = s.write(ctx, "set task "+taskID+" activity", func(tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx,
 			"UPDATE `task_run` SET `activity` = ?, `activity_at` = ? "+
 				"WHERE `task_id` = ? AND `finished_at` IS NULL",
-			nullable(activity), at.UTC(), taskID)
+			nullable(activity), stamp, taskID)
 		if err != nil {
 			return err
 		}
@@ -2307,19 +2377,23 @@ func (s *Store) SetTaskActivity(ctx context.Context, taskID, activity string, at
 // A live run that has never called the tool is absent rather than present
 // and empty: "said nothing" and "is not running" are different, but
 // neither gives a caller anything to show.
+//
+// agent_started_at comes along because it is what says whose phrase this
+// is: unset means the run has not been handed to its agent yet, so the
+// note is one grain stamped during setup (RunActivity.BySetup).
 func (s *Store) TaskActivity(ctx context.Context) (map[string]RunActivity, error) {
 	out := map[string]RunActivity{}
 	err := each(ctx, s.db,
-		"SELECT `task_id`,`activity`,`activity_at` FROM `task_run` "+
+		"SELECT `task_id`,`activity`,`activity_at`,`agent_started_at` FROM `task_run` "+
 			"WHERE `finished_at` IS NULL AND `activity` IS NOT NULL", nil,
 		func(rows *sql.Rows) error {
 			var taskID string
 			var note sql.NullString
-			var at sql.NullTime
-			if err := rows.Scan(&taskID, &note, &at); err != nil {
+			var at, agentStarted sql.NullTime
+			if err := rows.Scan(&taskID, &note, &at, &agentStarted); err != nil {
 				return err
 			}
-			out[taskID] = RunActivity{Note: note.String, At: timePtr(at)}
+			out[taskID] = RunActivity{Note: note.String, At: timePtr(at), BySetup: !agentStarted.Valid}
 			return nil
 		})
 	return out, err
@@ -2332,17 +2406,17 @@ func (s *Store) TaskActivity(ctx context.Context) (map[string]RunActivity, error
 // Client.ListTasks already make over MergeQueueBlocked.
 func (s *Store) TaskActivityOf(ctx context.Context, taskID string) (*RunActivity, error) {
 	var note sql.NullString
-	var at sql.NullTime
+	var at, agentStarted sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `activity`,`activity_at` FROM `task_run` "+
-			"WHERE `task_id` = ? AND `finished_at` IS NULL", taskID).Scan(&note, &at)
+		"SELECT `activity`,`activity_at`,`agent_started_at` FROM `task_run` "+
+			"WHERE `task_id` = ? AND `finished_at` IS NULL", taskID).Scan(&note, &at, &agentStarted)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !note.Valid) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &RunActivity{Note: note.String, At: timePtr(at)}, nil
+	return &RunActivity{Note: note.String, At: timePtr(at), BySetup: !agentStarted.Valid}, nil
 }
 
 // DropLease forgets a lease once its resource is actually revoked.
@@ -2531,8 +2605,10 @@ func (s *Store) State(ctx context.Context, taskID string) (State, error) {
 // unrelated new work", since the longer it waits the more likely
 // something else lands on the branch it targets and the fix has to be
 // refiled rather than simply merged. That priority is a position now
-// rather than a sort: orchestrator.fileFixTask files the task at the very
-// head of the backlog (OrderKeyForNewTask, atFront), where a human can
+// rather than a sort: the task being repaired is its repo's queue head,
+// which showQueueAtFrontOfBacklog has already moved to the front of the
+// backlog (and a fix task, back when the queue filed those, was filed at
+// the very head with OrderKeyForNewTask's atFront), where a human can
 // see it sitting first, see why the queue behind it is waiting, and drag
 // it elsewhere if they disagree. A rule that lived only in this ORDER BY
 // could do none of that -- the list said one thing and the dispatcher did
@@ -2581,10 +2657,27 @@ func (s *Store) IsReady(ctx context.Context, taskID string) (bool, error) {
 	return true, nil
 }
 
-// ReadyMergers is Ready narrowed to the merge queue's own fix tasks
-// (Origin.Reason == ReasonFix, OriginReason.Merger) -- the ready tasks
-// whose runs are mergers, and so bounded by Limits.Mergers on top of
-// Limits.Workers rather than by the worker ceiling alone.
+// mergerTaskSQL is the one definition of "a run of this task spends the
+// merge queue's reserved capacity", written once and used by all three
+// places that have to decide it: ReadyMergers, liveRunCounts and
+// taskIsMerger. It expects `t` bound to the task row and `o` to its
+// observation (LEFT JOIN -- a task with no observation yet is not being
+// repaired), and takes one parameter, ReasonFix.
+//
+// Two arms because a repair has two shapes now. A task the merge queue
+// filed to repair somebody else's branch is a merger by its reason, which
+// is what every fix task was before this; and a task the queue has sent
+// back to repair its own branch is a merger while that repair is in
+// flight (Observation.MergeQueueRepairAt with no completed_at), which is
+// what a repair is now. Both are the same claim on capacity kept back so
+// that a repair does not have to wait out whatever else is running.
+const mergerTaskSQL = "(`t`.`origin_reason` = ? OR (" +
+	"`o`.`merge_queue_repair_at` IS NOT NULL AND `o`.`completed_at` IS NULL))"
+
+// ReadyMergers is Ready narrowed to the tasks whose runs are mergers
+// (mergerTaskSQL, OriginReason.Merger) -- and so bounded by
+// Limits.Mergers on top of Limits.Workers rather than by the worker
+// ceiling alone.
 //
 // It is a second, narrower query rather than a kind returned alongside
 // each entry of Ready because that is all its caller needs: dispatch.
@@ -2598,7 +2691,8 @@ func (s *Store) ReadyMergers(ctx context.Context) ([]string, error) {
 	err := each(ctx, s.db,
 		"SELECT `r`.`task_id` FROM `task_ready` AS `r` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
-			"WHERE `t`.`origin_reason` = ? "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `r`.`task_id` "+
+			"WHERE "+mergerTaskSQL+" "+
 			"ORDER BY `t`.`order_key`, `r`.`task_id`",
 		[]any{string(ReasonFix)},
 		func(rows *sql.Rows) error {
@@ -3023,8 +3117,9 @@ func liveRunCounts(ctx context.Context, q querier) (RunCounts, error) {
 	var c RunCounts
 	var mergers, total int
 	if err := q.QueryRowContext(ctx,
-		"SELECT COALESCE(SUM(CASE WHEN `t`.`origin_reason` = ? THEN 1 ELSE 0 END), 0), COUNT(*) "+
+		"SELECT COALESCE(SUM(CASE WHEN "+mergerTaskSQL+" THEN 1 ELSE 0 END), 0), COUNT(*) "+
 			"FROM `task_run` AS `r` LEFT JOIN `task` AS `t` ON `t`.`id` = `r`.`task_id` "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `r`.`task_id` "+
 			"WHERE `r`.`finished_at` IS NULL",
 		string(ReasonFix)).Scan(&mergers, &total); err != nil {
 		return RunCounts{}, fmt.Errorf("counting live runs: %w", err)
@@ -3190,12 +3285,25 @@ type TaskPullRequestLink struct {
 // Narrowing this to 'completed' would leave such a task showing a pull
 // request grain had quietly stopped watching, open forever after it had
 // already merged.
+//
+// The third arm is the one task here whose run is not over: one the merge
+// queue has sent back to an agent to repair its own branch
+// (Observation.MergeQueueRepairAt with no completed_at yet, and no
+// closed_at -- orchestrator.requeueForRepair). Such a task reads 'queued'
+// or 'running' rather than either post-run state, and dropping it would
+// hand its queue position to whatever is behind it and leave the repair
+// running with nothing watching the deadline it is running against. It
+// keeps its head position instead, exactly as it did when the repair was
+// a separate fix task stacked on its branch.
 func (s *Store) OpenPullRequestLinks(ctx context.Context) ([]TaskPullRequestLink, error) {
 	var out []TaskPullRequestLink
 	err := each(ctx, s.db,
 		"SELECT `l`.`task_id`, `l`.`target` FROM `task_link` AS `l` "+
 			"JOIN `task_state` AS `st` ON `st`.`task_id` = `l`.`task_id` "+
-			"WHERE `l`.`kind` = ? AND `st`.`state` IN (?, ?) ORDER BY `l`.`task_id`",
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `l`.`task_id` "+
+			"WHERE `l`.`kind` = ? AND (`st`.`state` IN (?, ?) OR ("+
+			"`o`.`merge_queue_repair_at` IS NOT NULL AND `o`.`completed_at` IS NULL "+
+			"AND `o`.`closed_at` IS NULL)) ORDER BY `l`.`task_id`",
 		[]any{string(LinkFixes), string(StateCompleted), string(StateAwaitingSubmit)},
 		func(rows *sql.Rows) error {
 			var l TaskPullRequestLink

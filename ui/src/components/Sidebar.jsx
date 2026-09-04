@@ -2,6 +2,7 @@ import { Box, Button, Chip, Divider, List, ListItemButton, ListItemText, Typogra
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import { SIDEBAR_WIDTH } from "../theme.js";
 import GrainMark from "./GrainMark.jsx";
+import ItemGlyph from "./ItemGlyph.jsx";
 
 // Sidebar replaces TopBar and Filters with the one nav Plane builds every
 // view around: a fixed rail with the workspace identity up top, a state
@@ -97,7 +98,7 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
       onClick={() => selectState(id)}
       sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
     >
-      <span className={`dot ${dotClass}`} />
+      <span className="nav-icon"><span className={`dot ${dotClass}`} /></span>
       <ListItemText
         primary={label}
         sx={{ ml: 1 }}
@@ -173,23 +174,51 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           <NavItem id="blocked" label="Blocked" dotClass="dot-blocked" count={blocked} active={view === "tasks" && stateFilter === "blocked"} />
         )}
         <Divider sx={{ my: 0.7 }} />
+        {/* The board (TaskBoard.jsx, grain/task-287) is the same tasks
+            as the entries above it, in columns of the operator's own
+            choosing -- so it sits here among the destinations rather
+            than in the state list, whose entries each answer "show me
+            this one state" and always land on the flat list.
+            No count beside it, unlike its neighbours: what a board is
+            showing is decided by its own columns, which live in the
+            board and not here, and "all tasks" is already counted at
+            the top of this rail. The board shows tasks, not a list of
+            its own kind of thing, so its marker is the state entries'
+            invisible `dot dot-all` rather than one of the four item
+            glyphs below -- in the same `nav-icon` column as both, so
+            every label in this rail still lines up. */}
+        <ListItemButton selected={view === "board"} onClick={() => onSetView("board")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <span className="nav-icon"><span className="dot dot-all" /></span>
+          <ListItemText primary="Board" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+        </ListItemButton>
+        {/* The four list entries carry their own glyph where the state
+            entries above carry a coloured dot -- each one a Chladni
+            figure off the same plate as the mark at the top of this
+            rail, in a mode the mark's own cycle does not use
+            (src/brand/item-glyphs.js, docs/brand.md). Until now all
+            four sat behind an invisible `dot dot-all`, there purely to
+            keep their labels in the same column as the states' -- so
+            the only thing telling Schedules from Suites at a glance was
+            reading the word. The glyph inherits the entry's text
+            colour, so it brightens with the label when the entry is
+            selected. */}
         <ListItemButton selected={view === "repos"} onClick={() => onSetView("repos")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="dot dot-all" />
+          <span className="nav-icon"><ItemGlyph kind="repos" /></span>
           <ListItemText primary="Repos" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{repoCount}</Typography>
         </ListItemButton>
         <ListItemButton selected={view === "schedules"} onClick={() => onSetView("schedules")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="dot dot-all" />
+          <span className="nav-icon"><ItemGlyph kind="schedules" /></span>
           <ListItemText primary="Schedules" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{schedules.length}</Typography>
         </ListItemButton>
         <ListItemButton selected={view === "templates"} onClick={() => onSetView("templates")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="dot dot-all" />
+          <span className="nav-icon"><ItemGlyph kind="templates" /></span>
           <ListItemText primary="Templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{templates.length}</Typography>
         </ListItemButton>
         <ListItemButton selected={view === "suites"} onClick={() => onSetView("suites")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="dot dot-all" />
+          <span className="nav-icon"><ItemGlyph kind="suites" /></span>
           <ListItemText primary="Suites" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
           <Typography variant="caption" color="text.secondary">{suites.length}</Typography>
         </ListItemButton>

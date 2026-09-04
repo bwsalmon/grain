@@ -179,6 +179,15 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .content-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+/* The page's item glyph, ahead of its title. Centred on the line rather
+   than on the header's baseline, which for a replaced element is its
+   bottom edge and would hang the figure a third of itself too high.
+   Same tone as the count beside it: the heading is the loud part. */
+.content-header .header-icon {
+  display: flex;
+  align-self: center;
+  color: var(--text-tertiary);
+}
 .content-header .count { color: var(--text-tertiary); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 
 /* ---------- Status dot: a small colored circle stands in for the state
@@ -200,6 +209,18 @@ body {
 .dot-completed { background: var(--state-completed); }
 .dot-closed { background: var(--state-closed); }
 .dot-blocked { background: var(--danger); }
+
+/* ---------- The sidebar nav's icon column. A state entry's marker is an
+   8px dot and a list entry's is a 16px glyph (ItemGlyph.jsx), so without
+   a fixed box the two groups' labels would start 8px apart from each
+   other down one rail. Same job as .badge-icon does for a task row. --- */
+.nav-icon {
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
 
 main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 
@@ -311,7 +332,94 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   font-variant-numeric: tabular-nums;
   flex: none;
 }
+/* The mark on a phrase grain wrote itself, while the run's sandbox was
+   still being built and there was no agent to write one (ui.Task.
+   ActivityBySetup). Small and upright against the italic status beside
+   it: it is an attribution, not part of the sentence, and it has to
+   survive the note being truncated -- so it never shrinks. */
+.task-activity-by {
+  flex: none;
+  color: var(--text-tertiary);
+  font-style: normal;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+}
 .chips { display: flex; gap: 0.35rem; flex-wrap: nowrap; flex: none; }
+
+/* ---------- Board: the same tasks as .task-list, in columns
+   (components/TaskBoard.jsx). ---------- */
+/* The board is the one view whose body scrolls sideways, so it takes
+   its own height from the shell and hands the scrolling to the columns
+   instead of letting the page grow: the header and toolbar stay put,
+   the strip of columns scrolls horizontally, and each column scrolls
+   its own cards vertically. Without this the longest column would set
+   the height of the page and the toolbar would leave the screen with
+   it. */
+main.board { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
+.board-hidden-note { margin: 0.75rem 1.75rem 0; display: flex; align-items: center; gap: 0.4rem; }
+.board-columns {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 0.9rem;
+  padding: 1rem 1.75rem 1.5rem;
+  overflow-x: auto;
+}
+.board-column {
+  flex: 0 0 19rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.board-column-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+}
+.board-column-title { font-size: 0.85rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-column-header .count { margin-left: auto; color: var(--text-tertiary); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.board-column-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow-y: auto;
+  min-height: 0;
+}
+.board-column-empty { margin: 0; padding: 0 0.7rem 0.8rem; color: var(--text-tertiary); font-size: 0.8rem; }
+.board-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  cursor: pointer;
+}
+.board-card:hover { background: var(--surface-hover); }
+.board-card-dragging { opacity: 0.4; }
+.board-card-top { display: flex; align-items: center; gap: 0.4rem; }
+/* The number is the row's own fixed-width column in a list; in a card
+   it is one item in a line that has room to spare, so it shrinks to
+   the digits it has. */
+.board-card-top .task-number { width: auto; }
+.board-card-title { font-size: 0.85rem; margin-top: 0.2rem; overflow-wrap: anywhere; }
+.board-card-activity { margin-top: 0.25rem; white-space: normal; }
+.board-card-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
+.board-card-chips:empty { display: none; }
+/* The same "a rule where they would land" the list draws for a drop,
+   on a card rather than a row -- and the same trailing sentinel for
+   "at the end of this column". */
+.board-drop-target { box-shadow: inset 0 2px 0 var(--accent); }
+.board-drop-end { min-height: 2rem; }
 .badge {
   display: inline-flex;
   align-items: center;
@@ -405,6 +513,16 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 @media (prefers-reduced-motion: reduce) {
   .grain-mark-sheet { animation: none; }
 }
+
+/* A run that is the merge queue repairing a task's own pull request
+   branch rather than writing the change (StateDot's own `repairing`,
+   ui.Task.Repairing). The sheet is an alpha mask, so the whole
+   difference is one `background`: the same mark, moving the same way, in
+   state-completed's green instead of the accent's gold -- because a row
+   that has gone back to running has not gone back to the beginning, it
+   is a finished change being unstuck, and the two should not look alike
+   at a glance. */
+.grain-mark-sheet.grain-mark-repair { background: var(--state-completed); }
 
 /* .badge-mark is for a "running" badge showing a task's live status
    (bwsalmon/agents#586): StateDot renders the grain mark's animated
@@ -852,6 +970,15 @@ fieldset legend {
    other value here is a single token, which pre-wrap leaves exactly as
    it was. */
 .declared-value { color: var(--text-secondary); text-align: right; word-break: break-word; white-space: pre-wrap; }
+
+/* .hint is styled above for the forms it started in, and the detail
+   pane's side column uses the same class for the same thing -- "No
+   dependencies.", the "None" an empty capability picker shows, and the
+   note under the read-only repos picker about what an edit made mid-run
+   does and does not reach. Without this they inherit body type in a
+   260px column, which reads as prose rather than as an aside. */
+.detail-side .hint { color: var(--text-tertiary); font-size: 0.8rem; font-weight: normal; }
+.detail-side p.hint { margin: 0.4rem 0 0; }
 
 .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0 0 1.1rem; }
 .detail-side .actions { flex-direction: column; }

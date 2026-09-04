@@ -418,12 +418,18 @@ const (
 	LinkMergeWith  LinkKind = "merge-with"  // blocks the merge, not the run
 	LinkAddresses  LinkKind = "addresses"   // -> a review thread
 	LinkProposedBy LinkKind = "proposed-by" // provenance only
-	// LinkFixTask records the task the merge queue automatically filed to
-	// repair this task's own PR (-> the fix task's ID), so a later cycle
-	// knows one is already in flight rather than filing a second, and can
-	// tell whether it has finished. It does not block dispatch -- the
-	// fix task runs on its own the moment dispatch.Cycle sees it ready,
-	// independent of this task's own state.
+	// LinkFixTask recorded the separate task the merge queue used to file
+	// to repair this task's own PR (-> that task's ID). Nothing writes it
+	// any more: a repair now runs as another attempt of the task itself,
+	// on the very branch its pull request is open from, so that the
+	// resolution and the pull request share one set of CI runs rather
+	// than needing a second branch merged back in (Observation.
+	// MergeQueueRepairAt, orchestrator.requeueForRepair).
+	//
+	// The kind stays defined, and the queue still merges any such task
+	// still in flight, because databases written before that change carry
+	// these links and a report over them (Store.TaskTimings) should go on
+	// counting the repairs they record.
 	LinkFixTask LinkKind = "fix-task"
 	// LinkReviewTask records the task grain filed to review this one's
 	// own work (-> the review task's ID), from the template
@@ -651,8 +657,9 @@ type Task struct {
 	// It is also where grain writes down its own ordering, rather than
 	// keeping a second one to itself: Store.MoveToFrontOfBacklog puts the
 	// tasks waiting on a repo's merge queue at the front of the backlog in
-	// the order they will land, and orchestrator.fileFixTask files a
-	// repair at the very head of it. Everything that decides what happens
+	// the order they will land -- which is also what dispatches a repair
+	// promptly, since the task being repaired is the head of that queue
+	// (orchestrator.requeueForRepair). Everything that decides what happens
 	// next -- Ready, ListTasks, orchestrator.queueOrder -- then reads that
 	// one column, which is the one a human can see and drag.
 	OrderKey float64
@@ -696,27 +703,53 @@ type Observation struct {
 	// asked for.
 	PendingSecret string
 	// MergeQueueBlockedAt is set once the merge queue has stopped driving
-	// this task, for any of the three reasons it ever does: the automatic
-	// fix it filed ran and closed and the PR is still conflicted or
-	// failing, or that fix never finished at all within the time a fix is
-	// given (orchestrator.defaultFixTaskDeadline), or the PR's checks
-	// stayed unfinished for longer than the queue is willing to wait on
-	// CI that may never report
+	// this task, for any of the three reasons it ever does: the repair
+	// run it asked for finished and the PR is still conflicted or
+	// failing, or that repair never finished at all within the time a
+	// repair is given (orchestrator.defaultRepairDeadline), or the PR's
+	// checks stayed unfinished for longer than the queue is willing to
+	// wait on CI that may never report
 	// (orchestrator.defaultCheckStallDeadline). The task's own thread
 	// says which -- see orchestrator.SyncPullRequests. Either way
 	// it no longer counts as any repo's queue head (so a stuck PR cannot
-	// block the ones behind it) and gets no automatic fix from here on,
-	// but it is still merged the moment it reads clean, the same as a fix
-	// task itself, in case a human pushes the fix by hand or the checks
-	// it was waiting on turn up green after all.
+	// block the ones behind it) and gets no automatic repair from here
+	// on, but it is still merged the moment it reads clean, in case a
+	// human pushes the fix by hand or the checks it was waiting on turn
+	// up green after all.
 	MergeQueueBlockedAt *time.Time
+	// MergeQueueRepairAt is set the cycle the merge queue sent this task
+	// back to an agent to repair its own pull request branch --
+	// orchestrator.requeueForRepair, which clears CompletedAt so the
+	// task reads 'queued' again and the next dispatch picks it up.
+	//
+	// It is the whole record of a repair, and it is read three ways.
+	// While CompletedAt is nil it means "a repair is in flight": the task
+	// is running (or queued, or waiting on an answer) on the very branch
+	// its pull request is open from, so nothing merges that branch
+	// underneath it and nothing files a second repair. Once CompletedAt
+	// is set again, a repair has been run: if the pull request still
+	// reads broken on the next cycle the queue gives up and asks a person
+	// (MergeQueueBlockedAt above), because one repair is the whole policy
+	// -- see orchestrator.requeueForRepair. And it never being cleared is
+	// what keeps that policy to one attempt for the life of the task.
+	//
+	// It is also what makes the repair run a *merger*
+	// (OriginReason.Merger's own doc comment): a task being repaired
+	// draws on the capacity Limits.Mergers keeps back, where before this
+	// the repair was a separate ReasonFix task and the reason column
+	// alone answered it.
+	//
+	// Persisted, like MergeQueueRefreshedAt below and for the same
+	// reason: losing it would cost a second repair of a branch that has
+	// already had the one it gets.
+	MergeQueueRepairAt *time.Time
 	// MergeQueueRefreshedAt is set the cycle the merge queue tried to
 	// bring this task's pull request branch up to date with its base --
 	// whether or not that merge landed, and whether or not it helped. It
 	// is what stops a head whose refresh went red from being refreshed
 	// again on the next cycle, the same one-attempt-then-a-person policy
-	// MergeQueueBlockedAt above already records for the fix task the
-	// queue files (orchestrator.refreshStaleHead).
+	// MergeQueueRepairAt above already records for the repair run the
+	// queue asks for (orchestrator.refreshStaleHead).
 	//
 	// Persisted rather than kept in memory, unlike the two CI clocks
 	// orchestrator.sync.go runs: losing one of those costs another window
@@ -753,6 +786,34 @@ type Observation struct {
 	PrOpenedAt *time.Time
 	PrMergedAt *time.Time
 	PrClosedAt *time.Time
+}
+
+// RepairInFlight reports whether the merge queue has sent this task back
+// to an agent to repair its own pull request branch and that repair has
+// not finished yet: MergeQueueRepairAt is set and the task has neither
+// completed nor closed since.
+//
+// It is one question with three readers -- orchestrator.
+// advanceMergeQueueHead, which waits on it; orchestrator.syncEntry, which
+// will not merge a branch an agent is still pushing to; and ui.Client,
+// which shows such a task as being repaired rather than as merely running
+// -- so it is answered here, off the pair of observations that record it,
+// rather than re-derived from the task's state, which says "running" for
+// a first attempt just as readily as for a repair. Store.
+// MergeQueueRepairing is the same rule as SQL, for a caller listing every
+// task at once; the two are edited together, the way StateOf and
+// task_state are.
+//
+// The CompletedAt-before-MergeQueueRepairAt arm is belt and braces:
+// orchestrator.requeueForRepair clears CompletedAt in the same write that
+// sets MergeQueueRepairAt, so an unfinished repair reads nil here. A
+// completion stamped before the repair was asked for could only come from
+// a write that raced that one, and it is not evidence the repair has run.
+func (o *Observation) RepairInFlight() bool {
+	if o == nil || o.MergeQueueRepairAt == nil || o.ClosedAt != nil {
+		return false
+	}
+	return o.CompletedAt == nil || o.CompletedAt.Before(*o.MergeQueueRepairAt)
 }
 
 // Run is one attempt. A live run is a Run with no FinishedAt.
@@ -802,13 +863,22 @@ type Run struct {
 	// Store.SetRunTranscript/RunTranscript read and write it directly by
 	// task ID and attempt number instead.
 	Detail string
-	// Activity is the run's own one-line synopsis of what it is doing at
-	// the moment -- "waiting for CI on the third push", "reading
-	// pkg/orchestrator" -- written by the run itself through the
-	// update_status tool, and ActivityAt is when it last wrote one.
+	// Activity is the one-line synopsis of what this run is doing at the
+	// moment -- "waiting for CI on the third push", "reading
+	// pkg/orchestrator" -- and ActivityAt is when it was last written.
 	//
-	// Everything else on this type is grain's record of the run; this is
-	// the run's own account of itself, and nothing derives or infers it.
+	// Two hands write it, and which of them is answerable from the row
+	// rather than from the words. While task_run.agent_started_at is
+	// still unset it is grain's own narration of the run's setup, stamped
+	// from the dispatch path (orchestrator.setupNotes: "building a
+	// sandbox", "cloning acme/widgets"), because the stretch before the
+	// agent's first turn is exactly the one no run can narrate for
+	// itself. After it, it is the run's own account of itself, written
+	// through the update_status tool and nothing else -- the handover
+	// clears grain's last phrase in the same breath as
+	// Store.SetRunAgentStarted, so a note standing beside a stamped
+	// agent_started_at is always the agent's own (RunActivity.BySetup).
+	//
 	// Both are empty for a run that never said anything, which is no kind
 	// of signal: a framework with no route back to the daemon cannot carry
 	// the call at all (see mcp.NewStatusTools), and every run recorded
@@ -837,6 +907,23 @@ type Run struct {
 type RunActivity struct {
 	Note string
 	At   *time.Time
+	// BySetup says the phrase is grain's rather than the run's: one of
+	// orchestrator.setupNotes' own, stamped while the run's sandbox was
+	// still being built, its repo cloned or its credentials minted.
+	//
+	// It is read off the run rather than off the note -- true exactly
+	// while task_run.agent_started_at is unset, which is the moment
+	// grain hands the run over and clears whatever it last said (see
+	// Run.Activity). That is why no prefix or separate column is needed
+	// to tell the two apart, and why an agent cannot claim to be grain by
+	// writing "grain:" into its own status: the only notes standing
+	// before an agent exists are the ones grain wrote.
+	//
+	// Everything shown on a task row so far is something an agent said,
+	// so the distinction is worth carrying to the reader rather than
+	// quietly blurring: the UI marks such a phrase as grain's
+	// (ui.Task.ActivityBySetup, TaskList.jsx).
+	BySetup bool
 }
 
 // --- conversation ----------------------------------------------------
