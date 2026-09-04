@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
+import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
 
 // TemplateOverlay is the templates page's own sub page (bwsalmon/
 // agents#545): the "+" on TemplatesList opens this blank, and clicking
@@ -15,17 +16,21 @@ import Overlay from "./Overlay.jsx";
 // No target repo or branch here: a template carries no target of its
 // own (model.TaskTemplate's own doc comment on why) -- whatever fires
 // from this template (ScheduleOverlay.jsx, SuiteRunOverlay.jsx) asks for
-// a repo and branch of its own at the point of use instead.
-export default function TemplateOverlay({ template, config, onClose, onSaved, showError }) {
+// a repo and branch of its own at the point of use instead. repoOptions
+// is not a target either: it is only the suggestion list behind the
+// read-only repos picker, which a template does carry.
+export default function TemplateOverlay({ template, repoOptions = [], config, onClose, onSaved, showError }) {
   const isNew = !template;
   const [capabilities, setCapabilities] = useState(template?.capabilities || []);
+  // reads is state for the reason capabilities is: its picker
+  // (ReadOnlyReposField) is a search box, not a form field submit could
+  // read the answer off.
+  const [reads, setReads] = useState(template?.reads || []);
 
   const submit = async (evt) => {
     evt.preventDefault();
     const form = evt.target;
     const data = new FormData(form);
-    const reads = (data.get("reads") || "")
-      .split(",").map((r) => r.trim()).filter((r) => r !== "");
     const payload = {
       name: data.get("name"),
       title: data.get("title"),
@@ -63,16 +68,7 @@ export default function TemplateOverlay({ template, config, onClose, onSaved, sh
         <TextField name="name" label="Name" defaultValue={template?.name} required InputLabelProps={{ required: false }} helperText="shown wherever a template is picked" autoComplete="off" fullWidth margin="normal" />
         <TextField name="title" label="Task title" defaultValue={template?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" defaultValue={template?.description} multiline rows={4} fullWidth margin="normal" />
-        <TextField
-          name="reads"
-          label="Read-only repos"
-          defaultValue={(template?.reads || []).join(", ")}
-          helperText="owner/name, comma-separated, optional"
-          placeholder="owner/shared-lib, owner/schema"
-          autoComplete="off"
-          fullWidth
-          margin="normal"
-        />
+        <ReadOnlyReposField options={repoOptions} value={reads} onChange={setReads} />
         <FormControlLabel
           control={<Checkbox name="autoMerge" defaultChecked={template?.autoMerge} />}
           label="Auto-merge once checks pass"

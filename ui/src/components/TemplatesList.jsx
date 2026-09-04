@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Button } from "@mui/material";
+import { knownRepos } from "../state.js";
 import TemplateOverlay from "./TemplateOverlay.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 
@@ -27,10 +28,14 @@ const SORTS = {
 // Which template is open is App.jsx's state (openTemplateId), not this
 // component's, so the URL can name it -- SchedulesList's own doc
 // comment on why (grain/task-139).
-export default function TemplatesList({ templates, config, openTemplateId, onOpenTemplate, onRefresh, showError }) {
+export default function TemplatesList({ templates, config, tasks, openTemplateId, onOpenTemplate, onRefresh, showError }) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("name");
   const [showNew, setShowNew] = useState(false);
+  // Only so the overlay's read-only repos picker has repos to suggest --
+  // a template still has no target repo of its own. Same list the repo
+  // dropdowns elsewhere offer (SchedulesList, SuitesList).
+  const repoOptions = knownRepos(config, tasks);
   const editing = templates.find((t) => t.id === openTemplateId) || null;
 
   const q = search.trim().toLowerCase();
@@ -64,10 +69,10 @@ export default function TemplatesList({ templates, config, openTemplateId, onOpe
       {templates.length > 0 && visible.length === 0 && <ListEmpty>No templates match your search.</ListEmpty>}
 
       {showNew && (
-        <TemplateOverlay config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
+        <TemplateOverlay repoOptions={repoOptions} config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
       )}
       {editing && (
-        <TemplateOverlay template={editing} config={config} onClose={() => onOpenTemplate(null)} onSaved={onRefresh} showError={showError} />
+        <TemplateOverlay template={editing} repoOptions={repoOptions} config={config} onClose={() => onOpenTemplate(null)} onSaved={onRefresh} showError={showError} />
       )}
     </main>
   );
