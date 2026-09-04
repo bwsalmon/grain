@@ -613,12 +613,13 @@ export default function App() {
       ) : null}
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
-        <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} showError={showError} />
+        <DetailOverlay task={detail} tasks={tasks} config={config} templates={templates} onClose={closeDetail} onOpenTask={openTask} act={act} showError={showError} />
       )}
       {showNewTask && (
         <NewTaskOverlay
           tasks={tasks}
           config={config}
+          templates={templates}
           defaultRepo={newTaskRepo !== null ? newTaskRepo : openRepo}
           onClose={() => setShowNewTask(false)}
           onCreated={refreshAfterCreate}

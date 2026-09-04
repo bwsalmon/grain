@@ -330,6 +330,17 @@ describe("TaskList", () => {
       expect(screen.getByTitle("the merge queue's own automatic fix for another task's pull request"))
         .toHaveTextContent("merge fix");
     });
+
+    // grain/task-284: a review is stacked and nested exactly like a fix,
+    // so it would read as one if the chip went by stacked alone. The two
+    // are not the same event -- one is a second agent reading a change
+    // before it merges, the other is a repair of a red build.
+    it("chips a review as a review rather than as a merge fix", () => {
+      renderList({ tasks: [{ ...fix, id: 3, title: "Review the change", review: true }] });
+      expect(screen.getByTitle("a review of 1's own code, run before it merges"))
+        .toHaveTextContent("review");
+      expect(screen.queryByText("merge fix")).not.toBeInTheDocument();
+    });
   });
 
   // bwsalmon/agents#539

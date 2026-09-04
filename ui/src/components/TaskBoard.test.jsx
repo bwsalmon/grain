@@ -93,6 +93,21 @@ describe("TaskBoard", () => {
       expect(screen.getByText("Web search")).toBeInTheDocument();
     });
 
+    // grain/task-284: the board has no nesting to explain a stacked task
+    // with, so every stacked card carries the chip -- and it has to say
+    // which of the two kinds it is, since a review read as a merge fix
+    // would claim the change had a red build.
+    it("tells a review apart from a merge fix on a stacked card", () => {
+      renderBoard({
+        tasks: [
+          { id: 10, title: "Repair the pull request", state: "queued", capabilities: [], blocked: false, stacked: true, generatedFrom: 1 },
+          { id: 11, title: "Review the change", state: "queued", capabilities: [], blocked: false, stacked: true, review: true, generatedFrom: 2 },
+        ],
+      });
+      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+      expect(screen.getByTitle("a review of 2's own code, run before it merges")).toHaveTextContent("review");
+    });
+
     it("says what a running task's own agent is doing", () => {
       renderBoard({
         tasks: [{

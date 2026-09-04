@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Checkbox, Chip, Typography } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { STATE_LABELS, capabilityName, completionPhase, runActivity, stateLabel } from "../state.js";
+import { STATE_LABELS, capabilityName, completionPhase, runActivity, stackedChip, stateLabel } from "../state.js";
 import { SORTS, filterViews, matchesFilters, sortTasks } from "../taskFilters.js";
 import { boardStates, groupIntoColumns, hiddenStates, loadColumns, saveColumns } from "../board.js";
 import { ListEmpty, ListFilterSelect, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
@@ -313,14 +313,7 @@ export function BoardCard({ t, config, onOpenTask, selected, onToggleSelect, dra
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
         {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a suite run" label="suite" />}
         {t.stacked && (
-          <Chip
-            size="small"
-            className="chip-stacked"
-            title={t.generatedFrom
-              ? `the merge queue's own automatic fix for ${t.generatedFrom}`
-              : "the merge queue's own automatic fix for another task's pull request"}
-            label="merge fix"
-          />
+          <Chip size="small" className="chip-stacked" {...stackedChip(t)} />
         )}
         {t.interactive && (
           <Chip size="small" className="chip-interactive" title="a live chat, not a background task" label="interactive" />

@@ -548,12 +548,15 @@ type queueEntry struct {
 // (Origin.Reason == ReasonFix) is deliberately excluded too: it merges
 // into the task it repairs, not into the repo's own base branch, so it is
 // not a queue entry in its own right -- see syncEntry's own eligibility
-// check for why it still merges unconditionally. A task the queue has
+// check for why it still merges unconditionally. A review task
+// (isReviewTask, grain/task-284) is excluded on exactly the same
+// grounds: it is stacked on the branch of the task it reviews and merges
+// back into it, not into the repo's base. A task the queue has
 // already given up on (obs.MergeQueueBlockedAt set) is excluded as well,
 // which is what lets the queue move on to the next task rather than
 // waiting forever on one that needs a human.
 func isQueueMember(e queueEntry) bool {
-	if !e.task.AutoMerge || e.task.Origin.Reason == model.ReasonFix {
+	if !e.task.AutoMerge || e.task.Origin.Reason == model.ReasonFix || isReviewTask(e.task) {
 		return false
 	}
 	return e.obs == nil || e.obs.MergeQueueBlockedAt == nil
@@ -802,13 +805,43 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// somebody having fixed it by hand.
 	repairing := e.obs.RepairInFlight()
 
-	// A fix task -- the separate, stacked repair branch the queue used to
-	// file, which nothing creates any more but a database may still carry
-	// one of in flight -- always merges into the branch it repairs the
-	// moment it reads clean, unconditionally, the same as every AutoMerge
-	// task did before this package had a queue at all: it is not itself a
-	// queue entry (isQueueMember excludes it), so it is never "blocking" a
-	// repo the way a stuck top-level task would. A task the queue already gave
+	// stacked: a task filed onto another task's branch and merged back
+	// into it rather than into the repo's own base -- a fix task, or a
+	// review (grain/task-284). isQueueMember excludes both, so neither
+	// ever waits for a head position, and neither is a head that could be
+	// repaired or escalated.
+	stacked := isFixTask || isReviewTask(task)
+
+	// The review this task declared, if it has one and it has not landed
+	// yet (SyncReviews is what files it). A change waiting on its own
+	// review does not merge, clean or not and head or not: attaching a
+	// review means it happens before the merge rather than after.
+	//
+	// Only for an ordinary queue member whose pull request is still
+	// open. A stacked task is never itself reviewed; one the queue has
+	// already given up on is held by nothing -- blocked means exactly
+	// that this task merges the moment it reads clean and waits on
+	// nobody; and a pull request that has already merged or closed is
+	// past the point a review could hold anything back, so asking would
+	// only risk announcing that a review is overdue on a task this same
+	// cycle is about to close out.
+	settled := health == model.PrMerged || health == model.PrClosed
+	var review reviewState
+	if !stacked && !blocked && !settled {
+		review, err = reviewStateOf(ctx, store, task, e.obs, now)
+		if err != nil {
+			return err
+		}
+	}
+
+	// A stacked task -- a fix task, which is the separate repair branch
+	// the queue used to file and which nothing creates any more though a
+	// database may still carry one of in flight, or a review -- always
+	// merges into the branch it was filed against the moment it reads
+	// clean, unconditionally, the same as every AutoMerge task did before
+	// this package had a queue at all: it is not itself a queue entry
+	// (isQueueMember excludes it), so it is never "blocking" a repo the
+	// way a stuck top-level task would. A task the queue already gave
 	// up on (blocked) gets the same unconditional treatment: it stopped
 	// being anyone's queue head so it cannot hold the queue back, but it
 	// still lands the moment a human's own push makes it clean. Anything
@@ -837,7 +870,26 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// that reports it) rather than something wrong with any one of the
 	// pull requests it would otherwise comment on individually.
 	switch {
-	case health == model.PrClean && task.AutoMerge && (isFixTask || blocked || (isHead && !repairing)):
+	case review.overdue:
+		// The review is not arriving. Say so, give up the wait, and leave
+		// the merge itself to the next cycle -- which reads a task the
+		// store now says is blocked, and merges it the moment it reads
+		// clean the way it does any other blocked task.
+		if err := escalateUnfinishedReview(ctx, store, task, ref, review.taskID, now); err != nil {
+			return err
+		}
+
+	case review.pending:
+		// Nothing to do but wait: the review is still running, or its own
+		// pull request has not merged back into this branch yet. Holding
+		// the head position is the point -- this change is next in its
+		// repo, and it is not ready. No fix is filed and no stall
+		// escalated either, deliberately: the agent already reading this
+		// branch was sent to fix what is wrong with it, so a second one
+		// filed onto the same branch at the same time would be two
+		// stacked repairs of one change.
+
+	case health == model.PrClean && task.AutoMerge && (stacked || blocked || (isHead && !repairing)):
 		// Pinned to the commit the verdict above was computed for, not
 		// left to land on whatever the head branch points at by the time
 		// GitHub processes this. The two are the same commit right up
@@ -871,12 +923,12 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 		}
 		health = healthFrom(detail, checks, checksKnown, checksSettled)
 
-	case isHead && !isFixTask && !blocked && (health == model.PrConflicted || health == model.PrFailing):
+	case isHead && !stacked && !blocked && (health == model.PrConflicted || health == model.PrFailing):
 		if err := advanceMergeQueueHead(ctx, store, client, task, e.obs, ref, detail, health, checks, now); err != nil {
 			return err
 		}
 
-	case isHead && !isFixTask && !blocked && !repairing && stalled:
+	case isHead && !stacked && !blocked && !repairing && stalled:
 		if err := escalateStalledChecks(ctx, store, task, ref, checks, stallDeadline, now); err != nil {
 			return err
 		}
