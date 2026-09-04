@@ -13,20 +13,22 @@ import (
 // unlike bwsalmon/agents#398's singleton ReleaseConfig, a release row is
 // no longer 1:1 with a repo: `owner`+`repo` identifies the repo, `name`
 // identifies which of that repo's releases this is.
-const releaseColumns = "`id`,`owner`,`repo`,`name`,`status`,`created_at`,`merged_at`,`pull_request_url`,`last_error`"
+const releaseColumns = "`id`,`owner`,`repo`,`name`,`status`,`created_at`,`merged_at`,`pull_request_url`,`last_error`,`merge_note`"
 
 func scanRelease(scan func(...any) error) (Release, error) {
 	var r Release
 	var status string
 	var mergedAt sql.NullTime
-	var prURL, lastError sql.NullString
-	if err := scan(&r.ID, &r.Repo.Owner, &r.Repo.Name, &r.Name, &status, &r.CreatedAt, &mergedAt, &prURL, &lastError); err != nil {
+	var prURL, lastError, mergeNote sql.NullString
+	if err := scan(&r.ID, &r.Repo.Owner, &r.Repo.Name, &r.Name, &status, &r.CreatedAt, &mergedAt,
+		&prURL, &lastError, &mergeNote); err != nil {
 		return Release{}, err
 	}
 	r.Status = ReleaseStatus(status)
 	r.MergedAt = timePtr(mergedAt)
 	r.PullRequestURL = prURL.String
 	r.LastError = lastError.String
+	r.MergeNote = mergeNote.String
 	return r, nil
 }
 
@@ -136,10 +138,10 @@ func (s *Store) CreateRelease(ctx context.Context, repo RepoRef, name string, no
 
 func insertRelease(ctx context.Context, tx *sql.Tx, r Release) (int64, error) {
 	res, err := tx.ExecContext(ctx,
-		"INSERT INTO `release` (`owner`,`repo`,`name`,`status`,`created_at`,`merged_at`,`pull_request_url`,`last_error`) "+
-			"VALUES (?,?,?,?,?,?,?,?)",
+		"INSERT INTO `release` (`owner`,`repo`,`name`,`status`,`created_at`,`merged_at`,`pull_request_url`,`last_error`,`merge_note`) "+
+			"VALUES (?,?,?,?,?,?,?,?,?)",
 		r.Repo.Owner, r.Repo.Name, r.Name, string(r.Status), r.CreatedAt.UTC(), timeOf(r.MergedAt),
-		nullable(r.PullRequestURL), nullable(r.LastError))
+		nullable(r.PullRequestURL), nullable(r.LastError), nullable(r.MergeNote))
 	if err != nil {
 		return 0, fmt.Errorf("creating release %q for %s: %w", r.Name, r.Repo, err)
 	}
@@ -148,8 +150,10 @@ func insertRelease(ctx context.Context, tx *sql.Tx, r Release) (int64, error) {
 
 func updateRelease(ctx context.Context, tx *sql.Tx, r Release) error {
 	_, err := tx.ExecContext(ctx,
-		"UPDATE `release` SET `status` = ?, `merged_at` = ?, `pull_request_url` = ?, `last_error` = ? WHERE `id` = ?",
-		string(r.Status), timeOf(r.MergedAt), nullable(r.PullRequestURL), nullable(r.LastError), r.ID)
+		"UPDATE `release` SET `status` = ?, `merged_at` = ?, `pull_request_url` = ?, `last_error` = ?, "+
+			"`merge_note` = ? WHERE `id` = ?",
+		string(r.Status), timeOf(r.MergedAt), nullable(r.PullRequestURL), nullable(r.LastError),
+		nullable(r.MergeNote), r.ID)
 	if err != nil {
 		return fmt.Errorf("updating release %d: %w", r.ID, err)
 	}
@@ -196,6 +200,32 @@ func (s *Store) MarkReleaseMerged(ctx context.Context, id int64, pullRequestURL 
 		_, err := tx.ExecContext(ctx,
 			"UPDATE `release` SET `status` = ?, `merged_at` = ?, `pull_request_url` = ?, `last_error` = NULL WHERE `id` = ?",
 			string(ReleaseMerged), now.UTC(), pullRequestURL, id)
+		return err
+	})
+}
+
+// MarkReleaseNothingToMerge is the other way a ReleaseMergeRequested row
+// reaches ReleaseMerged: there was no pull request to open, because the
+// release's own ProdBranch carries no commits the default branch does not
+// already have. note is the sentence saying so, for whoever reads the
+// release afterwards; MergedAt is set and PullRequestURL left empty, and
+// LastError is cleared, since nothing here failed.
+//
+// Merged rather than some terminal error status of its own: a release
+// whose commits are already on the default branch is as merged back as it
+// will ever be, and this is the status that says "grain is done with it"
+// -- terminal (ReleaseMerged's own doc comment), out of PendingReleases,
+// and freeing the Name for the next release in the same line, which a
+// status meaning "stuck" would hold hostage with nothing a human could do
+// about it. What is *not* the same as an ordinary merge is that no pull
+// request exists, and MergeNote rather than a silently empty
+// PullRequestURL is what keeps that from reading as a lost URL.
+func (s *Store) MarkReleaseNothingToMerge(ctx context.Context, id int64, note string, now time.Time) error {
+	return s.write(ctx, "mark release as having nothing to merge", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `release` SET `status` = ?, `merged_at` = ?, `pull_request_url` = NULL, "+
+				"`last_error` = NULL, `merge_note` = ? WHERE `id` = ?",
+			string(ReleaseMerged), now.UTC(), note, id)
 		return err
 	})
 }

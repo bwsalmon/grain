@@ -727,6 +727,69 @@ func TestCycleSkipsATaskItsCallerIsStillFinishingWith(t *testing.T) {
 	}
 }
 
+// The other half of that window, and the half Busy cannot cover on its
+// own: a caller that finishes with the task *during* the cycle. Cycle
+// reads task_ready once, up front, and reaches a given candidate some
+// time later, so the two questions it asks about that candidate --
+// "queued?" and "busy?" -- are answered at different moments. A run
+// ending in between makes both answers yes when they are read and
+// neither true together: the ready list was taken while the result was
+// still being applied (queued, because the run's row was already
+// finished), and busy is asked once it has been (not busy, because the
+// caller is done -- and the task is completed, which the snapshot cannot
+// know). Dispatching on that pair starts a second run of a task that is
+// finished, which is the whole thing this path exists to prevent.
+//
+// The interleaving is forced here rather than waited for: busy is the
+// caller saying it has finished applying the run's result, so recording
+// that result inside busy is exactly where a real orchestrator's own
+// completion lands relative to this cycle's two reads. cmd/grain's
+// TestReconcileDispatchesWhileAnEarlierRunIsStillLive is where it was
+// found, as a flake -- a live reconcile loop hitting this window every
+// few hundred ticks.
+func TestCycleDoesNotDispatchATaskFinishedSinceTheReadyListWasRead(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, task("t0", true))
+
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now)
+	if err != nil || len(first) != 1 || first[0].TaskID != "t0" {
+		t.Fatalf("first cycle: %v, %+v", err, first)
+	}
+	// The run's row is finished, its result not yet recorded: the state
+	// this cycle's ready list is about to be read at.
+	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := store.State(ctx, "t0"); st != model.StateQueued {
+		t.Fatalf("t0 state = %q, want queued -- the premise of this test", st)
+	}
+
+	done := now.Add(2 * time.Minute)
+	busy := func(taskID string) bool {
+		if taskID != "t0" {
+			return false
+		}
+		// The moment the caller stops being busy with the run is the
+		// moment its result is in the store -- both, here, in the order
+		// the orchestrator does them (ProcessResult, then the goroutine
+		// InFlight tracks returning).
+		if err := store.Observe(ctx, model.Observation{TaskID: "t0", CompletedAt: &done}); err != nil {
+			t.Fatal(err)
+		}
+		return false
+	}
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, done, dispatch.Busy(busy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Errorf("cycle dispatched %+v, want nothing: t0 completed while the cycle was deciding", second)
+	}
+	if runs, err := store.Runs(ctx, "t0"); err != nil || len(runs) != 1 {
+		t.Errorf("t0 has %d run(s) (%v), want only the one that completed it", len(runs), err)
+	}
+}
+
 // The configuration agent takes the same exemption from its own dispatch
 // path (dispatchConfiguration), which does not share the loop above.
 func TestCycleSkipsAConfigurationTaskItsCallerIsStillFinishingWith(t *testing.T) {
@@ -748,6 +811,44 @@ func TestCycleSkipsAConfigurationTaskItsCallerIsStillFinishingWith(t *testing.T)
 	}
 	if len(second) != 0 {
 		t.Fatalf("cycle with the configuration task busy = %+v, want nothing dispatched", second)
+	}
+}
+
+// ...and the same stale ready list, on the same path, for the same
+// reason: dispatchConfiguration reads its own list up front too, and a
+// configuration run that completes between that read and the busy check
+// must not be started over. See
+// TestCycleDoesNotDispatchATaskFinishedSinceTheReadyListWasRead for the
+// interleaving; this is it with the exemption the configuration agent
+// dispatches under, which no headroom check would have stopped either.
+func TestCycleDoesNotDispatchAConfigurationTaskFinishedSinceItsReadyListWasRead(t *testing.T) {
+	store, ctx := open(t)
+	putTasks(t, store, ctx, configurationTask("config"))
+
+	first, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, now)
+	if err != nil || len(first) != 1 || first[0].TaskID != "config" {
+		t.Fatalf("first cycle: %v, %+v", err, first)
+	}
+	if err := store.FinishRun(ctx, first[0].RunID, now.Add(time.Minute), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	done := now.Add(2 * time.Minute)
+	busy := func(taskID string) bool {
+		if taskID != "config" {
+			return false
+		}
+		if err := store.Observe(ctx, model.Observation{TaskID: "config", CompletedAt: &done}); err != nil {
+			t.Fatal(err)
+		}
+		return false
+	}
+	second, err := dispatch.Cycle(ctx, store, model.Limits{Workers: 1}, done, dispatch.Busy(busy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Errorf("cycle dispatched %+v, want nothing: the configuration task completed while the cycle was deciding", second)
 	}
 }
 

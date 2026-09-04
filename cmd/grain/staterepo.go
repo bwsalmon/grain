@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -226,6 +227,37 @@ func openStateRepo(ctx context.Context, dataDir string) (*staterepo.Repo, error)
 		return nil, err
 	}
 	return repo, nil
+}
+
+// recoverDivergedStateRepo answers one question for the two places that
+// have to ask it -- the load at startup and every tick of the sync loop:
+// err is a divergence, and is it one grain can clear by itself?
+//
+// It reports whether the caller should try again. True means the working
+// tree has been reset onto the remote's branch and the commits that were
+// in the way were grain's own exports, which carry only what the database
+// still holds (staterepo.RecoverDiverged has the argument in full). False
+// means either that err was nothing to do with divergence, or that
+// somebody's own commit is in the way -- and that one is logged, because
+// a deployment that has stopped syncing until a human looks at it is
+// worth a line in the journal every time it is noticed.
+func recoverDivergedStateRepo(ctx context.Context, repo *staterepo.Repo, err error) bool {
+	if !errors.Is(err, staterepo.ErrDiverged) {
+		return false
+	}
+	recovered, rerr := repo.RecoverDiverged(ctx)
+	if rerr != nil {
+		log.Printf("grain: the state repository has diverged from its remote and is not syncing: %v", rerr)
+		return false
+	}
+	if !recovered {
+		log.Printf("grain: the state repository has diverged from its remote and is not syncing: %v", err)
+		return false
+	}
+	log.Printf("grain: the state repository had diverged from its remote -- every local commit was grain's "+
+		"own export, so %s has been reset onto origin/%s and the database will be exported over it again",
+		repo.Dir(), repo.Branch())
+	return true
 }
 
 // stateRepoToken resolves the credential a push to an https remote

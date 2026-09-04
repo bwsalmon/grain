@@ -24,6 +24,12 @@ type Release struct {
 	CreatedAt      time.Time  `json:"createdAt"`
 	MergedAt       *time.Time `json:"mergedAt,omitempty"`
 	PullRequestURL string     `json:"pullRequestUrl,omitempty"`
+	// MergeNote is why a merged release has no PullRequestURL: its prod
+	// branch carried nothing the default branch did not already have, so
+	// there was no pull request to open (model.Release.MergeNote). Set
+	// instead of PullRequestURL, never alongside it, and not an error --
+	// nothing went wrong with such a release.
+	MergeNote string `json:"mergeNote,omitempty"`
 	// Error is the releases reconciler's own account of why Status hasn't
 	// advanced yet, if anything has gone wrong.
 	Error string `json:"error,omitempty"`
@@ -34,7 +40,7 @@ func releaseFrom(r model.Release) Release {
 		Repo: r.Repo.String(), Name: r.Name,
 		LatestBranch: r.LatestBranch(), ProdBranch: r.ProdBranch(),
 		Status: string(r.Status), CreatedAt: r.CreatedAt, MergedAt: r.MergedAt,
-		PullRequestURL: r.PullRequestURL, Error: r.LastError,
+		PullRequestURL: r.PullRequestURL, MergeNote: r.MergeNote, Error: r.LastError,
 	}
 }
 

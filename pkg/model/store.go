@@ -196,6 +196,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureReleaseMergeNoteColumn(ctx); err != nil {
+		return fmt.Errorf("migrating release: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -835,6 +838,26 @@ func (s *Store) ensureTaskPromptExtensionColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task` ADD COLUMN `prompt_extension` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureReleaseMergeNoteColumn adds release.merge_note
+// (Release.MergeNote's own doc comment has the reasoning) to a database
+// created before it existed, the same probe-then-ALTER approach every
+// other ensure*Column migration here uses.
+//
+// No SchemaVersion bump goes with it: the column is nullable and added
+// here, so an existing database migrates into the new shape rather than
+// being one this build "cannot simply be re-created into" (SchemaVersion's
+// own doc comment). Every release recorded before it existed reads back
+// with no note, which is what a release that merged through an actual
+// pull request has anyway.
+func (s *Store) ensureReleaseMergeNoteColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `merge_note` FROM `release` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `release` ADD COLUMN `merge_note` TEXT NULL")
 	return err
 }
 
@@ -2359,6 +2382,31 @@ func (s *Store) Ready(ctx context.Context) ([]string, error) {
 			return nil
 		})
 	return out, err
+}
+
+// IsReady is Ready asked about one task: whether taskID is dispatchable
+// at the moment of the call, by exactly the rule the list itself applies
+// (the task_ready view).
+//
+// Ready answers "what could start", which is a list, and a caller
+// walking that list spends real time on each entry -- reading a streak,
+// starting a run. IsReady is for the look taken at the end of that walk,
+// immediately before a run is recorded: a list read a moment ago is a
+// snapshot, and the one thing most likely to have invalidated it is a
+// run of that very task ending in the meantime. dispatch.Cycle's own doc
+// comment has the window; this is the cheapest honest way to close it,
+// one row rather than the whole view re-read per dispatch.
+func (s *Store) IsReady(ctx context.Context, taskID string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT 1 FROM `task_ready` WHERE `task_id` = ?", taskID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ReadyMergers is Ready narrowed to the merge queue's own fix tasks
