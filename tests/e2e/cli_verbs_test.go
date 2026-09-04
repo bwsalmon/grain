@@ -438,7 +438,7 @@ func TestCLICapabilityAttachAndDetachControlWhatARealDispatchMaterializes(t *tes
 	deps := orchestrator.Deps{
 		Client: client, Sandboxes: sandboxes, Config: cfg,
 		MaxWorkers: 1,
-		Framework:     scriptedFramework(pushScript(remote, model.BranchName(taskA.ID), taskA.ID)),
+		Framework:  scriptedFramework(pushScript(remote, model.BranchName(taskA.ID), taskA.ID)),
 	}
 	withStore(t, storeDir, func(store *model.Store, ctx context.Context) {
 		deps.Store = store

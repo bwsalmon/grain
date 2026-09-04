@@ -960,6 +960,29 @@ func TestEverySecretMetadataKeyIsBothIgnoredAndRedacted(t *testing.T) {
 	}
 }
 
+// The formatting gate lives in one place, and CI runs that place rather
+// than a second copy of it.
+//
+// Unformatted Go builds, vets and tests exactly like formatted Go, so
+// until the go job ran this nothing in CI could see the drift, and three
+// files sat unformatted on main long enough that `gofmt -l` was no use
+// as a local signal: it always had something to say about files the
+// change in hand had not touched, and an editor that formats on save
+// turned that into diff noise. `make fmt` rather than a gofmt line of
+// the workflow's own is what keeps the two from drifting apart -- a
+// contributor reproducing a red build locally has to be able to run the
+// same check.
+func TestTheGoJobRunsTheFormattingGate(t *testing.T) {
+	goJob := between(t, stripComments(testsWorkflow(t)), "go-test:", "\n  ui-e2e:")
+	contains(t, goJob, "run: make fmt")
+
+	// And the target it names has to be a check that fails, not one that
+	// lists offenders and exits 0 -- which is how this went unnoticed
+	// before there was a job running it at all.
+	contains(t, between(t, read(t, "Makefile"), "\nfmt:", "\n\n"), "gofmt -l")
+	contains(t, between(t, read(t, "Makefile"), "\nfmt:", "\n\n"), "exit 1")
+}
+
 // The sandbox guest image's toolchain, which three files have to agree
 // on and none of them can see the others.
 //

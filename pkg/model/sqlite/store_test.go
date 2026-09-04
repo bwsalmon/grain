@@ -1782,7 +1782,7 @@ func testConfig() model.Config {
 		AgentFramework: model.AgentFrameworkAntigravity,
 		GeminiModel:    "gemini-2.5-pro", ClaudeModel: "claude-sonnet-5", CodexModel: "gpt-5.1-codex",
 		MaxAgentTurns: 40,
-		GitHubHost: "github.com", GitHubInsecureHTTP: false,
+		GitHubHost:    "github.com", GitHubInsecureHTTP: false,
 		GCPProject: "grain-prod", GCPServiceAccountEmail: "agent@grain-prod.iam.gserviceaccount.com",
 		TargetRepos:         []string{"acme/widgets", "acme/gadgets"},
 		SandboxCPUs:         4,
@@ -3018,10 +3018,10 @@ func TestInitMigratesAnExistingDatabaseMissingShowClosedByDefault(t *testing.T) 
 // same pattern, applied to grain_config.default_capabilities
 // (grain/task-14): a database from before a deployment could say
 // which capabilities every new task starts with gets the column added by
-// ensureConfigDefaultCapabilitiesColumn, defaulted to '' -- which
-// splitCSV reads back as no defaults, so an upgraded deployment keeps
-// filing tasks with exactly what whoever files them asks for until an
-// operator chooses otherwise.
+// ensureConfigDefaultCapabilitiesColumn, defaulted to the empty
+// string -- which splitCSV reads back as no defaults, so an upgraded
+// deployment keeps filing tasks with exactly what whoever files them
+// asks for until an operator chooses otherwise.
 func TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
@@ -3085,9 +3085,9 @@ func TestInitMigratesAnExistingDatabaseMissingDefaultCapabilities(t *testing.T) 
 // TestInitMigratesAnExistingDatabaseMissingEnvironmentName is the same
 // pattern, applied to grain_config.environment_name (grain/task-69): a
 // database from before a deployment could be named gets the column added
-// by ensureConfigEnvironmentNameColumn, defaulted to '' -- an unnamed
-// deployment, whose UI looks exactly as it did before the upgrade until
-// an operator names it.
+// by ensureConfigEnvironmentNameColumn, defaulted to the empty
+// string -- an unnamed deployment, whose UI looks exactly as it did
+// before the upgrade until an operator names it.
 func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
@@ -3159,9 +3159,10 @@ func TestInitMigratesAnExistingDatabaseMissingEnvironmentName(t *testing.T) {
 
 // TestInitMigratesAnExistingDatabaseMissingConfigPromptExtension is the
 // same pattern as the environment-name migration above, applied to
-// grain_config.prompt_extension: the column arrives defaulted to '',
-// which adds nothing to any prompt -- exactly what an upgraded
-// deployment was doing until somebody writes standing instructions.
+// grain_config.prompt_extension: the column arrives defaulted to the
+// empty string, which adds nothing to any prompt -- exactly what an
+// upgraded deployment was doing until somebody writes standing
+// instructions.
 func TestInitMigratesAnExistingDatabaseMissingConfigPromptExtension(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {

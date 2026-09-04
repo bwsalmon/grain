@@ -219,12 +219,30 @@ soak: frontend
 	GRAIN_STATEREPO_SOAK_ROUNDS=$${GRAIN_STATEREPO_SOAK_ROUNDS:-2000} \
 		go test ./pkg/staterepo/ -run TestSoak -v -timeout 120m
 
-# CI has no equivalent fmt check; this just fails the way `go vet` does
-# when a file needs gofmt, instead of only listing it.
+# The formatting gate, run here and by the go job in
+# .github/workflows/tests.yml -- one definition, so a local `make fmt`
+# and a red build mean the same thing. It fails the way `go vet` does
+# when a file needs gofmt, instead of only listing it, and prints the
+# diff for each offender rather than leaving the reader to run gofmt
+# themselves (the terraform job's `fmt -check -diff` is the same idea).
+#
+# Plain gofmt, not `gofmt -s`. The point of this gate is that
+# `gofmt -l` stays a usable local signal: an editor that formats on save
+# should never produce a diff in a file the change did not otherwise
+# touch, and what those editors run is plain gofmt. (The tree is -s
+# clean today as well; that is not what is being promised here.)
+#
+# third_party/kontur is excluded. It is a separate module of vendored
+# upstream code -- `go vet ./...` and `go test ./...` do not reach into
+# it either -- and a red build over formatting we would not be the ones
+# to fix is a gate nobody can act on.
 fmt:
-	@unformatted="$$(gofmt -l .)"; \
+	@files="$$(find . -name '*.go' -not -path './third_party/*')"; \
+	unformatted="$$(gofmt -l $$files)"; \
 	if [ -n "$$unformatted" ]; then \
-		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
+		echo "gofmt needed on:"; echo "$$unformatted"; echo; \
+		gofmt -d $$unformatted; \
+		exit 1; \
 	fi
 
 clean:
