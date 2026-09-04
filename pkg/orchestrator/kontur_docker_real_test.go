@@ -332,28 +332,22 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 			len(failures), len(slots), strings.Join(failures, "\n  "))
 	}
 
-	// Each VM has its own guest transport, and it is a socket in its own
-	// container rather than an address anywhere: `kontur exec` reaches
-	// the guest over virtio-vsock now, so there is no per-VM address to
-	// collide or to derive.
-	//
-	// This assertion has been inverted twice, and both inversions are the
-	// record of what the transport stopped depending on. It first said
-	// the two guest addresses *differed*, which was true while
-	// KonturConfig derived an -ip per slot; then that they were the
-	// *same*, which was true while flat mode gave each VM its own
-	// namespace and `kontur exec` dialed a fixed control-link address in
-	// it (KONTUR_EXEC_ADDR). Since bwsalmon/kontur#46 there is no address
-	// in the picture at all, and the thing worth asserting is that each
-	// VM really has its own socket -- two guests answering independently
-	// with nothing per-VM configured anywhere is the evidence that
-	// removing the derivation was safe.
-	for _, name := range names {
-		assertGuestVsockSocket(t, name)
-	}
-
 	// Each guest actually runs and answers a distinct command, for two
-	// guests at once this time.
+	// guests at once this time -- which is now the whole of what this
+	// test can say about the transport, and enough.
+	//
+	// There used to be an assertion here about the guests' addresses,
+	// inverted once already: first that the two *differed*, while
+	// KonturConfig derived an -ip per slot, then that they were the
+	// *same*, while flat mode gave each VM its own namespace and `kontur
+	// exec` dialed a fixed control-link address in it (KONTUR_EXEC_ADDR).
+	// Since bwsalmon/kontur#46 there is no address in the picture at all,
+	// and nothing per-VM left for this test to read: the transport is a
+	// vsock socket inside each VM's own container, and that container is
+	// built FROM scratch, so there is no `test`, `stat` or shell in it to
+	// look at the socket with. Two guests answering independently with
+	// nothing per-VM configured anywhere is the evidence that wanted
+	// asserting, and it is the loop below.
 	for _, slot := range slots {
 		var runCommand *mcp.Tool
 		for i, tool := range toolsBySlot[slot] {
@@ -373,7 +367,7 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("slot %s: run_command over SSH never succeeded within %s: %s", slot, 2*time.Minute, result.Text)
+				t.Fatalf("slot %s: run_command in the guest never succeeded within %s: %s", slot, 2*time.Minute, result.Text)
 			}
 			time.Sleep(2 * time.Second)
 		}
@@ -406,9 +400,6 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 //     looks identical from here: a guest that never becomes reachable.
 //     This is the only test that can tell them apart from each other, or
 //     from a guest that simply booted slowly.
-//   - That the socket is really there, put on the real VM container by
-//     the real internal/dockervm. Everything else here rests on it, and
-//     nothing in this repo creates it.
 //   - That a guest command's exit status survives both hops (the guest's
 //     agent to `kontur exec`, then `kontur exec`'s own os.Exit to
 //     `docker exec`), including the exit 1 that DockerExecRunner has to
@@ -502,12 +493,6 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			t.Fatalf("Tools() returned no %s tool (got %d tools)", want, len(tools))
 		}
 	}
-
-	// Confirm the thing this whole transport rests on really exists on
-	// the real VM container, put there by the real internal/dockervm.
-	// Nothing in this repo creates it, so nothing in this repo would
-	// notice it changing.
-	assertGuestVsockSocket(t, name)
 
 	// This needs no retry loop around the first tool call. A readiness
 	// wait that only watched a TCP port start answering -- what reaching
@@ -913,28 +898,6 @@ func assertGuestResolvesNames(t *testing.T, runCommand *mcp.Tool) {
 	if lookup.IsError || !strings.Contains(lookup.Text, "github.com") {
 		t.Errorf("resolving github.com inside the guest failed: %s\nthe guest has a resolver on paper (above) but cannot use it", lookup.Text)
 		dumpGuestNetwork(t, runCommand)
-	}
-}
-
-// assertGuestVsockSocket checks that the VM's own container holds the
-// host end of the guest's virtio-vsock device, which is what `kontur
-// exec` connects to and the only thing the guest transport depends on
-// since bwsalmon/kontur#46 replaced ssh with it.
-//
-// Under cloud-hypervisor's hybrid vsock the host end is an ordinary unix
-// socket, at internal/config's defaultVsockSocket. It is asserted here
-// rather than taken on trust because nothing in this repo creates it: a
-// kontur that stopped attaching a vsock device, or moved the socket,
-// would show up in grain only as a guest that never becomes reachable.
-func assertGuestVsockSocket(t *testing.T, vmName string) {
-	t.Helper()
-
-	const socket = "/run/kontur/vsock.sock"
-	out, err := exec.Command("docker", "exec", "kontur-vm-"+vmName,
-		"test", "-S", socket).CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s: no %s in the VM container: %v\n%s -- `kontur exec` has no other way to reach the guest",
-			vmName, socket, err, out)
 	}
 }
 
