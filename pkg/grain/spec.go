@@ -53,6 +53,16 @@ type Spec struct {
 	// this side does not act on is worth nothing.
 	Shape Shape `json:"shape"`
 
+	// Prompt is the agent's opening prompt, assembled by the controller
+	// out of its store: the task, its conversation, the previous
+	// attempts, the deployment's and the repo's prompt extensions. A
+	// grain neither reads nor understands it -- it hands it to whichever
+	// CLI Framework names.
+	//
+	// This is where everything task-shaped ends up that is not a file or
+	// a tool, and it is why a Spec needs no task, no repo and no branch.
+	Prompt string `json:"prompt,omitempty"`
+
 	// Setup is a script run in the guest once it answers, before the
 	// agent starts. It is opaque to the shim, which runs it and reports
 	// its exit code and output (Status.Setup) without reading either.
@@ -72,10 +82,11 @@ type Spec struct {
 	// setup tried to do -- so a secret in here is a secret in every log
 	// that quotes it.
 	//
-	// Its output is also how the two-phase start works: the controller
-	// wrote the script, so it can end it with whatever it needs to read
-	// back -- `git rev-parse HEAD`, a log of what earlier attempts pushed
-	// -- and parse its own output. The shim stays ignorant of all of it.
+	// Its exit code is what gates starting the agent, which is why a
+	// failed checkout costs no model tokens; its output is the diagnosis
+	// for a grain that failed before its agent ever ran. Both reach the
+	// controller as Status.Setup, uninterpreted -- the controller wrote
+	// the script, so it is the one that knows what its output means.
 	Setup string `json:"setup,omitempty"`
 
 	// Tools are the MCP tools this grain advertises to the agent beyond

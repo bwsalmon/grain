@@ -140,7 +140,7 @@ type Grain interface {
 	//
 	// It is a cursor rather than a stream because the trajectory is
 	// carried on the container's stdout and read back with the runtime's
-	// own log stream (docs/grain.md, "The trajectory goes to stdout").
+	// own log stream (docs/grain.md, "Poll for state, logs for the trajectory").
 	// That lets a backend serve a UI watching a grain live from a
 	// `docker logs -f` held open for as long as somebody is watching, and
 	// serve everyone else one call at a time, without the two being

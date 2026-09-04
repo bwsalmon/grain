@@ -61,20 +61,23 @@ type Record struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
-// VersionReport is what `grain version` writes. It is the one document a
-// controller can ask for before it knows whether the two ends agree,
-// which is why it carries a list: an image may speak several versions
-// through an upgrade, and a controller should take one they share rather
-// than refuse a shim that could have served it.
-type VersionReport struct {
-	Version   string   `json:"version"`
-	Supported []string `json:"supported"`
-	// Frameworks are the agent profiles this image carries, the names
-	// Spec.Framework may take. They are reported rather than assumed
-	// because the profiles ship in the image and the tasks naming them
-	// are written against a controller: a task asking for a framework
-	// this image lacks should fail at create, saying so, rather than at
-	// launch inside a guest nobody is watching yet.
-	Frameworks []string `json:"frameworks,omitempty"`
-	Build      string   `json:"build,omitempty"`
-}
+// Labels a sandbox image carries, saying what it can do. They replace a
+// `grain version` subcommand, and are better than one for the reason that
+// matters: a controller wants these *before* it creates a grain -- to
+// refuse a task naming a framework this image lacks, or an image speaking
+// a wire it does not -- and asking a grain requires a grain to exist.
+// Read once per image with `docker inspect`, not once per run.
+//
+// The wire version is also on every document (Version), which is what a
+// controller checks when it is already talking to a grain. These are for
+// deciding whether to start one.
+const (
+	// LabelWireVersions are the wire formats this image speaks, comma
+	// separated. A list rather than one value because an image may speak
+	// several through an upgrade, and a controller should take one they
+	// share rather than refuse an image that could have served it.
+	LabelWireVersions = "grain.wire-versions"
+	// LabelFrameworks are the agent profiles this image carries -- the
+	// names Spec.Framework.Name may take.
+	LabelFrameworks = "grain.frameworks"
+)

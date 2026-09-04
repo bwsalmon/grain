@@ -34,6 +34,24 @@ const (
 	// an environment variable on the *child* process and is the profile's
 	// business either way.
 	FileCredential = Root + "/credential"
+	// FilePrompt is the agent's opening prompt, assembled by the
+	// controller from its store -- the task, its conversation, the
+	// deployment's and the repo's prompt extensions, what earlier
+	// attempts did.
+	//
+	// A file rather than an environment variable for the reason the setup
+	// script is one: it is long and multi-line, and a variable would have
+	// it survive whatever quoting a pod spec or a "docker run" applies.
+	//
+	// It is here at create rather than delivered once the sandbox is up,
+	// which is what retired the two-phase start. That existed because the
+	// prompt names what earlier attempts pushed and those commits were
+	// read from the checkout -- but the controller can ask GitHub for a
+	// branch's commits, and it already talks to GitHub every cycle. What
+	// the two-phase start was really protecting is untouched: Setup's own
+	// exit code still gates starting the agent, so a failed checkout
+	// still spends no model tokens.
+	FilePrompt = Root + "/prompt"
 	// FileSetup is the setup script, run in the guest before the agent
 	// starts.
 	//
@@ -89,6 +107,9 @@ func (s Spec) Files() (map[string]File, error) {
 	out := make(map[string]File, len(s.Placements)+len(s.Tools)+2)
 	if s.Framework.Credential != "" {
 		out[FileCredential] = File{Content: s.Framework.Credential, Mode: "0600"}
+	}
+	if s.Prompt != "" {
+		out[FilePrompt] = File{Content: s.Prompt, Mode: "0644"}
 	}
 	if s.Setup != "" {
 		out[FileSetup] = File{Content: s.Setup, Mode: ModeSetup}

@@ -15,17 +15,14 @@ type Phase string
 const (
 	// PhaseProvisioning is everything before there is an agent: the
 	// container starting, the VMM booting a guest, the guest answering,
-	// placements landing, the clone and the repo's setup command. It is
+	// placements landing, and Setup -- the clone and the repo's own setup
+	// command. A grain goes straight from here to PhaseRunning: the
+	// prompt is a file it already has (FilePrompt), so there is nothing
+	// to wait for in between. It is
 	// bounded by Policy.ProvisionBudget rather than by anything the grain
 	// knows, because a grain wedged here is precisely one that cannot
 	// report that it is wedged.
 	PhaseProvisioning Phase = "provisioning"
-	// PhaseProvisioned is a grain whose sandbox is real and whose
-	// checkout exists, waiting for the prompt. It is the join between the
-	// two halves of a start: the controller cannot assemble a prompt
-	// until the checkout can be read (Status.Checkout), and it will not
-	// spend model tokens on a grain whose checkout failed.
-	PhaseProvisioned Phase = "provisioned"
 	// PhaseRunning is the agent CLI executing in the container.
 	PhaseRunning Phase = "running"
 	// PhaseBlocked is the agent waiting on a Request nobody has answered
@@ -99,13 +96,8 @@ type Status struct {
 	// exit code and output without reading either: the controller wrote
 	// that script, so it is the one that knows what its output means.
 	//
-	// This is how the two-phase start gets its facts. The controller's
-	// prompt needs things that exist only once there is a working tree --
-	// previousAttemptsSection reads the commits earlier attempts pushed,
-	// which can only be read from the checkout they are in -- so it ends
-	// its own script with the commands that print them and parses what
-	// comes back. A shim that understood repositories would be a shim
-	// that had to agree with the controller about them.
+	// It is the diagnosis for a grain that failed before its agent ever
+	// ran, which is the case a bare outcome explains worst.
 	Setup *SetupResult `json:"setup,omitempty"`
 	// Call is the one MCP tool call this grain is waiting on the
 	// controller to serve, or nil when it is waiting on nothing.
@@ -127,7 +119,7 @@ type Status struct {
 	//
 	// A sequence rather than a byte offset because the trajectory is
 	// carried by the container runtime's own log stream (docs/grain.md,
-	// "The trajectory goes to stdout"), and `docker logs`/`kubectl logs`
+	// "Poll for state, logs for the trajectory"), and `docker logs`
 	// are addressed by time and line rather than by byte. A monotonic
 	// per-record sequence is the one cursor both a log stream and a plain
 	// file can honour.
@@ -151,9 +143,10 @@ type Status struct {
 
 // SetupResult is how Spec.Setup ended, verbatim and uninterpreted.
 type SetupResult struct {
-	// ExitCode is the script's own. Non-zero is what turns
-	// PhaseProvisioning into a terminal failure rather than
-	// PhaseProvisioned, and is the whole of the shim's opinion about it.
+	// ExitCode is the script's own. Non-zero is what ends the grain
+	// before its agent starts, and is the whole of the shim's opinion
+	// about it -- which is also what makes a failed checkout cost no
+	// model tokens.
 	ExitCode int `json:"exitCode"`
 	// Output is the script's combined stdout and stderr, truncated to a
 	// bound the shim chooses. Combined rather than split because a setup
@@ -210,9 +203,6 @@ type Answer struct {
 type SignalKind string
 
 const (
-	// SignalPrompt starts the agent. It is the second half of the
-	// two-phase start and the only Signal a grain requires.
-	SignalPrompt SignalKind = "prompt"
 	// SignalAddenda folds comments a human added since the grain started
 	// into the conversation as fresh turns.
 	SignalAddenda SignalKind = "addenda"

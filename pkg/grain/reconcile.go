@@ -49,10 +49,6 @@ type RunRow struct {
 	// which stops every grain rather than letting each spend an agent's
 	// worth of wall clock discovering the same refusal.
 	Paused bool
-	// PromptSent records that SignalPrompt has already been delivered, so
-	// a controller that polls again before the phase moves does not send
-	// a second one.
-	PromptSent bool
 	// PendingAddenda are comments added since this grain started, oldest
 	// first, that have not been delivered yet.
 	PendingAddenda []string
@@ -78,9 +74,6 @@ type Observed struct {
 type ActionKind string
 
 const (
-	// ActionSendPrompt is the second half of the two-phase start: build
-	// the prompt now that the checkout can be read, and Signal it.
-	ActionSendPrompt ActionKind = "send-prompt"
 	// ActionSignal delivers Action.Signal.
 	ActionSignal ActionKind = "signal"
 	// ActionAnswer serves Action.Call -- the one forwarded MCP tool call
@@ -136,9 +129,8 @@ type Action struct {
 //     a grain being stopped is not also handed addenda.
 //  6. A provisioning grain past its budget is failed. Nothing else about
 //     a grain that cannot finish booting is worth doing.
-//  7. Otherwise: start it if it is waiting for a prompt, and keep it
-//     served if it is running. "Served" is at most one forwarded call,
-//     because a grain holds at most one.
+//  7. Otherwise, keep it served: at most one forwarded call, because a
+//     grain holds at most one.
 func Reconcile(o Observed, p Policy) []Action {
 	st := o.Status
 
@@ -206,16 +198,7 @@ func Reconcile(o Observed, p Policy) []Action {
 		}
 	}
 
-	// 7a. Second half of the start. The checkout exists, so the prompt
-	// can be assembled and this is the moment to do it -- late enough to
-	// include anything a human added since dispatch, and early enough
-	// that no model tokens have been spent on a grain whose checkout
-	// failed.
-	if st.Phase == PhaseProvisioned && !o.Run.PromptSent {
-		return []Action{{Kind: ActionSendPrompt}}
-	}
-
-	// 7b. Steady state: serve the call it is blocked on, tell it what it
+	// 7. Steady state: serve the call it is blocked on, tell it what it
 	// missed, and keep its row honest. All three are independent, and a
 	// tick that has nothing to do returns nothing at all.
 	var out []Action

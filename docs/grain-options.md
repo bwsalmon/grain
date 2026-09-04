@@ -1,0 +1,399 @@
+# Grains: options considered
+
+Companion to [`grain.md`](grain.md), which says what was decided. This
+holds what was weighed against it: the paths not taken, the conditions
+that would reopen them, and the places the reasoning changed on contact
+with the code.
+
+It exists so that a decision is not re-litigated from scratch, and so that
+"we should have done X" has an entry to argue with.
+
+## Poll versus push
+
+Four options for how the controller learns a grain's state:
+
+1. **Poll via exec** — `grain status` per grain per tick. *Chosen.*
+2. **Push with a credential** — the shim holds a token and posts to the
+   daemon's REST API. This is what grain does today for `update_status`,
+   `open_pull_request` and `recreate_sandbox`.
+3. **Attached stream over exec** — a persistent exec per grain, exec
+   transport with push semantics.
+4. **Poll via shared volume** — the shim writes `status.json` to a
+   hostPath the controller reads directly.
+
+**Push forces NAT, and the network decision deliberately keeps flat
+available.** Under flat the splice steals the container's ingress, so it
+can send but never establish a connection — there is no HTTP push from a
+flat-mode grain at all. Choosing push would close a door the network
+section leaves open. This is the argument specific to this design rather
+than to polling in general.
+
+**Silence is information under poll and ambiguous under push.** An
+unreachable grain is `PhaseLost` with a rule for it; a grain that stopped
+pushing might be dead, wedged or idle with nothing to tell them apart. So
+push systems grow a heartbeat, which is a poll rebuilt with the failure
+detector inside the thing it monitors.
+
+Beneath that: **poll is level-triggered and push is edge-triggered, and
+edges get lost.** A push landing while the controller restarts is gone, so
+push needs retry, at-least-once, idempotency keys and dedupe. `Reconcile`
+rests on level-triggering entirely.
+
+### What push would have bought
+
+Recorded so neither is rediscovered as an argument.
+
+**Latency**, in exactly one place. `ask_question` waits on a human;
+`open_pull_request` and `wait_for_checks` are fine at tick granularity;
+cancellation is controller-to-grain and push-shaped already. The one
+signal that suffers is the live trajectory — handled by container logs
+instead.
+
+**Scale.** Poll is O(grains × ticks), push is O(events). This does not
+bite at a single-operator cluster's size. **If it ever does, the answer is
+a node-local aggregator the controller polls once per tick, making it
+O(nodes) — not push.** Written down so "polling does not scale" is not
+later read as "we should have pushed": the aggregator keeps every property
+above, and push forfeits all of them.
+
+### The credential objection, disclaimed
+
+It would be easy to argue against push because it needs a credential in
+the container. That argument is weak. The container is the *trusted* side —
+untrusted code is in the guest, behind vsock — so a token there sits beside
+the model credential already present.
+
+The real cost is the **authorization surface**: what a token may do, scoped
+to which grain, minted when, revoked when, and what happens when a grain
+claims to be a run it is not. `pkg/gitproxy` is ~1,900 lines and much of it
+is exactly that. Not danger; work, and a place bugs live. Push also
+reinstates the daemon hops the local-versus-forwarded rule had just
+finished deleting.
+
+### Transport is not the interface
+
+`Observe` says nothing about how a status is fetched, which leaves option 4
+available as an implementation detail. On the docker backend the controller
+and its grains share a host, so reading a hostPath is strictly cheaper than
+a `docker exec` with identical semantics; it stops working across nodes.
+`KonturGrains` may choose it; nothing above it needs to know.
+
+## Why the control channel is not itself MCP
+
+The traffic is MCP tool calls and grain already speaks MCP, so it is fair
+to ask why this is a CLI.
+
+**MCP assumes a session; `Reconcile` assumes there is not one.** MCP's
+transports — stdio and Streamable HTTP — open with an `initialize`
+handshake negotiating protocol version and capabilities before any other
+request. Per poll that is three messages before the controller learns
+anything, on a channel where each round trip is a container exec, against
+one exec returning one document. Held open instead, it is the persistent
+connection "poll, not push" rejected.
+
+Level-triggering is the deeper mismatch: a session is state shared between
+two parties, which is what that decision removed.
+
+**There are two relationships and they are not the same shape:**
+
+| | shape | protocol |
+| --- | --- | --- |
+| agent ↔ shim | one session for the run's life | **MCP** (`pkg/mcp`, unchanged) |
+| controller ↔ shim | independent level-triggered calls | the CLI |
+
+What MCP has that we would otherwise have invented is already taken from
+elsewhere or better as it is: version negotiation is the wire version plus
+image labels (Kubernetes' string form rather than `initialize`'s); error
+codes are exit codes, which `docker exec` propagates for free and which we
+need anyway to tell exec-failed from shim-failed; progress notifications
+are the container log stream, which survives a disconnected controller and
+replays from `--since`.
+
+> Checked against the spec was not possible from this session —
+> `modelcontextprotocol.io` is blocked by the egress proxy — so the
+> transport details above are from training and worth confirming.
+
+### Open option: MCP frames as the trajectory
+
+`src: "agent"` records have no defined vocabulary, and each of
+`pkg/agent/claude`, `/antigravity`, `/codex` owns a transcript reader
+because "the two event vocabularies differ".
+
+The shim sits between the agent's MCP client and its own server, so it
+could mirror that JSON-RPC into the trajectory verbatim as the `agent`
+records — one well-specified vocabulary across every framework, at no cost
+to produce. It covers tool calls but not the model's prose, so the
+per-framework readers do not fully disappear.
+
+## The network
+
+The container needs egress because the agent moved into it. Four ways,
+and one rejected on purpose.
+
+### B. NAT — *chosen*
+
+Bridge plus masquerade in the pod netns, `eth0` unspliced. Works in every
+environment with no cluster provisioning, which is the deciding property.
+Costs are in [`grain.md`](grain.md); the two that matter are the loss of
+infrastructure-level differentiation and conntrack as a new failure class.
+
+Also true, and worth recording so it is not rediscovered as an objection:
+**guest egress is unaffected** (git proxy, registries, all work through
+masquerade); **attribution survives**, since the git proxy identifies
+callers by bearer token, not source IP — there is no `RemoteAddr` anywhere
+in `pkg/gitproxy`; **`kontur exec` is unaffected**, being vsock; **grain
+resolves no VM address at all**, so nothing breaks for want of one; and
+**address allocation is close to free**, because kontur is one VM per pod
+so every guest can share a private subnet — the old `-ip`/`-port` flags
+were for a topology with several VMs per namespace. **PMTU improves**: a
+splice has "no bridge or router in between to fragment an oversized frame",
+where NAT has a router in the path.
+
+### C. A second NIC on the netns-holder
+
+Attach a second network to the netns-holder container; `eth0` is spliced to
+the guest and `eth1` stays the container's. netshim splices exactly
+`NETSHIM_EXTERNAL_IFACE` and tc filters are per-device, so the second
+interface is untouched.
+
+Under docker this is a few lines in `KonturGrains.Acquire` and **no kontur
+change at all** — `-docker-run-opt` exists because the netns-holder "is the
+only place a caller's own docker options can go"
+(`internal/dockervm/docker.go:175`). Prefer `docker network connect` after
+netshim has run over a second `--network` at create: with two networks at
+create time docker does not guarantee which becomes `eth0`, and splicing
+the wrong one hands the guest the wrong network *and* leaves the container
+spliced.
+
+It keeps what NAT gives up — two interfaces means two addresses, so
+infrastructure policy can distinguish agent from sandbox — and adds no
+conntrack.
+
+**Why not:** it does not generalise. On kontur's standalone kubelet the CNI
+conflist is kontur's own, but a conflist is a chain over *one* interface, so
+a second NIC needs a small custom chained plugin (~200 lines; kontur already
+vendors `vishvananda/netlink`) or Multus. On a managed cluster it is cluster
+provisioning — additional VPC subnets, node pool configuration, Dataplane
+V2.
+
+**Take this if grain stays on the docker backend permanently**, where it is
+strictly cheaper and strictly better-separated than NAT.
+
+### A. An exec tunnel
+
+The shim binds a loopback listener (loopback is untouched by the splice);
+the agent's framework is pointed at it with a base-URL override. The
+controller attaches with `docker exec -i` — never `-t`, which would break
+8-bit cleanliness — and multiplexes streams over that pipe.
+
+Two variants, and the difference matters:
+
+- **A dumb TCP tunnel** forwards bytes; the agent does TLS end to end and
+  holds the credential itself. Solves connectivity only.
+- **A terminating proxy** takes plain HTTP on loopback and the controller
+  adds the `Authorization` header before re-issuing upstream. **The
+  credential never enters the container** — strictly better than any other
+  option. It needs the CLI to accept a base-URL override (`claude` and
+  `codex` have the standard env vars; `agy` needs checking), so it degrades
+  to the dumb variant per framework.
+
+It mirrors `pkg/gitproxy` with one simplification and one complication: no
+token is needed, because the exec's far end is unforgeable — the controller
+chose which container to exec into, so the pipe *is* the authentication. But
+`gitproxy` buffers `UpstreamResponse.Body []byte`, which is right for git
+and fatal for SSE, so the forwarder needs streaming `io.Copy` through a
+flushing writer both ways.
+
+**Why not:** a bespoke data plane, and on a managed cluster every model call
+— full prompts and streamed responses, for every grain at once — traverses
+the API server, which has its own timeouts and connection limits.
+
+**Take this if NAT's conntrack behaviour bites**, wherever a cluster's CNI
+cannot be modified, or **wherever keeping flat mode is worth a bespoke data
+plane** — a tunnelled grain needs no network at the container layer at all,
+so the rule selects flat and neither of NAT's costs is paid. That last is
+the strongest case for it.
+
+### D. Routing container egress through the guest
+
+Rejected, and recorded as rejected on purpose rather than overlooked. The
+guest has working network and the control link exists, so a route would
+need no new machinery, and TLS protects the traffic end to end. But it puts
+the sandboxed thing in the path of the thing sandboxing it: guest-side code
+could observe or block the agent's own control channel.
+
+### Why there is no carve-out within flat
+
+`splice.go`: each direction is a tc ingress qdisc plus a match-everything
+filter with `mirred` egress-redirect, so frames reach the tap at L2 and the
+namespace's IP stack never sees them. Discriminating replies-for-the-namespace
+from replies-for-the-guest would need L3/conntrack-aware classification
+inside what is deliberately a match-all L2 wire — and the two ends share a
+MAC by design, so there is nothing to match on at L2 either.
+
+## Configuration delivery
+
+**Where it landed:** scalars in the environment, everything else as files
+under `/grain`, all before the container starts.
+
+**A correction on the way.** An earlier draft delivered the credential and
+placements over an exec's stdin, on the grounds that an environment
+variable shows up in a Kubernetes pod spec. That was wrong about how
+Kubernetes does this: `valueFrom.secretKeyRef` puts a *reference* in the
+pod spec while the value stays in a Secret, with its own RBAC — `get
+secrets` being distinctly more privileged than `get pods` — and its own
+encryption at rest. Under docker the argument was always weak: reading the
+environment needs the docker socket, which is root-equivalent and can read
+the process's memory regardless.
+
+**Then files won anyway, for a different reason.** A Kubernetes Secret or
+ConfigMap volume *is* the placement model — `items: [{key, path, mode}]`
+gives files at chosen paths with chosen modes — so there is no encoding to
+invent, no ARG_MAX ceiling, nothing in `/proc/1/environ`, and a non-secret
+placement can come from a ConfigMap where an environment blob could not
+have told it apart from a secret.
+
+**What stayed in the environment** is what has no shape: the wire version,
+the framework name, the max runtime, and kontur's own `CHV_*`.
+
+**Setup as a file** rather than a string, though kontur's own
+`CHV_SETUP_SCRIPT` carries its script's text — fine for a line or two, and
+grain's is composed from a clone, a branch checkout, the repo's setup
+command and whatever the prompt needs read back. As a file it has a
+shebang, an executable bit, and something a human can `cat`. (kontur gained
+`CHV_SETUP_SCRIPT_PATH` for the same reason; see its branch.)
+
+## Placements: the destination field, removed
+
+An earlier draft had `Placement` carry a destination so model-facing keys
+could land container-side. Checking rather than assuming: `githubsandbox`,
+`gcpkey` and `geminikey` are the three capabilities that place anything and
+**all three place `model.SideSandbox`**. `model.SideController` exists and
+nothing produces one — `orchestrator/run.go:1832` skips it, "not written
+anywhere".
+
+`geminikey` looks like a counterexample and is not: it mints a key for a
+task and names the path in the prompt so the *work* can find it.
+
+So a placement has no side to choose, and a discriminator whose second
+value has never occurred is not worth carrying across a versioned wire. The
+agent's own credential is deployment-shaped rather than per-run and is not a
+placement at all — it has no path the controller could name, which is
+exactly what distinguishes it.
+
+## Deadlines: the lease, declined
+
+`GRAIN_MAX_RUNTIME` is enforced by the grain. The argument that survives is
+spending: a running agent costs money, and money should not keep leaving
+while a controller is down. (The argument that did not: "ends with a
+`Result` rather than being destroyed mid-thought" — cancellation already
+provides exactly that.)
+
+What it does not cover: a controller dying five minutes into a two-hour
+budget still leaves an hour fifty-five of spending. **A lease** — the grain
+stopping if nobody has polled it in a while — bounds that under *any*
+controller failure, and needs no policy in the grain at all ("nobody has
+asked how I am doing" rather than "my deadline is 14:32").
+
+**Declined** as more mechanism than the failure justifies, and with a
+failure mode of its own: a controller restart longer than the lease would
+kill healthy in-flight grains. **Worth revisiting if unattended controller
+death turns out to be a real operational event rather than a hypothetical.**
+
+## What the Spec shed
+
+It began with a task, a repository, a branch, a git credential, a capability
+grant list and three limits. All of it went, on one principle: a grain runs
+an agent in a sandbox and knows nothing about why.
+
+- **task, repo, branch** → the prompt and the setup script. A shim that
+  understood repositories would have to agree with the controller about
+  branch naming, proxy URLs and half-made checkouts.
+- **gitToken** → a placement. The same work `ConfigureGitCredentials` does,
+  said uniformly.
+- **grants** → nothing. Both capabilities only ever made content readable —
+  grain's own source, the embedded runbooks — and the sandbox image is built
+  from that source and that binary, so what remains is a line in the prompt.
+- **maxTurns** → a framework's own flag. `Config.MaxAgentTurns`' doc comment
+  already concedes both frameworks default to no cap and "what actually
+  bounds a runaway run is MaxRunRuntime".
+- **maxRebuilds** → `Policy.MaxRebuilds` alone; the controller has the view
+  of whether repair is converging.
+- **id** → the container is the identity. A controller execs into one
+  specific container, so a grain is never told a name it makes no use of.
+- **the tool vocabulary** → `/grain/tools/`. `ToolOpenPullRequest` and
+  friends were grain-the-product's names sitting inside
+  grain-the-sandbox-runner.
+
+### The two-phase start, retired
+
+For a while the prompt was delivered by signal once the grain reported
+`PhaseProvisioned`, because `previousAttemptsSection` names the commits
+earlier attempts pushed and those were read from the checkout.
+
+Retired once it was clear the controller can ask **GitHub** for a branch's
+commits, which it already does every cycle. That deleted `PhaseProvisioned`,
+`SignalPrompt`, `RunRow.PromptSent` and a reconcile row. What the two-phase
+start was really protecting is untouched: `Setup`'s exit code still gates
+starting the agent, so a failed checkout still spends no model tokens.
+
+### The deferred category, retired
+
+`comment_on_issue` and friends were to be answered locally with a canned
+acknowledgement and reported at the end. The shim cannot know which tools
+those are without understanding them — and forwarding them is better
+anyway: the agent waits one tick and gets the real result instead of a
+confirmation for an effect that happens later or not at all. Today's mocked
+tools essentially lie to the agent; this stops.
+
+## Versioning: what was taken from Kubernetes
+
+`apiVersion` + `kind` on every object, forming the group/version/kind an API
+server dispatches decoding on, with grade-carrying string versions.
+
+**Taken: the string.** It lets a wire that is still a proposal say
+`v1alpha1`, and it matches the comparison this needs — "refuse what you do
+not recognise" is set membership, where an integer invites `>=`, which is
+exactly the best-effort interpretation the rule forbids.
+
+**Not taken: `kind`.** Kubernetes needs it because an API server decodes an
+object without having been told what it asked for; here the subcommand is
+the kind. The one channel carrying mixed documents is the trajectory
+stream, where `src` already says which is which.
+
+**Not taken: the group prefix, or per-kind versions.** A group routes
+between vendors and there is one of those here; and Kubernetes versions per
+kind because its kinds belong to different API groups on different release
+cycles, where all of these ship in one binary.
+
+**The `version` subcommand, retired** in favour of image labels. A
+controller wants to know what an image can do *before* it creates a grain —
+to refuse a task naming a framework the image lacks — and asking a grain
+requires a grain to exist.
+
+## The trajectory: from held-open exec to logs
+
+An earlier draft gave the trajectory an exec held open for as long as
+somebody watched. Container logs are better on four counts: the runtime
+buffers, so a controller restarting mid-run resumes from `--since` rather
+than losing what it missed; nothing backpressures the agent, where a
+controller that stopped reading a held-open exec would eventually block the
+shim's write and let an open UI tab stall a run; replay is the same call as
+the tail; and wherever container logs are already collected, the trajectory
+arrives with them.
+
+Sharing the stream with the guest console makes tagged records mandatory —
+`kubectl logs` merges stdout and stderr, so splitting by fd works under
+docker and nowhere else — which turns the collision into something useful:
+a run killed by the provisioning budget can quote the last console lines.
+
+## An optimisation not taken
+
+`List` is `docker ps` plus a `status` exec per grain — N execs per tick,
+nothing at grain's size. Since the shim already emits tagged records,
+**status snapshots could ride the same log stream**, making the tail the
+steady-state path and `grain status` the fallback for a grain gone quiet.
+
+It stays level-triggered (a full snapshot, not a delta) and absence stays
+detectable, so it does not reopen poll versus push. The place to go if exec
+cost ever matters.

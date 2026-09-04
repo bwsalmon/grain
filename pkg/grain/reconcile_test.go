@@ -171,22 +171,15 @@ func TestReconcile(t *testing.T) {
 		},
 		want: []grain.ActionKind{grain.ActionFail, grain.ActionRelease},
 	}, {
-		name: "a provisioned grain is sent its prompt",
+		// A grain has its prompt as a file from the moment it is created,
+		// so provisioning runs straight into running with nothing to wait
+		// for in between.
+		name: "a provisioning grain within budget is left to get on with it",
 		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseProvisioned, Since: start,
-				Setup: &grain.SetupResult{Output: "deadbeef\n"}},
-			Run: live(),
-			Now: start.Add(time.Minute),
-		},
-		want: []grain.ActionKind{grain.ActionSendPrompt},
-	}, {
-		// Polling twice before the phase moves must not send a second
-		// prompt.
-		name: "a provisioned grain already sent its prompt is left alone",
-		obs: grain.Observed{
-			Status: grain.Status{Phase: grain.PhaseProvisioned, Since: start},
-			Run:    &grain.RunRow{ID: "task-7-1", Live: true, PromptSent: true},
-			Now:    start.Add(time.Minute),
+			Status: grain.Status{Phase: grain.PhaseProvisioning, Since: start,
+				Activity: "cloning acme/widgets"},
+			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "cloning acme/widgets"},
+			Now: start.Add(2 * time.Minute),
 		},
 		want: nil,
 	}, {
@@ -243,7 +236,7 @@ func TestReconcileIsLevelTriggered(t *testing.T) {
 // whole of orphan reaping -- there is no separate pass.
 func TestEveryOrphanPhaseIsReleased(t *testing.T) {
 	phases := []grain.Phase{
-		grain.PhaseProvisioning, grain.PhaseProvisioned, grain.PhaseRunning,
+		grain.PhaseProvisioning, grain.PhaseRunning,
 		grain.PhaseBlocked, grain.PhaseSucceeded, grain.PhaseFailed,
 		grain.PhaseCancelled, grain.PhaseLost,
 	}

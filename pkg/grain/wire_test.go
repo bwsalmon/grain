@@ -29,6 +29,7 @@ func TestSpecEnvAndFiles(t *testing.T) {
 		Version:    grain.Version,
 		Framework:  grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
 		Shape:      grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
+		Prompt:     "You are working on task-311...\n",
 		Setup:      "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/grain.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
 		Placements: []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
 		MaxRuntime: grain.Duration(2 * time.Hour),
@@ -65,6 +66,7 @@ func TestSpecEnvAndFiles(t *testing.T) {
 	}
 	wantFiles := map[string]grain.File{
 		"/grain/credential": {Content: "sk-ant-oat01-...", Mode: "0600"},
+		"/grain/prompt":     {Content: spec.Prompt, Mode: "0644"},
 		"/grain/setup":      {Content: spec.Setup, Mode: "0755"},
 		"/grain/placements/home/agent/.git-credentials": {
 			Content: "https://x:tok@10.0.2.1:8080", Mode: "0600",

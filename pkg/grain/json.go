@@ -8,7 +8,7 @@ import (
 
 // Version is the wire format this build speaks: the subcommand set of the
 // in-container `grain` CLI, the JSON documents that cross it, and the
-// trajectory records on the container's stdout (docs/grain-cli.md).
+// trajectory records on the container's stdout (docs/grain.md).
 //
 // It is stamped on every document in both directions, which is the whole
 // of version negotiation. The shim ships in the sandbox image and the
