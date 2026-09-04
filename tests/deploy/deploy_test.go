@@ -662,6 +662,44 @@ func TestTheSmokeWorkflowRunsTheScriptsAsTheyAre(t *testing.T) {
 	}
 }
 
+// The GCE smoke script can tag the VM it creates, and names the tag this
+// module's own networks ask for.
+//
+// --iap is the leg worth checking, since terraform/gcp gives the host no
+// external IP at all -- and network.tf admits IAP's 35.235.240.0/20 to
+// port 22 for a *target tag* only: agent_iap_ssh covers
+// `<name_prefix>-agent-vm`, the ssh rule covers `<name_prefix>-host`, and
+// an instance carrying neither matches no rule and is unreachable however
+// good the credential. IAP reports that drop as
+// [4003: 'failed to connect to backend'], which is also what it says
+// about a VM that has not finished booting, so the error itself sends
+// people to look at the key. Two things keep the script out of that hole,
+// and neither is visible from the script alone: --tags has to reach the
+// create, and the tag its own guidance names has to still be the one
+// network.tf creates. A rename there would otherwise leave the script
+// advising a tag no rule mentions -- the same dead end, reached by
+// following the instructions.
+func TestTheGCESmokeScriptCanTagTheVMItCreates(t *testing.T) {
+	gce := read(t, "scripts", "gce-vm-smoke.sh")
+	code := stripComments(gce)
+
+	contains(t, code, "--tags)")
+	contains(t, code, `CREATE_ARGS+=(--tags="$TAGS")`)
+	contains(t, code, "[--tags T]")
+
+	contains(t, read(t, "terraform", "gcp", "network.tf"), `agent_vm_tag = "${var.name_prefix}-agent-vm"`)
+	if !strings.Contains(gce, "-agent-vm") {
+		t.Error("gce-vm-smoke.sh does not name the `<name_prefix>-agent-vm` tag network.tf's agent_iap_ssh rule is scoped to; without it, --iap tells the operator to pass a tag but not which one")
+	}
+
+	// The failure path says which tags the network actually requires,
+	// rather than leaving the operator with IAP's own opaque error.
+	hint := body(t, gce, "iap_firewall_hint() {")
+	contains(t, hint, "firewall-rules list")
+	contains(t, hint, "targetTags")
+	contains(t, hint, "35.235.240.0/20")
+}
+
 // The introspection job is dispatch-only, holds nothing, and keeps the
 // token that can write a branch out of the job that runs agy.
 //
