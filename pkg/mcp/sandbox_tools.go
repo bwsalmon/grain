@@ -315,6 +315,21 @@ func editFileTool(root string) Tool {
 			if !hasOld || !hasNew {
 				return Result{Text: "old_string and new_string are required", IsError: true}
 			}
+			// An empty old_string matches between every character in
+			// the file: with replace_all it interleaves new_string
+			// through the whole file ("abc" becomes "XaXbXcX"), and
+			// without it the refusal counts those phantom matches and
+			// reads as nonsense ("String appears 19 times in the
+			// file"). Neither is what a caller that meant "create this
+			// file" or "add this to it" was asking for -- found by hand
+			// driving this server the way a framework does, task 244.
+			if oldStr == "" {
+				return Result{
+					Text: "old_string must not be empty: it matches between every character in the file. " +
+						"Use write_file to create or replace a file, or name the exact text this edit replaces.",
+					IsError: true,
+				}
+			}
 			replaceAll, _ := argBool(args, "replace_all")
 
 			full, err := resolvePath(root, fp)

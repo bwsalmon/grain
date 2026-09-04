@@ -13,7 +13,7 @@
 // Ref-level policy (no push to main, no force-push) is still left to
 // GitHub rulesets, for the same reason docs/design.md gives: a hand-rolled
 // pack parser subtly wrong fails open, so this package stays confined to
-// path matching and the error encoding a git client already understands.
+// path matching and to refusals a git client will print (Denial).
 package gitproxy
 
 import (
@@ -73,15 +73,25 @@ func IsValidGitRequest(userAgent, accept, action string) bool {
 	return strings.Contains(accept, expected)
 }
 
-// PktLine encodes one pkt-line: a 4-hex-digit length prefix, then the data.
-func PktLine(data []byte) []byte {
-	length := len(data) + 4
-	return append([]byte(fmt.Sprintf("%04x", length)), data...)
-}
-
-// ErrPkt is a single ERR pkt-line -- the encoding every git client already
-// knows how to surface as an abort message, instead of the opaque "the
-// remote end hung up unexpectedly" a plain connection drop produces.
-func ErrPkt(message string) []byte {
-	return PktLine([]byte("ERR " + message + "\n"))
+// Denial is how this proxy refuses one request: an HTTP status, and the
+// reason as plain text.
+//
+// Plain text, not the ERR pkt-line this used to send. A git client only
+// parses pkt-lines out of a *200* response carrying a git content type;
+// against the 401/403/500 a refusal is, it falls back to printing the
+// body verbatim as "remote: " lines, so the pkt-line's own 4-hex length
+// prefix ended up in front of the sentence an operator reads:
+//
+//	remote: 00c6ERR no credential configured for owner/repo -- ...
+//
+// which is what the first clone of a deployment with no GitHub
+// credential yet actually printed (found by hand, task 244). The
+// Content-Type is explicit for the same reason: git only shows the body
+// at all when it is told the body is text.
+func Denial(status int, message string) ProxyResponse {
+	return ProxyResponse{
+		Status:  status,
+		Headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"},
+		Body:    []byte(message + "\n"),
+	}
 }

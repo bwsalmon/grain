@@ -346,8 +346,22 @@ func (r *Repo) isEmpty(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+// currentBranch is the branch HEAD is on, including the unborn one a
+// clone of an empty repository lands on.
+//
+// `git branch --show-current` rather than `rev-parse --abbrev-ref HEAD`,
+// which is what this used to run: rev-parse resolves HEAD to a commit
+// first, so on a branch with no commits yet it fails outright ("unknown
+// revision"). That is exactly the case clone's caller has to answer --
+// adopting an *empty* remote -- and the failure there was silent, since
+// the rename to Config.Branch is skipped on any error. A remote whose
+// HEAD advertised "master" (a `git init --bare` with no
+// init.defaultBranch, or an older repository) therefore left every
+// commit on master while every push named main, and adopting it failed
+// with git's own "src refspec main does not match any" (found by hand,
+// task 244).
 func (r *Repo) currentBranch(ctx context.Context) (string, error) {
-	out, err := r.git(ctx, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := r.git(ctx, "branch", "--show-current")
 	if err != nil {
 		return "", err
 	}
