@@ -14,7 +14,12 @@ package main
 // so it runs nowhere without a live key (including CI) and costs nothing
 // when skipped:
 //
-//	GEMINI_API_KEY=... go test ./cmd/grain/... -run TestRunLiveDispatchesAndOpensAPullRequest -v
+//	GEMINI_API_KEY=... go test ./cmd/grain/... -run TestRunLiveDispatchesAndOpensAPullRequest -v -timeout 20m
+//
+// The -timeout is part of the invocation rather than an afterthought:
+// how long a live run takes is the model's business and not this test's,
+// so `go test -timeout` is what bounds one here -- see the pacing
+// constants below and liveDaemonContext, which read it.
 //
 // One gap this test works around rather than hides: neither
 // pkg/orchestrate.prepare() nor pkg/orchestrator.BuildPrompt tells a
@@ -73,6 +78,34 @@ func (s *syncedSim) pullRequestCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.sim.PullRequests)
+}
+
+// seedPassingCheck gives sim one completed, successful check run on
+// branch -- the CI a dispatched run's own wait_for_checks call reads.
+//
+// Without it that call is a three-minute stall in the middle of every
+// live run here, and one nothing in grain is doing wrong. The prompt
+// BuildPrompt writes tells a run with a repo to call wait_for_checks
+// after it pushes (orchestrator/run.go's own CI paragraph); the forked
+// mcpserver really does register that tool against this sim
+// (cmd/grain/mcpserver.go's pullRequestTools, wired from -github-host);
+// the sim answers the check-runs endpoint with an empty list, because no
+// test ever seeded one; and mcp.firstCheckGrace -- correctly -- gives an
+// empty answer three minutes to become a real one before reporting "this
+// repo has no CI". Three minutes was longer than the whole context either
+// test used to give its daemon, so a run that followed its prompt
+// exactly could not finish inside one.
+//
+// Seeding a check rather than shortening that grace is also the more
+// representative of the two: firstCheckGrace lives in the forked
+// mcpserver, a separate process no test can reach into, and a real target
+// repository has CI -- which is the entire reason that paragraph is in
+// the prompt.
+func (s *syncedSim) seedPassingCheck(branch string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	success := "success"
+	s.sim.CheckRuns[branch] = []github.CheckRun{{Name: "build", Status: "completed", Conclusion: &success}}
 }
 
 // githubHostServer serves one httptest.Server standing in for
@@ -183,6 +216,205 @@ func runLive(t *testing.T, dir, name string, args ...string) {
 	}
 }
 
+// The clocks the live daemon tests in this package run on -- this one and
+// daemon_true_e2e_test.go's, which shares every helper below.
+//
+// Only one of them is about the agent, and it is a ceiling rather than an
+// expectation: liveRunBudget is how long the model is *allowed* to take,
+// not how long it is assumed to take. What these tests actually wait for
+// is the run reaching a terminal state (awaitFinishedRun), and every
+// assertion after that is about what the finished run left behind rather
+// than about the wall clock.
+//
+// That distinction is the point. Both tests used to hand the daemon a
+// fixed context -- 200 and 240 seconds -- and carve fixed windows out of
+// it, which made the model's pace an assertion nobody had written down.
+// Against a live agy 1.1.26 on gemini-3.1-pro-high, single agent_response
+// steps of 89 seconds were measured, alongside runs that pushed within 40
+// seconds and runs that had not pushed after 180; three consecutive runs
+// of the kontur test gave one full pass, one "pushed, PR opened, task
+// never closed" and one "never pushed", with nothing wrong in any of them
+// but the clock. Worse than the flake was what it read as: "pushed but no
+// pull request" is exactly what a broken finish path looks like, so a
+// third of the runs of this suite accused grain of a regression it did
+// not have.
+//
+//   - liveRunBudget bounds the daemon, and so the agent. Eight minutes is
+//     several times what a healthy run needs and is there for the
+//     pathological case only -- a run still going at the end of it is
+//     reported as precisely that, and as nothing else.
+//   - liveFinishWindow is grain's own pace, and the one window here that
+//     measures something this repository controls: RunDispatch stamps a
+//     run finished immediately before runOne calls ProcessResult
+//     (cycle.go), so the pull request follows a couple of GitHub calls
+//     behind the finished row -- never a model turn behind it.
+//   - liveGitOps and liveMergeWindow are the same kind of window at the
+//     far end of the kontur test: a simulated human's real git merge, and
+//     the daemon's own next reconcile tick noticing it. Both are grain's
+//     and git's pace rather than an agent's.
+//   - minLiveRunWait is the point below which there is no sense starting:
+//     a wait this short cannot see even a fast run through, so a test
+//     given less says so up front instead of failing on the clock later.
+const (
+	liveRunBudget       = 8 * time.Minute
+	minLiveRunWait      = 1 * time.Minute
+	liveFinishWindow    = 1 * time.Minute
+	liveGitOps          = 1 * time.Minute
+	liveMergeWindow     = 1 * time.Minute
+	liveShutdownWait    = 30 * time.Second
+	liveShutdownReserve = liveShutdownWait + 15*time.Second
+	livePollInterval    = 2 * time.Second
+)
+
+// liveDaemonContext returns the context a live test's own run() call gets
+// and the shorter one its wait for that run gets, both derived from `go
+// test -timeout` rather than from a number written into the test.
+//
+// Two contexts, because the daemon has to outlive the run it dispatched:
+// the pull request is opened by ProcessResult *after* framework.Run
+// returns, and the kontur test's merge and task-closure both need a
+// daemon still ticking. inside is how much of the budget is kept back for
+// that work, so a run that finishes at the very last moment of the wait
+// still has all of it to be finished off in.
+//
+// reserve is the other end: what the test still has to do once the
+// daemon's context is over -- cancelling it and waiting for run() to
+// return -- kept clear of `go test`'s own deadline so that a test which
+// runs out of time fails with its own diagnosis rather than with the
+// panic and goroutine dump go test prints when it kills the binary. With
+// no deadline at all (-timeout 0) there is nothing to subtract from and
+// liveRunBudget stands alone.
+func liveDaemonContext(t *testing.T, inside, reserve time.Duration) (context.Context, context.Context, context.CancelFunc) {
+	t.Helper()
+	budget := liveRunBudget
+	if deadline, ok := t.Deadline(); ok {
+		if left := time.Until(deadline) - reserve; left < budget {
+			budget = left
+		}
+	}
+	if budget < inside+minLiveRunWait {
+		t.Fatalf("`go test -timeout` leaves %s for this live run, and it needs at least %s "+
+			"(%s of waiting for the agent, %s of grain's own finishing afterwards). Re-run with a "+
+			"larger -timeout -- 20m is comfortable for one live daemon test.",
+			budget.Round(time.Second), (inside + minLiveRunWait).Round(time.Second),
+			minLiveRunWait, inside.Round(time.Second))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	runCtx, cancelWait := context.WithTimeout(ctx, budget-inside)
+	return ctx, runCtx, func() { cancelWait(); cancel() }
+}
+
+// awaitFinishedRun blocks until taskID's latest run has been finished --
+// the stamp RunDispatch writes on the row once framework.Run has returned
+// -- and hands it back.
+//
+// This is what a live daemon test waits on in place of a wall-clock
+// window, and it is the moment every assertion these tests make becomes
+// decidable at once: the branch is either on the remote or it is not, and
+// ProcessResult, which runOne calls immediately afterwards, has either
+// opened the pull request or is a GitHub call away from it. Nothing after
+// this point is waiting on the model.
+//
+// The error a spent budget produces is written for the reader who has to
+// tell "the agent was slow" from "grain is broken", since that is the
+// distinction the fixed windows this replaced could not draw: it says the
+// run never finished, how long it had, and the last thing the run said
+// about itself -- grain's own setup notes while the sandbox is being
+// built, the agent's own update_status after that (model.Run.Activity).
+func awaitFinishedRun(ctx context.Context, store *model.Store, taskID string) (model.Run, error) {
+	started := time.Now()
+	last := "it had not been dispatched at all"
+	for {
+		runs, err := store.Runs(ctx, taskID)
+		switch {
+		case err != nil:
+			if ctx.Err() == nil {
+				last = fmt.Sprintf("reading its runs back failed: %v", err)
+			}
+		case len(runs) > 0:
+			run := runs[len(runs)-1]
+			if run.FinishedAt != nil {
+				return run, nil
+			}
+			last = describeLiveRun(run)
+		}
+		select {
+		case <-ctx.Done():
+			return model.Run{}, fmt.Errorf(
+				"no run of task %s finished in the %s this test waited: %s. That is the live "+
+					"agent's own pace against a ceiling this test chose, not evidence of anything "+
+					"wrong in grain -- `go test -timeout` is what sets the ceiling "+
+					"(liveDaemonContext), and the daemon's own log above says what the run was "+
+					"doing with the time",
+				taskID, time.Since(started).Round(time.Second), last)
+		case <-time.After(livePollInterval):
+		}
+	}
+}
+
+// describeLiveRun words what a run that has not finished was last doing,
+// for a wait that ran out of budget before it did.
+func describeLiveRun(run model.Run) string {
+	desc := fmt.Sprintf("attempt %d had been live for %s",
+		run.Attempt, time.Since(run.StartedAt).Round(time.Second))
+	if run.Activity != "" {
+		desc += fmt.Sprintf(", last saying %q", run.Activity)
+	}
+	return desc
+}
+
+// pollUntil calls check until it answers true, window elapses or ctx is
+// done, and reports whether it ever did.
+//
+// Every window it is called with is one of grain's own (liveFinishWindow,
+// liveMergeWindow): the waits for the agent go through awaitFinishedRun
+// instead, which is not a window at all.
+func pollUntil(ctx context.Context, window time.Duration, check func() bool) bool {
+	deadline := time.Now().Add(window)
+	for {
+		if check() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return check()
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// branchPushed reports whether branch is on the bare repository standing
+// in for the GitHub-hosted one -- read straight off the real repository
+// rather than through sim, so no lock is involved.
+func branchPushed(bare, branch string) bool {
+	return exec.Command("git", "--git-dir", bare, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil
+}
+
+// stopLiveDaemon cancels the daemon under test and waits for run() to
+// return, asserting that it does so cleanly.
+//
+// Deferred by both live tests rather than written out at each exit: every
+// assertion in them can end the test, and each one that did had to
+// remember to stop the daemon first -- five times over in the kontur
+// test, which is five chances to leave a live agy running against a
+// t.TempDir the framework is about to delete. Errorf rather than Fatalf,
+// since this runs when the test is already on its way out.
+func stopLiveDaemon(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("run() returned an error after being cancelled: %v", err)
+		}
+	case <-time.After(liveShutdownWait):
+		t.Errorf("run() did not return within %s of its context being cancelled", liveShutdownWait)
+	}
+}
+
 func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
@@ -218,6 +450,10 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 	runLive(t, seedDir, "git", "push", "origin", "main")
 
 	sim := &syncedSim{sim: githubsim.New(owner, repoName, bare, "main")}
+	// The CI this run's own wait_for_checks call will read once it has
+	// pushed -- seeded before the daemon starts, since the run reaches
+	// for it within a turn of pushing. See seedPassingCheck.
+	sim.seedPassingCheck(branch)
 	githubHost := githubHostServer(t, sim, upstream)
 
 	dataDir := t.TempDir()
@@ -263,11 +499,18 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 		db.Close()
 		t.Fatalf("seeding the task: %v", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("closing the seeding connection: %v", err)
-	}
+	// Held open past the seeding rather than closed after it: this
+	// connection is also how the test watches the run's own row while the
+	// daemon writes to it (awaitFinishedRun). Two connections on one
+	// SQLite file is the arrangement this store is built for -- WAL, so a
+	// reader never blocks on the writer, and a daemon, a UI and a CLI all
+	// open the same file directly (pkg/model/sqlite's package comment).
+	defer db.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Second)
+	// The daemon outlives the wait for its run by liveFinishWindow, since
+	// the pull request this test is named for is opened by ProcessResult
+	// after framework.Run returns -- see liveDaemonContext.
+	ctx, runCtx, cancel := liveDaemonContext(t, liveFinishWindow, liveShutdownReserve)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
@@ -277,60 +520,32 @@ func TestRunLiveDispatchesAndOpensAPullRequest(t *testing.T) {
 			githubHost: githubHost, githubInsecureHTTP: true,
 		})
 	}()
+	defer stopLiveDaemon(t, cancel, done)
 
-	// Poll the real bare repo -- not sim, so no lock needed here -- for
-	// the branch a successful live run pushes.
-	deadline := time.Now().Add(180 * time.Second)
-	pushed := false
-	for time.Now().Before(deadline) {
-		if exec.Command("git", "--git-dir", bare, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil {
-			pushed = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-	if !pushed {
-		cancel()
-		<-done
-		t.Fatalf("branch %s was never pushed to %s within the timeout -- the live agent did not complete the dispatch", branch, bare)
+	// The one wait that is about the agent, and it waits for an event
+	// rather than for a length of time: the run being over. Everything
+	// below it is a fact by then, which is what makes each failure
+	// message below able to name a cause.
+	finished, err := awaitFinishedRun(runCtx, store, taskID)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// openPullRequest runs when the *run* ends, not when the push lands:
+	if !branchPushed(bare, branch) {
+		t.Fatalf("branch %s is not on %s: the live run ended %q (%s) without pushing it",
+			branch, bare, finished.Outcome, finished.Detail)
+	}
+
+	// openPullRequest runs when the run ends, not when the push lands:
 	// cycle.go's runOne reaches finish.go's ProcessResult once
-	// framework.Run has returned. A live agy keeps taking turns after
-	// its push -- confirming what it did, writing its final answer --
-	// so the branch routinely appears tens of seconds before the run
-	// that pushed it is over, and this window is the whole of what the
-	// test allows for that. Twenty seconds was not enough of it against
-	// agy 1.1.26: a run that had already done everything asked of it
-	// failed here with "pushed but no pull request", which reads like
-	// grain's finish path is broken rather than like a test that stopped
-	// watching too early.
-	//
-	// Bounded by ctx as well as by its own deadline, so a push that took
-	// most of the wait above cannot spend the daemon's remaining time
-	// here and leave the shutdown assertions below with none.
-	prOpened := false
-	for deadline2 := time.Now().Add(120 * time.Second); time.Now().Before(deadline2) && ctx.Err() == nil; {
-		if sim.pullRequestCount() > 0 {
-			prOpened = true
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run() returned an error after being cancelled: %v", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("run() did not return within 30s of its context being cancelled")
-	}
-
-	if !prOpened {
-		t.Fatalf("branch %s was pushed but no pull request was opened for it", branch)
+	// framework.Run has returned. So this window is not waiting on the
+	// agent at all -- the agent is already gone -- only on grain's own
+	// couple of GitHub calls, which is why it can be a window at all.
+	if !pollUntil(ctx, liveFinishWindow, func() bool { return sim.pullRequestCount() > 0 }) {
+		t.Fatalf("branch %s was pushed and its run ended %q (%s), but no pull request was "+
+			"opened for it in the %s after that -- ProcessResult is what opens it (finish.go), "+
+			"and it had the run's whole ending to do so",
+			branch, finished.Outcome, finished.Detail, liveFinishWindow)
 	}
 }
 

@@ -41,7 +41,13 @@ package main
 // runs nowhere without a live key (including CI) and costs nothing when
 // skipped:
 //
-//	GEMINI_API_KEY=... go test ./cmd/grain/... -run TestRunLiveWithKonturAndRESTAPIOpensAPullRequest -v
+//	GEMINI_API_KEY=... go test ./cmd/grain/... -run TestRunLiveWithKonturAndRESTAPIOpensAPullRequest -v -timeout 20m
+//
+// How long it waits for that live run is `go test -timeout`'s business
+// rather than this file's, exactly as in daemon_live_test.go, whose
+// pacing constants and liveDaemonContext/awaitFinishedRun helpers this
+// shares -- see the comment on those constants for what the fixed windows
+// they replaced cost.
 
 import (
 	"context"
@@ -103,6 +109,51 @@ inspect)
   ;;
 esac
 `, homeDir))
+}
+
+// awaitFinishedAttempt is daemon_live_test.go's awaitFinishedRun read
+// through the REST API instead of the store -- the same wait for the run
+// to be over, made of the same GET /api/tasks/{id} this test uses for
+// every other assertion it makes, since the whole point of this one is
+// that an operator watching that API sees the story end.
+//
+// The error it returns when the budget runs out says the same thing its
+// store-side twin's does, off the same two facts the API happens to carry
+// in a different shape: the attempt's own progress (TaskDetail.Attempts)
+// and whatever the task last said it was doing (Task.Activity).
+func awaitFinishedAttempt(ctx context.Context, client *ui.HTTPClient, taskID string) (ui.Attempt, error) {
+	started := time.Now()
+	last := "it had not been dispatched at all"
+	for {
+		detail, err := client.GetTask(ctx, taskID)
+		switch {
+		case err != nil:
+			if ctx.Err() == nil {
+				last = fmt.Sprintf("reading it back over the REST API failed: %v", err)
+			}
+		case len(detail.Attempts) > 0:
+			attempt := detail.Attempts[len(detail.Attempts)-1]
+			if attempt.FinishedAt != nil {
+				return attempt, nil
+			}
+			last = fmt.Sprintf("attempt %d had been live for %s",
+				attempt.Number, time.Since(attempt.StartedAt).Round(time.Second))
+			if detail.Activity != "" {
+				last += fmt.Sprintf(", last saying %q", detail.Activity)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ui.Attempt{}, fmt.Errorf(
+				"no run of task %s finished in the %s this test waited: %s. That is the live "+
+					"agent's own pace against a ceiling this test chose, not evidence of anything "+
+					"wrong in grain -- `go test -timeout` is what sets the ceiling "+
+					"(liveDaemonContext), and the daemon's own log above says what the run was "+
+					"doing with the time",
+				taskID, time.Since(started).Round(time.Second), last)
+		case <-time.After(livePollInterval):
+		}
+	}
 }
 
 // freeTCPAddr returns a loopback address nothing is listening on yet, for
@@ -191,7 +242,13 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 
 	uiAddr := freeTCPAddr(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	// The daemon outlives the wait for its run by everything this test
+	// still needs a daemon for once the agent is done: opening the pull
+	// request (liveFinishWindow), the real git merge standing in for a
+	// human's (liveGitOps), and the reconcile tick that closes the task
+	// out (liveMergeWindow). See liveDaemonContext.
+	ctx, runCtx, cancel := liveDaemonContext(t,
+		liveFinishWindow+liveGitOps+liveMergeWindow, liveShutdownReserve)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
@@ -209,6 +266,10 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 			konturWorkspace: workspace,
 		})
 	}()
+	// Cancelling the daemon and waiting for run() to return, once, at the
+	// end -- rather than in front of each of the six assertions below,
+	// every one of which can end this test. See stopLiveDaemon.
+	defer stopLiveDaemon(t, cancel, done)
 
 	// File the task through the real REST API run() itself just started
 	// serving -- not a direct store write (contrast daemon_live_test.go's
@@ -235,8 +296,6 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 				break
 			}
 			if time.Now().After(deadline) {
-				cancel()
-				<-done
 				t.Fatalf("filing the task through the REST API: %v", err)
 			}
 			time.Sleep(200 * time.Millisecond)
@@ -255,60 +314,51 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 		"git add NOTES.md && git commit -q -m 'grain true e2e test' && " +
 		"git push origin " + branch
 	if _, err := client.UpdateTask(ctx, task.ID, ui.UpdateTaskRequest{Description: &description}); err != nil {
-		cancel()
-		<-done
 		t.Fatalf("updating the task through the REST API: %v", err)
 	}
+	// The CI this run's own wait_for_checks call will read once it has
+	// pushed, seeded before the task is approved and so before anything
+	// can be dispatched. See seedPassingCheck (daemon_live_test.go).
+	sim.seedPassingCheck(branch)
 	if err := client.Approve(ctx, task.ID); err != nil {
-		cancel()
-		<-done
 		t.Fatalf("approving the task through the REST API: %v", err)
 	}
 
-	// Poll the real bare repo -- not sim, so no lock needed here -- for
-	// the branch a successful live run, dispatched onto the kontur-faked
-	// sandbox, pushes. This is the first proof the whole chain worked:
-	// REST API -> store -> orchestrator -> real Gemini agent -> kontur's
-	// SSH tools -> git proxy -> githubsim's git-http-backend.
-	deadline := time.Now().Add(180 * time.Second)
-	pushed := false
-	for time.Now().Before(deadline) {
-		if exec.Command("git", "--git-dir", bare, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run() == nil {
-			pushed = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-	if !pushed {
-		cancel()
-		<-done
-		t.Fatalf("branch %s was never pushed to %s within the timeout -- the live agent did not complete the dispatch", branch, bare)
+	// The one wait in this test that is about the agent, and it waits for
+	// the run to be over rather than for a length of time -- through the
+	// REST API, like every assertion that follows it (awaitFinishedAttempt).
+	attempt, err := awaitFinishedAttempt(runCtx, client, task.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// openPullRequest runs synchronously right after a successful push,
-	// in the same tick (cycle.go's runOne, through finish.go's
-	// ProcessResult); poll the task back
-	// through the REST API -- not sim directly -- for its PullRequest
-	// field to confirm both that a PR was opened against githubsim *and*
-	// that the daemon's own REST API surfaces it, closing the loop this
-	// test is named for.
-	prOpened := false
-	for deadline2 := time.Now().Add(20 * time.Second); time.Now().Before(deadline2); {
-		got, err := client.Task(ctx, task.ID)
-		if err == nil && got.PullRequest != "" {
-			prOpened = true
-			break
-		}
-		time.Sleep(1 * time.Second)
+	// The branch a successful live run, dispatched onto the kontur-faked
+	// sandbox, pushes -- read off the real bare repo, not sim, so no lock
+	// is needed here. This is the first proof the whole chain worked:
+	// REST API -> store -> orchestrator -> real Gemini agent -> kontur's
+	// SSH tools -> git proxy -> githubsim's git-http-backend.
+	if !branchPushed(bare, branch) {
+		t.Fatalf("branch %s is not on %s: the live run ended %q (%s) without pushing it",
+			branch, bare, attempt.Outcome, attempt.Detail)
 	}
+
+	// openPullRequest runs when the run ends, not when the push lands
+	// (cycle.go's runOne, through finish.go's ProcessResult), so this
+	// window waits on grain's own GitHub calls and not on the agent,
+	// which is already gone. Polled back through the REST API -- not sim
+	// directly -- to confirm both that a PR was opened against githubsim
+	// *and* that the daemon's own REST API surfaces it, closing the loop
+	// this test is named for.
+	prOpened := pollUntil(ctx, liveFinishWindow, func() bool {
+		got, err := client.Task(ctx, task.ID)
+		return err == nil && got.PullRequest != ""
+	})
 	if !prOpened {
-		cancel()
-		<-done
-		t.Fatalf("branch %s was pushed but the REST API never reported a pull request for task %s", branch, task.ID)
+		t.Fatalf("branch %s was pushed and its run ended %q (%s), but the REST API reported no "+
+			"pull request for task %s in the %s after that",
+			branch, attempt.Outcome, attempt.Detail, task.ID, liveFinishWindow)
 	}
 	if sim.pullRequestCount() == 0 {
-		cancel()
-		<-done
 		t.Fatalf("REST API reported a pull request for task %s but githubsim has none", task.ID)
 	}
 	prNumber := sim.firstPullRequestNumber()
@@ -332,8 +382,6 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	userTransport.UseTLS = false
 	userClient := github.NewClient(userTransport, nil)
 	if err := userClient.MergePullRequest(owner, repoName, prNumber, ""); err != nil {
-		cancel()
-		<-done
 		t.Fatalf("submitting (merging) the pull request: %v", err)
 	}
 
@@ -342,28 +390,19 @@ func TestRunLiveWithKonturAndRESTAPIOpensAPullRequest(t *testing.T) {
 	// the REST API rather than the store, so this test's whole final
 	// assertion is exactly what an operator watching the same API would
 	// see: the task they filed, dispatched, and had merged reads closed.
-	closed := false
-	for closeDeadline := time.Now().Add(60 * time.Second); time.Now().Before(closeDeadline); {
+	//
+	// Another of grain's own windows rather than the agent's: what has to
+	// happen inside it is one poll interval and one reconcile pass, both
+	// this test's own configuration (pollInterval above).
+	closed := pollUntil(ctx, liveMergeWindow, func() bool {
 		got, err := client.Task(ctx, task.ID)
-		if err == nil && got.State == model.StateClosed {
-			closed = true
-			break
-		}
-		time.Sleep(2 * time.Second)
-	}
-
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("run() returned an error after being cancelled: %v", err)
-		}
-	case <-time.After(30 * time.Second):
-		t.Fatal("run() did not return within 30s of its context being cancelled")
-	}
-
+		return err == nil && got.State == model.StateClosed
+	})
 	if !closed {
-		t.Fatalf("task %s never read back as closed over the REST API after its pull request was merged", task.ID)
+		t.Fatalf("task %s never read back as closed over the REST API in the %s after its pull "+
+			"request was merged -- the run itself ended %q (%s) and its pull request was opened, "+
+			"so what is left unproven here is the reconcile tick that notices a merge",
+			task.ID, liveMergeWindow, attempt.Outcome, attempt.Detail)
 	}
 	if len(sim.sim.Issues) != 0 {
 		t.Fatalf("expected no GitHub issues at all, got %+v", sim.sim.Issues)
