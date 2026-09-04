@@ -26,7 +26,7 @@ func marshal(t *testing.T, v any) string {
 
 func TestSpecWireFormat(t *testing.T) {
 	spec := grain.Spec{
-		Contract:  grain.Contract,
+		Version:   grain.Version,
 		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
 		Shape:     grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
 		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh",
@@ -38,7 +38,7 @@ func TestSpecWireFormat(t *testing.T) {
 	}
 
 	want := `{
-  "contract": 1,
+  "version": "v1",
   "framework": {
     "name": "claude",
     "credential": "sk-ant-oat01-..."
@@ -91,7 +91,7 @@ func TestSpecWireFormat(t *testing.T) {
 // contract.
 func TestSpecCarriesNoTaskModel(t *testing.T) {
 	full := marshal(t, grain.Spec{
-		Contract:  grain.Contract,
+		Version:   grain.Version,
 		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
 		Shape:     grain.Shape{CPUs: 2}, Setup: "true",
 		Placements: []grain.Placement{{Path: "/p", Mode: "0600"}},
@@ -117,7 +117,7 @@ func TestSpecCarriesNoTaskModel(t *testing.T) {
 
 func TestStatusWireFormat(t *testing.T) {
 	st := grain.Status{
-		Contract: grain.Contract,
+		Version:  grain.Version,
 		ID:       "task-311-2", // set by the backend, never on the wire
 		Phase:    grain.PhaseBlocked,
 		Since:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
@@ -140,7 +140,7 @@ func TestStatusWireFormat(t *testing.T) {
 	}
 
 	want := `{
-  "contract": 1,
+  "version": "v1",
   "phase": "blocked",
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
@@ -182,7 +182,7 @@ func TestStatusWireFormat(t *testing.T) {
 // rotation taking the first half of it.
 func TestRecordIsOneLine(t *testing.T) {
 	rec := grain.Record{
-		V: grain.Contract, Seq: 42,
+		Version: grain.Version, Seq: 42,
 		T:    time.Date(2026, 9, 4, 19, 55, 3, 0, time.UTC),
 		Src:  grain.SrcConsole,
 		Data: json.RawMessage(`"[    0.512] EXT4-fs (vda): mounted"`),
@@ -194,7 +194,7 @@ func TestRecordIsOneLine(t *testing.T) {
 	if strings.ContainsAny(string(b), "\n\r") {
 		t.Fatalf("record spans lines: %s", b)
 	}
-	want := `{"v":1,"seq":42,"t":"2026-09-04T19:55:03Z","src":"console","data":"[    0.512] EXT4-fs (vda): mounted"}`
+	want := `{"version":"v1","seq":42,"t":"2026-09-04T19:55:03Z","src":"console","data":"[    0.512] EXT4-fs (vda): mounted"}`
 	if string(b) != want {
 		t.Fatalf("Record wire format changed.\n got: %s\nwant: %s", b, want)
 	}
@@ -217,7 +217,7 @@ func TestDurationRejectsNonsense(t *testing.T) {
 // what stops a later field from quietly escaping it.
 func TestRedactedCarriesNoMaterial(t *testing.T) {
 	spec := grain.Spec{
-		Contract:  grain.Contract,
+		Version:   grain.Version,
 		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-secret"},
 		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w",
 		Placements: []grain.Placement{

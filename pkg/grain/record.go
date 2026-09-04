@@ -41,10 +41,10 @@ const (
 // parsed is skipped rather than fatal, for the same reason -- the tail of
 // a rotated file routinely begins mid-line.
 type Record struct {
-	// V is the contract version, on every line rather than once at the
+	// Version is the wire format, on every line rather than once at the
 	// top: a reader may start anywhere in the stream, so there is no
 	// "top" to have read.
-	V int `json:"v"`
+	Version string `json:"version"`
 	// Seq is monotonic across a grain's whole life, and is the cursor
 	// Status.Seq reports and Transcript takes. It is what makes a
 	// sequence rather than a byte offset the right cursor: `docker logs`
@@ -61,15 +61,14 @@ type Record struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
-// Contract report, as `grain contract` writes it. It is the one document
-// a controller can ask for before it knows whether the two ends agree,
-// which is why it carries a list rather than a number: an image may speak
-// several versions during an upgrade, and a controller should pick the
-// highest it also speaks rather than refuse a shim that could have served
-// it.
-type ContractReport struct {
-	Contract  int   `json:"contract"`
-	Supported []int `json:"supported"`
+// VersionReport is what `grain version` writes. It is the one document a
+// controller can ask for before it knows whether the two ends agree,
+// which is why it carries a list: an image may speak several versions
+// through an upgrade, and a controller should take one they share rather
+// than refuse a shim that could have served it.
+type VersionReport struct {
+	Version   string   `json:"version"`
+	Supported []string `json:"supported"`
 	// Frameworks are the agent profiles this image carries, the names
 	// Spec.Framework may take. They are reported rather than assumed
 	// because the profiles ship in the image and the tasks naming them

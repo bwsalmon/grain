@@ -65,8 +65,8 @@ func (p Phase) Terminal() bool {
 // rather than behind its own call because the poll is the only read: a
 // field split out is a second exec per grain per tick.
 type Status struct {
-	// Contract is the wire version this document is written to.
-	Contract int `json:"contract"`
+	// Version is the wire format this document is written to.
+	Version string `json:"version"`
 	// ID is the grain this describes, and is deliberately not on the
 	// wire: a backend fills it in from the container it read the document
 	// out of, because the container is the identity. A controller execs
@@ -188,10 +188,10 @@ type Request struct {
 // it can act on, rather than leaving it blocked until its deadline.
 type Answer struct {
 	// Contract is the wire version this document is written to.
-	Contract int             `json:"contract"`
-	OK       bool            `json:"ok"`
-	Payload  json.RawMessage `json:"payload,omitempty"`
-	Err      string          `json:"err,omitempty"`
+	Version string          `json:"version"`
+	OK      bool            `json:"ok"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Err     string          `json:"err,omitempty"`
 }
 
 // SignalKind is what a Signal carries.
@@ -217,11 +217,11 @@ const (
 // Signal is something the controller delivers unasked.
 type Signal struct {
 	// Contract is the wire version this document is written to.
-	Contract int        `json:"contract"`
-	Kind     SignalKind `json:"kind"`
-	Prompt   string     `json:"prompt,omitempty"`  // SignalPrompt
-	Addenda  []string   `json:"addenda,omitempty"` // SignalAddenda, oldest first
-	Reason   string     `json:"reason,omitempty"`  // SignalCancel, SignalPause
+	Version string     `json:"version"`
+	Kind    SignalKind `json:"kind"`
+	Prompt  string     `json:"prompt,omitempty"`  // SignalPrompt
+	Addenda []string   `json:"addenda,omitempty"` // SignalAddenda, oldest first
+	Reason  string     `json:"reason,omitempty"`  // SignalCancel, SignalPause
 }
 
 // Outcome vocabulary, matching what model.Store.FinishRun already

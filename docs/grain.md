@@ -393,7 +393,7 @@ one file). That knowledge sits in a different artifact from the CLI it
 describes, so upgrading the CLI can require upgrading the daemon. Moving
 it into the image versions the two together and makes adding a framework
 an image change rather than a controller release.
-`ContractReport.Frameworks` is how a controller checks before dispatching,
+`VersionReport.Frameworks` is how a controller checks before dispatching,
 so a task naming a framework the image lacks fails at create rather than
 inside a guest nobody is watching yet.
 
@@ -810,7 +810,7 @@ own control channel.
 4. **The whole wire is a versioned contract**, not just the Spec. The
    in-container CLI, the documents crossing it and the trajectory records
    all ship in the sandbox image while the controller ships in the daemon
-   binary, so a deployment can genuinely run two versions. `grain.Contract`
+   binary, so a deployment can genuinely run two versions. `grain.Version`
    is stamped on every document in both directions, and a receiver that
    does not recognise one must refuse it naming both versions rather than
    interpret it on a best effort. See `docs/grain-cli.md`.

@@ -16,8 +16,8 @@ artifacts — the daemon binary and the sandbox image.
 
 ## Versioning
 
-`contract` is the wire version: one number on each document so the two
-ends can detect that they disagree. `grain.Contract` is currently `1`, and
+`version` is the wire format: one string on each document so the two ends
+can detect that they disagree. `grain.Version` is currently `"v1"`, and
 stamping it on every document in both directions is the whole of
 negotiation.
 
@@ -32,12 +32,37 @@ reattach. An upgraded daemon meets grains its predecessor created, in both
 directions, so a status written by an older shim and a signal written by a
 newer controller each have to say what they are.
 
-A receiver that does not recognise a document's contract **must refuse it
-and name both versions**, never interpret it on a best effort: a refusal
+### What is borrowed from Kubernetes, and what is not
+
+Kubernetes stamps `apiVersion` and `kind` on every object, forming the
+group/version/kind an API server dispatches decoding on — versions being
+grade-carrying strings (`v1alpha1`, `v1beta1`, `v1`) with explicit
+conversion between them, never silent reinterpretation.
+
+**Taken: the string.** It lets a wire that is still a proposal say so,
+which an integer cannot, and it matches the comparison this actually
+needs. The rule above is "refuse what you do not recognise", which is set
+membership against `supported` — an integer invites `>=`, which is exactly
+the best-effort interpretation the rule forbids.
+
+**Not taken: `kind`.** Kubernetes needs it because an API server decodes an
+object without having been told what it asked for. Here the subcommand is
+the kind: `grain configure` takes a spec and nothing else. The one channel
+that really does carry mixed documents is the trajectory stream, and
+`src` already says which is which there.
+
+**Not taken: the group prefix, or per-kind versions.** A group routes
+between vendors and there is one of those here; and Kubernetes versions
+per kind because its kinds belong to different API groups on different
+release cycles, where all of these ship in one binary and are released
+together.
+
+A receiver that does not recognise a document's version **must refuse it
+and name both**, never interpret it on a best effort: a refusal
 costs one run and says exactly what is wrong, where a misread document is
-a run that quietly does something else. `grain contract` exists so a
+a run that quietly does something else. `grain version` exists so a
 controller can ask before it knows whether the two ends agree, and it
-answers with a list rather than a number — an image may speak several
+answers with a list — an image may speak several
 versions through an upgrade, and a controller should take the highest it
 also speaks rather than refuse a shim that could have served it.
 
@@ -71,7 +96,7 @@ grain configure                    < spec.json
 grain status                                     > status.json
 grain answer   --request <id>      < answer.json
 grain signal   --id <id>           < signal.json
-grain contract                                   > contract.json
+grain version                                     > version.json
 ```
 
 **Payloads go on stdin, never argv.** An assembled prompt carries a task's
@@ -98,7 +123,7 @@ A CLI's exit codes are its error type, so they are part of the contract:
 | 1 | failed; stderr is the detail | reports it |
 | 2 | unknown subcommand or flag | **version skew** — image predates this controller |
 | 3 | not configured yet | retries next tick; still `provisioning` |
-| 4 | unrecognised contract version | fails the run `setup-failed`, naming both |
+| 4 | unrecognised wire version | fails the run `setup-failed`, naming both |
 
 The distinction the controller must not lose is **exec-failed versus
 shim-failed**: `docker exec` uses 125/126/127 for its own failures and
@@ -129,7 +154,7 @@ Written once, at create. Four things:
 
 ```json
 {
-  "contract": 1,
+  "version": "v1",
   "framework": { "name": "claude", "credential": "sk-ant-oat01-..." },
   "shape": { "cpus": 2, "memoryMB": 8192, "diskGB": 30 },
   "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && git checkout -b grain/task-311 && ./scripts/setup.sh && git rev-parse HEAD",
@@ -177,7 +202,7 @@ the reason this is an object rather than a string — *where its credential
 goes* are facts about the binary, and the binary is in this image. The
 controller hands over an opaque key; the profile knows whether claude
 wants a file at a path, agy wants a private HOME, or codex wants an
-environment variable. `grain contract` reports which profiles an image
+environment variable. `grain version` reports which profiles an image
 carries, so a task naming one it lacks fails at create rather than inside
 a guest.
 
@@ -230,7 +255,7 @@ would be a second exec per grain per tick.
 
 ```json
 {
-  "contract": 1,
+  "version": "v1",
   "phase": "blocked",
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
@@ -301,14 +326,14 @@ path today; here it is a field the ordinary finish path reads.
 ### `answer.json` → `grain answer --request r-7`
 
 ```json
-{ "contract": 1, "ok": true,
+{ "version": "v1", "ok": true,
   "payload": { "number": 812, "url": "https://github.com/bwsalmon/grain/pull/812" } }
 ```
 
 A refusal is an answer, not an omission:
 
 ```json
-{ "contract": 1, "ok": false,
+{ "version": "v1", "ok": false,
   "err": "this deployment has no GitHub credential that can open pull requests" }
 ```
 
@@ -318,20 +343,20 @@ it no is a turn it can act on.
 ### `signal.json` → `grain signal --id sig-20`
 
 ```json
-{ "contract": 1, "kind": "prompt", "prompt": "You are working on task-311...\n" }
-{ "contract": 1, "kind": "addenda", "addenda": ["Also fix the flake in TestMergeQueue."] }
-{ "contract": 1, "kind": "cancel", "reason": "the task was closed" }
-{ "contract": 1, "kind": "pause", "reason": "the deployment met its usage limit" }
+{ "version": "v1", "kind": "prompt", "prompt": "You are working on task-311...\n" }
+{ "version": "v1", "kind": "addenda", "addenda": ["Also fix the flake in TestMergeQueue."] }
+{ "version": "v1", "kind": "cancel", "reason": "the task was closed" }
+{ "version": "v1", "kind": "pause", "reason": "the deployment met its usage limit" }
 ```
 
 One mechanism replacing three: `orchestrator`'s `addendaPoller`,
 `watchForTaskClosed` and `Pause.register` all exist because a run in
 flight has no address anything can deliver to.
 
-### `contract.json` ← `grain contract`
+### `version.json` ← `grain version`
 
 ```json
-{ "contract": 1, "supported": [1],
+{ "version": "v1", "supported": ["v1"],
   "frameworks": ["claude", "codex"],
   "build": "grain 2.4.1 (9f3c1a2)" }
 ```
@@ -345,9 +370,9 @@ with a name in it rather than inside a guest nobody is watching yet.
 One JSON object per line on the container's stdout.
 
 ```json
-{"v":1,"seq":41,"t":"2026-09-04T19:55:03.101Z","src":"shim","kind":"phase","data":{"phase":"provisioned"}}
-{"v":1,"seq":42,"t":"2026-09-04T19:55:03.940Z","src":"console","data":"[    0.512] EXT4-fs (vda): mounted"}
-{"v":1,"seq":43,"t":"2026-09-04T19:55:07.220Z","src":"agent","kind":"tool_use","data":{"name":"run_command"}}
+{"version":"v1","seq":41,"t":"2026-09-04T19:55:03.101Z","src":"shim","kind":"phase","data":{"phase":"provisioned"}}
+{"version":"v1","seq":42,"t":"2026-09-04T19:55:03.940Z","src":"console","data":"[    0.512] EXT4-fs (vda): mounted"}
+{"version":"v1","seq":43,"t":"2026-09-04T19:55:07.220Z","src":"agent","kind":"tool_use","data":{"name":"run_command"}}
 ```
 
 **`src` is required and cannot be replaced by writing one source to
@@ -360,7 +385,7 @@ Sharing the stream with the console is what makes a failed boot legible: a
 run killed by the provisioning budget can quote the last console lines in
 its detail instead of reporting only that time ran out.
 
-**`v` is on every line, not once at the top**, because a reader may join
+**`version` is on every line, not once at the top**, because a reader may join
 the stream anywhere — there is no top to have read. For the same reason a
 record never spans lines, and an unparseable line is skipped rather than
 fatal: the tail of a rotated log routinely begins mid-line.

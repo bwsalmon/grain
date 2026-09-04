@@ -29,9 +29,10 @@ import "fmt"
 // guest has to be given back is right here, beside the thing being
 // rebuilt.
 type Spec struct {
-	// Contract is the wire version this document is written to. See
-	// Contract's own doc comment for what a receiver does with it.
-	Contract int `json:"contract"`
+	// Version is the wire format this document is written to. See
+	// Version's own doc comment for what a receiver does with a version it
+	// does not recognise.
+	Version string `json:"version"`
 
 	// There is no id here. The container is the identity: a controller
 	// execs into one specific container to configure it, and the shim
@@ -161,7 +162,7 @@ type Spec struct {
 // change rather than a controller release.
 //
 // A controller can ask which profiles an image has before dispatching to
-// one -- ContractReport.Frameworks -- so a task naming a framework this
+// one -- VersionReport.Frameworks -- so a task naming a framework this
 // image lacks fails at create, naming it, rather than at launch.
 type FrameworkSpec struct {
 	// Name is the profile: "claude", "antigravity", "codex".

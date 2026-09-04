@@ -6,25 +6,39 @@ import (
 	"time"
 )
 
-// Contract is the version of the wire format this build speaks: the
-// subcommand set of the in-container `grain` CLI, the JSON documents that
-// cross it, and the trajectory records on the container's stdout
-// (docs/grain-cli.md).
+// Version is the wire format this build speaks: the subcommand set of the
+// in-container `grain` CLI, the JSON documents that cross it, and the
+// trajectory records on the container's stdout (docs/grain-cli.md).
 //
 // It is stamped on every document in both directions, which is the whole
 // of version negotiation. The shim ships in the sandbox image and the
 // controller ships in the daemon binary, so the two can genuinely differ:
 // a deployment upgrades one and not the other, or pins an image. A
-// receiver that does not recognise a document's contract must refuse it
-// and say so, naming both versions -- never interpret it on a best
-// effort, which is how a mismatch turns into a run that does the wrong
-// thing quietly instead of one that fails legibly.
+// receiver that does not recognise a document's version must refuse it
+// and say so, naming both -- never interpret it on a best effort, which
+// is how a mismatch turns into a run that does the wrong thing quietly
+// instead of one that fails legibly.
 //
-// It supersedes SpecVersion, which said the same thing about one document
-// in one direction. There is one contract because the two halves are
-// released together in the same binary; a shim that can read a Spec it
-// cannot write a Status for would be a state with no use.
-const Contract = 1
+// A string in Kubernetes' grade-carrying style ("v1alpha1", "v1beta1",
+// "v1") rather than an integer, for two reasons. It lets a wire that is
+// still a proposal say so, which an integer cannot. And it matches the
+// comparison this actually needs: the rule above is "refuse what you do
+// not recognise", which is set membership against VersionReport.Supported,
+// not an ordering -- an integer invites `>=`, which is precisely the
+// best-effort interpretation the rule forbids.
+//
+// One version across every document, where Kubernetes versions per kind:
+// its kinds belong to different API groups on different release cycles,
+// and all of these ship in one binary and are released together. There is
+// no group prefix for the same reason -- a group exists to route between
+// vendors, and there is one of those here.
+//
+// There is no "kind" field either. Kubernetes needs one because an API
+// server decodes an object without having been told what it asked for;
+// here the subcommand is the kind. `grain configure` takes a spec and
+// nothing else. The one place mixed documents really do share a channel
+// is the trajectory stream, and Record.Src already says which is which.
+const Version = "v1"
 
 // Duration is a time.Duration that crosses the wire as a string --
 // "2h0m0s" rather than 7200000000000.
