@@ -97,17 +97,21 @@ func TestInstallingTheWorkflowDoesNotRollTheDatabaseBack(t *testing.T) {
 	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("loading: %v", err)
 	}
-	// Filed after the seed, so it is in the database and not in the dump
-	// -- which is the ordinary state of a deployment between two exports.
-	if err := store.PutTask(ctx, task("a1b2")); err != nil {
-		t.Fatalf("putting: %v", err)
+	// A settings row created after the seed, so it is in the database and
+	// not in the dump -- the ordinary state of a deployment between two
+	// exports, and a settings row because those are the tables Apply
+	// replaces in a database that is already running.
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
 	}
 	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("applying: %v", err)
 	}
-	got, err := store.GetTask(ctx, "a1b2")
+	got, err := store.GetTemplate(ctx, "tpl-1")
 	if err != nil {
-		t.Fatalf("reading the task back: %v", err)
+		t.Fatalf("reading the template back: %v", err)
 	}
 	if got == nil {
 		t.Fatal("the workflow commit made Apply import the dump over a newer database")

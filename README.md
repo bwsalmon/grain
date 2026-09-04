@@ -2862,9 +2862,8 @@ An empty repository is worth formatting before it is adopted:
 `grain state format`, in a clone of it, writes the README, the
 `.gitignore` and the CI step that validates every later pull request
 against it (see "A task can change the settings" below). It is optional
--- grain seeds a repository that has had nothing done to it just the same
--- and it is the only way that CI step gets there, since grain's own
-pushes deliberately never carry a workflow file.
+-- grain seeds a repository that has had nothing done to it just the
+same, and installs that CI step itself on the first sync after it does.
 
 Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
@@ -2924,20 +2923,48 @@ deployment. As a CI step in the state repository (`grain state check .`
 needs no `-data-dir`, no store and no daemon) it fails the pull request
 instead.
 
-`grain state ci DIR` is what puts it there. It writes
-`.github/workflows/grain-state-check.yml` into a clone of the state
-repository: a checkout and one `docker run` of grain's own published
-image, on pull requests alone -- grain commits to that repository itself
-every time its database changes, and validating those pushes would spend
-a CI run per task state change on a dump grain had just written out of
-the database the check imports it back into. The image is a flag, because
-the check only means anything against a build that knows the same schema
-as the deployment (`grain state status` prints both numbers). Neither
-this nor `format` below commits anything, and that is deliberate: a push
-adding a file under `.github/workflows` is refused unless the credential
-making it may write workflows, and a commit sitting in the deployment's
-own working tree that its sync loop can never push would wedge every
-later sync behind it.
+grain installs that step itself, so it runs whether or not anybody
+remembered to add it. `Seed` and every `Sync` write
+`.github/workflows/grain-state-check.yml` when it is not there -- a
+repository grain seeds gets it on the way in, and one a merged pull
+request dropped it out of gets it back on the next tick -- and the file
+is a checkout and one `docker run` of grain's own published image, on
+pull requests alone: grain commits to that repository every time its
+database changes, and validating those pushes would spend a CI run per
+task state change on a dump grain had just written out of the database
+the check imports it back into. The image is grain's own container
+because grain publishes no bare binaries and that package is public, so
+the step needs no credential of any kind.
+
+Unlike the README, which is grain's text and is rewritten on every sync,
+a workflow that is already there is never touched again. Pinning the
+image to the tag a deployment runs is the obvious edit -- the check only
+means anything against a build that knows the same schema (`grain state
+status` prints both numbers) -- and a runner, a trigger or a step of
+somebody's own are just as much theirs; a file grain rewrote every
+thirty seconds would be a file whose editor is fighting a timer, which
+is the same reason the export must not fight a hand edit to a table
+file. Deleting it is not an opt-out, because grain writes back what is
+missing: `"noWorkflow": true` in `state-repo.json` is, and
+`"checkImage"` pins the image from the host side.
+
+That leaves the reason grain did not commit this file until now, which
+is real: a push adding a file under `.github/workflows` is refused
+unless the credential making it may write workflows, and grain's own
+installation token need not be able to. So the workflow is a commit of
+its own, pushed on its own, and a refusal -- GitHub says "refusing to
+allow ... to create or update workflow" -- is undone in full: the commit
+is dropped, the file removed, the export goes on untouched, and the
+journal says to run `grain state ci` in a clone and commit the file with
+a credential that may. grain tries again a day later, so granting the
+permission needs no restart. A local-only repository gets no workflow at
+all: there is no GitHub to run one.
+
+`grain state ci DIR` is that manual path, and the one for a repository
+whose deployment cannot push workflows. It writes the same file into a
+clone of the state repository, with `-image` to pin and `-force` to
+replace one that is already there, and commits nothing: it runs in
+somebody's own checkout, and the commit is theirs to make.
 
 `grain state format DIR` is the step before adopting: an operator has
 made an empty repository on GitHub and cloned it, and this lays out the
