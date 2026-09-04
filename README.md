@@ -1718,8 +1718,17 @@ against a real credential and reading the tool steps back off its
   `global<TAB>deny<TAB>run_command`. Bare names, `run_command(*)` and
   `regex:` forms all survive; a malformed value (`"deny": 12345`) is
   dropped in silence, no rule and no complaint -- the failure mode this
-  section already warned about. What the rules do *not* do is change the
-  roster: the `init` event of a real stream-json session advertises the
+  section already warned about, and the reason
+  `TestLiveAgyLoadsGrainsPermissionRules` (`tests/e2e`) now asks the
+  binary that question nightly, one assertion per rule
+  `permissionRules` wrote. They load for exactly the launch that finds
+  them: agy rewrites `settings.json` on *every* start, keeping the keys it
+  owns (`modelProvider`) and dropping the whole `permissions` block, so a
+  second `agy` in the same `HOME` has no rules at all. Harmless as grain
+  runs agy -- `writeAgyHome` builds a fresh `HOME` per run and `Run`
+  starts the binary once in it -- and a trap for any future change that
+  reuses one or starts agy again to resume a run. What the rules do *not*
+  do is change the roster: the `init` event of a real stream-json session advertises the
   same 55 native tools with the block and without it. And `Run` passes
   `--dangerously-skip-permissions`, which that same event reports as
   permission mode `always-proceed`, while agy's own prompt calls an
@@ -1748,6 +1757,34 @@ against a real credential and reading the tool steps back off its
   different mechanism from the permission prompt the flag auto-approves.
   grain's hook is grain: `hooks.json` runs `grain agy-tool-hook`
   (`cmd/grain/agyhook.go`), which answers from `HookDecision`.
+- **Whether it is loaded at all is a separate, cheaper question, and it
+  is now asked nightly.** `hooks.json` is not validated on load -- one agy
+  cannot make sense of leaves a run with no hooks and no complaint -- and
+  a live run only shows the hook working when the model happens to reach
+  for a native tool. `agy -p /hooks` needs neither: it prints one
+  tab-separated record per loaded hook,
+  `grain-native-tool-denial<TAB>enabled<TAB>PreToolUse<TAB>*<TAB>command<TAB>'/path/to/grain' agy-tool-hook`,
+  out of the config it just read and without an agent turn or a valid
+  credential. `TestLiveAgyLoadsGrainsHookConfig` (`tests/e2e`) asserts
+  each field of that record, and asserts as its control that the same
+  command names nothing when `hooks.json` is removed from the `HOME` --
+  without which "the output contains our hook's name" would not be
+  evidence of anything.
+- **What the hook is asked about is the name in the payload, and the
+  nightly now records it.** `HookDecision` matches `toolCall.name` against
+  agy's tool names, while agy's own hook guide describes matchers as
+  matching *step types* ("lowercasing the step type and removing the
+  `CORTEX_STEP_TYPE_` prefix") -- and a name arriving in a shape that deny
+  list is not written in would deny nothing, silently. A transcript cannot
+  answer it, since it reports the tool that ran rather than the name the
+  hook was handed, so `TestLiveNativeToolsAreDenied` points agy's config
+  at a stand-in for the grain binary that logs every payload before
+  passing it to the real one (`tests/e2e/hook_payload_log_test.go`, which
+  also covers the stand-in from the ordinary suite). Every name is logged,
+  split into the ones the deny list matches, grain's own qualified names,
+  and everything else; a run whose tool calls never reached the hook, or a
+  native call the hook was never asked about under a matchable name, fails
+  the test.
 - **It denies by name, and never allows by name.** `HookDecision` denies
   the tools in `withheldNativeTools` -- agy's own file and command tools,
   now the whole of that set rather than a representative handful -- and
@@ -1789,7 +1826,11 @@ agy stores policy but stop nothing, the `PreToolUse` hook is where a call
 is actually stopped, and a kontur sandbox is still what contains a native
 tool that gets past all three. Only the hook has been watched stopping a
 live model, and only nightly (`live-agent.yml`), since that is where the
-credential is.
+credential is -- though two of the three questions turn out not to need
+one: that agy loaded grain's hook, and that it loaded grain's permission
+rules, are both answered by print mode against any runner with `agy`
+installed, which is why the two tests that ask them fail on a laptop and
+in the nightly alike rather than waiting for a model turn.
 
 How that was established is worth keeping, because the question keeps
 coming back and a *locked-down* grain sandbox cannot answer it: a sandbox
@@ -2000,6 +2041,15 @@ that this one triggers on nothing but the schedule and a manual dispatch.
 ```
 GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
   go test ./tests/e2e/ -run TestLiveIssueCompletesEndToEnd -v
+```
+
+The two that ask agy what it *loaded* rather than what it does need no
+key, since print mode spends nothing (agy still refuses to start without
+`GEMINI_API_KEY` set to something, so they pass a placeholder when the
+environment has none):
+
+```
+GRAIN_LIVE_AGENT_TEST=1 go test ./tests/e2e/ -run TestLiveAgyLoads -v
 ```
 
 with `agy` on `$PATH` and a Go toolchain to build `cmd/grain` with (agy

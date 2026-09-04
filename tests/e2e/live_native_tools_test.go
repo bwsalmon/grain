@@ -39,7 +39,15 @@ package e2e
 // controller is the property itself and is checked first. The hook's
 // verdict on grain's own tools is next, because that is the failure this
 // test was written after: a denial that also denies grain's tools reads,
-// from any distance, like a model that would not do as it was asked.
+// from any distance, like a model that would not do as it was asked. Last
+// is the run seen from the hook's own side -- the names agy put in front
+// of grain, which is what the deny list is matched against and what no
+// transcript records (assertHookSawTheseCalls, below).
+//
+// What this test cannot see is a hook that was never loaded: a model that
+// happens not to reach for a native tool passes every assertion here
+// whether or not hooks.json was read at all. That is
+// TestLiveAgyLoadsGrainsHookConfig's question, and it needs no credential.
 
 import (
 	"context"
