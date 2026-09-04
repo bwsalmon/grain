@@ -1424,6 +1424,24 @@ func (c *Client) Reorder(ctx context.Context, req ReorderRequest) error {
 	if len(req.IDs) == 0 {
 		return validationErrorf("ids is required")
 	}
+	// A drop naming a task nothing exists behind is a stale list in
+	// somebody's browser, not a broken server -- so it reports as this
+	// package's own NotFoundError, which the server answers 404, rather
+	// than falling out of the store as "reordering: no such task 999"
+	// and being reported as a 500 (found by hand, task 244). The same
+	// translation Client.mutate does for every single-task edit.
+	for _, id := range append(append([]string{}, req.IDs...), req.AfterID, req.BeforeID) {
+		if id == "" {
+			continue
+		}
+		task, err := c.Store.GetTask(ctx, id)
+		if err != nil {
+			return err
+		}
+		if task == nil {
+			return &NotFoundError{ID: id}
+		}
+	}
 	var afterID, beforeID *string
 	if req.AfterID != "" {
 		afterID = &req.AfterID

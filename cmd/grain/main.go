@@ -552,6 +552,17 @@ func cmdComment(ctx context.Context, c *ui.HTTPClient, out *printer, args []stri
 	if err != nil {
 		return err
 	}
+	// Go's flag package stops at the first non-flag argument, so
+	// `grain comment 3 -attach shot.png "look at this"` parses no flags
+	// at all: it files a comment whose body is the literal words
+	// "-attach shot.png look at this", and the file is silently not
+	// attached (found by hand, task 244). A bare body word that names
+	// one of this command's own flags is that mistake far more often
+	// than it is prose -- and prose survives it, since a quoted body is
+	// one argument and never looks like a flag.
+	if name, ok := misplacedFlag(fs, fs.Args()[1:]); ok {
+		return fmt.Errorf("-%s has to come before the task id: grain comment -%s <path> %s <body>", name, name, fs.Arg(0))
+	}
 	body := strings.Join(fs.Args()[1:], " ")
 	attachments, err := loadAttachments(attach)
 	if err != nil {
@@ -564,6 +575,23 @@ func cmdComment(ctx context.Context, c *ui.HTTPClient, out *printer, args []stri
 		return err
 	}
 	return respond(ctx, c, out, id)
+}
+
+// misplacedFlag reports the first word in args that names a flag defined
+// on fs -- a flag written after the positional arguments, where
+// flag.Parse has already stopped looking at them.
+func misplacedFlag(fs *flag.FlagSet, args []string) (string, bool) {
+	for _, arg := range args {
+		name := strings.TrimLeft(arg, "-")
+		if name == arg || name == "" {
+			continue // not a flag-shaped word, or a bare "--"
+		}
+		name, _, _ = strings.Cut(name, "=")
+		if fs.Lookup(name) != nil {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // loadAttachments reads each path in paths off local disk and returns it
