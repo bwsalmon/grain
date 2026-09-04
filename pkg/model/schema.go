@@ -86,7 +86,6 @@ var Tables = []string{
   ` + "`sandbox_memory_mb`" + `     INTEGER  NOT NULL DEFAULT 0,
   ` + "`sandbox_disk_gb`" + `       INTEGER  NOT NULL DEFAULT 0,
   ` + "`interactive`" + `           INTEGER  NOT NULL DEFAULT 0,
-  ` + "`configuration`" + `         INTEGER  NOT NULL DEFAULT 0,
   ` + "`agent_framework`" + `       TEXT     NOT NULL DEFAULT '',
   ` + "`prompt_extension`" + `      TEXT     NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)

@@ -150,11 +150,13 @@ grants, and IAP/Cloud Run access set up afterward -- run from the VM
 itself, against `-target`ed subsets of this same module, with state kept
 on the VM's own data disk (`backend-local.hcl.example`) instead of GCS.
 
-That path is written up as playbooks grain's own configuration agent can
-read and act on -- `pkg/capability/bootstrap/playbooks/
-gcp-capabilities.md` and `cloudrun-iap.md` -- rather than repeated here;
-open the configuration agent from the UI and ask it to bootstrap GCP
-capabilities or CloudRun IAP access, or read those two files directly.
+That path is written up as playbooks an agent holding the
+`bootstrap-playbooks` grant can read and act on --
+`pkg/capability/bootstrap/playbooks/gcp-capabilities.md` and
+`cloudrun-iap.md` -- rather than repeated here; file an interactive task
+carrying that grant (plus `self-repair`, for the commands the playbooks
+tell it to run) and ask it to bootstrap GCP capabilities or CloudRun IAP
+access, or read those two files directly.
 The GitHub-side setup (`github-connections.md`, `github-test-repos.md`
 in the same directory) has no Terraform involved at all -- see those
 playbooks for why.

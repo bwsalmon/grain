@@ -1497,10 +1497,10 @@ no new field and no framework change in between.
 PlaybookTools`' `list_bootstrap_playbooks` and `read_bootstrap_playbook`
 read markdown runbooks embedded in the grain binary itself, so the
 subprocess is already holding everything they serve and needs no hop of
-any kind. That matters because `ui.configurationPrompt` has told the
-configuration agent to reach for both tools since bwsalmon/agents#620,
-while `Config.GrantTools` was the only thing assembling them — the prompt
-named a tool that was on no run's roster.
+any kind. That matters because `Config.GrantTools` was the only thing
+assembling them until this flag existed, and no CLI-driving `Framework`
+consumes that map — a task granted `bootstrap-playbooks` was told about
+tools that were on no run's roster.
 
 `-grant self-debug` turns on `selfdebug.SourceTools`'
 `read_grain_source`/`list_grain_source`, which answer what grain is
@@ -1542,23 +1542,41 @@ daemon aimed at one endpoint about one task id
 own pull request"). Neither is a store handle, and neither can answer
 `selfrepair.Confirm`'s blocking read of `Store.Comments`.
 
-bwsalmon/agents#621 turned that pair of capabilities into an explicit
-"configuration agent": an overlay button the frontend keeps reachable in
-the bottom-right corner of the screen no matter what view is on screen
-(`ConfigurationAgentButton.jsx`), which files a task with nothing but
-`{"configuration": true}` and opens its chat the moment it exists. What
-that one field expands into -- `Interactive` forced true, `self-debug`
-and `self-repair` both granted, a default title and a prompt oriented at
-helping with a problem, a question, or grain's own configuration -- is
-assembled once, server-side, in `ui.Client.CreateTask`, so nobody
-filing one (this button today, conceivably a CLI flag later) has to
-reassemble the bundle by hand. `Task.Configuration` also changes how
-`dispatch.Cycle` schedules the task: `dispatchConfiguration` starts every
-such task unconditionally, ahead of the capacity-gated loop that governs
-everything else, so the configuration agent can always start a sandbox
-even when the deployment is already at its worker limit -- the moment
-someone reaches for it is often exactly the moment the deployment is
-already saturated.
+bwsalmon/agents#621 once turned that pair of capabilities into an
+explicit "configuration agent": an overlay button the frontend kept
+reachable in the bottom-right corner of the screen, which filed a task
+with nothing but `{"configuration": true}` and opened its chat the moment
+it existed. One field on the task (`model.Task.Configuration`, a column
+of its own) expanded server-side into `Interactive` forced true, the
+`self-debug`/`self-repair`/`bootstrap-playbooks` grants, a default title
+and a prompt about helping with a problem, a question or grain's own
+configuration -- and `dispatch.Cycle` started every such task
+unconditionally, ahead of the capacity-gated loop, so it could get a
+sandbox even at the worker limit.
+
+**It is gone.** What it was for was changing this deployment's
+configuration, and configuration is not something to change by talking to
+a chat agent about it any more: it is the state repository (see "The
+store is a git repository again"). Settings, repo configuration, prompt
+extensions, schedules and suites are files an ordinary task can be
+dispatched at, edit, and open a pull request against, reviewed and merged
+like any other change, with `grain state check` validating it before it
+lands. A one-click chat that could reach into the running deployment
+instead was a second, unreviewed way to do the same thing.
+
+Nothing it was built out of goes with it. `self-debug`, `self-repair` and
+`bootstrap-playbooks` are still capabilities, still grantable from the
+new-task form or a deployment's defaults, and still reach a run the same
+way (`grain mcpserver -grant <name>`) -- what is removed is the bundle,
+the button, the field, the column and the exemption from the concurrency
+limit, not the tools. A deployment that wants what the button offered
+files an interactive task and ticks those grants, which is what the
+button was assembling for it. Removing the special dispatch path costs
+nothing that the state repository does not already answer: an interactive
+task filed to debug a saturated deployment waits its turn like everything
+else, and a deployment saturated badly enough for that to matter has a
+`MaxWorkers` a person can raise -- through the state repository, or
+through Settings.
 
 ## The agent runtime is a CLI now, not our own turn loop
 
@@ -3800,6 +3818,107 @@ being a **Ready** badge and nothing else. `grain settings
 -check-capability <id>` asks the same question from the host, which is
 where whoever is reading a failed task's error is usually already
 standing.
+
+### The question no button can ask: standing something up
+
+The check above is deliberately cheap and harmless, and that is also its
+ceiling. `gcp-key`'s is `Minter.ListKeys` — it proves the minter
+credential is alive and that GCP will still talk to it. It does not
+prove the *agent* account can create a VM, and those are different
+questions with different answers: the roles are different, the APIs are
+different, and an org policy or a dropped role binding can move one
+without touching the other.
+
+**Two scripts answer the larger question, and for a while nothing ran
+them.** `scripts/gce-vm-smoke.sh` creates a throwaway VM, ssh's into it
+and deletes it (about ninety seconds); `scripts/gke-cluster-smoke.sh`
+creates a cluster, runs a workload on it, resizes the node pool, relabels
+it and deletes it (about twelve minutes, a control plane and two
+`e2-medium` nodes). Both pass against a real project as
+`grain-main-agent`, and both are worth more than any assertion about
+configuration, because they exercise the same three verbs
+`terraform/gcp` and a `gcp-key` sandbox do. They also only ever answered
+when a human typed them, which is reliably *after* something has already
+failed in a way that reads as something else — the two `gcp-key`
+debugging sections above, twice over.
+
+**`.github/workflows/gcp-smoke.yml` runs both, nightly.** Nightly rather
+than weekly for `live-agent.yml`'s reason: what this samples drifts on
+somebody else's schedule — an org policy lands, a role binding is
+dropped, `constraints/iam.disableServiceAccountKeyCreation` gets
+enforced, a quota changes — so a longer interval buys nothing but a
+longer window in which every `gcp-key` task fails for a reason nobody has
+been told. A few cents a night, in a repository whose `tests.yml` already
+spends a 45-minute KVM job on every pull request.
+
+Two other homes were weighed. **Not a preflight in
+`terraform/gcp/deploy`**, which is the only shape that would *block* a
+deployment about to fail anyway: it would put twelve minutes in front of
+an interactive deploy to re-answer a question a few hours old, and it
+would answer it with the operator's own credential rather than with the
+agent account whose drift is the actual risk. **Not a grain schedule
+dispatching a task** either, tempting as it is to have grain watch its
+own credential: the answer would land as a task in the queue rather than
+as a red check, and a deployment whose `gcp-key` has stopped working is
+exactly the deployment that cannot dispatch the task that would say so.
+
+**Where the credential lives is the same boundary `live-agent.yml`
+draws**, and for the same reason — most branches here are pushed by
+grain's own agent runs, so a workflow file on a branch is code no human
+has read, and a *repository* secret is readable by any workflow on any
+branch push whichever file declares it. So a maintainer creates a
+`gcp-smoke` environment whose deployment branch policy names the default
+branch alone, holding `GCP_KEY_MINTER_KEY` as a secret and `GCP_PROJECT`
+and `GCP_AGENT_SERVICE_ACCOUNT` as variables. Until all three exist the
+"Require a credential" step fails every night with the instructions in
+the error, on purpose: it blocks no merge, and a job that skipped quietly
+would be this same gap in a new place.
+
+**It mints its own key rather than being handed one**, which is the part
+worth arguing. The obvious arrangement is a standing key for the agent
+account pasted into a secret; this authenticates as the same minter
+`pkg/capability/gcpkey` uses, mints a key for the agent account exactly
+the way a `gcp-key` grant does, and gives it back at the end of the run.
+That is what makes key creation itself part of what is sampled: the day
+`constraints/iam.disableServiceAccountKeyCreation` is enforced, every
+`gcp-key` task starts failing, and a job holding a static key would sail
+through it and report green. It also keeps CI's copy of the agent's power
+to the length of one run — and if the revoke never happens because a
+runner died, `gcpkey.Provider.Reap` deletes agent keys past
+`DefaultMaxKeyAge` on the deployment's own hourly sweep and does not care
+who minted them.
+
+**The `actAs` question is exposed rather than inherited.** Both scripts
+default to the self-acting shape — no service account on the VM, the
+calling account on the nodes — because the agent account has
+`iam.serviceAccounts.actAs` on itself alone, and attaching any other
+identity (including the default compute account gcloud reaches for on its
+own) needs `roles/iam.serviceAccountUser` **on that account**. That is
+what a real `gcp-key` sandbox can do, so it is what the nightly run
+samples. A `workflow_dispatch` input runs either leg the
+production-shaped way instead, which fails until somebody makes that
+grant — being able to ask on demand is the point, and making the nightly
+depend on a grant nobody has made yet is not.
+
+**Cleanup is the workflow's, not the scripts'.** Both delete what they
+made on every path out of themselves, Ctrl-C included, but a bash `EXIT`
+trap does not run when the runner kills the shell — which is what a
+cancelled job or a blown timeout does, and a leaked cluster bills all
+week. An `always()` step deletes anything carrying the scripts' own
+labels on either of two tests: created after this run minted its key, so
+it is this run's and goes now rather than billing until tomorrow; or more
+than two hours old, which no run of this job (about fifteen minutes) ever
+is, so that bound only ever decides about somebody else's leftovers — and
+is long enough not to take a cluster a human is standing in front of with
+`--keep`. By label rather than by name, so tonight's run clears last
+night's leak.
+
+`tests/deploy` holds the arrangement rather than trusting it — the
+trigger (no `push`, no `pull_request`), the `environment:`, both
+cleanup steps, and that the workflow names scripts that exist, are
+executable, parse under `bash -n`, and take the flags it passes them.
+What no test here can check is the one thing the workflow is for, which
+is why it is a schedule and not an assertion.
 
 ### The fourth credential: a named GitHub token
 

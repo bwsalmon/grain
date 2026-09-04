@@ -1630,9 +1630,9 @@ func appendSection(prompt, section string) string {
 //
 // Both root and placer are empty for a sandbox that offers neither. That
 // is only a problem for a grant that actually materializes a SideSandbox
-// placement (gcpkey, geminikey, githubsandbox): most grants, including
-// the Configuration agent's own self-debug/self-repair, materialize none
-// and so never reach the loop body below at all (bwsalmon/agents#643).
+// placement (gcpkey, geminikey, githubsandbox): most grants, self-debug
+// and self-repair included, materialize none and so never reach the loop
+// body below at all (bwsalmon/agents#643).
 func applyPlacements(ctx context.Context, root string, placer SandboxPlacer, materialized []model.Materialized) error {
 	for _, m := range materialized {
 		for _, p := range m.Materialization.Placements {

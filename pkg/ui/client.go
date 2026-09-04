@@ -601,14 +601,6 @@ type CreateTaskRequest struct {
 	// an unapproved proposal or waiting behind everything already
 	// queued, has nothing to show for itself.
 	Interactive bool `json:"interactive"`
-	// Configuration files this task as grain's own "configuration agent"
-	// (bwsalmon/agents#621, model.Task.Configuration's own doc comment) --
-	// CreateTask resolves it into the full bundle that name implies
-	// (Interactive forced true, configurationCapabilities merged in, a
-	// default Title/Description) rather than a caller assembling that by
-	// hand, and dispatch.Cycle lets a task carrying it start even with
-	// the deployment already at its worker limit.
-	Configuration bool `json:"configuration"`
 	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
 	// (bwsalmon/agents#534, grain/task-41) set model.Task's own fields of
 	// the same name -- a per-task override of the deployment's default
@@ -705,58 +697,6 @@ type CreateTaskRequest struct {
 	NoRepo bool `json:"noRepo"`
 }
 
-// configurationCapabilities are the grants every configuration-agent
-// task (CreateTaskRequest.Configuration, bwsalmon/agents#621) carries --
-// selfdebug.CapabilityName, selfrepair.CapabilityName and
-// bootstrap.CapabilityName's own string values (bwsalmon/agents#620
-// added the third), named here rather than imported so this package
-// stays free of every capability provider it merely knows the id of, the
-// same distance OfferedCapabilities (labels.go) already keeps.
-var configurationCapabilities = []string{"self-debug", "self-repair", "bootstrap-playbooks"}
-
-// configurationPrompt seeds a configuration-agent task's own Body when
-// the caller supplies none of its own -- bwsalmon/agents#621's "a prompt
-// that prepares it to help the user either with a problem, question or
-// configuration," so opening the configuration agent from its overlay
-// takes one click rather than a human writing out what it is for every
-// time. A caller that does supply its own Description keeps it verbatim
-// instead (CreateTask below) -- this is a default, not something every
-// configuration task is stuck carrying.
-const configurationPrompt = "You are grain's own configuration agent, opened for a live conversation " +
-	"with whoever is looking at this deployment's UI right now. Help with whatever they bring: a " +
-	"question about how grain or this deployment works, a problem to debug, or a change to make to " +
-	"grain's own configuration or the host it runs on. You hold the self-debug, self-repair and " +
-	"bootstrap-playbooks grants: read grain's own source to explain or debug its behavior " +
-	"(read_grain_source, list_grain_source), run commands " +
-	"directly on the host it runs on (each one needs a live human reply in this chat, approve or deny, " +
-	"before it runs), and read grain's own bootstrap playbooks (list_bootstrap_playbooks, " +
-	"read_bootstrap_playbook) for setting up GCP service accounts, the primary GitHub connection, " +
-	"CloudRun-based IAP access, or test repos -- reach for one of those if whoever you're talking to " +
-	"wants to bootstrap one of those flows, read it fully before acting on it, and follow its own " +
-	"guidance on what to ask them for and what to run yourself. Start by asking what they need."
-
-// mergeGrants returns grants with each of extra appended, skipping any
-// whose capability is already granted -- CreateTask's own way of adding
-// the configuration agent's grants (configurationCapabilities) on top of
-// whatever the request or this deployment's defaults already produced,
-// without granting anything twice. First one wins, so a capability a
-// human ticked keeps the Via it was ticked under rather than being
-// restated as something else.
-func mergeGrants(grants, extra []model.Grant) []model.Grant {
-	have := make(map[string]bool, len(grants))
-	for _, g := range grants {
-		have[g.Capability] = true
-	}
-	out := append([]model.Grant{}, grants...)
-	for _, g := range extra {
-		if !have[g.Capability] {
-			out = append(out, g)
-			have[g.Capability] = true
-		}
-	}
-	return out
-}
-
 // defaultCapabilities is the capability ids a task filed on this
 // deployment, against target, starts out holding: two layers, unioned,
 // deployment-wide first.
@@ -831,16 +771,7 @@ func (c *Client) defaultCapabilities(ctx context.Context, target *model.RepoRef)
 // a poll notice it, which meant a task could not be created without
 // GitHub reachable, and could not be dispatched until the next tick.
 //
-// req.Configuration (bwsalmon/agents#621) is resolved into its full
-// bundle here, once, rather than trusting every caller -- the frontend's
-// overlay, a future CLI flag, anything else that ever files one -- to
-// assemble Interactive, Capabilities and a Description by hand the same
-// way each time: Interactive is forced true regardless of what the
-// request itself set there, configurationCapabilities is merged into
-// whatever capabilities the task is otherwise filed with, and an empty
-// Title/Description defaults to "Configuration agent"/configurationPrompt.
-//
-// Capabilities are resolved the same way, once, for every caller: a
+// Capabilities are resolved once, for every caller: a
 // request that names its own set is filed with exactly that set, and one
 // that names none at all is filed with the default set resolved for the
 // repo it targets -- this deployment's, plus that repo's own
@@ -863,15 +794,6 @@ func (c *Client) defaultCapabilities(ctx context.Context, target *model.RepoRef)
 // seeds itself from the same stored value (GET /api/config's
 // newestFirst).
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
-	if req.Configuration {
-		req.Interactive = true
-		if strings.TrimSpace(req.Title) == "" {
-			req.Title = "Configuration agent"
-		}
-		if strings.TrimSpace(req.Description) == "" {
-			req.Description = configurationPrompt
-		}
-	}
 	if strings.TrimSpace(req.Title) == "" {
 		return Task{}, validationErrorf("title is required")
 	}
@@ -963,7 +885,6 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Base:            req.Base,
 		AutoMerge:       req.AutoMerge,
 		Interactive:     req.Interactive,
-		Configuration:   req.Configuration,
 		SandboxCPUs:     req.SandboxCPUs,
 		SandboxMemoryMB: req.SandboxMemoryMB,
 		SandboxDiskGB:   req.SandboxDiskGB,
@@ -1122,8 +1043,7 @@ func (c *Client) grantsFor(ids []string, via model.GrantSource) ([]model.Grant, 
 // creationGrants is the grant set a new task is filed with: whatever the
 // request named, or -- when it named nothing at all -- the default
 // capabilities resolved for target (this deployment's, plus target's own
-// repo row), plus the configuration agent's own three if this is one of
-// those.
+// repo row).
 //
 // target is the repo CreateTask has already resolved, defaults and all,
 // rather than req.Repo as written: a request that names no repo is filed
@@ -1159,13 +1079,6 @@ func (c *Client) creationGrants(ctx context.Context, req CreateTaskRequest, targ
 			return nil, err
 		}
 		grants = defaults
-	}
-	if req.Configuration {
-		extra, err := c.grantsFor(configurationCapabilities, model.GrantByLabel)
-		if err != nil {
-			return nil, err
-		}
-		grants = mergeGrants(grants, extra)
 	}
 	return grants, nil
 }

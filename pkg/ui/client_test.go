@@ -187,68 +187,6 @@ func TestCreateTaskInteractiveJumpsTheQueue(t *testing.T) {
 	}
 }
 
-// TestCreateTaskConfigurationAssemblesTheWholeBundle is bwsalmon/
-// agents#621 (widened by bwsalmon/agents#620's bootstrap-playbooks
-// grant): a caller asking for nothing but Configuration gets back a
-// task that is interactive, carries the self-debug, self-repair and
-// bootstrap-playbooks grants, and has a non-empty title and body --
-// CreateTask assembles the whole thing itself rather than trusting a
-// caller to ask for each piece by hand.
-func TestCreateTaskConfigurationAssemblesTheWholeBundle(t *testing.T) {
-	c, _, ctx := testClient(t)
-
-	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Configuration: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !task.Interactive {
-		t.Error("task.Interactive = false, want true")
-	}
-	if !task.Configuration {
-		t.Error("task.Configuration = false, want true")
-	}
-	if task.Title == "" {
-		t.Error("task.Title is empty, want a default")
-	}
-	if task.Description == "" {
-		t.Error("task.Description is empty, want the default prompt")
-	}
-	want := []string{"bootstrap-playbooks", "self-debug", "self-repair"}
-	sort.Strings(task.Capabilities)
-	if !reflect.DeepEqual(task.Capabilities, want) {
-		t.Fatalf("capabilities = %v, want %v", task.Capabilities, want)
-	}
-}
-
-// TestCreateTaskConfigurationKeepsACallerSuppliedTitleAndCapabilities
-// checks the other half of the bundle: Configuration only fills in what
-// the request left blank, rather than overwriting a title, description
-// or capability list the caller actually supplied.
-func TestCreateTaskConfigurationKeepsACallerSuppliedTitleAndCapabilities(t *testing.T) {
-	c, _, ctx := testClient(t)
-
-	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
-		Configuration: true,
-		Title:         "why is the daemon restarting",
-		Description:   "it keeps crash-looping, please debug",
-		Capabilities:  &[]string{"gemini-key"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if task.Title != "why is the daemon restarting" {
-		t.Errorf("task.Title = %q, want the caller's own", task.Title)
-	}
-	if task.Description != "it keeps crash-looping, please debug" {
-		t.Errorf("task.Description = %q, want the caller's own", task.Description)
-	}
-	want := []string{"bootstrap-playbooks", "gemini-key", "self-debug", "self-repair"}
-	sort.Strings(task.Capabilities)
-	if !reflect.DeepEqual(task.Capabilities, want) {
-		t.Fatalf("capabilities = %v, want the caller's own plus the configuration agent's", task.Capabilities)
-	}
-}
-
 // A repo outside Config.TargetRepos is filed exactly as asked, but
 // parked awaiting reply -- v1's "a task naming anything else is parked
 // with a comment rather than dispatched" -- so it never reaches
@@ -429,31 +367,6 @@ func TestCreateTaskCapabilitiesOverrideDeploymentDefaults(t *testing.T) {
 	}
 	if len(none.Capabilities) != 0 {
 		t.Errorf("capabilities = %v, want none: an empty list is a choice, not an absent one", none.Capabilities)
-	}
-}
-
-// A configuration-agent task gets its own three grants on top of
-// whatever the deployment defaults, rather than either one replacing the
-// other.
-func TestCreateConfigurationTaskKeepsDeploymentDefaults(t *testing.T) {
-	c, store, ctx := testClient(t)
-	putDefaultCapabilities(t, ctx, store, "gcp-key")
-
-	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{Configuration: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"gcp-key", "self-debug", "self-repair", "bootstrap-playbooks"} {
-		if !slices.Contains(task.Capabilities, want) {
-			t.Errorf("capabilities = %v, want %s among them", task.Capabilities, want)
-		}
-	}
-	stored, err := store.GetTask(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(stored.Grants) != 4 {
-		t.Fatalf("grants = %+v, want four", stored.Grants)
 	}
 }
 
