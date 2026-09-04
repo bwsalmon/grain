@@ -7,12 +7,14 @@ import (
 	"time"
 )
 
-// Branch is one branch a human has asked grain to create on a repo --
+// Branch is one branch a human has asked grain to know about on a repo --
 // bwsalmon/agents#638's own "Add the ability to create a new branch on a
 // repo from the repo page. This should just create the given branch in
-// github." Name is exactly the ref a human typed; Status walks pending ->
-// created, the same declarative-intent-then-reconcile shape Release
-// already holds to.
+// github," plus grain/task-176's own "if a branch already exists on a
+// repo, we should be able to add it to grain." Name is exactly the ref a
+// human typed; Status walks pending -> created (grain cut the ref) or
+// pending -> adopted (the ref was already there), the same declarative-
+// intent-then-reconcile shape Release already holds to.
 type Branch struct {
 	ID        int64
 	Repo      RepoRef
@@ -29,10 +31,22 @@ type BranchStatus string
 
 const (
 	// BranchPending is a freshly requested branch, before the branches
-	// reconciler has created it on GitHub.
+	// reconciler has looked for it on GitHub.
 	BranchPending BranchStatus = "pending"
-	// BranchCreated is a branch confirmed live on GitHub.
+	// BranchCreated is a branch confirmed live on GitHub, cut by the
+	// branches reconciler itself.
 	BranchCreated BranchStatus = "created"
+	// BranchAdopted is a branch that was already live on GitHub when the
+	// reconciler went to create it -- grain/task-176's own "if a branch
+	// already exists on a repo, we should be able to add it to grain."
+	//
+	// It is as terminal as BranchCreated, and means the same thing to
+	// everything downstream: the name is on GitHub and grain has a row
+	// for it. The two are kept apart because only one of them says grain
+	// made the ref, and somebody who typed a name expecting a fresh
+	// branch and got a colleague's existing one would otherwise never be
+	// told which they now have.
+	BranchAdopted BranchStatus = "adopted"
 )
 
 // branchNameSafe is what a branch Name has to match to be safe to hand

@@ -35,7 +35,8 @@ func TestCreateBranchAllowsTheSameNameTwice(t *testing.T) {
 	// Unlike a release name, a branch name is never checked for
 	// in-store uniqueness -- whether it collides is a fact only GitHub
 	// holds, so two requests for the same name are both recorded, and
-	// whichever the reconciler tries second finds it already exists.
+	// whichever the reconciler tries second adopts the branch the first
+	// one left behind.
 	store, _, ctx := openStore(t)
 	if _, err := store.CreateBranch(ctx, widgets, "myfeat", now); err != nil {
 		t.Fatalf("first create: %v", err)
@@ -93,6 +94,37 @@ func TestMarkBranchCreatedClearsLastError(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Status != model.BranchCreated || got[0].LastError != "" {
 		t.Fatalf("got %+v, want created with no error", got)
+	}
+}
+
+func TestMarkBranchAdoptedIsTerminalAndClearsLastError(t *testing.T) {
+	store, _, ctx := openStore(t)
+	b, err := store.CreateBranch(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkBranchError(ctx, b.ID, "boom"); err != nil {
+		t.Fatalf("mark error: %v", err)
+	}
+	if err := store.MarkBranchAdopted(ctx, b.ID); err != nil {
+		t.Fatalf("mark adopted: %v", err)
+	}
+
+	got, err := store.ListBranches(ctx, widgets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Status != model.BranchAdopted || got[0].LastError != "" {
+		t.Fatalf("got %+v, want adopted with no error", got)
+	}
+	// Adopted is as done as created: the reconciler owes it nothing
+	// further.
+	pending, err := store.PendingBranches(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("got %+v, want nothing left pending", pending)
 	}
 }
 

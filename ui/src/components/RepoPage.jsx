@@ -6,11 +6,11 @@ import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, capabilityUn
 // RepoPage is one repo's own page (grain/task-111), at /repos/{owner}/
 // {name} -- the repo-side counterpart of a task's own /tasks/{id} page.
 // Everything that is a property of one repo lives here: its task counts,
-// the branches grain has been asked to create in it, the default
-// capabilities every task filed against it starts with, the standing
-// instructions every run against it is given, the setup command grain
-// runs in every checkout it makes here, the way into its releases, and
-// removing it from the deployment's allowlist.
+// the branches grain has been asked to create in it or to adopt from it,
+// the default capabilities every task filed against it starts with, the
+// standing instructions every run against it is given, the setup command
+// grain runs in every checkout it makes here, the way into its releases,
+// and removing it from the deployment's allowlist.
 //
 // That is the whole point of it. Each of those used to be a button on
 // the repo *list* row (bwsalmon/agents#459, #473, #474, #638), which
@@ -145,12 +145,13 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
     }
   };
 
-  // createBranch only ever records the request -- the branches reconciler
-  // (pkg/orchestrator.SyncBranches) is what actually creates it on GitHub,
-  // typically within one cycle, so a freshly submitted name reappears
-  // below still "pending" until the next loadBranches picks up "created"
-  // or, if GitHub refused it, an error.
-  const createBranch = async (evt) => {
+  // addBranch only ever records the request -- the branches reconciler
+  // (pkg/orchestrator.SyncBranches) is what goes to GitHub, typically
+  // within one cycle, so a freshly submitted name reappears below still
+  // "pending" until the next loadBranches picks up "created" (grain cut
+  // the ref), "adopted" (the name was already on the repo, taken as it
+  // stands) or, if GitHub refused it, an error.
+  const addBranch = async (evt) => {
     evt.preventDefault();
     const form = evt.target;
     const branchName = form.elements.branchName.value.trim();
@@ -278,13 +279,13 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
 
         <Box>
           <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Branches</Typography>
-          <Stack component="form" direction="row" spacing={1} alignItems="flex-start" onSubmit={createBranch}>
+          <Stack component="form" direction="row" spacing={1} alignItems="flex-start" onSubmit={addBranch}>
             <TextField
-              name="branchName" label="New branch name" placeholder="feature/foo"
-              helperText="Created from the repo's current default branch"
+              name="branchName" label="Branch name" placeholder="feature/foo"
+              helperText="Created from the repo's current default branch, or adopted as it stands if it already exists"
               autoComplete="off" required InputLabelProps={{ required: false }} size="small"
             />
-            <Button type="submit" variant="outlined" size="small">Create branch</Button>
+            <Button type="submit" variant="outlined" size="small">Add branch</Button>
           </Stack>
           {branches.length > 0 && (
             <ul className="candidate-history" style={{ marginTop: "0.75rem" }}>
