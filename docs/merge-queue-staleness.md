@@ -9,6 +9,16 @@ function and field it names now exists -- `github.MergeBranch`,
 `orchestrator.refreshStaleHead` and its outcome type -- and the tests it
 asks for at the bottom are written.
 
+One name in it has since moved: what this document calls `fileFixTask`
+-- the step after a refresh that did not help -- no longer files a
+separate stacked task. The merge queue sends the task itself back to an
+agent on the pull request's own branch instead (`requeueForRepair`,
+`Observation.MergeQueueRepairAt`, grain/task-271), so that a resolution
+and the change it repairs share one pull request and one round of CI.
+Everything below about *when* the queue acts, and about reading `201`,
+`204` and `409` off its own merge attempt, is unchanged; only what it
+does afterwards is spelled differently.
+
 The one thing it asks for that code cannot supply is still outstanding:
 **the `204`/`409` split has been confirmed against `githubsim` (which
 answers both by running real `git` against a real bare repository) and

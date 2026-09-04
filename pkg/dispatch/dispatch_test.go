@@ -58,12 +58,14 @@ func task(id string, approved bool, links ...model.Link) model.Task {
 	return tk
 }
 
-// fixTask builds a task the merge queue would file to repair a stuck
-// queue head (Origin.Reason == ReasonFix) -- see orchestrator/sync.go's
-// fileFixTask, including the place in the backlog it files one at: the
-// very head, ahead of the zero OrderKey every task() here carries. That
-// position is now the whole of why it dispatches first, so a fix task
-// built without it would prove nothing.
+// fixTask builds one of the separate tasks the merge queue used to file
+// to repair a stuck queue head (Origin.Reason == ReasonFix), including
+// the place in the backlog it was filed at: the very head, ahead of the
+// zero OrderKey every task() here carries. That position is the whole of
+// why it dispatches first, so a fix task built without it would prove
+// nothing. A repair is another attempt of the head task itself now
+// (orchestrator.requeueForRepair), but such a task is still a merger and
+// a database can still hold one of these.
 func fixTask(id string) model.Task {
 	tk := task(id, true)
 	tk.Origin.Reason = model.ReasonFix

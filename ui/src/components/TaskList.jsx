@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { STATE_LABELS, capabilityName, completionPhase, runActivity } from "../state.js";
+import { STATE_LABELS, capabilityName, completionPhase, runActivity, stateLabel } from "../state.js";
 import { SORTS, filterViews, matchesFilters, sortTasks } from "../taskFilters.js";
 import { ListEmpty, ListFilterSelect, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
@@ -297,9 +297,9 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       )}
       <span
         className={`badge badge-icon badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}
-        title={STATE_LABELS[t.state] || t.state}
+        title={stateLabel(t)}
       >
-        <StateDot state={t.state} title={STATE_LABELS[t.state] || t.state} />
+        <StateDot state={t.state} title={stateLabel(t)} repairing={t.repairing} />
       </span>
       <span className="task-number">{t.id}</span>
       <span className="task-title">{t.title}</span>

@@ -187,10 +187,10 @@ func printPullRequests(p ui.MetricsPullRequests) {
 	fmt.Printf("\nmid-run pull requests (%d run(s) in the window could have opened one)\n", p.Runs)
 	fmt.Printf("  opened one themselves    %6d  (%.0f%% of them, %d call(s) in all)\n",
 		p.Opened, p.AdoptionRate*100, p.Calls)
-	fmt.Printf("  fix task filed after     %6.0f%% of the %d that did, %.0f%% of the %d that did not\n",
+	fmt.Printf("  repaired by the queue after %3.0f%% of the %d that did, %.0f%% of the %d that did not\n",
 		p.WithTool.Rate*100, p.WithTool.Runs, p.WithoutTool.Rate*100, p.WithoutTool.Runs)
-	fmt.Println("  (a fix task is the merge queue cleaning up a red build the run left behind." +
-		"\n   The link is on the task, not the attempt: read the difference, not either rate.)")
+	fmt.Println("  (a repair is the merge queue cleaning up a red build the run left behind." +
+		"\n   It is recorded on the task, not the attempt: read the difference, not either rate.)")
 }
 
 // atMost renders a bucketed percentile as the bound it is, so nobody

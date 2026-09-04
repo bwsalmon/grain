@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button, Checkbox, Chip, Typography } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { STATE_LABELS, capabilityName, completionPhase, runActivity } from "../state.js";
+import { STATE_LABELS, capabilityName, completionPhase, runActivity, stateLabel } from "../state.js";
 import { SORTS, filterViews, matchesFilters, sortTasks } from "../taskFilters.js";
 import { boardStates, groupIntoColumns, hiddenStates, loadColumns, saveColumns } from "../board.js";
 import { ListEmpty, ListFilterSelect, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
@@ -257,7 +257,10 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
 export function BoardCard({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, showState = true }) {
   const phase = completionPhase(t);
   const activity = runActivity(t);
-  const stateLabel = STATE_LABELS[t.state] || t.state;
+  // stateLabel rather than STATE_LABELS, and the repairing flag passed
+  // through to the mark, so a card says "Repairing" in the queue's own
+  // green wherever the same task's row in TaskList would.
+  const label = stateLabel(t);
   return (
     <div
       className={`board-card${dragging ? " board-card-dragging" : ""}`}
@@ -285,9 +288,9 @@ export function BoardCard({ t, config, onOpenTask, selected, onToggleSelect, dra
         {showState && (
           <span
             className={`badge badge-icon badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}
-            title={stateLabel}
+            title={label}
           >
-            <StateDot state={t.state} title={stateLabel} />
+            <StateDot state={t.state} title={label} repairing={t.repairing} />
           </span>
         )}
         <span className="task-number">{t.id}</span>

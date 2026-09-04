@@ -14,9 +14,17 @@ import { FormControl, InputLabel, MenuItem, Select, TextField, Typography } from
 // repo's per-state counts, a template's single title line, a schedule's
 // second "next run" line) that don't reduce to one shape without either
 // losing information or growing a prop for every page's special case.
-export function ListHeader({ title, count, action, style }) {
+
+// `icon` is the page's own item glyph (ItemGlyph.jsx), for the four
+// pages that have one -- the same figure the nav entry that got here
+// carries, at the size a heading can hold, so the icon in the rail and
+// the page it opens are visibly the same thing. Ahead of the title and
+// outside the heading itself, so it is decoration and the heading's
+// accessible name stays the one word.
+export function ListHeader({ title, count, action, icon, style }) {
   return (
     <div className="content-header" style={style}>
+      {icon ? <span className="header-icon">{icon}</span> : null}
       <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>{title}</Typography>
       {count != null && <span className="count">{count}</span>}
       {action}

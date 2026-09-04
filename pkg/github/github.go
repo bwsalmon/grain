@@ -626,11 +626,11 @@ var actionsLogTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z `)
 // JobLogTailLines lines, without Actions' own per-line timestamps.
 //
 // It lives here, next to JobLog itself, because two callers render the
-// same logs to two different audiences -- orchestrator's fix task body
-// (fileFixTask) and mcp's own CI answers (failingJobLogs) -- and a run
-// reading its build break through one of them should not see a
-// differently-bounded excerpt than the fix task filed for that same
-// break would carry.
+// same logs to two different audiences -- the comment the merge queue
+// asks a repair with (orchestrator's requeueForRepair) and mcp's own CI
+// answers (failingJobLogs) -- and a run reading its build break through
+// one of them should not see a differently-bounded excerpt than the
+// repair asked for that same break would carry.
 func JobLogExcerpt(text string) string {
 	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	if len(lines) > JobLogTailLines {

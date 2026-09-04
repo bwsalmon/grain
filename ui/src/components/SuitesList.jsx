@@ -4,6 +4,7 @@ import { knownRepos } from "../state.js";
 import SuiteOverlay from "./SuiteOverlay.jsx";
 import SuiteRunOverlay from "./SuiteRunOverlay.jsx";
 import { ListEmpty, ListHeader } from "./ListPrimitives.jsx";
+import ItemGlyph from "./ItemGlyph.jsx";
 
 // STATUS_LABELS/STATUS_COLORS render model.TaskSuiteRunStatus's own
 // three values the way a human reads them -- Chip's own "color" prop
@@ -42,6 +43,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
     <main>
       <ListHeader
         title="Suites"
+        icon={<ItemGlyph kind="suites" size={20} />}
         count={suites.length}
         action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New suite</Button>}
       />

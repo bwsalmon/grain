@@ -359,6 +359,25 @@ describe("TaskList", () => {
     expect(runningDot.querySelector(".grain-mark-sheet")).toHaveAttribute("title", "Running");
   });
 
+  // A run that is the merge queue repairing this task's own pull request
+  // branch, rather than writing the change: the same mark, moving the
+  // same way, in green instead of the accent (.grain-mark-repair), and a
+  // badge that says which kind of work it is. A row that has gone back to
+  // running has not gone back to the beginning.
+  it("marks a task the merge queue is repairing apart from one merely running", () => {
+    renderList({
+      tasks: [
+        { ...tasks[1], state: "running", repairing: true },
+      ],
+    });
+    const dot = rowFor("Ship the other thing").querySelector(".badge");
+    const mark = dot.querySelector(".grain-mark-sheet");
+
+    expect(dot).toHaveClass("badge-mark");
+    expect(mark).toHaveClass("grain-mark-repair");
+    expect(mark).toHaveAttribute("title", "Repairing");
+  });
+
   describe("search (bwsalmon/agents#460)", () => {
     it("filters down to tasks whose title matches the search text", async () => {
       const user = userEvent.setup();
