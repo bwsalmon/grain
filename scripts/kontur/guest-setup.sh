@@ -20,8 +20,7 @@
 #
 # What this deliberately does NOT do, because the base image
 # (ghcr.io/bwsalmon/kontur:debian12-*, built with
-# GUEST_KERNEL_PACKAGE=linux-image-amd64 and GUEST_CONSOLE_WRAP=0) now
-# carries all of it:
+# GUEST_KERNEL_PACKAGE=linux-image-amd64) now carries all of it:
 #
 #   - install a kernel, or regenerate the initramfs. The base has Debian's
 #     linux-image-amd64 and an initramfs generated with kontur's udev
@@ -31,11 +30,17 @@
 #   - configure networking from the "ip=" kernel parameter, or keep the
 #     guest's NICs named eth0/eth1. kontur-net-cmdline.service and the
 #     udev mask do both.
-#   - undo kontur's SSH console wrapper. The base is built without it, so
-#     `kontur exec` output is byte-transparent rather than passing
-#     through a pty that rewrites newlines and merges stderr into stdout.
-#   - install any SSH key. kontur generates a keypair per VM boot and
-#     passes the public half on the kernel command line.
+#   - anything at all about SSH. There is no sshd in the base any more,
+#     and nothing here needs one: `kontur exec` reaches the guest over
+#     its vsock device, where kontur-agent answers (bwsalmon/kontur#46).
+#     That retired three things this script used to have to think about
+#     -- the per-boot keypair, the account the key was authorized for,
+#     and the console wrapper that ran every session under a pty and so
+#     corrupted every file grain's sandbox tools read back.
+#
+#     It also means a command runs here with no network involved in
+#     reaching it, so a guest whose networking is broken is still one a
+#     dispatched run can be debugged inside.
 #
 # There is no operator hook here either. Customizing this guest is
 # `konturctl guest build --from <this image>` with a script of your own,
