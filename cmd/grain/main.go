@@ -86,6 +86,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/kontur"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -132,6 +133,9 @@ func main() {
 		case "sandbox-image":
 			sandboxImageCmd(args[1:])
 			return
+		case antigravity.HookSubcommand:
+			agyToolHook(args[1:])
+			return
 		}
 	}
 	if err := runCLI(args); err != nil {
@@ -151,6 +155,7 @@ const usage = `usage: grain [global flags] <command> [args]
        grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
        grain schema-version    print pkg/model.SchemaVersion and exit (see schemaversion.go)
        grain sandbox-image     print the sandbox container this build expects and exit (see sandboximage.go)
+       grain agy-tool-hook     answer one of agy's PreToolUse hooks on stdin/stdout (see agyhook.go)
 
 Global flags (must come before the command):
   -server string  base URL of a running "grain daemon"'s UI/API. Defaults to

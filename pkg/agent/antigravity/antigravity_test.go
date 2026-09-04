@@ -34,6 +34,10 @@ type recordingRunner struct {
 	homeAtRun     string
 	settingsAtRun string
 	sawSettings   bool
+	// hooksAtRun is agy's hooks.json from the same HOME, read on the same
+	// terms, and sawHooks whether one was written at all.
+	hooksAtRun string
+	sawHooks   bool
 	// dirEntriesAtRun is what the working directory agy was started in
 	// held while the run was in flight, and dirExistedAtRun whether it
 	// was there at all -- read for the same reason as the two above, a
@@ -54,6 +58,9 @@ func (r *recordingRunner) Run(_ context.Context, args []string, stdin string, en
 			}
 			if data, err := os.ReadFile(filepath.Join(home, cliSettingsRelPath)); err == nil {
 				r.settingsAtRun, r.sawSettings = string(data), true
+			}
+			if data, err := os.ReadFile(filepath.Join(home, hooksConfigRelPath)); err == nil {
+				r.hooksAtRun, r.sawHooks = string(data), true
 			}
 		}
 	}
@@ -436,7 +443,9 @@ func TestRunAsksAgyToUseTheAPIKeyItIsGiven(t *testing.T) {
 
 // The other side of it: a deployment that configured no key at all means
 // agy to authenticate however its own environment says, and pinning the
-// provider for it would break that rather than fix anything.
+// provider for it would break that rather than fix anything. The settings
+// file is still written -- it carries this run's permission rules too --
+// so what must be absent is the setting, not the file.
 func TestRunLeavesAgysProviderAloneWithoutAKey(t *testing.T) {
 	r := &recordingRunner{stdout: okStream()}
 	f := newFramework(r, "/usr/local/bin/grain")
@@ -444,9 +453,149 @@ func TestRunLeavesAgysProviderAloneWithoutAKey(t *testing.T) {
 	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if r.sawSettings {
-		t.Errorf("%s = %q for a run with no API key, want no settings file at all",
-			cliSettingsRelPath, r.settingsAtRun)
+	if !r.sawSettings {
+		t.Fatalf("no %s written into the private HOME; this run's permission rules go there", cliSettingsRelPath)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal([]byte(r.settingsAtRun), &settings); err != nil {
+		t.Fatalf("agy settings were not JSON: %v (%q)", err, r.settingsAtRun)
+	}
+	if _, ok := settings["modelProvider"]; ok {
+		t.Errorf("modelProvider = %v for a run with no API key, want it left unset so agy authenticates as its own environment says",
+			settings["modelProvider"])
+	}
+}
+
+// TestRunDeniesAgysOwnFileAndCommandToolsInItsSettings: the permission
+// rules grain writes name agy's own filesystem and shell tools as denied
+// and grain's own as allowed. What is asserted here is that the rules are
+// written and say the right thing -- agy 1.1.26 reads them back
+// (`-p /permissions`), but see permissionRules on why this package does
+// not claim the deny is enforced while Run passes
+// --dangerously-skip-permissions.
+func TestRunDeniesAgysOwnFileAndCommandToolsInItsSettings(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/usr/local/bin/grain", WithAPIKey("AIza-not-a-real-key"))
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var settings struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(r.settingsAtRun), &settings); err != nil {
+		t.Fatalf("agy settings were not JSON: %v (%q)", err, r.settingsAtRun)
+	}
+	for _, native := range withheldNativeTools {
+		if !slices.Contains(settings.Permissions.Deny, native) {
+			t.Errorf("deny = %v, want agy's own %q denied", settings.Permissions.Deny, native)
+		}
+	}
+	for _, tool := range []string{"run_command", "write_file", "comment_on_issue"} {
+		want := mcp.AgyQualifiedToolName(tool)
+		if !slices.Contains(settings.Permissions.Allow, want) {
+			t.Errorf("allow = %v, want grain's own %q allowed", settings.Permissions.Allow, want)
+		}
+	}
+	// The trap the deny list must not fall into: grain's tools carry the
+	// same verbs as agy's, and a rule naming the bare verb would deny the
+	// run the only tools that reach its sandbox.
+	for _, denied := range settings.Permissions.Deny {
+		if slices.Contains(settings.Permissions.Allow, denied) {
+			t.Errorf("%q is both allowed and denied", denied)
+		}
+	}
+}
+
+// TestRunPutsGrainInFrontOfEveryToolCall: the hooks.json in the private
+// HOME points a PreToolUse hook at this very binary, which is the one
+// place agy documents as able to block a tool call outright.
+func TestRunPutsGrainInFrontOfEveryToolCall(t *testing.T) {
+	r := &recordingRunner{stdout: okStream()}
+	f := newFramework(r, "/opt/grain/bin/grain")
+
+	if _, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !r.sawHooks {
+		t.Fatalf("no %s written into the private HOME; nothing then stands between the model and agy's own tools", hooksConfigRelPath)
+	}
+	var hooks map[string]struct {
+		PreToolUse []struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"PreToolUse"`
+	}
+	if err := json.Unmarshal([]byte(r.hooksAtRun), &hooks); err != nil {
+		t.Fatalf("hook config was not JSON: %v (%q)", err, r.hooksAtRun)
+	}
+	groups := hooks[hookName].PreToolUse
+	if len(groups) != 1 || len(groups[0].Hooks) != 1 {
+		t.Fatalf("PreToolUse = %+v, want exactly one handler in one group", groups)
+	}
+	if groups[0].Matcher != "*" {
+		t.Errorf("matcher = %q, want %q -- HookDecision reads the name out of the payload, so the hook has to see every call",
+			groups[0].Matcher, "*")
+	}
+	cmd := groups[0].Hooks[0].Command
+	if !strings.Contains(cmd, "/opt/grain/bin/grain") || !strings.Contains(cmd, HookSubcommand) {
+		t.Errorf("hook command = %q, want this binary's own path and %q", cmd, HookSubcommand)
+	}
+}
+
+// TestHookDecisionDeniesAgysToolsAndOnlyAgysTools is the policy itself,
+// and the second half of it matters more than the first: this hook sees
+// every tool call a run makes, so a decision it gets wrong about grain's
+// own tools is a run that cannot do anything at all.
+func TestHookDecisionDeniesAgysToolsAndOnlyAgysTools(t *testing.T) {
+	decision := func(name string) string {
+		payload, err := json.Marshal(map[string]any{
+			"toolCall": map[string]any{"name": name, "args": map[string]any{"CommandLine": "ls"}},
+			"stepIdx":  3,
+		})
+		if err != nil {
+			t.Fatalf("building payload: %v", err)
+		}
+		var out struct {
+			Decision string `json:"decision"`
+		}
+		if err := json.Unmarshal(HookDecision(payload), &out); err != nil {
+			t.Fatalf("hook reply for %q was not JSON: %v", name, err)
+		}
+		return out.Decision
+	}
+
+	for _, native := range withheldNativeTools {
+		if got := decision(native); got != "deny" {
+			t.Errorf("decision(%q) = %q, want deny -- it runs on the controller", native, got)
+		}
+	}
+	// Grain's own, including the ones whose names collide with agy's.
+	for _, tool := range publishedTools() {
+		if got := decision(mcp.AgyQualifiedToolName(tool)); got != "" {
+			t.Errorf("decision(%q) = %q, want no opinion -- this is the tool that reaches the sandbox",
+				mcp.AgyQualifiedToolName(tool), got)
+		}
+	}
+	// And anything this package was not asked about: a tool agy added
+	// since, a name reported in a shape nobody anticipated, or no payload
+	// at all. Every one of them leaves the call alone rather than
+	// stopping a run over a surprise.
+	for _, name := range []string{"browser_click_element", "finish", "call_mcp_tool", "", "run_command "} {
+		if got := decision(name); got != "" {
+			t.Errorf("decision(%q) = %q, want no opinion for a name this hook does not know", name, got)
+		}
+	}
+	for _, junk := range [][]byte{nil, []byte(""), []byte("not json"), []byte(`{"toolCall":7}`)} {
+		if got := string(HookDecision(junk)); got != `{}` {
+			t.Errorf("HookDecision(%q) = %s, want {} -- an unreadable payload must not stop a run", junk, got)
+		}
 	}
 }
 
