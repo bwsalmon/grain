@@ -150,6 +150,36 @@ func TestTaskQuerySortIsStable(t *testing.T) {
 	}
 }
 
+// grain/task-284: a review is stacked on another task's branch the way
+// the merge queue's own fix is, so both would answer to "fix" if
+// taskOrigin read Stacked alone. -origin has to tell them apart -- one
+// is a second agent reading a change, the other is a repair of a red
+// build.
+func TestTaskOriginTellsAReviewFromAMergeFix(t *testing.T) {
+	tasks := []ui.Task{
+		{ID: "1", Title: "Widget work", State: model.StateQueued},
+		{ID: "2", Title: "Repair it", State: model.StateQueued, Stacked: true, GeneratedFrom: "1"},
+		{ID: "3", Title: "Review it", State: model.StateQueued, Stacked: true, Review: true, GeneratedFrom: "1"},
+	}
+	for _, tc := range []struct {
+		origin string
+		want   []string
+	}{
+		{origin: "fix", want: []string{"2"}},
+		{origin: "review", want: []string{"3"}},
+	} {
+		t.Run(tc.origin, func(t *testing.T) {
+			got, err := taskQuery{origin: tc.origin}.apply(tasks)
+			if err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			if !equal(ids(got), tc.want) {
+				t.Fatalf("apply(-origin %s) = %v, want %v", tc.origin, ids(got), tc.want)
+			}
+		})
+	}
+}
+
 // A word nobody can act on is answered with the list of words that work,
 // rather than with an empty listing that reads like a deployment with no
 // such tasks.

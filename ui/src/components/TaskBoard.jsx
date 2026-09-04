@@ -6,6 +6,7 @@ import {
   capabilityName,
   completionPhase,
   runActivity,
+  stackedChip,
   stateLabel,
 } from "../state.js";
 import {
@@ -471,16 +472,7 @@ export function BoardCard({
           />
         )}
         {t.stacked && (
-          <Chip
-            size="small"
-            className="chip-stacked"
-            title={
-              t.generatedFrom
-                ? `the merge queue's own automatic fix for ${t.generatedFrom}`
-                : "the merge queue's own automatic fix for another task's pull request"
-            }
-            label="merge fix"
-          />
+          <Chip size="small" className="chip-stacked" {...stackedChip(t)} />
         )}
         {t.interactive && (
           <Chip

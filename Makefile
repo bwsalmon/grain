@@ -192,6 +192,17 @@ container-build: builder
 # Both need pkg/ui/static populated first, same as build: go:embed
 # fails to compile -- not just to run -- against a static/ holding
 # nothing but .gitkeep.
+#
+# -race, and the `go test` line here is character-for-character the one
+# .github/workflows/tests.yml's go-test job runs -- tests/deploy's
+# TestTheGoJobRunsTheSameSuiteCommandTheMakefileDoes fails on a change to
+# either file alone. It was not always so: the workflow ran a plain `go
+# test ./...` while this file's header claimed to mirror it, so for the
+# whole life of that claim the race detector had never run in CI, and a
+# data race in the reconcile loop, a dispatch goroutine, an addendum
+# poller or the stateManager lock only ever surfaced if a developer
+# happened to run `make test` on a machine where it showed. It is worth
+# roughly double the wall clock of the run.
 test: frontend
 	go test -race ./...
 	cd ui && npm test

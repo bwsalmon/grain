@@ -519,3 +519,32 @@ const FRAMEWORK_LABELS = { claude: "Claude", codex: "Codex" };
 export function frameworkLabel(framework) {
   return FRAMEWORK_LABELS[framework] || "Antigravity";
 }
+
+// stackedChip is the label and hover text for the chip a stacked task
+// carries -- a task branched off another task's branch and merged back
+// into it rather than into a repo's own base. Two things are stacked
+// that way, and the chip says which: a review (grain/task-284), run over
+// a change before it merges, and the merge queue's own automatic fix for
+// a pull request. Both are stacked; only one of them is a repair of a
+// red build.
+//
+// It lives here rather than in either view because both of them show it:
+// the task list's rows and the board's cards would otherwise each spell
+// out the same two labels and drift apart the first time one of them was
+// edited.
+export function stackedChip(t) {
+  if (t.review) {
+    return {
+      label: "review",
+      title: t.generatedFrom
+        ? `a review of ${t.generatedFrom}'s own code, run before it merges`
+        : "a review of another task's own code, run before it merges",
+    };
+  }
+  return {
+    label: "merge fix",
+    title: t.generatedFrom
+      ? `the merge queue's own automatic fix for ${t.generatedFrom}`
+      : "the merge queue's own automatic fix for another task's pull request",
+  };
+}

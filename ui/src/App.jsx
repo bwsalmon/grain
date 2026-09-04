@@ -738,6 +738,7 @@ export default function App() {
           task={detail}
           tasks={tasks}
           config={config}
+          templates={templates}
           onClose={closeDetail}
           onOpenTask={openTask}
           act={act}
@@ -748,6 +749,7 @@ export default function App() {
         <NewTaskOverlay
           tasks={tasks}
           config={config}
+          templates={templates}
           defaultRepo={newTaskRepo !== null ? newTaskRepo : openRepo}
           onClose={() => setShowNewTask(false)}
           onCreated={refreshAfterCreate}

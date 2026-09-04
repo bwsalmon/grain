@@ -89,6 +89,7 @@ const ORIGIN_LABELS = {
   schedule: "Scheduled",
   suite: "Suite run",
   fix: "Merge fix",
+  review: "Review",
 };
 
 // originOf is the one thing that put this task in the list -- what the
@@ -98,6 +99,9 @@ const ORIGIN_LABELS = {
 // generated from another task, so answering "proposed" for it would say
 // the less specific of two true things.
 export function originOf(t) {
+  // Review before fix: both are stacked, and only one of them is a
+  // repair of a red build.
+  if (t.review) return "review";
   if (t.stacked) return "fix";
   if (t.scheduled) return "schedule";
   if (t.suiteRun) return "suite";
@@ -160,7 +164,7 @@ export const FILTERS = [
     label: "Origin",
     anyLabel: "Any origin",
     values: (t) => [originOf(t)],
-    order: ["hand", "proposed", "schedule", "suite", "fix"],
+    order: ["hand", "proposed", "schedule", "suite", "fix", "review"],
     labelOf: (v) => ORIGIN_LABELS[v],
   },
   {

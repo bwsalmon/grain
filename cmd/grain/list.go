@@ -42,16 +42,20 @@ var taskStates = []model.State{
 }
 
 // taskOrigins is every way a task can come to exist, and what -origin
-// calls each -- the same five the UI's own Origin menu offers, read off
+// calls each -- the same set the UI's own Origin menu offers, read off
 // the same fields. A task carrying more than one marker is reported as
 // the most specific of them, which is why the order below is the order
 // taskOrigin tests them in: a merge fix is always generated from another
 // task, so calling it "proposed" would say the less specific of two true
 // things.
-var taskOrigins = []string{"fix", "schedule", "suite", "proposed", "hand"}
+var taskOrigins = []string{"review", "fix", "schedule", "suite", "proposed", "hand"}
 
 func taskOrigin(t ui.Task) string {
 	switch {
+	// Review before fix: both are stacked on another task's own branch,
+	// and only one of them is a repair of a red build (ui.Task.Review).
+	case t.Review:
+		return "review"
 	case t.Stacked:
 		return "fix"
 	case t.Scheduled:

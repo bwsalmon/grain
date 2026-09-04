@@ -155,6 +155,39 @@ func TestTheCLIWrappersReplaceASymlinkRatherThanWritingThroughIt(t *testing.T) {
 		"the wrapper is written before the symlink is removed")
 }
 
+// The CLI has to be told the two things about this deployment it cannot
+// work out for itself: where the daemon listens, and where its files are.
+//
+// The second was missing (grain/task-303). `grain state` and `grain
+// secrets` edit the data directory directly and take a -data-dir; the
+// wrapper already bind-mounts that directory at its own path, but passed
+// nothing naming it -- so the `grain state status` this script's own
+// closing report prints failed, typed exactly as printed, with
+// "-data-dir is required".
+//
+// Both halves are asserted: the wrapper's container, which is where a
+// `grain` invocation on this host actually runs, and the profile script,
+// which is what a shell (and anything reading $GRAIN_DATA_DIR out here,
+// like pkg/capability/bootstrap's playbooks) gets.
+func TestTheCLIIsToldWhereThisDeploymentsStateLives(t *testing.T) {
+	text := setupText(t)
+
+	wrapper := between(t, text, "cat > /usr/local/lib/grain/run-image.sh", "\nWRAPPER\n")
+	contains(t, wrapper, "--env GRAIN_DATA_DIR=${GRAIN_DATA_DIR}")
+	// Baked, not passed through from the caller the way GRAIN_SERVER is:
+	// the only data directory inside that container is the one mounted
+	// on the next line.
+	contains(t, wrapper, "--volume ${GRAIN_DATA_DIR}:${GRAIN_DATA_DIR}")
+
+	profile := body(t, text, "write_cli_profile() {")
+	contains(t, profile, `export GRAIN_DATA_DIR="${GRAIN_DATA_DIR}"`)
+	contains(t, profile, `export GRAIN_SERVER=`)
+	// The data directory is exported even when GRAIN_UI_ADDR carries no
+	// port to build a GRAIN_SERVER out of: the two are unrelated, and
+	// that branch used to write no profile script at all.
+	absent(t, profile, "not writing /etc/profile.d/grain.sh")
+}
+
 // The `grain` CLI is a `docker run` with the data dir bind-mounted.
 //
 // Docker creates a missing bind-mount source itself, as root and with a
@@ -627,6 +660,44 @@ func TestTheSmokeWorkflowRunsTheScriptsAsTheyAre(t *testing.T) {
 	for _, script := range []string{gce, gke} {
 		contains(t, script, `ZONE="${ZONE:-`)
 	}
+}
+
+// The GCE smoke script can tag the VM it creates, and names the tag this
+// module's own networks ask for.
+//
+// --iap is the leg worth checking, since terraform/gcp gives the host no
+// external IP at all -- and network.tf admits IAP's 35.235.240.0/20 to
+// port 22 for a *target tag* only: agent_iap_ssh covers
+// `<name_prefix>-agent-vm`, the ssh rule covers `<name_prefix>-host`, and
+// an instance carrying neither matches no rule and is unreachable however
+// good the credential. IAP reports that drop as
+// [4003: 'failed to connect to backend'], which is also what it says
+// about a VM that has not finished booting, so the error itself sends
+// people to look at the key. Two things keep the script out of that hole,
+// and neither is visible from the script alone: --tags has to reach the
+// create, and the tag its own guidance names has to still be the one
+// network.tf creates. A rename there would otherwise leave the script
+// advising a tag no rule mentions -- the same dead end, reached by
+// following the instructions.
+func TestTheGCESmokeScriptCanTagTheVMItCreates(t *testing.T) {
+	gce := read(t, "scripts", "gce-vm-smoke.sh")
+	code := stripComments(gce)
+
+	contains(t, code, "--tags)")
+	contains(t, code, `CREATE_ARGS+=(--tags="$TAGS")`)
+	contains(t, code, "[--tags T]")
+
+	contains(t, read(t, "terraform", "gcp", "network.tf"), `agent_vm_tag = "${var.name_prefix}-agent-vm"`)
+	if !strings.Contains(gce, "-agent-vm") {
+		t.Error("gce-vm-smoke.sh does not name the `<name_prefix>-agent-vm` tag network.tf's agent_iap_ssh rule is scoped to; without it, --iap tells the operator to pass a tag but not which one")
+	}
+
+	// The failure path says which tags the network actually requires,
+	// rather than leaving the operator with IAP's own opaque error.
+	hint := body(t, gce, "iap_firewall_hint() {")
+	contains(t, hint, "firewall-rules list")
+	contains(t, hint, "targetTags")
+	contains(t, hint, "35.235.240.0/20")
 }
 
 // The introspection job is dispatch-only, holds nothing, and keeps the
@@ -1146,6 +1217,67 @@ func TestTheGoJobRunsTheFrontendFormattingGateAfterInstallingIt(t *testing.T) {
 	// what stops prettier walking up out of the repository into whatever
 	// ~/.prettierrc the contributor happens to have.
 	read(t, "ui", ".prettierrc")
+}
+
+// The Go suite is one command, and the two files that run it run the
+// same one.
+//
+// The Makefile's own header promises it "mirrors the steps
+// .github/workflows/tests.yml's go-test job runs", and for that promise's
+// whole life it did not: `make test` ran `go test -race ./...` while the
+// workflow ran `go test ./...`, so the race detector -- the one check
+// that can see a data race between the reconcile loop, a goroutine per
+// dispatch, the addenda pollers, an atomic ForbiddenSet swapped under a
+// serving proxy and a stateManager lock shared by a UI handler and a
+// timer -- had never run in CI at all. Neither file can see the other,
+// and both read like the whole story on their own, which is exactly the
+// kind of drift this package exists to catch.
+//
+// Compared as one string rather than by asserting -race twice: any
+// divergence at all -- a flag, a package pattern, a timeout on one side
+// only -- means a red build locally and a green one in CI, or the
+// reverse, and either way `make test` stops being how a contributor
+// reproduces this job.
+func TestTheGoJobRunsTheSameSuiteCommandTheMakefileDoes(t *testing.T) {
+	// The recipe's `go test` line, without the leading tab make needs.
+	var recipe string
+	for _, line := range strings.Split(between(t, read(t, "Makefile"), "\ntest: frontend", "\n\n"), "\n") {
+		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "go test") {
+			recipe = trimmed
+			break
+		}
+	}
+	if recipe == "" {
+		t.Fatal("the Makefile's test target runs no `go test` line")
+	}
+
+	// The workflow's, which is the "Test" step and not the "Test frontend"
+	// one below it -- hence the newline in the marker.
+	goJob := between(t, stripComments(testsWorkflow(t)), "go-test:", "\n  ui-e2e:")
+	step := strings.TrimSpace(between(t, goJob, "- name: Test\n", "\n\n"))
+	_, command, ok := strings.Cut(step, "run:")
+	if !ok {
+		t.Fatalf("the go job's Test step runs nothing: %q", step)
+	}
+	command = strings.TrimSpace(command)
+
+	if command != recipe {
+		t.Errorf("CI runs %q and `make test` runs %q; the Makefile says it mirrors CI, so they have to be the same command", command, recipe)
+	}
+	// Naming the flag as well, so that dropping it from *both* files --
+	// which the comparison above would happily accept -- is still a
+	// failure someone has to argue with rather than a silent loss of the
+	// only race coverage this repository has.
+	contains(t, recipe, "-race")
+
+	// The detector is a cgo library. Disabling cgo for this job would not
+	// quietly drop the coverage -- `go test -race` refuses to build
+	// without it -- but it would turn the whole suite red for a reason
+	// that reads like a toolchain fault, so keep the two apart: only the
+	// binary that ships is built with CGO_ENABLED=0.
+	if regexp.MustCompile(`CGO_ENABLED[=:]\s*["']?0`).MatchString(goJob) {
+		t.Error("the go job disables cgo somewhere, and `go test -race` needs it")
+	}
 }
 
 // The sandbox guest image's toolchain, which three files have to agree
