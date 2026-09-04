@@ -3140,6 +3140,35 @@ func (s *Store) PutConfig(ctx context.Context, c Config) error {
 	})
 }
 
+// SetNewestFirst writes grain_config.newest_first on its own, leaving
+// every other column of the single config row exactly as it was --
+// unlike PutConfig, which replaces the whole row.
+//
+// It is what ui.Client.CreateTask remembers a filing choice with: a task
+// filed at the front or the end of the backlog says which end new work
+// should join by default from now on, so the next new-task form opens on
+// the choice the last one made (ui.CreateTaskRequest.AtFront). Filing a
+// task is not a settings save, which is why it does not go through the
+// read-modify-write PutConfig would need: a whole-row write from a task
+// creation would carry a Config read moments earlier back over anything
+// the Settings pane had written in between, and newest_first is the only
+// column a filing has any business touching.
+//
+// A deployment with no grain_config row yet has nowhere to remember it,
+// and this writes nothing rather than creating one: the row's existence
+// is what "this deployment has been configured" means
+// (ui.Settings.Configured), and filing a task must not answer that
+// question on an operator's behalf. The daemon seeds the row the first
+// time it starts (cmd/grain's loadConfig), so that case is a store no
+// daemon has ever run against.
+func (s *Store) SetNewestFirst(ctx context.Context, newestFirst bool) error {
+	return s.write(ctx, "remember which end of the backlog new tasks join", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `grain_config` SET `newest_first` = ? WHERE `id` = 1", newestFirst)
+		return err
+	})
+}
+
 // joinCSV/splitCSV round-trip Config.TargetRepos (an owner/name repo can
 // never contain a comma) through the same comma-separated shape the
 // daemon's own -target-repos flag already parses, so a value written by

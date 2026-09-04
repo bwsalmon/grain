@@ -267,6 +267,11 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 // re-applies the rest once per reconcile tick (that type's own doc
 // comment, including the two settings that genuinely cannot be applied
 // live and are reported to this pane as needing a restart).
+//
+// The Settings pane is no longer the only thing that writes it: a task
+// filed with CreateTaskRequest.AtFront set remembers that choice here
+// (Store.SetNewestFirst), so what this reads is usually where the last
+// task added went rather than a toggle anybody had to go looking for.
 func (c *Client) newestFirst(ctx context.Context) (bool, error) {
 	cfg, err := c.Store.GetConfig(ctx)
 	if err != nil {
@@ -654,6 +659,27 @@ type CreateTaskRequest struct {
 	// Approved files the task already approved, so it is dispatchable at
 	// once. False files it proposed, waiting for Approve.
 	Approved bool `json:"approved"`
+	// AtFront is which end of the backlog this task joins: true files it
+	// at the front, ahead of everything already queued, so it runs next;
+	// false files it at the end, behind everything already queued, the
+	// FIFO backlog grain has always defaulted to
+	// (Store.OrderKeyForNewTask).
+	//
+	// A pointer, for the reason Capabilities above is one: nil -- the
+	// field left out, or JSON null -- is a caller with no opinion, and
+	// the task joins whichever end this deployment currently remembers
+	// (model.Config.NewestFirst). A caller that does state one is
+	// remembered: CreateTask writes that choice back as the deployment's
+	// own default (Store.SetNewestFirst), so the next task filed with no
+	// opinion, and the next new-task form that opens, start from what the
+	// last task added chose rather than from a setting somebody has to go
+	// and find in Settings.
+	//
+	// An interactive task ignores all of this and files at the front
+	// regardless (see CreateTask): somebody is waiting on the chat right
+	// now. Stating AtFront on one still remembers it, since that is the
+	// filing choice being made either way.
+	AtFront *bool `json:"atFront"`
 	// Attachments is files to carry alongside the task's own body --
 	// bwsalmon/agents#522: a screenshot, a repro zip, anything the agent
 	// needs that isn't already code in a repo it can clone. Stored under
@@ -819,6 +845,16 @@ func (c *Client) defaultCapabilities(ctx context.Context, target *model.RepoRef)
 // there is no second, deployment-level grant set read again at dispatch,
 // so every capability a run holds is one that can be seen and detached
 // on the task that holds it.
+//
+// req.AtFront (grain/task-202) is resolved the same "the request has the
+// last word, and is remembered" way: it says which end of the backlog
+// this task joins, and stating it also stores that end as the
+// deployment's own default (model.Config.NewestFirst) for the next task
+// filed without one. That is what makes the choice sticky from the form
+// rather than from Settings -- whoever files a task at the front is
+// usually about to file the next one there too, and the new-task form
+// seeds itself from the same stored value (GET /api/config's
+// newestFirst).
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
 	if req.Configuration {
 		req.Interactive = true
@@ -884,20 +920,25 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err != nil {
 		return Task{}, err
 	}
-	newestFirst, err := c.newestFirst(ctx)
-	if err != nil {
+	// atFront: which end of the backlog this task joins. A request that
+	// states it (CreateTaskRequest.AtFront) is the last word; one that
+	// does not gets the end this deployment remembers, which is the end
+	// the last task filed with an opinion chose
+	// (model.Config.NewestFirst). Either way, true files it ahead of
+	// everything already queued -- the top of the list, dispatched next
+	// (Store.OrderKeyForNewTask's own doc comment) -- and false at the
+	// end instead, behind everything queued, the FIFO backlog grain has
+	// always defaulted to. An interactive task asks for the front
+	// unconditionally, on top of whatever either of those says, since
+	// somebody is waiting on it right now rather than checking back on it
+	// later (CreateTaskRequest.Interactive's own doc comment).
+	atFront := false
+	if req.AtFront != nil {
+		atFront = *req.AtFront
+	} else if atFront, err = c.newestFirst(ctx); err != nil {
 		return Task{}, err
 	}
-	// atFront: NewestFirst asks a new task to dispatch ahead of
-	// everything already queued (Store.OrderKeyForNewTask's own doc
-	// comment), which is the top of the list -- the default (false) files
-	// it at the end instead, behind everything queued, the FIFO backlog
-	// grain has always defaulted to. An interactive task asks for the same
-	// treatment unconditionally, on top of whatever NewestFirst already
-	// says, since somebody is waiting on it right now rather than
-	// checking back on it later (CreateTaskRequest.Interactive's own doc
-	// comment).
-	orderKey, err := c.Store.OrderKeyForNewTask(ctx, newestFirst || req.Interactive)
+	orderKey, err := c.Store.OrderKeyForNewTask(ctx, atFront || req.Interactive)
 	if err != nil {
 		return Task{}, err
 	}
@@ -933,6 +974,16 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	}
 	if err := c.Store.PutTask(ctx, task); err != nil {
 		return Task{}, err
+	}
+	// Remembered only once the task it came with is actually filed, and
+	// only when the request stated a choice at all: "where the last task
+	// added went" is a fact about tasks that exist, and a caller that
+	// said nothing has expressed nothing to remember
+	// (CreateTaskRequest.AtFront).
+	if req.AtFront != nil {
+		if err := c.Store.SetNewestFirst(ctx, *req.AtFront); err != nil {
+			return Task{}, err
+		}
 	}
 	for i := range attachments {
 		attachments[i].TaskID = id

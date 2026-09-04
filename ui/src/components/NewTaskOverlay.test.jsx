@@ -45,6 +45,7 @@ describe("NewTaskOverlay", () => {
         reads: [],
         approved: false,
         interactive: false,
+        atFront: false,
         attachments: [],
       }),
     });
@@ -71,6 +72,61 @@ describe("NewTaskOverlay", () => {
     const payload = JSON.parse(api.mock.calls[0][1].body);
     expect(payload.approved).toBe(true);
     expect(payload.autoMerge).toBe(true);
+  });
+
+  // grain/task-202: which end of the backlog a new task joins is a
+  // choice on this form rather than only a setting buried in Settings,
+  // and the form opens on the end the last task added went to --
+  // config.newestFirst, which the server rewrites on every filing that
+  // states one (ui.CreateTaskRequest.AtFront).
+  it("seeds the backlog-end picker from what the last task added chose", async () => {
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={{ newestFirst: true }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    expect(screen.getByLabelText("Add to backlog")).toHaveTextContent(/^Front/);
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).atFront).toBe(true);
+  });
+
+  it("files at the other end of the backlog when that end is picked", async () => {
+    const user = userEvent.setup();
+    render(<NewTaskOverlay config={{ newestFirst: true }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Fix the thing");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByLabelText("Add to backlog"));
+    await user.click(screen.getByRole("option", { name: /^End/ }));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body).atFront).toBe(false);
+  });
+
+  // An interactive session dispatches ahead of the backlog whatever the
+  // picker says, so there is no end to pick and nothing to remember: the
+  // field is left out of the payload rather than sent as a choice
+  // nobody made (ui.CreateTaskRequest.AtFront).
+  it("leaves the backlog end out of an interactive task, which always jumps the queue", async () => {
+    api.mockResolvedValueOnce({ id: "42" });
+    const user = userEvent.setup();
+    render(
+      <NewTaskOverlay
+        config={{ newestFirst: false }}
+        onClose={() => {}} onCreated={() => Promise.resolve()} onOpenTask={() => {}} showError={() => {}}
+      />
+    );
+
+    await user.type(screen.getByLabelText(/Title/), "Talk this through");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Advanced options" }));
+    await user.click(screen.getByLabelText(/Interactive session/));
+    expect(screen.queryByLabelText("Add to backlog")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    expect(JSON.parse(api.mock.calls[0][1].body)).not.toHaveProperty("atFront");
   });
 
   it("greys out Create task until the title and target repo are both filled", async () => {

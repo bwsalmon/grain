@@ -1192,6 +1192,24 @@ grain will work through it, merges at the very top, and `NewestFirst` now
 only decides which end of that list a newly filed task joins (the bottom
 by default, behind everything already queued; the top when it is on).
 
+And that end is now chosen where the task is filed, not in Settings
+(grain/task-202). The new-task form carries an "Add to backlog" picker —
+front, so it runs next, or end, behind everything already queued — and
+`grain create -position front|end` is the same choice from a shell;
+`ui.CreateTaskRequest.AtFront` carries it, and a request that names an
+end wins over whatever is stored. Naming one also *stores* it
+(`Store.SetNewestFirst`, which writes `grain_config.newest_first` alone
+rather than replacing the row the way a settings save does), so the next
+task filed with no opinion joins the same end and the form opens on the
+choice the last one made (`GET /api/config`'s `newestFirst`). That is the
+whole of the remembering: `NewestFirst` was always "where new work joins
+the backlog", and the only thing that changed is that filing a run of
+urgent work at the front no longer means opening Settings first and
+remembering to put it back. A filing that names no end changes nothing —
+a schedule, a proposal or a script cannot quietly reset what a human
+picked — and an interactive session is unaffected either way, since it
+dispatches ahead of the backlog regardless of what any of this says.
+
 The git proxy has moved, though (`gitproxy/`, above) — it is the one
 piece of "actually dispatching" v2 now owns outright, credential ladder
 and sandbox-token identity included. `grain/proxy`'s

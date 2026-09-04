@@ -48,7 +48,10 @@ func testClient(t *testing.T) (*ui.Client, *model.Store, context.Context) {
 	return client, store, ctx
 }
 
-// create is the common setup: an approved task, so it reads queued.
+// create is the common setup: an approved task, so it reads queued. It
+// states no opinion about where in the backlog it goes, so it joins
+// whichever end the deployment currently remembers -- createAt below is
+// the same task with that choice made.
 func create(t *testing.T, c *ui.Client, ctx context.Context) ui.Task {
 	t.Helper()
 	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
@@ -56,6 +59,21 @@ func create(t *testing.T, c *ui.Client, ctx context.Context) ui.Task {
 	})
 	if err != nil {
 		t.Fatalf("creating a task: %v", err)
+	}
+	return task
+}
+
+// createAt is create with grain/task-202's own choice stated: atFront
+// true files the task ahead of everything already queued, false at the
+// end behind it, and either way the deployment remembers it for the next
+// task filed without one (ui.CreateTaskRequest.AtFront).
+func createAt(t *testing.T, c *ui.Client, ctx context.Context, atFront bool) ui.Task {
+	t.Helper()
+	task, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title: "fix the thing", Description: "please", Approved: true, AtFront: &atFront,
+	})
+	if err != nil {
+		t.Fatalf("creating a task at the %s of the backlog: %v", map[bool]string{true: "front", false: "end"}[atFront], err)
 	}
 	return task
 }
@@ -1917,6 +1935,100 @@ func TestNewestFirstSettingMovesNewTasksToTheFrontOfTheQueue(t *testing.T) {
 	}
 	if !reflect.DeepEqual(ready, want) {
 		t.Fatalf("Ready under NewestFirst = %v, want newest dispatched first %v", ready, want)
+	}
+}
+
+// TestCreateTaskFilesAtTheEndTheRequestNames is grain/task-202's own
+// half of the same choice: whoever files a task says which end of the
+// backlog it joins on the request itself
+// (ui.CreateTaskRequest.AtFront), rather than by going and flipping a
+// deployment-wide setting first. The request wins over what is stored --
+// here NewestFirst is off and the third task still runs next.
+func TestCreateTaskFilesAtTheEndTheRequestNames(t *testing.T) {
+	c, store, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	first := create(t, c, ctx)
+	second := create(t, c, ctx)
+	third := createAt(t, c, ctx, true)
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{third.ID, first.ID, second.ID}
+	if !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready after filing one at the front = %v, want %v", ready, want)
+	}
+}
+
+// TestCreateTaskRemembersWhichEndTheLastTaskJoined: the choice is
+// sticky, which is the whole of grain/task-202 beyond the field itself.
+// A task filed at the front stores that as the deployment's own default
+// (model.Config.NewestFirst), so the next task filed with no opinion at
+// all -- another form, the CLI, a second person -- joins the same end,
+// and the Settings pane and the new-task form both read it back.
+func TestCreateTaskRemembersWhichEndTheLastTaskJoined(t *testing.T) {
+	c, store, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	first := create(t, c, ctx)
+	second := createAt(t, c, ctx, true)
+	// No opinion: it inherits what the task before it chose rather than
+	// falling back to the end of the backlog.
+	third := create(t, c, ctx)
+
+	ready, err := store.Ready(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{third.ID, second.ID, first.ID}
+	if !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready after remembering the front = %v, want %v", ready, want)
+	}
+
+	settings, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.NewestFirst {
+		t.Fatalf("Settings.NewestFirst after filing a task at the front = false, want true")
+	}
+
+	// And back the other way, so it is a memory of the last filing
+	// rather than a one-way switch.
+	fourth := createAt(t, c, ctx, false)
+	fifth := create(t, c, ctx)
+	if ready, err = store.Ready(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{third.ID, second.ID, first.ID, fourth.ID, fifth.ID}
+	if !reflect.DeepEqual(ready, want) {
+		t.Fatalf("Ready after remembering the end again = %v, want %v", ready, want)
+	}
+}
+
+// A task filed with no opinion changes nothing about where the next one
+// goes: only a stated choice is remembered, so a scheduled or scripted
+// filing cannot quietly reset what a human picked.
+func TestCreateTaskWithNoOpinionLeavesTheRememberedEndAlone(t *testing.T) {
+	c, _, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+	createAt(t, c, ctx, true)
+	create(t, c, ctx)
+
+	settings, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.NewestFirst {
+		t.Fatalf("Settings.NewestFirst after a filing that stated nothing = false, want the remembered true")
 	}
 }
 

@@ -1990,6 +1990,57 @@ func TestPutConfigReplacesRatherThanAccumulating(t *testing.T) {
 	}
 }
 
+// grain/task-202: filing a task remembers which end of the backlog it
+// joined, and does it through SetNewestFirst rather than through a
+// read-modify-write of the whole row -- so it must move that one column
+// and leave everything else stored exactly as it was, including whatever
+// was written between the read and this write.
+func TestSetNewestFirstLeavesEveryOtherSettingAlone(t *testing.T) {
+	store, _, ctx := openStore(t)
+	stored := testConfig()
+	if err := store.PutConfig(ctx, stored); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := store.SetNewestFirst(ctx, true); err != nil {
+		t.Fatalf("remembering the front of the backlog: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	want := stored
+	want.NewestFirst = true
+	if !reflect.DeepEqual(*got, want) {
+		t.Fatalf("got %+v, want %+v", *got, want)
+	}
+
+	if err := store.SetNewestFirst(ctx, false); err != nil {
+		t.Fatalf("remembering the end of the backlog: %v", err)
+	}
+	if got, err = store.GetConfig(ctx); err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if !reflect.DeepEqual(*got, stored) {
+		t.Fatalf("got %+v, want the original %+v back", *got, stored)
+	}
+}
+
+// A deployment nothing has ever configured has no row to remember it in,
+// and this must not write one: the row's existence is what
+// ui.Settings.Configured reports, and a task filed before anyone opened
+// Settings must not answer "has this deployment been configured" on an
+// operator's behalf.
+func TestSetNewestFirstWritesNoConfigRowOnAFreshDatabase(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.SetNewestFirst(ctx, true); err != nil {
+		t.Fatalf("remembering with nothing stored: %v", err)
+	}
+	got, err := store.GetConfig(ctx)
+	if err != nil || got != nil {
+		t.Fatalf("want (nil, nil) still, got (%+v, %v)", got, err)
+	}
+}
+
 // bwsalmon/agents#427: grain_config.target_repos did not exist at all
 // before this, on any database, so an already-created grain_config table
 // has no such column -- CREATE TABLE IF NOT EXISTS (schema.go's own

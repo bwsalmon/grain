@@ -161,7 +161,8 @@ Global flags (must come before the command):
 Commands:
   list                                 list every task
   get <id>                             show one task and its conversation
-  create -title T [flags]              file a new task
+  create -title T [flags]              file a new task (-position front|end picks which end of
+                                       the backlog it joins, and is remembered for the next one)
   update <id> [flags]                  edit a task's title or fields
   approve <id>                         accept a proposed task (proposed -> queued)
   withdraw <id>                        withdraw a queued task's approval (queued -> proposed)
@@ -356,6 +357,7 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	var reads stringList
 	fs.Var(&reads, "read", "owner/name of a repo this task's run may read but never push to (repeatable)")
 	approve := fs.Bool("approve", false, "queue the task immediately instead of filing it as a proposal awaiting approval")
+	position := fs.String("position", "", `which end of the backlog to file it at: "front" to run ahead of everything already queued, "end" to queue behind it. Unset files it wherever the last task added chose, and leaves that choice alone`)
 	interactive := fs.Bool("interactive", false, "file this as a live chat rather than a change to run unattended (bwsalmon/agents#539); implies -approve and dispatches ahead of the backlog")
 	var attach stringList
 	fs.Var(&attach, "attach", "path to a local file to attach to the task (repeatable)")
@@ -367,9 +369,13 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	if err != nil {
 		return err
 	}
+	atFront, err := backlogPosition(*position)
+	if err != nil {
+		return err
+	}
 	req := ui.CreateTaskRequest{
 		Title: *title, Description: *body, Repo: *repo, NoRepo: *noRepo, Base: *base,
-		AutoMerge: autoMerge, Reads: reads, Approved: *approve,
+		AutoMerge: autoMerge, Reads: reads, Approved: *approve, AtFront: atFront,
 		Interactive: *interactive, Attachments: attachments,
 	}
 	// Naming any -capability names the whole set (ui.CreateTaskRequest.
@@ -389,6 +395,31 @@ func cmdCreate(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 	}
 	out.task(task)
 	return nil
+}
+
+// backlogPosition turns `grain create -position` into
+// ui.CreateTaskRequest.AtFront: the two ends a new task can join are
+// "front" (ahead of everything already queued, dispatched next) and
+// "end" (behind it, the FIFO backlog grain defaults to).
+//
+// An unset flag is nil rather than false -- "no opinion", which files
+// the task at whichever end the last one filed with an opinion chose and
+// leaves that memory as it is (that field's own doc comment). Naming
+// either end both files this task there and makes it the default the
+// next one starts from, which is the same thing the UI's own new-task
+// form does with its picker.
+func backlogPosition(v string) (*bool, error) {
+	switch v {
+	case "":
+		return nil, nil
+	case "front":
+		front := true
+		return &front, nil
+	case "end":
+		end := false
+		return &end, nil
+	}
+	return nil, fmt.Errorf(`-position must be "front" or "end", not %q`, v)
 }
 
 func cmdUpdate(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
