@@ -1166,6 +1166,14 @@ out:
   is now identified rather than lost, so a review-sourced task can say
   whose request it is answering.
 
+`REVIEW` reads wider than this in the implementation (grain/task-284,
+`orchestrator.SyncReviews`): the reviewer whose request it answers may
+have made it by attaching a review template to a task rather than by
+leaving comments on the pull request that came out of it. It is the same
+reason either way -- a review of a change somebody has proposed -- and it
+is deliberately still not `FIX`, which is the merge queue's own repair
+and draws on the capacity `model.Limits.Mergers` keeps back for it.
+
 **The landing rule gets sharper: the actor decides, the reason does
 not.** A task whose creating actor is a `HUMAN` lands `QUEUED`. A task
 whose creating actor is `AUTOMATION` lands `PROPOSED` — whatever the

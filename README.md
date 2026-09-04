@@ -192,7 +192,11 @@ pkg/orchestrator/  v1's core.py/Orchestrator equivalent: runs
                 request once GitHub reports it merged or closed. It no
                 longer polls anything: tasks arrive by being written
                 (see "Input is a model update, not a GitHub issue").
-                RunCycle runs the two halves as independent reconcilers
+                It also files the review a finished task declares
+                (SyncReviews, Task.ReviewTemplateID) and holds that
+                task's own merge until the review has landed -- see "A
+                review, before the merge" below.
+                RunCycle runs the halves as independent reconcilers
                 rather than one pipeline -- see "Reconcilers, not a
                 pipeline" below. It also times itself
                 (orchestrator.CycleTimes): a bounded in-memory ring of how
@@ -5983,6 +5987,73 @@ ordinary concurrency it had and gains a single slot the merge queue
 cannot be shut out of. Setting it to 0 puts a deployment back exactly
 where it was: fix tasks contending for worker capacity like anything
 else.
+
+## A review, before the merge
+
+A task can carry a review: `Task.ReviewTemplateID`, the id of a
+`model.Template` whose title, body and grants are what a *second* agent
+is dispatched with once the first one's work is done. The "reviews"
+reconciler files it (`orchestrator.SyncReviews`), the merge queue waits
+for it, and everything else about it is machinery that already existed.
+
+The shape is the merge queue's own fix task, reused deliberately. A
+review task's `Base` is the reviewed task's branch (`model.BranchName`,
+derived, so nothing has to agree with anything), its `AutoMerge` is set,
+and it is filed already approved at the head of the backlog. So it is a
+stacked branch: the reviewing agent reads the diff on the branch under
+review, commits its fixes onto its own branch off that one, and
+`syncEntry` merges its pull request straight back into the branch it
+reviewed the moment it reads clean. That is as close to "a new agent on
+the same branch" as grain can be, given that a run's branch is a function
+of its task id and always will be. Like a fix task, a review is never a
+merge queue entry in its own right (`isQueueMember`): it merges into
+another task's branch, not into the repo's base, so it neither takes a
+head position nor waits for one.
+
+What is new is the wait. A reviewed task does not merge while its review
+is outstanding, so the order is work, review, merge — not work, merge,
+and a review of something that has already landed. The wait is on the
+*declaration* rather than on the review task existing, which matters more
+than it looks: filing the review and advancing the merge queue are two
+reconcilers in one cycle, and if the gate were "has a review task been
+filed" then whether a change merged before its review existed would come
+down to which of them ran first. `Task.ReviewTemplateID` alone holds the
+merge; filing the review starts the clock rather than starting the wait.
+
+And the wait is bounded, for the reason the wait on an automatic fix is
+(`defaultFixTaskDeadline`): a task holding its merge for a review reads
+PrClean, not PrPending, so the CI stall clock never times it, and the
+review's own pull request is never a queue head, so nothing times that
+either. A review neither finished nor abandoned after six hours is said
+so on the task, which is then blocked in the merge queue's own sense —
+it stops being anyone's head, so the tasks behind it move, and it merges
+as soon as it reads clean like any other task the queue has given up
+driving. That is the deliberate choice between the two ways to be wrong:
+merging a change whose review never arrived, having said so, is
+recoverable; holding a finished change out of the repo forever on a
+review that is not coming is not.
+
+A template rather than a body typed onto the task, for the same reason
+`Schedule.TemplateID` is one: "read this branch and fix what you find" is
+the same paragraph on every task it is attached to, and the instructions
+worth improving once. Nothing about a template says it is a review; what
+makes it one is being named as a task's own. Grain appends the subject
+the template cannot know — which task, which branch, which pull request —
+and supplies nothing else, so what the reviewing agent is told is what
+somebody wrote in Templates.
+
+It is attachable from the new-task form, from a task's own edit form (the
+usual case: a task is filed, and somewhere before it finishes somebody
+decides its change wants a second pass), from `PATCH /api/tasks/{id}`,
+and from `grain create -review-template`/`grain update -review-template`.
+An edit reaches any review not yet filed, since the template is resolved
+when the work is done rather than when the task is created — so a review
+can be attached to a task that is queued, running, or already finished
+and waiting to merge. Once the review task exists, changing it changes
+nothing: exactly one review is ever filed per task (`LinkReviewTask` is
+both the record of that and what the merge queue waits on), and the
+picker locks and says which task is carrying it out. A review task
+carries no review of its own, which is what stops reviews nesting.
 
 ## Pausing when the agent runs out of budget
 
