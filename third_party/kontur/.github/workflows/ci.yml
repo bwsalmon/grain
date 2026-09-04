@@ -49,13 +49,12 @@ jobs:
       - name: test
         run: go test ./...
 
-      # internal/netshim's integration tests create real interfaces, tc
-      # filters and nftables rules, so they need CAP_NET_ADMIN and
-      # /dev/net/tun (the netlink library opens that device to create a
-      # tap). The netlink tap path needs the module present; it is
-      # normally already loaded, and if it genuinely is not, the run
-      # below fails naming the device rather than failing obscurely
-      # inside link creation.
+      # internal/netshim's integration tests create real interfaces and
+      # tc filters, so they need CAP_NET_ADMIN and /dev/net/tun (the
+      # netlink library opens that device to create a tap). The netlink
+      # tap path needs the module present; it is normally already
+      # loaded, and if it genuinely is not, the run below fails naming
+      # the device rather than failing obscurely inside link creation.
       - name: load tun module
         run: sudo modprobe tun || true
 
@@ -70,6 +69,13 @@ jobs:
       # cached "ok" for this package would be reused and nothing would
       # actually execute. sudo resets PATH, hence passing the runner's
       # own through so setup-go's toolchain is still found.
+      #
+      # Nothing here puts the tests in a namespace of their own: the test
+      # binary does that itself, re-executing under CLONE_NEWNET before
+      # the first test runs (see internal/netshim/netns_test.go), so the
+      # interfaces below never appear in the runner's own namespace and
+      # nothing else on the runner -- systemd-networkd, udev, docker --
+      # is watching for them.
       - name: test (kernel networking, as root)
         run: sudo env "PATH=$PATH" KONTUR_NETNS_TESTS=required go test -count=1 ./internal/netshim/...
 
@@ -137,7 +143,6 @@ jobs:
             build_args: |
               GUEST_DISTRO=debian
               GUEST_KERNEL_PACKAGE=linux-image-amd64
-              GUEST_CONSOLE_WRAP=0
               GUEST_DISK_EXTRA_MB=2048
     steps:
       - uses: actions/checkout@v4
@@ -236,7 +241,6 @@ jobs:
           build-args: |
             GUEST_DISTRO=debian
             GUEST_KERNEL_PACKAGE=linux-image-amd64
-            GUEST_CONSOLE_WRAP=0
             GUEST_DISK_EXTRA_MB=2048
           load: true
           tags: kontur:debian12
@@ -244,6 +248,15 @@ jobs:
 
       - name: Build konturctl
         run: go build -o konturctl ./cmd/konturctl
+
+      # Every VM below is fronted by netshim, which creates a tap through
+      # /dev/net/tun -- both the guest build's throwaway VM and the
+      # verification boot after it. The module is normally already
+      # loaded; loading it here means a runner where it genuinely is not
+      # says so, rather than failing obscurely inside link creation with
+      # a VM already half-created.
+      - name: load tun module
+        run: sudo modprobe tun || true
 
       # Deliberately does things a container build cannot: starts a
       # service, and records the machine-id it saw while running. The
@@ -275,39 +288,138 @@ jobs:
             -t kontur:debian12-customized
 
       # Boot what came out. This is the assertion that the whole chain
-      # holds: a guest that got its address from "ip=", a kernel and
-      # initramfs the image carried, a disk the commit captured, and an
-      # exec path that works without the console wrapper.
+      # holds: a guest that got its address from "ip=" -- derived from
+      # the sandbox's own interface, since that is the address the splice
+      # hands the guest -- a kernel and initramfs the image carried, a
+      # disk the commit captured, and an exec path that works without the
+      # console wrapper.
       - name: Boot the customized guest and check it
         run: |
           set -euo pipefail
           # No -disk: the guest to boot is the one inside the image
-          # being verified. Writable, because a read-only root cannot
-          # complete a boot. -state-dir because konturctl's default is
-          # /var/lib/kontur, which a runner's unprivileged user cannot
-          # create -- and the VM container starts before that write, so
-          # without this the failure lands after a VM is already running.
-          ./konturctl vm create verify \
+          # being verified. No -disk-mode either: the default is the
+          # overlay, and this boot is what proves that default is one a
+          # guest actually comes up on -- it used to be readonly, which
+          # a root filesystem cannot complete a boot from, and this step
+          # passed -disk-readonly=false to work around it. -state-dir
+          # because konturctl's default is /var/lib/kontur, which a
+          # runner's unprivileged user cannot create; the create refuses
+          # up front now rather than after a VM is already running, but
+          # it still refuses.
+          #
+          # -disk-size-mb is comfortably larger than the image's own disk
+          # (its rootfs plus GUEST_DISK_EXTRA_MB=2048), so the checks
+          # below can tell a grown filesystem from the built one. It
+          # costs the runner nothing: growing a qcow2's virtual size
+          # allocates no clusters, and the guest only ever writes what it
+          # writes.
+          #
+          # -wait is what makes this a create and not a create plus a
+          # hand-written poll loop: it returns when the guest answers a
+          # command, or fails early if the VM's container exits. This is
+          # the only place that wait is exercised against a guest that
+          # really boots.
+          if ! ./konturctl vm create verify \
             -backend docker \
             -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
             -kontur-image kontur:debian12-customized \
-            -disk-readonly=false \
-            -ip 169.254.100.9 -port 22222 -guest-user root
-          for i in $(seq 1 60); do
-            if docker exec kontur-vm-verify kontur exec -- true 2>/dev/null; then
-              ready=1
-              break
-            fi
-            sleep 5
-          done
-          if [ "${ready:-0}" != "1" ]; then
+            -disk-size-mb 6144 \
+            -guest-user root \
+            -wait -ready-timeout 5m; then
             echo "::error::the customized guest never became reachable" >&2
             docker logs --tail 100 kontur-vm-verify >&2 || true
             exit 1
           fi
-          docker exec kontur-vm-verify kontur exec -- \
-            sh -c 'test -f /etc/kontur-guest-build-ok'
+          # The standalone wait, against a guest that is already up: it
+          # has to return promptly rather than wait out its timeout.
+          ./konturctl vm wait verify \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
+            -timeout 30s
+          # The readiness signal itself, run exactly the way a pod spec's
+          # readinessProbe runs it (absolute path, single attempt). Every
+          # wait above goes through this, but only here is it the thing
+          # being asserted rather than the thing being used.
+          docker exec kontur-vm-verify /usr/local/bin/kontur ready -timeout 0
+          echo "kontur ready answered for a booted guest"
+          # The negative is the half that matters for a probe: a
+          # container with no VM in it must not report ready, or a probe
+          # that always exits zero would look exactly like a working one.
+          # No netshim, no /dev/kvm, nothing -- so there is no vsock
+          # socket to dial, let alone a guest behind it.
+          if docker run --rm kontur:debian12-customized ready -timeout 0; then
+            echo "::error::kontur ready exited zero in a container with no VM in it" >&2
+            exit 1
+          fi
+          echo "kontur ready refuses a container with no guest in it"
+          # And the same question asked without waiting for the answer to
+          # be yes, which is what "vm status" is for: against a guest
+          # that is up it has to agree with the wait and exit zero.
+          ./konturctl vm status verify \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state"
+          # Through "konturctl vm exec" rather than the three-exec form
+          # above, so the subcommand is checked against a real guest and
+          # not only against a fake docker in the unit tests: it has to
+          # find the VM's backend from -state-dir, name its container
+          # itself, and hand back the guest command's own exit status.
+          ./konturctl vm exec verify \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
+            -- sh -c 'test -f /etc/kontur-guest-build-ok'
           echo "provisioning survived the commit"
+          # A command that fails in the guest must come back as its own
+          # status, not as konturctl's blanket 1 -- that is what makes
+          # "vm exec" usable in a script at all.
+          set +e
+          ./konturctl vm exec verify \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
+            -- sh -c 'exit 42'
+          exec_status=$?
+          set -e
+          if [ "$exec_status" != "42" ]; then
+            echo "::error::vm exec reported $exec_status for a guest command that exited 42" >&2
+            exit 1
+          fi
+          echo "vm exec passed the guest command's exit status through"
+          # stdin reaches the guest command, and stdout comes back
+          # untouched: the README's Flow 4 pipelines are this property.
+          echo hello-from-stdin | ./konturctl vm exec verify \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
+            -- sh -c 'cat > /tmp/stdin-check'
+          got=$(./konturctl vm exec verify \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
+            -- cat /tmp/stdin-check)
+          if [ "$got" != "hello-from-stdin" ]; then
+            echo "::error::stdin/stdout through vm exec gave '$got'" >&2
+            exit 1
+          fi
+          echo "vm exec proxied stdin and stdout byte for byte"
+          # -w and -e against a real guest agent, which is the only place
+          # the wire fields, the agent's own chdir and the flags
+          # konturctl threads through "kontur exec" are all exercised
+          # together. The unit tests run the agent on the build machine,
+          # where an image whose kontur-agent predates these fields
+          # cannot be told apart from one that has them.
+          got=$(./konturctl vm exec verify \
+            -state-dir "$GITHUB_WORKSPACE/.kontur-state" \
+            -w /etc -e KONTUR_CI_CHECK=works \
+            -- sh -c 'pwd; echo "$KONTUR_CI_CHECK"; echo "$HOME"' | tr '\n' ' ')
+          if [ "$got" != "/etc works /root " ]; then
+            echo "::error::vm exec -w/-e gave '$got', want '/etc works /root '" >&2
+            exit 1
+          fi
+          echo "vm exec ran in the directory and environment it was given, without losing the rest of it"
+          # A working directory the guest does not have has to be refused
+          # by name, before the command runs -- the failure it replaces
+          # is the shell's own "fork/exec /bin/sh: no such file or
+          # directory", which reads as a guest with no shell.
+          set +e
+          err=$(docker exec kontur-vm-verify kontur exec -w /no/such/place -- true 2>&1)
+          workdir_status=$?
+          set -e
+          if [ "$workdir_status" = "0" ] || ! grep -q "/no/such/place" <<<"$err"; then
+            echo "::error::a missing working directory exited $workdir_status saying: $err" >&2
+            exit 1
+          fi
+          echo "a working directory that is not there was refused by name"
           docker exec kontur-vm-verify kontur exec -- sh -c '
             built=$(cat /etc/kontur-build-machine-id)
             now=$(cat /etc/machine-id)
@@ -335,7 +447,269 @@ jobs:
             exit 1
           fi
           echo "the guest wrote into its overlay, not the image"
+          # -disk-size-mb only sizes the block device; kontur-growfs in
+          # the guest is what turns that into free space. Both halves are
+          # checked, because the first one alone is what this used to do
+          # and it looks like success from out here -- an 8GiB /dev/vda
+          # with a few hundred MiB free reads as a working -disk-size-mb
+          # right up until something in the guest runs out of room.
+          docker exec kontur-vm-verify kontur exec -- sh -c '
+            set -eu
+            want_mb=6144
+            dev_mb=$(( $(cat /sys/class/block/vda/size) / 2048 ))
+            fs_mb=$(df -B1M --output=size / | tail -1 | tr -d " ")
+            avail_mb=$(df -B1M --output=avail / | tail -1 | tr -d " ")
+            echo "/dev/vda ${dev_mb}MiB, root filesystem ${fs_mb}MiB, ${avail_mb}MiB free"
+            if [ "$dev_mb" -ne "$want_mb" ]; then
+              echo "the block device is ${dev_mb}MiB, not the ${want_mb}MiB -disk-size-mb asked for" >&2
+              exit 1
+            fi
+            # Only ext4 metadata should stand between the filesystem and
+            # the whole device -- inode tables and journal, a couple of
+            # percent. 10% is slack for that, and still nowhere near the
+            # ~3GB the image was built with, which is what an ungrown
+            # filesystem would report.
+            if [ "$fs_mb" -lt "$(( want_mb - want_mb / 10 ))" ]; then
+              echo "the root filesystem is ${fs_mb}MiB of a ${dev_mb}MiB disk: kontur-growfs did not grow it" >&2
+              exit 1
+            fi
+            if [ "$avail_mb" -lt 2048 ]; then
+              echo "only ${avail_mb}MiB free on a ${dev_mb}MiB disk" >&2
+              exit 1
+            fi'
+          echo "the guest grew its filesystem onto the disk it was given"
+
+      # The guest is supposed to end up with the *container's* own
+      # routing table, not one inferred from its netmask -- which is a
+      # claim about two tables being equal, and neither of them exists
+      # until a VM has really booted behind a real netshim. The unit
+      # tests derive one from a dump and apply the other to a fake "ip";
+      # this compares what the guest actually has against what the
+      # sandbox actually has.
+      #
+      # docker's network is a bridge, so the two tables were already
+      # equal before any of this existed. That is the point: this is the
+      # case that must not change, and the one CI can reach. The
+      # point-to-point case it exists for (a "10.244.0.0/24 via
+      # <gateway>" that no netmask can express) needs a ptp CNI, i.e. a
+      # cluster.
+      #
+      # The sandbox's side is read with nsenter rather than from inside
+      # the VM container, which is a "scratch" image with no iproute2 in
+      # it. Both tables are reduced to destination and gateway: the
+      # kernel decorates its own with "proto kernel" and a preferred
+      # source that the guest's copy has no reason to carry.
+      - name: Check the guest has the container's own routes
+        run: |
+          set -euo pipefail
+          strip() { awk '{ gw=""; for (i=2; i<NF; i++) if ($i == "via") gw=$(i+1); print $1 (gw == "" ? "" : " via " gw) }' | sort; }
+
+          # The unit that installs them has to have run and succeeded.
+          # Asserted separately because the comparison below cannot see
+          # it: on docker's bridge the "ip=" parameter alone already
+          # produces the right table, so a unit that never ran would
+          # still match.
+          #
+          # Waited for rather than sampled, because "kontur exec" answers
+          # over vsock from early in the boot -- deliberately, it is what
+          # a guest whose boot went wrong is reached with -- so every
+          # step in this job before this one can and does run while the
+          # guest is still in sysinit. Asking a booting guest whether a
+          # sysinit-era unit has finished is a coin toss, and this used
+          # to lose it.
+          state=""
+          for _ in $(seq 1 60); do
+            state=$(docker exec kontur-vm-verify kontur exec -- systemctl is-active kontur-net-routes.service || true)
+            case "$state" in
+              active|failed) break ;;
+            esac
+            sleep 2
+          done
+          if [ "$state" != "active" ]; then
+            echo "::error::kontur-net-routes.service is $state, not active" >&2
+            docker exec kontur-vm-verify kontur exec -- systemctl status --no-pager kontur-net-routes.service >&2 || true
+            exit 1
+          fi
+
+          pid=$(docker inspect -f '{{.State.Pid}}' kontur-vm-verify)
+          # "ip" lives in /usr/sbin, which is not on the PATH a guest
+          # session gets -- internal/agent's defaultPATH reproduces
+          # sshd's, deliberately.
+          sudo nsenter -t "$pid" -n ip -4 route show dev eth0 > sandbox.routes
+          docker exec kontur-vm-verify kontur exec -- \
+            sh -c 'PATH=/usr/sbin:/sbin:$PATH; ip -4 route show dev eth0' > guest.routes
+          echo "the sandbox's own table:"; cat sandbox.routes
+          echo "the guest's table:"; cat guest.routes
+
+          sandbox=$(strip < sandbox.routes)
+          guest=$(strip < guest.routes)
+          if [ -z "$sandbox" ]; then
+            echo "::error::the sandbox has no routes on eth0, so this proves nothing" >&2
+            exit 1
+          fi
+          if [ "$sandbox" != "$guest" ]; then
+            echo "::error::the guest's routing table is not the container's" >&2
+            diff <(echo "$sandbox") <(echo "$guest") >&2 || true
+            docker logs --tail 50 kontur-vm-verify >&2 || true
+            exit 1
+          fi
+          echo "the guest routes exactly as its container does"
+
+      # "kontur cp" is a claim about bytes surviving a round trip, and
+      # the unit tests make it against a shell on the build machine
+      # rather than a guest across a vsock. This is the same claim
+      # against a real VM: a megabyte of random binary in and back out
+      # again, compared byte for byte, and a directory through the tar
+      # path both ways. Random rather than text on purpose -- text is
+      # what the old hand-built pipelines got right.
+      - name: Copy files in and out with kontur cp
+        run: |
+          set -euo pipefail
+          head -c 1048576 /dev/urandom > blob.bin
+          docker exec -i kontur-vm-verify kontur cp - /root/blob.bin < blob.bin
+          want=$(sha256sum blob.bin | cut -d' ' -f1)
+          got=$(docker exec kontur-vm-verify kontur exec -- sha256sum /root/blob.bin | cut -d' ' -f1)
+          if [ "$want" != "$got" ]; then
+            echo "::error::the file arrived in the guest as $got, not $want" >&2
+            exit 1
+          fi
+          echo "a binary file copied into the guest intact"
+
+          docker exec kontur-vm-verify kontur cp /root/blob.bin - > blob.out
+          cmp blob.bin blob.out
+          echo "and came back out intact"
+
+          mkdir -p tree/nested
+          cp blob.bin tree/nested/blob.bin
+          echo hello > tree/top.txt
+          tar -cf - -C tree . | docker exec -i kontur-vm-verify kontur cp -tar - /srv/tree
+          docker exec kontur-vm-verify kontur cp -tar /srv/tree - > tree.tar
+          mkdir restored
+          tar -xf tree.tar -C restored
+          cmp blob.bin restored/nested/blob.bin
+          test "$(cat restored/top.txt)" = "hello"
+          echo "a directory round-tripped through the tar path"
+
+          # And a pack that fails has to fail. The guest-side command is
+          # "tar | base64", whose status is base64's -- and base64
+          # succeeds on the empty input a tar that could not open its
+          # directory leaves it, so this wrote an empty archive and
+          # exited 0. Asserted here as well as in the unit tests because
+          # it depends on the guest's own shell rather than on the build
+          # machine's.
+          set +e
+          docker exec kontur-vm-verify kontur cp -tar /srv/not-there - > empty.tar
+          pack_status=$?
+          set -e
+          if [ "$pack_status" = "0" ]; then
+            echo "::error::packing a directory that does not exist reported success, writing $(wc -c < empty.tar) bytes" >&2
+            exit 1
+          fi
+          echo "a pack of a directory that is not there fails rather than writing an empty archive"
+
+      # The other half of what "vm status" is for: a VM that is not going
+      # to become ready has to be reported as such straight away, rather
+      # than looking like one that is merely slow. Last of the steps that
+      # use this VM, because it stops it.
+      - name: konturctl vm status on a stopped VM
+        run: |
+          set -euo pipefail
+          state="$GITHUB_WORKSPACE/.kontur-state"
+          docker stop kontur-vm-verify >/dev/null
+          set +e
+          out=$(./konturctl vm status verify -state-dir "$state")
+          status=$?
+          set -e
+          echo "$out"
+          if [ "$status" = "0" ]; then
+            echo "::error::vm status exited zero for a VM whose container is stopped" >&2
+            exit 1
+          fi
+          case "$out" in
+            *"not running"*) ;;
+            *) echo "::error::vm status did not say the container is not running" >&2; exit 1 ;;
+          esac
+          echo "vm status answers for a stopped VM without waiting for it"
+
+      # The one-off flow, which is the same guest reached a different
+      # way: no create, no polling loop and no delete on this side, since
+      # "vm run" does all three. Worth its own step because it is the
+      # only place the readiness wait is exercised for real -- a fake
+      # docker can say the guest answered, it cannot say when.
+      - name: One-off VM with konturctl vm run
+        run: |
+          set -euo pipefail
+          state="$GITHUB_WORKSPACE/.kontur-state"
+          # Only the guest command's own bytes may land on stdout: every
+          # progress line "vm run" prints goes to stderr, or capturing
+          # its output like this would be useless.
+          out=$(./konturctl vm run oneoff \
+            -state-dir "$state" \
+            -kontur-image kontur:debian12-customized \
+            -ready-timeout 5m \
+            -- cat /etc/kontur-guest-build-ok)
+          if [ "$out" != "provisioned" ]; then
+            echo "::error::vm run printed '$out', want the file's contents alone" >&2
+            exit 1
+          fi
+          echo "vm run booted a VM, ran one command and gave back its output"
+
+          set +e
+          ./konturctl vm run oneoff2 \
+            -state-dir "$state" \
+            -kontur-image kontur:debian12-customized \
+            -ready-timeout 5m \
+            -- sh -c 'exit 42'
+          run_status=$?
+          set -e
+          if [ "$run_status" != "42" ]; then
+            echo "::error::vm run reported $run_status for a guest command that exited 42" >&2
+            exit 1
+          fi
+
+          # Both VMs are gone, the failing one included: a non-zero
+          # command is a result, not a reason to leave a container, a tap
+          # device and an overlay behind.
+          ./konturctl vm list -state-dir "$state"
+          if ./konturctl vm list -state-dir "$state" | grep -q oneoff; then
+            echo "::error::vm run left saved state behind" >&2
+            exit 1
+          fi
+          if docker ps -a --format '{{.Names}}' | grep -q kontur-vm-oneoff; then
+            echo "::error::vm run left containers behind" >&2
+            docker ps -a >&2
+            exit 1
+          fi
+          echo "vm run cleaned up after both commands"
 
       - name: Guest console on failure
         if: failure()
-        run: docker logs --tail 200 kontur-vm-verify || true
+        run: |
+          docker logs --tail 200 kontur-vm-verify || true
+          docker logs --tail 200 kontur-vm-oneoff || true
+          docker logs --tail 200 kontur-vm-oneoff2 || true
+
+      # Last, so it is the end of the log and not buried in the console
+      # dump above. Networking is the half of a guest that fails without
+      # failing to boot -- an address that works and routes that do not
+      # look identical from out here -- so when something in this job
+      # goes wrong, what the two sides of the splice actually have is
+      # worth a few lines.
+      - name: Guest networking on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          set +e
+          echo "== the VM container's own namespace"
+          pid=$(docker inspect -f '{{.State.Pid}}' kontur-vm-verify)
+          sudo nsenter -t "$pid" -n ip -4 addr show
+          sudo nsenter -t "$pid" -n ip -4 route show
+          echo "== what kontur run derived for the guest"
+          docker logs kontur-vm-verify 2>&1 | grep -E "guest takes over|route\(s\)|CHV_CMDLINE" | tail -5
+          echo "== the guest's own view"
+          docker exec kontur-vm-verify kontur exec -- cat /proc/cmdline
+          docker exec kontur-vm-verify kontur exec -- \
+            sh -c 'PATH=/usr/sbin:/sbin:$PATH; ip -4 addr show dev eth0; ip -4 route show'
+          docker exec kontur-vm-verify kontur exec -- \
+            systemctl --no-pager --full status kontur-net-cmdline.service kontur-net-routes.service
+          docker exec kontur-vm-verify kontur exec -- systemctl --no-pager list-jobs

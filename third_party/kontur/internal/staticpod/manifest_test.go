@@ -5,8 +5,6 @@ import (
 	"testing"
 
 	"github.com/bwsalmon/kontur/internal/config"
-
-	"github.com/bwsalmon/kontur/internal/netshim"
 )
 
 // envValue returns the "value:" line following a "- name: <key>" entry in
@@ -46,17 +44,23 @@ func TestRender_Basic(t *testing.T) {
 	if got, want := envValue(t, out, "CHV_DISK_IMAGE"), s.DiskImage; got != want {
 		t.Errorf("CHV_DISK_IMAGE = %q, want %q", got, want)
 	}
-	if got, want := envValue(t, out, "CHV_NET"), "tap=tap-web"; got != want {
-		t.Errorf("CHV_NET = %q, want %q", got, want)
+	// No CHV_NET: the VM container derives its own --net from the
+	// identity on the namespace's interface, from the same NETSHIM_*
+	// settings the init container reads.
+	if strings.Contains(out, "- name: CHV_NET") {
+		t.Errorf("manifest sets CHV_NET, which the VM container derives for itself:\n%s", out)
 	}
-	if got, want := envValue(t, out, "NETSHIM_VMS"), "web:169.254.100.2:30080"; got != want {
-		t.Errorf("NETSHIM_VMS = %q, want %q", got, want)
+	if got, want := envValue(t, out, "NETSHIM_VM"), "web"; got != want {
+		t.Errorf("NETSHIM_VM = %q, want %q", got, want)
 	}
 	if got, want := envValue(t, out, "CHV_CMDLINE"), s.Cmdline; got != want {
 		t.Errorf("CHV_CMDLINE = %q, want %q", got, want)
 	}
-	if got, want := envValue(t, out, "KONTUR_EXEC_ADDR"), "169.254.100.2:22"; got != want {
-		t.Errorf("KONTUR_EXEC_ADDR = %q, want %q", got, want)
+	// The manifest no longer carries an address for exec to dial: it
+	// reaches the guest over the VM's vsock device instead, at a path
+	// both halves of the kontur binary default to.
+	if strings.Contains(out, "KONTUR_EXEC_ADDR") {
+		t.Errorf("manifest still sets KONTUR_EXEC_ADDR:\n%s", out)
 	}
 }
 
@@ -74,7 +78,7 @@ func TestRender_OmitsUnsetOptionalFields(t *testing.T) {
 	// rendered, though, since Validate auto-derives it whenever Firmware
 	// is unset (see TestValidate_Minimal) -- direct kernel boot still
 	// applies even with no explicit Kernel, so the guest still needs its
-	// netshim-matching "ip=" boot parameter.
+	// console and root device named.
 	for _, key := range []string{"CHV_KERNEL", "CHV_INITRAMFS", "CHV_FIRMWARE"} {
 		if strings.Contains(out, key) {
 			t.Errorf("manifest unexpectedly contains %s when unset:\n%s", key, out)
@@ -105,6 +109,7 @@ func TestRender_QuotesSpecialCharacters(t *testing.T) {
 
 func TestRender_ReadOnlyDiskHasNoWritableMount(t *testing.T) {
 	s := baseSpec()
+	s.DiskMode = config.DiskModeReadOnly
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
@@ -158,11 +163,13 @@ func TestManifestFileNameAndPodName(t *testing.T) {
 	}
 }
 
-func TestRender_FlatMode(t *testing.T) {
-	s := Defaults()
-	s.Name = "web"
-	s.DiskImage = "/images/disk.img"
-	s.NetMode = netshim.ModeFlat
+// TestRender_ReadinessProbeReportsOnTheGuest is what makes "kubectl wait
+// --for=condition=Ready" on a kontur pod mean anything: without the
+// probe the condition reports on a container that is up as soon as
+// cloud-hypervisor is exec'd, minutes before the guest inside it can be
+// reached, and every caller writes its own poll loop instead.
+func TestRender_ReadinessProbeReportsOnTheGuest(t *testing.T) {
+	s := baseSpec()
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
@@ -172,37 +179,22 @@ func TestRender_FlatMode(t *testing.T) {
 		t.Fatalf("Render() error = %v", err)
 	}
 
-	if got, want := envValue(t, out, "NETSHIM_MODE"), netshim.ModeFlat; got != want {
-		t.Errorf("NETSHIM_MODE = %q, want %q", got, want)
+	if !strings.Contains(out, `command: ["/usr/local/bin/kontur", "ready", "-timeout", "0"]`) {
+		t.Errorf("manifest has no \"kontur ready\" readiness probe:\n%s", out)
 	}
-	if got, want := envValue(t, out, "NETSHIM_VM"), "web"; got != want {
-		t.Errorf("NETSHIM_VM = %q, want %q", got, want)
-	}
-	// The VM container derives the guest's ip= parameter at boot in this
-	// mode, nameservers included, so it has to be told them here.
-	if got, want := envValue(t, out, "NETSHIM_DNS"), netshim.DefaultDNS; got != want {
-		t.Errorf("NETSHIM_DNS = %q, want %q", got, want)
-	}
-	// NAT-only settings must not leak into a flat-mode manifest, where
-	// they describe a subnet and forwarding rules that do not exist.
-	for _, unwanted := range []string{"NETSHIM_VMS", "NETSHIM_GUEST_PORT", "NETSHIM_BRIDGE_CIDR", "CHV_NET"} {
-		if strings.Contains(out, "- name: "+unwanted) {
-			t.Errorf("manifest sets %s in flat mode:\n%s", unwanted, out)
-		}
-	}
-	// exec goes via the control link, since the guest now answers to the
-	// namespace's own address.
-	if got, want := envValue(t, out, "KONTUR_EXEC_ADDR"), "169.254.100.2:22"; got != want {
-		t.Errorf("KONTUR_EXEC_ADDR = %q, want %q", got, want)
+	// The VM container only: netshim is an init container that has
+	// already exited by the time anything could be probed.
+	if got := strings.Count(out, "readinessProbe:"); got != 1 {
+		t.Errorf("readinessProbe appears %d times, want once (on the VM container):\n%s", got, out)
 	}
 }
 
-func TestRender_FlatModeWithoutControlLinkOmitsExecAddr(t *testing.T) {
-	s := Defaults()
-	s.Name = "web"
-	s.DiskImage = "/images/disk.img"
-	s.NetMode = netshim.ModeFlat
-	s.ControlCIDR = ""
+// TestRender_NetshimEnvOnBothContainers covers the settings that have to
+// reach the VM container as well as the init container: it derives its
+// own --net from them, so a manifest that gave them to only one would
+// have the two disagree about the tap.
+func TestRender_NetshimEnvOnBothContainers(t *testing.T) {
+	s := baseSpec()
 	if err := s.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
@@ -211,8 +203,19 @@ func TestRender_FlatModeWithoutControlLinkOmitsExecAddr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Render() error = %v", err)
 	}
+
+	for _, key := range []string{"NETSHIM_VM", "NETSHIM_BRIDGE", "NETSHIM_CONTROL_CIDR", "NETSHIM_EXTERNAL_IFACE"} {
+		if got := strings.Count(out, "- name: "+key); got != 2 {
+			t.Errorf("%s appears %d times, want once per container:\n%s", key, got, out)
+		}
+	}
+	// exec goes via the control link, since the guest answers to the
+	// namespace's own address.
+	// The manifest no longer carries an address for exec to dial: it
+	// reaches the guest over the VM's vsock device instead, at a path
+	// both halves of the kontur binary default to.
 	if strings.Contains(out, "KONTUR_EXEC_ADDR") {
-		t.Errorf("manifest sets KONTUR_EXEC_ADDR with no control link, which has no address to dial:\n%s", out)
+		t.Errorf("manifest still sets KONTUR_EXEC_ADDR:\n%s", out)
 	}
 }
 
@@ -282,5 +285,59 @@ func TestRender_OmitsDiskSizeWhenUnset(t *testing.T) {
 	}
 	if strings.Contains(out, "CHV_DISK_SIZE_MB") {
 		t.Errorf("manifest unexpectedly contains CHV_DISK_SIZE_MB when unset:\n%s", out)
+	}
+}
+
+// The two hotplug ceilings a VM can only be given at boot: without them
+// "kontur resize" has nothing to grow into, which is the whole reason
+// they are settable from konturctl at all.
+func TestRender_HotplugCeilings(t *testing.T) {
+	s := baseSpec()
+	s.CPUsMax = 8
+	s.MemoryMaxMB = 4096
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if got, want := envValue(t, out, "CHV_CPUS_MAX"), "8"; got != want {
+		t.Errorf("CHV_CPUS_MAX = %q, want %q", got, want)
+	}
+	if got, want := envValue(t, out, "CHV_MEMORY_MAX_MB"), "4096"; got != want {
+		t.Errorf("CHV_MEMORY_MAX_MB = %q, want %q", got, want)
+	}
+}
+
+func TestRender_OmitsHotplugCeilingsWhenUnset(t *testing.T) {
+	// Rendering the boot values as their own ceilings would be the same
+	// as leaving them out -- and would make a spec saved before these
+	// existed look like one that had asked for no headroom on purpose.
+	s := baseSpec()
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	out, err := Render(s)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	for _, name := range []string{"CHV_CPUS_MAX", "CHV_MEMORY_MAX_MB"} {
+		if strings.Contains(out, name) {
+			t.Errorf("manifest unexpectedly contains %s when unset:\n%s", name, out)
+		}
+	}
+}
+
+func TestValidate_RejectsCeilingBelowBootSize(t *testing.T) {
+	s := baseSpec()
+	s.CPUsMax = s.CPUs - 1
+	if err := s.Validate(); err == nil {
+		t.Errorf("Validate() with cpus-max below cpus = nil, want error")
+	}
+	s = baseSpec()
+	s.MemoryMaxMB = s.MemoryMB - 1
+	if err := s.Validate(); err == nil {
+		t.Errorf("Validate() with memory-max-mb below memory-mb = nil, want error")
 	}
 }

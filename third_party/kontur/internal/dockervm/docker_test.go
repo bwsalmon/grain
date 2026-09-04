@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bwsalmon/kontur/internal/netshim"
 	"github.com/bwsalmon/kontur/internal/staticpod"
 )
 
@@ -69,8 +68,6 @@ func testSpec() staticpod.VMSpec {
 	s.Name = "web"
 	s.DiskImage = "/images/disk.img"
 	s.Kernel = "/images/vmlinux"
-	s.IP = "169.254.100.2"
-	s.Port = 30080
 	s.Backend = staticpod.BackendDocker
 	return s
 }
@@ -115,21 +112,46 @@ func TestCreate_RunsNetnsHolderNetshimThenVM(t *testing.T) {
 	if netshimCall[0] != "run" || !containsArg(netshimCall, "container:kontur-vm-web-netns") || !containsArg(netshimCall, "netshim") {
 		t.Errorf("second call = %v, want netshim attached to the netns holder", netshimCall)
 	}
-	if !containsArg(netshimCall, "NETSHIM_VMS=web:169.254.100.2:30080") {
-		t.Errorf("netshim call = %v, missing expected NETSHIM_VMS", netshimCall)
+	if !containsArg(netshimCall, "NETSHIM_VM=web") {
+		t.Errorf("netshim call = %v, missing expected NETSHIM_VM", netshimCall)
+	}
+	if !containsArg(netshimCall, "NETSHIM_CONTROL_CIDR=169.254.100.1/24") {
+		t.Errorf("netshim call = %v, missing expected NETSHIM_CONTROL_CIDR", netshimCall)
+	}
+	// netshim does no routing and installs no NAT rules, so it never
+	// writes the sysctl that would force it to run privileged.
+	if containsArg(netshimCall, "--privileged") {
+		t.Errorf("netshim call = %v, want capabilities rather than --privileged", netshimCall)
+	}
+	for _, want := range []string{"NET_ADMIN", "/dev/net/tun"} {
+		if !containsArg(netshimCall, want) {
+			t.Errorf("netshim call = %v, missing %q", netshimCall, want)
+		}
 	}
 
 	if vmCall[0] != "run" || !containsArg(vmCall, "kontur-vm-web") || !containsArg(vmCall, "container:kontur-vm-web-netns") {
 		t.Errorf("third call = %v, want the VM container attached to the netns holder", vmCall)
 	}
-	if !containsArg(vmCall, "CHV_NET=tap=tap-web") {
-		t.Errorf("VM call = %v, missing expected CHV_NET", vmCall)
+	// The VM container derives its own --net from the namespace, so it
+	// gets netshim's settings rather than a precomputed CHV_NET.
+	if !containsArg(vmCall, "NETSHIM_VM=web") {
+		t.Errorf("VM call = %v, want the netshim settings it derives its --net from", vmCall)
+	}
+	for _, a := range vmCall {
+		if strings.HasPrefix(a, "CHV_NET=") {
+			t.Errorf("VM call = %v, should not set CHV_NET", vmCall)
+		}
 	}
 	if !containsArg(vmCall, "CHV_KERNEL=/images/vmlinux") {
 		t.Errorf("VM call = %v, missing expected CHV_KERNEL", vmCall)
 	}
-	if !containsArg(vmCall, "KONTUR_EXEC_ADDR=169.254.100.2:22") {
-		t.Errorf("VM call = %v, missing expected KONTUR_EXEC_ADDR", vmCall)
+	// Nothing tells the container how to reach its guest any more: exec
+	// goes over the VM's own vsock device, whose host end both halves of
+	// the kontur binary default to the same path for.
+	for _, a := range vmCall {
+		if strings.HasPrefix(a, "KONTUR_EXEC_ADDR=") {
+			t.Errorf("VM call = %v, still sets KONTUR_EXEC_ADDR: exec no longer dials the guest", vmCall)
+		}
 	}
 	if !containsArg(vmCall, "--privileged") || !containsArg(vmCall, "/dev/kvm") {
 		t.Errorf("VM call = %v, want --privileged and /dev/kvm", vmCall)
@@ -307,23 +329,22 @@ func TestDelete_IdempotentWhenContainersAlreadyGone(t *testing.T) {
 	}
 }
 
-// flatSpec is testSpec in flat mode: no -ip (the container runtime picks
-// the address the guest takes over), and a couple of caller-supplied
-// docker options that only the namespace holder can carry.
-func flatSpec() staticpod.VMSpec {
+// runOptsSpec is testSpec plus a couple of caller-supplied docker options
+// that only the namespace holder can carry.
+func runOptsSpec() staticpod.VMSpec {
 	s := testSpec()
-	s.NetMode = netshim.ModeFlat
-	s.IP = ""
-	s.Port = 0
 	s.DockerRunOpts = []string{"--network", "mynet", "-p", "8080:80"}
 	return s
 }
 
-func TestCreate_FlatMode(t *testing.T) {
+// TestCreate_DockerRunOpts covers where a caller's own docker options
+// land: on the container that creates the namespace, since nothing
+// joining an existing one can add them afterwards.
+func TestCreate_DockerRunOpts(t *testing.T) {
 	d, calls := testDocker(t)
 	var stdout strings.Builder
 
-	if err := Create(context.Background(), d, flatSpec(), &stdout); err != nil {
+	if err := Create(context.Background(), d, runOptsSpec(), &stdout); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 
@@ -331,7 +352,7 @@ func TestCreate_FlatMode(t *testing.T) {
 	if len(got) != 5 {
 		t.Fatalf("Create() issued %d docker calls, want 5:\n%v", len(got), got)
 	}
-	netnsCall, netshimCall, vmCall := got[2], got[3], got[4]
+	netnsCall, vmCall := got[2], got[4]
 
 	// Port publishing and network membership belong to the container
 	// that owns the namespace; nothing joining it later can add them.
@@ -346,57 +367,16 @@ func TestCreate_FlatMode(t *testing.T) {
 		t.Errorf("VM call = %v, should not repeat the holder's published ports", vmCall)
 	}
 
-	if !containsArg(netshimCall, "NETSHIM_MODE=flat") || !containsArg(netshimCall, "NETSHIM_VM=web") {
-		t.Errorf("netshim call = %v, want flat-mode settings", netshimCall)
-	}
-	if !containsArg(netshimCall, "NETSHIM_CONTROL_CIDR=169.254.100.1/24") {
-		t.Errorf("netshim call = %v, missing expected NETSHIM_CONTROL_CIDR", netshimCall)
-	}
-
-	// Flat mode does no routing and installs no NAT rules, so it never
-	// writes the sysctl that forces the NAT path to run privileged.
-	if containsArg(netshimCall, "--privileged") {
-		t.Errorf("netshim call = %v, want capabilities rather than --privileged in flat mode", netshimCall)
-	}
-	for _, want := range []string{"NET_ADMIN", "/dev/net/tun"} {
-		if !containsArg(netshimCall, want) {
-			t.Errorf("netshim call = %v, missing %q", netshimCall, want)
-		}
-	}
-
-	// The VM container derives its own --net from the namespace, so it
-	// gets netshim's settings rather than a precomputed CHV_NET.
-	if !containsArg(vmCall, "NETSHIM_MODE=flat") {
-		t.Errorf("VM call = %v, want the flat-mode netshim settings", vmCall)
-	}
-	// Including the nameservers: the VM container is what assembles the
-	// guest's ip= parameter here, so this is the only way the resolver a
-	// deployment chose reaches the guest at all.
-	if !containsArg(vmCall, "NETSHIM_DNS="+netshim.DefaultDNS) {
-		t.Errorf("VM call = %v, missing NETSHIM_DNS", vmCall)
-	}
-	for _, unwanted := range []string{"CHV_NET=tap=tap-web", "CHV_NET="} {
-		if containsArg(vmCall, unwanted) {
-			t.Errorf("VM call = %v, should not set CHV_NET in flat mode", vmCall)
-		}
-	}
-
-	// exec has to go via the control link: the guest now answers to the
-	// namespace's own address, so dialing that from inside the namespace
-	// would reach the local stack.
-	if !containsArg(vmCall, "KONTUR_EXEC_ADDR=169.254.100.2:22") {
-		t.Errorf("VM call = %v, want KONTUR_EXEC_ADDR on the control link", vmCall)
-	}
 }
 
-// TestCreate_FlatModeNoControlLink confirms that disabling the control
-// link drops the exec address entirely rather than emitting an empty or
-// bogus one that would fail at dial time.
-func TestCreate_FlatModeNoControlLink(t *testing.T) {
+// TestCreate_NoControlLink confirms that disabling the control link drops
+// the exec address entirely rather than emitting an empty or bogus one
+// that would fail at dial time.
+func TestCreate_NoControlLink(t *testing.T) {
 	d, calls := testDocker(t)
 	var stdout strings.Builder
 
-	spec := flatSpec()
+	spec := testSpec()
 	spec.ControlCIDR = ""
 	if err := Create(context.Background(), d, spec, &stdout); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -405,7 +385,7 @@ func TestCreate_FlatModeNoControlLink(t *testing.T) {
 	vmCall := calls()[4]
 	for _, a := range vmCall {
 		if strings.HasPrefix(a, "KONTUR_EXEC_ADDR=") {
-			t.Errorf("VM call = %v, want no KONTUR_EXEC_ADDR without a control link", vmCall)
+			t.Errorf("VM call = %v, want no KONTUR_EXEC_ADDR", vmCall)
 		}
 	}
 }
@@ -476,5 +456,65 @@ func TestCreate_OmitsDiskSizeWhenUnset(t *testing.T) {
 		if strings.HasPrefix(a, "CHV_DISK_SIZE_MB=") {
 			t.Errorf("VM call = %v, unexpectedly sets CHV_DISK_SIZE_MB for a VM that asked for no size", vmCall)
 		}
+	}
+}
+
+func TestCreate_HotplugCeilings(t *testing.T) {
+	d, calls := testDocker(t)
+	spec := testSpec()
+	spec.CPUsMax = 8
+	spec.MemoryMaxMB = 4096
+
+	if err := Create(context.Background(), d, spec, &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	vmCall := calls()[4]
+	for _, want := range []string{"CHV_CPUS_MAX=8", "CHV_MEMORY_MAX_MB=4096"} {
+		if !containsArg(vmCall, want) {
+			t.Errorf("VM call = %v, missing expected %s", vmCall, want)
+		}
+	}
+}
+
+func TestCreate_OmitsHotplugCeilingsWhenUnset(t *testing.T) {
+	d, calls := testDocker(t)
+
+	if err := Create(context.Background(), d, testSpec(), &strings.Builder{}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	vmCall := calls()[4]
+	for _, a := range vmCall {
+		if strings.HasPrefix(a, "CHV_CPUS_MAX=") || strings.HasPrefix(a, "CHV_MEMORY_MAX_MB=") {
+			t.Errorf("VM call = %v, unexpectedly sets a hotplug ceiling for a VM that asked for none", vmCall)
+		}
+	}
+}
+
+// NETSHIM_DNS is passed on every create, empty value included: the VM
+// container assembles the guest's ip= parameter, so an unset variable
+// there would silently mean netshim's own default rather than what this
+// VM was created with -- and an empty one is how a caller asks for the
+// guest image's own resolv.conf to be left alone.
+func TestCreate_AlwaysPassesTheNameserversTheVMWasCreatedWith(t *testing.T) {
+	d, calls := testDocker(t)
+	var stdout strings.Builder
+
+	spec := testSpec()
+	spec.DNS = "10.0.0.53"
+	if err := Create(context.Background(), d, spec, &stdout); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if vmCall := calls()[4]; !containsArg(vmCall, "NETSHIM_DNS=10.0.0.53") {
+		t.Errorf("VM call = %v, missing NETSHIM_DNS", vmCall)
+	}
+
+	d, calls = testDocker(t)
+	stdout.Reset()
+	spec.DNS = ""
+	if err := Create(context.Background(), d, spec, &stdout); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if vmCall := calls()[4]; !containsArg(vmCall, "NETSHIM_DNS=") {
+		t.Errorf("VM call = %v, want NETSHIM_DNS passed even when empty", vmCall)
 	}
 }

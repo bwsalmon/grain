@@ -295,9 +295,9 @@ func TestString_QuotesArgsWithSpaces(t *testing.T) {
 	}
 }
 
-// TestBuildArgs_MultipleNets covers flat mode's two-NIC guest: the
+// TestBuildArgs_MultipleNets covers a netshim-managed two-NIC guest: the
 // spliced interface plus the control link, each of which needs its own
-// --net (see internal/netshim's FlatGuestConfig).
+// --net (see internal/netshim's GuestConfig).
 func TestBuildArgs_MultipleNets(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Nets = []string{"tap=tap-web,mac=02:42:ac:11:00:02,mtu=1450", "tap=ctl-web"}
@@ -316,6 +316,28 @@ func TestBuildArgs_MultipleNets(t *testing.T) {
 	for i := range cfg.Nets {
 		if nets[i] != cfg.Nets[i] {
 			t.Errorf("--net[%d] = %q, want %q", i, nets[i], cfg.Nets[i])
+		}
+	}
+}
+
+// The vsock device is how "kontur exec" reaches the guest at all now, so
+// a VM booted without one is a VM nothing can be run inside.
+func TestBuildArgs_AttachesTheVsockDeviceExecReachesTheGuestOver(t *testing.T) {
+	cfg := baseConfig()
+	cfg.VsockSocket = "/run/kontur/vsock.sock"
+	cfg.VsockCID = 3
+
+	args := BuildArgs(cfg)
+	if got := argValue(t, args, "--vsock"); got != "cid=3,socket=/run/kontur/vsock.sock" {
+		t.Errorf("--vsock = %q", got)
+	}
+
+	// Empty means no device, which is the only way to ask for a VM with
+	// no exec path in.
+	cfg.VsockSocket = ""
+	for _, a := range BuildArgs(cfg) {
+		if a == "--vsock" {
+			t.Error("a VM with no vsock socket configured still got a vsock device")
 		}
 	}
 }

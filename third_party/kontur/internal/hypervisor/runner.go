@@ -57,9 +57,10 @@ func (r *Runner) Start(stdout, stderr io.Writer) error {
 		return fmt.Errorf("creating api socket directory: %w", err)
 	}
 	// cloud-hypervisor refuses to bind an api-socket path that already
-	// exists from a previous run.
-	if err := os.Remove(r.cfg.APISocket); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("removing stale api socket: %w", err)
+	// exists from a previous run -- but one a running VM is still
+	// listening on is not this run's to remove. See RemoveStaleSocket.
+	if err := RemoveStaleSocket(r.cfg.APISocket, "cloud-hypervisor's API socket"); err != nil {
+		return err
 	}
 
 	r.restored = SnapshotExists(r.cfg.SnapshotPath)
@@ -139,10 +140,96 @@ func (r *Runner) snapshot(ctx context.Context) error {
 		return fmt.Errorf("snapshotting vm: %w", err)
 	}
 
+	// cloud-hypervisor's own snapshot is memory and device state; the
+	// disk behind it stays wherever it was. In the default disk mode
+	// that disk is a qcow2 overlay inside this container's writable
+	// layer (see config.PrepareOverlay), which the next run -- a new
+	// container, which is the whole point of snapshotting to a volume
+	// -- does not have: it would make a fresh one from the base image
+	// and resume a guest whose memory believes in files the disk under
+	// it no longer holds. So the overlay goes into the snapshot too,
+	// while the VM is paused and it is not being written, and
+	// RestoreDiskOverlay puts it back before the next boot restores.
+	if r.cfg.DiskMode == config.DiskModeOverlay && r.cfg.OverlayPath != "" {
+		if err := copyFile(r.cfg.OverlayPath, filepath.Join(tmp, SnapshotDiskOverlayName)); err != nil {
+			os.RemoveAll(tmp)
+			return fmt.Errorf("saving the guest's disk overlay into the snapshot: %w", err)
+		}
+	}
+
 	if err := os.Rename(tmp, r.cfg.SnapshotPath); err != nil {
 		return fmt.Errorf("publishing snapshot to %s: %w", r.cfg.SnapshotPath, err)
 	}
 	return nil
+}
+
+// SnapshotDiskOverlayName is the file name a snapshot directory carries
+// the guest's writable qcow2 overlay under (see Runner.snapshot and
+// RestoreDiskOverlay). It sits alongside cloud-hypervisor's own
+// config.json/state.json/memory-ranges, which name themselves and ignore
+// anything else in the directory.
+const SnapshotDiskOverlayName = "kontur-disk-overlay.qcow2"
+
+// RestoreDiskOverlay copies the disk overlay saved inside the snapshot at
+// snapshotPath back to dst, reporting whether the snapshot had one to
+// put back at all -- a snapshot taken before kontur saved it does not,
+// and a guest resumed from one gets whatever disk the container it lands
+// in already has (see Runner.snapshot for why that matters).
+//
+// It writes through a sibling temporary file and renames, so a copy
+// interrupted partway through leaves the destination as it was rather
+// than a truncated qcow2 that config.PrepareOverlay would go on to reuse
+// as if it were whole.
+func RestoreDiskOverlay(snapshotPath, dst string) (bool, error) {
+	if snapshotPath == "" || dst == "" {
+		return false, nil
+	}
+	src := filepath.Join(snapshotPath, SnapshotDiskOverlayName)
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking the disk overlay saved at %s: %w", src, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return false, fmt.Errorf("creating the overlay directory for %s: %w", dst, err)
+	}
+	tmp := dst + ".restoring"
+	if err := copyFile(src, tmp); err != nil {
+		os.Remove(tmp)
+		return false, fmt.Errorf("restoring the disk overlay saved at %s: %w", src, err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
+		return false, fmt.Errorf("putting the restored disk overlay at %s: %w", dst, err)
+	}
+	return true, nil
+}
+
+// copyFile copies src over dst, creating dst if it isn't there, and
+// flushes it to disk: both callers are writing something a *later* run
+// (or a later container) has to be able to read back intact.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // Wait blocks until the VMM process exits and returns its error, following

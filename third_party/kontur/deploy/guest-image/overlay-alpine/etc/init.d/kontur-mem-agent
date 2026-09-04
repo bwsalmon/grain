@@ -10,10 +10,11 @@ depend() {
 }
 
 start_pre() {
-	# Written by kontur-control-net when this guest has a flat-mode
-	# control link, naming the host address to signal. Absent in NAT
-	# mode, where the agent's own default (this guest's default route's
-	# gateway) is correct.
+	# Written by kontur-control-net when this guest has a control link,
+	# naming the host address to signal. Absent on a guest booted
+	# without one, which leaves the agent's own default (this guest's
+	# default route's gateway) -- reaching the container network rather
+	# than the host side of this VM, so nothing answers.
 	if [ -f /run/kontur-control-net.env ]; then
 		. /run/kontur-control-net.env
 		export KONTUR_MEM_AGENT_HOST

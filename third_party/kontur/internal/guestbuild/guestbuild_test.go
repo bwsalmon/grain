@@ -131,7 +131,10 @@ func TestBuildRunsTheWholeSequence(t *testing.T) {
 	if find(got, "run", "--rm", "--network", "container:", opts.From, "netshim") == nil {
 		t.Errorf("netshim never ran, so the guest would have no tap; calls were %v", got)
 	}
-	if find(got, "run", "-d", "--network", "container:", "--device", "/dev/kvm", "CHV_NET=tap=", opts.From, "run") == nil {
+	// The VM container gets netshim's own settings rather than a
+	// precomputed CHV_NET: it derives its --net (and the guest's ip=)
+	// from the identity on the namespace's interface at boot.
+	if find(got, "run", "-d", "--network", "container:", "--device", "/dev/kvm", "NETSHIM_VM=", opts.From, "run") == nil {
 		t.Errorf("no VM container attached to the namespace with a tap; calls were %v", got)
 	}
 	// No disk mount and no CHV_DISK_IMAGE: the guest being customized is

@@ -9,8 +9,8 @@
 //
 // The protocol is deliberately minimal: the guest opens a plain TCP
 // connection to Server's listen address (reachable directly, since the
-// guest and this container share netshim's bridge network -- see the
-// top-level README's "Pod-local networking") and writes one line,
+// guest and this container are joined by netshim's control link -- see
+// the top-level README's "Container networking") and writes one line,
 // "PRESSURE <value>\n", where <value> is whatever pressure metric the
 // guest used to decide to signal at all (currently /proc/pressure/memory's
 // "some avg10", but Server itself never interprets it -- it's carried

@@ -64,13 +64,53 @@ access via `privileged: true` + a `/dev/kvm` hostPath. The console log
 should reach a login prompt within a few seconds of the container
 starting.
 
-`deploy/k8s/pod-example.yaml` -- the multi-VM, `netshim`-networked
-example the main README points to -- also runs unmodified on a cluster
-set up this way; `gke-pod-example.yaml` here is deliberately a simpler
-single-VM version of the same thing, minus the node-local image cache
-`pod-example.yaml` assumes is already populated.
+`deploy/k8s/pod-example.yaml` -- the `netshim`-networked example the main
+README points to, where the guest takes over the pod's own IP -- is the
+same shape with two prerequisites this one deliberately drops: a KVM
+device plugin providing `devices.kubevirt.io/kvm`, and a node-local
+`/var/lib/vm-images` holding a disk image and kernel. Install those and
+it runs here too; without them it stays `Pending` on the missing
+resource. `gke-pod-exec-example.yaml` in the next section is the closer
+equivalent -- the same `netshim` shape, with neither prerequisite.
+
+## 4. Run something in the guest
+
+The pod above boots a VM with no network of its own, which is not the
+same thing as one you cannot reach: exec goes over the VM's own vsock
+device, so `kubectl exec kontur-gke-example -- kontur exec -- uname -a`
+already runs a command inside that guest, with no `netshim` and no
+control link involved (verified on a cluster -- see "Validated" below).
+
+What the pod above has no answer for is a guest that needs a *network*.
+Apply [`gke-pod-exec-example.yaml`](gke-pod-exec-example.yaml) instead --
+identical, plus the `netshim` init container, which gives the guest the
+pod's own IP and MAC -- and the same `kubectl exec` reaches a guest that
+can also talk to the rest of the cluster:
+
+```sh
+sed 's|IMAGE_PLACEHOLDER|us-central1-docker.pkg.dev/<project>/<repo>/kontur:latest|' \
+  gke-pod-exec-example.yaml | kubectl apply -f -
+kubectl wait --for=condition=Ready pod/kontur-gke-exec-example --timeout=180s
+kubectl exec kontur-gke-exec-example -c web -- kontur exec -- uname -a
+```
+
+The main README's "User flows" section walks that, guest customization
+and copying files in and out through to the end, alongside the docker
+equivalents.
+
+Both manifests, exactly as they are checked in here, have since been
+applied to a live single-node cluster and walked through all four of
+those flows -- though not a GKE one; see "Validated" below for what that
+does and does not settle.
 
 ## Validated
+
+Two passes, on two different clusters, covering different halves of what
+this file claims. The GKE-specific mechanics come from the first; the
+manifests and the flows in their current form come from the second, which
+did not run on GKE.
+
+### On a real GKE Standard cluster
 
 Both of the above were run end-to-end against a real GKE Standard
 cluster (not Autopilot -- its restricted `securityContext` would reject
@@ -114,3 +154,73 @@ scheduling -- reached the guest's login prompt.
 No kontur code changes were needed -- everything here worked exactly as
 already documented once the one GKE-specific piece (the node pool flag)
 was in place.
+
+### On a stand-in cluster, not GKE
+
+The pass above predates exec moving off SSH onto vsock, and the main
+README's "User flows" had never had its GKE column walked end to end at
+all. Both were put right by running all four flows against the two
+manifests in this directory exactly as they are checked in -- but on a
+single-node Kubernetes v1.34.0 cluster created with `kind` v0.30.0 on a
+nested-virt host with real `/dev/kvm` (Intel Xeon, `vmx`, Docker CE),
+with the host's `/dev/kvm` mounted into the node container so the
+manifests' own `hostPath` finds it, and the image built from this tree
+and side-loaded onto the node rather than pulled. The machine that run
+happened on had no GCP credentials, so a cluster of the shape section 1
+describes could not be created for it.
+
+So: a real apiserver, kubelet, containerd and CNI ran these manifests
+unmodified, and everything in them that is about kontur was exercised for
+real. Nothing GKE-specific was -- `--enable-nested-virtualization`, the
+COS node image, GKE's device cgroup and an Artifact Registry pull all
+still rest on the pass above, which is why that pass's findings are kept
+above in full rather than folded into this one.
+
+- Both manifests boot: `gke-pod-example.yaml` reached a guest login
+  prompt in `kubectl logs`, and `gke-pod-exec-example.yaml` ran its
+  `netshim` init container to completion and then its VM container, with
+  `kubectl exec ... -c web -- kontur exec -- uname -a` answering about 8s
+  after `kubectl apply`.
+- **`kubectl exec ... -- kontur exec` works on the `netshim`-less pod
+  too**, whose guest has no interface but `lo`. Exec is vsock now, not
+  SSH over the control link, so section 4 above no longer says otherwise
+  -- and `KONTUR_EXEC_ADDR`, which the code stopped reading when the SSH
+  transport went, is gone from `gke-pod-exec-example.yaml`,
+  `pod-example.yaml` and the static-kubelet manifest.
+- **Neither manifest had hotplug headroom**, which made the main README's
+  Flow 3 `kontur resize` line a no-op on either of them: `-memory-mb=1024`
+  exited 0 and moved nothing (it was below the boot size), `-cpus=4` came
+  back 500 "Requested vCPUs exceed maximum". Both now set `CHV_CPUS_MAX`
+  and `CHV_MEMORY_MAX_MB` above their boot sizes, and pod `limits` sized
+  for the ceilings; `kontur resize -memory-mb=2048 -cpus=4` then took the
+  running guest from 1000828 kB to 2049404 kB of `MemTotal` and added
+  `cpu2`/`cpu3`.
+- **The guest holds the pod's IP, but pod-to-pod traffic did not work**
+  on this cluster's `ptp` CNI: another pod could not reach the guest's
+  nginx on the pod IP (the node could, `200`), and the guest could not
+  reach another pod's IP either, while its gateway, the node and a
+  ClusterIP were all fine. The main README's "Container networking"
+  known gaps explains why -- `ip=` carries a netmask, `ptp` deliberately
+  makes nothing on-link, and the CNI's own route is what the splice
+  drops. GKE's node CNI is `ptp`-based too, so this is the first thing
+  to measure on a real GKE cluster; nothing here shows whether it bites
+  there.
+- **`CHV_SETUP_SCRIPT` in a pod spec, booted rather than assumed**: its
+  output appears in `kubectl logs <pod> -c web`, the file it wrote was
+  there afterwards, the VM stayed up, and a script exiting non-zero
+  failed the container (pod `Failed`) instead.
+- Flow 4's copy pipelines through `kubectl exec -i`, in the `kontur
+  exec` shape they had at the time (`kontur cp` landed after that run and
+  has not been through `kubectl exec` on a cluster), round-trip a 100KB
+  random binary byte for byte in both directions, extract a `tar` of a
+  directory in the guest, and keep stderr separate from stdout with no
+  CRLF rewriting -- none of the pty-era caveats in that flow's table
+  apply to a stock guest any more.
+- Flow 2's GKE half end to end: a `konturctl guest build` image built
+  off-cluster, named in the manifest with nothing else changed,
+  `systemctl is-active nginx` answering `active` in the pod. `kontur
+  exec` starts working about 3s before the guest's own units finish
+  starting (47s to first exec, 50s to `active` from `kubectl apply`), so
+  that check wants a retry rather than a single shot.
+- `kubectl delete pod --wait` returned in about 6s, well inside
+  `terminationGracePeriodSeconds: 40`.

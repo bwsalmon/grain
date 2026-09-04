@@ -1,17 +1,21 @@
 // Command kontur is the container-facing binary for kontur: it either
 // boots a single cloud-hypervisor VM as PID 1 of a container ("run", the
-// default), sets up pod-local networking as a Kubernetes init container
-// ("netshim"), blocks forever ("sleep", used by -backend docker to hold
+// default), splices that VM onto the sandbox's own network segment as a
+// Kubernetes init container ("netshim"), blocks forever ("sleep", used by -backend docker to hold
 // a network namespace open in place of a pod sandbox -- see
 // internal/dockervm), runs a command inside the VM guest over SSH
-// ("exec", see internal/guestexec), or live-resizes an already-running
-// VM's memory and/or vCPU count via cloud-hypervisor's API ("resize",
-// see internal/hypervisor's APIClient.Resize/ResizeCPUs) -- the latter
-// two meant to be invoked as `kubectl exec`'s own command, so they
-// reach the guest/VMM of the already-running container rather than this
-// otherwise-empty one.
-// All five modes live in the same binary and the same OCI image -- which,
-// since internal/netshim talks to the kernel directly via netlink/nftables
+// ("exec", see internal/guestexec), copies a file or directory in or out
+// of that guest over the same session ("cp", see internal/guestcp),
+// live-resizes an already-running VM's memory and/or vCPU count via
+// cloud-hypervisor's API ("resize", see internal/hypervisor's
+// APIClient.Resize/ResizeCPUs), or reports whether the guest is up yet
+// and nothing else ("ready", see runReady and internal/guestexec's
+// Ready) -- the last four meant to be invoked as `kubectl exec`'s own
+// command, so they reach the guest/VMM of the already-running container
+// rather than this otherwise-empty one, and "ready" also as that
+// container's own readiness probe.
+// All seven modes live in the same binary and the same OCI image -- which,
+// since internal/netshim talks to the kernel directly via netlink
 // rather than exec'ing external CLIs, ships from "scratch" with no shell
 // or coreutils of its own, so "sleep" exists here rather than relying on
 // one being present in the image -- invoked with different args per role.
@@ -26,7 +30,7 @@
 // present in the container by name, never through the mode dispatch
 // below, so this is the only way for a plain sh/bash invocation (as
 // opposed to one that already knows to run "kontur exec") to end up
-// reaching the guest at all. main tells these two apart from the five
+// reaching the guest at all. main tells these two apart from the seven
 // real modes by argv[0] rather than an argument, since that's the only
 // thing docker/kubectl's own exec machinery lets a container control
 // about how it's invoked. See ShellCommandLine for exactly which
@@ -51,8 +55,8 @@ import (
 	"time"
 
 	"github.com/bwsalmon/kontur/internal/config"
+	"github.com/bwsalmon/kontur/internal/guestcp"
 	"github.com/bwsalmon/kontur/internal/guestexec"
-	"github.com/bwsalmon/kontur/internal/guestkey"
 	"github.com/bwsalmon/kontur/internal/hypervisor"
 	"github.com/bwsalmon/kontur/internal/memagent"
 	"github.com/bwsalmon/kontur/internal/netshim"
@@ -86,9 +90,19 @@ func main() {
 		if err := runExec(os.Args[2:]); err != nil {
 			log.Fatalf("%v", err)
 		}
+	case "cp":
+		log.SetPrefix("kontur: cp: ")
+		if err := runCp(os.Args[2:]); err != nil {
+			log.Fatalf("%v", err)
+		}
 	case "resize":
 		log.SetPrefix("kontur: resize: ")
 		if err := runResize(os.Args[2:]); err != nil {
+			log.Fatalf("%v", err)
+		}
+	case "ready":
+		log.SetPrefix("kontur: ready: ")
+		if err := runReady(os.Args[2:]); err != nil {
 			log.Fatalf("%v", err)
 		}
 	case "shell":
@@ -107,7 +121,7 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 		<-sigCh
 	default:
-		log.Fatalf("kontur: unknown mode %q (want \"run\", \"netshim\", \"exec\", \"resize\" or \"sleep\")", mode)
+		log.Fatalf("kontur: unknown mode %q (want \"run\", \"netshim\", \"exec\", \"cp\", \"resize\", \"ready\" or \"sleep\")", mode)
 	}
 }
 
@@ -119,6 +133,47 @@ func runVM() error {
 	cfg, err := config.FromEnv()
 	if err != nil {
 		return err
+	}
+
+	// Whether this container already has a VM in it is settled before
+	// anything else: both sockets a boot has to clear (see
+	// hypervisor.RemoveStaleSocket) belong to a VM that is still running
+	// if anything answers on them, and so does the disk everything below
+	// is about to write to. A second "kontur run" -- including a bare
+	// "kontur", whose default mode this is -- stops here without having
+	// touched either.
+	if cfg.VsockSocket != "" {
+		// cloud-hypervisor creates the vsock socket itself, but not the
+		// directory it sits in, and refuses to start if that is missing
+		// -- which reads as a hypervisor failure rather than a missing
+		// mkdir.
+		if err := os.MkdirAll(filepath.Dir(cfg.VsockSocket), 0o755); err != nil {
+			return fmt.Errorf("preparing the directory for the guest's vsock socket: %w", err)
+		}
+		if err := hypervisor.RemoveStaleSocket(cfg.VsockSocket, "the guest's vsock socket"); err != nil {
+			return err
+		}
+	}
+	if err := hypervisor.RemoveStaleSocket(cfg.APISocket, "cloud-hypervisor's API socket"); err != nil {
+		return err
+	}
+
+	// A resumed VM's disk has to be the one its snapshotted memory was
+	// taken against, so the overlay saved inside the snapshot goes back
+	// first -- before PrepareOverlay below, which then reuses it instead
+	// of creating an empty overlay from the base image and resuming the
+	// guest onto a disk that has silently rolled back underneath it.
+	// See hypervisor.RestoreDiskOverlay.
+	if hypervisor.SnapshotExists(cfg.SnapshotPath) && cfg.DiskMode == config.DiskModeOverlay {
+		restored, err := hypervisor.RestoreDiskOverlay(cfg.SnapshotPath, cfg.OverlayPath)
+		if err != nil {
+			return err
+		}
+		if restored {
+			log.Printf("restored the guest's disk overlay from the snapshot at %s", cfg.SnapshotPath)
+		} else {
+			log.Printf("warning: the snapshot at %s carries no disk overlay, so the guest resumes onto whatever disk this container has; if that is not the disk the snapshot was taken against, expect the guest to find files it believes in missing", cfg.SnapshotPath)
+		}
 	}
 
 	// Before anything boots: in the default disk mode the guest writes
@@ -133,12 +188,8 @@ func runVM() error {
 		log.Printf("writable disk sized to %d MiB; the guest grows its own filesystem into it", cfg.DiskSizeMB)
 	}
 
-	if err := ensureGuestKey(&cfg, guestexec.DefaultKeyPath); err != nil {
-		return err
-	}
-
-	if netshim.FlatEnabled() {
-		if err := applyFlatNet(&cfg); err != nil {
+	if netshim.Enabled() {
+		if err := applyNetshimNet(&cfg); err != nil {
 			return err
 		}
 	}
@@ -186,81 +237,6 @@ func runVM() error {
 	return err
 }
 
-// ensureGuestKey makes sure a keypair "kontur exec" can authenticate with
-// exists for the guest this run is about to boot, and that the guest will
-// authorize it.
-//
-// On a fresh boot that means generating one and appending its public half
-// to the kernel command line, which the guest installs before starting
-// sshd (deploy/guest-image's kontur-authorized-key). The key lives only
-// in this container, only for this guest's boot -- see internal/guestkey
-// for why that replaced a keypair baked into the image.
-//
-// A restore is the exception, and it is not a small one. BuildArgs passes
-// no command line at all when resuming from a snapshot: cloud-hypervisor
-// replays the entire machine from the snapshot's own config.json, and the
-// guest never boots a kernel, so nothing would read a freshly generated
-// key. Its authorized_keys still holds whatever the boot that was
-// suspended installed. Generating a new key here would therefore not
-// "rotate" anything -- it would lock this container out of the guest it
-// just resumed. So a restore reuses that boot's key instead.
-//
-// Which is why the key is also saved beside the snapshot whenever one is
-// configured: the container's own writable layer does not survive being
-// recreated, and a snapshot exists precisely to be resumed by a later
-// container than the one that took it.
-func ensureGuestKey(cfg *config.Config, keyPath string) error {
-	saved := savedKeyPath(cfg.SnapshotPath)
-
-	if hypervisor.SnapshotExists(cfg.SnapshotPath) {
-		if _, err := os.Stat(keyPath); err == nil {
-			return nil
-		}
-		if err := copyKey(saved, keyPath); err != nil {
-			return fmt.Errorf("recovering the resumed guest's exec key from %s: %w", saved, err)
-		}
-		log.Printf("resuming from %s: reusing the exec key that boot installed", cfg.SnapshotPath)
-		return nil
-	}
-
-	authorized, err := guestkey.Generate(keyPath)
-	if err != nil {
-		return fmt.Errorf("generating this boot's guest exec key: %w", err)
-	}
-	cfg.Cmdline = guestkey.WithParams(cfg.Cmdline, authorized, guestexec.UserFromEnv())
-
-	if saved != "" {
-		if err := copyKey(keyPath, saved); err != nil {
-			return fmt.Errorf("saving the exec key for a later resume: %w", err)
-		}
-	}
-	return nil
-}
-
-// savedKeyPath returns where this VM's exec key is kept so that a
-// container recreated around the same snapshot can still reach the guest,
-// or "" when no snapshot is configured and the question cannot arise.
-func savedKeyPath(snapshotPath string) string {
-	if snapshotPath == "" {
-		return ""
-	}
-	return filepath.Join(filepath.Dir(snapshotPath), "exec_id_ed25519")
-}
-
-func copyKey(src, dst string) error {
-	if src == "" {
-		return fmt.Errorf("no snapshot directory to read it from")
-	}
-	key, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, key, 0o600)
-}
-
 // startMemAgent starts internal/memagent's listener in the background so
 // the guest-side agent baked into the disk image (see
 // deploy/guest-image's kontur-mem-agent) can ask this already-running VM
@@ -288,8 +264,9 @@ func startMemAgent(ctx context.Context, cfg config.Config) {
 	}()
 }
 
-// runSetupScript runs cfg.SetupScript once inside the guest over SSH
-// (see internal/guestexec, the same machinery "kontur exec" uses below).
+// runSetupScript runs cfg.SetupScript once inside the guest over its
+// vsock device (see internal/guestexec, the same machinery "kontur exec"
+// uses below).
 // If cfg.SnapshotPath is set, it then -- once the script exits zero --
 // suspends the VM to it (see hypervisor.Runner.Suspend) so a future
 // kontur run resumes this exact post-setup state instead of booting
@@ -324,21 +301,126 @@ func runSetupScript(ctx context.Context, cfg config.Config, runner *hypervisor.R
 	return nil
 }
 
-// runExec connects to the VM guest over SSH and runs args as a command
-// there (or, given none, an interactive login shell), proxying
-// stdin/stdout/stderr and, for a TTY, window resizes -- see
-// internal/guestexec. Meant to be invoked as `kubectl exec`'s own
-// command (e.g. `kubectl exec -it <pod> -c <container> -- kontur exec --
-// <command>`), since the container itself ships no shell of its own to
-// exec into (see the "final" stage of the Dockerfile).
+// runExec connects to the VM guest and runs args as a command there (or,
+// given none, an interactive login shell), proxying stdin/stdout/stderr
+// and, for a TTY, window resizes -- see internal/guestexec. Meant to be
+// invoked as `kubectl exec`'s own command (e.g. `kubectl exec -it <pod>
+// -c <container> -- kontur exec -- <command>`), since the container
+// itself ships no shell of its own to exec into (see the "final" stage
+// of the Dockerfile).
+//
+// -w and -e (see guestexec.ParseArgs) are the two things about the
+// command that used to have to be written into the command line itself:
+// a working directory as a "cd ... &&" prefix, a variable as an "export"
+// in front of it, both quoted correctly by the caller.
 func runExec(args []string) error {
-	if len(args) > 0 && args[0] == "--" {
-		args = args[1:]
+	opts, err := guestexec.ParseArgs(args)
+	if errors.Is(err, flag.ErrHelp) {
+		// "kontur exec -h" asked a question rather than got something
+		// wrong, so it answers on stdout and exits zero -- the same as
+		// "kontur cp -h".
+		fmt.Println(guestexec.Usage)
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	return runGuestSession(func(ctx context.Context, cfg guestexec.Config) (int, error) {
-		return guestexec.Run(ctx, cfg, args, os.Stdin, os.Stdout, os.Stderr)
+		// Per command rather than per container, which is why these come
+		// from flags and not from cfg's own environment variables.
+		cfg.Dir, cfg.Env = opts.Workdir, opts.Env
+		return guestexec.Run(ctx, cfg, opts.Command, os.Stdin, os.Stdout, os.Stderr)
 	})
+}
+
+// runReady answers one question about this container's own VM -- is the
+// guest up? -- with an exit status and nothing else, so that a caller
+// stops needing a poll loop around "kontur exec -- true" of its own.
+//
+// Being a mode of the same binary in the same container, it is usable as
+// a container readiness probe with nothing extra in the image:
+//
+//	readinessProbe:
+//	  exec:
+//	    command: ["kontur", "ready", "-timeout", "0"]
+//
+// which is what makes "kubectl wait --for=condition=Ready" report on the
+// guest rather than on the container wrapping it (see
+// internal/staticpod's rendered manifest, which sets exactly that). The
+// "-timeout 0" is a single attempt: the kubelet retries on its own
+// schedule, and a probe that did its own retrying would only be racing
+// it.
+//
+// -timeout defaults to whatever KONTUR_EXEC_CONNECT_TIMEOUT would give a
+// session (30s if unset), so a "kontur ready" with no flags waits about
+// as long as a "kontur exec" into a booting guest would.
+//
+// What being ready means -- kontur-agent answers a trivial command, and
+// nothing about the workload inside the guest -- is guestexec.Ready's
+// doc comment, and is a deliberately smaller claim than a caller
+// eventually wants.
+func runReady(args []string) error {
+	cfg, err := guestexec.FromEnv()
+	if err != nil {
+		return err
+	}
+
+	fs := flag.NewFlagSet("kontur ready", flag.ContinueOnError)
+	timeout := fs.Duration("timeout", cfg.ConnectTimeout, "how long to keep probing the guest before giving up; 0 makes it a single attempt, which is what a readiness probe wants")
+	if err := fs.Parse(args); err != nil {
+		// "kontur ready -h" asked a question and Parse has already
+		// answered it with the usage above, so it exits zero -- the same
+		// as "kontur cp -h" and "kontur resize -h".
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if *timeout < 0 {
+		return fmt.Errorf("-timeout must not be negative, got %s", *timeout)
+	}
+	cfg.ConnectTimeout = *timeout
+
+	ctx, cancel := signalledContext()
+	defer cancel()
+	// Silent on success: the exit status is the whole answer, and a probe
+	// that printed on every success would fill a kubelet's logs with it.
+	return guestexec.Ready(ctx, cfg)
+}
+
+// runCp copies a file or directory between this container's own
+// stdin/stdout and the guest's filesystem, over the same session "exec"
+// above uses -- see internal/guestcp. Meant to be invoked the same way,
+// with the caller's own redirection supplying or receiving the stream:
+//
+//	docker exec -i kontur-vm-web kontur cp - /srv/app.tar < app.tar
+//	docker exec    kontur-vm-web kontur cp /srv/app.tar - > app.tar
+//
+// Unlike runExec and runShell this does not exit with the guest command's
+// status: a copy either happened or it did not, so what the guest's shell
+// exited with is part of the error message rather than something to hand
+// back as this process's own answer.
+func runCp(args []string) error {
+	opts, err := guestcp.ParseArgs(args)
+	if errors.Is(err, flag.ErrHelp) {
+		// "kontur cp -h" asked a question rather than got something
+		// wrong, so it answers on stdout and exits zero instead of
+		// arriving as a log line prefixed "kontur: cp:".
+		fmt.Println(guestcp.Usage)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	cfg, err := guestexec.FromEnv()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := signalledContext()
+	defer cancel()
+	return guestcp.Copy(ctx, cfg, opts, os.Stdin, os.Stdout, os.Stderr)
 }
 
 // runResize live-resizes this container's own already-running VM's
@@ -364,9 +446,22 @@ func runResize(args []string) error {
 	cpus := fs.Int("cpus", 0, "desired vCPU count")
 	timeout := fs.Duration("timeout", 10*time.Second, "how long to wait for cloud-hypervisor's API to respond")
 	if err := fs.Parse(args); err != nil {
+		// "kontur resize -h" asked a question and Parse has already
+		// answered it with the usage above, so it exits zero rather
+		// than adding a "flag: help requested" line to it -- the same
+		// as "kontur cp -h".
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
-	if *memoryMB <= 0 && *cpus <= 0 {
+	// A negative size is a typo, not a request to leave that half alone:
+	// saying "required" to someone who did pass -memory-mb sends them
+	// looking in the wrong place.
+	if *memoryMB < 0 || *cpus < 0 {
+		return fmt.Errorf("-memory-mb and -cpus must be positive, got -memory-mb=%d -cpus=%d", *memoryMB, *cpus)
+	}
+	if *memoryMB == 0 && *cpus == 0 {
 		return fmt.Errorf("at least one of -memory-mb or -cpus is required")
 	}
 
@@ -418,16 +513,8 @@ func runGuestSession(runSession func(ctx context.Context, cfg guestexec.Config) 
 		return err
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := signalledContext()
 	defer cancel()
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		if sig, ok := <-sigCh; ok {
-			log.Printf("received %s, closing guest session", sig)
-			cancel()
-		}
-	}()
 
 	code, err := runSession(ctx, cfg)
 	if err != nil {
@@ -437,34 +524,45 @@ func runGuestSession(runSession func(ctx context.Context, cfg guestexec.Config) 
 	return nil
 }
 
-// runNetshim sets up the shared-IP network shim for the VM containers that
-// follow it in the same pod, exactly as the standalone netshim binary
-// used to.
+// signalledContext returns a context that SIGTERM/SIGINT cancels, which
+// is what tears a guest session down the same way those signals turn
+// into a VM shutdown in runVM. Shared by every mode that holds a session
+// open (exec, the sh/bash shims, cp), since a copy interrupted with ^C
+// has to end the guest's own command too rather than leave it writing
+// into a stream nobody is reading.
+func signalledContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		if sig, ok := <-sigCh; ok {
+			log.Printf("received %s, closing guest session", sig)
+			cancel()
+		}
+	}()
+	return ctx, cancel
+}
+
+// runNetshim splices this namespace's single VM onto the segment the
+// container runtime put the sandbox on, for the VM container that
+// follows it, exactly as the standalone netshim binary used to.
 func runNetshim() error {
 	cfg, err := netshim.FromEnv()
 	if err != nil {
 		return err
 	}
 
-	if cfg.Mode == netshim.ModeFlat {
-		if err := netshim.SetupFlat(cfg); err != nil {
-			return err
-		}
-		log.Printf("network shim ready: %s spliced onto %s", cfg.VMs[0].TapName(), cfg.ExternalIface)
-		return nil
-	}
-
 	if err := netshim.Setup(cfg); err != nil {
 		return err
 	}
 
-	log.Printf("network shim ready: bridge %s (%s), %d VM(s)", cfg.Bridge, cfg.BridgeNet, len(cfg.VMs))
+	log.Printf("network shim ready: %s spliced onto %s", cfg.TapName(), cfg.ExternalIface)
 	return nil
 }
 
-// applyFlatNet fills in the guest configuration a flat-mode VM cannot be
-// told in advance: the address, MAC and MTU the container runtime chose
-// for this network namespace, which are only knowable once the sandbox
+// applyNetshimNet fills in the guest configuration the VM cannot be told
+// in advance: the address, MAC and MTU the container runtime chose for
+// this network namespace, which are only knowable once the sandbox
 // exists.
 //
 // It is deliberately done here, from inside the namespace, rather than
@@ -475,8 +573,8 @@ func runNetshim() error {
 // no second copy of the identity to drift out of date.
 //
 // This relies on netshim having left that interface addressed, which
-// SetupFlat documents it does.
-func applyFlatNet(cfg *config.Config) error {
+// netshim.Setup documents it does.
+func applyNetshimNet(cfg *config.Config) error {
 	ncfg, err := netshim.FromEnv()
 	if err != nil {
 		return err
@@ -486,14 +584,28 @@ func applyFlatNet(cfg *config.Config) error {
 		return err
 	}
 
-	guest := netshim.FlatGuestConfig(ncfg, id)
+	guest := netshim.GuestConfig(ncfg, id)
 	cfg.Nets = guest.Nets
-	cfg.Cmdline = netshim.WithIPParam(cfg.Cmdline, guest.IPParam)
 
-	log.Printf("flat mode: guest takes over %s as %s (mac %s, mtu %d)",
+	cmdline := netshim.WithGuestParams(cfg.Cmdline, guest)
+	if cmdline == cfg.Cmdline {
+		log.Printf("CHV_CMDLINE configures an interface itself, so the identity discovered on %s is not applied to it", id.Iface)
+	}
+	cfg.Cmdline = cmdline
+
+	log.Printf("guest takes over %s as %s (mac %s, mtu %d)",
 		id.Iface, id.IP, id.MAC, id.MTU)
+	// The routes are what an address and a netmask cannot say: on a
+	// point-to-point CNI the subnet is deliberately not on-link, and a
+	// guest that never hears about it can reach its gateway and nothing
+	// else on the segment. Logged in full because it is the one part of
+	// the identity whose absence looks like a working guest.
+	if guest.RouteParam != "" {
+		log.Printf("guest also gets the %d route(s) %s carries: %s",
+			len(id.Routes), id.Iface, guest.RouteParam)
+	}
 	if guest.ControlIP != "" {
-		log.Printf("flat mode: control link expects the guest at %s on its second NIC", guest.ControlIP)
+		log.Printf("control link expects the guest at %s on its second NIC", guest.ControlIP)
 	}
 	return nil
 }
