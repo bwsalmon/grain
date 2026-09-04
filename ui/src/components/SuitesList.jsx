@@ -83,6 +83,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
       {showNew && (
         <SuiteOverlay
           templates={templates}
+          repoOptions={repoOptions}
           config={config}
           onClose={() => setShowNew(false)}
           onSaved={onRefresh}
@@ -94,6 +95,7 @@ export default function SuitesList({ suites, suiteRuns, templates = [], config, 
         <SuiteOverlay
           suite={editing}
           templates={templates}
+          repoOptions={repoOptions}
           config={config}
           onClose={() => onOpenSuite(null)}
           onSaved={onRefresh}

@@ -184,7 +184,36 @@ describe("NewTaskOverlay", () => {
     expect(payload.attachments).toEqual([upload]);
   });
 
-  it("adds depends-on tasks via the picker and parses read-only repos, and includes checked capabilities", async () => {
+  // grain/task-241: read-only repos are picked the way dependencies are,
+  // over the same repo list the target-repo dropdown offers -- a repo
+  // this deployment already works with is a click rather than something
+  // to spell out from memory.
+  it("picks read-only repos from the repos this deployment already knows", async () => {
+    const config = { targetRepos: ["acme/widgets", "acme/shared-lib"] };
+    const tasks = [{ id: "12", title: "Fix the login bug", repo: "other/tooling" }];
+    const user = userEvent.setup();
+    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+
+    await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
+    await user.click(screen.getByLabelText(/No repo/));
+
+    const readsInput = screen.getByLabelText(/Read-only repos/);
+    await user.click(readsInput);
+    await user.click(await screen.findByRole("menuitem", { name: "acme/shared-lib" }));
+    await user.click(readsInput);
+    await user.click(await screen.findByRole("menuitem", { name: "other/tooling" }));
+    // A repo neither the deployment nor any task has named yet still has
+    // to be reachable, the gap RepoField's own "Other…" covers.
+    await user.type(readsInput, "someone/brand-new");
+    await user.click(await screen.findByRole("menuitem", { name: "Add someone/brand-new" }));
+
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.reads).toEqual(["acme/shared-lib", "other/tooling", "someone/brand-new"]);
+  });
+
+  it("adds depends-on tasks via the picker and includes checked capabilities", async () => {
     const config = { capabilities: [{ id: "web-search", name: "Web search" }, { id: "shell", name: "Shell" }] };
     const tasks = [
       { id: "12", title: "Fix the login bug" },
@@ -202,7 +231,6 @@ describe("NewTaskOverlay", () => {
     await user.type(dependsOnInput, "15");
     await user.click(await screen.findByText("Add dark mode"));
 
-    await user.type(screen.getByLabelText(/Read-only repos/), "owner/shared-lib, owner/schema ");
     await user.click(screen.getByLabelText("Capabilities"));
     await user.click(await screen.findByRole("option", { name: "Web search" }));
     await user.keyboard("{Escape}");
@@ -210,7 +238,6 @@ describe("NewTaskOverlay", () => {
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
     expect(payload.dependsOn).toEqual(["12", "15"]);
-    expect(payload.reads).toEqual(["owner/shared-lib", "owner/schema"]);
     expect(payload.capabilities).toEqual(["web-search"]);
   });
 

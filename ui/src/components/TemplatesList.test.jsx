@@ -154,6 +154,26 @@ describe("TemplatesList", () => {
     expect(screen.queryByRole("heading", { name: "Edit template" })).not.toBeInTheDocument();
   });
 
+  // grain/task-241: read-only repos are picked from the repos this
+  // deployment already knows about, and the ones a template carries show
+  // as chips rather than as a comma-separated string to edit by hand.
+  it("shows a template's read-only repos as chips and picks more from the known repos", async () => {
+    api.mockResolvedValueOnce({});
+    const withReads = { ...template, reads: ["owner/schema"] };
+    const config = { targetRepos: ["acme/widgets", "owner/shared-lib"] };
+    const user = userEvent.setup();
+    render(<ControlledTemplatesList templates={[withReads]} config={config} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByText("Dependency bump"));
+    expect(screen.getByTitle("Remove owner/schema")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText(/Read-only repos/));
+    await user.click(await screen.findByText("owner/shared-lib"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(JSON.parse(api.mock.lastCall[1].body).reads).toEqual(["owner/schema", "owner/shared-lib"]);
+  });
+
   it("deletes a template from its overlay after confirming", async () => {
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     api.mockResolvedValueOnce({});
