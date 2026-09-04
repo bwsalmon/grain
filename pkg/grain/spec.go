@@ -113,19 +113,41 @@ type Spec struct {
 	// and reports a terminal Phase. Zero means no bound of the grain's
 	// own.
 	//
-	// It is the only limit left here. Turns are gone: they are a
-	// framework's own flag, and Config.MaxAgentTurns' doc comment already
-	// concedes that both frameworks default to no cap and "what actually
-	// bounds a runaway run is MaxRunRuntime". Rebuilds are gone too --
-	// the controller has the whole view and decides when self-repair has
-	// stopped converging (Policy.MaxRebuilds), and two enforcement points
-	// for one rule is one more than it needs.
+	// Decided by the controller, enforced by the grain, and that split is
+	// the point rather than an inconsistency with Policy.ProvisionBudget
+	// next door. Before there is an agent, only the controller can act --
+	// a grain wedged in provisioning is precisely the one that cannot
+	// report being wedged, so its budget is enforced from outside. Once
+	// there is an agent, the grain can stop it without depending on
+	// anybody, and that is worth having: a running agent is spending
+	// money, and money should not keep leaving while a controller is
+	// down. The two budgets sit at opposite ends of the same run for that
+	// reason.
 	//
-	// This one stays despite the controller also being able to Release a
-	// grain that has overrun, for two reasons: stopping the agent is how
-	// a run ends with a Result rather than being destroyed mid-thought,
-	// and a runaway agent spends money, so it should not depend on a
-	// controller being up to notice.
+	// The controller does not also enforce it. One rule, one enforcement
+	// point -- and the concern Config.MaxRunRuntime's own doc comment
+	// names, a stuck run "tying up its share of the concurrency limit",
+	// is served anyway: the grain goes terminal, the next poll sees it,
+	// and the ordinary finish path frees the slot.
+	//
+	// It is the only limit here. Turns are a framework's own flag, and
+	// Config.MaxAgentTurns' doc comment already concedes both frameworks
+	// default to no cap and "what actually bounds a runaway run is
+	// MaxRunRuntime". Rebuilds are Policy.MaxRebuilds' alone -- the
+	// controller has the view of whether repair is converging.
+	//
+	// A stopped run reports OutcomeCancelled with the limit named, which
+	// is the vocabulary orchestrator already uses for this: run.go
+	// records a timed-out run as "cancelled" with model.RuntimeCapDetail,
+	// "the run did not fail".
+	//
+	// What it does not cover, recorded so nobody later assumes it does: a
+	// controller that dies five minutes into a two-hour budget still
+	// leaves an hour fifty-five of spending. Only a lease -- stop if
+	// nobody has polled in a while -- bounds that under *any* controller
+	// failure, and it is declined as more mechanism than the failure
+	// justifies, with a failure mode of its own in killing healthy grains
+	// over a slow controller restart.
 	MaxRuntime Duration `json:"maxRuntime,omitempty"`
 }
 

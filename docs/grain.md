@@ -399,10 +399,40 @@ Two things fell out of drawing it this way:
   and `Config.MaxAgentTurns`' doc comment already concedes both default to
   no cap and that "what actually bounds a runaway run is MaxRunRuntime".
   Rebuilds belong to `Policy.MaxRebuilds` alone — the controller has the
-  view. `maxRuntime` survives because stopping the agent is how a run ends
-  with a `Result` rather than being destroyed mid-thought, and because a
-  runaway agent spends money and should not depend on a controller being
-  up to notice.
+  view of whether repair is converging. `maxRuntime` survives, and is
+  discussed below.
+
+### Who enforces a deadline
+
+`maxRuntime` is decided by the controller and enforced by the grain, which
+looks inconsistent beside `Policy.ProvisionBudget` — the same kind of
+bound, enforced from the other side — and is not.
+
+**Before there is an agent, only the controller can act.** A grain wedged
+in provisioning is precisely the one that cannot report being wedged, so
+that budget has to be enforced from outside.
+
+**Once there is an agent, the grain can stop it without depending on
+anybody.** That is worth having on its own: a running agent is spending
+money, and money should not keep leaving while a controller is down. The
+two budgets sit at opposite ends of the same run for that reason.
+
+The controller does not also enforce it — one rule, one enforcement point.
+The concern `Config.MaxRunRuntime`'s own doc comment names, a stuck run
+"tying up its share of the concurrency limit", is served anyway: the grain
+goes terminal, the next poll sees it, and the ordinary finish path frees
+the slot. A stopped run reports `cancelled` with the limit named, which is
+what `run.go` already records for a timed-out run
+(`model.RuntimeCapDetail`, "the run did not fail").
+
+**What it does not cover**, recorded so nobody later assumes it does: a
+controller that dies five minutes into a two-hour budget still leaves an
+hour fifty-five of spending. Only a lease — the grain stopping if nobody
+has polled it in a while — bounds that under *any* controller failure, and
+it was considered and declined: more mechanism than the failure justifies,
+and with a failure mode of its own in killing healthy grains over a slow
+controller restart. Worth revisiting only if unattended controller death
+turns out to be a real operational event rather than a hypothetical one.
 
 ## The interface
 

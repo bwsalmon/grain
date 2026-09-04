@@ -183,12 +183,15 @@ gets its facts: the controller wrote the script, so it ends it with
 whatever the prompt needs read back — `git rev-parse HEAD`, a log of what
 earlier attempts pushed — and parses its own output.
 
-**`maxRuntime` is the only limit.** Turns are a framework's own flag, and
-`Config.MaxAgentTurns`' doc comment already concedes both frameworks
-default to no cap. Rebuilds are `Policy.MaxRebuilds`' alone. This one
-survives because stopping the agent ends a run with a `Result` rather than
-destroying it mid-thought, and because a runaway agent spends money and
-should not depend on a controller being up to notice.
+**`maxRuntime` is the only limit, and the grain enforces it.** Turns are a
+framework's own flag, and `Config.MaxAgentTurns`' doc comment already
+concedes both frameworks default to no cap; rebuilds are
+`Policy.MaxRebuilds`' alone. This one is decided by the controller and
+enforced by the grain because a running agent is spending money, and money
+should not keep leaving while a controller is down — see "Who enforces a
+deadline" in `docs/grain.md` for why that is the opposite side from
+`ProvisionBudget` on purpose, and for what it still does not cover. A
+stopped run reports `cancelled` with the limit named.
 
 Durations cross as strings. Go's own marshalling gives nanoseconds as an
 integer, which is correct and unreadable, and these get read by people
