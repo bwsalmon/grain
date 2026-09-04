@@ -160,3 +160,44 @@ func TestInitMigratesAnExistingDatabaseMissingAgentStartedAt(t *testing.T) {
 		t.Fatalf("RunTimings after set = (%+v, %v), want the agent start now durable", runs, err)
 	}
 }
+
+// TaskTiming carries two facts that are not moments -- whether the task
+// had a repo to push to, and whether the merge queue ever had to file a
+// fix task for it -- because pkg/metrics cannot measure the pull request
+// loop without them: the first is who was ever offered that loop, and
+// the second is the recorded form of a red build outliving its run.
+func TestTaskTimingsReadTargetAndFixTaskLink(t *testing.T) {
+	store, _, ctx := openStore(t)
+
+	// One task with a target and a fix task filed against it, one with a
+	// target and only an unrelated link, and one with no target at all.
+	red := task("a1b2", true)
+	red.Links = []model.Link{{Kind: model.LinkFixTask, Target: "f1x0"}}
+	green := task("b2c3", true)
+	green.Links = []model.Link{{Kind: model.LinkDependsOn, Target: "a1b2"}}
+	bare := task("c3d4", true)
+	bare.Target = nil
+	for _, tk := range []model.Task{red, green, bare} {
+		if err := store.PutTask(ctx, tk); err != nil {
+			t.Fatalf("putting %s: %v", tk.ID, err)
+		}
+	}
+
+	timings, err := store.TaskTimings(ctx)
+	if err != nil {
+		t.Fatalf("TaskTimings: %v", err)
+	}
+	byID := map[string]model.TaskTiming{}
+	for _, tm := range timings {
+		byID[tm.TaskID] = tm
+	}
+	if got := byID["a1b2"]; !got.Targeted || !got.FixTaskFiled {
+		t.Errorf("a1b2 = %+v, want targeted with a fix task filed", got)
+	}
+	if got := byID["b2c3"]; !got.Targeted || got.FixTaskFiled {
+		t.Errorf("b2c3 = %+v, want targeted with no fix task -- its only link is a dependency", got)
+	}
+	if got := byID["c3d4"]; got.Targeted || got.FixTaskFiled {
+		t.Errorf("c3d4 = %+v, want neither -- it has no repo to push to", got)
+	}
+}

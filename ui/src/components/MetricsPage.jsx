@@ -80,8 +80,8 @@ export function sortedOutcomes(outcomes) {
 
 // formatBytes renders a result size the way somebody sizing a truncation
 // cap reads one. Binary units, because the cap they would set is written
-// in them (mcp.maxToolResultBytes is 64 << 10), and no decimals below a
-// megabyte: the difference between 63 KB and 64 KB matters and the
+// in them (mcp.maxToolResultBytes is 16 << 10), and no decimals below a
+// megabyte: the difference between 15 KB and 16 KB matters and the
 // difference between 63.4 and 63.5 does not.
 export function formatBytes(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
@@ -216,6 +216,7 @@ export default function MetricsPage({ showError, onOpenTask }) {
   // renders at all until something recorded one.
   const tools = report?.tools;
   const checks = report?.checks;
+  const pullRequests = report?.pullRequests;
   const verdicts = sortedOutcomes(checks?.verdicts);
   const oldestTaskId = report?.backlog?.oldestQueuedTaskId;
 
@@ -440,6 +441,40 @@ export default function MetricsPage({ showError, onOpenTask }) {
                     title="How many pushes a run had made when its first passing wait returned. 1.0 is CI right first time; the distance above it is what the loop costs."
                   />
                 )}
+              </Box>
+            </>
+          )}
+
+          {pullRequests?.runs > 0 && (
+            <>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5, mt: 2.5 }}>
+                Mid-run pull requests
+              </Typography>
+              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
+                A run can open its own pull request while it still has turns left to fix what the checks say. Over the{" "}
+                {pullRequests.runs} attempt{pullRequests.runs === 1 ? "" : "s"} that were offered it — a task with a
+                repo to push to, and a census recorded. The two fix-task rates are a comparison and not a rate to
+                quote: the link is on the task rather than the attempt, and a branch can go red for reasons no amount
+                of watching would have caught.
+              </Typography>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+                <Stat
+                  label="Opened one themselves"
+                  value={percent(pullRequests.adoptionRate)}
+                  sub={`${pullRequests.opened} attempt${pullRequests.opened === 1 ? "" : "s"} · ${pullRequests.calls} call${pullRequests.calls === 1 ? "" : "s"} in all`}
+                />
+                <Stat
+                  label="Fix task after, having opened one"
+                  value={percent(pullRequests.withTool.rate)}
+                  sub={`${pullRequests.withTool.fixTasks} of ${pullRequests.withTool.runs}`}
+                  title="A fix task is the merge queue cleaning up a red build the run left behind — exactly what opening the pull request early exists to prevent."
+                />
+                <Stat
+                  label="Fix task after, having not"
+                  value={percent(pullRequests.withoutTool.rate)}
+                  sub={`${pullRequests.withoutTool.fixTasks} of ${pullRequests.withoutTool.runs}`}
+                  title="The same number for the attempts that never opened their pull request — the baseline the one beside it only means anything against."
+                />
               </Box>
             </>
           )}

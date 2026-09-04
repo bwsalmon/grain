@@ -440,6 +440,12 @@ type Report struct {
 	// tools.go.
 	Tools  Tools
 	Checks Checks
+	// PullRequests is the last stretch of that same loop: whether runs
+	// take the pull request grain offers them mid-flight, and whether
+	// taking it changes how often a red build outlives the run that
+	// pushed it. Read off the same census as Tools, and empty on the same
+	// input -- see pullrequests.go.
+	PullRequests PullRequests
 }
 
 // Compute derives a Report. It reads its input and nothing else -- no
@@ -577,6 +583,7 @@ func Compute(in Input) Report {
 	// --- the inside of a run ------------------------------------------
 	rep.Tools = toolsOf(w, in.Runs, in.ToolUses)
 	rep.Checks = checksOf(w, in.Runs, in.CheckWaits)
+	rep.PullRequests = pullRequestsOf(w, in.Tasks, in.Runs, in.ToolUses)
 
 	// --- the daemon's own tick ----------------------------------------
 	rep.Cycles = cyclesOf(w, in.Cycles)

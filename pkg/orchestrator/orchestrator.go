@@ -339,14 +339,15 @@ type Config struct {
 	// handed an in-process registry. See selfrepair.Confirm's own doc
 	// comment for what closing that gap would take.
 	//
-	// self-debug is the one capability that no longer depends on this,
-	// and it is worth reading why: its tools are read-only, so they need
-	// no route back to a live run's own conversation, and a forked
-	// "grain mcpserver" can therefore build them for itself out of a
-	// flag (agent.SelfDebugArgs) and a REST client of the daemon. What
-	// travels is the fact of the grant, not the tools --
-	// agent.RunConfig.SelfDebug, set by RunDispatch. selfrepair cannot
-	// follow it: its one tool blocks on a human reply in the task's own
+	// self-debug and bootstrap-playbooks are the capabilities that no
+	// longer depend on this, and it is worth reading why: their tools are
+	// read-only, so they need no route back to a live run's own
+	// conversation, and a forked "grain mcpserver" can therefore build
+	// them for itself out of an argument (agent.GrantArgs) plus, for
+	// self-debug's task half, a REST client of the daemon. What travels
+	// is the name of the grant, not the tools --
+	// agent.RunConfig.Grants, set by RunDispatch. selfrepair cannot
+	// follow them: its one tool blocks on a human reply in the task's own
 	// chat, which is a store handle that process deliberately lacks.
 	GrantTools map[string]func(store *model.Store, taskID string) []mcp.Tool
 	// GrainSourceDir is the checkout of grain's own source a self-debug
