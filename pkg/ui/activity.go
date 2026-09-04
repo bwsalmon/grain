@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -115,8 +114,7 @@ func normalizeActivity(note string) string {
 // with a task to name can record one.
 func (s *Server) handleSetTaskActivity(w http.ResponseWriter, r *http.Request) {
 	var req activityRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !readJSON(w, r, &req) {
 		return
 	}
 	activity, err := s.tasks.SetTaskActivity(r.Context(), r.PathValue("id"), req.Note)
