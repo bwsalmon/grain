@@ -88,11 +88,14 @@ type PutQualificationPlanRequest struct {
 // PutQualificationPlan validates req -- every item naming a template
 // that actually exists, a positive repeat count, and a dependency graph
 // with no cycle (model.QualificationPlan.Validate) -- before replacing
-// repo's plan wholesale. It does not check a template against repo: a
-// template carries no target of its own (model.Template's own doc
-// comment on why), so any template may schedule against any repo's plan
-// -- CreateQualificationRun always targets repo and the candidate's own
-// branch, whatever the template itself says.
+// repo's plan wholesale. An unbound template may schedule against any
+// repo's plan, which is the ordinary case; a template bound to a repo
+// of its own (model.Template.Target) may only schedule against that
+// repo's, since CreateQualificationRun always targets repo and the
+// candidate's own branch and so could not honour a binding pointing
+// somewhere else. Rejected here, when a human is saving the plan,
+// rather than left to fail the run days later when a candidate is
+// finally cut.
 func (c *Client) PutQualificationPlan(ctx context.Context, repo model.RepoRef, req PutQualificationPlanRequest) (QualificationPlan, error) {
 	items := make([]model.QualificationItem, 0, len(req.Items))
 	for _, it := range req.Items {
@@ -105,6 +108,10 @@ func (c *Client) PutQualificationPlan(ctx context.Context, repo model.RepoRef, r
 		}
 		if tmpl == nil {
 			return QualificationPlan{}, validationErrorf("unknown template %s", it.TemplateID)
+		}
+		if tmpl.Target != nil && *tmpl.Target != repo {
+			return QualificationPlan{}, validationErrorf(
+				"template %s is bound to %s, so it cannot qualify %s", tmpl.Name, tmpl.Target, repo)
 		}
 		repeat := it.Repeat
 		if repeat < 1 {

@@ -320,6 +320,60 @@ func TestCreateQualificationRunFailsWhenATemplateIsMissing(t *testing.T) {
 	}
 }
 
+// TestCreateQualificationRunFailsWhenATemplateIsBoundElsewhere is
+// CreateQualificationRun's own backstop for grain/task-285: a run's
+// tasks always target the candidate's repo and branch, so a template
+// bound to another repo is one this run cannot honour -- it fails the
+// run outright rather than quietly aiming the template somewhere its
+// binding says it does not belong. ui.Client.PutQualificationPlan
+// refuses to save such a plan in the first place; this catches a
+// template bound after the plan was saved.
+func TestCreateQualificationRunFailsWhenATemplateIsBoundElsewhere(t *testing.T) {
+	store, _, ctx := openStore(t)
+	bound := buildTemplate("template-build")
+	bound.Target = &gadgets
+	if err := store.PutTemplate(ctx, bound); err != nil {
+		t.Fatalf("put build template: %v", err)
+	}
+	candidate := cutTestCandidate(t, ctx, store)
+	plan := model.QualificationPlan{
+		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-build", Repeat: 1}},
+	}
+	if _, err := store.CreateQualificationRun(ctx, candidate, plan, now); err == nil {
+		t.Fatal("want an error when a plan's template is bound to another repo")
+	}
+}
+
+// A template bound to the repo being qualified is usable, and the
+// candidate's own branch still decides what its tasks run against --
+// the binding's branch never moves a qualification task.
+func TestCreateQualificationRunHonoursTheCandidateBranchOverABinding(t *testing.T) {
+	store, _, ctx := openStore(t)
+	bound := buildTemplate("template-build")
+	bound.Target, bound.Base = &widgets, "some-other-branch"
+	if err := store.PutTemplate(ctx, bound); err != nil {
+		t.Fatalf("put build template: %v", err)
+	}
+	candidate := cutTestCandidate(t, ctx, store)
+	plan := model.QualificationPlan{
+		Repo: widgets, Items: []model.QualificationItem{{TemplateID: "template-build", Repeat: 1}},
+	}
+	run, err := store.CreateQualificationRun(ctx, candidate, plan, now)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	for _, ts := range run.Tasks {
+		task, err := store.GetTask(ctx, ts.TaskID)
+		if err != nil || task == nil {
+			t.Fatalf("get task %s: (%+v, %v)", ts.TaskID, task, err)
+		}
+		if task.Target == nil || *task.Target != widgets || task.Base != candidate.Branch {
+			t.Errorf("task %s: target/base = %v/%q, want %s/%q",
+				ts.TaskID, task.Target, task.Base, widgets, candidate.Branch)
+		}
+	}
+}
+
 func TestCreateQualificationRunLeavesTasksUnapprovedWhenPlanRequiresApproval(t *testing.T) {
 	store, _, ctx := openStore(t)
 	if err := store.PutTemplate(ctx, buildTemplate("template-build")); err != nil {

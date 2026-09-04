@@ -236,11 +236,13 @@ func (c *Client) ListSchedules(ctx context.Context) ([]Schedule, error) {
 // two task-only concerns have no home here. Recurrence is always
 // required: a schedule with no cadence cannot ever fire.
 //
-// Repo and Base are always this request's own fields, template-backed
-// or not: a template carries no target of its own (model.Template's own
-// doc comment on why), so which repo and branch this schedule fires
-// against is decided here, at the point of use, exactly as bwsalmon/
-// agents#516 asks. Repo is always required.
+// Repo and Base are this request's own fields, and required, for every
+// schedule except one fired from a template bound to a repo of its own
+// (model.Template.Target): a template is normally content with no
+// target, so which repo and branch a schedule fires against is decided
+// here, at the point of use, exactly as bwsalmon/agents#516 asks -- but
+// a bound template has already answered that, and its answer wins over
+// (and stands in for) anything given here.
 //
 // TemplateID, given, takes over
 // Title/Description/AutoMerge/Capabilities/Reads entirely
@@ -298,15 +300,22 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	if err != nil {
 		return Schedule{}, err
 	}
-	if strings.TrimSpace(req.Repo) == "" {
-		return Schedule{}, validationErrorf("repo is required")
-	}
-	target, err := model.ParseRepo(req.Repo)
-	if err != nil {
-		return Schedule{}, &ValidationError{err: err}
+	// Not required outright the way it used to be: a bound template
+	// (model.Template.Target) already names the repo every firing
+	// targets, so a schedule fired from one needs no repo of its own.
+	// Everything else still does, which the check after the template is
+	// resolved enforces.
+	var target model.RepoRef
+	if strings.TrimSpace(req.Repo) != "" {
+		parsed, err := model.ParseRepo(req.Repo)
+		if err != nil {
+			return Schedule{}, &ValidationError{err: err}
+		}
+		target = parsed
 	}
 
 	var sched model.Schedule
+	var firing *model.Template
 	var templateName, suiteName string
 	if strings.TrimSpace(req.SuiteID) != "" {
 		if strings.TrimSpace(req.TemplateID) != "" {
@@ -334,7 +343,7 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 			return Schedule{}, validationErrorf("unknown template %s", req.TemplateID)
 		}
 		sched = scheduleContentFromTemplate(*tmpl)
-		templateName = tmpl.Name
+		firing, templateName = tmpl, tmpl.Name
 	} else {
 		if strings.TrimSpace(req.Title) == "" {
 			return Schedule{}, validationErrorf("title is required")
@@ -357,6 +366,17 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	}
 	sched.Target = target
 	sched.Base = req.Base
+	if firing != nil {
+		// A bound template's own repo and branch win over whatever this
+		// request named, the same rule fireTaskSchedule applies on every
+		// firing (model.Template.FiringTarget) -- applied here as well so
+		// the schedule reads as what it will actually fire from the
+		// moment it is created, not only after it first fires.
+		sched.Target, sched.Base = firing.FiringTarget(target, req.Base)
+	}
+	if sched.Target == (model.RepoRef{}) {
+		return Schedule{}, validationErrorf("repo is required")
+	}
 
 	enabled := true
 	if req.Enabled != nil {
@@ -381,13 +401,14 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 
 // scheduleContentFromTemplate is the content half of a Schedule that a
 // template actually carries (everything but identity, recurrence,
-// timing, and Target/Base -- a template has no target of its own,
-// model.Template's own doc comment on why) copied from t --
-// CreateSchedule's and UpdateSchedule's shared way of attaching a
-// schedule to a template, and also what fireTaskSchedule itself calls
+// timing and Target/Base) copied from t -- CreateSchedule's and
+// UpdateSchedule's shared way of attaching a schedule to a template,
+// mirroring what fireTaskSchedule itself re-reads from the template
 // each time a template-backed schedule fires, so a schedule's own
 // inline copy never drifts from the template it names for longer than
-// one firing. Callers still need to set Target and Base themselves.
+// one firing. Callers still set Target and Base themselves, through
+// Template.FiringTarget: a template usually has no target of its own,
+// and a bound one is the one case where those two are content too.
 func scheduleContentFromTemplate(t model.Template) model.Schedule {
 	return model.Schedule{
 		Title:      t.Title,
@@ -405,11 +426,13 @@ func scheduleContentFromTemplate(t model.Template) model.Schedule {
 // ever coming due without losing its NextRunAt, so resuming it later
 // picks up rather than firing every occurrence that elapsed while paused.
 //
-// Repo and Base follow the plain nil-means-leave-alone rule regardless
-// of TemplateID: a template carries no target of its own
-// (model.Template's own doc comment on why), so attaching one never
-// touches this schedule's own Target/Base, and either can still be
-// edited on the same request that attaches or detaches a template.
+// Repo and Base follow the plain nil-means-leave-alone rule, and either
+// can still be edited on the same request that attaches or detaches a
+// template -- attaching an ordinary, unbound template never touches this
+// schedule's own Target/Base. Attaching one bound to a repo of its own
+// (model.Template.Target) does: a binding is what that schedule fires
+// against from then on, so it overwrites Repo and Base here rather than
+// leaving the row saying one thing and every firing doing another.
 //
 // TemplateID follows the same nil-means-leave-alone rule, with two
 // non-nil cases of its own (bwsalmon/agents#516): a non-empty id
@@ -509,6 +532,21 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 		attaching = tmpl
 	}
 
+	// firing is the template this schedule will fire from once this
+	// request lands -- the one being attached, or the one it already
+	// carries and is not detaching from. Only its binding is read below;
+	// content still comes from attaching alone, since a schedule already
+	// pointing at a template holds its own synced copy of that.
+	firing := attaching
+	if firing == nil && existing.TemplateID != nil &&
+		!(req.TemplateID != nil && strings.TrimSpace(*req.TemplateID) == "") {
+		tmpl, err := c.Store.GetTemplate(ctx, *existing.TemplateID)
+		if err != nil {
+			return Schedule{}, err
+		}
+		firing = tmpl
+	}
+
 	var target *model.RepoRef
 	if req.Repo != nil {
 		if strings.TrimSpace(*req.Repo) == "" {
@@ -586,14 +624,20 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 				s.Reads = reads
 			}
 		}
-		// Target and Base are always applied on their own, template
-		// attached or not (UpdateScheduleRequest's own doc comment on
-		// why): a template carries no target of its own.
+		// Target and Base are applied on their own, template attached or
+		// not (UpdateScheduleRequest's own doc comment on why) -- unless
+		// the template this schedule fires from is bound to a repo of
+		// its own, whose binding then wins over both what is on the row
+		// and what this request asked for, the same rule
+		// fireTaskSchedule applies on every firing.
 		if target != nil {
 			s.Target = *target
 		}
 		if req.Base != nil {
 			s.Base = *req.Base
+		}
+		if firing != nil {
+			s.Target, s.Base = firing.FiringTarget(s.Target, s.Base)
 		}
 		if recurrence != nil {
 			s.Recurrence = *recurrence

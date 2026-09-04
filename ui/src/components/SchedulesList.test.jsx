@@ -375,8 +375,8 @@ describe("SchedulesList", () => {
     await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
 
     expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
-    // Repo and base are never among a template's own content (a
-    // template carries no target of its own), so they still render.
+    // Repo and base are not among an unbound template's own content, so
+    // they still render (the bound case is the next test).
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
 
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
@@ -388,6 +388,33 @@ describe("SchedulesList", () => {
       base: "",
       recurrence: { kind: "everyNHours", everyNHours: 24 },
     });
+  });
+
+  // grain/task-285: a template bound to a repo already decides where its
+  // firings go, so the form stops asking for a repo and branch and says
+  // where this schedule will fire instead.
+  it("replaces repo/base with the binding when the chosen template is bound", async () => {
+    api.mockResolvedValueOnce({});
+    const templates = [{ id: "template-1", name: "Dependency bump", repo: "acme/widgets", base: "release" }];
+    const user = userEvent.setup();
+    render(<ControlledSchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
+    await user.click(screen.getByLabelText("Template"));
+    await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
+
+    expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Base branch/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Fires against acme\/widgets on release/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add schedule" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.templateId).toBe("template-1");
+    // Sent empty rather than guessed at here: the API fills both in from
+    // the binding (ui.CreateSchedule).
+    expect(payload.repo).toBe("");
+    expect(payload.base).toBe("");
   });
 
   it("pre-fills the template select when editing a template-backed schedule, and can detach from it", async () => {
