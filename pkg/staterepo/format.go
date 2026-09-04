@@ -26,19 +26,31 @@ package staterepo
 // adopting an existing repository, which by then would have been true.
 //
 // No commit, and no push. Format writes files into a directory and
-// stops. A push that adds a file under .github/workflows is refused
-// unless the credential making it may write workflows, which grain's
-// own installation token need not be able to do -- and a state
-// repository whose sync loop is wedged on a permission is a deployment
-// that cannot save its own settings. So the workflow is committed by
-// whoever ran the command, from a clone of their own, and grain's timer
-// never carries one.
+// stops, because it runs in a clone somebody made and has no business
+// making commits there.
+//
+// installWorkflow, at the bottom of this file, is the other half of the
+// same job and the one that runs on the deployment: Seed and every Sync
+// call it, so a repository grain was pointed at ends up with the check
+// whether or not anybody ran a command, and one whose workflow a merge
+// dropped gets it back on the next tick. It carries the risk `format`
+// was written to avoid -- a push that adds a file under
+// .github/workflows is refused unless the credential making it may
+// write workflows, and grain's own installation token need not be able
+// to -- and it carries it in the one shape where that is survivable: the
+// workflow is a commit of its own, pushed on its own, undone in full if
+// the remote refuses it. A deployment whose credential says no loses the
+// CI step and nothing else, and is told in its journal how to install
+// the file by hand.
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // DefaultCheckImage is the container the generated CI step runs
@@ -155,8 +167,15 @@ func Workflow(image string) []byte {
 
 const workflowImagePlaceholder = "@IMAGE@"
 
-const workflow = `# Written by ` + "`grain state format`" + `. Checks that grain can still load
-# this repository.
+const workflow = `# Written by grain. Checks that grain can still load this repository.
+#
+# grain writes this file whenever it is not here -- on the sync after a
+# merge dropped it, or the first sync after a deployment adopted this
+# repository -- and never rewrites one that is. So an edit to it is
+# safe: pin the image below, change the runner, add a step of your own,
+# and grain leaves what you wrote alone. To have the check run somewhere
+# else instead, put your own file here; to stop grain offering it at
+# all, set "noWorkflow": true in the deployment's state-repo.json.
 #
 # This repository is a grain deployment's database, written out as text
 # (see README.md), so a pull request against it is a change to what that
@@ -230,3 +249,202 @@ jobs:
           fi
           docker run --rm -v "$PWD:/state:ro" "$IMAGE" state check /state
 `
+
+// workflowCommitMessage is what the commit that installs the CI step
+// says. Its own commit, and not folded into the export beside it, for
+// the reason installWorkflow gives: a remote that refuses this file has
+// to be able to refuse it without taking a database export down with it.
+const workflowCommitMessage = "Add the check that runs on pull requests against this repository\n\n" +
+	"Written by grain. `grain state check` imports this repository into a\n" +
+	"throwaway database, so a change that would not load fails here rather\n" +
+	"than on the deployment. Edit it freely -- grain writes this file only\n" +
+	"when it is missing, and never over one that is already here."
+
+// workflowRefusedFile records that this host's credential was refused a
+// push carrying the workflow.
+//
+// Inside the git directory, beside grain-loaded-head and
+// grain-churn-exported and for the same reason: it is a fact about this
+// host's credential rather than about the repository, so it must not be
+// committed and must not travel to a clone on a machine whose credential
+// may be a different one.
+const workflowRefusedFile = "grain-workflow-refused"
+
+// workflowRetryInterval is how long grain leaves a credential alone
+// after it has refused the workflow once.
+//
+// Not "never again", because a permission is exactly the sort of thing
+// an operator grants the day after they read the journal line below, and
+// a grain that only ever tried once would need a restart to notice. Not
+// every thirty seconds either: the attempt costs a commit and a rejected
+// push, and repeating that on every tick would fill a deployment's
+// journal with a refusal nobody has had a chance to act on yet.
+const workflowRetryInterval = 24 * time.Hour
+
+// installWorkflow makes sure the repository carries the CI step, and
+// reports whether it committed one.
+//
+// This is what turns "grain state check exists" into "grain state check
+// runs". Seed calls it once the repository has its first commit, and
+// every Sync calls it after that, on the same terms the README is
+// rewritten on: a repository an operator adopted, or one a merged pull
+// request dropped the file out of, ends up with the workflow anyway
+// rather than only if somebody remembered.
+//
+// It writes the file only when it is missing, and there the README and
+// the workflow part company. The README is grain's own text and is
+// rewritten wholesale; this file is one an operator is entitled to own
+// -- pinning the image to the tag their deployment runs is the obvious
+// case, and running the check on their own infrastructure is another --
+// and a file grain rewrote on every tick would be a file whose editor is
+// fighting a timer. So an edit made here, or merged in through a pull
+// request, is final: grain notices there is a workflow and stops.
+//
+// Nothing at all happens without a remote. A workflow is GitHub's to
+// run, so a local-only repository has no use for one; more to the point,
+// a workflow commit sitting in a local-only history is a commit the
+// *first* push after that repository is later published would carry, and
+// that push either succeeds whole or is refused whole. Contained to a
+// deployment that already has a remote, a refusal costs one commit that
+// is undone on the spot.
+func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
+	if r.cfg.NoWorkflow || r.cfg.Remote == "" {
+		return false, nil
+	}
+	// A repository with no commits is Seed's business, and the undo below
+	// needs a commit to come back to. Seed calls this once it has made
+	// one.
+	if empty, _ := r.isEmpty(ctx); empty {
+		return false, nil
+	}
+	path := filepath.Join(r.cfg.Dir, filepath.FromSlash(WorkflowFile))
+	switch _, err := os.Stat(path); {
+	case err == nil:
+		return false, nil
+	case !os.IsNotExist(err):
+		return false, fmt.Errorf("staterepo: looking for %s in %s: %w", WorkflowFile, r.cfg.Dir, err)
+	}
+	if !r.workflowDue(ctx, r.now()) {
+		return false, nil
+	}
+	before, err := r.Head(ctx)
+	if err != nil {
+		return false, err
+	}
+	if _, err := EnsureWorkflow(r.cfg.Dir, r.cfg.CheckImage, false); err != nil {
+		return false, err
+	}
+	// Staged and committed by path, so this commit holds the workflow and
+	// nothing but the workflow whatever else happens to be in the working
+	// tree -- which is what makes undoing it a matter of dropping one
+	// commit rather than a judgement about what else went with it.
+	if _, err := r.git(ctx, "add", "--", WorkflowFile); err != nil {
+		return false, err
+	}
+	if _, err := r.git(ctx, "commit", "--quiet", "-m", workflowCommitMessage, "--", WorkflowFile); err != nil {
+		return false, err
+	}
+	// The loaded-head marker moves with HEAD, here as everywhere else
+	// that commits. It records the commit this host's database is up to
+	// date with, and this commit changes nothing the database holds -- so
+	// leaving it behind would tell the next Apply that a pull request had
+	// been merged, and have it import the repository's settings back over
+	// every one changed since the last export.
+	if err := r.recordLoadedHead(ctx); err != nil {
+		return false, err
+	}
+	pushErr := r.Push(ctx)
+	if pushErr == nil {
+		return true, nil
+	}
+	if !workflowRefused(pushErr) {
+		// An unreachable remote or an expired credential is not this
+		// step's business: the commit stays where every other unpushed
+		// commit stays, and the next push that works carries it.
+		return true, pushErr
+	}
+	log.Printf("staterepo: this deployment's credential may not push %s to %s, so grain cannot install "+
+		"the check that runs on pull requests against its own state (%v). Run `grain state ci` in a "+
+		"clone and commit the file with a credential that may, or set \"noWorkflow\": true in %s to "+
+		"stop grain offering it. grain will try again in %s.",
+		WorkflowFile, r.cfg.Remote, pushErr, SettingsFileName, workflowRetryInterval)
+	if err := r.undoWorkflowCommit(ctx, before, path); err != nil {
+		return false, err
+	}
+	// Back where the marker was, for the reason it was moved above: HEAD
+	// is the commit it names again.
+	if err := r.recordLoadedHead(ctx); err != nil {
+		return false, err
+	}
+	return false, r.recordWorkflowRefused(ctx, r.now())
+}
+
+// undoWorkflowCommit takes the working tree back to before the workflow
+// was written, leaving no trace of a commit that can never be pushed.
+//
+// --soft, and the path unstaged by hand afterwards, rather than a --hard
+// reset: a --hard would also throw away whatever else is in the working
+// tree, and the caller's own export may have written half a dump into it
+// already. What is undone here is exactly the file this step added.
+func (r *Repo) undoWorkflowCommit(ctx context.Context, before, path string) error {
+	if _, err := r.git(ctx, "reset", "--soft", before); err != nil {
+		return fmt.Errorf("staterepo: undoing the workflow commit in %s: %w", r.cfg.Dir, err)
+	}
+	if _, err := r.git(ctx, "reset", "-q", "--", WorkflowFile); err != nil {
+		return fmt.Errorf("staterepo: unstaging %s in %s: %w", WorkflowFile, r.cfg.Dir, err)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("staterepo: removing %s: %w", path, err)
+	}
+	return nil
+}
+
+// workflowRefused reports whether a failed push was GitHub declining a
+// change under .github/workflows for want of the permission to make one.
+//
+// Matched on the message because that is the only thing git gives us: a
+// refusal is a non-zero exit and the remote's own text, and GitHub's
+// text is stable and specific -- "refusing to allow a GitHub App / an
+// OAuth App / a Personal Access Token to create or update workflow ...
+// without `workflows` permission" (or "`workflow` scope"). Read too
+// narrowly this costs a deployment one undone commit a day; read too
+// widely it would undo a commit over some other push failure, which is
+// why both halves have to be there.
+func workflowRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "refusing to allow") && strings.Contains(msg, "workflow")
+}
+
+// workflowDue reports whether grain should offer the workflow to this
+// host's credential now. A marker that is missing, empty or unreadable
+// means yes: the cost of trying is one commit that is undone again, and
+// the cost of not trying is a repository with no CI step forever.
+func (r *Repo) workflowDue(ctx context.Context, now time.Time) bool {
+	path, err := r.gitDirFile(ctx, workflowRefusedFile)
+	if err != nil {
+		return true
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return true
+	}
+	return !now.Before(at.Add(workflowRetryInterval))
+}
+
+func (r *Repo) recordWorkflowRefused(ctx context.Context, at time.Time) error {
+	path, err := r.gitDirFile(ctx, workflowRefusedFile)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(at.UTC().Format(time.RFC3339Nano)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("staterepo: writing %s: %w", path, err)
+	}
+	return nil
+}

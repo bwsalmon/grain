@@ -557,7 +557,10 @@ func stateRepoSection(prepared checkout) string {
 		"Check what you propose before it merges: `grain state check .` loads the whole " +
 		"directory into a throwaway database and reports what breaks. A malformed file, " +
 		"or a row missing a column the schema requires, otherwise fails when grain next " +
-		"reads the repository, which is the worst place to find out. A merged change to " +
+		"reads the repository, which is the worst place to find out. Your pull request " +
+		"runs that same check itself -- grain keeps `.github/workflows/grain-state-check.yml` " +
+		"here and writes it back whenever it goes missing -- so a red tick on it means " +
+		"grain would not have loaded what you wrote. A merged change to " +
 		"a settings table is pulled in and applied within the minute, without a restart; " +
 		"everything else waits for one. Either way the import is a replacement, so a row " +
 		"you delete is a row that is gone."
