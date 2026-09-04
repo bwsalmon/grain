@@ -409,6 +409,14 @@ var ErrRemoteAhead = errors.New("the state repository has changes this deploymen
 // What changed is in the diff, which is the whole reason the dump is
 // text; a message that tried to summarise it would be a second, worse
 // answer that could disagree with the first.
+//
+// A push that failed is not the last word on it either: every call
+// pushes whatever this host holds that the remote has not got, whether
+// or not it had anything of its own to commit, so an outage costs the
+// remote the delay and nothing else. The reported bool stays what it
+// says -- a call that only carried an earlier commit out to the remote
+// committed nothing and reports false -- and a push that goes on failing
+// comes back as an error every time rather than once.
 func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
 	return sync(ctx, r, db, version, false)
 }
@@ -422,13 +430,19 @@ func SyncAll(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error
 }
 
 func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool) (bool, error) {
-	// Asked before anything is written, so that a merged change is never
+	// One ls-remote, before anything is written, answering both of this
+	// cycle's questions about the remote (remoteState, staterepo.go): is
+	// it ahead of us, which decides whether we may export at all, and are
+	// we ahead of it, which decides whether we push at the end.
+	//
+	// Asked before anything is written so that a merged change is never
 	// committed over -- see ErrRemoteAhead. An unreachable remote answers
-	// "not ahead" and the push below reports the network in its own
-	// words. It guards both entry points: asking for a sync explicitly
-	// (SyncAll) is no more a reason to commit over a merge than the
-	// timer's own tick is.
-	if ahead, err := r.RemoteAhead(ctx); err == nil && ahead {
+	// "nothing is known" and the push below reports the network in its
+	// own words. It guards both entry points: asking for a sync
+	// explicitly (SyncAll) is no more a reason to commit over a merge
+	// than the timer's own tick is.
+	remote := r.remoteState(ctx)
+	if remote.ahead {
 		return false, ErrRemoteAhead
 	}
 	// The CI step, before anything is exported and as a commit and a push
@@ -480,22 +494,44 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	if err != nil {
 		return installed, err
 	}
-	if !changed {
+	if changed {
+		// Recorded before the push, not after: the commit exists either
+		// way, and a push that fails (an expired credential, an
+		// unreachable remote) must not leave the next start believing the
+		// repository has moved on without it and importing its own stale
+		// dump back over a database that is ahead.
+		if err := r.recordLoadedHead(ctx); err != nil {
+			return true, err
+		}
+	}
+	// Pushed when this host holds a commit the remote has not got, which
+	// is a different question from whether this cycle made one -- and the
+	// difference is a commit that never leaves the host.
+	//
+	// A push that failed used to be retried only by the next cycle that
+	// had something of its own to commit. On a busy deployment that is
+	// the next one and nobody notices. On an idle one there is no such
+	// cycle at all: nothing files a task, nothing changes a setting, the
+	// churn tier is not due, so every export from here on is
+	// byte-identical, Commit reports nothing to do, and the commit sits
+	// here until the deployment next does something -- which may be
+	// hours, and is exactly the window in which a merged pull request
+	// turns it into the divergence diverge.go exists to clear. The pane
+	// went quiet over it too, since a cycle that pushed nothing reported
+	// nothing.
+	//
+	// Asking the remote instead retries on the very next tick, and goes
+	// on reporting the failure for as long as it lasts. It costs nothing
+	// extra to ask: the answer is the one already fetched at the top of
+	// this function.
+	if !changed && !remote.behind {
 		return installed, nil
 	}
-	// Recorded before the push, not after: the commit exists either way,
-	// and a push that fails (an expired credential, an unreachable
-	// remote) must not leave the next start believing the repository has
-	// moved on without it and importing its own stale dump back over a
-	// database that is ahead.
-	if err := r.recordLoadedHead(ctx); err != nil {
-		return true, err
-	}
 	if err := r.Push(ctx); err != nil {
-		return true, err
+		return installed || changed, err
 	}
 	r.maintain(ctx)
-	return true, nil
+	return installed || changed, nil
 }
 
 func writeReadme(dir string) error {
