@@ -3532,6 +3532,14 @@ names the file, and offers the same two ways out: install it by hand, or
 set `"noWorkflow": true`. It stops saying it the moment the file is in
 the repository, however it got there.
 
+`grain state status` says it too, out of that same marker rather than out
+of anything of its own, so the terminal and the pane cannot come to
+describe one repository differently. It is the same question asked by
+whoever is on the host, and without the line every other one that command
+prints -- the remote, the head, the schema, the dispatch verdict -- is
+word for word what a repository whose check runs on every pull request
+prints.
+
 `grain state ci DIR` is that manual path, and the one for a repository
 whose deployment cannot push workflows. It writes the same file into a
 clone of the state repository, with `-image` to pin (defaulting, like

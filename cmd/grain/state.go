@@ -194,6 +194,31 @@ func stateStatus(ctx context.Context, dataDir string, out io.Writer) error {
 		fmt.Fprintf(out, "dispatch:   allowed -- a task may be filed against this repository "+
 			"(`grain create -repo <owner>/<name> ...`)\n")
 	}
+	// Whether anything validates a proposed change to this repository,
+	// which is the other thing none of the lines above can be read for:
+	// a deployment whose credential may not push files under
+	// .github/workflows syncs, commits and pushes exactly like one whose
+	// check runs on every pull request, because installWorkflow undoes
+	// the commit GitHub refused and lets the sync carry on rather than
+	// stopping over a file worth one CI step. Asked of the same
+	// WorkflowRefusedAt the State pane's warning is drawn from, so the
+	// terminal and the pane cannot come to say different things about
+	// one repository.
+	if at, refused := repo.WorkflowRefusedAt(ctx); refused {
+		fmt.Fprintf(out, "checks:     none -- this deployment's credential may not push %s, so the check "+
+			"that runs `grain state check` on pull requests against this repository was never "+
+			"committed", staterepo.WorkflowFile)
+		// Absent when grain wrote the marker and can no longer read it
+		// back: the refusal still happened and is still worth saying, and
+		// only the date is unknown.
+		if !at.IsZero() {
+			fmt.Fprintf(out, " (last tried %s)", at.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintf(out, ". grain keeps syncing and offers it again daily\n")
+		fmt.Fprintf(out, "            run `grain state ci` in a clone and commit %s with a credential that "+
+			"may write workflows, or set \"noWorkflow\": true in %s to stop grain offering it\n",
+			staterepo.WorkflowFile, filepath.Join(dataDir, staterepo.SettingsFileName))
+	}
 	reportSecretsKey(dataDir, out)
 	return nil
 }
