@@ -3421,6 +3421,17 @@ file with a credential that may. grain tries again a day later, so
 granting the permission needs no restart. A local-only repository gets
 no workflow at all: there is no GitHub to run one.
 
+The Settings pane's State tab says so too, and not only the journal. The
+refusal is not a sync failure -- everything about that deployment is
+working, one file aside -- so a pane that reported only failures would
+show a repository syncing perfectly happily with nothing validating a
+change to it, which is the failure the check exists to prevent, and the
+line naming `grain state ci` would have been seen only by whoever was
+reading the journal that minute. It says when grain was last refused,
+names the file, and offers the same two ways out: install it by hand, or
+set `"noWorkflow": true`. It stops saying it the moment the file is in
+the repository, however it got there.
+
 `grain state ci DIR` is that manual path, and the one for a repository
 whose deployment cannot push workflows. It writes the same file into a
 clone of the state repository, with `-image` to pin (defaulting, like
