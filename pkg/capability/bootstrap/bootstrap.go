@@ -1,8 +1,8 @@
 // Package bootstrap is a GRANT model.CapabilityProvider: a task holding
 // it gets read-only tools onto a fixed set of bootstrap playbooks --
 // markdown runbooks, embedded at build time, for the setup flows
-// bwsalmon/agents#620 asked the configuration agent to be able to walk
-// an operator through: minting the GCP service accounts the gcp-key/
+// bwsalmon/agents#620 asked an agent to be able to walk an operator
+// through: minting the GCP service accounts the gcp-key/
 // gemini-key capabilities need, registering grain's primary GitHub
 // connection, standing up CloudRun-based IAP access, and installing a
 // GitHub App on a set of test repos.
@@ -28,10 +28,9 @@
 // itself -- every command it tells the agent to run still goes through
 // the self-repair grant's own run_host_command tool, which is what
 // actually touches the host, gated on a human's live approval in the
-// task's chat the same way any other self-repair command is. Bundling
-// this capability alongside self-repair (see ui/client.go's
-// configurationCapabilities) is what lets the configuration agent read
-// a playbook and then act on it in the same conversation.
+// task's chat the same way any other self-repair command is. Granting
+// this capability alongside self-repair is what lets an agent read a
+// playbook and then act on it in the same conversation.
 package bootstrap
 
 import (

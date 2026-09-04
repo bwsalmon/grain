@@ -42,10 +42,6 @@
 // deployment each kind may occupy, not about their order -- the backlog
 // still says which task goes first.
 //
-// One exception to "drains into whatever headroom there is": the
-// configuration agent (Task.Configuration, bwsalmon/agents#621) is not
-// drawn from that headroom at all -- see dispatchConfiguration.
-//
 // One exception to "ordering is whatever task_ready yields", beyond the
 // backoff above: a caller may pass Busy to have Cycle pass over a task
 // it is itself still finishing with. That is not a scheduling policy
@@ -262,18 +258,7 @@ func (o options) skip(taskID string) bool {
 // than started a second time.
 func Cycle(ctx context.Context, store *model.Store, limits model.Limits, now time.Time, opts ...Option) ([]Dispatch, error) {
 	o := newOptions(opts)
-	// The configuration agent (Task.Configuration, bwsalmon/agents#621)
-	// dispatches first, and unconditionally -- see dispatchConfiguration's
-	// own doc comment for why it cannot wait on the same headroom check
-	// below. Doing this before LiveRunCounts is read is what makes the
-	// free-capacity math that follows accurate for everything else: a
-	// configuration task started here already counts as live by the time
-	// this function asks.
-	out, err := dispatchConfiguration(ctx, store, now, o)
-	if err != nil {
-		return nil, err
-	}
-
+	var out []Dispatch
 	if limits.Total() <= 0 {
 		return out, nil
 	}
@@ -334,53 +319,6 @@ func Cycle(ctx context.Context, store *model.Store, limits model.Limits, now tim
 	return out, nil
 }
 
-// dispatchConfiguration starts every configuration-agent task
-// (Store.ReadyConfiguration) that is ready and not still backing off
-// after a failed run, regardless of how much of this deployment's
-// capacity is already spent -- it calls startTask with zero limits, which
-// StartRun takes to mean "no limit of mine to enforce" (its own doc
-// comment).
-//
-// The configuration agent is what bwsalmon/agents#621 added for a person
-// to reach for when something about this deployment needs a live look --
-// a question, a problem, or its own configuration -- and a deployment
-// already at its concurrency limit is exactly the kind of "something"
-// that might be. Making it wait behind the same headroom check as
-// ordinary work would strand it at the one moment it is most likely to
-// be needed.
-func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Time, o options) ([]Dispatch, error) {
-	ready, err := store.ReadyConfiguration(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("dispatch: reading ready configuration tasks: %w", err)
-	}
-	var out []Dispatch
-	for _, taskID := range ready {
-		if o.skip(taskID) {
-			continue
-		}
-		eligible, err := retryEligible(ctx, store, taskID, now)
-		if err != nil {
-			return nil, fmt.Errorf("dispatch: %w", err)
-		}
-		if !eligible {
-			continue
-		}
-		still, err := stillReady(ctx, store, taskID)
-		if err != nil {
-			return nil, err
-		}
-		if !still {
-			continue
-		}
-		d, err := startTask(ctx, store, taskID, now, model.Limits{})
-		if err != nil {
-			return nil, fmt.Errorf("dispatch: starting configuration run for %s: %w", taskID, err)
-		}
-		out = append(out, d)
-	}
-	return out, nil
-}
-
 // stillReady is the last look before a run is recorded: whether taskID
 // is *still* what the ready list said it was when this cycle read it
 // (Store.IsReady).
@@ -415,9 +353,8 @@ func stillReady(ctx context.Context, store *model.Store, taskID string) (bool, e
 
 // startTask records taskID's next run (Store.Attempts + 1) and starts
 // it, against limits the same way StartRun itself interprets them --
-// limits that bound nothing disable the check entirely. Factored out of
-// Cycle's own loop so dispatchConfiguration can share it rather than
-// duplicate the attempt bookkeeping.
+// limits that bound nothing disable the check entirely. Kept apart from
+// Cycle's own loop so the attempt bookkeeping reads as one thing.
 func startTask(ctx context.Context, store *model.Store, taskID string, now time.Time, limits model.Limits) (Dispatch, error) {
 	attempts, err := store.Attempts(ctx, taskID)
 	if err != nil {
