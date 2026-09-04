@@ -3132,11 +3132,37 @@ recorded it as loaded. The import a restart does is now the import a tick
 does.
 
 The whole-database import -- every table, churn included -- is left with
-the one case that needs it: a working tree with no marker, which is a
-clone onto a host that has never loaded it. That is the restore case,
-where the repository is the only copy there is and there is no database
-ahead of it to protect, and it is what makes a clone a whole deployment
-rather than a settings file.
+the cases that need it, and what they have in common is that there is no
+database ahead of the dump to protect. A working tree with no marker is
+one: a clone onto a host that has never loaded it, which is the restore
+case, and what makes a clone a whole deployment rather than a settings
+file. A database with nothing in it is the other, and it is the same case
+reached from the other side -- a store deleted, a volume restored from a
+backup that did not include it, `sqlite.Open` handed a path that has
+never held one -- where the working tree survived and the marker with it.
+
+That second one used to be the one shape of this that lost data rather
+than recovering from it. The marker answers "has the repository moved
+since this host last agreed with it" and knows nothing about the
+database, so a host whose store was gone read `marker == HEAD`, imported
+nothing, came up empty, and the next sync exported that empty database
+over the dump, committed it and pushed it -- with nothing further out to
+object, because the remote was not ahead: this host really had written
+the commit under it. The repository that exists to be the off-host copy
+of the deployment was deleted by the deployment. (The paired case was
+already handled: `scripts/setup.sh` moves the working tree aside
+alongside the store on a schema bump, so the daemon re-seeds. It was the
+unpaired one -- store gone, tree kept -- that had no answer.) An empty
+database now takes the whole repository, which costs nothing by
+definition and is the restore an operator wanted, and the export in that
+direction is refused outright and reported in the State pane rather than
+committed (`staterepo.ErrDatabaseEmpty`) -- because a database that goes
+away underneath a daemon that is already running cannot be restored on
+the spot: an import that replaces every row is not something to do with
+runs in flight holding the ids, so it waits for a restart. "Nothing in
+it" means no row in any table, bar the schema stamp every database has
+from the moment it is created; a database with a single task in it is one
+this host is responsible for and takes the ordinary path.
 
 If a pull arrives that cannot be applied -- a dump stamped with a schema
 this build does not know, or rows that will not insert -- the daemon
@@ -3246,8 +3272,8 @@ database is ahead of the repository on churn by up to an hour by design,
 and ahead of it on everything else by up to an export interval for the
 same reason, a merged pull request arriving at startup imports the
 settings out of it and leaves grain's own record of what it did alone. A
-clone with no marker -- the restore case, where the repository is the
-only copy there is -- still imports all of it.
+start with nothing to lose -- a clone with no marker, or a database with
+nothing in it -- still imports all of it.
 
 Squashing history periodically was the other candidate and is not what
 happened: it means force-pushing a branch that people open pull requests
