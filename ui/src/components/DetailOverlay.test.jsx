@@ -1143,7 +1143,7 @@ describe("DetailOverlay", () => {
     render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
 
     const file = new File(["fake"], "screenshot.png", { type: "image/png" });
-    await user.upload(screen.getByLabelText("Attach files"), file);
+    await user.upload(document.querySelector('input[type="file"]'), file);
     await user.click(screen.getByRole("button", { name: "Comment" }));
 
     expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
