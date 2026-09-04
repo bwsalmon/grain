@@ -150,8 +150,27 @@ func TestAnExportDoesNotBlockTheDaemonFromWriting(t *testing.T) {
 		}
 	}()
 	// Let the writer get going, so that "nothing landed" below means the
-	// export blocked it rather than that it had not started.
+	// export blocked it rather than that it had not started, and then
+	// measure how fast it actually goes on *this* machine with nothing in
+	// its way.
+	//
+	// Measured rather than assumed, because the assumption was wrong. The
+	// threshold used to be one write per ten milliseconds of export, on
+	// the reasoning that a writer sleeping a millisecond between tasks
+	// manages far more than that. It does on an idle machine and it does
+	// not on a busy one: under `make test`'s own `go test -race ./...`,
+	// with every other package's tests running beside it, one PutTask can
+	// take the whole ten milliseconds by itself, and the test fails
+	// reporting that the export holds the write lock when the export is
+	// holding nothing at all. A rate compared against a constant is a
+	// test of how fast the machine is; compared against the same writer's
+	// own rate a moment earlier, it is a test of what the export did to
+	// it, which is the thing this is about.
 	time.Sleep(20 * time.Millisecond)
+	baselineStart := time.Now()
+	baselineFrom := written.Load()
+	time.Sleep(200 * time.Millisecond)
+	baseline := rate(written.Load()-baselineFrom, time.Since(baselineStart))
 
 	before := written.Load()
 	start := time.Now()
@@ -164,20 +183,36 @@ func TestAnExportDoesNotBlockTheDaemonFromWriting(t *testing.T) {
 	close(stop)
 	<-done
 
-	// The writer sleeps a millisecond between tasks, so an export that
-	// blocks nobody sees a write every millisecond or three of its own
-	// duration. A tenth of that is the threshold: well below the rate a
-	// loaded machine manages, and well above what an export holding the
-	// write lock leaves behind, which is the single write that was blocked
-	// on it and landed as it let go.
-	want := int64(took / (10 * time.Millisecond))
-	t.Logf("%d writes landed during an export that took %s (wanted at least %d)",
-		during, took.Round(time.Millisecond), want)
-	if during < want {
-		t.Fatalf("only %d writes landed during an export that took %s: "+
-			"the export is holding SQLite's write lock and the daemon is waiting on it",
-			during, took)
+	if baseline == 0 {
+		t.Fatalf("no write landed in %s with nothing in the writer's way, so this machine "+
+			"cannot say anything about what the export did to it", 200*time.Millisecond)
 	}
+	// A tenth of the writer's own unobstructed rate. Well under what an
+	// export that blocks nobody leaves -- it competes for the same disk
+	// and the same cores, so some slowdown is honest -- and well over
+	// what an export holding the write lock leaves behind, which is the
+	// single write that was blocked on it and landed as it let go.
+	got := rate(during, took)
+	want := baseline / 10
+	t.Logf("%d writes landed during an export that took %s: %.0f/s against the writer's own "+
+		"%.0f/s a moment earlier (wanted at least %.0f/s)",
+		during, took.Round(time.Millisecond), got, baseline, want)
+	if got < want {
+		t.Fatalf("the writer managed %.0f writes/s during the export and %.0f/s just before it: "+
+			"the export is holding SQLite's write lock and the daemon is waiting on it",
+			got, baseline)
+	}
+}
+
+// rate is writes per second, for the two windows the test above compares
+// against each other. Zero for a window in which nothing landed, and for
+// one of no duration -- neither says anything about a rate, and the
+// caller checks for it rather than dividing by zero here.
+func rate(writes int64, over time.Duration) float64 {
+	if writes <= 0 || over <= 0 {
+		return 0
+	}
+	return float64(writes) / over.Seconds()
 }
 
 // A task and the repos it may read are written in one transaction and

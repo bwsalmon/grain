@@ -38,10 +38,12 @@ package staterepo
 // .github/workflows is refused unless the credential making it may
 // write workflows, and grain's own installation token need not be able
 // to -- and it carries it in the one shape where that is survivable: the
-// workflow is a commit of its own, pushed on its own, undone in full if
-// the remote refuses it. A deployment whose credential says no loses the
-// CI step and nothing else, and is told in its journal how to install
-// the file by hand.
+// workflow is a commit of its own, pushed on its own, and undone in full
+// whenever that push does not land -- for whatever reason, since a
+// commit left behind is a commit the *export's* next push carries, which
+// is where a refusal would take the export down with it. A deployment
+// whose credential says no loses the CI step and nothing else, and is
+// told in its journal how to install the file by hand.
 
 import (
 	"context"
@@ -357,17 +359,28 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	if pushErr == nil {
 		return true, nil
 	}
-	if !workflowRefused(pushErr) {
-		// An unreachable remote or an expired credential is not this
-		// step's business: the commit stays where every other unpushed
-		// commit stays, and the next push that works carries it.
-		return true, pushErr
-	}
-	log.Printf("staterepo: this deployment's credential may not push %s to %s, so grain cannot install "+
-		"the check that runs on pull requests against its own state (%v). Run `grain state ci` in a "+
-		"clone and commit the file with a credential that may, or set \"noWorkflow\": true in %s to "+
-		"stop grain offering it. grain will try again in %s.",
-		WorkflowFile, r.cfg.Remote, pushErr, SettingsFileName, workflowRetryInterval)
+	// Undone whenever the push does not land, and not only when grain
+	// recognises GitHub's refusal in it. What is at stake is the sentence
+	// at the top of this file: a remote that will not take this file must
+	// not be able to take a database export down with it.
+	//
+	// Keeping the commit is what broke that. "The next push that works
+	// carries it" is true and is the problem: the next push is the
+	// export's, so the commit rides along on it, and a remote that
+	// refuses workflows refuses *that* push -- on a path with no undo, on
+	// a tick where installWorkflow does nothing because the file is
+	// already in the tree. The deployment's settings then stop reaching
+	// its remote entirely, permanently, over a file worth one CI step. It
+	// takes only two ordinary things in sequence: one push that failed
+	// for its own reasons, and a credential that may not write workflows
+	// -- which is the case this whole shape was built for.
+	//
+	// What the undo costs instead is one commit that never left this host
+	// and is made again on a later tick. The one case it is not free is a
+	// push the remote accepted and git reported as failed anyway, where
+	// the remote now holds a commit this tree has reset away: the next
+	// pull fast-forwards onto it, which is a merge arriving as far as
+	// Apply is concerned, and the dump it imports is the one it exported.
 	if err := r.undoWorkflowCommit(ctx, before, path); err != nil {
 		return false, err
 	}
@@ -376,6 +389,24 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	if err := r.recordLoadedHead(ctx); err != nil {
 		return false, err
 	}
+	if !workflowRefused(pushErr) {
+		// Not the permission, so not a day's wait: an unreachable remote
+		// or an expired credential says nothing about whether this
+		// credential may write workflows, and the next tick asks again.
+		// Reported rather than returned, too. The export below is about
+		// to push through the same remote and will say what it makes of
+		// it in its own words; failing the cycle here would only mean
+		// this tick's rows never got committed at all, over a step that
+		// has already put everything back as it found it.
+		log.Printf("staterepo: could not push %s to %s (%v). The commit that carried it has been "+
+			"undone; grain offers it again on the next sync.", WorkflowFile, r.cfg.Remote, pushErr)
+		return false, nil
+	}
+	log.Printf("staterepo: this deployment's credential may not push %s to %s, so grain cannot install "+
+		"the check that runs on pull requests against its own state (%v). Run `grain state ci` in a "+
+		"clone and commit the file with a credential that may, or set \"noWorkflow\": true in %s to "+
+		"stop grain offering it. grain will try again in %s.",
+		WorkflowFile, r.cfg.Remote, pushErr, SettingsFileName, workflowRetryInterval)
 	return false, r.recordWorkflowRefused(ctx, r.now())
 }
 
