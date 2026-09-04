@@ -14,6 +14,7 @@ import { FormControl, InputLabel, MenuItem, Select, TextField, Typography } from
 // repo's per-state counts, a template's single title line, a schedule's
 // second "next run" line) that don't reduce to one shape without either
 // losing information or growing a prop for every page's special case.
+
 // `icon` is the page's own item glyph (ItemGlyph.jsx), for the four
 // pages that have one -- the same figure the nav entry that got here
 // carries, at the size a heading can hold, so the icon in the rail and
