@@ -193,6 +193,30 @@ var Tables = []string{
 	// so NULL for a run that never reached its agent at all (a checkout
 	// that would not clone, a capability that would not mint) as well as
 	// for every run recorded before this column existed.
+	// activity and activity_at are the run's own synopsis of what it is
+	// doing right now -- one short phrase it writes for itself through the
+	// update_status tool ("waiting for CI on the third push", "reading
+	// pkg/orchestrator"), and the moment it last wrote one. Every other
+	// column here is grain's record of a run; this is the run's, which is
+	// why nothing derives it and nothing but Store.SetRunActivity writes
+	// it.
+	//
+	// It answers the question a list of live runs could not: a task has
+	// read 'running' for forty minutes and the only way to find out what
+	// that meant was to open its transcript after the fact. A phrase on
+	// the row turns that into a glance (ui.Task.Activity, TaskList.jsx).
+	//
+	// activity_at is worth its own column rather than being implied by the
+	// write, because the phrase alone cannot say whether it is current: a
+	// synopsis from ten seconds ago and one from an hour ago read
+	// identically and mean opposite things, so a reader is shown how long
+	// it has stood.
+	//
+	// Both stay NULL for a run that never called the tool, which is every
+	// run recorded before the column existed and every run driven by a
+	// framework with no route back to the daemon that would carry the
+	// call -- so a reader must treat "no synopsis" as ordinary rather than
+	// as a run in trouble.
 	`CREATE TABLE IF NOT EXISTS ` + "`task_run`" + ` (
   ` + "`id`" + `               TEXT     NOT NULL,
   ` + "`task_id`" + `          TEXT     NOT NULL,
@@ -206,6 +230,8 @@ var Tables = []string{
   ` + "`detail`" + `           TEXT     NULL,
   ` + "`transcript`" + `       TEXT     NULL,
   ` + "`prompt`" + `           TEXT     NULL,
+  ` + "`activity`" + `         TEXT     NULL,
+  ` + "`activity_at`" + `      DATETIME NULL,
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

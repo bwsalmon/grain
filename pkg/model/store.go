@@ -112,6 +112,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskRunPromptColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task_run: %w", err)
 	}
+	if err := s.ensureTaskRunActivityColumns(ctx); err != nil {
+		return fmt.Errorf("migrating task_run: %w", err)
+	}
 	if err := s.ensureScheduleRecurrenceColumns(ctx); err != nil {
 		return fmt.Errorf("migrating schedule: %w", err)
 	}
@@ -415,6 +418,47 @@ func (s *Store) ensureTaskRunPromptColumn(ctx context.Context) error {
 		return rows.Close()
 	}
 	_, err = s.db.ExecContext(ctx, "ALTER TABLE `task_run` ADD COLUMN `prompt` TEXT NULL")
+	return err
+}
+
+// ensureTaskRunActivityColumns adds task_run.activity and
+// task_run.activity_at (schema.go's own DDL comment on the table has the
+// reasoning) to a database created before they existed, the same
+// probe-then-ALTER approach ensureTaskRunPromptColumn already uses for
+// the same reason: CREATE TABLE IF NOT EXISTS never alters a table that
+// is already there.
+//
+// Each column is probed on its own rather than both together, unlike
+// every single-column migration above: SQLite adds columns one ALTER at a
+// time, so a process that died between the two would leave a database
+// with the first and not the second, and a joint probe would then try to
+// add the first again and fail every startup from then on.
+//
+// No SchemaVersion bump goes with them, for the reason the prompt column
+// takes none: both are nullable and added here, so an existing database
+// migrates into the new shape rather than being one this build "cannot
+// simply be re-created into" (SchemaVersion's own doc comment). Every run
+// recorded before they existed reads back with no synopsis, which is
+// already how a run that never called update_status reads.
+func (s *Store) ensureTaskRunActivityColumns(ctx context.Context) error {
+	if err := s.ensureColumn(ctx, "task_run", "activity", "TEXT NULL"); err != nil {
+		return err
+	}
+	return s.ensureColumn(ctx, "task_run", "activity_at", "DATETIME NULL")
+}
+
+// ensureColumn is the probe-then-ALTER above, once, for callers with no
+// reason to spell it out: a SELECT that cannot run is taken as "the
+// column is not there", which is the same reading every ensure*Column
+// here makes of the same failure.
+func (s *Store) ensureColumn(ctx context.Context, table, column, decl string) error {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `"+column+"` FROM `"+table+"` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `"+table+"` ADD COLUMN `"+column+"` "+decl)
 	return err
 }
 
@@ -2154,6 +2198,93 @@ func (s *Store) RunPrompt(ctx context.Context, taskID string, attempt int) (prom
 	return p.String, true, nil
 }
 
+// SetTaskActivity records what taskID's live run says it is doing right
+// now -- one short phrase the run wrote for itself, and the moment it
+// wrote it (Run.Activity). It reports whether there was a live run to
+// record it against at all: false, with no error, means the task has
+// nothing in flight, which is not a failure of the write but the answer
+// to a call that arrived after its run was over.
+//
+// Keyed by task rather than by run because the caller is the task's own
+// run reaching back through the daemon (ui.Client.SetTaskActivity, over
+// the update_status tool), and a run identifies itself by the task it was
+// dispatched for -- the same handle every other write an agent can reach
+// takes. The WHERE clause is what makes that safe: at most one run per
+// task is ever open (schema.go's task_run_open_task index), so "the live
+// run of this task" names exactly one row, and a call that arrives late
+// cannot overwrite the synopsis a finished run ended on.
+func (s *Store) SetTaskActivity(ctx context.Context, taskID, activity string, at time.Time) (live bool, err error) {
+	err = s.write(ctx, "set task "+taskID+" activity", func(tx *sql.Tx) error {
+		result, err := tx.ExecContext(ctx,
+			"UPDATE `task_run` SET `activity` = ?, `activity_at` = ? "+
+				"WHERE `task_id` = ? AND `finished_at` IS NULL",
+			nullable(activity), at.UTC(), taskID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		live = n > 0
+		return nil
+	})
+	return live, err
+}
+
+// TaskActivity is what every task with a live run currently says it is
+// doing, keyed by task ID -- one query for a whole list, the same trade
+// MergeQueueBlocked above makes for the merge queue's own signal rather
+// than a read per task.
+//
+// Only live runs are here, and deliberately: a synopsis is a fact about
+// what is happening now, and a finished run's last words describe a
+// moment that is over and would read on a task list as work still in
+// progress. The rows keep it (nothing clears the columns at FinishRun),
+// so a caller that wants the last thing a finished run said can still
+// read it off the run itself.
+//
+// A live run that has never called the tool is absent rather than present
+// and empty: "said nothing" and "is not running" are different, but
+// neither gives a caller anything to show.
+func (s *Store) TaskActivity(ctx context.Context) (map[string]RunActivity, error) {
+	out := map[string]RunActivity{}
+	err := each(ctx, s.db,
+		"SELECT `task_id`,`activity`,`activity_at` FROM `task_run` "+
+			"WHERE `finished_at` IS NULL AND `activity` IS NOT NULL", nil,
+		func(rows *sql.Rows) error {
+			var taskID string
+			var note sql.NullString
+			var at sql.NullTime
+			if err := rows.Scan(&taskID, &note, &at); err != nil {
+				return err
+			}
+			out[taskID] = RunActivity{Note: note.String, At: timePtr(at)}
+			return nil
+		})
+	return out, err
+}
+
+// TaskActivityOf is TaskActivity for one task -- what its live run says
+// it is doing, or nil for a task with nothing in flight or a run that has
+// said nothing yet. A caller rendering one task uses this rather than
+// reading a map of the whole store, the same split Client.Task and
+// Client.ListTasks already make over MergeQueueBlocked.
+func (s *Store) TaskActivityOf(ctx context.Context, taskID string) (*RunActivity, error) {
+	var note sql.NullString
+	var at sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		"SELECT `activity`,`activity_at` FROM `task_run` "+
+			"WHERE `task_id` = ? AND `finished_at` IS NULL", taskID).Scan(&note, &at)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !note.Valid) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &RunActivity{Note: note.String, At: timePtr(at)}, nil
+}
+
 // DropLease forgets a lease once its resource is actually revoked.
 // Idempotent by construction — a DELETE matching nothing is not an error,
 // which is what lets release and the expiry reaper both reach the same
@@ -2184,17 +2315,19 @@ func (s *Store) Attempts(ctx context.Context, taskID string) (int, error) {
 func (s *Store) Runs(ctx context.Context, taskID string) ([]Run, error) {
 	var out []Run
 	err := each(ctx, s.db,
-		"SELECT `id`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail` "+
+		"SELECT `id`,`sandbox`,`unit`,`attempt`,`started_at`,`finished_at`,`outcome`,`detail`,"+
+			"`activity`,`activity_at` "+
 			"FROM `task_run` WHERE `task_id` = ? ORDER BY `attempt` ASC", taskID,
 		func(rows *sql.Rows) error {
 			r := Run{TaskID: taskID}
-			var unit, outcome, detail sql.NullString
-			var finishedAt sql.NullTime
+			var unit, outcome, detail, activity sql.NullString
+			var finishedAt, activityAt sql.NullTime
 			if err := rows.Scan(&r.ID, &r.Sandbox, &unit, &r.Attempt,
-				&r.StartedAt, &finishedAt, &outcome, &detail); err != nil {
+				&r.StartedAt, &finishedAt, &outcome, &detail, &activity, &activityAt); err != nil {
 				return err
 			}
 			r.Unit, r.Outcome, r.Detail = unit.String, outcome.String, detail.String
+			r.Activity, r.ActivityAt = activity.String, timePtr(activityAt)
 			r.FinishedAt = timePtr(finishedAt)
 			out = append(out, r)
 			return nil

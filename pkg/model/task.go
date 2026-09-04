@@ -649,7 +649,41 @@ type Run struct {
 	// Store.SetRunTranscript/RunTranscript read and write it directly by
 	// task ID and attempt number instead.
 	Detail string
-	Leases []Lease
+	// Activity is the run's own one-line synopsis of what it is doing at
+	// the moment -- "waiting for CI on the third push", "reading
+	// pkg/orchestrator" -- written by the run itself through the
+	// update_status tool, and ActivityAt is when it last wrote one.
+	//
+	// Everything else on this type is grain's record of the run; this is
+	// the run's own account of itself, and nothing derives or infers it.
+	// Both are empty for a run that never said anything, which is no kind
+	// of signal: a framework with no route back to the daemon cannot carry
+	// the call at all (see mcp.NewStatusTools), and every run recorded
+	// before the columns existed reads the same way.
+	//
+	// ActivityAt is what makes the phrase readable. "Waiting for CI" said
+	// ten seconds ago and the same words left standing for an hour mean
+	// opposite things, and only the timestamp tells them apart.
+	Activity   string
+	ActivityAt *time.Time
+	Leases     []Lease
+}
+
+// RunActivity is Run.Activity and Run.ActivityAt on their own -- what a
+// live run says it is doing, without the run around them.
+//
+// It exists because that pair is what a reader of a *task* wants: the
+// task list asks "what is each running task up to?" and has no use for
+// the attempt number, the sandbox or the outcome that would come with a
+// whole Run (Store.TaskActivity, ui.Task.Activity).
+//
+// At is a pointer for the same reason it is on Run: a row written before
+// the columns existed, or by a build that only set one of them, has a
+// note and no time, and a zero time.Time rendered as "written in year 1"
+// would be worse than showing nothing at all.
+type RunActivity struct {
+	Note string
+	At   *time.Time
 }
 
 // --- conversation ----------------------------------------------------

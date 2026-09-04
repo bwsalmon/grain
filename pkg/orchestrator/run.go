@@ -162,6 +162,12 @@ func frameworkOpensPullRequests(framework agent.Framework) bool {
 // deployment without that route never sends a run after a tool that is
 // not on its roster.
 //
+// It gates one more paragraph, statusSection's, on exactly the same fact:
+// update_status is registered by the same -server/-task pair, so a run
+// that can open its own pull request can also say what it is doing on its
+// task's row, and one that cannot has neither tool. See statusSection for
+// why that paragraph is worth its space at all.
+//
 // maxRuntime is the wall-clock budget RunDispatch will cancel this run
 // at (cfg.maxRunRuntime(), the deadline on the very ctx framework.Run
 // receives), and it is here for the reason everything else here is: it
@@ -330,6 +336,7 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 			base, base, branch,
 		)
 	}
+	prompt += statusSection(canOpenPullRequest)
 	prompt += runtimeSection(task, maxRuntime)
 	if len(task.Reads) > 0 {
 		names := make([]string, len(task.Reads))
@@ -392,6 +399,48 @@ func runtimeSection(task model.Task, maxRuntime time.Duration) string {
 	s += " You will be told how much time is left, on every tool result, once it " +
 		"runs low -- until then, work rather than counting."
 	return s
+}
+
+// statusSection is the paragraph about update_status: that a run can put
+// one line on its own task's row saying what it is doing, and when doing
+// so is worth a turn.
+//
+// It is here rather than left to the tool's own description for the
+// reason every other paragraph in this prompt is: a run reads its tools
+// when it wants one, and a tool nobody goes looking for is a tool nobody
+// finds. Nothing in the sandbox suggests that anybody is watching the
+// task at all, so a run has no reason to imagine there is a row to write
+// on -- and this is the one tool here whose whole value is to somebody
+// outside the run, which makes it exactly the one a run optimising for
+// its own task would never reach for unprompted.
+//
+// What it deliberately does not do is ask for a status per turn. The call
+// costs a turn like any other, and a run that narrates every file it
+// opens has spent its budget on narration; the paragraph names the
+// moments worth marking -- a long build, a wait on CI, a change of
+// approach -- and says the quiet stretches are fine.
+//
+// canReachDaemon is canOpenPullRequest under the name that actually
+// applies here. The two tools are registered by the same -server/-task
+// pair (cmd/grain/mcpserver.go), so a Framework that can open a pull
+// request can also carry a status and one that cannot has neither; the
+// caller's bool answers both questions, and a deployment without that
+// route never reads about a tool it does not have.
+func statusSection(canReachDaemon bool) string {
+	if !canReachDaemon {
+		return ""
+	}
+	return "\n\nAs you go, call `update_status` with one short phrase saying what you " +
+		"are doing -- \"reading the dispatch path\", \"running the test suite\", " +
+		"\"waiting for CI on the second push\". It is shown on this task's row in " +
+		"grain's UI while your run lasts, so somebody watching can see what the run " +
+		"is spending its time on without opening your transcript. Call it when what " +
+		"you are doing changes -- starting something long, moving from reading to " +
+		"writing, settling in to wait -- and not otherwise: it costs a turn like any " +
+		"other call, and a stretch with no update reads as work carrying on. It " +
+		"changes nothing about your run and reaches nobody as a question: " +
+		"ask_question and comment_on_issue are still the only ways to say something " +
+		"a human has to answer or read."
 }
 
 // resolvePromptExtension is the three layers of standing instructions

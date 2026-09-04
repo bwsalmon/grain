@@ -63,6 +63,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/tasks/{id}/retry", s.handleRetry)
 	s.mux.HandleFunc("POST /api/tasks/{id}/pull-request", s.handleOpenPullRequest)
 	s.mux.HandleFunc("POST /api/tasks/{id}/sandbox/recreate", s.handleRecreateSandbox)
+	s.mux.HandleFunc("POST /api/tasks/{id}/activity", s.handleSetTaskActivity)
 	s.mux.HandleFunc("GET /api/tasks/{id}/attempts/{number}/transcript", s.handleGetAttemptTranscript)
 	s.mux.HandleFunc("GET /api/tasks/{id}/prompt", s.handleGetTaskPrompt)
 
