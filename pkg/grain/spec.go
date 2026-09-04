@@ -78,6 +78,22 @@ type Spec struct {
 	// -- and parse its own output. The shim stays ignorant of all of it.
 	Setup string `json:"setup,omitempty"`
 
+	// Tools are the MCP tools this grain advertises to the agent beyond
+	// its own built-ins, and forwards every call to.
+	//
+	// Declared rather than known: a grain serves BuiltinTools, which are
+	// all about the sandbox, and forwards anything here without a
+	// vocabulary of its own for it. So open_pull_request, ask_question
+	// and the rest are grain-the-product's tools, declared by the
+	// controller that knows what they mean, and a grain that never heard
+	// of them relays them anyway.
+	//
+	// It is what makes "a grain runs an agent in a sandbox and knows
+	// nothing about why" true of the tool surface too, and it is why a
+	// deployment can give its agents a tool grain has never heard of
+	// without grain being changed.
+	Tools []ToolDecl `json:"tools,omitempty"`
+
 	// Placements is everything written into the guest before the agent
 	// starts: credentials, and any other file a run needs that the image
 	// does not already carry.

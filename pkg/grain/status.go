@@ -165,29 +165,6 @@ type SetupResult struct {
 // CallID identifies one forwarded call within one grain.
 type CallID string
 
-// The tools a grain forwards rather than serves. Each needs something the
-// container does not have and must not be given: the store, a GitHub
-// credential, or a human. Everything else -- the sandbox tools, and
-// rebuilding the guest most of all -- is answered inside the grain and
-// never reaches the controller.
-const (
-	ToolOpenPullRequest   = "open_pull_request"
-	ToolPullRequestStatus = "pull_request_status"
-	ToolWaitForChecks     = "wait_for_checks"
-	ToolAskQuestion       = "ask_question"
-	ToolRequestSecret     = "request_secret"
-)
-
-// The tools the shim answers locally with an acknowledgement and reports
-// in Result.Deferred, because their effect needs no answer for the agent
-// to carry on. Making the agent wait a tick to post a comment would buy
-// nothing.
-const (
-	ToolCommentOnIssue   = "comment_on_issue"
-	ToolProposeTask      = "propose_task"
-	ToolAddReviewComment = "add_review_comment"
-)
-
 // Call is one MCP tool call the shim is holding open on the agent's
 // behalf, waiting for the controller to serve it.
 //
@@ -198,6 +175,11 @@ const (
 // cannot run itself, reached by being polled rather than by holding a
 // connection -- which is the whole of what "MCP over a poll" means here,
 // and why none of it needs an MCP transport.
+//
+// Tool is a bare string because a grain does not know what any of these
+// mean. It serves its own built-ins (BuiltinTools) and forwards every
+// tool somebody else declared (Spec.Tools), without a vocabulary of its
+// own for them. Whoever declared a tool is who knows what it does.
 type Call struct {
 	ID   CallID `json:"id"`
 	Tool string `json:"tool"`
@@ -285,14 +267,7 @@ type Result struct {
 	// runOne's error path; here it is a field the ordinary finish path
 	// reads.
 	Pushed *PushedBranch `json:"pushed,omitempty"`
-	// Deferred are the calls the shim answered locally with an
-	// acknowledgement rather than forwarding, for the effects that need
-	// no answer to carry on -- comment_on_issue, propose_task,
-	// add_review_comment. They are reported here so the controller can
-	// carry them out once, at the end, instead of the agent waiting a
-	// tick to post a comment.
-	Deferred []Call `json:"deferred,omitempty"`
-	Usage    Usage  `json:"usage"`
+	Usage  Usage         `json:"usage"`
 }
 
 // PushedBranch is a branch and the commit at its head.

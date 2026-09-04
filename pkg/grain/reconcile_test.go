@@ -201,7 +201,7 @@ func TestReconcile(t *testing.T) {
 		name: "a forwarded call is answered, addenda delivered and activity mirrored",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseBlocked, Since: start, Activity: "waiting for CI",
-				Call: &grain.Call{ID: "c1", Tool: grain.ToolOpenPullRequest}},
+				Call: &grain.Call{ID: "c1", Tool: "open_pull_request"}},
 			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building",
 				PendingAddenda: []string{"also fix the flake"}},
 			Now: start.Add(time.Minute),
@@ -227,7 +227,7 @@ func TestReconcile(t *testing.T) {
 func TestReconcileIsLevelTriggered(t *testing.T) {
 	obs := grain.Observed{
 		Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building",
-			Call: &grain.Call{ID: "c1", Tool: grain.ToolOpenPullRequest}},
+			Call: &grain.Call{ID: "c1", Tool: "open_pull_request"}},
 		Run: live(),
 		Now: start.Add(time.Minute),
 	}
@@ -266,7 +266,7 @@ func TestReconcileAnswersAtMostOneCall(t *testing.T) {
 	obs := grain.Observed{
 		Status: grain.Status{
 			Phase: grain.PhaseBlocked, Since: start, Activity: "waiting for CI",
-			Call: &grain.Call{ID: "c1", Tool: grain.ToolWaitForChecks},
+			Call: &grain.Call{ID: "c1", Tool: "wait_for_checks"},
 		},
 		Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "waiting for CI",
 			PendingAddenda: []string{"one more thing"}},

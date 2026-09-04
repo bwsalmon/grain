@@ -68,29 +68,66 @@ also speaks rather than refuse a shim that could have served it.
 
 ## This is MCP over a poll, not an RPC of our own
 
-Most of what crosses this channel is an MCP tool call. The shim runs an
-MCP server in the container for the agent -- the same `pkg/mcp` that
-serves the sandbox tools today -- and serves everything it can locally.
-The handful of tools needing the store, a GitHub credential or a human it
-cannot serve, so it **holds the call open and forwards it**: the call
-surfaces on the next `grain status`, the controller executes it and hands
-the result back through `grain answer`, and the shim returns that to the
-agent as the tool's own result.
+The shim runs an MCP server in the container for the agent — the same
+`pkg/mcp` that serves the sandbox tools today — and the rule for what it
+does with a call is one line:
+
+> **If grain declared it, grain serves it. If you declared it, grain
+> forwards it.**
+
+What grain declares is `BuiltinTools`, and all of it is about the sandbox:
+
+| tool | served |
+| --- | --- |
+| `run_command`, `read_file`, `write_file`, `edit_file` | locally, over vsock |
+| `recreate_sandbox` | locally — a kontur call, now that the VMM is the shim's own child |
+| `status` | locally — writes `status.activity`, read on the next poll |
+
+`status` is worth its own line: today `update_status` is an HTTP hop to
+the daemon to put a phrase on a task's row. As a built-in it is a file
+write that cannot fail and costs the agent nothing, and it is the only
+escape hatch that becomes *fully* local rather than merely cheaper.
+
+Everything else — `open_pull_request`, `ask_question`, `request_secret`,
+`wait_for_checks`, whatever a deployment adds — is declared in
+`/grain/tools/` and **forwarded without the grain understanding it**. The
+shim holds the call open, it surfaces on the next `grain status` as
+`call`, the controller executes it and hands back a result through `grain
+answer`, and the shim returns that to the agent as the tool's own result.
 
 So the controller is an out-of-band executor for tools the grain cannot
-run itself. That is the whole of it, and it needs no MCP transport, no
-session and no connection.
+run itself, and grain's whole job on this channel is **presenting the
+tools and relaying frames**. There are no tool names in `pkg/grain`
+besides its own: `call.tool` is a bare string, and whoever declared a tool
+is who knows what it means.
 
 **At most one call is outstanding, always.** The status has one slot, not
 a queue: a grain is blocked on something or it is not. Parallel tool use
 makes two forwarded calls possible in principle, and the shim serialises
-them -- holding the second until the first is settled -- which costs a
-tick on a rare case and buys a controller whose obligation per tick is
-bounded at one. `TestReconcileAnswersAtMostOneCall` holds that.
+them — holding the second until the first is settled — which costs a tick
+on a rare case and buys a controller whose obligation per tick is bounded
+at one. `TestReconcileAnswersAtMostOneCall` holds that.
 
-**`answer.json` is `mcp.Result`'s own shape** -- text plus an error flag --
+**`answer.json` is `mcp.Result`'s own shape** — text plus an error flag —
 so nothing is translated on the way back. The controller produces a tool
 result; the shim passes it through.
+
+**There is no deferred category.** An earlier draft had the shim answer
+`comment_on_issue` and friends locally with a canned acknowledgement and
+report them at the end. It cannot: it does not know which tools those
+are, and it should not have to. Forwarding them is better anyway — the
+agent waits one tick and gets the real result ("posted comment #42", or
+the failure) instead of a confirmation for an effect that happens later
+or not at all.
+
+**Whether a tool blocks the agent is the controller's business, not the
+wire's.** `wait_for_checks` is a call the controller simply does not
+answer until CI has a verdict; `call.since` says how long it has been
+waiting. `ask_question` is the same mechanism with a different policy —
+answer it if a human is watching, or refuse it (`isError` with "parked
+for a human; wrap up now") to reproduce today's end-the-turn behaviour.
+Both are one tool result the agent reacts to, and neither is something a
+grain knows about.
 
 ### Why the control channel is not itself MCP
 
@@ -244,6 +281,8 @@ CHV_CPUS=2  CHV_MEMORY_MB=8192  CHV_DISK_SIZE_MB=30720
 ```
 /grain/credential                                  0600
 /grain/setup                                       0755
+/grain/tools/open_pull_request.json                0644
+/grain/tools/ask_question.json                     0644
 /grain/placements/home/agent/.git-credentials      0600
 /grain/placements/home/debian/.gemini-api-key      0600
 ```
@@ -273,6 +312,21 @@ blob could not have told it apart from a secret.
 
 Under docker the same tree is populated however that backend does it. The
 shim's contract is the tree, not how it was filled.
+
+**`/grain/tools/` is how a grain learns what it can offer beyond its own
+tools** — one ordinary MCP tool declaration per file:
+
+```json
+{
+  "name": "open_pull_request",
+  "description": "Open this run's pull request and read back what CI makes of it.",
+  "inputSchema": { "type": "object", "properties": { "title": { "type": "string" } } }
+}
+```
+
+Non-secret and structured, so it is a **ConfigMap** volume — and a
+deployment can give its agents a tool grain has never heard of without
+grain being changed or released.
 
 **The placements tree is the mapping.** A placement bound for
 `/home/agent/.netrc` is mounted at
@@ -387,8 +441,6 @@ Once terminal, `result` is set:
   "result": {
     "outcome": "succeeded",
     "pushed": { "branch": "grain/task-311", "head": "9f3c1a2" },
-    "deferred": [ { "id": "q-2", "kind": "ask_question", "raised": "...",
-                    "payload": { "question": "Should this also cover draft PRs?" } } ],
     "usage": { "turns": 34, "inputTokens": 812004, "outputTokens": 41221, "wall": "22m14s" }
   }
 }

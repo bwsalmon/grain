@@ -102,22 +102,31 @@ controller request iff it touches the store, GitHub, or a human.**
 
 | tool | today | as a grain |
 | --- | --- | --- |
-| `run_command`, `read_file`, `write_file`, `edit_file` | `docker exec` → `kontur exec` | local, vsock |
-| `recreate_sandbox` | MCP → daemon REST → registry → four `restore*` | local kontur call |
-| `update_status` | MCP → daemon REST → store write | `status.json`, read on poll |
-| `open_pull_request` | MCP → daemon REST | forwarded: `Status.Call` / `Answer` |
-| `pull_request_status`, `wait_for_checks` | controller's GitHub client | forwarded |
-| `ask_question`, `request_secret` | deferred into the result | forwarded |
-| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | acknowledged locally, reported in `Result.Deferred` |
+| `run_command`, `read_file`, `write_file`, `edit_file` | `docker exec` → `kontur exec` | **built in** — local, vsock |
+| `recreate_sandbox` | MCP → daemon REST → registry → four `restore*` | **built in** — local kontur call |
+| `update_status` → `status` | MCP → daemon REST → store write | **built in** — writes `status.activity`, read on poll |
+| `open_pull_request` | MCP → daemon REST | **declared and forwarded** |
+| `pull_request_status`, `wait_for_checks` | controller's GitHub client | declared and forwarded |
+| `ask_question`, `request_secret` | deferred into the result | declared and forwarded |
+| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | declared and forwarded |
 
-Two consequences worth stating separately.
+The line is not a list of tool names: **if grain declared it, grain serves
+it; if you declared it, grain forwards it.** Grain's own are the six
+built-ins above, every one of them about the sandbox. Everything else is
+an ordinary MCP tool declaration in `/grain/tools/` that the grain
+advertises, holds calls to, and relays without a vocabulary of its own —
+so `open_pull_request` and `ask_question` are grain-the-product's tools,
+declared by the controller that knows what they mean, and a deployment
+can add one grain has never heard of without grain being changed.
 
 A forwarded tool is not translated into a request of our own: the shim
 holds the MCP call open, it surfaces as `Status.Call`, the controller
 executes it, and `Answer` is `mcp.Result`'s own two fields handed straight
 back as the tool's result. At most one is outstanding at a time — the
-status has one slot, not a queue. See `docs/grain-cli.md`, "This is MCP
-over a poll".
+status has one slot, not a queue. Whether a tool blocks the agent or tells
+it to wrap up is the controller's policy, expressed as how fast it
+answers and what it answers with, and is invisible to the grain. See
+`docs/grain-cli.md`, "This is MCP over a poll".
 
 **The container needs no daemon URL, no task ID and no bearer token.**
 `agent.RunConfig.TaskID`'s entire justification is "the one fact a forked

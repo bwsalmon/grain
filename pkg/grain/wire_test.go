@@ -229,7 +229,7 @@ func TestStatusWireFormat(t *testing.T) {
 		Rebuilds: 1,
 		Setup:    &grain.SetupResult{Output: "9f3c1a2\n"},
 		Call: &grain.Call{
-			ID: "c-7", Tool: grain.ToolOpenPullRequest,
+			ID: "c-7", Tool: "open_pull_request",
 			Arguments: json.RawMessage(`{"title":"Port the staleness check"}`),
 			Since:     time.Date(2026, 9, 4, 19, 40, 0, 0, time.UTC),
 		},
@@ -361,4 +361,68 @@ func TestRedactedCarriesNoMaterial(t *testing.T) {
 	if strings.Contains(spec.Setup, "@") {
 		t.Error("the setup script embeds credentials in a URL; they belong in a placement")
 	}
+}
+
+// A grain has no vocabulary for the tools it forwards: it serves its own
+// built-ins and relays whatever somebody else declared. The declarations
+// land as ordinary MCP tool objects, one file each, so a ConfigMap can
+// carry them and a deployment can add a tool without grain changing.
+func TestDeclaredToolsBecomeFiles(t *testing.T) {
+	files, err := grain.Spec{
+		Version: grain.Version,
+		Tools: []grain.ToolDecl{{
+			Name:        "open_pull_request",
+			Description: "Open this run's pull request and read back what CI makes of it.",
+			InputSchema: map[string]any{"type": "object"},
+		}},
+	}.Files()
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	got, ok := files["/grain/tools/open_pull_request.json"]
+	if !ok {
+		t.Fatalf("no declaration file; got %v", keys(files))
+	}
+	if got.Mode != "0644" {
+		t.Errorf("mode = %q, want 0644: a declaration is not material", got.Mode)
+	}
+	var back grain.ToolDecl
+	if err := json.Unmarshal([]byte(got.Content), &back); err != nil {
+		t.Fatalf("the declaration is not readable as one: %v", err)
+	}
+	if back.Name != "open_pull_request" || back.InputSchema["type"] != "object" {
+		t.Errorf("declaration round-tripped as %+v", back)
+	}
+}
+
+// Refused rather than resolved by precedence: a grain that quietly picked
+// one of two tools named run_command would hand the agent a tool other
+// than the one somebody meant it to have, and nothing downstream could
+// tell.
+func TestToolDeclarationsAreChecked(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tools []grain.ToolDecl
+	}{
+		{"shadows a built-in", []grain.ToolDecl{{Name: "run_command"}}},
+		{"shadows the status built-in", []grain.ToolDecl{{Name: "status"}}},
+		{"declared twice", []grain.ToolDecl{{Name: "ask_question"}, {Name: "ask_question"}}},
+		{"is a path", []grain.ToolDecl{{Name: "../escape"}}},
+		{"has a slash", []grain.ToolDecl{{Name: "a/b"}}},
+		{"is empty", []grain.ToolDecl{{Name: ""}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := (grain.Spec{Version: grain.Version, Tools: tc.tools}).Files(); err == nil {
+				t.Fatalf("Files accepted a tool that %s", tc.name)
+			}
+		})
+	}
+}
+
+func keys(m map[string]grain.File) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

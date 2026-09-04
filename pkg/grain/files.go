@@ -1,6 +1,7 @@
 package grain
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"strings"
@@ -45,6 +46,12 @@ const (
 	// human can cat in an incident -- rather than a string that has to
 	// survive shell quoting on its way through a runtime's env handling.
 	FileSetup = Root + "/setup"
+	// DirTools holds the MCP tool declarations the grain advertises to
+	// the agent and forwards calls to, one JSON file per tool
+	// (ToolDecl). Non-secret and structured, which makes it a ConfigMap
+	// volume on Kubernetes -- and means a deployment can give its agents
+	// a new tool without grain being changed or released.
+	DirTools = Root + "/tools"
 	// DirPlacements holds the files to copy into the guest, in a tree
 	// that mirrors their guest paths: a placement at /home/agent/.netrc
 	// is mounted at /grain/placements/home/agent/.netrc.
@@ -76,12 +83,24 @@ type File struct {
 // and writing three of four credentials is a worse outcome than writing
 // none and saying so.
 func (s Spec) Files() (map[string]File, error) {
-	out := make(map[string]File, len(s.Placements)+2)
+	if err := checkTools(s.Tools); err != nil {
+		return nil, err
+	}
+	out := make(map[string]File, len(s.Placements)+len(s.Tools)+2)
 	if s.Framework.Credential != "" {
 		out[FileCredential] = File{Content: s.Framework.Credential, Mode: "0600"}
 	}
 	if s.Setup != "" {
 		out[FileSetup] = File{Content: s.Setup, Mode: ModeSetup}
+	}
+	for _, d := range s.Tools {
+		encoded, err := json.MarshalIndent(d, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("grain: encoding the %q tool: %w", d.Name, err)
+		}
+		// 0644: a tool declaration is not material, and the agent's own
+		// process may need to read it.
+		out[DirTools+"/"+d.Name+".json"] = File{Content: string(encoded) + "\n", Mode: "0644"}
 	}
 	for _, p := range s.Placements {
 		at, err := PlacementPath(p.Path)
