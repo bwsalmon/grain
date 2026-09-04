@@ -174,7 +174,7 @@ describe("NewTaskOverlay", () => {
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
     await user.click(screen.getByLabelText(/No repo/));
     const file = new File(["fake"], "screenshot.png", { type: "image/png" });
-    await user.upload(screen.getByLabelText("Attach files"), file);
+    await user.upload(document.querySelector('input[type="file"]'), file);
     expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Create task" }));
