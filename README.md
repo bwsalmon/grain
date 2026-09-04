@@ -2677,6 +2677,14 @@ contents replace this installation's database, or an empty repository
 grain seeds from what it has. The last two are one operation, because
 adopting cannot tell them apart up front and does not need to.
 
+An empty repository is worth formatting before it is adopted:
+`grain state format`, in a clone of it, writes the README, the
+`.gitignore` and the CI step that validates every later pull request
+against it (see "A task can change the settings" below). It is optional
+-- grain seeds a repository that has had nothing done to it just the same
+-- and it is the only way that CI step gets there, since grain's own
+pushes deliberately never carry a workflow file.
+
 Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
 previous working tree is moved aside with a timestamped name rather than
@@ -2734,6 +2742,34 @@ a row missing a NOT NULL column failed after the merge, on the
 deployment. As a CI step in the state repository (`grain state check .`
 needs no `-data-dir`, no store and no daemon) it fails the pull request
 instead.
+
+`grain state ci DIR` is what puts it there. It writes
+`.github/workflows/grain-state-check.yml` into a clone of the state
+repository: a checkout and one `docker run` of grain's own published
+image, on pull requests alone -- grain commits to that repository itself
+every time its database changes, and validating those pushes would spend
+a CI run per task state change on a dump grain had just written out of
+the database the check imports it back into. The image is a flag, because
+the check only means anything against a build that knows the same schema
+as the deployment (`grain state status` prints both numbers). Neither
+this nor `format` below commits anything, and that is deliberate: a push
+adding a file under `.github/workflows` is refused unless the credential
+making it may write workflows, and a commit sitting in the deployment's
+own working tree that its sync loop can never push would wedge every
+later sync behind it.
+
+`grain state format DIR` is the step before adopting: an operator has
+made an empty repository on GitHub and cloned it, and this lays out the
+parts of a state repository that are not the dump -- the README that says
+what the tree is, the `.gitignore` that keeps a stray key out of it, and
+that same CI step. It writes no `tables/` and no `schema-version`, which
+is what keeps the bootstrap's two cases apart: a repository with a dump
+in it is one adopting *imports over the database*, so a format that wrote
+an empty dump would turn "grain seeds this empty repository from what it
+has" into "this empty repository replaces grain's state", and an operator
+who formatted one and then adopted it would have emptied their own
+deployment. It refuses a directory that already holds a dump and points
+at `grain state ci`, which is the command that has something to do there.
 
 And the encrypted secrets file is not in there any more, for the reason
 the section above gives: a repository a sandbox may clone is a

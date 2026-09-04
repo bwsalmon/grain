@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/model"
@@ -53,6 +54,14 @@ Commands:
                             database and report what breaks. Needs no -data-dir
                             and touches nothing: this is the CI step a state
                             repository runs against a proposed change
+  format [DIR] [-image I] [-force]
+                            lay out a new, empty state repository: its README,
+                            its .gitignore and the CI step above, written into
+                            a clone you commit and push yourself. Needs no
+                            -data-dir
+  ci [DIR] [-image I] [-force]
+                            write just that CI step, into a repository a
+                            deployment is already using. Needs no -data-dir
   key show                  print this installation's secrets public key
   key path                  print where the private key is read from
   key import [-key-file F]  install a secrets private key this operator holds,
@@ -79,13 +88,20 @@ func runState(args []string) error {
 		return errors.New("a command is required")
 	}
 	ctx := context.Background()
-	// check is the one command here that is not about this host's own
-	// installation: it reads a directory somebody hands it, in a CI
-	// runner that has no data directory, no store and no deployment. So
-	// it is dispatched before -data-dir is insisted on rather than being
-	// made to invent one.
-	if rest[0] == "check" {
+	// Three commands here are not about this host's own installation:
+	// they read, or write, a directory somebody hands them -- a CI runner
+	// with a checkout and nothing else, or an operator's own clone of a
+	// repository no deployment has been pointed at yet. Neither has a
+	// data directory, a store or a daemon, so all three are dispatched
+	// before -data-dir is insisted on rather than being made to invent
+	// one.
+	switch rest[0] {
+	case "check":
 		return stateCheck(ctx, rest[1:])
+	case "format":
+		return stateFormat(rest[1:])
+	case "ci":
+		return stateCI(rest[1:])
 	}
 	if *dataDir == "" {
 		fs.Usage()
@@ -439,6 +455,127 @@ func stateCheck(ctx context.Context, args []string) error {
 	}
 	fmt.Println("ok: grain can load this")
 	return nil
+}
+
+// stateFormat lays out a state repository in a directory that does not
+// hold one yet: the README, the .gitignore and the workflow that runs
+// `grain state check` on every pull request against it.
+//
+// It is the step before `grain state adopt`, and it runs somewhere else
+// -- in a clone the operator made, not in the deployment's own working
+// tree. That is not squeamishness about touching the tree. A push that
+// adds a file under .github/workflows is refused unless the credential
+// making it may write workflows, and grain's own installation token need
+// not be able to: a commit sitting in the deployment's tree that its
+// sync loop can never push would wedge every later sync behind it, so
+// the one file that carries that risk is committed by a human with a
+// credential of their own. Nothing here commits anything.
+//
+// It writes no dump, and that is what keeps the bootstrap's two cases
+// apart. A repository with a dump in it is one `adopt` imports over the
+// database; a formatted one still has none, so adopting it is still the
+// "empty repository grain seeds from what it has" case -- see
+// staterepo/format.go.
+func stateFormat(args []string) error {
+	fs := flag.NewFlagSet("grain state format", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, "usage: grain state format [-image IMAGE] [-force] [DIR]\n\n"+
+			"DIR is a clone of the repository this installation's state will live in,\n"+
+			"and defaults to \".\". It must not hold a dump already: use `grain state ci`\n"+
+			"to add the validation step to a repository a deployment is already using.\n")
+	}
+	image := fs.String("image", staterepo.DefaultCheckImage,
+		"container image the CI step runs `grain state check` from")
+	force := fs.Bool("force", false, "replace a workflow file that is already there")
+	dir, err := stateDirArg(fs, args, "format")
+	if err != nil {
+		return err
+	}
+	if staterepo.HasDump(dir) {
+		return fmt.Errorf("%s already holds a dump (there are table files in %s/), so it is a "+
+			"state repository already; `grain state ci %s` adds the validation step to it "+
+			"without formatting anything", dir, staterepo.TablesDir, dir)
+	}
+	formatted, err := staterepo.Format(dir, *image, *force)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("formatted %s as a grain state repository\n", dir)
+	for _, path := range formatted.Wrote {
+		fmt.Printf("  wrote   %s\n", path)
+	}
+	for _, path := range formatted.Left {
+		fmt.Printf("  left    %s alone; it is already there (-force replaces it)\n", path)
+	}
+	fmt.Printf("\nCommit and push these yourself: a push that adds a file under\n"+
+		".github/workflows needs a credential that may write workflows, and grain's\n"+
+		"own pushes deliberately never carry one.\n\n"+
+		"  git -C %s add .\n"+
+		"  git -C %s commit -m 'Format this repository for grain'\n"+
+		"  git -C %s push\n\n"+
+		"Then, on the host grain runs on:\n\n"+
+		"  grain state adopt -remote <this repository's URL>\n\n"+
+		"which seeds it from that deployment's database. There is deliberately no dump\n"+
+		"here, so adopting still means \"grain writes its state out\" rather than \"this\n"+
+		"repository replaces grain's state\".\n", dir, dir, dir)
+	return nil
+}
+
+// stateCI writes the validation workflow into a repository that already
+// has one of everything else -- the case `format` cannot cover, because
+// a deployment has been pushing to this repository since before the
+// workflow existed and formatting it would mean nothing.
+//
+// The same warning applies to the commit as it does above, and for the
+// same reason, which is why this writes the file and stops rather than
+// committing into a deployment's working tree.
+func stateCI(args []string) error {
+	fs := flag.NewFlagSet("grain state ci", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, "usage: grain state ci [-image IMAGE] [-force] [DIR]\n\n"+
+			"DIR is a clone of a state repository, and defaults to \".\". Writes the\n"+
+			"workflow that runs `grain state check` on every pull request against it.\n")
+	}
+	image := fs.String("image", staterepo.DefaultCheckImage,
+		"container image the CI step runs `grain state check` from")
+	force := fs.Bool("force", false, "replace a workflow file that is already there")
+	dir, err := stateDirArg(fs, args, "ci")
+	if err != nil {
+		return err
+	}
+	wrote, err := staterepo.EnsureWorkflow(dir, *image, *force)
+	if err != nil {
+		return err
+	}
+	if !wrote {
+		fmt.Printf("%s is already there; -force replaces it\n",
+			filepath.Join(dir, filepath.FromSlash(staterepo.WorkflowFile)))
+		return nil
+	}
+	fmt.Printf("wrote %s\n", filepath.Join(dir, filepath.FromSlash(staterepo.WorkflowFile)))
+	fmt.Printf("\nCommit and push it yourself: a push that adds a file under\n" +
+		".github/workflows needs a credential that may write workflows, and grain's\n" +
+		"own pushes deliberately never carry one.\n")
+	return nil
+}
+
+// stateDirArg parses the flags of a command whose only argument is the
+// directory it works on, defaulting to the working directory -- which is
+// what these commands look like when they are run at the top of a
+// checkout, in CI or in a terminal sitting in one.
+func stateDirArg(fs *flag.FlagSet, args []string, name string) (string, error) {
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	switch fs.NArg() {
+	case 0:
+		return ".", nil
+	case 1:
+		return fs.Arg(0), nil
+	default:
+		fs.Usage()
+		return "", fmt.Errorf("%s takes one directory", name)
+	}
 }
 
 // throwawayStore opens an empty database in a temporary directory, at
