@@ -13,11 +13,16 @@ package grain
 //     local: today's update_status is an HTTP hop to the daemon to put a
 //     phrase on a row.
 //
-// Every other tool an agent can call comes from an ordinary MCP server
-// the controller runs, reached over the upstream connection (SocketUpstream).
-// The shim merges those into its own tools/list and relays their calls; it
-// holds no vocabulary for them, and never sees their declarations except
-// as whatever that server advertised.
+// There is no seventh tool, and nothing outside the sandbox is a tool at
+// all. An escape hatch is a CLI in the guest image with a credential
+// placed beside it (Spec.Placements), which the agent runs with
+// run_command: "grainctl open-pull-request --title ..." rather than a
+// tool call the shim would have to declare, relay and keep in sync. That
+// is how the git proxy already works, and reusing its shape rather than
+// inventing one is the point -- a deployment adds a capability by
+// shipping a binary and a placement, with no change to this package, no
+// merged tools/list, and no connection whose failure costs the agent
+// those tools for the rest of the run.
 //
 // This is a list rather than a registry because it is the only tool
 // knowledge in this package: whoever wrote a tool is who knows what it

@@ -22,10 +22,11 @@ const (
 	PhaseProvisioning Phase = "provisioning"
 	// PhaseRunning is the agent CLI executing in the container.
 	PhaseRunning Phase = "running"
-	// There is no blocked phase. An agent waiting on a controller tool is
-	// waiting on an HTTP request it made itself, which the shim cannot
-	// see -- and does not need to. The controller is the far end of that
-	// request, so it already knows which grains are waiting on it, and
+	// There is no blocked phase. An agent waiting on the controller is
+	// waiting on a command it ran itself in the guest, which to the shim
+	// is an ordinary run_command that has not returned -- and that is
+	// enough. The controller is the far end of whatever that command
+	// called, so it already knows which grains are waiting on it, and
 	// knows it better than a shim inferring from the outside could.
 
 	PhaseSucceeded Phase = "succeeded"

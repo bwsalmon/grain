@@ -30,19 +30,6 @@ const (
 	EnvFramework = "GRAIN_FRAMEWORK"
 	// EnvMaxRuntime bounds the agent, in time.Duration notation.
 	EnvMaxRuntime = "GRAIN_MAX_RUNTIME"
-	// EnvControllerURL is the controller's MCP endpoint, which the agent
-	// reaches directly over Streamable HTTP. The shim writes it into
-	// whichever MCP config its framework profile wants and otherwise has
-	// nothing to do with it.
-	//
-	// An address rather than a pipe because MCP already knows how to
-	// survive a network: Streamable HTTP carries a session id and
-	// resumable SSE, so a dropped connection is the protocol's problem
-	// and not this package's. Reachable because the container has a
-	// working stack under NAT -- and under flat, over the same local
-	// listener the model-API tunnel uses, since that tunnel carries TCP
-	// rather than one protocol.
-	EnvControllerURL = "GRAIN_CONTROLLER_URL"
 )
 
 // kontur's own variables, which grain sets and never reads. A grain's
@@ -72,9 +59,6 @@ func (s Spec) Env() map[string]string {
 	}
 	if s.MaxRuntime != 0 {
 		env[EnvMaxRuntime] = s.MaxRuntime.String()
-	}
-	if s.ControllerURL != "" {
-		env[EnvControllerURL] = s.ControllerURL
 	}
 	if s.Shape.CPUs != 0 {
 		env[envKonturCPUs] = strconv.Itoa(s.Shape.CPUs)
@@ -114,9 +98,8 @@ func SpecFromEnv(lookup func(string) string) (Spec, error) {
 		return Spec{}, fmt.Errorf("grain: this environment is written to wire version %q and this build speaks %q", got, Version)
 	}
 	s := Spec{
-		Version:       got,
-		Framework:     FrameworkSpec{Name: lookup(EnvFramework)},
-		ControllerURL: lookup(EnvControllerURL),
+		Version:   got,
+		Framework: FrameworkSpec{Name: lookup(EnvFramework)},
 	}
 	if raw := lookup(EnvMaxRuntime); raw != "" {
 		d, err := time.ParseDuration(raw)

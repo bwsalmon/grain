@@ -75,126 +75,86 @@ Grain's own are six, every one about the sandbox:
 | `recreate_sandbox` | locally — a kontur call, now that the VMM is the shim's own child |
 | `status` | locally — writes `status.activity`, read off the record stream |
 
-**Everything else comes from an MCP server the controller runs**, which the
-agent reaches directly over Streamable HTTP. The shim does not merge,
-relay, or know those tools exist.
-
-`status` is the one escape hatch that becomes *fully* local: `update_status`
-is an HTTP hop today to put a phrase on a task's row, and as a built-in it
-is a file write that cannot fail and costs the agent nothing.
+**Everything else is a CLI in the guest**, run with `run_command` like
+anything else the agent runs. `grainctl open-pull-request --title "…"`,
+not a tool call. Grain has no vocabulary for any of it and does not know a
+controller exists.
 
 | tool | today | as a grain |
 | --- | --- | --- |
 | `run_command`, `read_file`, … | `docker exec` → `kontur exec` | built in — local, vsock |
 | `recreate_sandbox` | MCP → daemon REST → registry → four `restore*` | built in — local kontur call |
 | `update_status` → `status` | MCP → daemon REST → store write | built in — a local file write |
-| `open_pull_request`, `pull_request_status`, `wait_for_checks` | daemon REST / controller's GitHub client | the controller's MCP server |
-| `ask_question`, `request_secret` | deferred into the result | the controller's MCP server |
-| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | the controller's MCP server |
+| `open_pull_request`, `pull_request_status`, `wait_for_checks` | daemon REST / controller's GitHub client | `grainctl`, from the guest |
+| `ask_question`, `request_secret` | deferred into the result | `grainctl`, from the guest |
+| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | `grainctl`, from the guest |
 
-### The agent reaches the controller directly
+`status` is the one escape hatch that becomes *fully* local: `update_status`
+is an HTTP hop today to put a phrase on a task's row, and as a built-in it
+is a file write that cannot fail and costs the agent nothing.
 
-The controller runs an MCP server over **Streamable HTTP**, and the agent
-talks to it itself. An MCP client speaks to several servers as a matter of
-course, so the agent is simply configured with two: the shim's stdio
-server for the six sandbox tools, and `GRAIN_CONTROLLER_URL` for
-everything else.
+### This is the git proxy's shape, reused
 
-The shim takes no part. It does not merge tool lists, relay calls, hold
-them, or know that any of those tools exist.
+Not a new mechanism — the one grain already has, pointed at a second
+service:
 
-**Reachable because the container has a working stack under NAT** — the
-host gateway under docker, ordinary cluster networking on Kubernetes. Under
-flat it is the same local listener the model-API tunnel uses, since that
-tunnel carries TCP rather than one protocol.
+| | git | controller |
+| --- | --- | --- |
+| how the guest reaches it | an address the proxy advertises | the same |
+| where the credential lives | a placement in the guest | a placement in the guest |
+| where the address lives | the clone URL in `setup` | a placement beside the token |
+| what authorizes a request | `Store.GitScope` → live run → its repos | the same resolution → what that run may ask |
 
-**Drops are the protocol's problem, not ours.** Streamable HTTP carries a
-session id and resumable SSE (`Last-Event-ID`), so a client reconnects and
-picks up where it was. There is nothing here that holds a call, replays
-one, or reattaches — and nothing that has to wait for a controller before
-starting an agent.
+`startGitProxy` already binds `0.0.0.0` and advertises a host when
+`-kontur-git-proxy-host` is set — "typically the docker bridge gateway
+address the guest's own outbound NAT routes through to reach this host" —
+and binds loopback only when sandboxes share the daemon's netns. A
+guest-reachable service on the controller is a deployed, working shape,
+and it is **already a separate listener** from the daemon's REST API and
+UI (`startGitProxy` and `startUIServer` are two servers on two ports).
 
-**The agent never holds the token.** `/grain/token` is root-owned and
-`0600`, and the agent runs as a different uid: it points at a loopback
-address the shim serves, and the shim adds the `Authorization` header and
-forwards. A byte proxy, not an MCP-aware one — it terminates no session,
-merges no tool list, holds no call, so MCP's own session id and resumable
-SSE still do the reconnecting.
+**A credential in the guest is not a new exposure.** Git's token is
+already there, because git runs there. What makes that safe is worth
+copying exactly:
 
-The asymmetry that makes this clean: **an agent needs its own model
-credential and does not need the controller token.** So `/grain/credential`
-stays readable by it and `/grain/token` does not.
+- **Authorization resolves through the live run, not the token.**
+  `authorize.go`: "A sandbox with no live run authorizes nothing, which is
+  the same fail-closed default a missing allowlist file gave." So a leaked
+  credential is dead the moment the run ends — no expiry to tune, no
+  revocation race.
+- **Each request is checked**, not just the bearer.
+- **A forbidden set** refuses some things to every sandbox regardless — for
+  git, grain's own state repository when it holds encrypted secrets.
 
-It matters because **under NAT the guest has egress too** — masquerade
-gives the sandbox its own path out — so agent and sandbox share a source
-address and "only the container may reach the controller" is not
-enforceable at the network layer. The token is what enforces it, which is
-why the token is the thing to keep out of reach. And it is why the MCP
-endpoint **must be its own listener**, separate from the daemon's REST API
-and UI: otherwise reachability to one is reachability to the other, and a
-container with no path to the daemon — a property this design otherwise
-has — quietly stops being true.
+**What does not come for free is the scope.** Git's is repos; a controller
+CLI needs its own answer to *what may this grain ask for* — open a pull
+request on its own branch, comment on its own task, propose a task, ask
+its own question. "Authenticated as this grain" is not "allowed to do
+this", and that check is the controller's to write, modelled on
+`authorize.go` rather than inherited from it.
 
-**Which grain is calling comes from that token.** An exec pipe
-authenticated by construction — the controller chose which container to
-exec into — and an address does not, so something has to say.
-That token is the *same* one the git proxy already mints per grain
-(`SandboxTokenStore.EnsureToken`), revoked by the same `Revoke` at reap and
-resolved to a live run by the same `Store.GitScope`. One more consumer of
-machinery that exists, rather than a second authorization surface to build
-and get wrong. It also spares the controller a server instance per grain
-for identity alone.
+### What this deletes
 
-The same secret reaches the guest too, as a placement, because git runs
-there. Same value, two consumers, two sides of the vsock boundary.
+The MCP-to-controller path, entirely: no `ControllerURL`, no container-side
+token, no loopback proxy in the shim, no Streamable-HTTP-versus-SSE split
+to serve both `codex` and `agy`, and no per-framework MCP config beyond the
+shim's own stdio server.
 
-### Extending it
+It also means **a grain needs no controller to run**. Nothing attaches,
+nothing is held open, nothing waits.
 
-Somebody who wants an agent to be able to do something new writes **a plain
-MCP server** — the spec, any official SDK — and the controller serves or
-aggregates it. That server is unaware of the container and the VM.
+**The container needs no daemon URL, no task ID and no bearer token.**
+`agent.RunConfig.TaskID` exists solely as "the one fact a forked mcpserver
+subprocess needs before it can ask the daemon to act on this run's
+behalf" — that field goes, with `WithGrainServer` and the `-task` flag.
 
-### What the three CLIs actually support
+**Recreating a sandbox stops being a subsystem.** `SandboxRecreations`,
+`sandboxRecreation`, `SandboxRebuilder`, `pkg/ui/sandbox_recreate.go` and
+its route all go — roughly 900 lines with tests.
 
-Checked, not assumed:
-
-| CLI | remote MCP | transport | bearer token |
-| --- | --- | --- | --- |
-| `claude` | yes | `--transport http` **or** `sse` | `--header "Authorization: Bearer …"` |
-| `codex` | yes | **Streamable HTTP** only (`McpServerTransportConfig::StreamableHttp { url }`) | `bearer_token_env_var`, `http_headers`, `env_http_headers` |
-| `agy` | yes | **SSE only** (`serverUrl`) | `--header`, per `agy mcp add` |
-
-Sources: `claude mcp add --help` on the installed binary ("Transport type
-(stdio, sse, http)"); `codex-rs/config/src/mcp_types.rs`, whose transport
-enum has exactly `Stdio` and `StreamableHttp` and cites the spec's
-streamable-http section; and `docs/agy-surface.md`, which records
-Antigravity's schema as "two transport mechanisms for MCP: **Stdio** …
-and **SSE** (for remote services)" with `serverUrl`.
-
-**So the controller must serve both transports**, because no single one
-covers all three:
-
-| endpoint serves | claude | codex | agy |
-| --- | :---: | :---: | :---: |
-| Streamable HTTP only | ✓ | ✓ | ✗ |
-| HTTP+SSE only | ✓ | ✗ | ✓ |
-| both | ✓ | ✓ | ✓ |
-
-That is not onerous — HTTP+SSE is the older, well-specified transport and
-server SDKs generally still carry it for compatibility — but it is a real
-requirement rather than a detail, and the alternative is that one
-framework needs the shim to bridge stdio for it alone.
-
-`codex` has the best of the three auth shapes: `bearer_token_env_var`
-names an environment variable rather than embedding the secret in the
-config file, so the shim reads `/grain/token` and exports it. The other
-two take a header, which means the token is written into their config
-file — same trust zone, but worth knowing.
-
-One caution specific to agy, already measured in `docs/agy-surface.md`: a
-*known* key of the wrong JSON type does not warn or partially load, it
-drops the whole server entry, and `agy mcp list` then shows nothing. So
-its config wants writing exactly.
+Two more things move inside by the same rule: **`ConfigureGitCredentials`**
+becomes an ordinary placement, and **`prepareCheckout`** (~500 lines of
+`checkout.go`) becomes part of the setup script the controller composes.
 
 ## What a grain does not know
 
@@ -706,6 +666,17 @@ Two costs, paid only by deployments that select NAT:
    through, so `-kontur-net nat` would make every `vm create` fail against
    current kontur; `-kontur-base-ip`/`-kontur-base-port` feed flags kontur
    now ignores.
+7. **The controller's scope check is unwritten**, and it is the one piece
+   of the guest-CLI decision that is not already built. `GitScope` answers
+   "which repos", which is not "may this grain open a pull request on this
+   branch, comment on this task, ask this question". Modelled on
+   `authorize.go` — per-request, fail-closed, resolved through the live
+   run — but written fresh.
+8. **An escape hatch has to be told about.** An MCP client asks
+   `tools/list`; a CLI does not announce itself, and an agent never told
+   `grainctl` exists finishes without opening a pull request and reports
+   success. Naming it belongs in the prompt or the setup script, per
+   framework, and is part of the work rather than documentation.
 
 ### Asks of kontur
 
@@ -732,8 +703,12 @@ path and the agent's location, not of the task model.
    and the decision table against the existing suite.
 3. The controller loop — `Tick` over `List` + `Reconcile`, alongside the
    existing dispatch path behind a flag.
-4. kontur's NAT mode (the blocking ask), then `grain run` and the sandbox
-   image. Steps 1–3 do not wait on it.
-5. `KonturGrains`.
-6. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`, `runOne`,
+4. `grainctl` and the controller-side listener it calls: the scope check
+   (item 7 above), then the verbs that today are MCP tools reaching the
+   daemon. Shares `gitproxy`'s token store and `startGitProxy`'s
+   advertise-host handling.
+5. kontur's NAT mode (the blocking ask), then `grain run` and the sandbox
+   image. Steps 1–4 do not wait on it.
+6. `KonturGrains`.
+7. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`, `runOne`,
    `RunDispatch`'s sandbox half, `pkg/ui/sandbox_recreate.go`.

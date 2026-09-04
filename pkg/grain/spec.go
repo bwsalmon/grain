@@ -94,6 +94,14 @@ type Spec struct {
 	// starts: credentials, and any other file a run needs that the image
 	// does not already carry.
 	//
+	// This is how a run reaches anything outside its sandbox, and it is
+	// the only way. There is no tool for it and no connection to the
+	// controller: whatever a deployment wants an agent to be able to ask
+	// for, it puts a CLI in the guest image and a credential here, and
+	// the agent runs it with run_command like anything else. grain's own
+	// escape hatches -- opening a pull request, asking a human -- are
+	// that and nothing more.
+	//
 	// Into the guest, with no other side to choose. Every capability
 	// grain has that places anything places it in the sandbox --
 	// githubsandbox, gcpkey and geminikey, all model.SideSandbox -- and
@@ -120,52 +128,6 @@ type Spec struct {
 	// special case out of the setup path. Guest-side, because the clone
 	// runs there.
 	Placements []Placement `json:"placements,omitempty"`
-
-	// ControllerURL is the controller's MCP endpoint. The *shim* dials
-	// it; the agent is pointed at LocalControllerURL instead and the shim
-	// forwards, adding the bearer token the agent cannot read.
-	//
-	// It must be its own listener, separate from the daemon's REST API
-	// and UI. Under NAT the container has egress and so does the guest,
-	// so anything the controller serves at a reachable address is
-	// reachable by both -- and the whole of what a grain should be able
-	// to reach is a set of MCP tools. Sharing a listener with the API
-	// would make network reachability to one reachability to the other,
-	// undoing a property this design otherwise has: a container with no
-	// path to the daemon.
-	//
-	// Empty leaves a grain with its six sandbox tools and no way to reach
-	// anything outside -- which is right for a HostGrains test and wrong
-	// for a real run.
-	ControllerURL string `json:"controllerURL,omitempty"`
-
-	// Token authenticates this grain to that endpoint, and the agent
-	// never sees it: it lands at FileToken, root-owned and 0600, and the
-	// shim adds it to each forwarded request. See FileToken for why that
-	// is worth a proxy hop.
-	//
-	// It is the *same* per-grain token the git proxy already mints
-	// (gitproxy.SandboxTokenStore.EnsureToken), revoked by the same
-	// Revoke at reap and resolved to a live run by the same
-	// model.Store.GitScope -- one more consumer of machinery that exists,
-	// rather than a second authorization surface to build and get wrong.
-	//
-	// An exec pipe authenticated by construction: the controller chose
-	// which container to exec into. An address does not, so something has
-	// to say which grain is calling, and this is it. It is also what
-	// spares the controller a server instance per grain for identity
-	// alone.
-	//
-	// Container-side, at FileToken -- unlike the git credential, which is
-	// the same secret placed in the guest because git runs there. Same
-	// value, two consumers, two sides of the vsock boundary.
-	//
-	// That the guest holds it for git is not a way around the above: git
-	// reaches the *proxy*, whose scope is this run's repos
-	// (model.Store.GitScope), and the MCP endpoint is a different service
-	// that must check what a token is being presented for rather than
-	// only who it belongs to.
-	Token string `json:"token,omitempty"`
 
 	// MaxRuntime is how long the agent may run before the shim stops it
 	// and reports a terminal Phase. Zero means no bound of the grain's
@@ -288,8 +250,7 @@ type Placement struct {
 }
 
 // Redacted returns this Spec with every piece of material blanked --
-// the framework credential, the controller token, and every placement's
-// content -- so that a
+// the framework credential and every placement's content -- so that a
 // spec can be logged, echoed into an error, or written beside a failed
 // run without carrying secrets there.
 //
@@ -300,7 +261,6 @@ type Placement struct {
 // is the diagnosis where a blank string is a mystery.
 func (s Spec) Redacted() Spec {
 	s.Framework.Credential = redact(s.Framework.Credential)
-	s.Token = redact(s.Token)
 	if len(s.Placements) > 0 {
 		out := make([]Placement, len(s.Placements))
 		for i, p := range s.Placements {

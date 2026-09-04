@@ -26,23 +26,20 @@ func marshal(t *testing.T, v any) string {
 
 func TestSpecEnvAndFiles(t *testing.T) {
 	spec := grain.Spec{
-		Version:       grain.Version,
-		Framework:     grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
-		Shape:         grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
-		Prompt:        "You are working on task-311...\n",
-		ControllerURL: "http://10.0.2.1:8081/mcp",
-		Token:         "sbx_9f3c1a",
-		Setup:         "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/grain.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
-		Placements:    []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
-		MaxRuntime:    grain.Duration(2 * time.Hour),
+		Version:    grain.Version,
+		Framework:  grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+		Shape:      grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
+		Prompt:     "You are working on task-311...\n",
+		Setup:      "#!/bin/sh\nset -eu\ngit clone http://10.0.2.1:8080/bwsalmon/grain.git /w\ncd /w && ./scripts/setup.sh\ngit rev-parse HEAD\n",
+		Placements: []grain.Placement{{Path: "/home/agent/.git-credentials", Content: "https://x:tok@10.0.2.1:8080"}},
+		MaxRuntime: grain.Duration(2 * time.Hour),
 	}
 
 	// Scalars only: no material in the environment at all.
 	wantEnv := map[string]string{
-		"GRAIN_WIRE_VERSION":   "v1",
-		"GRAIN_FRAMEWORK":      "claude",
-		"GRAIN_MAX_RUNTIME":    "2h0m0s",
-		"GRAIN_CONTROLLER_URL": "http://10.0.2.1:8081/mcp",
+		"GRAIN_WIRE_VERSION": "v1",
+		"GRAIN_FRAMEWORK":    "claude",
+		"GRAIN_MAX_RUNTIME":  "2h0m0s",
 		// kontur's own, passed through and never read back.
 		"CHV_CPUS":         "2",
 		"CHV_MEMORY_MB":    "8192",
@@ -69,7 +66,6 @@ func TestSpecEnvAndFiles(t *testing.T) {
 	}
 	wantFiles := map[string]grain.File{
 		"/grain/credential": {Content: "sk-ant-oat01-...", Mode: "0600"},
-		"/grain/token":      {Content: "sbx_9f3c1a", Mode: "0600"},
 		"/grain/prompt":     {Content: spec.Prompt, Mode: "0644"},
 		"/grain/setup":      {Content: spec.Setup, Mode: "0755"},
 		"/grain/placements/home/agent/.git-credentials": {
@@ -93,13 +89,6 @@ func TestSpecEnvAndFiles(t *testing.T) {
 	back, err := grain.SpecFromEnv(func(k string) string { return env[k] })
 	if err != nil {
 		t.Fatalf("SpecFromEnv: %v", err)
-	}
-	if back.ControllerURL != spec.ControllerURL {
-		t.Errorf("ControllerURL round-tripped as %q", back.ControllerURL)
-	}
-	// The token is material, so it is a file and never in the environment.
-	if back.Token != "" {
-		t.Errorf("SpecFromEnv recovered a token from the environment: material belongs in files")
 	}
 	if time.Duration(back.MaxRuntime) != 2*time.Hour || back.Framework.Name != "claude" {
 		t.Errorf("scalars round-tripped as %+v", back)
@@ -321,7 +310,6 @@ func TestRedactedCarriesNoMaterial(t *testing.T) {
 	spec := grain.Spec{
 		Version:   grain.Version,
 		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-secret"},
-		Token:     "sbx_tok_controller",
 		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w",
 		Placements: []grain.Placement{
 			{Path: "/home/agent/.git-credentials", Content: "https://x:sbx_tok@10.0.2.1:8080", Mode: "0600"},
@@ -329,7 +317,7 @@ func TestRedactedCarriesNoMaterial(t *testing.T) {
 	}
 	out := marshal(t, spec.Redacted())
 
-	for _, secret := range []string{"sk-ant-oat01-secret", "https://x:sbx_tok@10.0.2.1:8080", "sbx_tok_controller"} {
+	for _, secret := range []string{"sk-ant-oat01-secret", "https://x:sbx_tok@10.0.2.1:8080"} {
 		if strings.Contains(out, secret) {
 			t.Errorf("Redacted still carries %q", secret)
 		}
@@ -408,47 +396,53 @@ func TestStatusRidesTheRecordStream(t *testing.T) {
 	}
 }
 
-// The agent must not be able to read the token that authenticates its
-// grain to the controller: it does not need it (the shim adds it to each
-// forwarded request) and a compromised agent holding one could reach
-// whatever else that token opens.
-//
-// Asserted on the rendered files because the mode is the whole of the
-// mechanism -- the agent runs as a different uid, and 0600 on a
-// root-owned file is what puts this out of its reach while leaving the
-// model credential, which it does need, readable.
-func TestTokenIsNotReadableByTheAgent(t *testing.T) {
-	files, err := grain.Spec{
-		Version:   grain.Version,
-		Token:     "sbx_9f3c1a",
-		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
-	}.Files()
-	if err != nil {
-		t.Fatalf("Files: %v", err)
-	}
-	tok, ok := files[grain.FileToken]
-	if !ok {
-		t.Fatalf("no token file; got %v", keys(files))
-	}
-	if tok.Mode != "0600" {
-		t.Errorf("token mode = %q, want 0600", tok.Mode)
-	}
-	// And the agent's own credential stays reachable, because it needs
-	// that one. Same mode, different owner -- the asymmetry is in who the
-	// file belongs to, not how wide it is.
-	if cred := files[grain.FileCredential]; cred.Content == "" {
-		t.Error("the model credential is missing; the agent needs that one")
-	}
-	// The agent is pointed at loopback, never at the controller itself.
-	if !strings.HasPrefix(grain.LocalControllerURL, "http://127.0.0.1") {
-		t.Errorf("LocalControllerURL = %q, want a loopback address", grain.LocalControllerURL)
-	}
-}
-
 func keys(m map[string]grain.File) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
 	return out
+}
+
+// Nothing outside the sandbox is a tool. A deployment's escape hatches --
+// opening a pull request, asking a human -- are a CLI in the guest image
+// and a credential in a placement, run with run_command like anything
+// else, so this package holds no vocabulary for any of them and no idea
+// that a controller exists.
+//
+// Asserted on the rendered environment and files together, because the
+// failure this guards against is a later change quietly reintroducing a
+// controller address or a controller credential on the grain's own wire.
+func TestAGrainCannotReachAControllerAtAll(t *testing.T) {
+	spec := grain.Spec{
+		Version:   grain.Version,
+		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+		Setup:     "true",
+		Placements: []grain.Placement{
+			// A run's controller credential is one of these, exactly as
+			// its git credential is -- and grain cannot tell them apart,
+			// which is the property.
+			{Path: "/etc/grain/controller", Content: "url=… token=…", Mode: "0600"},
+		},
+	}
+	env := spec.Env()
+	for k := range env {
+		if strings.Contains(k, "CONTROLLER") || strings.Contains(k, "TOKEN") || strings.Contains(k, "URL") {
+			t.Errorf("the grain environment carries %s: a grain has no controller to reach", k)
+		}
+	}
+	files, err := spec.Files()
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	for at := range files {
+		if at == "/grain/token" {
+			t.Error("a controller token is being placed container-side; it belongs in the guest, as a placement, like git's")
+		}
+	}
+	// The one it does place is the agent's own, which lives beside the
+	// agent because the agent is what uses it.
+	if _, ok := files[grain.FileCredential]; !ok {
+		t.Error("the model credential is missing; that one is the grain's own business")
+	}
 }

@@ -34,28 +34,26 @@
 // rebuilt, so a rebuild replays Spec.Placements rather than coordinating
 // a re-mint with a controller that holds the only copy.
 //
-// Everything else an agent can call comes from an MCP server the
-// controller runs, which the agent reaches *directly* over Streamable
-// HTTP at Spec.ControllerURL. The shim does not relay, merge or even know
-// about those tools: an MCP client speaks to several servers as a matter
-// of course, so the agent is simply configured with two -- the shim's own
-// stdio server for the sandbox, and a URL for everything else.
+// Everything else is not a tool at all. Whatever a deployment wants an
+// agent to be able to ask for -- open a pull request, wait on checks, ask
+// a human a question -- it puts a CLI in the guest image and a credential
+// beside it as a Spec.Placement, and the agent runs it with run_command
+// like anything else it runs. Grain holds no vocabulary for any of it.
 //
-// Which means a dropped connection is the protocol's problem rather than
-// this package's. Streamable HTTP carries a session id and resumable SSE
-// (Last-Event-ID), so a client reconnects and picks up where it was;
-// there is nothing here to hold a call, replay one, or reattach.
+// That is the git proxy's shape, reused rather than reinvented: git
+// already reaches a controller-side service from inside the guest, with
+// its token as a placement and its authorization resolved through the
+// live run (model.Store.GitScope, and authorize.go's "a sandbox with no
+// live run authorizes nothing"). A second service on the same pattern
+// costs no new mechanism, and a leaked credential is dead the moment the
+// run ends.
 //
-// Somebody extending a deployment writes a plain MCP server against the
-// spec and any official SDK, and the controller serves or aggregates it.
-// That server is unaware of the container and the VM; which grain is
-// calling comes from the bearer token, so it needs no per-grain instance
-// for identity alone.
-//
-// That is the whole of what leaves the container, and it means the
-// container needs no daemon URL, no task ID and no bearer token of its
-// own -- the three things agent.RunConfig currently carries so that a
-// forked mcpserver can call back into the daemon.
+// It also means a grain needs no controller to run: nothing attaches,
+// nothing is held open, nothing waits, and a dropped connection cannot
+// cost an agent its tools an hour in. The container needs no daemon URL,
+// no task ID and no bearer token of its own -- the three things
+// agent.RunConfig currently carries so that a forked mcpserver can call
+// back into the daemon.
 //
 // # Why polling
 //

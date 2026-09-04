@@ -519,7 +519,10 @@ still-provisioning grains; marginal, and recorded rather than built.
 outstanding call, `seq`. There is no native "ask the container what it is
 doing" short of exec, so the poll stays.
 
-## How the agent reaches the controller: three designs
+## How the agent reaches the controller: four designs, then none
+
+Four designs, in the order they were built, each cutting the previous —
+and then a fifth that deleted the question instead of answering it.
 
 **1. Forwarding over a poll.** The shim held a tool call it could not
 serve, surfaced it as `status.call`, and a `grain answer` verb settled it.
@@ -527,7 +530,13 @@ MCP over a poll. It re-implemented request/response over a channel not
 built for it, and needed a spool, ids, acknowledgement and an
 at-most-one-outstanding rule.
 
-**2. An exec-attached MCP server.** The controller attached by exec'ing
+**2. Mounted tool declarations.** `/grain/tools/`, `ToolDecl` and
+`checkTools`: the shim advertised the controller's tools from JSON files
+placed beside it, so it could serve a `tools/list` before any controller
+was connected. A second copy of every schema, to be kept in sync with the
+server that actually implements it.
+
+**3. An exec-attached MCP server.** The controller attached by exec'ing
 `grain proxy` and served MCP over that pipe; the shim terminated the
 agent's session, merged tool lists, and held calls while detached.
 
@@ -541,72 +550,80 @@ upstream servers had to tolerate seeing one twice), and a wait for the
 first attach before the agent could start, because a tool list is fixed at
 `initialize`.
 
-**3. Streamable HTTP, direct.** *Chosen.* The container has a working
-stack under NAT, so the agent reaches the controller's endpoint itself and
-the shim takes no part at all.
+**4. Streamable HTTP, direct.** The container has a working stack under
+NAT, so the agent reached the controller's endpoint itself and the shim
+took no part. MCP's remote transport already solved what design 3 was
+hand-rolling — a session id keeps state across requests, and resumable SSE
+(`Last-Event-ID`) replays what a client missed — so a drop became the
+protocol's problem. That deleted `grain proxy`, `SocketUpstream`,
+`Grain.Attach`, `Status.Upstream`, `ActionAttach`, the hold, the replay
+hazard, the wait-for-first-attach rule and the merging server.
 
-MCP's remote transport already solves what design 2 was hand-rolling: a
-session id keeps state across requests, and resumable SSE (`Last-Event-ID`)
-replays what a client missed. So a drop is the protocol's problem. Gone
-with it: `grain proxy`, `SocketUpstream`, `Grain.Attach`,
-`Status.Upstream`, `ActionAttach`, the hold, the replay hazard, the
-wait-for-first-attach rule, the merging server, and `PhaseBlocked` — the
-shim cannot see an agent waiting on an HTTP request it made itself, and
-does not need to, since the controller is the far end and knows better.
+**5. A CLI in the guest.** *Chosen.* Nothing leaves the container at all.
+The escape hatch is a binary in the guest image with a credential placed
+beside it, run with `run_command` like anything else the agent runs.
 
-### What made it work: the token already exists
+### Why the fifth won
 
-An exec pipe authenticates by construction — the controller chose which
-container to exec into. An address does not, and needing "which grain is
-calling" is exactly the authorization surface argued against for push.
+Design 4 was defensible, and two things decided against it.
 
-It is already built. `gitproxy.SandboxTokenStore.EnsureToken` mints a
-per-grain token, `Revoke` drops it at reap, and `model.Store.GitScope`
-resolves it to a live run. The MCP endpoint is one more consumer, not a
-second surface. The same secret lands twice — container-side at
-`/grain/token` for the agent, guest-side as a placement for git — which is
-one value with two consumers on two sides of the vsock boundary.
+**It needed two transports, not one.** All three CLIs do remote MCP, but
+not the same remote MCP: `claude` takes `--transport http` or `sse`,
+`codex` has only `Stdio` and `StreamableHttp`
+(`codex-rs/config/src/mcp_types.rs`), and `agy` has only SSE with
+`serverUrl` (`docs/agy-surface.md`). No single transport covers all three,
+so the controller would serve both — or bridge stdio in the shim for
+whichever framework was left out, which is design 3 again for one case.
 
-### What it costs
+**It put a controller credential where the agent could read it.** Under
+NAT the endpoint is reachable by the *guest* as well as the container, so
+the design leaned on keeping the token root-owned at `/grain/token` with
+the agent on a different uid, pointed at a loopback address a byte-proxy
+in the shim forwarded from after adding the header. That is a real
+mechanism — a uid split, a second listener, a header-rewriting proxy — and
+it exists only because the agent and the thing it must not read share a
+container.
 
-**Reachability, which needed two answers.** An exec pipe reached exactly
-one container by construction. An address is reachable by anything with a
-route — and under NAT that includes the *guest*, since masquerade gives
-the sandbox egress of its own. So agent and sandbox share a source address
-and the network layer cannot tell them apart, which is NAT's documented
-cost showing up in a second place.
+The guest CLI has no such problem to solve, because grain already solved
+it once. **A credential in the guest is not a new exposure**: git's token
+is already there, because git runs there. What makes that safe is what
+gets copied — `gitproxy.SandboxTokenStore.EnsureToken` mints per grain,
+`Revoke` drops it at reap, and `model.Store.GitScope` resolves it to a
+live run, with `authorize.go`'s fail-closed default that "a sandbox with
+no live run authorizes nothing". A leaked credential dies with the run: no
+expiry to tune, no revocation race. `startGitProxy` already binds
+`0.0.0.0` and advertises a guest-reachable host, on **its own listener**,
+separate from the daemon's REST API and UI. So the second service is the
+same shape pointed somewhere else, not a second mechanism.
 
-Two things close it. The MCP endpoint is **its own listener**, so
-reachability to it is not reachability to the daemon's REST API and UI —
-otherwise direct HTTP would quietly undo "the container needs no daemon
-URL", a property this design was claiming. And the token is **kept out of
-the agent's reach**: root-owned and 0600 at `/grain/token`, with the agent
-on a different uid, pointed at a loopback address the shim forwards from
-after adding the header.
+**Open item, and it is the real one.** Git's scope is repos. A controller
+CLI needs its own answer to *what may this grain ask for* — open a pull
+request on its own branch, comment on its own task, propose a task, ask
+its own question. "Authenticated as this grain" is not "allowed to do
+this", and that check is the controller's to write, modelled on
+`authorize.go` rather than inherited from it.
 
-That last works because of an asymmetry worth naming: an agent needs its
-own model credential and does not need the controller token. So the one it
-must have stays readable and the one it must not have does not — and a
-compromised agent cannot exfiltrate a credential that authenticates as its
-grain.
+### What was given up
 
-The shim doing the forwarding is a byte proxy, not the MCP-aware one
-design 2 needed: it adds a header and copies, so no session is terminated
-and MCP's own resumption still applies.
+**Per-tool schemas, again.** This is the message-tool design's cost
+returning (below): a model given a declared tool with typed parameters
+produces better-formed arguments than one given a CLI's `--help`. The
+answer here is thinner than it looks — an agent CLI is a thing these
+models are unusually good at driving, `--help` is a schema of a sort, and
+a malformed invocation gets a non-zero exit and a message rather than
+silently doing the wrong thing. But it is a real loss and worth naming.
 
-**A network dependency between grain and controller** that exec did not
-have. Under NAT the container has a stack anyway (that is why NAT was
-chosen), and under flat the model-API tunnel carries TCP, so the same
-local listener serves both — it does not force the network decision.
+**The one-sentence extension story.** Under design 4 it was: write a plain
+MCP server, list it in the controller's config, and its tools appear to
+every agent. Now it is: ship a binary in the guest image, place a
+credential, and mention it in the prompt or the setup script. Comparable
+work, but the second one is not a standard anybody else implements.
 
-**Two transports, not one.** All three CLIs do remote MCP, but not the
-same remote MCP: `claude` takes `--transport http` or `sse`, `codex` has
-only `Stdio` and `StreamableHttp` (`codex-rs/config/src/mcp_types.rs`),
-and `agy` has only SSE with `serverUrl` (`docs/agy-surface.md`). No single
-transport covers all three, so the controller serves both — HTTP+SSE being
-the older, well-specified one that SDKs generally still carry. The
-alternative is bridging stdio in the shim for whichever framework is left
-out, which is the exec-attached design for one case.
+**Discoverability.** An MCP client asks `tools/list` and learns what
+exists. A CLI has to be *told about*, in the prompt or in `setup`, and an
+agent never told is an agent that finishes without opening a pull request
+and reports success — the "an absent tool is not an error" failure, moved
+from the connection to the prompt.
 
 ### And the message-tool design, considered
 
@@ -616,40 +633,22 @@ controller reads it and decides what to do, retrying or parking by id. It
 would have made a grain a single-shot function needing no controller at
 all while it runs.
 
-Rejected because it loses per-tool schemas (models produce better-formed
-arguments given one) and, more concretely, because reacting to CI would
-cost a full redispatch — VM boot, clone, re-derivation — where
-`open_pull_request` plus `wait_for_checks` do it inside one run today,
-deliberately: "instead of exiting blind and leaving the pull request to
-orchestrator's finish path." MCP exists for this, and reinventing a
-narrower version of it is not a saving.
+Rejected because it loses per-tool schemas and, more concretely, because
+reacting to CI would cost a full redispatch — VM boot, clone,
+re-derivation — where `open_pull_request` plus `wait_for_checks` do it
+inside one run today, deliberately: "instead of exiting blind and leaving
+the pull request to orchestrator's finish path."
 
-## What Kubernetes gives natively, and what it does not
+Worth noting what survived it: the guest CLI keeps the in-run property the
+message tool lost — `grainctl wait-for-checks` blocks in the guest and the
+run continues after it — while keeping the message tool's best property,
+that a grain needs no controller connection to run.
 
-Checked when asking whether any of this duplicates something k8s already
-does.
+## Forwarding calls, and the connection that replaced it
 
-**`.status.containerStatuses[]`** — `state`, `ready`, `restartCount`, and
-for terminated ones `exitCode`/`reason`/`message`. This is what `List`
-already reads; on docker it is `docker ps`/`docker inspect`, and the
-information is the same.
-
-**The termination message** is the one genuine addition: a container
-writes `/dev/termination-log` and Kubernetes surfaces it in the pod
-status, so a finished grain's outcome arrives with the listing rather than
-needing an exec. Taken.
-
-**Probes are the wrong tool.** They are binary, they exist for the kubelet
-to act on rather than for an external reader, and liveness in particular
-*restarts* — which a grain must never be. A readiness probe could surface
-"provisioned" in the pod listing for free, letting `List` skip the exec for
-still-provisioning grains; marginal, and recorded rather than built.
-
-**What Kubernetes does not give** is mid-run rich state — activity, the
-outstanding call, `seq`. There is no native "ask the container what it is
-doing" short of exec, so the poll stays.
-
-## Forwarding calls, replaced by a real MCP connection
+Both are superseded by the guest CLI above; kept because the reasoning
+about session-oriented transports is what ruled design 3 out and is worth
+having written down.
 
 For a while the controller was an out-of-band executor: the shim held a
 tool call it could not serve, surfaced it as `status.call`, and a `grain
@@ -716,3 +715,9 @@ to every agent.** That server is unaware of the proxy, the container or
 the VM; per-run context reaches it as launch arguments, because the
 controller starts one instance per grain — which is how MCP servers are
 scoped anyway.
+
+Both properties were kept and paid for differently. `wait_for_checks`
+still blocks in-run, as a guest command that has not returned. The
+extension story is no longer one sentence of a public standard; it is a
+binary in the guest image and a placement, which is the trade the section
+above accepts.
