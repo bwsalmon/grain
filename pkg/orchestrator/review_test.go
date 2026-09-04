@@ -308,6 +308,44 @@ func TestSyncPullRequestsGivesUpOnAReviewThatNeverFinishes(t *testing.T) {
 	}
 }
 
+// A pull request that has already merged is past the point a review can
+// hold anything back, so the cycle that closes the task out must not
+// also announce that its review is overdue.
+func TestSyncPullRequestsClosesOutAMergedTaskWithoutEscalatingItsReview(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	tmpl := reviewTemplate(t, ctx, store)
+	task := completedTask(t, ctx, store, sim, client, "t1", repo, true, tmpl.ID)
+	if err := orchestrator.SyncReviews(ctx, store, baseTime); err != nil {
+		t.Fatalf("SyncReviews: %v", err)
+	}
+
+	// Merged by hand, long after the review should have finished.
+	for i := range sim.PullRequests {
+		sim.PullRequests[i].State = "closed"
+		sim.PullRequests[i].Merged = true
+	}
+	late := baseTime.Add(7 * time.Hour)
+	if err := orchestrator.SyncPullRequests(ctx, store, client, late); err != nil {
+		t.Fatalf("SyncPullRequests: %v", err)
+	}
+
+	obs, err := store.GetObservation(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs == nil || obs.ClosedAt == nil {
+		t.Fatal("a merged pull request must still close its task out")
+	}
+	if obs.MergeQueueBlockedAt != nil {
+		t.Fatal("a task whose pull request has merged must not be escalated over its review")
+	}
+	if bodies := commentBodies(t, ctx, store, task.ID); len(bodies) != 1 {
+		t.Fatalf("comments = %q, want only the one announcing the review", bodies)
+	}
+}
+
 // A review is not a queue entry in its own right -- it merges into the
 // branch it reviewed, not into the repo's base -- so it neither takes the
 // head position from an ordinary task nor waits for one.

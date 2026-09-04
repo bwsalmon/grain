@@ -807,12 +807,17 @@ func syncEntry(ctx context.Context, store *model.Store, client github.Client,
 	// review does not merge, clean or not and head or not: attaching a
 	// review means it happens before the merge rather than after.
 	//
-	// Only for an ordinary queue member. A stacked task is never itself
-	// reviewed, and one the queue has already given up on is held by
-	// nothing -- blocked means exactly that this task merges the moment
-	// it reads clean and waits on nobody.
+	// Only for an ordinary queue member whose pull request is still
+	// open. A stacked task is never itself reviewed; one the queue has
+	// already given up on is held by nothing -- blocked means exactly
+	// that this task merges the moment it reads clean and waits on
+	// nobody; and a pull request that has already merged or closed is
+	// past the point a review could hold anything back, so asking would
+	// only risk announcing that a review is overdue on a task this same
+	// cycle is about to close out.
+	settled := health == model.PrMerged || health == model.PrClosed
 	var review reviewState
-	if !stacked && !blocked {
+	if !stacked && !blocked && !settled {
 		review, err = reviewStateOf(ctx, store, task, e.obs, now)
 		if err != nil {
 			return err
