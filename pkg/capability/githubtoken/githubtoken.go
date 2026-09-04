@@ -38,14 +38,104 @@
 // adding a file; what this package adds is that the file is then
 // something a human can attach to one task without editing
 // credentials.json and changing every repo's default at once.
+//
+// **One thing here does reach GitHub: the credential check** --
+// CheckCredential (check.go), the "test this credential" action Settings
+// offers beside every other standing credential. Nothing about a
+// dispatch changed for it: the check is handed the same ladder the proxy
+// resolves through and asks GitHub what it still accepts, rather than
+// this provider growing a client or a token of its own. See check.go's
+// own doc comment.
 package githubtoken
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/bwsalmon/grain/pkg/github"
 	"github.com/bwsalmon/grain/pkg/model"
 )
+
+// DefaultHost is Config.Host's default, the same "github.com" default
+// cmd/grain/daemon.go's -github-host flag and githubsandbox.DefaultHost
+// use -- restated here because this package is constructed
+// independently of that flag in tests.
+const DefaultHost = "github.com"
+
+// credentialDir is where these credentials live, relative to a
+// deployment's data directory -- named in what a failed check says,
+// never opened here (this package reads no files; Config.Credentials
+// does).
+const credentialDir = "secrets/github"
+
+// CredentialFile is the file backing the credential named name, in
+// either form the ladder keeps one in -- what a check names as the
+// credential it authenticated as (model.CredentialCheck.Credentials) and
+// as the thing to replace when GitHub refuses it. A path, and it says
+// nothing about what is in it.
+func CredentialFile(name string, app bool) string {
+	if app {
+		return credentialDir + "/" + name + ".app.json"
+	}
+	return credentialDir + "/" + name + ".token"
+}
+
+// Credential is one named credential's current material, as the ladder
+// resolves it right now: the token a push through this credential would
+// carry this minute, and which of the two forms it came from.
+//
+// Token is empty for a credential the ladder serves anonymously -- an
+// empty <name>.token, or a <name>.app.json whose installation token
+// could not be minted, both of which gitproxy.CredentialSet.load
+// deliberately fails soft to. That is a real, checkable state, not an
+// error: every push through it goes out unauthenticated.
+type Credential struct {
+	Token string
+	// App reports whether this is a <name>.app.json credential -- a
+	// GitHub App installation whose token is re-minted rather than a
+	// token read as-is. It changes only what a refusal tells an
+	// operator to go and replace, since the two forms are fixed in
+	// different places.
+	App bool
+}
+
+// CredentialSource resolves a named GitHub credential to the material it
+// currently authenticates with -- this deployment's own credential
+// ladder (gitproxy.CredentialSet, behind cmd/grain/daemon.go's adapter),
+// which is the one thing that already knows both forms and does the App
+// re-minting.
+//
+// Deliberately not the ladder's own type: this package needs one
+// question answered about one name, and taking the whole of pkg/gitproxy
+// to ask it would tie a capability provider to the proxy's internals.
+// The second return is false when no credential of that name is
+// configured at all.
+type CredentialSource interface {
+	GitHubCredential(name string) (Credential, bool)
+}
+
+// Config is what a named-token provider needs beyond the name itself,
+// all of it for CheckCredential and none of it for a dispatch: a
+// dispatch records a choice and touches nothing (Materialize below).
+type Config struct {
+	// Credentials is where the check reads this token's material from.
+	// nil means no check can be made here, which the check reports as
+	// exactly that rather than failing the credential.
+	Credentials CredentialSource
+	// Repos is the repos this deployment targets
+	// (model.Config.TargetRepos, in that order) -- what the check holds
+	// the token against beyond "is it alive", since a token that has
+	// lost access to the repo it exists for fails in the same place a
+	// dead one does. Empty (a single-repo deployment names none) leaves
+	// the check reporting liveness alone.
+	Repos []string
+	// Host is the GitHub host the check asks. Empty means DefaultHost.
+	Host string
+	// InsecureHTTP speaks plain HTTP to Host instead of HTTPS -- mock
+	// servers only, mirroring github.RealTransport.UseTLS and
+	// githubsandbox.Config's field of the same name.
+	InsecureHTTP bool
+}
 
 // Provider is the capability for one named GitHub token.
 //
@@ -57,20 +147,51 @@ import (
 type Provider struct {
 	model.BaseCapability
 	name string
+	cfg  Config
+	// newTransport builds the transport CheckCredential's own calls go
+	// out over. New sets this to the real one; tests substitute a
+	// github.FakeTransport, the same seam githubsandbox.Provider.newClient
+	// gives its own checks.
+	newTransport func(host string, insecureHTTP bool) github.Transport
 }
 
 // New returns the provider for the credential named name --
 // gitproxy.CredentialSet's own name for it, which is the file name under
-// secrets/github with its .token/.app.json suffix removed.
-func New(name string) *Provider { return &Provider{name: name} }
+// secrets/github with its .token/.app.json suffix removed -- configured
+// with cfg, which only CheckCredential reads.
+func New(name string, cfg Config) *Provider {
+	return &Provider{name: name, cfg: cfg, newTransport: realTransport}
+}
 
-// Providers is one Provider per name, in the order given -- what
-// cmd/grain/daemon.go registers alongside the capabilities grain ships
-// unconditionally. An empty or duplicate name is skipped rather than
-// registered: the first would be a capability id no human could tell
-// apart from the prefix itself, and the second would silently replace
-// the provider registered before it (model.CapabilityRegistry.Register).
-func Providers(names []string) []model.CapabilityProvider {
+func realTransport(host string, insecureHTTP bool) github.Transport {
+	rt := github.NewRealTransport(host)
+	rt.UseTLS = !insecureHTTP
+	return rt
+}
+
+func (p *Provider) host() string {
+	if p.cfg.Host != "" {
+		return p.cfg.Host
+	}
+	return DefaultHost
+}
+
+func (p *Provider) transport() github.Transport {
+	build := p.newTransport
+	if build == nil {
+		build = realTransport
+	}
+	return build(p.host(), p.cfg.InsecureHTTP)
+}
+
+// Providers is one Provider per name, in the order given, each with the
+// same cfg -- what cmd/grain/daemon.go registers alongside the
+// capabilities grain ships unconditionally. An empty or duplicate name
+// is skipped rather than registered: the first would be a capability id
+// no human could tell apart from the prefix itself, and the second would
+// silently replace the provider registered before it
+// (model.CapabilityRegistry.Register).
+func Providers(names []string, cfg Config) []model.CapabilityProvider {
 	seen := make(map[string]bool, len(names))
 	out := make([]model.CapabilityProvider, 0, len(names))
 	for _, name := range names {
@@ -78,7 +199,7 @@ func Providers(names []string) []model.CapabilityProvider {
 			continue
 		}
 		seen[name] = true
-		out = append(out, New(name))
+		out = append(out, New(name, cfg))
 	}
 	return out
 }

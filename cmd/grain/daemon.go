@@ -675,13 +675,14 @@ func run(ctx context.Context, cfg config) error {
 		sandboxes = orchestrator.NewHostSandboxes(cfg.sandboxDir)
 	}
 
-	// Every named GitHub token this deployment has beyond its default one
-	// (grain/task-117), read once here and carried on live below so that
-	// the two halves of this process -- the picker the UI offers and the
-	// providers the reconcile loop resolves grants against -- are built
-	// from one reading of the credential directory rather than two that
-	// could disagree if a file appeared between them.
-	githubTokens, err := gitHubTokenNames(cfg.dataDir)
+	// This deployment's GitHub credential ladder, read once here and
+	// carried on live below so that everything downstream of it -- the
+	// picker the UI offers, the providers the reconcile loop resolves
+	// grants against, the Settings pane that writes a token, and the
+	// check that tests one -- is built from one reading of the
+	// credential directory rather than several that could disagree if a
+	// file appeared between them.
+	githubCredentials, err := gitHubCredentialLadder(cfg.dataDir)
 	if err != nil {
 		return err
 	}
@@ -692,7 +693,7 @@ func run(ctx context.Context, cfg config) error {
 	// what this deployment is actually running with, as opposed to what
 	// is merely stored. Built here because it needs both the config
 	// loadConfig just resolved and the sandbox backend above.
-	live := newLiveConfig(store, sandboxes, cfg, githubTokens)
+	live := newLiveConfig(store, sandboxes, cfg, githubCredentials)
 
 	// transcriptDir is where a run's own agent.Framework may mirror its
 	// transcript-in-progress live, and where the UI server below reads one
@@ -856,7 +857,7 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 	// finish path would have opened for it.
 	livePullRequests.Store(&pullRequestOpener{store: store, client: githubClient})
 
-	registry := model.NewCapabilityRegistry(capabilityProviders(cfg, live.gitHubTokens())...)
+	registry := model.NewCapabilityRegistry(capabilityProviders(cfg, live.gitHubTokens(), live.gitHubCredentialSource())...)
 
 	// Recovering any run a previous process left running (bwsalmon/agents#425)
 	// has to happen here, once, before reconcile's first tick -- see
@@ -1752,29 +1753,50 @@ type liveConfig struct {
 	// nil, or a backend that is not one, simply means that pair of
 	// settings has nothing to apply to.
 	sandboxes orchestrator.Sandboxes
-	// githubTokens is every named GitHub token this deployment has
-	// beyond its default one (gitproxy.CredentialSet.ExtraNames), each of
-	// which is a capability of its own (pkg/capability/githubtoken).
+	// githubCredentials is this deployment's GitHub credential ladder,
+	// and githubTokens the named tokens in it beyond the default one
+	// (gitproxy.CredentialSet.ExtraNames), each of which is a capability
+	// of its own (pkg/capability/githubtoken).
 	//
 	// Fixed for this process's lifetime, unlike everything below it: the
-	// credential ladder these names come from is loaded once at startup
-	// and is not hot-reloaded (pkg/gitproxy/credentials.go's own doc
-	// comment), so adding a token means restarting the daemon the same
-	// way changing the default one already does. It is held here anyway
-	// because refresh rebuilds the capability registry from scratch, and
-	// a rebuild that forgot these would quietly drop every named token's
-	// provider the first time somebody changed the GCP project.
-	githubTokens []string
+	// ladder is loaded once at startup and is not hot-reloaded
+	// (pkg/gitproxy/credentials.go's own doc comment), so adding a token
+	// means restarting the daemon the same way changing the default one
+	// already does. The names are held here anyway because refresh
+	// rebuilds the capability registry from scratch, and a rebuild that
+	// forgot them would quietly drop every named token's provider the
+	// first time somebody changed the GCP project.
+	//
+	// The ladder itself is held for what it, and only it, can answer:
+	// the material one of those tokens authenticates with right now,
+	// which is what a credential check for a named token is made through
+	// (githubtoken.CredentialSource). One ladder rather than a second
+	// copy, deliberately -- it caches what it resolves, and the copy the
+	// Settings pane writes a new token through is the copy that forgets
+	// the old one, so a check made through any other would go on testing
+	// the token an operator has just replaced.
+	githubCredentials *gitproxy.CredentialSet
+	githubTokens      []string
 
 	mu      sync.Mutex
 	applied config
 }
 
 // newLiveConfig starts a liveConfig off at what loadConfig resolved --
-// the configuration this process is about to run with, plus the named
-// GitHub tokens (githubTokens above) it was started with.
-func newLiveConfig(store *model.Store, sandboxes orchestrator.Sandboxes, cfg config, githubTokens []string) *liveConfig {
-	return &liveConfig{store: store, sandboxes: sandboxes, githubTokens: githubTokens, applied: cfg}
+// the configuration this process is about to run with, plus the GitHub
+// credential ladder (githubCredentials above) it was started with, whose
+// extra names are the named tokens this deployment offers. A nil ladder
+// is a process with no GitHub credentials wired up at all (the tests
+// below): no named tokens, and nothing for a check to authenticate as.
+func newLiveConfig(store *model.Store, sandboxes orchestrator.Sandboxes, cfg config, github *gitproxy.CredentialSet) *liveConfig {
+	var tokens []string
+	if github != nil {
+		tokens = github.ExtraNames()
+	}
+	return &liveConfig{
+		store: store, sandboxes: sandboxes,
+		githubCredentials: github, githubTokens: tokens, applied: cfg,
+	}
 }
 
 // gitHubTokens is the named GitHub tokens this process started with --
@@ -1782,6 +1804,50 @@ func newLiveConfig(store *model.Store, sandboxes orchestrator.Sandboxes, cfg con
 // once, before either half of this process is running, and never
 // change.
 func (l *liveConfig) gitHubTokens() []string { return l.githubTokens }
+
+// gitHubCredentials is the ladder those names came from, for the two
+// callers that need the credentials themselves rather than their names:
+// the Settings pane that writes and lists them, and the credential check
+// below.
+func (l *liveConfig) gitHubCredentials() *gitproxy.CredentialSet { return l.githubCredentials }
+
+// gitHubCredentialSource is that ladder in the shape a named token's own
+// capability check reaches its material through -- see
+// githubCredentialSource, and githubtoken/check.go for why the check is
+// handed the ladder rather than growing a client of its own.
+func (l *liveConfig) gitHubCredentialSource() githubtoken.CredentialSource {
+	return githubCredentialSource{set: l.githubCredentials}
+}
+
+// githubCredentialSource adapts the credential ladder onto
+// githubtoken.CredentialSource: one name in, the material a push through
+// it would carry right now out, and which of the two file forms it came
+// from. The one place those two packages meet, the same way
+// credentialTokenSource below is for pkg/github's own token lookup.
+//
+// A nil ladder answers "no such credential" rather than panicking: a
+// process with no GitHub credentials configured offers no named tokens
+// to check in the first place.
+type githubCredentialSource struct{ set *gitproxy.CredentialSet }
+
+func (s githubCredentialSource) GitHubCredential(name string) (githubtoken.Credential, bool) {
+	if s.set == nil {
+		return githubtoken.Credential{}, false
+	}
+	cred, ok := s.set.Get(name)
+	if !ok {
+		return githubtoken.Credential{}, false
+	}
+	// A nil Token is the ladder's own "anonymous": an empty or unreadable
+	// <name>.token, or a <name>.app.json whose installation token could
+	// not be minted. Carried across as an empty token, which is a state
+	// the check has its own sentence for.
+	token := ""
+	if cred.Token != nil {
+		token = *cred.Token
+	}
+	return githubtoken.Credential{Token: token, App: s.set.IsApp(name)}, true
+}
 
 // current is the configuration in effect right now. Safe to call from
 // any goroutine -- the UI server calls it to answer GET /api/settings
@@ -1836,7 +1902,8 @@ func (l *liveConfig) refresh(ctx context.Context, deps *orchestrator.Deps) (poll
 		// and a dispatch goroutine still holding the old registry keeps
 		// resolving against it (deps is copied per cycle and per
 		// dispatch) rather than seeing one change underneath it.
-		deps.Config.Capabilities = model.NewCapabilityRegistry(capabilityProviders(now, l.githubTokens)...)
+		deps.Config.Capabilities = model.NewCapabilityRegistry(
+			capabilityProviders(now, l.githubTokens, l.gitHubCredentialSource())...)
 	}
 	if now.sandboxCPUs != was.sandboxCPUs || now.sandboxMemoryMB != was.sandboxMemoryMB || now.sandboxDiskGB != was.sandboxDiskGB {
 		if shaper, ok := l.sandboxes.(defaultShaper); ok {
@@ -2056,8 +2123,14 @@ func (c config) withModelConfig(mc model.Config) config {
 // way any other missing secret does.
 //
 // githubTokens is this deployment's named GitHub tokens beyond its
-// default one (gitHubTokenNames below), one provider each.
-func capabilityProviders(cfg config, githubTokens []string) []model.CapabilityProvider {
+// default one (gitHubCredentialLadder below), one provider each, and
+// githubCredentials is where a check for one of those reads its material
+// -- the ladder itself, which is the only thing that knows both forms a
+// named credential comes in (githubtoken.Config.Credentials). It may be
+// nil: a dispatch through one of these providers resolves no credential
+// at all (they mint nothing and place nothing), so only the check misses
+// it, and it says so rather than failing the token.
+func capabilityProviders(cfg config, githubTokens []string, githubCredentials githubtoken.CredentialSource) []model.CapabilityProvider {
 	var providers []model.CapabilityProvider
 	if cfg.gcpProject != "" {
 		if cfg.gcpServiceAccountEmail != "" {
@@ -2078,27 +2151,34 @@ func capabilityProviders(cfg config, githubTokens []string) []model.CapabilityPr
 	// enumerates it -- so without these, granting one would be refused as
 	// a capability no provider is registered for (model.ResolveGrants),
 	// and the run would never dispatch.
-	providers = append(providers, githubtoken.Providers(githubTokens)...)
+	providers = append(providers, githubtoken.Providers(githubTokens, githubtoken.Config{
+		Credentials: githubCredentials,
+		// What a check holds the token against beyond "is it alive":
+		// the repos any task on this deployment may name, which are the
+		// ones a push through this token would be for.
+		Repos:        cfg.targetRepos,
+		Host:         cfg.githubHost,
+		InsecureHTTP: cfg.githubInsecureHTTP,
+	})...)
 	return providers
 }
 
-// gitHubTokenNames is every named GitHub token dataDir's credential
-// ladder holds beyond the deployment default -- the names
-// capabilityProviders above turns into providers and startUIServer into
-// picker rows.
+// gitHubCredentialLadder loads dataDir's GitHub credential ladder -- the
+// names capabilityProviders above turns into providers and startUIServer
+// into picker rows (ExtraNames), the credentials the Settings pane
+// writes, and the material a check for one of them authenticates with.
 //
-// A fourth load of the same ladder (runDaemon's own git proxy, its
-// GitHub REST client and the UI server each build one too, all of them
-// cheap and none of them hot-reloaded -- see startUIServer's own comment
-// on why a second copy is fine): run() needs these names before either
-// of those exists, and one reading shared by both halves of the process
-// is what keeps the picker and the registry offering the same set.
-func gitHubTokenNames(dataDir string) ([]string, error) {
+// A second load of the same ladder (runDaemon's own git proxy and its
+// GitHub REST client share one more, cheap and not hot-reloaded either):
+// run() needs this before the reconcile loop exists, and one reading
+// shared by everything above that loop is what keeps the picker, the
+// registry, the pane and the check all talking about the same files.
+func gitHubCredentialLadder(dataDir string) (*gitproxy.CredentialSet, error) {
 	credentials, err := gitproxy.LoadCredentialSet(filepath.Join(dataDir, "secrets", "github"))
 	if err != nil {
 		return nil, fmt.Errorf("loading GitHub credential ladder for named-token capabilities: %w", err)
 	}
-	return credentials.ExtraNames(), nil
+	return credentials, nil
 }
 
 // defaultSourceDir is where the deployment image carries the source it
@@ -2358,15 +2438,16 @@ func startGitProxy(dataDir string, store *model.Store, githubHost string, insecu
 // directory to hand; there is no longer a cross-process case where it
 // would not.
 func startUIServer(cfg config, store *model.Store, transcriptDir string, sandboxes orchestrator.Sandboxes, live *liveConfig, stateRepo ui.StateRepoManager) (stop func(context.Context) error, err error) {
-	// A second CredentialSet, loaded the same way BuildProxy (above) and
-	// run's own githubClient each load their own: not hot-reloaded,
-	// cheap to load again, and this is the one Settings checks
-	// targetRepos against to flag bwsalmon/agents#427's drift before a
-	// push ever reaches the proxy with a confusing 500.
-	uiCredentials, err := gitproxy.LoadCredentialSet(filepath.Join(cfg.dataDir, "secrets", "github"))
-	if err != nil {
-		return nil, fmt.Errorf("loading GitHub credential ladder for the UI: %w", err)
-	}
+	// The credential ladder run() already loaded, not a second copy of
+	// it: this is the one Settings checks targetRepos against to flag
+	// bwsalmon/agents#427's drift before a push ever reaches the proxy
+	// with a confusing 500, *and* the one the tokens pane writes through
+	// -- and writing through it is what makes it forget the token it had
+	// cached (gitproxy.CredentialSet.forget). A check made through a
+	// different copy would go on testing the token an operator has just
+	// replaced on this very pane, which is the moment the button exists
+	// for. So both halves are handed the same ladder.
+	uiCredentials := live.gitHubCredentials()
 	disks := hostDisks(cfg)
 	// One open of this deployment's secrets, used twice below: the
 	// secrets fields on the Capabilities tab write into it, and the
@@ -2389,7 +2470,8 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// behind a gate like PullRequests below, because it needs
 		// nothing the reconcile loop builds -- the providers come from
 		// the live configuration and the credentials from this same
-		// secrets directory, both available before (and regardless of
+		// secrets directory (and, for a named GitHub token, from the
+		// ladder above), all available before (and regardless of
 		// whether) that loop ever starts.
 		CapabilityChecks: capabilityCheckAdapter{live: live, creds: uiSecrets},
 		// The bootstrap pane: this process owns the state repository its
@@ -2719,16 +2801,21 @@ func (a cycleTimesAdapter) CycleTimes() metrics.CycleHistory {
 //
 // The credential resolver is the daemon's own secrets store, the same
 // one orchestrator.Config.Credentials resolves a real Materialize
-// through. Nothing here reads a value back out to the caller: material
-// goes into a provider, and what comes back is a sentence about what the
-// far end said.
+// through. A named GitHub token is the one capability whose standing
+// credential is not in there at all -- it is an operator's file under
+// secrets/github -- so its provider is built holding the credential
+// ladder instead (capabilityProviders' own githubCredentials argument),
+// and this resolver goes unused by it. Nothing here reads a value back
+// out to the caller either way: material goes into a provider, and what
+// comes back is a sentence about what the far end said.
 type capabilityCheckAdapter struct {
 	live  *liveConfig
 	creds model.CredentialResolver
 }
 
 func (a capabilityCheckAdapter) CheckCapability(ctx context.Context, id string) (ui.CapabilityCheckResult, error) {
-	registry := model.NewCapabilityRegistry(capabilityProviders(a.live.current(), a.live.gitHubTokens())...)
+	registry := model.NewCapabilityRegistry(
+		capabilityProviders(a.live.current(), a.live.gitHubTokens(), a.live.gitHubCredentialSource())...)
 	provider, ok := registry.Lookup(id)
 	if !ok {
 		// An answer about this deployment rather than a fault:
