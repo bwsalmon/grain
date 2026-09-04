@@ -199,6 +199,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureTaskReviewTemplateColumn(ctx); err != nil {
+		return fmt.Errorf("migrating task: %w", err)
+	}
 	if err := s.ensureReleaseMergeNoteColumn(ctx); err != nil {
 		return fmt.Errorf("migrating release: %w", err)
 	}
@@ -908,6 +911,28 @@ func (s *Store) ensureTaskPromptExtensionColumn(ctx context.Context) error {
 	return err
 }
 
+// ensureTaskReviewTemplateColumn adds task.review_template_id
+// (Task.ReviewTemplateID's own doc comment has the reasoning --
+// grain/task-284) to a database created before this column existed, the
+// same probe-then-ALTER approach every other ensure*Column migration
+// here uses. It defaults to the empty string, Task.ReviewTemplateID's
+// own "no review attached" zero value, so no task already in such a
+// database suddenly acquires a review of work that is long since done.
+//
+// No SchemaVersion bump goes with it, for the reason
+// ensureReleaseMergeNoteColumn gives: an existing database migrates into
+// the new shape here rather than being one this build cannot re-create
+// into.
+func (s *Store) ensureTaskReviewTemplateColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `review_template_id` FROM `task` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx,
+		"ALTER TABLE `task` ADD COLUMN `review_template_id` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
 // ensureReleaseMergeNoteColumn adds release.merge_note
 // (Release.MergeNote's own doc comment has the reasoning) to a database
 // created before it existed, the same probe-then-ALTER approach every
@@ -1354,14 +1379,14 @@ func putTask(ctx context.Context, tx *sql.Tx, t Task) error {
   `+"`origin_actor_kind`, `origin_actor_id`, `origin_behalf_kind`, `origin_behalf_id`, `origin_reason`"+`,
   `+"`approval_actor_kind`, `approval_actor_id`, `approval_behalf_kind`, `approval_behalf_id`, `approved_at`"+`,
   `+"`target_owner`, `target_name`, `binding`, `base`, `folder`"+`,
-  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `agent_framework`, `prompt_extension`"+`
-) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?)`,
+  `+"`auto_merge`, `created_at`, `order_key`, `sandbox_cpus`, `sandbox_memory_mb`, `sandbox_disk_gb`, `interactive`, `agent_framework`, `prompt_extension`, `review_template_id`"+`
+) VALUES (?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?,?,?,?,?,?)`,
 		t.ID, string(t.Intent), t.Title, t.Body,
 		string(oActor.Kind), oActor.ID, kindOf(oBehalf), idOf(oBehalf), string(t.Origin.Reason),
 		aActorKind, aActorID, aBehalfKind, aBehalfID, timeOf(t.ApprovedAt),
 		targetOwner, targetName, string(t.Binding), nullable(t.Base), folderOf(t.Folder),
 		t.AutoMerge, timeOf(t.CreatedAt), t.OrderKey, t.SandboxCPUs, t.SandboxMemoryMB, t.SandboxDiskGB, t.Interactive,
-		t.AgentFramework, t.PromptExtension,
+		t.AgentFramework, t.PromptExtension, t.ReviewTemplateID,
 	); err != nil {
 		return fmt.Errorf("writing task %s: %w", t.ID, err)
 	}
@@ -1637,7 +1662,7 @@ const taskColumns = "`id`,`intent`,`title`,`body`," +
 	"`approval_actor_kind`,`approval_actor_id`,`approval_behalf_kind`,`approval_behalf_id`,`approved_at`," +
 	"`target_owner`,`target_name`,`binding`,`base`,`folder`," +
 	"`auto_merge`,`created_at`,`order_key`,`sandbox_cpus`,`sandbox_memory_mb`,`sandbox_disk_gb`,`interactive`," +
-	"`agent_framework`,`prompt_extension`"
+	"`agent_framework`,`prompt_extension`,`review_template_id`"
 
 // scanTask reads one task row. It takes the Scan method rather than a
 // *sql.Row or *sql.Rows so one function serves both the single-row and
@@ -1654,7 +1679,7 @@ func scanTask(scan func(...any) error) (Task, error) {
 		&aaKind, &aaID, &abKind, &abID, &approvedAt,
 		&tOwner, &tName, &binding, &base, &folder,
 		&t.AutoMerge, &createdAt, &t.OrderKey, &t.SandboxCPUs, &t.SandboxMemoryMB, &t.SandboxDiskGB, &t.Interactive,
-		&t.AgentFramework, &t.PromptExtension); err != nil {
+		&t.AgentFramework, &t.PromptExtension, &t.ReviewTemplateID); err != nil {
 		return Task{}, err
 	}
 

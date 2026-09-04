@@ -88,6 +88,7 @@ var Tables = []string{
   ` + "`interactive`" + `           INTEGER  NOT NULL DEFAULT 0,
   ` + "`agent_framework`" + `       TEXT     NOT NULL DEFAULT '',
   ` + "`prompt_extension`" + `      TEXT     NOT NULL DEFAULT '',
+  ` + "`review_template_id`" + `    TEXT     NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
