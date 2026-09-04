@@ -166,15 +166,25 @@ func skipUnlessLiveRequired(t *testing.T, reason string) {
 }
 
 // assertGrainToolsAdvertised reads agy's own opening "init" event out of
-// a raw stream-json capture and fails unless the roster it reports
-// carries grain's sandbox tools.
+// a raw stream-json capture and fails unless the roster it reports leaves
+// the run some route to grain's tools.
 //
-// This is the assertion the whole live gate exists for. agy's roster is
-// whatever it loaded out of the HOME agent/antigravity built for the run,
-// so an empty one -- or one holding only agy's native tools -- means the
-// MCP config was written somewhere agy does not read, which is a bug no
-// scripted test in this repository can see (see this file's own doc
-// comment).
+// It used to demand grain's tools by name in that roster, on the theory
+// that the roster is the run's whole tool vocabulary. Run against the
+// real binary that turned out to be false: agy's init event lists agy's
+// own native tools and never an MCP tool under any spelling, eagerly
+// registered or not (agy 1.1.25 advertises 57 of them and no grain tool).
+// The old assertion would therefore have failed every live run, and the
+// reason would have read as "grain's MCP config is written where agy
+// cannot find it" -- which was true once (task 146) and is exactly the
+// kind of wrong diagnosis a test should not hand anybody.
+//
+// What the roster does say is whether there is a bridge at all:
+// call_mcp_tool, agy's dispatcher for lazily loaded MCP tools, or an
+// eagerly registered tool under mcp.AgyQualifiedToolName's spelling. A
+// roster with neither is a run that cannot reach its sandbox. The
+// stronger claim -- that a tool call really landed -- is
+// assertSandboxToolRan's, below, and it is the one that matters.
 func assertGrainToolsAdvertised(t *testing.T, transcriptPath string) {
 	t.Helper()
 
@@ -186,25 +196,18 @@ func assertGrainToolsAdvertised(t *testing.T, transcriptPath string) {
 	if !sawInit {
 		t.Fatalf("agy's stream carried no init event, so nothing here can say which tools the run was given; capture:\n%s", capture)
 	}
+	t.Logf("agy's init event advertised %d tool(s): %v", len(tools), tools)
 
-	prefix := mcp.QualifiedToolName("")
-	var grainTools []string
+	eagerPrefix := mcp.AgyQualifiedToolName("")
 	for _, name := range tools {
-		if strings.HasPrefix(name, prefix) {
-			grainTools = append(grainTools, name)
+		if name == "call_mcp_tool" || strings.HasPrefix(name, eagerPrefix) {
+			return
 		}
 	}
-	t.Logf("agy's init event advertised %d tool(s), %d of them grain's: %v", len(tools), len(grainTools), tools)
-
-	if len(grainTools) == 0 {
-		t.Fatalf("agy's init event advertised no %s* tools (roster: %v).\n"+
-			"agy loaded no MCP server, which is what a config written to a file it does not read looks like: "+
-			"check that agent/antigravity's mcpConfigRelPath is still where this agy build keeps its servers "+
-			"(`agy mcp add` writes it, `agy mcp list` reads it back).", prefix, tools)
-	}
-	if want := mcp.QualifiedToolName("run_command"); !slices.Contains(grainTools, want) {
-		t.Fatalf("agy advertised grain's tools as %v, which does not include %s -- the one this run's prompt needs", grainTools, want)
-	}
+	t.Fatalf("agy's init event advertised neither call_mcp_tool nor any %s* tool (roster: %v).\n"+
+		"This run had no way to reach grain's MCP server at all: check that agent/antigravity's "+
+		"mcpConfigRelPath is still where this agy build keeps its servers (`agy mcp add` writes "+
+		"it, `agy mcp list` reads it back).", eagerPrefix, tools)
 }
 
 // advertisedTools pulls the tool roster off the first "init" event in a
@@ -238,15 +241,17 @@ func advertisedTools(capture []byte) (tools []string, sawInit bool) {
 // itself against agy's event shape, with the same fixtures
 // agent/antigravity's own parser tests use.
 func TestAdvertisedToolsReadsAgysInitEvent(t *testing.T) {
-	const initLine = `{"event":"init","init":{"cwd":"/w","tools":["mcp__grain-sandbox__run_command","Bash"],"permission_mode":"bypass"}}`
+	// agy's own roster shape: its native tools, with call_mcp_tool among
+	// them as the only thing in it that leads to grain.
+	const initLine = `{"event":"init","init":{"cwd":"/w","tools":["run_command","view_file","call_mcp_tool"],"permission_mode":"bypass"}}`
 	const resultLine = `{"event":"result","result":{"status":"SUCCESS","response":"done"}}`
 
 	tools, sawInit := advertisedTools([]byte(initLine + "\n" + resultLine + "\n"))
 	if !sawInit {
 		t.Fatal("advertisedTools found no init event in a capture that opens with one")
 	}
-	if !slices.Contains(tools, mcp.QualifiedToolName("run_command")) {
-		t.Errorf("advertisedTools = %v, want grain's run_command among them", tools)
+	if !slices.Contains(tools, "call_mcp_tool") {
+		t.Errorf("advertisedTools = %v, want agy's MCP dispatcher among them", tools)
 	}
 
 	// A run agy never loaded the MCP config for: the event is there, the

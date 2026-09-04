@@ -44,6 +44,23 @@
 // required. Run 'agy' to log in, then retry." So writeAgyHome writes that
 // setting alongside the MCP config whenever grain has a key to pass.
 //
+// A private HOME is also where this package tells agy how to put grain's
+// tools in front of the model, which it does not do by default. agy loads
+// an MCP server's tools lazily: they appear in no roster, and the only
+// way to one is a native dispatcher, call_mcp_tool. A run configured that
+// way reaches for agy's own 57 native tools instead -- which execute
+// wherever agy does, on the controller -- and every call grain does see
+// comes back named after the dispatcher rather than the tool. So the MCP
+// config asks for every published tool with "eager": true, which
+// registers each as a tool of agy's own under the name
+// mcp.AgyQualifiedToolName spells (see eagerToolsConfig, and
+// transcript.go for the two names a call can arrive under).
+//
+// agy caps a whole print-mode run at five minutes unless told otherwise,
+// which ends a grain-shaped run long before it can push anything. Run
+// passes --print-timeout derived from the deadline on its own context, so
+// that grain's cancellation is always what stops a run; see printTimeout.
+//
 // agy also has no --max-turns. The cap RunConfig.MaxTurns asks for is
 // therefore enforced here rather than by the binary: Run counts completed
 // agent_response steps as they stream past and cancels the subprocess
@@ -797,15 +814,25 @@ func userEvent(prompt string) (string, error) {
 //
 // claude empties its own tool roster with --tools ” and admits only the
 // grain-sandbox tools with --strict-mcp-config plus --allowedTools. agy
-// exposes no equivalent switch. What this does instead is give the
-// subprocess a HOME with exactly one MCP server in it and a working
-// directory that is the sandbox itself, so the tools it reaches are this
-// run's, and verifyToolRoster reports -- as a transcript line, not a
-// failure, since a roster this code does not recognize is not by itself
-// evidence of a breach -- any tool agy's own init event advertises beyond
-// the ones grain published. A deployment that needs a hard guarantee
-// should run agy against a kontur sandbox (cfg.KonturVM), where the
-// controller's filesystem is not reachable from the guest at all.
+// exposes no equivalent switch: no --tools, no --strict-mcp-config, and
+// its disabledTools setting applies to an MCP server's tools rather than
+// its own. Every run therefore sees agy's native run_command, view_file,
+// write_to_file and the rest alongside grain's, and those execute
+// wherever agy does -- on the controller.
+//
+// Three things stand in for the switch that does not exist. The private
+// HOME holds exactly one MCP server, so grain's tools are the only MCP
+// tools there are. Those tools are registered eagerly, so the model can
+// see them rather than having to go looking. And toolPreamble opens the
+// prompt by saying which tools reach the sandbox and that agy's own do
+// not. verifyToolRoster then reports -- as a transcript line, not a
+// failure -- a roster with no route to grain's server at all.
+//
+// None of that is a guarantee, and it is not offered as one. A deployment
+// that needs one should run agy against a kontur sandbox (cfg.KonturVM),
+// where the controller's filesystem is not reachable from the guest at
+// all; workDir gives such a run an empty scratch directory to start in,
+// so a native tool reached for by mistake writes somewhere harmless.
 func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
 	mcpArgs, err := f.mcpServerArgs(ctx, cfg)
 	if err != nil {
