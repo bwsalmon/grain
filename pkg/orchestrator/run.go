@@ -499,6 +499,10 @@ func setupSection(r *SetupResult) string {
 // (pkg/staterepo) is told about the thing it has just been handed: not
 // source code but grain's own database, written out as text.
 //
+// What it deliberately does not say is whose database that is -- the
+// checkout cannot answer that, and settingsRepoSection below is where
+// this deployment's own answer to it goes.
+//
 // Every fact here is one the checkout does not volunteer. The files are
 // JSON, so their shape is discoverable, but nothing in them says that
 // grain rewrites all of them from its database on a timer -- which is
