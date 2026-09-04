@@ -538,11 +538,12 @@ and become grain's, which means grain has to render them. That is what
   everything already queued, rather than at `OrderKey`'s zero value —
   which is not "no position" but a position ahead of every task filed
   since the backlog started.
-- The merge queue's own two voices moved too: `fileFixTask` files a store
-  task instead of an issue, and both it and `escalateToUser` comment
-  through `Store.AddComment` as the `merge-queue` principal, so a human
-  reading a task's conversation can tell the queue's remarks from a
-  relayed agent's.
+- The merge queue's own two voices moved too: it asks for a repair with a
+  store comment instead of an issue (`fileFixTask` then, `requeueForRepair`
+  now), and both it and `escalateToUser` comment through
+  `Store.AddComment` as the `merge-queue` principal, so a human reading a
+  task's conversation can tell the queue's remarks from a relayed
+  agent's.
 - **Closing out is one write.** It used to be two — close the task's
   GitHub issue, then record the closure — with the issue closed first and
   the store told second, so a crash in between left a closed issue that
@@ -1071,24 +1072,24 @@ merge a human withheld. `BuildPrompt` mentions `auto_merge` only to a task
 that is itself an auto-merge job, since there is nothing another task
 could do with it.
 
-Filing a fix task when a PR goes red is built now (bwsalmon/agents#283):
+Repairing a PR that goes red is built now (bwsalmon/agents#283):
 `SyncPullRequests` runs a merge queue, one per target repo, over every
 task that asked for `/auto-merge` and still has a PR open. Only the
 queue's head — whichever of a repo's waiting tasks sits first in the
 backlog — is ever acted on in a
-cycle; a fix filed for the second task while the first is still being
-repaired would likely need refiling the moment the first merges and
-changes what the second is based against, so everything behind the head
-just waits. Nothing merges while CI is still
+cycle; a repair started for the second task while the first is still
+being repaired would likely need starting over the moment the first
+merges and changes what the second is based against, so everything behind
+the head just waits. Nothing merges while CI is still
 running: a check run GitHub has not finished reads `PrHealth.PENDING`
 (`healthFrom`), which is neither clean nor failing, so the head simply
 holds its place and the next cycle asks again — a queue that merged on
 "no failure reported yet" would land changes before their tests had said
 anything about them. Pending outranks failing on purpose, so a red job
-alongside a still-running one waits too: the queue files exactly one
-automatic fix per pull request, and it is worth a cycle to file that one
-against CI's whole verdict rather than against whichever job went red
-first. Nor does it merge before CI has said *anything*: an empty check
+alongside a still-running one waits too: the queue asks for exactly one
+automatic repair per pull request, and it is worth a cycle to ask for
+that one against CI's whole verdict rather than against whichever job
+went red first. Nor does it merge before CI has said *anything*: an empty check
 list is read `PENDING` too, until the head commit has carried it for
 `defaultCheckRegistrationWindow` (two minutes). GitHub creates a
 workflow run's check runs asynchronously after processing a push, so a
@@ -1103,9 +1104,9 @@ sha off the pull-request read (a branch-scoped read answers for a commit
 the cycle never saw), the window above is keyed on it, and the merge
 carries it in GitHub's own `sha` parameter, which refuses with `409` if
 the branch has moved since. That closes the gap a push landing mid-cycle
-would otherwise walk through — a human's own "push a fix by hand", a fix
-task merging into the branch it repairs, a redispatched task pushing
-again — and costs one cycle when it happens: the task keeps its queue
+would otherwise walk through — a human's own "push a fix by hand", a
+repair run pushing to the branch it was sent to fix, a redispatched task
+pushing again — and costs one cycle when it happens: the task keeps its queue
 position and the commit that landed is judged next cycle on its own CI.
 Nor does it wait for CI that is never coming: a head that
 has read `PENDING` for longer than `defaultCheckStallDeadline` (two
@@ -1114,10 +1115,10 @@ given up on — a comment naming the checks that never finished,
 `Observation.MergeQueueBlockedAt` set, the queue moved on — since a
 workflow waiting on an approval nobody gives, or a provider that posted
 "queued" and went away, would otherwise hold its repo's whole queue for
-the life of the deployment with nothing said to anyone. No fix task is
-filed for that one: nothing has failed, and a check that never finishes
-is usually waiting on something outside the pull request, so there may
-be nothing in it to repair. A conflicted or failing head is not taken at
+the life of the deployment with nothing said to anyone. No repair is
+asked for on that one: nothing has failed, and a check that never
+finishes is usually waiting on something outside the pull request, so
+there may be nothing in it to repair. A conflicted or failing head is not taken at
 its word, either. Before anything is filed for it, `refreshStaleHead`
 asks GitHub to merge the pull request's own base branch into its head
 branch (`POST /repos/{owner}/{repo}/merges`, `Client.MergeBranch`) —
@@ -1132,9 +1133,9 @@ case, and a check run names no base — it asks for the merge and lets the
 answer classify: `201` means it was behind and is not now, so CI re-runs,
 the head holds its queue position while it does, and the *next* cycle
 decides on a fresh verdict; `204` means the branch already contained its
-base, so the failure is genuine and the fix task is filed as it always
-was; `409` means it genuinely conflicts, which is the case a fix task is
-really for, filed immediately and now naming the conflict the queue
+base, so the failure is genuine and the repair is asked for as it always
+was; `409` means it genuinely conflicts, which is the case a repair is
+really for, asked for immediately and now naming the conflict the queue
 watched GitHub refuse rather than one inferred from a `Mergeable` flag.
 That is one API call in place of a full agent run for what has been the
 majority of this deployment's automatic fixes — every one of them
@@ -1143,26 +1144,51 @@ type. It happens once per pull request
 (`Observation.MergeQueueRefreshedAt`, persisted for the same reason the
 CI clocks are not: losing it would cost a repeated write to GitHub rather
 than another window of waiting), only for the queue head, and never for a
-fix task's own stacked branch or one the queue has given up on. It is a
+branch the queue is not steering or one it has given up on. It is a
 merge, never a rebase: nothing force-pushes a branch an agent may still
-hold a clone of, or moves the base out from under an in-flight stacked
-fix. A conflicted or failing head that survives all that gets a fix task filed straight
-into the store already approved (`Task.Approval` set by
-`PrincipalAutomation`, `LinkFixTask` recording which one) rather than
-`core.py`'s own `_suggest_fix`, which filed a `needs_approval_label`
-issue and waited for a human to apply the trigger label or comment
-`/lgtm` — bwsalmon/agents#283 asked for exactly that human step to go
-away. The fix task carries `/base` the original PR's own branch and
-`/auto-merge true`, the same stacked-branch trick `_suggest_fix` used, so
-it dispatches on the very next `dispatch.Cycle` with no approval in
-between and, once clean, merges straight back into the branch it
-repairs. If it finishes and the original PR is still broken,
-`SyncPullRequests` gives up
-automatically rather than refiling: it comments explaining why, sets
-`Observation.MergeQueueBlockedAt`, and the queue moves on to the next
-task in that repo — a blocked task still merges the moment a human's own
-push makes it clean, it just stops being anyone's queue head, so it can
-no longer hold up what's behind it. No new record was needed for the
+hold a clone of.
+
+A conflicted or failing head that survives all that is **sent back to an
+agent on its own branch** (grain/task-271). The queue comments on the
+task saying what is broken, which branch to push to, and what CI printed
+if a job went red; clears `Observation.CompletedAt`, which is what makes
+`StateOf` read the task `queued` again; and stamps
+`Observation.MergeQueueRepairAt`. The next `dispatch.Cycle` picks it up
+through the ordinary path, the run continues the branch the pull request
+is already open from, and GitHub re-runs that one pull request's checks
+once. Until grain/task-271 the queue filed a *separate* task instead —
+pre-approved, `/base` the broken branch, `/auto-merge true`, stacked and
+merged back once green, which is `core.py`'s own `_suggest_fix` trick
+minus the human approval step bwsalmon/agents#283 asked to remove. It
+worked, and it cost two full rounds of CI for one resolution: the fix
+branch's own before it could merge, and the head branch's afterward, with
+the queue waiting out both and a second pull request left behind. A
+conflict resolved on the branch that has the conflict needs neither.
+`LinkFixTask` is still defined and such a task still merges if a database
+holds one in flight; nothing writes a new one.
+
+`MergeQueueRepairAt` is the whole record of a repair, and four things
+read it: the queue waits on it rather than on another task's state, it
+will not merge a branch an agent is still pushing to, the store spends
+the capacity `Limits.Mergers` keeps back on the repair run (`mergerTaskSQL`,
+which used to be the `ReasonFix` column alone), and never clearing it is
+what holds the deployment to one automatic repair per pull request. If
+the repair finishes and the PR is still broken, `SyncPullRequests` gives
+up automatically rather than asking again: it comments explaining why,
+sets `Observation.MergeQueueBlockedAt`, and the queue moves on to the
+next task in that repo — a blocked task still merges the moment a human's
+own push makes it clean, it just stops being anyone's queue head, so it
+can no longer hold up what's behind it. It judges that a cycle *after*
+the one the repair completed on, since dispatch runs before sync inside a
+tick and the verdict read on that tick describes the branch as it was
+before the repair pushed to it.
+
+The task goes visibly back to working while this happens, which is what
+a person watching the queue should see — so the frontend says which kind
+of work it is: `ui.Task.Repairing` carries it, a repairing row's grain
+mark animates in green rather than the accent's gold, and its badge reads
+"Repairing" instead of "Running". A row that has gone back to running has
+not gone back to the beginning. No new record was needed for the
 queue itself: `queueOrder` derives the whole queue from `Task.AutoMerge`,
 `Origin.Reason` and `MergeQueueBlockedAt` fresh every cycle, and
 `queueHeads` takes each repo's first entry from it — the same "derive it,
@@ -1170,14 +1196,15 @@ don't store it" discipline `TaskState` already holds to.
 
 What the queue does write down is where it is. Every cycle,
 `showQueueAtFrontOfBacklog` moves the tasks waiting to land to the front
-of the backlog in the order they will land, and `fileFixTask` files a
-repair at the very head of it (`Store.MoveToFrontOfBacklog`,
-`Store.OrderKeyForNewTask`) — so a task list answers "what is grain about
-to finish, and in what order" without anyone opening a task. It is the
-same order in both directions: `queueOrder` reads position back off the
-backlog rather than comparing `Task.CreatedAt` behind everyone's back, so
-dragging one waiting pull request above another really does change which
-merges first, and `Store.Ready` needs no carve-out for a fix task any
+of the backlog in the order they will land (`Store.MoveToFrontOfBacklog`)
+— so a task list answers "what is grain about to finish, and in what
+order" without anyone opening a task, and so a repair, being the head
+task itself going back to work, is dispatched ahead of new work without
+anything having to file it there. It is the same order in both
+directions: `queueOrder` reads position back off the backlog rather than
+comparing `Task.CreatedAt` behind everyone's back, so dragging one
+waiting pull request above another really does change which merges first,
+and `Store.Ready` needs no carve-out for the merge queue's own work any
 more — being at the head of the list is what dispatches it first, which
 is a thing a human can see and, if they disagree, undo.
 
@@ -1948,9 +1975,10 @@ push to the task's own target (`gitproxy/authorize.go`), and
 `ConfigureGitCredentials` leaves a working identity and credential helper
 behind — but it had no way to find out what CI made of a push. The
 checks were read minutes later by a different process
-(`SyncPullRequests`), and a red build became a whole separate fix task
-(`fileFixTask`), dispatched into a cold sandbox, to repair something the
-run that broke it was still sitting there able to repair.
+(`SyncPullRequests`), and a red build became a whole further dispatch
+(`requeueForRepair`, a separate fix task before that), into a cold
+sandbox, to repair something the run that broke it was still sitting
+there able to repair.
 
 `pkg/mcp`'s `pull_request_status` closes that loop. It reports the branch
 tip, the pull request open for it if there is one, and every check run
@@ -1984,8 +2012,8 @@ base — `task.Base` where the task names one, described rather than
 guessed where it does not. A conflict is read off the pull request before
 any check is (`healthFrom`'s `PrConflicted`), so a green branch that
 conflicts still never merges, and the run holding the checkout can fetch
-and merge in a turn — which is cheaper than the fix task the merge queue
-would otherwise file for it minutes later in a cold sandbox.
+and merge in a turn — which is cheaper than the repair the merge queue
+would otherwise ask for minutes later in a cold sandbox.
 
 ## Waiting for CI instead of polling it
 
@@ -2060,18 +2088,18 @@ That is enough to know the build is red and not enough to do anything
 about it, so a run's next move was always to guess at what broke and try
 to reproduce it — in a sandbox that is not the runner and may not be able
 to run the failing suite at all. It is the same gap `github.JobLog`'s own
-doc comment describes and `fileFixTask` already closes for the merge
-queue's fix tasks, which carry the tail of each failing job's log in
-their body rather than a job name.
+doc comment describes and `requeueForRepair` already closes for the merge
+queue's own repairs, whose comment carries the tail of each failing job's
+log rather than a job name.
 
 So `pull_request_status` and `wait_for_checks` carry it too: under the
 check list, each failing job's own URL and the end of its log, fenced in
 four backticks so a log containing a fenced block cannot close the quote
 early. Rendered by `github.JobLogExcerpt` and bounded by
 `github.JobLogTailBytes` over the wire and `github.JobLogTailLines` on
-the page — the same excerpt `fileFixTask` builds, shared rather than
+the page — the same excerpt `requeueForRepair` builds, shared rather than
 copied so a run reading its own break cannot be shown a
-differently-bounded log than the fix task filed for that same break.
+differently-bounded log than the repair asked for that same break.
 
 Two things keep it cheap and keep it from taking the answer down with it.
 The logs are read only once something has actually failed — never per
@@ -5547,9 +5575,9 @@ CI waits (84 wait(s) across 18 run(s))
 
 mid-run pull requests (34 run(s) in the window could have opened one)
   opened one themselves        21  (62% of them, 48 call(s) in all)
-  fix task filed after         10% of the 21 that did, 31% of the 13 that did not
-  (a fix task is the merge queue cleaning up a red build the run left behind.
-   The link is on the task, not the attempt: read the difference, not either rate.)
+  repaired by the queue after  10% of the 21 that did, 31% of the 13 that did not
+  (a repair is the merge queue cleaning up a red build the run left behind.
+   It is recorded on the task, not the attempt: read the difference, not either rate.)
 ```
 
 **This is the one measurement that had to be stored,** and it is stored
@@ -5628,19 +5656,21 @@ paragraph and the sentence naming the tool inside `task.Target != nil`
 and a task with no target was never asked.
 
 The second is a comparison and is deliberately not reported as a rate.
-"A run opened its pull request and its task still needed a fix task"
-means nothing alone: some share of branches go red for reasons no amount
-of watching would have caught. So both cohorts are printed with their own
-denominators — the runs that called the tool and the runs that did not,
-each with the share whose task the merge queue later filed a fix task
-against (`model.LinkFixTask`, `fileFixTask`), which is the recorded form
-of a red build outliving the run that pushed it. Read the difference, not
-either number. The signal is coarse in two known ways, both stated where
-the number is read: the fix-task link is on the task rather than the
-attempt, so every finished attempt of a task that ever went red counts as
-having gone red; and a fix task can only exist for a task that got as far
-as a pull request, which flatters any cohort holding runs that pushed
-nothing.
+"A run opened its pull request and the merge queue still had to repair
+it" means nothing alone: some share of branches go red for reasons no
+amount of watching would have caught. So both cohorts are printed with
+their own denominators — the runs that called the tool and the runs that
+did not, each with the share whose task the merge queue later had to
+repair (`Observation.MergeQueueRepairAt`, or the older `model.LinkFixTask`
+for a task repaired before grain/task-271; both are counted, so a report
+spanning that change does not show the rate falling to zero on the day
+the recording moved), which is the recorded form of a red build outliving
+the run that pushed it. Read the difference, not either number. The
+signal is coarse in two known ways, both stated where the number is read:
+it is recorded on the task rather than the attempt, so every finished
+attempt of a task that ever went red counts as having gone red; and a
+repair can only happen to a task that got as far as a pull request, which
+flatters any cohort holding runs that pushed nothing.
 
 **The fine-grained version of that question is not counted in bulk, on
 purpose.** "Did a push follow the last failing report" is answerable by
@@ -5670,13 +5700,19 @@ Concurrency was one number: `max_concurrent`, the count of runs
 `dispatch.Cycle` would let be in flight. Every kind of run drew on it
 equally, which put the two least alike kinds in direct competition. Most
 runs are new work, at the start of its life. A few are the merge queue's
-own fix tasks (`Origin.Reason == ReasonFix`, `fileFixTask`), filed
-against a pull request that will not land — the last step of work that is
-already committed, pushed and reviewed. A saturated deployment starved
-exactly the second kind, and starving it is expensive twice over: the
-branch a fix targets keeps moving while the fix waits, so a repair
-delayed long enough has to be filed again, and the queue behind it waits
+own repairs of a pull request that will not land — the last step of work
+that is already committed, pushed and reviewed. A saturated deployment
+starved exactly the second kind, and starving it is expensive twice over:
+the branch a repair targets keeps moving while the repair waits, so one
+delayed long enough has to start over, and the queue behind it waits
 too.
+
+What counts as a merger is `Store.mergerTaskSQL`, written once and read
+by all three places that decide it. It has two arms: a task the queue has
+sent back to work on its own branch (`Observation.MergeQueueRepairAt`
+with no `completed_at`, which is what a repair is since grain/task-271),
+or one of the separate fix tasks the queue used to file for that
+(`Origin.Reason == ReasonFix`), which a database may still hold one of.
 
 `model.Limits` is that one number split in two — `MaxWorkers` and
 `MaxMergers`, in the store as `grain_config.max_workers`/`max_mergers`,
@@ -5703,7 +5739,7 @@ transaction that records the run, which is where the limit is actually
 enforced — two overlapping cycles cannot both spend the last slot. A
 candidate whose own half is full is passed over rather than ending the
 cycle, the same skip a task still backing off gets, so a queue of
-ordinary work at the head of the backlog no longer hides the fix task
+ordinary work at the head of the backlog no longer hides the repair
 behind it from the capacity kept for it.
 
 `-max-concurrent` still parses, as the former spelling of
@@ -5716,8 +5752,8 @@ watching. The stored column is migrated rather than reinterpreted
 `model.DefaultMaxMergers` — one — so an upgraded deployment keeps the
 ordinary concurrency it had and gains a single slot the merge queue
 cannot be shut out of. Setting it to 0 puts a deployment back exactly
-where it was: fix tasks contending for worker capacity like anything
-else.
+where it was: the merge queue's own repairs contending for worker
+capacity like anything else.
 
 ## Pausing when the agent runs out of budget
 

@@ -78,11 +78,24 @@ func TestSeedDemoCoversEveryState(t *testing.T) {
 	// pane (grain/task-91) shows what a dispatch actually hands an agent
 	// rather than its "nothing has run yet" placeholder -- which is also
 	// what ui/e2e's own prompt test reads.
-	var running ui.Task
+	//
+	// Not the *repairing* one, which is the demo's other running card: a
+	// task the merge queue has sent back to work on its own branch, seeded
+	// to show the green mark that tells the two apart. That one stands for
+	// a second attempt and has no prompt of its own here.
+	var running, repairing ui.Task
 	for _, task := range tasks {
-		if task.State == model.StateRunning {
-			running = task
+		if task.State != model.StateRunning {
+			continue
 		}
+		if task.Repairing {
+			repairing = task
+			continue
+		}
+		running = task
+	}
+	if repairing.ID == "" {
+		t.Error("no seeded task is being repaired by the merge queue; the UI's green running mark has no card to show")
 	}
 	prompt, err := client.TaskPrompt(ctx, running.ID)
 	if err != nil {
