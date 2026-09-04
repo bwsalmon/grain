@@ -273,6 +273,27 @@ func capabilityCheckable(name string) bool {
 	return false
 }
 
+// checkable is capabilityCheckable widened by the one listing that is
+// not this build's catalog: a named GitHub token
+// (githubTokenStatuses below). Every one of those has a check --
+// githubtoken.Provider implements model.CredentialChecker for all of
+// them, which TestEveryNamedGitHubTokenRowCanBeChecked holds it to --
+// so what decides it here is whether this deployment offers that token
+// at all, which is exactly the id's own picker row and the thing
+// cmd/grain/daemon.go registered a provider beside.
+//
+// A method rather than a second package-level function because that
+// second half can only be answered from a Client: which tokens exist is
+// an operator's files, read at startup into Config.Capabilities, not a
+// property of this build.
+func (c *Client) checkable(id string) bool {
+	if _, ok := model.GitCredentialName(id); ok {
+		_, offered := c.capabilityByID(id)
+		return offered
+	}
+	return capabilityCheckable(id)
+}
+
 // missingConfigFor is capabilityProviders' own gates
 // (cmd/grain/daemon.go), read back as the human-facing labels Settings'
 // Capabilities tab already uses for the same two fields -- gcp-key needs
@@ -445,7 +466,7 @@ func (c *Client) capabilityStatuses(cfg model.Config, repoConfigs []model.RepoCo
 			Name:          capabilityDisplayNames[spec.Name],
 			Description:   spec.Description,
 			Grantable:     grantable,
-			Checkable:     c.Config.CapabilityChecks != nil && capabilityCheckable(spec.Name),
+			Checkable:     c.Config.CapabilityChecks != nil && c.checkable(spec.Name),
 			Default:       slices.Contains(cfg.DefaultCapabilities, spec.Name),
 			DefaultRepos:  reposByCapability[spec.Name],
 			MissingConfig: missingConfigFor(spec.Name, cfg),
@@ -468,14 +489,25 @@ func (c *Client) capabilityStatuses(cfg model.Config, repoConfigs []model.RepoCo
 // secrets/github, which cmd/grain/daemon.go turned into picker rows and
 // providers at startup.
 //
-// Ready and Grantable are both true by construction, and that is the
-// honest answer rather than an unchecked one: a row exists here only
+// Ready and Grantable are both true by construction, and that stays the
+// honest answer to what those two fields ask: a row exists here only
 // because a credential file of that name exists (gitproxy.CredentialSet.
 // ExtraNames), and it exists in the picker only because the same startup
 // pass put it there beside the matching provider. There is no
 // deployment setting and no secrets-store entry either could be waiting
 // on -- MissingConfig and MissingSecrets ask about the two gates a
 // GitHub token has neither of.
+//
+// What that answer never covered is the way these credentials actually
+// fail: a token revoked, expired or rotated at GitHub's end, or one
+// whose access to a repo was withdrawn, changes nothing about the file,
+// so this row went on saying **Ready** while every push through it was
+// refused (grain/task-189). Checkable is where that is answered now, and
+// deliberately not folded into Ready -- the same rule grain/task-172
+// landed on for every other standing credential: Ready means configured,
+// a check is a point-in-time answer somebody asked for, and a badge that
+// silently meant both would be a worse answer than two fields that each
+// mean one thing.
 func (c *Client) githubTokenStatuses(cfg model.Config, reposByCapability map[string][]string) []CapabilityStatus {
 	var out []CapabilityStatus
 	for _, capability := range c.Config.Capabilities {
@@ -489,6 +521,7 @@ func (c *Client) githubTokenStatuses(cfg model.Config, reposByCapability map[str
 			Description:  capability.Description,
 			Ready:        true,
 			Grantable:    true,
+			Checkable:    c.Config.CapabilityChecks != nil && c.checkable(capability.ID),
 			Default:      slices.Contains(cfg.DefaultCapabilities, capability.ID),
 			DefaultRepos: reposByCapability[capability.ID],
 		})

@@ -89,7 +89,9 @@ var errCapabilityCheckUnavailable = errors.New(
 // one cheap, harmless call with it -- gcp-key lists the agent service
 // account's own keys, exactly as Reap does; gemini-key lists the
 // project's API keys; github-sandbox asks GitHub which installation its
-// App has -- and reports what came back.
+// App has; a named GitHub token asks GitHub for its own rate limit and
+// then which of this deployment's target repos it can still reach -- and
+// reports what came back.
 //
 // This is the one question Settings could not previously ask. "Ready"
 // there means *configured*: a project, an agent account and a
@@ -132,8 +134,11 @@ func (c *Client) CheckCapability(ctx context.Context, id string) (CapabilityChec
 	// Known covers both listings, since a capability grain ships a
 	// provider for but the picker does not offer is a real capability
 	// with a real credential -- ungrantable is Grantable's answer to
-	// give, not this one's.
-	if !capabilityCheckable(id) {
+	// give, not this one's. A github-credential: id this deployment does
+	// not offer falls through to the same "unknown capability": there is
+	// no such token here, and no build of grain could have one, since
+	// which tokens exist is an operator's own files.
+	if !c.checkable(id) {
 		known := capabilityShipped(id)
 		if !known {
 			_, known = c.capabilityByID(id)

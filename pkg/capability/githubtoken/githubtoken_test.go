@@ -9,7 +9,7 @@ import (
 )
 
 func TestSpecIsTheNamedTokensOwnCapabilityID(t *testing.T) {
-	spec := New("release-bot").Spec()
+	spec := New("release-bot", Config{}).Spec()
 	if spec.Name != model.GitCredentialCapability("release-bot") {
 		t.Errorf("Name = %q, want %q -- the id is what a Grant carries", spec.Name, model.GitCredentialCapability("release-bot"))
 	}
@@ -33,7 +33,7 @@ func TestSpecIsTheNamedTokensOwnCapabilityID(t *testing.T) {
 // offer a capability whose id is the bare prefix -- neither is a token
 // anyone asked for.
 func TestProvidersSkipsEmptyAndDuplicateNames(t *testing.T) {
-	providers := Providers([]string{"release-bot", "", "release-bot", "docs-bot"})
+	providers := Providers([]string{"release-bot", "", "release-bot", "docs-bot"}, Config{})
 	var ids []string
 	for _, p := range providers {
 		ids = append(ids, p.Spec().Name)
@@ -48,7 +48,7 @@ func TestProvidersSkipsEmptyAndDuplicateNames(t *testing.T) {
 }
 
 func TestMaterializeRecordsTheCredentialAndPlacesNothing(t *testing.T) {
-	m, err := New("release-bot").Materialize(context.Background(), model.CapabilityContext{})
+	m, err := New("release-bot", Config{}).Materialize(context.Background(), model.CapabilityContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestMaterializeRecordsTheCredentialAndPlacesNothing(t *testing.T) {
 }
 
 func TestPromptSectionNamesTheTokenWithoutHandingItOver(t *testing.T) {
-	section, err := New("release-bot").PromptSection(context.Background(), model.CapabilityContext{}, nil)
+	section, err := New("release-bot", Config{}).PromptSection(context.Background(), model.CapabilityContext{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestPromptSectionNamesTheTokenWithoutHandingItOver(t *testing.T) {
 }
 
 func TestResolveHonoursTheGrant(t *testing.T) {
-	res, err := New("release-bot").Resolve(context.Background(), model.CapabilityContext{})
+	res, err := New("release-bot", Config{}).Resolve(context.Background(), model.CapabilityContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
