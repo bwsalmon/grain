@@ -170,6 +170,41 @@ func TestAReviewsFindingsTakeTheChangeItReviewsOffAutomaticMerge(t *testing.T) {
 	}
 }
 
+// The other half of the same decision: posting findings does not stop a
+// review landing the fixes it did make. Its own pull request still merges
+// straight back into the branch under review, which is what it was
+// dispatched to do -- what waits is the change, and it waits on a person
+// rather than on the review.
+func TestAReviewThatPostedFindingsStillMergesItsOwnFixesBack(t *testing.T) {
+	store, ctx, sim, client, reviewed, review := reviewedAndReviewing(t)
+
+	// It fixed what it could and wrote down what it would not fix.
+	pushBranch(t, sim.BareRepo, model.BranchName(review.ID))
+	result := toolResult(
+		agent.ToolCall{Name: "run_command", Text: "pushed the fixes"},
+		reviewFinding("this one is a call for whoever asked for the change", "shape.go", 11),
+	)
+	if err := orchestrator.ProcessResult(ctx, store, client, review, result, review.ID+"-1", baseTime); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+	markMergeable(sim)
+
+	if err := orchestrator.SyncPullRequests(ctx, store, client, baseTime.Add(time.Minute)); err != nil {
+		t.Fatalf("SyncPullRequests: %v", err)
+	}
+
+	merged := map[string]bool{}
+	for _, pr := range sim.PullRequests {
+		merged[pr.Head] = pr.Merged
+	}
+	if !merged[model.BranchName(review.ID)] {
+		t.Error("a review's own fixes still merge back into the branch it reviewed")
+	}
+	if merged[model.BranchName(reviewed.ID)] {
+		t.Error("the change itself waits: its review left findings for a human to read")
+	}
+}
+
 // A review that pushes nothing has no pull request of its own, so nothing
 // will ever close it -- and the change it reviewed used to wait on that
 // for six hours before the queue announced that the review had never
