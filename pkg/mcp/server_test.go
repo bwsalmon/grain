@@ -364,3 +364,44 @@ func TestUnknownToolIsAnRPCError(t *testing.T) {
 		t.Fatal("expected an error calling an unregistered tool")
 	}
 }
+
+// An empty old_string used to be taken literally: strings.Count finds a
+// match between every character, so replace_all interleaved new_string
+// through the whole file and a plain edit refused with a count of
+// phantom matches. Found by hand-driving this server the way a framework
+// does (task 244) -- the file it silently rewrote had asked for one
+// change.
+func TestEditFileRefusesAnEmptyOldString(t *testing.T) {
+	root := t.TempDir()
+	client := newTestClient(t, root)
+	ctx := context.Background()
+
+	if _, err := client.CallTool(ctx, "write_file", map[string]any{
+		"file_path": "f.txt", "content": "abc",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, replaceAll := range []bool{false, true} {
+		res, err := client.CallTool(ctx, "edit_file", map[string]any{
+			"file_path": "f.txt", "old_string": "", "new_string": "X", "replace_all": replaceAll,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.IsError {
+			t.Fatalf("replace_all=%v: empty old_string was accepted: %s", replaceAll, res.Text())
+		}
+		if !strings.Contains(res.Text(), "old_string") {
+			t.Errorf("replace_all=%v: error %q does not say which argument is wrong", replaceAll, res.Text())
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "abc" {
+		t.Errorf("file content = %q, want it untouched", string(data))
+	}
+}
