@@ -2082,7 +2082,7 @@ nothing for size. So the point at which a tool result stopped working was
 a per-framework default grain had not chosen, did not know, and could not
 explain to the agent when it was hit.
 
-`mcp.maxToolResultBytes` is that choice: 64 KB, applied where the answer
+`mcp.maxToolResultBytes` is that choice: 16 KB, applied where the answer
 is formatted, so it holds for every framework at once. Both `run_command`
 streams share the one budget rather than getting one each — a build that
 fails prints kilobytes of stderr and megabytes of stdout, or the reverse,
@@ -2096,10 +2096,61 @@ redirect it to a file, and for `read_file` the `cat -n` numbering either
 side of the cut is exactly the `offset` and `limit` to ask for. The cut
 snaps to line boundaries so that numbering stays whole.
 
-64 KB is a starting guess — about 16k tokens, enough for a failing suite's
-summary and far short of an unbounded `git log -p`. The result-size
-telemetry in `docs/agent-ergonomics.md`'s finding 11 is what should
-eventually set it from what runs actually ask for, rather than taste.
+**16 KB is a measurement, not taste.** The cap started at 64 KB with the
+code saying outright that the number was a guess, deliberately a `var`
+until the result-size telemetry (`docs/agent-ergonomics.md`'s finding
+11) could say what runs actually ask for. This is that window — the 90
+days to 2026-09-04, over the 23 runs of grain's own deployment that
+recorded a census, from `grain metrics -window 90d`:
+
+```
+tool use (23 run(s) in the window recorded what they called)
+  calls                      1736  (76 per run at the median, 118 at p90)
+  errored calls                73  (4.2% of them -- a handful is the ordinary shape of this work)
+  tool                 runs    calls   errors timed out  mean bytes   p95 bytes
+  run_command            23     1162       4%    1 (0%)        2163      <=8191
+  edit_file              21      321       1%         -          48       <=127
+  read_file              17       92      22%         -        6736     <=32767
+  wait_for_checks        21       34       3%         -         729      <=1023
+  pull_request_status       20       29       0%         -         838      <=1023
+  write_file             14       26      19%         -          71       <=255
+  open_pull_request       21       21       0%         -         237       <=511
+  read_grain_task         3       16       0%         -        2770     <=16383
+  comment_on_issue       13       13       0%         -         184       <=511
+  propose_task           10       12       0%         -         160       <=255
+  list_grain_tasks        3        6       0%         -        7243     <=32767
+  ask_question            2        2       0%         -         197       <=255
+  list_grain_source        1        2       0%         -         183       <=255
+  (p95 bytes is an upper bound: sizes are kept in base-2 buckets, so the real
+   number is inside the octave below it. It is what should size the tool-result cap.)
+```
+
+with the p50, p99 and max of the two capped tools out of the same
+report's `-json`: `run_command` `p50 <=1023`, `p99 <=32767`, `max
+43460`; `read_file` `p50 <=4095`, `p99 <=65535`, `max 44860`.
+
+Two things fall out of that. **64 KB never fired.** The largest answer of
+any kind in those 1,254 capped calls was 44,860 bytes, so the cap was
+inert for the whole window — and with nothing ever elided, whether a run
+takes the notice's advice is a question this window cannot answer at all,
+rather than one it answers badly. **16 KB is not tight either.** At least
+95% of `run_command` answers pass whole under it and half are under 1 KB;
+`read_file` is the heavier of the two distributions — its p95 is in the
+16–32 KB octave, so a few in twenty are cut — and it is also the tool
+whose notice recovers exactly, since the `cat -n` numbering either side
+of the cut is the `offset` and `limit` that fetch the missing range.
+
+16 KB is also antigravity's own per-result default, and `agy` is what
+grain dispatches with unless a deployment says otherwise. That is what
+settles one number rather than one per tool, in spite of the two
+distributions differing: a framework's own limit is per *result*, so a
+32 KB `read_file` answer grain let through is one `agy` cuts instead,
+with none of the notice that says what went and how to get it. It stays
+a `var` rather than becoming a stored setting for the same kind of
+reason it stopped being a guess — one deployment's distribution is not
+two deployments disagreeing, and a second one that disagrees, or that
+runs a framework with a higher limit of its own, is what would make it a
+setting.
 
 ## Telling attempt N what attempt N−1 did
 
@@ -5295,8 +5346,9 @@ read whole on every report. Each census row instead carries a base-2
 histogram of its result sizes, so `p95 <=65535` means "95% of those
 answers were at most 64 KB", with the real number inside the octave
 below. That is precise enough for the question it exists to answer: what
-should `mcp.maxToolResultBytes` be, which is currently a defensible guess
-at 64 KB and deliberately a `var` until this says otherwise.
+should `mcp.maxToolResultBytes` be — a question it has now answered, and
+the 64 KB guess it was left at is 16 KB because of what it said (see "No
+single answer may eat the run's context" for the window it was read from).
 
 **Two facts had to be read back out of a tool's own text,** because
 nothing else carries them: whether a `run_command` was ended by its bound

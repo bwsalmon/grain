@@ -80,8 +80,8 @@ export function sortedOutcomes(outcomes) {
 
 // formatBytes renders a result size the way somebody sizing a truncation
 // cap reads one. Binary units, because the cap they would set is written
-// in them (mcp.maxToolResultBytes is 64 << 10), and no decimals below a
-// megabyte: the difference between 63 KB and 64 KB matters and the
+// in them (mcp.maxToolResultBytes is 16 << 10), and no decimals below a
+// megabyte: the difference between 15 KB and 16 KB matters and the
 // difference between 63.4 and 63.5 does not.
 export function formatBytes(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";

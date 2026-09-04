@@ -199,9 +199,24 @@ invocation in the first. The notice between them says how much went, that
 grain cut it rather than the command, and the call that gets it back —
 narrow the command or redirect it to a file, and for `read_file` the
 `cat -n` numbering either side of the cut is the `offset` and `limit` to
-ask for, which is why the cut snaps to line boundaries. The number is
-still a guess and is deliberately a `var`: finding 11's telemetry is what
-should set it. Nothing else was capped here, because the other big
+ask for, which is why the cut snaps to line boundaries. The number was a
+guess and deliberately a `var`, for finding 11's telemetry to set.
+
+**Re-sized** (grain/task-183) to 16 KB, from that telemetry over the 90
+days to 2026-09-04 — 23 runs of this deployment, 1,254 `run_command` and
+`read_file` answers. 64 KB had never once fired (the largest answer in
+the window was 44,860 bytes), so nothing was ever elided and the
+question of whether a run takes the notice's advice went unanswered
+rather than answered badly; `run_command` is at p95 `<=8191` and p50
+`<=1023`, and `read_file`, the heavier tail, at p95 `<=32767`. 16 KB is
+also antigravity's own per-result default, and `agy` is the default
+framework — which is what settles one cap rather than one per tool, a
+framework's limit being per result. It is still a `var`: one
+deployment's distribution is not two deployments disagreeing. The
+numbers are quoted in README.md's "No single answer may eat the run's
+context" and in `pkg/mcp/result_size.go`.
+
+Nothing else was capped here, because the other big
 answers already bound themselves (`github.JobLogExcerpt` for a failing
 job's log). See README.md's "No single answer may eat the run's context".
 
@@ -471,8 +486,9 @@ cannot be taken is not a reason to fail the run being measured.
 all four bullets over a window, and `grain metrics` and the Metrics pane
 both print it. The size percentiles are bounds and are named `AtMost`:
 an exact one needs a stored row per *call*, and a bound within an octave
-is enough to size `mcp.maxToolResultBytes`, which is still the 64 KB
-guess finding 4 left deliberately as a `var`. The timeout rate reads
+is enough to size `mcp.maxToolResultBytes`, which is what it went on to
+do: finding 4's 64 KB guess is 16 KB (grain/task-183) because of what
+these bounds said over a real deployment's 90 days. The timeout rate reads
 finding 3's own notice back (`mcp.RunCommandTimedOut`), matching a marker
 that notice is built from, and counts neither the hedged `exit=137` nor a
 stalled transport as a timeout. See README.md's "Measuring what a run does
