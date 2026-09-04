@@ -15,6 +15,14 @@ import {
 // replaces the raw "type a task id and hope you copied it right" inputs
 // that used to sit wherever a task needed to reference another one.
 //
+// No item glyph on these rows, unlike the repo picker built out of this
+// one (ReadOnlyReposField): the four figures are for the kinds grain
+// keeps a *list* of -- a repo, a schedule, a template, a suite
+// (src/brand/item-glyphs.js) -- and a task is not one of them. A row
+// here already carries the two things that identify a task, its id and
+// its title, and stamping all eight with one figure that never varies
+// would be decoration saying nothing the box above it does not.
+//
 // It holds no selection state of its own -- onPick fires once per pick
 // and the field clears, so a caller wanting a persistent choice (a chip,
 // a form field) keeps that in its own state and renders it alongside.

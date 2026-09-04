@@ -111,8 +111,13 @@ export default function SuitesList({
         </ListEmpty>
       )}
 
+      {/* The runs are the suites' own list -- every row names the suite
+          it is a run of -- so this second heading carries the same
+          figure as the first rather than being the one heading on the
+          page with nothing in front of it. */}
       <ListHeader
         title="Runs"
+        icon={<ItemGlyph kind="suites" size={20} />}
         count={suiteRuns.length}
         style={{ marginTop: "1.5rem" }}
       />

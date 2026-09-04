@@ -23,6 +23,27 @@ describe("RepoField", () => {
     expect(screen.getByRole("option", { name: "—" })).toBeInTheDocument();
   });
 
+  // grain/task-320: the repos figure goes in front of the field rather
+  // than on each option, because an <option> can hold no markup and this
+  // stays a native <select> -- but it is the same ring the Repos page,
+  // the nav rail and the read-only repos picker carry (ItemGlyph.jsx,
+  // docs/brand.md), in both of this field's two states.
+  it("marks the field with the repos glyph, as a dropdown and as free text", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <RepoField name="repo" options={["acme/widgets"]} />,
+    );
+
+    expect(
+      container.querySelector('.repo-field svg[data-glyph="repos"]'),
+    ).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByRole("combobox"), "Other…");
+    expect(
+      container.querySelector('.repo-field svg[data-glyph="repos"]'),
+    ).toBeInTheDocument();
+  });
+
   it("omits the blank option when required", () => {
     render(<RepoField name="repo" options={["acme/widgets"]} required />);
     expect(screen.queryByRole("option", { name: "—" })).not.toBeInTheDocument();

@@ -15,6 +15,7 @@ import {
   Typography,
 } from "@mui/material";
 import api from "../api.js";
+import { GlyphLabel } from "./ItemGlyph.jsx";
 import Overlay from "./Overlay.jsx";
 import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
 import RepoField from "./RepoField.jsx";
@@ -301,8 +302,18 @@ export default function ScheduleOverlay({
               value={fires}
               onChange={(e) => setFires(e.target.value)}
             >
-              <MenuItem value="task">A task</MenuItem>
-              <MenuItem value="suite">A suite</MenuItem>
+              {/* The suite option carries the suites glyph
+                  (ItemGlyph.jsx): this choice decides which of the two
+                  kinds below a schedule runs, and until now the two
+                  options differed by one word. "A task" is not one of
+                  the four kinds and has no figure, so it holds the slot
+                  open instead -- GlyphLabel's own null kind. */}
+              <MenuItem value="task">
+                <GlyphLabel kind={null}>A task</GlyphLabel>
+              </MenuItem>
+              <MenuItem value="suite">
+                <GlyphLabel kind="suites">A suite</GlyphLabel>
+              </MenuItem>
             </Select>
           </FormControl>
         )}
@@ -317,7 +328,7 @@ export default function ScheduleOverlay({
             >
               {suites.map((s) => (
                 <MenuItem key={s.id} value={s.id}>
-                  {s.name}
+                  <GlyphLabel kind="suites">{s.name}</GlyphLabel>
                 </MenuItem>
               ))}
             </Select>
@@ -331,10 +342,18 @@ export default function ScheduleOverlay({
               value={templateId}
               onChange={(e) => setTemplateId(e.target.value)}
             >
-              <MenuItem value="">None -- fill in the fields below</MenuItem>
+              {/* "None" holds the glyph slot open rather than carrying
+                  one: it is the absence of a template, and starting its
+                  label a figure's width left of every other row's would
+                  read as a fifth kind. */}
+              <MenuItem value="">
+                <GlyphLabel kind={null}>
+                  None -- fill in the fields below
+                </GlyphLabel>
+              </MenuItem>
               {templates.map((t) => (
                 <MenuItem key={t.id} value={t.id}>
-                  {t.name}
+                  <GlyphLabel kind="templates">{t.name}</GlyphLabel>
                 </MenuItem>
               ))}
             </Select>

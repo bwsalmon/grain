@@ -278,6 +278,35 @@ describe("DetailOverlay", () => {
     expect(screen.queryByText("Review")).not.toBeInTheDocument();
   });
 
+  // grain/task-320: that row is the one value in this column that names
+  // a template rather than describing the task, so it carries the
+  // templates figure (ItemGlyph.jsx, docs/brand.md) -- "this came from a
+  // template", said by the same lattice the Templates page uses.
+  it("marks the attached review's template with the templates glyph", () => {
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          reviewTemplateId: "7",
+          reviewTemplateName: "Security pass",
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
+
+    const value = screen.getByText("Security pass").closest(".declared-value");
+    expect(
+      value.querySelector('svg[data-glyph="templates"]'),
+    ).toBeInTheDocument();
+    // Decorative -- the name is right there, and a screen reader saying
+    // "templates" as well would only say it twice.
+    expect(value.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+  });
+
   // bwsalmon/agents#534: a per-task sandbox shape override.
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(

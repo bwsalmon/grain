@@ -23,6 +23,7 @@ import {
   ListSortSelect,
   ListToolbar,
 } from "./ListPrimitives.jsx";
+import ItemGlyph from "./ItemGlyph.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
 const FILTER_TITLES = { all: "All tasks", blocked: "Blocked" };
@@ -442,10 +443,17 @@ export function TaskRow({
         </span>
       )}
       <span className="chips">
+        {/* The two chips that say where a task came from carry the
+            figure of the thing it came from (ItemGlyph.jsx) -- the same
+            hourglass and lobes the nav rail shows for Schedules and
+            Suites, so a row filed by a schedule is recognisable in a
+            list of forty without reading the word. Decorative: the chip
+            says "scheduled" beside it either way. */}
         {t.scheduled && (
           <Chip
             size="small"
             className="chip-scheduled"
+            icon={<ItemGlyph kind="schedules" />}
             title="filed automatically by a schedule"
             label="scheduled"
           />
@@ -454,6 +462,7 @@ export function TaskRow({
           <Chip
             size="small"
             className="chip-suite"
+            icon={<ItemGlyph kind="suites" />}
             title="filed automatically by a suite run"
             label="suite"
           />
