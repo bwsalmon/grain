@@ -162,7 +162,11 @@ jobs:
           # here makes it: dispatch with publish off to get the artifact
           # and read what the binary actually said.
           missing=""
-          grep -q '^### `agy mcp`' docs/agy-surface.md || missing="$missing no-subcommand-help"
+          # The heading is "### `agy mcp`". Its backticks are matched with
+          # `.` rather than written out, because shellcheck reads a
+          # backtick inside single quotes as a command substitution that
+          # will not expand (SC2016) and says so in this job.
+          grep -q '^### .agy mcp.$' docs/agy-surface.md || missing="$missing no-subcommand-help"
           grep -q '^native tools: [0-9]' docs/agy-surface.md || missing="$missing no-init-roster"
           grep -q '^READ .*antigravity-cli/settings.json' docs/agy-surface.md || missing="$missing no-settings-path"
           grep -q '^READ .*config/mcp_config.json' docs/agy-surface.md || missing="$missing no-mcp-path"
