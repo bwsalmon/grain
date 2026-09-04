@@ -3,15 +3,19 @@ package staterepo_test
 // The CI step as a deployment gets it: not a command somebody ran, but a
 // file Seed and Sync put in the repository and keep there.
 //
-// Four properties, and each of them is a way this could have gone wrong.
-// A repository grain seeds ends up with the workflow without anybody
-// asking. A workflow a merge dropped comes back. A workflow somebody
-// edited is never touched again, because a file grain rewrote on a timer
-// would be a file whose editor is fighting one. And a remote that will
-// not accept a file under .github/workflows -- which is what GitHub says
-// to a credential without the permission -- costs the deployment the CI
-// step and nothing else: the commit is undone, the export goes on, and
-// grain tries again a day later rather than every thirty seconds.
+// Each property here is a way this could have gone wrong. A repository
+// grain seeds ends up with the workflow without anybody asking. A
+// workflow a merge dropped comes back. A workflow somebody edited is
+// never touched again, because a file grain rewrote on a timer would be
+// a file whose editor is fighting one. The image in a workflow nobody
+// has edited follows the deployment across an upgrade, because a check
+// running a build that knows another schema fails every pull request
+// against this repository over nothing in the change. And a remote that
+// will not accept a file under .github/workflows -- which is what GitHub
+// says to a credential without the permission -- costs the deployment
+// the CI step and nothing else: the commit is undone, whatever check was
+// already there is left as it was, the export goes on, and grain tries
+// again a day later rather than every thirty seconds.
 
 import (
 	"context"
@@ -213,6 +217,135 @@ func TestSyncLeavesAnEditedWorkflowAlone(t *testing.T) {
 	}
 	if got := remoteWorkflow(t, remote); got != edited {
 		t.Errorf("grain pushed its own workflow over the merged one:\n%s", got)
+	}
+}
+
+// An upgrade is the moment a workflow written once goes wrong. The file
+// names the build that installed it; the deployment now runs another
+// one; and `grain state check` refuses a dump stamped with a schema it
+// does not know, so the check fails every pull request against this
+// repository the first time the schema moves -- for a reason that has
+// nothing to do with the change in it.
+//
+// So the image is the one line grain maintains after the fact: a sync
+// after an upgrade repoints it, on its own commit, and the syncs after
+// that have nothing to do.
+func TestSyncRepointsTheCheckAtTheImageThisDeploymentRuns(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	const was = "ghcr.io/bwsalmon/grain/grain:sha-0000000"
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote, CheckImage: was})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if body := remoteWorkflow(t, remote); !strings.Contains(body, was) {
+		t.Fatalf("the seed did not push a workflow pinned to this build:\n%s", body)
+	}
+
+	// The deployment is upgraded: the same repository, the same working
+	// tree, a grain that says it is a different image.
+	const now = "ghcr.io/bwsalmon/grain/grain:sha-abc1234"
+	upgraded, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote, CheckImage: now})
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, upgraded, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after the upgrade: %v", err)
+	}
+	body := remoteWorkflow(t, remote)
+	if !strings.Contains(body, now) || strings.Contains(body, was) {
+		t.Errorf("the check still runs the build this deployment has stopped running:\n%s", body)
+	}
+	// Its own commit still, holding nothing but the workflow: the reason
+	// installing one is a commit of its own is that a remote may refuse
+	// it, and that is no less true of a one-line change to it.
+	at := strings.TrimSpace(git(t, dir, "log", "-1", "--format=%H", "--", staterepo.WorkflowFile))
+	files := git(t, dir, "show", "--name-only", "--format=", at)
+	if strings.TrimSpace(files) != staterepo.WorkflowFile {
+		t.Errorf("the repointing commit carries more than the workflow: %q", files)
+	}
+	if subject := git(t, dir, "show", "-s", "--format=%s", at); !strings.Contains(subject, "image this deployment runs") {
+		t.Errorf("the repointing commit does not say what it did: %q", subject)
+	}
+
+	// And it is done: a deployment that syncs every thirty seconds must
+	// not commit every thirty seconds.
+	before := head(t, dir)
+	if err := store.PutTask(ctx, task("c3d4")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, upgraded, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing again: %v", err)
+	}
+	if got := remoteWorkflow(t, remote); got != body {
+		t.Errorf("the workflow was rewritten a second time:\n%s", got)
+	}
+	if before == head(t, dir) {
+		t.Fatal("the second sync exported nothing at all; the test is not testing anything")
+	}
+}
+
+// The refusal, on the other commit. A credential that may not write
+// workflows is the case this whole shape exists for, and a repointing
+// that gets refused must leave the repository with the check it already
+// had -- undoing it by deleting the file would cost a deployment the CI
+// step it has been running for months over a one-line change it was
+// never allowed to make.
+func TestARefusedRepointingLeavesTheCheckThatWasAlreadyThere(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	const was = "ghcr.io/bwsalmon/grain/grain:sha-0000000"
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote, CheckImage: was})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	installed := remoteWorkflow(t, remote)
+	if !strings.Contains(installed, was) {
+		t.Fatalf("the seed did not push a workflow:\n%s", installed)
+	}
+
+	// The permission is taken away -- or, as this looks from the
+	// deployment, was never there and the file was committed by hand.
+	refuseWorkflows(t, remote)
+	upgraded, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote,
+		CheckImage: "ghcr.io/bwsalmon/grain/grain:sha-abc1234"})
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, upgraded, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing against a remote that refuses workflows: %v", err)
+	}
+	// The export still lands, which is the property the workflow's own
+	// commit protects.
+	if out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json"); !strings.Contains(out, "a1b2") {
+		t.Errorf("this deployment's settings stopped reaching its remote:\n%s", out)
+	}
+	// The check is exactly as it was, in the tree and on the remote, and
+	// no commit is stranded in front of the next push.
+	if got := read(t, workflowPath(dir)); got != installed {
+		t.Errorf("the refused repointing left the working tree without the check it had:\n%s", got)
+	}
+	if got := remoteWorkflow(t, remote); got != installed {
+		t.Errorf("the remote's workflow changed under a push it refused:\n%s", got)
+	}
+	if local, want := head(t, dir), head(t, remote); local != want {
+		t.Errorf("a commit the remote refused is in the way: local %s, remote %s", local, want)
 	}
 }
 

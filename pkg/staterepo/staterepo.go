@@ -81,9 +81,17 @@ type Config struct {
 	// hour) is re-read rather than cached until it fails.
 	Token func(ctx context.Context) (string, error)
 	// CheckImage is the container image the CI workflow grain installs
-	// runs `grain state check` from; DefaultCheckImage when empty. A
-	// deployment pinned to an older build wants that build's tag here,
-	// since the check refuses a dump stamped with any other schema.
+	// runs `grain state check` from; DefaultCheckImage when empty. The
+	// check refuses a dump stamped with any other schema, so what belongs
+	// here is the build this deployment is running -- which is what
+	// cmd/grain passes, from the reference stamped into its own image
+	// (cmd/grain/grainimage.go), unless an operator has named one in
+	// state-repo.json.
+	//
+	// It is not only written into a workflow that is missing: an
+	// installed one that is still grain's own rendering is repointed here
+	// as well, so an upgraded deployment's check follows it. See
+	// StaleImage.
 	CheckImage string
 	// NoWorkflow stops grain from installing that workflow at all: the
 	// opt-out for a deployment whose state repository is checked
