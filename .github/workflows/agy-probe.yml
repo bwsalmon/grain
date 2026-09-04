@@ -1,12 +1,10 @@
 # TEMPORARY probe job for task 255 -- delete before this branch merges.
 #
-# Round 4. Round 3 established that permissions.allow/deny in
-# ~/.gemini/antigravity-cli/settings.json is a real, loaded ruleset (agy
-# echoes it back from `-p /permissions`, scope "global") and that a
-# malformed value is dropped in silence. This round asks which rule
-# spellings survive that round trip, what agy leaves behind in the HOME,
-# and what the hook mechanism ("pre-tool hook decision", "SOFT_BLOCK")
-# takes, since a hook is the other candidate for a hard denial.
+# Round 5. Round 4 turned up agy's own shipped documentation, materialized
+# into a fresh HOME on first run:
+# ~/.gemini/antigravity-cli/builtin/skills/agy-customizations/docs/. That is
+# the authoritative account of settings.json's permissions block, so this
+# round just fetches it.
 name: agy-probe
 
 on:
@@ -21,7 +19,7 @@ jobs:
   probe:
     name: probe agy permissions schema
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +37,7 @@ jobs:
           echo "AGY_BIN=$agy" >> "$GITHUB_ENV"
           agy --version
 
-      - name: Which rule spellings load
+      - name: Materialize and collect the shipped docs
         env:
           GEMINI_API_KEY: not-a-real-key-probe-only
         run: |
@@ -47,60 +45,19 @@ jobs:
           out=/tmp/agy-evidence
           rm -rf "$out"; mkdir -p "$out"
           agy --version > "$out"/version.txt 2>&1
-
-          rules() { # $1 label, $2 settings
-            local label="$1" settings="$2"
-            local h="/tmp/h-$label"
-            rm -rf "$h"; mkdir -p "$h/.gemini/antigravity-cli" "$h/.gemini/config"
-            printf '%s' "$settings" > "$h/.gemini/antigravity-cli/settings.json"
-            echo '{"mcpServers":{}}' > "$h/.gemini/config/mcp_config.json"
-            {
-              echo "########## $label"
-              echo "--- in:  $settings"
-              echo "--- /permissions:"
-              ( cd /tmp && HOME="$h" timeout 90 agy -p /permissions 2>&1 | head -40 )
-              echo "--- /hooks:"
-              ( cd /tmp && HOME="$h" timeout 90 agy -p /hooks 2>&1 | head -20 )
-              echo "--- HOME tree after:"
-              ( cd "$h" && find . -type f | sort | head -40 )
-              echo "--- settings.json after:"
-              cat "$h/.gemini/antigravity-cli/settings.json"; echo
-              for f in "$h"/.gemini/config/*.json "$h"/.gemini/antigravity-cli/*.json; do
-                [ -f "$f" ] || continue
-                case "$f" in *mcp_config.json|*settings.json) continue ;; esac
-                echo "--- $f:"; head -c 2000 "$f"; echo
-              done
-            } >> "$out"/rule-syntax.txt 2>&1
-          }
-
-          rules bare      '{"modelProvider":"gemini","permissions":{"deny":["run_command","view_file","write_to_file"]}}'
-          rules parens    '{"modelProvider":"gemini","permissions":{"deny":["run_command(*)","view_file(*)","write_to_file(*)"]}}'
-          rules regex     '{"modelProvider":"gemini","permissions":{"deny":["regex:^(run_command|view_file|write_to_file)$"]}}'
-          rules command   '{"modelProvider":"gemini","permissions":{"deny":["command(*)"],"allow":["command(git)"]}}'
-          rules mixed     '{"modelProvider":"gemini","permissions":{"allow":["mcp_grain-sandbox_run_command","mcp_grain-sandbox_*"],"deny":["run_command(*)"],"ask":["view_file(*)"]}}'
-          rules toolperm  '{"modelProvider":"gemini","toolPermission":"strict","permissions":{"deny":["run_command(*)"]}}'
-          rules hooks     '{"modelProvider":"gemini","hooks":{"preToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/bin/false"}]}]}}'
-
-      - name: Documentation and hook schema in the binary
-        run: |
-          set +e +o pipefail
-          out=/tmp/agy-evidence
-          strings -n 4 "$AGY_BIN" > /tmp/agy.strings
-          ctx() { echo "##### $1"; grep -a -n -F -B "${3:-8}" -A "${3:-8}" -- "$1" /tmp/agy.strings | head -"${4:-80}"; echo; }
-          {
-            ctx '**Permission Grants**' '' 10 80
-            ctx 'Command Allowlist / Denylist' '' 10 80
-            ctx 'unsupported hook decision' '' 10 60
-            ctx 'Post-tool SOFT_BLOCK at step' '' 10 60
-            ctx 'pre_invocation_hooks' '' 10 60
-            ctx 'default_grant:%s(%s)' '' 10 60
-            ctx 'is prohibited by' '' 10 60
-            ctx 'overridden by dangerously-skip-permissions' '' 10 60
-          } > "$out"/doc-context.txt 2>&1
-          grep -a -oE 'jsonschema_description:"[^"]{0,300}"' /tmp/agy.strings | grep -iE 'permission|hook|tool|command' \
-            | sort -u | head -80 > "$out"/schema-desc.txt
-          grep -a -iE '^[^ ]*(soft.?block|SOFT_BLOCK|deny|DENY|ALLOW|ASK)[^ ]*$' /tmp/agy.strings | sort -u | head -80 \
-            > "$out"/decision-enums.txt
+          h=/tmp/h-docs
+          rm -rf "$h"; mkdir -p "$h/.gemini/antigravity-cli" "$h/.gemini/config"
+          echo '{"modelProvider":"gemini"}' > "$h/.gemini/antigravity-cli/settings.json"
+          echo '{"mcpServers":{}}' > "$h/.gemini/config/mcp_config.json"
+          ( cd /tmp && HOME="$h" timeout 90 agy -p /help > "$out"/help-print.txt 2>&1 )
+          docs="$h/.gemini/antigravity-cli/builtin/skills"
+          find "$docs" -type f | sort > "$out"/skills-index.txt
+          for f in "$docs"/agy-customizations/SKILL.md "$docs"/agy-customizations/docs/*.md; do
+            [ -f "$f" ] || continue
+            cp "$f" "$out"/"customizations-$(basename "$f")"
+          done
+          cp "$docs"/antigravity_guide/references/cli.md "$out"/guide-cli.md 2>/dev/null
+          wc -l "$out"/*
 
       - name: Push the capture to a tag
         run: |
@@ -116,7 +73,7 @@ jobs:
           mkdir -p docs/agy-evidence
           cp /tmp/agy-evidence/* docs/agy-evidence/
           git add -A docs/agy-evidence
-          git commit -m "agy probe evidence for task 255 (round 4)"
+          git commit -m "agy probe evidence for task 255 (round 5: shipped docs)"
           git tag -f "$tag"
           git push -f origin "$tag"
           echo "pushed tag $tag"
@@ -125,6 +82,6 @@ jobs:
         run: |
           set +e +o pipefail
           cd /tmp/agy-evidence
-          echo "===== rule syntax ====="; head -150 rule-syntax.txt
+          echo "===== json_configs.md ====="; head -120 customizations-json_configs.md
           echo "::error::probe job -- fails on purpose so its log is quoted back"
           exit 1
