@@ -100,6 +100,29 @@ into the field, so a figure is framed by scaling it (`glyphZoom` already
 does this for two of the mark's four). Each zoom above is the framing
 where the figure reads as one shape at 16px instead of as texture.
 
+**Where they are used.** The nav rail's four entries and the four list
+pages' headings first, and then everywhere else a row refers to one of
+these kinds and the word was doing the work alone:
+
+| Site | Figure | What it says |
+|---|---|---|
+| Nav rail; the four list pages' headings (`ListHeader`'s `icon`) | that kind's own | which list this is |
+| A task row's `scheduled` / `suite` chip | schedules / suites | which of the two filed a task nobody typed in |
+| The task pane's Review row | templates | the review attached to this task came out of a template |
+| `ScheduleOverlay`'s "Fires" choice, and its template and suite pickers | suites / templates | whether this schedule runs one template or a whole suite |
+| `SuiteRunOverlay`'s heading and suite picker; the Suites page's "Runs" heading | suites | a run is a run *of a suite* |
+| `RepoField`, `ReadOnlyReposField`'s results | repos | this field names a repo |
+
+**One placement rule** for all of them, in `ItemGlyph`'s own
+`GlyphLabel`: 16px, inline, in front of the word, decorative — the
+label is right beside it, and a screen reader announcing the figure too
+would only say it twice. A list heading is the one exception at 20px.
+A row that sits in a glyphed menu but names none of the four kinds ("A
+task" beside "A suite", the template picker's "None") holds the slot
+open and empty rather than starting its label a figure's width to the
+left. `RepoField` is the one site that marks the field rather than each
+option, because a native `<option>` can hold no markup.
+
 **Solid, traced, inline.** They are drawn as filled paths rather than
 grains for the reason the still is: at 16px a grain is smaller than a
 pixel. `npm run brand:assets` traces them out of the field the same way

@@ -139,6 +139,42 @@ describe("SuitesList", () => {
     ).toBeInTheDocument();
   });
 
+  // grain/task-320: both lists on this page are the suites' own -- a run
+  // is a run *of a suite*, and every row names one -- so the "Runs"
+  // heading carries the same figure as "Suites" rather than being the one
+  // heading here with nothing in front of it (ItemGlyph.jsx,
+  // docs/brand.md). Decoration ahead of each heading, so both accessible
+  // names are still the single word.
+  it("heads both of its lists with the suites glyph", () => {
+    const { container } = renderList();
+
+    expect(
+      container.querySelectorAll('.header-icon svg[data-glyph="suites"]'),
+    ).toHaveLength(2);
+    expect(screen.getByRole("heading", { name: "Suites" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Runs" })).toBeInTheDocument();
+  });
+
+  it("heads the run overlay with the suites glyph, and glyphs the suite it names", async () => {
+    const user = userEvent.setup();
+    renderList();
+
+    await user.click(screen.getByRole("button", { name: "Run…" }));
+
+    // Beside the heading rather than inside it, so the accessible name
+    // is still the three words.
+    const heading = screen.getByRole("heading", { name: "Run a suite" });
+    expect(
+      heading.parentElement.querySelector('svg[data-glyph="suites"]'),
+    ).toBeInTheDocument();
+    // The picked suite's own name, in the closed field, with its figure.
+    const picked = screen.getByLabelText("Suite");
+    expect(picked).toHaveTextContent("Nightly sweep");
+    expect(
+      picked.querySelector('svg[data-glyph="suites"]'),
+    ).toBeInTheDocument();
+  });
+
   it("shows empty messages for both lists when there is nothing yet", () => {
     renderList({ suites: [], suiteRuns: [] });
 

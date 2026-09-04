@@ -406,6 +406,41 @@ describe("TaskList", () => {
     ).not.toBeInTheDocument();
   });
 
+  // grain/task-320: the two "nobody filed this by hand" chips carry the
+  // figure of the thing that did (ItemGlyph.jsx, docs/brand.md), so the
+  // hourglass and the four lobes mean the same on a task row as they do
+  // in the nav rail. A glyph on the wrong chip is exactly what nobody
+  // spots by eye.
+  it("marks each origin chip with the glyph of the thing that filed the task", () => {
+    renderList({
+      tasks: [
+        { ...tasks[0], scheduled: true },
+        { ...tasks[1], suiteRun: true },
+      ],
+    });
+
+    expect(
+      screen
+        .getByTitle("filed automatically by a schedule")
+        .querySelector('svg[data-glyph="schedules"]'),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getByTitle("filed automatically by a suite run")
+        .querySelector('svg[data-glyph="suites"]'),
+    ).toBeInTheDocument();
+    // Decoration beside the word, not a replacement for it: the chips
+    // still read "scheduled" and "suite".
+    expect(
+      screen.getByTitle("filed automatically by a schedule"),
+    ).toHaveTextContent("scheduled");
+  });
+
+  it("leaves an ordinary task's chips unglyphed", () => {
+    renderList();
+    expect(document.querySelector(".chips svg[data-glyph]")).toBeNull();
+  });
+
   // bwsalmon/agents#378: a stacked task explains itself by sitting under
   // the task it repairs, so the chip is only for the rows where that
   // nesting is missing.
