@@ -229,7 +229,7 @@ iap_firewall_hint() {
         if (r[i] == "35.235.240.0/20" || r[i] == "0.0.0.0/0") return 1
       return 0
     }
-    function reaches_ssh(allowed,   n, i, a, port, lo_hi) {
+    function reaches_ssh(allowed,   n, i, a, lo_hi) {
       n = split(allowed, a, ",")
       for (i = 1; i <= n; i++) {
         if (a[i] == "tcp" || a[i] == "tcp:22") return 1
