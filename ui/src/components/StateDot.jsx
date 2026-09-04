@@ -17,13 +17,30 @@ import GrainMark from "./GrainMark.jsx";
 // than the task's live status (Timeline's superseded entries) -- that
 // one keeps the plain, non-spinning solid dot .badge-static draws, the
 // same as every other historical state.
+//
+// repairing is a task whose run is the merge queue repairing its own
+// pull request branch rather than writing the change in the first place
+// (ui.Task.Repairing, model.Observation.MergeQueueRepairAt). It is
+// running either way -- the same mark, moving the same way -- so what
+// tells the two apart is the colour it moves in: green rather than the
+// accent, .grain-mark-repair in style.css. A repair is the queue's own
+// work on a change that is otherwise finished, and reading a row as
+// "back to square one" when it is really being unstuck is exactly the
+// misreading the second colour exists to prevent.
 const MARK_SIZE = 20;
 
 export function isLiveRunning(state, live = true) {
   return state === "running" && live;
 }
 
-export default function StateDot({ state, live = true, title }) {
+export default function StateDot({ state, live = true, title, repairing = false }) {
   if (!isLiveRunning(state, live)) return null;
-  return <GrainMark size={MARK_SIZE} animated title={title} />;
+  return (
+    <GrainMark
+      size={MARK_SIZE}
+      animated
+      title={title}
+      className={repairing ? "grain-mark-repair" : undefined}
+    />
+  );
 }
