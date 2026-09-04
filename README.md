@@ -36,7 +36,8 @@ pkg/dispatch/   which tasks run now: what one cycle decides to
 pkg/mcp/        a port of grain/automation/mcp_server.py: a newline-
                 delimited JSON-RPC server exposing the sandbox tools
                 (run_command, read_file, edit_file, write_file) and the
-                escape-hatch tools (ask_question, comment_on_issue,
+                escape-hatch tools (ask_question, request_secret,
+                comment_on_issue,
                 propose_task, add_review_comment) -- plus two tools whose
                 effect is real and immediate rather than mocked and
                 deferred. open_pull_request
@@ -528,6 +529,14 @@ and become grain's, which means grain has to render them. That is what
   `comment_on_issue` become `model.Comment`s attributed as grain relaying
   an agent — (automation, on behalf of agent), the distinction v1 could
   only gesture at by looking for a signature substring in a comment body.
+  `request_secret` (grain/task-230) is the one thing a run can ask for
+  that must *not* come back as a comment: it relays the request and parks
+  the task exactly as `ask_question` does, but records the credential's
+  name on `Observation.PendingSecret`, and the task pane answers it with
+  a write-only box whose value goes to `PUT /api/tasks/{id}/secret` and
+  straight into the encrypted secret store. A reply is conversation, and
+  conversation is the next run's prompt; this way the run gets the *use*
+  of a credential on its next attempt and never the material.
   `propose_task` files a real `model.Task` with no `Approval`, so
   `proposeTaskTool`'s "a human must accept it first" contract is enforced
   by the state machine rather than by withholding a label, and
@@ -970,16 +979,18 @@ now builds that real guest image as part of the test itself and asserts a
 `run_command` tool call actually executes inside it over SSH, closing the
 gap this paragraph used to describe.
 
-The `mcp.NewMockTools` escape hatches (`ask_question`, `comment_on_issue`,
+The `mcp.NewMockTools` escape hatches (`ask_question`, `request_secret`,
+`comment_on_issue`,
 `propose_task`, `add_review_comment`) a run's own MCP server wires
 internally are still discarded rather than acted on *while a run is
 live* — `ProcessResult` only ever inspects `agent.Result.ToolCalls`
-after a run finishes, and relays `ask_question`/`comment_on_issue`/
+after a run finishes, and relays `ask_question`/`request_secret`/
+`comment_on_issue`/
 `propose_task` for real at that point (see the package tree entry
 above); giving `Framework.Run` (or its caller) a way to inject a live
 sink instead is still open, and `add_review_comment` calls are still
 just recorded and nothing more, since nothing yet dispatches with review
-intent for one to attach to. What the *agent* is told about all four is
+intent for one to attach to. What the *agent* is told about all five is
 that relay rather than that sink: the tools' descriptions and
 confirmations used to answer every production run with "mocked — no
 GitHub comment was posted", and describe v1's issue, trigger label and
@@ -1393,12 +1404,14 @@ picks the image lives in `-kontur-create-arg`, repeated once per
 A real `github.RESTClient` exists and is wired into the daemon too, driving
 every call `pkg/orchestrator` makes (issue listing/labelling, branch and
 pull-request state, check runs, comments) — but not the agent's own
-`ask_question`/`comment_on_issue`/`propose_task`/`add_review_comment`
+`ask_question`/`request_secret`/`comment_on_issue`/`propose_task`/
+`add_review_comment`
 calls: a run's own MCP server still wires those to a `mcp.MockSink` it
 builds and discards internally on every call, so nothing happens at the
 moment the agent makes one. `ProcessResult` only sees them after the
 fact, through the `agent.Result` `Run` returns, not while the run is
-live — and then relays a question, a closing comment and a proposal into
+live — and then relays a question, a secret request, a closing comment
+and a proposal into
 the store for real (`add_review_comment` alone goes nowhere). Giving
 `Framework.Run` (or its caller) a way to inject a real sink, so the
 effect could happen while the run is still going, is still open.

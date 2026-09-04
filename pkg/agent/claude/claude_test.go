@@ -502,18 +502,19 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	}
 }
 
-// Sixteen now: the four sandbox tools, the four escape hatches,
+// Seventeen now: the four sandbox tools, the five escape hatches
+// (request_secret joined them in grain/task-230),
 // pull_request_status, wait_for_checks, open_pull_request,
 // recreate_sandbox, the self-debug capability's two source tools, and
-// the bootstrap-playbooks capability's two. Everything past the eighth
+// the bootstrap-playbooks capability's two. Everything past the ninth
 // is named here for every run even though only a run whose mcpserver was
 // given the flags for them actually gets them, since --allowedTools
 // filters what the server advertises rather than adding to it
 // (allowedTools' own comment).
 func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	names := allowedTools()
-	if len(names) != 16 {
-		t.Fatalf("allowedTools() = %v, want 16 entries", names)
+	if len(names) != 17 {
+		t.Fatalf("allowedTools() = %v, want 17 entries", names)
 	}
 	for _, n := range names {
 		if !strings.HasPrefix(n, "mcp__grain-sandbox__") {

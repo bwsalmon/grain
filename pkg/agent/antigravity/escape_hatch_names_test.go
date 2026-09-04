@@ -21,7 +21,7 @@ import (
 // This suite scripted "mcp__grain-sandbox__<tool>" -- a spelling agy has
 // never produced -- which is why nothing caught it.
 func TestEscapeHatchToolCallsAreRecordedUnderTheirBareNames(t *testing.T) {
-	for _, tool := range []string{"ask_question", "comment_on_issue", "propose_task"} {
+	for _, tool := range []string{"ask_question", "request_secret", "comment_on_issue", "propose_task"} {
 		for _, reporting := range []struct {
 			name  string
 			steps func(tool string) []string

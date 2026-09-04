@@ -34,6 +34,7 @@ func TestEscapeHatchToolCallsAreRecordedUnderTheirBareNames(t *testing.T) {
 		{"ask_question", map[string]any{"question": "which config file?"}},
 		{"comment_on_issue", map[string]any{"comment": "the answer is 4"}},
 		{"propose_task", map[string]any{"title": "follow-up", "body": "the rest of it"}},
+		{"request_secret", map[string]any{"secret": "stripe-api-key", "reason": "the deploy needs it"}},
 	} {
 		t.Run(tt.tool, func(t *testing.T) {
 			fake := &fakeRunner{stdout: strings.Join([]string{
