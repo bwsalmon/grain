@@ -89,6 +89,38 @@ func TestGrantsSubsetOfIsFalseForAWiderRequest(t *testing.T) {
 	}
 }
 
+func TestSameBranchComparesTheTargetAndTheBase(t *testing.T) {
+	widgets := &RepoRef{Owner: "acme", Name: "widgets"}
+	gadgets := &RepoRef{Owner: "acme", Name: "gadgets"}
+	for _, tc := range []struct {
+		name string
+		a, b Task
+		want bool
+	}{
+		{"both on the default branch", Task{Target: widgets}, Task{Target: widgets}, true},
+		{"both on the same named base",
+			Task{Target: widgets, Base: "release/2.0"},
+			Task{Target: widgets, Base: "release/2.0"}, true},
+		{"a named base against the default branch",
+			Task{Target: widgets, Base: "release/2.0"},
+			Task{Target: widgets}, false},
+		{"different bases", Task{Target: widgets, Base: "release/2.0"},
+			Task{Target: widgets, Base: "release/1.0"}, false},
+		{"different repos", Task{Target: widgets}, Task{Target: gadgets}, false},
+		// GitHub resolves owner and name case-insensitively, so these
+		// are one branch of one repo however they were typed.
+		{"the same repo written differently",
+			Task{Target: &RepoRef{Owner: "ACME", Name: "Widgets"}},
+			Task{Target: widgets}, true},
+		{"neither writes anywhere", Task{}, Task{}, true},
+		{"one writes nowhere", Task{}, Task{Target: widgets}, false},
+	} {
+		if got := SameBranch(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: SameBranch = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // ParseRepo's own gate: a paste that is not owner/name is either
 // normalised to it or refused here, because nothing downstream of this
 // function looks at a RepoRef again before building a clone URL out of

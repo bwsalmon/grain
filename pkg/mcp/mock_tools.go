@@ -414,7 +414,12 @@ func proposeTaskTool(sink *MockSink) Tool {
 						"for separate work that deserves its own review. " +
 						"Passing true cannot grant more than your own task " +
 						"has -- if your task is not an auto-merge job, " +
-						"neither is anything you propose.",
+						"neither is anything you propose, and neither is a " +
+						"proposal that lands on a different branch than " +
+						"yours (a proposal is filed against the " +
+						"repository's default branch, so a task working " +
+						"against a base branch of its own passes on no " +
+						"auto-merge at all).",
 				},
 			},
 			"required": []string{"title", "body"},

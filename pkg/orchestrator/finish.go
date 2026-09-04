@@ -573,6 +573,32 @@ func relayComment(ctx context.Context, store *model.Store, task model.Task,
 // it does not touch Approval, so a proposed task still needs a human to
 // approve it before it ever runs, the same as any other.
 //
+// Inheritance is capped a second way, alongside the capabilities: a
+// proposal auto-merges only if it lands where task itself does
+// (model.SameBranch). Auto-merge is a permission a human gave one branch
+// to take commits nobody reviewed, and a proposal is filed with no Base
+// of its own -- it lands on the target repo's default branch, whatever
+// branch its parent works against. So a task with a `/base` of its own,
+// including every merge queue fix task, passes on no auto-merge: it was
+// never given anything about the default branch, and a run whose
+// proposals merged themselves there unreviewed would have turned a
+// permission for a release branch into one for the trunk.
+//
+// The alternative -- filing the proposal against task.Base, so the two
+// really are the same branch -- is worse than it looks. A proposal sits
+// unapproved for as long as a human takes, and the branches tasks work
+// against are not all long-lived: a fix task's Base is the pull request
+// branch it repairs, which is gone once that pull request merges, and
+// prepareCheckout refuses to start a run whose base has vanished. A
+// proposal pointed at the trunk and left for a human to retarget is
+// dispatchable whenever they get to it; one pointed at a branch that has
+// since merged is not dispatchable at all.
+//
+// otherBranchAutoMergeNote is how the proposal says so, for the same
+// reason unresolvedDependencyNote exists: silently filing work an agent
+// expected to auto-merge as work that does not leaves the human
+// approving it with no idea a decision was made.
+//
 // depends_on becomes real model.LinkDependsOn links (proposedDependency
 // resolves each entry), so a proposal that names work it has to follow is
 // blocked until that work is done rather than dispatchable the moment a
@@ -656,8 +682,12 @@ func relayProposedTasks(ctx context.Context, store *model.Store, task model.Task
 			CreatedAt: &now,
 			OrderKey:  orderKey,
 		}
-		proposal.AutoMerge = proposedAutoMerge(p, task) &&
+		asked := proposedAutoMerge(p, task) &&
 			model.GrantsSubsetOf(proposal.Grants, task.Grants)
+		proposal.AutoMerge = asked && model.SameBranch(proposal, task)
+		if asked && !proposal.AutoMerge {
+			proposal.Body += otherBranchAutoMergeNote(task, proposal)
+		}
 		if err := store.PutTask(ctx, proposal); err != nil {
 			return fmt.Errorf("orchestrator: filing proposed task %q: %w", title, err)
 		}
@@ -768,6 +798,35 @@ func unresolvedDependencyNote(unresolved []string) string {
 		"which named no task that exists and no other proposal from the same run. "+
 		"Nothing blocks this task on them -- resolve them by hand if they matter.",
 		"`"+strings.Join(unresolved, "`, `")+"`")
+}
+
+// otherBranchAutoMergeNote is what a human approving the proposal reads
+// in place of the auto-merge it would have inherited had it landed where
+// the run that proposed it does -- attributed to grain, since the rest of
+// the body is the agent's own words.
+//
+// It says which two branches those are rather than just "a different
+// branch": the whole decision is that they differ, and the one thing the
+// approver can do about it -- file this work against the parent's branch
+// instead, or turn auto-merge on where it is -- needs both names.
+func otherBranchAutoMergeNote(task, proposal model.Task) string {
+	return fmt.Sprintf("\n\n---\n\ngrain: task %s, which proposed this, is an auto-merge job on "+
+		"%s. This task lands on %s instead, so it did not inherit that -- auto-merge is a "+
+		"permission for one branch, not for the run holding it. Turn it on when you approve "+
+		"this if it belongs here too.",
+		task.ID, landingBranch(task), landingBranch(proposal))
+}
+
+// landingBranch names the branch a task's work lands on, for the sentence
+// above: its Base when it has one, and otherwise the target repo's
+// default branch, unnamed for the same reason baseDescription leaves it
+// unnamed -- grain does not know which branch that is here, and naming
+// the wrong one would be worse than saying nothing.
+func landingBranch(task model.Task) string {
+	if task.Base != "" {
+		return "`" + task.Base + "`"
+	}
+	return "its repository's default branch"
 }
 
 // argStrings reads a tool argument that should have arrived as an array
