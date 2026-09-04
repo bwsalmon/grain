@@ -151,8 +151,9 @@ step "create cluster $CLUSTER ($MACHINE_TYPE x1, $ZONE) -- takes ~6 minutes"
 # Artifact Registry pulls). That does not stop a node registering or a pod
 # from a public registry running, which is all this script asserts; it is not
 # the shape to copy into a real deployment.
-# An `if` rather than `[[ ... ]] && ...`, which under `set -e` would abort
-# the script on the very branch that means "use the project default".
+# A plain `if`: the `[[ ... ]] && args+=(...)` idiom the sibling script uses
+# is safe here too (bash's `set -e` does not fire on the non-final command of
+# an AND list), but it reads like it is one edit away from not being.
 CREATE_ARGS=()
 if [[ "$NODE_SA" != "default" ]]; then
   CREATE_ARGS+=(--service-account="$NODE_SA")
