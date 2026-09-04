@@ -113,13 +113,18 @@ type Spec struct {
 	// carrying across a versioned wire.
 	//
 	// The agent's own credential is the case that looks like it wants the
-	// other side, and does not: it is deployment-wide rather than
-	// per-run -- a Claude Code OAuth token or a Gemini key set once in
-	// Settings, which is why Deps.Framework can fail for want of it -- so
-	// it reaches the container as configuration at create, beside the
-	// framework profile that reads it, and never travels in a Spec at
-	// all. The sandbox still cannot read it. That property comes from
-	// where the agent runs, not from a field here.
+	// other side, and does not. It travels in a Spec -- it has to,
+	// because which credential a grain needs follows from the framework
+	// its task chose (FrameworkSpec.Credential) -- but it is not a
+	// placement, and that is the whole of the difference: it lands
+	// container-side at FileCredential, beside the profile that reads it,
+	// and nothing copies it into the guest. So the sandbox cannot read
+	// the model key, and the property comes from where the file lands
+	// rather than from a discriminator on this type.
+	//
+	// The reverse does not hold, and should not be claimed. Everything
+	// placed here *is* readable by the agent, because run_command reaches
+	// the guest and can cat any of it. A placement is scoped, not hidden.
 	//
 	// Git's credential is one of these, rather than a field of its own.
 	// It is the same work pkg/orchestrator does today in
@@ -206,12 +211,16 @@ type FrameworkSpec struct {
 	// Deps.Framework resolving it): static configuration would mean
 	// shipping every deployment's every credential into every container.
 	//
-	// It reaches the container as its own environment variable
-	// (EnvCredential), which on Kubernetes a deployment points at a
-	// Secret key with valueFrom.secretKeyRef -- so the pod spec holds a
-	// reference and the value keeps the Secret's own RBAC and encryption
-	// at rest. Its own variable rather than a key inside the placements
-	// blob, so it can be rotated and scoped by itself.
+	// It reaches the container as a file (FileCredential), which on
+	// Kubernetes a deployment fills from a Secret volume's own
+	// items: [{key, path, mode}] -- so the pod spec holds a reference,
+	// the value keeps the Secret's RBAC and encryption at rest, and the
+	// container's environment carries no material at all.
+	//
+	// A file of its own rather than one of the Placements, because the
+	// two go to different sides: placements are copied into the guest and
+	// this must not be. That is the credential boundary, and it is a
+	// destination rather than a rule anything has to enforce.
 	//
 	// It is not a Placement, and that is why removing Placement.Dest cost
 	// nothing: a placement is path-addressed, written where the
