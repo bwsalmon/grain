@@ -108,7 +108,7 @@ func TestSandboxTokenMintedAfterGitProxyStartsAuthenticates(t *testing.T) {
 	// The order under test: start the proxy against an empty token file,
 	// *then* mint -- the order a sandbox per run forces, and the one the
 	// old ordering would have failed closed on.
-	proxyURL, stop, err := startGitProxy(dataDir, store, githubHost, true, "")
+	proxyURL, stop, err := startGitProxy(dataDir, store, githubHost, true, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

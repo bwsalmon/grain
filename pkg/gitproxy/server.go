@@ -62,11 +62,13 @@ type BuildConfig struct {
 	// "github.com over TLS".
 	ForwardHost string
 	ForwardTLS  bool
-	// Forbidden is ModelAuthorizer.Forbidden: repos no sandbox may reach
-	// through this proxy at all. Nil for a deployment with none, which
-	// is every deployment whose state repository has never held the
-	// encrypted secrets file.
-	Forbidden []model.RepoRef
+	// Forbidden is ModelAuthorizer.Forbidden: the live set of repos no
+	// sandbox may reach through this proxy at all. Nil for a deployment
+	// with none and no way of acquiring any; a caller that can change
+	// which repository grain's state lives in passes a set it keeps a
+	// handle on instead, and replaces its contents when that changes
+	// (cmd/grain's stateManager).
+	Forbidden *ForbiddenSet
 }
 
 // BuildProxy wires the real files under DataDir plus the live model store
