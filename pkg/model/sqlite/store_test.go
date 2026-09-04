@@ -83,7 +83,6 @@ func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
 	want.Tags = []string{"nightly"}
 	want.AutoMerge = true
 	want.Interactive = true
-	want.Configuration = true
 
 	if err := store.PutTask(ctx, want); err != nil {
 		t.Fatalf("put: %v", err)
@@ -113,7 +112,7 @@ func TestTaskRoundTripsWithEveryCollection(t *testing.T) {
 	if got.Approval == nil || got.Approval.Actor.Kind != model.PrincipalHuman {
 		t.Errorf("approval: %+v", got.Approval)
 	}
-	if !got.AutoMerge || !got.Interactive || !got.Configuration {
+	if !got.AutoMerge || !got.Interactive {
 		t.Errorf("flags: %+v", got)
 	}
 	if got.CreatedAt == nil || !got.CreatedAt.Equal(now) {
@@ -3665,80 +3664,6 @@ func TestInitMigratesAnExistingDatabaseMissingTaskSandboxShape(t *testing.T) {
 	if got.SandboxCPUs != 0 || got.SandboxMemoryMB != 0 || got.SandboxDiskGB != 0 {
 		t.Fatalf("SandboxCPUs/SandboxMemoryMB/SandboxDiskGB after migrating = %d/%d/%d, want 0/0/0",
 			got.SandboxCPUs, got.SandboxMemoryMB, got.SandboxDiskGB)
-	}
-}
-
-// TestInitMigratesAnExistingDatabaseMissingConfiguration is the same
-// migration, applied to task.configuration (bwsalmon/agents#621) -- a
-// database that already has every column through task.interactive
-// (bwsalmon/agents#539) but predates the configuration agent.
-func TestInitMigratesAnExistingDatabaseMissingConfiguration(t *testing.T) {
-	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
-	if err != nil {
-		t.Fatalf("opening embedded sqlite: %v", err)
-	}
-	defer db.Close()
-	ctx := context.Background()
-
-	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task`"+` (
-  `+"`id`"+`                    TEXT    NOT NULL,
-  `+"`intent`"+`                TEXT    NOT NULL,
-  `+"`title`"+`                 TEXT    NOT NULL,
-  `+"`body`"+`                  TEXT    NOT NULL,
-  `+"`origin_actor_kind`"+`     TEXT    NOT NULL,
-  `+"`origin_actor_id`"+`       TEXT    NOT NULL,
-  `+"`origin_behalf_kind`"+`    TEXT    NULL,
-  `+"`origin_behalf_id`"+`      TEXT    NULL,
-  `+"`origin_reason`"+`         TEXT    NOT NULL,
-  `+"`approval_actor_kind`"+`   TEXT    NULL,
-  `+"`approval_actor_id`"+`     TEXT    NULL,
-  `+"`approval_behalf_kind`"+`  TEXT    NULL,
-  `+"`approval_behalf_id`"+`    TEXT    NULL,
-  `+"`approved_at`"+`           DATETIME NULL,
-  `+"`target_owner`"+`          TEXT    NULL,
-  `+"`target_name`"+`           TEXT    NULL,
-  `+"`binding`"+`               TEXT    NOT NULL,
-  `+"`base`"+`                  TEXT    NULL,
-  `+"`folder`"+`                TEXT    NULL,
-  `+"`auto_merge`"+`            INTEGER  NOT NULL,
-  `+"`created_at`"+`            DATETIME NULL,
-  `+"`order_key`"+`             REAL     NOT NULL DEFAULT 0,
-  `+"`sandbox_cpus`"+`          INTEGER  NOT NULL DEFAULT 0,
-  `+"`sandbox_memory_mb`"+`     INTEGER  NOT NULL DEFAULT 0,
-  `+"`interactive`"+`           INTEGER  NOT NULL DEFAULT 0,
-  PRIMARY KEY (`+"`id`"+`)
-)`); err != nil {
-		t.Fatalf("creating the pre-#621 task table: %v", err)
-	}
-	if _, err := db.ExecContext(ctx,
-		"INSERT INTO `task` (`id`,`intent`,`title`,`body`,`origin_actor_kind`,`origin_actor_id`,`origin_reason`,"+
-			"`binding`,`auto_merge`) VALUES ('t1','implement','a title','a body','automation','grain','direct','default',0)"); err != nil {
-		t.Fatalf("seeding a pre-#621 task row: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_grant` (`task_id` TEXT, `capability` TEXT, `via` TEXT, `folder` TEXT)"); err != nil {
-		t.Fatalf("creating task_grant: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_read` (`task_id` TEXT, `owner` TEXT, `name` TEXT)"); err != nil {
-		t.Fatalf("creating task_read: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_link` (`task_id` TEXT, `kind` TEXT, `target` TEXT, `blocks` INTEGER)"); err != nil {
-		t.Fatalf("creating task_link: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, "CREATE TABLE `task_tag` (`task_id` TEXT, `tag` TEXT)"); err != nil {
-		t.Fatalf("creating task_tag: %v", err)
-	}
-
-	store := model.New(db)
-	if err := store.Init(ctx); err != nil {
-		t.Fatalf("Init against an existing database missing task.configuration: %v", err)
-	}
-
-	got, err := store.GetTask(ctx, "t1")
-	if err != nil || got == nil {
-		t.Fatalf("get: (%+v, %v)", got, err)
-	}
-	if got.Configuration {
-		t.Fatalf("Configuration after migrating = true, want false")
 	}
 }
 

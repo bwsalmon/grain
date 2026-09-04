@@ -110,7 +110,7 @@ func runHostCommandTool(store *model.Store, taskID string, pollInterval, timeout
 			}
 
 			question := fmt.Sprintf(
-				"Configuration mode wants to run this command directly on grain's own host:\n\n```\n%s\n```\n\n"+
+				"This task wants to run this command directly on grain's own host:\n\n```\n%s\n```\n\n"+
 					"Reply **approve** to run it, or **deny** (optionally with a reason) to refuse.", command)
 			approved, reply, err := Confirm(ctx, store, taskID, question, pollInterval, timeout)
 			if err != nil {

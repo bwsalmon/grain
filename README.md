@@ -1468,10 +1468,10 @@ no new field and no framework change in between.
 PlaybookTools`' `list_bootstrap_playbooks` and `read_bootstrap_playbook`
 read markdown runbooks embedded in the grain binary itself, so the
 subprocess is already holding everything they serve and needs no hop of
-any kind. That matters because `ui.configurationPrompt` has told the
-configuration agent to reach for both tools since bwsalmon/agents#620,
-while `Config.GrantTools` was the only thing assembling them — the prompt
-named a tool that was on no run's roster.
+any kind. That matters because `Config.GrantTools` was the only thing
+assembling them until this flag existed, and no CLI-driving `Framework`
+consumes that map — a task granted `bootstrap-playbooks` was told about
+tools that were on no run's roster.
 
 `-grant self-debug` turns on `selfdebug.SourceTools`'
 `read_grain_source`/`list_grain_source`, which answer what grain is
@@ -1513,23 +1513,41 @@ daemon aimed at one endpoint about one task id
 own pull request"). Neither is a store handle, and neither can answer
 `selfrepair.Confirm`'s blocking read of `Store.Comments`.
 
-bwsalmon/agents#621 turned that pair of capabilities into an explicit
-"configuration agent": an overlay button the frontend keeps reachable in
-the bottom-right corner of the screen no matter what view is on screen
-(`ConfigurationAgentButton.jsx`), which files a task with nothing but
-`{"configuration": true}` and opens its chat the moment it exists. What
-that one field expands into -- `Interactive` forced true, `self-debug`
-and `self-repair` both granted, a default title and a prompt oriented at
-helping with a problem, a question, or grain's own configuration -- is
-assembled once, server-side, in `ui.Client.CreateTask`, so nobody
-filing one (this button today, conceivably a CLI flag later) has to
-reassemble the bundle by hand. `Task.Configuration` also changes how
-`dispatch.Cycle` schedules the task: `dispatchConfiguration` starts every
-such task unconditionally, ahead of the capacity-gated loop that governs
-everything else, so the configuration agent can always start a sandbox
-even when the deployment is already at its worker limit -- the moment
-someone reaches for it is often exactly the moment the deployment is
-already saturated.
+bwsalmon/agents#621 once turned that pair of capabilities into an
+explicit "configuration agent": an overlay button the frontend kept
+reachable in the bottom-right corner of the screen, which filed a task
+with nothing but `{"configuration": true}` and opened its chat the moment
+it existed. One field on the task (`model.Task.Configuration`, a column
+of its own) expanded server-side into `Interactive` forced true, the
+`self-debug`/`self-repair`/`bootstrap-playbooks` grants, a default title
+and a prompt about helping with a problem, a question or grain's own
+configuration -- and `dispatch.Cycle` started every such task
+unconditionally, ahead of the capacity-gated loop, so it could get a
+sandbox even at the worker limit.
+
+**It is gone.** What it was for was changing this deployment's
+configuration, and configuration is not something to change by talking to
+a chat agent about it any more: it is the state repository (see "The
+store is a git repository again"). Settings, repo configuration, prompt
+extensions, schedules and suites are files an ordinary task can be
+dispatched at, edit, and open a pull request against, reviewed and merged
+like any other change, with `grain state check` validating it before it
+lands. A one-click chat that could reach into the running deployment
+instead was a second, unreviewed way to do the same thing.
+
+Nothing it was built out of goes with it. `self-debug`, `self-repair` and
+`bootstrap-playbooks` are still capabilities, still grantable from the
+new-task form or a deployment's defaults, and still reach a run the same
+way (`grain mcpserver -grant <name>`) -- what is removed is the bundle,
+the button, the field, the column and the exemption from the concurrency
+limit, not the tools. A deployment that wants what the button offered
+files an interactive task and ticks those grants, which is what the
+button was assembling for it. Removing the special dispatch path costs
+nothing that the state repository does not already answer: an interactive
+task filed to debug a saturated deployment waits its turn like everything
+else, and a deployment saturated badly enough for that to matter has a
+`MaxWorkers` a person can raise -- through the state repository, or
+through Settings.
 
 ## The agent runtime is a CLI now, not our own turn loop
 

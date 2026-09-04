@@ -440,29 +440,6 @@ type Task struct {
 	// its chat view immediately after filing it instead of returning to
 	// the task list.
 	Interactive bool
-	// Configuration marks a task as grain's own "configuration agent"
-	// (bwsalmon/agents#621): the one-click interactive session, opened
-	// from an overlay the frontend keeps reachable at all times, that
-	// carries the self-debug/self-repair/bootstrap-playbooks grants
-	// (bwsalmon/agents#620 added the third) and a prompt oriented at
-	// helping whoever opened it with a problem, a question, or grain's
-	// own configuration -- rather than a human assembling that
-	// combination by hand through Interactive and Capabilities every
-	// time. ui.Client.CreateTask is what actually assembles it (forcing
-	// Interactive true, attaching the grants, defaulting Title/Body) so
-	// every caller gets the same bundle regardless of what it asked for
-	// individually.
-	//
-	// It also changes how dispatch.Cycle schedules the task: unlike an
-	// ordinary Interactive task, which still waits its turn for
-	// Config.MaxWorkers headroom the same as anything else, a
-	// Configuration task is dispatched unconditionally, on top of
-	// whatever the deployment's concurrency limit already has in flight.
-	// A person reaching for this because something is already wrong --
-	// including the deployment being saturated -- must not find the one
-	// tool meant to help stuck behind the very saturation it might need
-	// to diagnose.
-	Configuration bool
 	// SandboxCPUs, SandboxMemoryMB and SandboxDiskGB
 	// (bwsalmon/agents#534, grain/task-41) override
 	// Config.SandboxCPUs/SandboxMemoryMB/SandboxDiskGB for this task's

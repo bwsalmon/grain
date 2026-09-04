@@ -40,7 +40,7 @@ func TestGrantedToolsServesThePlaybooksForTheBootstrapGrant(t *testing.T) {
 	}
 }
 
-// The configuration agent holds both grants at once, and gets both sets.
+// A task holding both grants at once gets both sets.
 func TestGrantedToolsServesEveryGrantsTools(t *testing.T) {
 	names := toolNames(grantedTools(grantNames{"self-debug", "bootstrap-playbooks"}, "/src"))
 	for _, want := range []string{
