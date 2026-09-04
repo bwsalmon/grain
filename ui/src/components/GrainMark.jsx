@@ -1,8 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useTheme } from "@mui/material";
 
-import { STATIC_SLOT, createGrainMark, grainSpec } from "../brand/grain-mark.js";
-import { SHEET_FRAMES, SHEET_LOOP_MS, hasSheet, sheetHref } from "../brand/mark-sheet.js";
+import {
+  STATIC_SLOT,
+  createGrainMark,
+  grainSpec,
+} from "../brand/grain-mark.js";
+import {
+  SHEET_FRAMES,
+  SHEET_LOOP_MS,
+  hasSheet,
+  sheetHref,
+} from "../brand/mark-sheet.js";
 
 // GrainMark is the brand mark: a Chladni glyph -- the filled regions of a
 // square-plate eigenmode, stippled into grains -- inside an invisible
@@ -46,9 +55,17 @@ import { SHEET_FRAMES, SHEET_LOOP_MS, hasSheet, sheetHref } from "../brand/mark-
 // else on it -- the case the pack's renderer was written for. Any size
 // without a sheet lands here too, so a new call site works before
 // anyone has recorded one for it.
-const STILL_SRC = { light: "/grain-mark-light.svg", dark: "/grain-mark-dark.svg" };
+const STILL_SRC = {
+  light: "/grain-mark-light.svg",
+  dark: "/grain-mark-dark.svg",
+};
 
-export default function GrainMark({ size = 28, animated = false, title, className }) {
+export default function GrainMark({
+  size = 28,
+  animated = false,
+  title,
+  className,
+}) {
   const theme = useTheme();
   const mode = theme.palette.mode === "dark" ? "dark" : "light";
   const reducedMotion = usePrefersReducedMotion();
@@ -69,7 +86,8 @@ export default function GrainMark({ size = 28, animated = false, title, classNam
   // lockstep, and keeps them there as rows come and go.
   useEffect(() => {
     if (!spinning || !plays) return;
-    for (const animation of sheetRef.current?.getAnimations?.() ?? []) animation.startTime = 0;
+    for (const animation of sheetRef.current?.getAnimations?.() ?? [])
+      animation.startTime = 0;
   }, [spinning, plays, size]);
 
   useEffect(() => {

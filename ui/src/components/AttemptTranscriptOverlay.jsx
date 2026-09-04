@@ -22,19 +22,28 @@ const REFRESH_MS = 5000;
 // -- useful for debugging why an attempt failed, or for watching one
 // still in flight without reaching for a shell (bwsalmon/agents#446,
 // bwsalmon/agents#467).
-export default function AttemptTranscriptOverlay({ taskId, attempt, onClose, showError }) {
+export default function AttemptTranscriptOverlay({
+  taskId,
+  attempt,
+  onClose,
+  showError,
+}) {
   const [transcript, setTranscript] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
-      const res = await api(`/api/tasks/${encodeURIComponent(taskId)}/attempts/${attempt.number}/transcript`);
+      const res = await api(
+        `/api/tasks/${encodeURIComponent(taskId)}/attempts/${attempt.number}/transcript`,
+      );
       setTranscript(res.transcript || "");
     } catch (err) {
       showError(err);
     }
   }, [taskId, attempt.number, showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
     if (attempt.finishedAt) return;
@@ -48,9 +57,10 @@ export default function AttemptTranscriptOverlay({ taskId, attempt, onClose, sho
       <pre className="logs-view">
         {transcript === null
           ? "Loading…"
-          : transcript || (attempt.finishedAt
-            ? "(no transcript recorded)"
-            : "Still running -- nothing written yet.")}
+          : transcript ||
+            (attempt.finishedAt
+              ? "(no transcript recorded)"
+              : "Still running -- nothing written yet.")}
       </pre>
     </Overlay>
   );

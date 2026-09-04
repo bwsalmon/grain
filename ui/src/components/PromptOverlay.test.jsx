@@ -11,10 +11,15 @@ describe("PromptOverlay", () => {
   });
 
   it("fetches and shows the prompt the agent was given", async () => {
-    api.mockResolvedValueOnce({ prompt: "Fix the thing\n\nWork in acme/widgets.", attempt: 2 });
+    api.mockResolvedValueOnce({
+      prompt: "Fix the thing\n\nWork in acme/widgets.",
+      attempt: 2,
+    });
     render(<PromptOverlay taskId="12" onClose={() => {}} />);
 
-    expect(await screen.findByText(/Work in acme\/widgets\./)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Work in acme\/widgets\./),
+    ).toBeInTheDocument();
     expect(api).toHaveBeenLastCalledWith("/api/tasks/12/prompt");
   });
 
@@ -31,7 +36,9 @@ describe("PromptOverlay", () => {
     api.mockResolvedValueOnce({ prompt: "", attempt: 0 });
     render(<PromptOverlay taskId="12" onClose={() => {}} />);
 
-    expect(await screen.findByText(/No prompt recorded yet/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/No prompt recorded yet/),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/attempt #/)).not.toBeInTheDocument();
   });
 
@@ -39,6 +46,8 @@ describe("PromptOverlay", () => {
     api.mockRejectedValueOnce(new Error("boom"));
     render(<PromptOverlay taskId="12" onClose={() => {}} />);
 
-    expect(await screen.findByText(/Could not load this task's prompt: boom/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Could not load this task's prompt: boom/),
+    ).toBeInTheDocument();
   });
 });

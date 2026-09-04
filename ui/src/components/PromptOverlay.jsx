@@ -34,7 +34,9 @@ export default function PromptOverlay({ taskId, onClose }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await api(`/api/tasks/${encodeURIComponent(taskId)}/prompt`);
+        const res = await api(
+          `/api/tasks/${encodeURIComponent(taskId)}/prompt`,
+        );
         if (cancelled) return;
         setPrompt(res.prompt || "");
         setAttempt(res.attempt || 0);
@@ -42,7 +44,9 @@ export default function PromptOverlay({ taskId, onClose }) {
         if (!cancelled) setError(err);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [taskId]);
 
   return (
@@ -56,8 +60,9 @@ export default function PromptOverlay({ taskId, onClose }) {
           ? `Could not load this task's prompt: ${error.message}`
           : prompt === null
             ? "Loading…"
-            : prompt || "No prompt recorded yet -- nothing has been dispatched for this task, "
-              + "so grain has not built one. A prompt is recorded the moment a run hands it to its agent."}
+            : prompt ||
+              "No prompt recorded yet -- nothing has been dispatched for this task, " +
+                "so grain has not built one. A prompt is recorded the moment a run hands it to its agent."}
       </pre>
     </Overlay>
   );

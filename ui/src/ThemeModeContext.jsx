@@ -37,7 +37,11 @@ export function ThemeModeProvider({ children }) {
 
   const value = useMemo(() => ({ mode, setMode }), [mode]);
 
-  return <ThemeModeContext.Provider value={value}>{children}</ThemeModeContext.Provider>;
+  return (
+    <ThemeModeContext.Provider value={value}>
+      {children}
+    </ThemeModeContext.Provider>
+  );
 }
 
 export function useThemeMode() {

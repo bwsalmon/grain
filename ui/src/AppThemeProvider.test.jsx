@@ -28,7 +28,11 @@ describe("AppThemeProvider", () => {
 
   it("resolves auto to the OS preference and tags <html> with it", () => {
     stubMatchMedia(true);
-    render(<AppThemeProvider><div>content</div></AppThemeProvider>);
+    render(
+      <AppThemeProvider>
+        <div>content</div>
+      </AppThemeProvider>,
+    );
 
     expect(screen.getByText("content")).toBeInTheDocument();
     expect(document.documentElement.dataset.theme).toBe("dark");
@@ -36,7 +40,11 @@ describe("AppThemeProvider", () => {
 
   it("resolves auto to light when the OS does not prefer dark", () => {
     stubMatchMedia(false);
-    render(<AppThemeProvider><div>content</div></AppThemeProvider>);
+    render(
+      <AppThemeProvider>
+        <div>content</div>
+      </AppThemeProvider>,
+    );
 
     expect(document.documentElement.dataset.theme).toBe("light");
   });
@@ -44,7 +52,11 @@ describe("AppThemeProvider", () => {
   it("an explicit stored mode overrides the OS preference", () => {
     localStorage.setItem("grain.themeMode", "dark");
     stubMatchMedia(false);
-    render(<AppThemeProvider><div>content</div></AppThemeProvider>);
+    render(
+      <AppThemeProvider>
+        <div>content</div>
+      </AppThemeProvider>,
+    );
 
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
@@ -57,7 +69,10 @@ describe("AppThemeProvider", () => {
     // Both links, because a browser picks whichever of the two it can
     // render and either one left on the light mark is a bronze icon in a
     // dark tab on some machines and not others.
-    for (const [id, href] of [["favicon", "/grain-mark-light.svg"], ["favicon-png", "/grain-mark-light.png"]]) {
+    for (const [id, href] of [
+      ["favicon", "/grain-mark-light.svg"],
+      ["favicon-png", "/grain-mark-light.png"],
+    ]) {
       const link = document.createElement("link");
       link.id = id;
       link.rel = "icon";
@@ -66,9 +81,17 @@ describe("AppThemeProvider", () => {
     }
 
     stubMatchMedia(true);
-    render(<AppThemeProvider><div>content</div></AppThemeProvider>);
+    render(
+      <AppThemeProvider>
+        <div>content</div>
+      </AppThemeProvider>,
+    );
 
-    expect(document.getElementById("favicon").getAttribute("href")).toBe("/grain-mark-dark.svg");
-    expect(document.getElementById("favicon-png").getAttribute("href")).toBe("/grain-mark-dark.png");
+    expect(document.getElementById("favicon").getAttribute("href")).toBe(
+      "/grain-mark-dark.svg",
+    );
+    expect(document.getElementById("favicon-png").getAttribute("href")).toBe(
+      "/grain-mark-dark.png",
+    );
   });
 });

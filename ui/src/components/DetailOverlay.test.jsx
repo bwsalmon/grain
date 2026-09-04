@@ -19,7 +19,9 @@ const baseTask = {
 };
 
 const config = {
-  capabilities: [{ id: "web-search", name: "Web search", description: "search the web" }],
+  capabilities: [
+    { id: "web-search", name: "Web search", description: "search the web" },
+  ],
 };
 
 describe("DetailOverlay", () => {
@@ -28,7 +30,16 @@ describe("DetailOverlay", () => {
   });
 
   it("renders the task id, title, description and state badge", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
 
     expect(screen.getByText("12 Fix the login bug")).toBeInTheDocument();
     expect(screen.getByText("Login fails on retry")).toBeInTheDocument();
@@ -39,20 +50,44 @@ describe("DetailOverlay", () => {
   // box floating in the middle of it -- an agent's own answer runs long,
   // and reading one through a 900px porthole was the complaint.
   it("opens as a full pane rather than a centered dialog", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
 
-    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
-    expect(document.querySelector(".overlay-pane .detail-layout")).toBeInTheDocument();
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass(
+      "MuiDialog-paperFullScreen",
+    );
+    expect(
+      document.querySelector(".overlay-pane .detail-layout"),
+    ).toBeInTheDocument();
   });
 
   // The page somebody opens *because* the list said "running" must not
   // answer with less than the list did: the same status line, under the
   // badge that only says it is running (grain/task-240).
   it("shows what a running task's agent says it is doing", () => {
-    render(<DetailOverlay
-      task={{ ...baseTask, state: "running", activity: "running the test suite", activityAt: new Date().toISOString() }}
-      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-    />);
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "running",
+          activity: "running the test suite",
+          activityAt: new Date().toISOString(),
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.getByText("running the test suite")).toBeInTheDocument();
   });
 
@@ -60,31 +95,75 @@ describe("DetailOverlay", () => {
   // written while the run's sandbox was still being built is grain's,
   // not the agent's, and the page says so rather than passing it off.
   it("marks a setup status as grain's own", () => {
-    render(<DetailOverlay
-      task={{ ...baseTask, state: "running", activity: "building a sandbox", activityBySetup: true }}
-      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-    />);
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "running",
+          activity: "building a sandbox",
+          activityBySetup: true,
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.getByText("building a sandbox")).toBeInTheDocument();
-    expect(document.querySelector(".task-activity-by")).toHaveTextContent("grain");
+    expect(document.querySelector(".task-activity-by")).toHaveTextContent(
+      "grain",
+    );
   });
 
   it("shows no status line for a task that is not running", () => {
-    render(<DetailOverlay
-      task={{ ...baseTask, state: "completed", activity: "running the test suite" }}
-      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-    />);
+    render(
+      <DetailOverlay
+        task={{
+          ...baseTask,
+          state: "completed",
+          activity: "running the test suite",
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(document.querySelector(".detail-activity")).not.toBeInTheDocument();
   });
 
   it("shows a placeholder when there is no description", () => {
-    render(<DetailOverlay task={{ ...baseTask, description: "" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, description: "" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.getByText("(no description)")).toBeInTheDocument();
   });
 
   it("links the pull request when one is attached", () => {
-    render(<DetailOverlay task={{ ...baseTask, pullRequest: "acme/widgets#42" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#42" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     const link = screen.getByRole("link", { name: "acme/widgets#42" });
-    expect(link).toHaveAttribute("href", "https://github.com/acme/widgets/pull/42");
+    expect(link).toHaveAttribute(
+      "href",
+      "https://github.com/acme/widgets/pull/42",
+    );
   });
 
   // A per-task agent framework override gets the same treatment: named
@@ -94,13 +173,26 @@ describe("DetailOverlay", () => {
     const { rerender } = render(
       <DetailOverlay
         task={{ ...baseTask, agentFramework: "claude" }}
-        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-      />
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
     expect(screen.getByText("Agent framework")).toBeInTheDocument();
     expect(screen.getByText("Claude")).toBeInTheDocument();
 
-    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    rerender(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.queryByText("Agent framework")).not.toBeInTheDocument();
   });
 
@@ -111,13 +203,26 @@ describe("DetailOverlay", () => {
     const { rerender } = render(
       <DetailOverlay
         task={{ ...baseTask, promptExtension: "Ignore the house rules." }}
-        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-      />
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
     expect(screen.getByText("Prompt extension")).toBeInTheDocument();
     expect(screen.getByText("Ignore the house rules.")).toBeInTheDocument();
 
-    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    rerender(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.queryByText("Prompt extension")).not.toBeInTheDocument();
   });
 
@@ -128,22 +233,48 @@ describe("DetailOverlay", () => {
   it("names the attached review, and the task filed for it once there is one", () => {
     const { rerender } = render(
       <DetailOverlay
-        task={{ ...baseTask, reviewTemplateId: "7", reviewTemplateName: "Security pass" }}
-        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-      />
+        task={{
+          ...baseTask,
+          reviewTemplateId: "7",
+          reviewTemplateName: "Security pass",
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
     expect(screen.getByText("Review")).toBeInTheDocument();
     expect(screen.getByText("Security pass")).toBeInTheDocument();
 
     rerender(
       <DetailOverlay
-        task={{ ...baseTask, reviewTemplateId: "7", reviewTemplateName: "Security pass", reviewTask: "91" }}
-        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-      />
+        task={{
+          ...baseTask,
+          reviewTemplateId: "7",
+          reviewTemplateName: "Security pass",
+          reviewTask: "91",
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
     expect(screen.getByText("Security pass (task 91)")).toBeInTheDocument();
 
-    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    rerender(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.queryByText("Review")).not.toBeInTheDocument();
   });
 
@@ -151,9 +282,18 @@ describe("DetailOverlay", () => {
   it("shows a sandbox shape override when set, and hides it when not", () => {
     const { rerender } = render(
       <DetailOverlay
-        task={{ ...baseTask, sandboxCpus: 4, sandboxMemoryMb: 8192, sandboxDiskGb: 40 }}
-        tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-      />
+        task={{
+          ...baseTask,
+          sandboxCpus: 4,
+          sandboxMemoryMb: 8192,
+          sandboxDiskGb: 40,
+        }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
     expect(screen.getByText("Sandbox vCPUs")).toBeInTheDocument();
     expect(screen.getByText("4")).toBeInTheDocument();
@@ -162,7 +302,16 @@ describe("DetailOverlay", () => {
     expect(screen.getByText("Sandbox disk (GiB)")).toBeInTheDocument();
     expect(screen.getByText("40")).toBeInTheDocument();
 
-    rerender(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    rerender(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.queryByText("Sandbox vCPUs")).not.toBeInTheDocument();
     expect(screen.queryByText("Sandbox memory (MiB)")).not.toBeInTheDocument();
     expect(screen.queryByText("Sandbox disk (GiB)")).not.toBeInTheDocument();
@@ -170,7 +319,16 @@ describe("DetailOverlay", () => {
 
   // bwsalmon/agents#539: an interactive task's Timeline reads as a chat.
   it("labels an interactive task's mode and renders its Timeline as a Chat", () => {
-    render(<DetailOverlay task={{ ...baseTask, interactive: true }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, interactive: true }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.getByText("Mode")).toBeInTheDocument();
     expect(screen.getByText("Interactive")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Chat" })).toBeInTheDocument();
@@ -178,22 +336,39 @@ describe("DetailOverlay", () => {
   });
 
   it("labels an ordinary task's Timeline as Timeline, not Chat, and shows no Mode row", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.queryByText("Mode")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Timeline" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Timeline" }),
+    ).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Reply...")).toBeInTheDocument();
   });
 
   it("shows the merge-blocked chip once the merge queue has given up", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, state: "completed", pullRequest: "acme/widgets#42", autoMerge: true, mergeQueueBlockedAt: "2026-08-01T00:00:00Z" }}
+        task={{
+          ...baseTask,
+          state: "completed",
+          pullRequest: "acme/widgets#42",
+          autoMerge: true,
+          mergeQueueBlockedAt: "2026-08-01T00:00:00Z",
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
     expect(screen.getByText("Merge blocked")).toBeInTheDocument();
   });
@@ -203,13 +378,18 @@ describe("DetailOverlay", () => {
   it("says awaiting submit on the state badge, with no chip repeating it", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, state: "awaiting_submit", pullRequest: "acme/widgets#42", autoMerge: false }}
+        task={{
+          ...baseTask,
+          state: "awaiting_submit",
+          pullRequest: "acme/widgets#42",
+          autoMerge: false,
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
     expect(screen.getAllByText("Awaiting submit")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Submit" })).toBeInTheDocument();
@@ -218,7 +398,16 @@ describe("DetailOverlay", () => {
   it("opens the originating task when generatedFrom is clicked", async () => {
     const onOpenTask = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={{ ...baseTask, generatedFrom: "9" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={onOpenTask} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, generatedFrom: "9" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={onOpenTask}
+        act={vi.fn()}
+      />,
+    );
 
     await user.click(screen.getByText("9"));
 
@@ -228,42 +417,72 @@ describe("DetailOverlay", () => {
   it("shows the blocked badge and failure summary for a failed task", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, state: "failed", blocked: true, failedAttempts: 2, lastFailureReason: "build error" }}
+        task={{
+          ...baseTask,
+          state: "failed",
+          blocked: true,
+          failedAttempts: 2,
+          lastFailureReason: "build error",
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("Blocked")).toBeInTheDocument();
-    expect(screen.getByText(/2 consecutive failed attempts/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/2 consecutive failed attempts/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/build error/)).toBeInTheDocument();
   });
 
   it("shows an Approve button for a proposed task, wired to the approve endpoint", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={{ ...baseTask, state: "proposed" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "proposed" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Approve" }));
 
     expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
     act.mock.calls[0][0]();
-    expect(api).toHaveBeenCalledWith("/api/tasks/12/approve", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/approve", {
+      method: "POST",
+    });
   });
 
   it("shows a Withdraw approval button for a queued task, wired to the withdraw endpoint", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Withdraw approval" }));
 
     expect(act).toHaveBeenCalledWith(expect.any(Function), "12");
     act.mock.calls[0][0]();
-    expect(api).toHaveBeenCalledWith("/api/tasks/12/withdraw-approval", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/withdraw-approval", {
+      method: "POST",
+    });
   });
 
   // The states Client.WithdrawApproval refuses never get the button:
@@ -271,30 +490,70 @@ describe("DetailOverlay", () => {
   // stopped with Cancel instead.
   it("offers no Withdraw approval button on a task that is not queued", () => {
     const { rerender } = render(
-      <DetailOverlay task={{ ...baseTask, state: "proposed" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />
+      <DetailOverlay
+        task={{ ...baseTask, state: "proposed" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
-    expect(screen.queryByRole("button", { name: "Withdraw approval" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Withdraw approval" }),
+    ).not.toBeInTheDocument();
 
     rerender(
-      <DetailOverlay task={{ ...baseTask, state: "running" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />
+      <DetailOverlay
+        task={{ ...baseTask, state: "running" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
-    expect(screen.queryByRole("button", { name: "Withdraw approval" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Withdraw approval" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a Submit button once a pull request exists and auto-merge is off", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={{ ...baseTask, pullRequest: "acme/widgets#1" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#1" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Submit" }));
 
     act.mock.calls[0][0]();
-    expect(api).toHaveBeenCalledWith("/api/tasks/12/submit", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/submit", {
+      method: "POST",
+    });
   });
 
   it("hides the Submit button once auto-merge is already on", () => {
-    render(<DetailOverlay task={{ ...baseTask, pullRequest: "acme/widgets#1", autoMerge: true }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
-    expect(screen.queryByRole("button", { name: "Submit" })).not.toBeInTheDocument();
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, pullRequest: "acme/widgets#1", autoMerge: true }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Submit" }),
+    ).not.toBeInTheDocument();
   });
 
   // bwsalmon/agents#483: on a deployment whose GitHub credential can't
@@ -310,9 +569,11 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
-    expect(screen.getByText(/can't read pull request checks/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/can't read pull request checks/),
+    ).toBeInTheDocument();
   });
 
   it("shows no auto-merge warning on a deployment that can read checks", () => {
@@ -324,9 +585,11 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
-    expect(screen.queryByText(/can't read pull request checks/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/can't read pull request checks/),
+    ).not.toBeInTheDocument();
   });
 
   it("shows no auto-merge warning before a task has been submitted, even when degraded", () => {
@@ -338,15 +601,26 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
-    expect(screen.queryByText(/can't read pull request checks/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/can't read pull request checks/),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a Retry button for a failed task, wired to the retry endpoint", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={{ ...baseTask, state: "failed" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "failed" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
 
@@ -357,12 +631,23 @@ describe("DetailOverlay", () => {
   it("shows Reopen for a closed task, wired to the reopen endpoint", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={{ ...baseTask, state: "closed" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "closed" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Reopen" }));
 
     act.mock.calls[0][0]();
-    expect(api).toHaveBeenCalledWith("/api/tasks/12/reopen", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/tasks/12/reopen", {
+      method: "POST",
+    });
   });
 
   // A pull request nobody is going to merge, said where the person who
@@ -378,10 +663,14 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    expect(screen.getByText(/acme\/widgets#42 is still open, and grain has stopped watching it\./)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /acme\/widgets#42 is still open, and grain has stopped watching it\./,
+      ),
+    ).toBeInTheDocument();
   });
 
   // The ordinary ending closes the task too: a pull request that merged
@@ -401,17 +690,28 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    expect(screen.queryByText(/grain has stopped watching it/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/grain has stopped watching it/),
+    ).not.toBeInTheDocument();
   });
 
   it("shows Cancel for a running task, only closing after confirmation", async () => {
     const act = vi.fn();
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
     const user = userEvent.setup();
-    render(<DetailOverlay task={{ ...baseTask, state: "running" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "running" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
@@ -423,7 +723,16 @@ describe("DetailOverlay", () => {
     const act = vi.fn();
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const user = userEvent.setup();
-    render(<DetailOverlay task={{ ...baseTask, state: "running" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={{ ...baseTask, state: "running" }}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
@@ -438,7 +747,16 @@ describe("DetailOverlay", () => {
   it("shows Close for a queued task, wired to the close endpoint", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Close" }));
 
@@ -464,10 +782,12 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={act}
-      />
+      />,
     );
 
-    const box = screen.getByRole("checkbox", { name: /Close acme\/widgets#42 too/ });
+    const box = screen.getByRole("checkbox", {
+      name: /Close acme\/widgets#42 too/,
+    });
     expect(box).not.toBeChecked();
 
     await user.click(screen.getByRole("button", { name: "Close" }));
@@ -488,9 +808,18 @@ describe("DetailOverlay", () => {
 
   it("does not offer to close a pull request there is no open one to close", () => {
     const { rerender } = render(
-      <DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
-    expect(screen.queryByRole("checkbox", { name: /too/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /too/ }),
+    ).not.toBeInTheDocument();
 
     // One that already merged is the same: there is nothing left to
     // close, and an option with nothing behind it invites a tick that
@@ -507,9 +836,11 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
-    expect(screen.queryByRole("checkbox", { name: /too/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /too/ }),
+    ).not.toBeInTheDocument();
   });
 
   // Cancelling a running task takes the same close path, so it can orphan
@@ -528,13 +859,17 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={act}
-      />
+      />,
     );
 
-    await user.click(screen.getByRole("checkbox", { name: /Close acme\/widgets#42 too/ }));
+    await user.click(
+      screen.getByRole("checkbox", { name: /Close acme\/widgets#42 too/ }),
+    );
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(confirm.mock.calls[0][0]).toMatch(/close acme\/widgets#42 on GitHub/);
+    expect(confirm.mock.calls[0][0]).toMatch(
+      /close acme\/widgets#42 on GitHub/,
+    );
     act.mock.calls[0][0]();
     expect(api).toHaveBeenCalledWith("/api/tasks/12/close", {
       method: "POST",
@@ -546,13 +881,18 @@ describe("DetailOverlay", () => {
   it("shows declared repo, base and auto-merge", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, repo: "acme/widgets", base: "main", autoMerge: true }}
+        task={{
+          ...baseTask,
+          repo: "acme/widgets",
+          base: "main",
+          autoMerge: true,
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("acme/widgets")).toBeInTheDocument();
@@ -572,7 +912,7 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("acme/shared")).toBeInTheDocument();
@@ -594,7 +934,7 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={() => {}}
-      />
+      />,
     );
 
     await user.click(screen.getByLabelText(/Read-only repos/));
@@ -617,7 +957,7 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={() => {}}
-      />
+      />,
     );
 
     await user.click(screen.getByTitle("Remove acme/shared"));
@@ -643,7 +983,7 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={() => {}}
-      />
+      />,
     );
 
     const box = screen.getByLabelText(/Read-only repos/);
@@ -673,7 +1013,7 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={showError}
-      />
+      />,
     );
 
     await user.click(screen.getByTitle("Remove acme/shared"));
@@ -696,7 +1036,7 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={() => {}}
-      />
+      />,
     );
 
     expect(screen.getByText(/not cloned into it/)).toBeInTheDocument();
@@ -712,7 +1052,7 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={() => {}}
-      />
+      />,
     );
 
     expect(screen.queryByText(/not cloned into it/)).not.toBeInTheDocument();
@@ -726,7 +1066,16 @@ describe("DetailOverlay", () => {
     // invocation (as the other assertions in this file use) ran it.
     const act = vi.fn((mutate) => mutate());
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByLabelText("Capabilities"));
     await user.click(await screen.findByRole("option", { name: "Web search" }));
@@ -746,10 +1095,21 @@ describe("DetailOverlay", () => {
     const act = vi.fn((mutate) => mutate());
     const user = userEvent.setup();
     const task = { ...baseTask, capabilities: ["scratch-repo"] };
-    render(<DetailOverlay task={task} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={task}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByLabelText("Capabilities"));
-    await user.click(await screen.findByRole("option", { name: "scratch-repo" }));
+    await user.click(
+      await screen.findByRole("option", { name: "scratch-repo" }),
+    );
 
     expect(api).toHaveBeenCalledWith("/api/tasks/12/capabilities", {
       method: "POST",
@@ -758,7 +1118,16 @@ describe("DetailOverlay", () => {
   });
 
   it("shows no timeline entries when the task has no history", () => {
-    const { container } = render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    const { container } = render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.getByText("Timeline")).toBeInTheDocument();
     expect(container.querySelectorAll(".timeline-item")).toHaveLength(0);
   });
@@ -772,7 +1141,13 @@ describe("DetailOverlay", () => {
         task={{
           ...baseTask,
           attempts: [
-            { number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:10:00Z", outcome: "failed", detail: "build error" },
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:10:00Z",
+              outcome: "failed",
+              detail: "build error",
+            },
             { number: 2, startedAt: "2026-08-28T13:00:00Z" },
           ],
         }}
@@ -781,7 +1156,7 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("Failed")).toBeInTheDocument();
@@ -809,10 +1184,13 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    const list = screen
+      .getByText("Timeline")
+      .closest(".timeline")
+      .querySelector(".timeline-list");
     expect(within(list).getAllByText("Running")).toHaveLength(1);
     expect(list.querySelectorAll(".timeline-item")).toHaveLength(2);
   });
@@ -833,10 +1211,13 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    const list = screen
+      .getByText("Timeline")
+      .closest(".timeline")
+      .querySelector(".timeline-list");
     const labels = ["Proposed", "Queued", "Running"];
     for (const label of labels) {
       expect(within(list).getByText(label)).toBeInTheDocument();
@@ -859,25 +1240,33 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    const list = screen
+      .getByText("Timeline")
+      .closest(".timeline")
+      .querySelector(".timeline-list");
     expect(within(list).getByText("PR opened")).toBeInTheDocument();
     expect(within(list).getByText("PR merged")).toBeInTheDocument();
-    expect(within(list).getAllByRole("link", { name: "acme/widgets#42" })).toHaveLength(2);
+    expect(
+      within(list).getAllByRole("link", { name: "acme/widgets#42" }),
+    ).toHaveLength(2);
   });
 
   it("labels a pull request closed without merging distinctly from a merged one", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, pullRequestEvents: [{ kind: "closed", at: "2026-08-28T12:00:00Z" }] }}
+        task={{
+          ...baseTask,
+          pullRequestEvents: [{ kind: "closed", at: "2026-08-28T12:00:00Z" }],
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
     expect(screen.getByText("PR closed without merging")).toBeInTheDocument();
   });
@@ -901,10 +1290,13 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    const list = screen
+      .getByText("Timeline")
+      .closest(".timeline")
+      .querySelector(".timeline-list");
     const items = [...list.querySelectorAll(".timeline-item")];
     expect(items[items.length - 1].textContent).toContain("Closed");
   });
@@ -925,10 +1317,13 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    const list = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-list");
+    const list = screen
+      .getByText("Timeline")
+      .closest(".timeline")
+      .querySelector(".timeline-list");
     const items = [...list.querySelectorAll(".timeline-item")];
     expect(items[0].textContent).toContain("Proposed");
   });
@@ -942,8 +1337,22 @@ describe("DetailOverlay", () => {
             { state: "proposed", at: "2026-08-28T09:00:00Z" },
             { state: "closed", at: "2026-08-28T15:00:00Z" },
           ],
-          attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:10:00Z", outcome: "succeeded" }],
-          comments: [{ author: "alice", authorKind: "human", body: "looks good", createdAt: "2026-08-28T13:00:00Z" }],
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:10:00Z",
+              outcome: "succeeded",
+            },
+          ],
+          comments: [
+            {
+              author: "alice",
+              authorKind: "human",
+              body: "looks good",
+              createdAt: "2026-08-28T13:00:00Z",
+            },
+          ],
           pullRequestEvents: [{ kind: "merged", at: "2026-08-28T14:00:00Z" }],
         }}
         tasks={[]}
@@ -951,11 +1360,19 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    const titles = screen.getAllByText(/^Proposed$|^Succeeded$|^looks good$|^PR merged$|^Closed$/).map((el) => el.textContent);
-    expect(titles).toEqual(["Proposed", "Succeeded", "looks good", "PR merged", "Closed"]);
+    const titles = screen
+      .getAllByText(/^Proposed$|^Succeeded$|^looks good$|^PR merged$|^Closed$/)
+      .map((el) => el.textContent);
+    expect(titles).toEqual([
+      "Proposed",
+      "Succeeded",
+      "looks good",
+      "PR merged",
+      "Closed",
+    ]);
   });
 
   it("only animates the running badge for the current transition, not a past one", () => {
@@ -976,12 +1393,16 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    const runningItems = screen.getAllByText("Running").map((el) => el.closest(".timeline-item"));
+    const runningItems = screen
+      .getAllByText("Running")
+      .map((el) => el.closest(".timeline-item"));
     expect(runningItems[0].querySelector(".badge")).toHaveClass("badge-static");
-    expect(runningItems[1].querySelector(".badge")).not.toHaveClass("badge-static");
+    expect(runningItems[1].querySelector(".badge")).not.toHaveClass(
+      "badge-static",
+    );
   });
 
   // A run that ended without an agent ever finishing still ended, and
@@ -1000,7 +1421,8 @@ describe("DetailOverlay", () => {
               startedAt: "2026-08-28T12:00:00Z",
               finishedAt: "2026-08-28T12:02:00Z",
               outcome: "setup-failed",
-              detail: "this run's sandbox could not be prepared: guest never became reachable",
+              detail:
+                "this run's sandbox could not be prepared: guest never became reachable",
             },
           ],
         }}
@@ -1009,7 +1431,7 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     const item = screen.getByText("Setup failed").closest(".timeline-item");
@@ -1035,7 +1457,7 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     const item = screen.getByText("Orphaned").closest(".timeline-item");
@@ -1069,7 +1491,7 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     const item = screen.getByText("Finish failed").closest(".timeline-item");
@@ -1084,7 +1506,12 @@ describe("DetailOverlay", () => {
         task={{
           ...baseTask,
           attempts: [
-            { number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:02:00Z", outcome: "invented" },
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:02:00Z",
+              outcome: "invented",
+            },
           ],
         }}
         tasks={[]}
@@ -1092,14 +1519,23 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("Invented")).toBeInTheDocument();
   });
 
   it("shows a hint when there are no dependencies", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
     expect(screen.getByText("No dependencies.")).toBeInTheDocument();
   });
 
@@ -1115,7 +1551,7 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={onOpenTask}
         act={act}
-      />
+      />,
     );
 
     expect(screen.getByText("9 (open)")).toBeInTheDocument();
@@ -1142,12 +1578,14 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     const chip = screen.getByText("9 Add dark mode (open)");
     await user.hover(chip);
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("9 Add dark mode — Running (blocking this task)");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "9 Add dark mode — Running (blocking this task)",
+    );
   });
 
   it("falls back to the id for a dependency the task list does not carry", async () => {
@@ -1160,7 +1598,7 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     await user.hover(screen.getByText("9"));
@@ -1171,7 +1609,16 @@ describe("DetailOverlay", () => {
     const act = vi.fn();
     const tasks = [{ id: "20", title: "Add dark mode" }];
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={tasks} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.type(screen.getByPlaceholderText("Add a dependency…"), "20");
     await user.click(await screen.findByText("Add dark mode"));
@@ -1190,7 +1637,12 @@ describe("DetailOverlay", () => {
           ...baseTask,
           comments: [
             { author: "alice", authorKind: "human", body: "please retry" },
-            { author: "grain", authorKind: "agent", onBehalfOf: "the dispatched run", body: "what branch should I target?" },
+            {
+              author: "grain",
+              authorKind: "agent",
+              onBehalfOf: "the dispatched run",
+              body: "what branch should I target?",
+            },
           ],
         }}
         tasks={[]}
@@ -1198,12 +1650,14 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     expect(screen.getByText("alice · human")).toBeInTheDocument();
     expect(screen.getByText("please retry")).toBeInTheDocument();
-    expect(screen.getByText("grain on behalf of the dispatched run · agent")).toBeInTheDocument();
+    expect(
+      screen.getByText("grain on behalf of the dispatched run · agent"),
+    ).toBeInTheDocument();
   });
 
   // grain/task-93: an agent's answer arrives as markdown, and reading it
@@ -1216,7 +1670,11 @@ describe("DetailOverlay", () => {
         task={{
           ...baseTask,
           comments: [
-            { author: "grain", authorKind: "agent", body: "## What I did\n\n- touched `run.go`\n- pushed it" },
+            {
+              author: "grain",
+              authorKind: "agent",
+              body: "## What I did\n\n- touched `run.go`\n- pushed it",
+            },
           ],
         }}
         tasks={[]}
@@ -1224,11 +1682,15 @@ describe("DetailOverlay", () => {
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    expect(screen.getByRole("heading", { name: "What I did" })).toBeInTheDocument();
-    expect(document.querySelectorAll(".timeline-comment-body li")).toHaveLength(2);
+    expect(
+      screen.getByRole("heading", { name: "What I did" }),
+    ).toBeInTheDocument();
+    expect(document.querySelectorAll(".timeline-comment-body li")).toHaveLength(
+      2,
+    );
     expect(screen.getByText("run.go").tagName).toBe("CODE");
   });
 
@@ -1238,22 +1700,36 @@ describe("DetailOverlay", () => {
   it("renders the description as markdown", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, description: "**Why:** the retry path never resets" }}
+        task={{
+          ...baseTask,
+          description: "**Why:** the retry path never resets",
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
-    expect(document.querySelector(".description strong")).toHaveTextContent("Why:");
+    expect(document.querySelector(".description strong")).toHaveTextContent(
+      "Why:",
+    );
   });
 
   it("posts a comment and clears the textarea", async () => {
     const act = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     const textarea = screen.getByPlaceholderText("Reply...");
     await user.type(textarea, "sounds good");
@@ -1274,12 +1750,26 @@ describe("DetailOverlay", () => {
   // now that task rows no longer carry a button of their own.
   it("opens the full prompt the agent was given", async () => {
     const user = userEvent.setup();
-    api.mockResolvedValueOnce({ prompt: "Fix the login bug\n\nWork in acme/widgets.", attempt: 2 });
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    api.mockResolvedValueOnce({
+      prompt: "Fix the login bug\n\nWork in acme/widgets.",
+      attempt: 2,
+    });
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Prompt" }));
 
-    expect(await screen.findByText(/Work in acme\/widgets\./)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Work in acme\/widgets\./),
+    ).toBeInTheDocument();
     expect(api).toHaveBeenLastCalledWith("/api/tasks/12/prompt");
   });
 
@@ -1288,7 +1778,16 @@ describe("DetailOverlay", () => {
   it("edits the title and description via the PATCH endpoint", async () => {
     const act = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
 
@@ -1305,7 +1804,11 @@ describe("DetailOverlay", () => {
     act.mock.calls[0][0]();
     expect(api).toHaveBeenCalledWith("/api/tasks/12", {
       method: "PATCH",
-      body: JSON.stringify({ title: "Fix the login bug for real", description: "New repro steps", reviewTemplateId: "" }),
+      body: JSON.stringify({
+        title: "Fix the login bug for real",
+        description: "New repro steps",
+        reviewTemplateId: "",
+      }),
     });
     // Back to the read-only view once saved.
     expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
@@ -1320,10 +1823,14 @@ describe("DetailOverlay", () => {
     const user = userEvent.setup();
     render(
       <DetailOverlay
-        task={baseTask} tasks={[]} config={config}
+        task={baseTask}
+        tasks={[]}
+        config={config}
         templates={[{ id: "7", name: "Security pass" }]}
-        onClose={() => {}} onOpenTask={() => {}} act={act}
-      />
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
     );
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
@@ -1342,21 +1849,40 @@ describe("DetailOverlay", () => {
     const user = userEvent.setup();
     render(
       <DetailOverlay
-        task={{ ...baseTask, reviewTemplateId: "7", reviewTemplateName: "Security pass", reviewTask: "91" }}
-        tasks={[]} config={config}
+        task={{
+          ...baseTask,
+          reviewTemplateId: "7",
+          reviewTemplateName: "Security pass",
+          reviewTask: "91",
+        }}
+        tasks={[]}
+        config={config}
         templates={[{ id: "7", name: "Security pass" }]}
-        onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
-      />
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
     );
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
-    expect(screen.getByText(/Task 91 is already reviewing this one/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Task 91 is already reviewing this one/),
+    ).toBeInTheDocument();
   });
 
   it("leaves the task unchanged when editing is cancelled", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.type(screen.getByLabelText("Title"), " (draft)");
@@ -1368,7 +1894,16 @@ describe("DetailOverlay", () => {
 
   it("disables Save once the title is cleared", async () => {
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.clear(screen.getByLabelText("Title"));
@@ -1379,7 +1914,16 @@ describe("DetailOverlay", () => {
   it("does not post an empty or whitespace-only comment with no attachment either", async () => {
     const act = vi.fn();
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     await user.type(screen.getByPlaceholderText("Reply..."), "   ");
     await user.click(screen.getByRole("button", { name: "Comment" }));
@@ -1391,11 +1935,24 @@ describe("DetailOverlay", () => {
   // still worth sending -- the empty-comment guard above must not treat
   // it the same as one with nothing at all.
   it("posts a comment carrying only an attachment, with no body", async () => {
-    const upload = { filename: "screenshot.png", contentType: "image/png", content: "ZmFrZQ==" };
+    const upload = {
+      filename: "screenshot.png",
+      contentType: "image/png",
+      content: "ZmFrZQ==",
+    };
     fileToAttachment.mockResolvedValueOnce(upload);
     const act = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={act}
+      />,
+    );
 
     const file = new File(["fake"], "screenshot.png", { type: "image/png" });
     await user.upload(document.querySelector('input[type="file"]'), file);
@@ -1414,14 +1971,28 @@ describe("DetailOverlay", () => {
       <DetailOverlay
         task={{
           ...baseTask,
-          comments: [{ author: "alice", authorKind: "human", body: "", attachments: [{ id: 5, filename: "repro.zip", contentType: "application/zip", size: 9 }] }],
+          comments: [
+            {
+              author: "alice",
+              authorKind: "human",
+              body: "",
+              attachments: [
+                {
+                  id: 5,
+                  filename: "repro.zip",
+                  contentType: "application/zip",
+                  size: 9,
+                },
+              ],
+            },
+          ],
         }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     const link = screen.getByRole("link", { name: "repro.zip" });
@@ -1431,13 +2002,23 @@ describe("DetailOverlay", () => {
   it("shows the task's own attachments as links to the download endpoint", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, attachments: [{ id: 3, filename: "notes.txt", contentType: "text/plain", size: 4 }] }}
+        task={{
+          ...baseTask,
+          attachments: [
+            {
+              id: 3,
+              filename: "notes.txt",
+              contentType: "text/plain",
+              size: 4,
+            },
+          ],
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
-      />
+      />,
     );
 
     const link = screen.getByRole("link", { name: "notes.txt" });
@@ -1451,19 +2032,31 @@ describe("DetailOverlay", () => {
     const user = userEvent.setup();
     render(
       <DetailOverlay
-        task={{ ...baseTask, attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z", finishedAt: "2026-08-28T12:10:00Z", outcome: "succeeded" }] }}
+        task={{
+          ...baseTask,
+          attempts: [
+            {
+              number: 1,
+              startedAt: "2026-08-28T12:00:00Z",
+              finishedAt: "2026-08-28T12:10:00Z",
+              outcome: "succeeded",
+            },
+          ],
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={vi.fn()}
-      />
+      />,
     );
 
     await user.click(screen.getByText("Succeeded"));
 
-    expect(await screen.findByText("Attempt #1 transcript")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Attempt #1 transcript"),
+    ).toBeInTheDocument();
     expect(await screen.findByText("found it")).toBeInTheDocument();
     expect(api).toHaveBeenLastCalledWith("/api/tasks/12/attempts/1/transcript");
   });
@@ -1473,36 +2066,47 @@ describe("DetailOverlay", () => {
     const user = userEvent.setup();
     render(
       <DetailOverlay
-        task={{ ...baseTask, attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z" }] }}
+        task={{
+          ...baseTask,
+          attempts: [{ number: 1, startedAt: "2026-08-28T12:00:00Z" }],
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={vi.fn()}
-      />
+      />,
     );
 
     screen.getByText("Running").closest(".timeline-item-attempt").focus();
     await user.keyboard("{Enter}");
 
-    expect(await screen.findByText("Attempt #1 transcript")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Attempt #1 transcript"),
+    ).toBeInTheDocument();
   });
 
   it("does not make a plain transition or comment row interactive", () => {
     render(
       <DetailOverlay
-        task={{ ...baseTask, transitions: [{ state: "queued", at: "2026-08-28T12:00:00Z" }] }}
+        task={{
+          ...baseTask,
+          transitions: [{ state: "queued", at: "2026-08-28T12:00:00Z" }],
+        }}
         tasks={[]}
         config={config}
         onClose={() => {}}
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={vi.fn()}
-      />
+      />,
     );
 
-    const row = screen.getByText("Timeline").closest(".timeline").querySelector(".timeline-item");
+    const row = screen
+      .getByText("Timeline")
+      .closest(".timeline")
+      .querySelector(".timeline-item");
     expect(row).not.toHaveClass("timeline-item-attempt");
     expect(row).not.toHaveAttribute("tabindex");
   });
@@ -1521,7 +2125,12 @@ describe("DetailOverlay", () => {
         task={{
           ...baseTask,
           state: "awaiting_reply",
-          pendingSecret: { name: "stripe-api-key", secret: "stripe-api-key", key: "value", set: false },
+          pendingSecret: {
+            name: "stripe-api-key",
+            secret: "stripe-api-key",
+            key: "value",
+            set: false,
+          },
         }}
         tasks={[]}
         config={config}
@@ -1529,7 +2138,7 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={act}
         showError={vi.fn()}
-      />
+      />,
     );
 
     const box = screen.getByLabelText("Value for stripe-api-key");
@@ -1543,7 +2152,10 @@ describe("DetailOverlay", () => {
     });
     // Never as a comment: that is the whole distinction this box exists
     // to draw.
-    expect(api).not.toHaveBeenCalledWith("/api/tasks/12/comments", expect.anything());
+    expect(api).not.toHaveBeenCalledWith(
+      "/api/tasks/12/comments",
+      expect.anything(),
+    );
   });
 
   it("keeps a rejected value in the box rather than clearing it", async () => {
@@ -1555,7 +2167,12 @@ describe("DetailOverlay", () => {
         task={{
           ...baseTask,
           state: "awaiting_reply",
-          pendingSecret: { name: "stripe-api-key", secret: "stripe-api-key", key: "value", set: false },
+          pendingSecret: {
+            name: "stripe-api-key",
+            secret: "stripe-api-key",
+            key: "value",
+            set: false,
+          },
         }}
         tasks={[]}
         config={config}
@@ -1563,19 +2180,36 @@ describe("DetailOverlay", () => {
         onOpenTask={() => {}}
         act={vi.fn()}
         showError={showError}
-      />
+      />,
     );
 
-    await user.type(screen.getByLabelText("Value for stripe-api-key"), "sk_live_1");
+    await user.type(
+      screen.getByLabelText("Value for stripe-api-key"),
+      "sk_live_1",
+    );
     await user.click(screen.getByRole("button", { name: "Set secret" }));
 
     expect(showError).toHaveBeenCalled();
-    expect(screen.getByLabelText("Value for stripe-api-key")).toHaveValue("sk_live_1");
+    expect(screen.getByLabelText("Value for stripe-api-key")).toHaveValue(
+      "sk_live_1",
+    );
   });
 
   it("offers no secret box on a task with no pending secret", () => {
-    render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} showError={vi.fn()} />);
+    render(
+      <DetailOverlay
+        task={baseTask}
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onOpenTask={() => {}}
+        act={vi.fn()}
+        showError={vi.fn()}
+      />,
+    );
 
-    expect(screen.queryByRole("button", { name: "Set secret" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Set secret" }),
+    ).not.toBeInTheDocument();
   });
 });

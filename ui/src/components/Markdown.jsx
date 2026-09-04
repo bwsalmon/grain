@@ -37,7 +37,9 @@ const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 // in is a transient thing, and navigating it away loses whatever the
 // operator was in the middle of.
 const COMPONENTS = {
-  a: ({ node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+  a: ({ node, ...props }) => (
+    <a {...props} target="_blank" rel="noopener noreferrer" />
+  ),
 };
 
 // className is the caller's own styling hook (.description,

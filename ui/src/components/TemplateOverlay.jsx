@@ -1,5 +1,19 @@
 import { useState } from "react";
-import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import {
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  FormControl,
+  FormControlLabel,
+  InputLabel,
+  ListItemText,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
@@ -22,9 +36,18 @@ import RepoField from "./RepoField.jsx";
 // every firing targets instead, and those pickers stop asking.
 // Re-submitting this form with the repo cleared unbinds the template,
 // which is exactly what ui.UpdateTemplateRequest reads an empty repo as.
-export default function TemplateOverlay({ template, repoOptions = [], config, onClose, onSaved, showError }) {
+export default function TemplateOverlay({
+  template,
+  repoOptions = [],
+  config,
+  onClose,
+  onSaved,
+  showError,
+}) {
   const isNew = !template;
-  const [capabilities, setCapabilities] = useState(template?.capabilities || []);
+  const [capabilities, setCapabilities] = useState(
+    template?.capabilities || [],
+  );
   // reads is state for the reason capabilities is: its picker
   // (ReadOnlyReposField) is a search box, not a form field submit could
   // read the answer off.
@@ -46,8 +69,14 @@ export default function TemplateOverlay({ template, repoOptions = [], config, on
     };
     try {
       const saved = isNew
-        ? await api("/api/templates", { method: "POST", body: JSON.stringify(payload) })
-        : await api(`/api/templates/${template.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+        ? await api("/api/templates", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          })
+        : await api(`/api/templates/${template.id}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
       await onSaved(saved);
       onClose();
     } catch (err) {
@@ -56,7 +85,12 @@ export default function TemplateOverlay({ template, repoOptions = [], config, on
   };
 
   const remove = async () => {
-    if (!confirm(`Delete the template "${template.name}"? Schedules using it must be repointed or deleted first.`)) return;
+    if (
+      !confirm(
+        `Delete the template "${template.name}"? Schedules using it must be repointed or deleted first.`,
+      )
+    )
+      return;
     try {
       await api(`/api/templates/${template.id}`, { method: "DELETE" });
       await onSaved();
@@ -68,16 +102,56 @@ export default function TemplateOverlay({ template, repoOptions = [], config, on
 
   return (
     <Overlay onClose={onClose} pane backLabel="Templates">
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New template" : "Edit template"}</Typography>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>
+        {isNew ? "New template" : "Edit template"}
+      </Typography>
       <form className="pane-form" onSubmit={submit}>
-        <TextField name="name" label="Name" defaultValue={template?.name} required InputLabelProps={{ required: false }} helperText="shown wherever a template is picked" autoComplete="off" fullWidth margin="normal" />
-        <TextField name="title" label="Task title" defaultValue={template?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
-        <TextField name="description" label="Description" defaultValue={template?.description} multiline rows={4} fullWidth margin="normal" />
+        <TextField
+          name="name"
+          label="Name"
+          defaultValue={template?.name}
+          required
+          InputLabelProps={{ required: false }}
+          helperText="shown wherever a template is picked"
+          autoComplete="off"
+          fullWidth
+          margin="normal"
+        />
+        <TextField
+          name="title"
+          label="Task title"
+          defaultValue={template?.title}
+          required
+          InputLabelProps={{ required: false }}
+          autoComplete="off"
+          fullWidth
+          margin="normal"
+        />
+        <TextField
+          name="description"
+          label="Description"
+          defaultValue={template?.description}
+          multiline
+          rows={4}
+          fullWidth
+          margin="normal"
+        />
         <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-            Target repo <span className="hint">optional -- leave empty to let whatever fires this template choose</span>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mb: 0.5 }}
+          >
+            Target repo{" "}
+            <span className="hint">
+              optional -- leave empty to let whatever fires this template choose
+            </span>
           </Typography>
-          <RepoField name="repo" options={repoOptions} defaultValue={template?.repo || ""} />
+          <RepoField
+            name="repo"
+            options={repoOptions}
+            defaultValue={template?.repo || ""}
+          />
         </Box>
         <TextField
           name="base"
@@ -89,9 +163,15 @@ export default function TemplateOverlay({ template, repoOptions = [], config, on
           fullWidth
           margin="normal"
         />
-        <ReadOnlyReposField options={repoOptions} value={reads} onChange={setReads} />
+        <ReadOnlyReposField
+          options={repoOptions}
+          value={reads}
+          onChange={setReads}
+        />
         <FormControlLabel
-          control={<Checkbox name="autoMerge" defaultChecked={template?.autoMerge} />}
+          control={
+            <Checkbox name="autoMerge" defaultChecked={template?.autoMerge} />
+          }
           label="Auto-merge once checks pass"
           sx={{ display: "flex", mt: 1 }}
         />
@@ -106,7 +186,9 @@ export default function TemplateOverlay({ template, repoOptions = [], config, on
             renderValue={(selected) => (
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
                 {selected.map((id) => {
-                  const c = (config?.capabilities || []).find((cap) => cap.id === id);
+                  const c = (config?.capabilities || []).find(
+                    (cap) => cap.id === id,
+                  );
                   return <Chip key={id} size="small" label={c ? c.name : id} />;
                 })}
               </Box>
@@ -120,11 +202,22 @@ export default function TemplateOverlay({ template, repoOptions = [], config, on
             ))}
           </Select>
         </FormControl>
-        <Stack direction="row" justifyContent={isNew ? "flex-end" : "space-between"} alignItems="center" sx={{ mt: 2 }}>
-          {!isNew && <Button color="error" onClick={remove}>Delete</Button>}
+        <Stack
+          direction="row"
+          justifyContent={isNew ? "flex-end" : "space-between"}
+          alignItems="center"
+          sx={{ mt: 2 }}
+        >
+          {!isNew && (
+            <Button color="error" onClick={remove}>
+              Delete
+            </Button>
+          )}
           <Stack direction="row" spacing={1}>
             <Button onClick={onClose}>Cancel</Button>
-            <Button type="submit" variant="contained">{isNew ? "Add template" : "Save"}</Button>
+            <Button type="submit" variant="contained">
+              {isNew ? "Add template" : "Save"}
+            </Button>
           </Stack>
         </Stack>
       </form>

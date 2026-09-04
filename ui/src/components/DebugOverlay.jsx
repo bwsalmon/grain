@@ -52,7 +52,12 @@ export default function DebugOverlay({ config, onClose, showError }) {
   // from an actual failure (disabled, or the sudo command itself
   // erroring) worth showing the operator.
   const rebootHost = async () => {
-    if (!confirm("Reboot the host machine? Every task currently running is interrupted, and this UI will be unreachable until the machine comes back up.")) return;
+    if (
+      !confirm(
+        "Reboot the host machine? Every task currently running is interrupted, and this UI will be unreachable until the machine comes back up.",
+      )
+    )
+      return;
     try {
       await api("/api/host/reboot", { method: "POST" });
     } catch (err) {
@@ -65,8 +70,15 @@ export default function DebugOverlay({ config, onClose, showError }) {
   // under them.
   const header = (
     <>
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Debug</Typography>
-      <Tabs value={tab} onChange={(_, value) => setTab(value)} variant="scrollable" scrollButtons="auto">
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>
+        Debug
+      </Typography>
+      <Tabs
+        value={tab}
+        onChange={(_, value) => setTab(value)}
+        variant="scrollable"
+        scrollButtons="auto"
+      >
         {TABS.map((t) => (
           <Tab key={t.id} value={t.id} label={t.label} />
         ))}
@@ -85,17 +97,23 @@ export default function DebugOverlay({ config, onClose, showError }) {
       {tab === "logs" && <LogsPage showError={showError} />}
       {tab === "sandboxHealth" && <SandboxHealthPage showError={showError} />}
       {tab === "top" && <TopPage showError={showError} />}
-      {tab === "restart" && (
-        config && config.rebootEnabled ? (
+      {tab === "restart" &&
+        (config && config.rebootEnabled ? (
           <fieldset>
             <legend>Danger zone</legend>
-            <p className="hint">Reboots the machine grain itself is running on.</p>
-            <Button variant="outlined" color="error" onClick={rebootHost}>Reboot host</Button>
+            <p className="hint">
+              Reboots the machine grain itself is running on.
+            </p>
+            <Button variant="outlined" color="error" onClick={rebootHost}>
+              Reboot host
+            </Button>
           </fieldset>
         ) : (
-          <Alert severity="info">Not available: rebooting the host is not enabled for this deployment.</Alert>
-        )
-      )}
+          <Alert severity="info">
+            Not available: rebooting the host is not enabled for this
+            deployment.
+          </Alert>
+        ))}
     </Overlay>
   );
 }

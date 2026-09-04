@@ -21,25 +21,41 @@ describe("ThemeModeContext", () => {
   });
 
   it("defaults to auto with nothing stored", () => {
-    render(<ThemeModeProvider><Probe /></ThemeModeProvider>);
+    render(
+      <ThemeModeProvider>
+        <Probe />
+      </ThemeModeProvider>,
+    );
     expect(screen.getByTestId("mode")).toHaveTextContent("auto");
   });
 
   it("reads a previously stored mode on mount", () => {
     localStorage.setItem("grain.themeMode", "dark");
-    render(<ThemeModeProvider><Probe /></ThemeModeProvider>);
+    render(
+      <ThemeModeProvider>
+        <Probe />
+      </ThemeModeProvider>,
+    );
     expect(screen.getByTestId("mode")).toHaveTextContent("dark");
   });
 
   it("ignores a stored value that is not a known mode", () => {
     localStorage.setItem("grain.themeMode", "sepia");
-    render(<ThemeModeProvider><Probe /></ThemeModeProvider>);
+    render(
+      <ThemeModeProvider>
+        <Probe />
+      </ThemeModeProvider>,
+    );
     expect(screen.getByTestId("mode")).toHaveTextContent("auto");
   });
 
   it("persists an explicit choice and reflects it immediately", async () => {
     const user = userEvent.setup();
-    render(<ThemeModeProvider><Probe /></ThemeModeProvider>);
+    render(
+      <ThemeModeProvider>
+        <Probe />
+      </ThemeModeProvider>,
+    );
 
     await user.click(screen.getByRole("button", { name: "dark" }));
 
@@ -50,7 +66,11 @@ describe("ThemeModeContext", () => {
   it("clears storage when switching back to auto", async () => {
     localStorage.setItem("grain.themeMode", "light");
     const user = userEvent.setup();
-    render(<ThemeModeProvider><Probe /></ThemeModeProvider>);
+    render(
+      <ThemeModeProvider>
+        <Probe />
+      </ThemeModeProvider>,
+    );
 
     await user.click(screen.getByRole("button", { name: "auto" }));
 

@@ -64,7 +64,11 @@ export const DEFAULT_COLUMNS = [
   { id: "proposed", title: "Proposed", states: ["proposed"] },
   { id: "queued", title: "Queued", states: ["queued"] },
   { id: "running", title: "Running", states: ["running"] },
-  { id: "needs-you", title: "Needs you", states: ["awaiting_reply", "failed", "awaiting_submit"] },
+  {
+    id: "needs-you",
+    title: "Needs you",
+    states: ["awaiting_reply", "failed", "awaiting_submit"],
+  },
   { id: "landing", title: "Queued for merge", states: ["completed"] },
 ];
 
@@ -84,7 +88,11 @@ let nextColumnSeq = 0;
 // enough -- it only has to be unique among the columns on screen.
 export function newColumn() {
   nextColumnSeq += 1;
-  return { id: `col-${Date.now().toString(36)}-${nextColumnSeq}`, title: "New column", states: [] };
+  return {
+    id: `col-${Date.now().toString(36)}-${nextColumnSeq}`,
+    title: "New column",
+    states: [],
+  };
 }
 
 // normalizeColumns turns whatever was stored -- or whatever the editor
@@ -119,11 +127,15 @@ export function normalizeColumns(raw) {
       ? c.states.filter((s) => known.has(s) && !taken.has(s))
       : [];
     for (const s of states) taken.add(s);
-    let id = typeof c.id === "string" && c.id !== "" && !ids.has(c.id) ? c.id : newColumn().id;
+    let id =
+      typeof c.id === "string" && c.id !== "" && !ids.has(c.id)
+        ? c.id
+        : newColumn().id;
     ids.add(id);
-    const title = typeof c.title === "string" && c.title.trim() !== ""
-      ? c.title.trim()
-      : states.map((s) => STATE_LABELS[s] || s).join(" · ") || "Untitled";
+    const title =
+      typeof c.title === "string" && c.title.trim() !== ""
+        ? c.title.trim()
+        : states.map((s) => STATE_LABELS[s] || s).join(" · ") || "Untitled";
     columns.push({ id, title, states });
   }
   return columns.length > 0 ? columns : null;

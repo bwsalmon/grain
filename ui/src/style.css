@@ -61,7 +61,8 @@
      its own instead. */
   --pr-merged: #8250df;
 
-  --shadow-panel: 0 16px 40px rgba(26, 24, 19, 0.16), 0 2px 8px rgba(26, 24, 19, 0.08);
+  --shadow-panel:
+    0 16px 40px rgba(26, 24, 19, 0.16), 0 2px 8px rgba(26, 24, 19, 0.08);
   --shadow-toast: 0 10px 28px rgba(26, 24, 19, 0.28);
 }
 
@@ -114,11 +115,20 @@
   --shadow-toast: 0 10px 28px rgba(0, 0, 0, 0.6);
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
 body {
   margin: 0;
-  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font:
+    14px/1.5 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
   color: var(--text);
   background: var(--canvas);
 }
@@ -178,7 +188,11 @@ body {
   padding: 1rem 1.75rem;
   border-bottom: 1px solid var(--border);
 }
-.content-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+.content-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
 /* The page's item glyph, ahead of its title. Centred on the line rather
    than on the header's baseline, which for a replaced element is its
    bottom edge and would hang the figure a third of itself too high.
@@ -188,7 +202,11 @@ body {
   align-self: center;
   color: var(--text-tertiary);
 }
-.content-header .count { color: var(--text-tertiary); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.content-header .count {
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ---------- Status dot: a small colored circle stands in for the state
    pill everywhere a state is shown, in place of the filled badge. ---------- */
@@ -199,16 +217,37 @@ body {
   flex: none;
   background: var(--text-tertiary);
 }
-.dot-all { background: transparent; }
-.dot-proposed { background: var(--state-proposed); }
-.dot-queued { background: transparent; border: 1.5px solid var(--state-queued); }
-.dot-running { background: var(--state-running); }
-.dot-awaiting_reply { background: var(--state-awaiting); }
-.dot-failed { background: var(--state-failed); }
-.dot-awaiting_submit { background: var(--state-awaiting-submit); }
-.dot-completed { background: var(--state-completed); }
-.dot-closed { background: var(--state-closed); }
-.dot-blocked { background: var(--danger); }
+.dot-all {
+  background: transparent;
+}
+.dot-proposed {
+  background: var(--state-proposed);
+}
+.dot-queued {
+  background: transparent;
+  border: 1.5px solid var(--state-queued);
+}
+.dot-running {
+  background: var(--state-running);
+}
+.dot-awaiting_reply {
+  background: var(--state-awaiting);
+}
+.dot-failed {
+  background: var(--state-failed);
+}
+.dot-awaiting_submit {
+  background: var(--state-awaiting-submit);
+}
+.dot-completed {
+  background: var(--state-completed);
+}
+.dot-closed {
+  background: var(--state-closed);
+}
+.dot-blocked {
+  background: var(--danger);
+}
 
 /* ---------- The sidebar nav's icon column. A state entry's marker is an
    8px dot and a list entry's is a 16px glyph (ItemGlyph.jsx), so without
@@ -222,7 +261,12 @@ body {
   flex: none;
 }
 
-main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
+main {
+  flex: 1;
+  min-width: 0;
+  padding: 0 0 2.5rem;
+  overflow-y: auto;
+}
 
 /* Wraps because the task list's toolbar is now search, sort and one
    Select per task attribute worth narrowing by (TaskList.jsx's FILTERS),
@@ -246,7 +290,11 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   padding: 0.6rem 1.75rem 0;
 }
 
-.task-list { list-style: none; margin: 0; padding: 0; }
+.task-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .task-row {
   display: flex;
   align-items: center;
@@ -255,7 +303,9 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
-.task-row:hover { background: var(--surface-hover); }
+.task-row:hover {
+  background: var(--surface-hover);
+}
 /* A stacked task (bwsalmon/agents#378) nests under the task that
    generated it rather than getting a row of its own -- indented and
    set off from the parent's own row, so it reads as a continuation of
@@ -265,8 +315,12 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   margin: 0;
   padding: 0;
 }
-.task-sublist .task-row { padding-left: 3.25rem; }
-.task-select { flex: 0 0 auto; }
+.task-sublist .task-row {
+  padding-left: 3.25rem;
+}
+.task-select {
+  flex: 0 0 auto;
+}
 /* Drag-and-drop backlog reordering (bwsalmon/agents#476). The handle is
    the drag affordance; the row itself stays draggable so grabbing
    anywhere on it still works, the handle just signals that it can be.
@@ -277,16 +331,28 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
    Both are fixed at the small icon's own 1.25rem so they cannot drift
    apart. */
 .task-drag-handle,
-.task-drag-placeholder { flex: none; width: 1.25rem; }
-.task-drag-handle { color: var(--text-tertiary); cursor: grab; }
-.task-row-dragging { opacity: 0.4; }
+.task-drag-placeholder {
+  flex: none;
+  width: 1.25rem;
+}
+.task-drag-handle {
+  color: var(--text-tertiary);
+  cursor: grab;
+}
+.task-row-dragging {
+  opacity: 0.4;
+}
 /* .task-drop-target marks whichever <li> (a task row, or the trailing
    .task-drop-end sentinel for "drop at the very end of the list") the
    dragged task(s) are currently over, with a rule drawn where they would
    land -- above the row for an ordinary task, above the sentinel row for
    the end of the list. */
-.task-drop-target { box-shadow: inset 0 2px 0 var(--accent); }
-.task-drop-end { min-height: 2.5rem; }
+.task-drop-target {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.task-drop-end {
+  min-height: 2.5rem;
+}
 .task-number {
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
@@ -345,7 +411,12 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   letter-spacing: 0.04em;
   text-transform: lowercase;
 }
-.chips { display: flex; gap: 0.35rem; flex-wrap: nowrap; flex: none; }
+.chips {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: nowrap;
+  flex: none;
+}
 
 /* ---------- Board: the same tasks as .task-list, in columns
    (components/TaskBoard.jsx). ---------- */
@@ -356,8 +427,18 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
    its own cards vertically. Without this the longest column would set
    the height of the page and the toolbar would leave the screen with
    it. */
-main.board { display: flex; flex-direction: column; overflow: hidden; padding-bottom: 0; }
-.board-hidden-note { margin: 0.75rem 1.75rem 0; display: flex; align-items: center; gap: 0.4rem; }
+main.board {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding-bottom: 0;
+}
+.board-hidden-note {
+  margin: 0.75rem 1.75rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
 .board-columns {
   flex: 1;
   min-height: 0;
@@ -384,8 +465,19 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   padding: 0.55rem 0.7rem;
   border-bottom: 1px solid var(--border);
 }
-.board-column-title { font-size: 0.85rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.board-column-header .count { margin-left: auto; color: var(--text-tertiary); font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.board-column-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-column-header .count {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
 .board-column-cards {
   list-style: none;
   margin: 0;
@@ -396,7 +488,12 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   overflow-y: auto;
   min-height: 0;
 }
-.board-column-empty { margin: 0; padding: 0 0.7rem 0.8rem; color: var(--text-tertiary); font-size: 0.8rem; }
+.board-column-empty {
+  margin: 0;
+  padding: 0 0.7rem 0.8rem;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
 .board-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -404,22 +501,50 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   padding: 0.5rem 0.6rem;
   cursor: pointer;
 }
-.board-card:hover { background: var(--surface-hover); }
-.board-card-dragging { opacity: 0.4; }
-.board-card-top { display: flex; align-items: center; gap: 0.4rem; }
+.board-card:hover {
+  background: var(--surface-hover);
+}
+.board-card-dragging {
+  opacity: 0.4;
+}
+.board-card-top {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
 /* The number is the row's own fixed-width column in a list; in a card
    it is one item in a line that has room to spare, so it shrinks to
    the digits it has. */
-.board-card-top .task-number { width: auto; }
-.board-card-title { font-size: 0.85rem; margin-top: 0.2rem; overflow-wrap: anywhere; }
-.board-card-activity { margin-top: 0.25rem; white-space: normal; }
-.board-card-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
-.board-card-chips:empty { display: none; }
+.board-card-top .task-number {
+  width: auto;
+}
+.board-card-title {
+  font-size: 0.85rem;
+  margin-top: 0.2rem;
+  overflow-wrap: anywhere;
+}
+.board-card-activity {
+  margin-top: 0.25rem;
+  white-space: normal;
+}
+.board-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+}
+.board-card-chips:empty {
+  display: none;
+}
 /* The same "a rule where they would land" the list draws for a drop,
    on a card rather than a row -- and the same trailing sentinel for
    "at the end of this column". */
-.board-drop-target { box-shadow: inset 0 2px 0 var(--accent); }
-.board-drop-end { min-height: 2rem; }
+.board-drop-target {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.board-drop-end {
+  min-height: 2rem;
+}
 .badge {
   display: inline-flex;
   align-items: center;
@@ -437,7 +562,11 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   background: var(--text-tertiary);
   flex: none;
 }
-.badge-queued::before { background: transparent; border: 1.5px solid var(--state-queued); box-sizing: border-box; }
+.badge-queued::before {
+  background: transparent;
+  border: 1.5px solid var(--state-queued);
+  box-sizing: border-box;
+}
 .badge-running::before {
   background: transparent;
   border: 2px solid var(--state-running);
@@ -445,12 +574,24 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   box-sizing: border-box;
   animation: badge-spin 0.8s linear infinite;
 }
-.badge-awaiting_reply::before { background: var(--state-awaiting); }
-.badge-failed::before { background: var(--state-failed); }
-.badge-proposed::before { background: var(--state-proposed); }
-.badge-awaiting_submit::before { background: var(--state-awaiting-submit); }
-.badge-completed::before { background: var(--state-completed); }
-.badge-closed::before { background: var(--state-closed); }
+.badge-awaiting_reply::before {
+  background: var(--state-awaiting);
+}
+.badge-failed::before {
+  background: var(--state-failed);
+}
+.badge-proposed::before {
+  background: var(--state-proposed);
+}
+.badge-awaiting_submit::before {
+  background: var(--state-awaiting-submit);
+}
+.badge-completed::before {
+  background: var(--state-completed);
+}
+.badge-closed::before {
+  background: var(--state-closed);
+}
 
 /* RepoList (bwsalmon/agents#546) is the one place .badge sits on an MUI
    Chip rather than a plain span, to get its filled pill background. The
@@ -461,7 +602,9 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    flush against x:0, exactly where the pill's own border-radius rounds
    the corner away, and reads as spilling outside the bubble instead of
    sitting inside it. */
-.MuiChip-root.badge { padding-left: 0.45rem; }
+.MuiChip-root.badge {
+  padding-left: 0.45rem;
+}
 
 /* .badge-static is for a "running" badge that records a past moment
    (e.g. a Timeline entry once superseded by a later transition) rather
@@ -511,7 +654,9 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    GrainMark.jsx decides -- this is the belt-and-braces for a mark
    already on screen when the preference changes. */
 @media (prefers-reduced-motion: reduce) {
-  .grain-mark-sheet { animation: none; }
+  .grain-mark-sheet {
+    animation: none;
+  }
 }
 
 /* A run that is the merge queue repairing a task's own pull request
@@ -522,7 +667,9 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    that has gone back to running has not gone back to the beginning, it
    is a finished change being unstuck, and the two should not look alike
    at a glance. */
-.grain-mark-sheet.grain-mark-repair { background: var(--state-completed); }
+.grain-mark-sheet.grain-mark-repair {
+  background: var(--state-completed);
+}
 
 /* .badge-mark is for a "running" badge showing a task's live status
    (bwsalmon/agents#586): StateDot renders the grain mark's animated
@@ -530,7 +677,9 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    a real child instead of the spinning-border dot, so the dot the
    ::before rule above draws is suppressed here rather than doubled up
    underneath it. */
-.badge-mark::before { content: none; }
+.badge-mark::before {
+  content: none;
+}
 
 /* .badge-icon is for a badge that is only the state icon -- no label
    text beside it -- sitting in a fixed column ahead of a task's title
@@ -539,7 +688,10 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    without a fixed, centred box here a running row's icon column would
    be 9px wider than every other row's and the titles after it would
    not line up. */
-.badge-icon { width: 20px; justify-content: center; }
+.badge-icon {
+  width: 20px;
+  justify-content: center;
+}
 
 /* .badge-running's own spin animation still drives RepoList's chip
    (bwsalmon/agents#546), which badges a repo's *count* of running tasks
@@ -549,16 +701,24 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    so their CSS (dependency-chip, chip-remove, chip-read, badge-blocked,
    task-picker*) is gone rather than merged back in. */
 @keyframes badge-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .badge-running::before { animation: none; }
+  .badge-running::before {
+    animation: none;
+  }
 }
 
 /* RepoList (bwsalmon/agents#561) uses TaskList's own flat, full-width
    divider-row treatment instead of its old card-per-repo look, so all
    four list pages share one row shape. */
-.repo-list { list-style: none; margin: 0; padding: 0; }
+.repo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .repo-list-row {
   padding: 0.6rem 1.75rem;
   border-bottom: 1px solid var(--border);
@@ -567,7 +727,9 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   align-items: center;
   gap: 0.85rem;
 }
-.repo-list-row:hover { background: var(--surface-hover); }
+.repo-list-row:hover {
+  background: var(--surface-hover);
+}
 /* Without min-width: 0, a flex:1 item's minimum width defaults to its
    content's min-content size, not 0 -- so a long repo/org name refuses
    to shrink, stretches the row past its container's edge, and the
@@ -595,22 +757,56 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   border-bottom: 1px solid var(--border);
 }
 
-.empty { color: var(--text-tertiary); padding: 1.5rem 1.75rem; }
-.hidden { display: none !important; }
-
-.candidate-current { background: var(--canvas); border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0 0 1rem; }
-.candidate-current p { margin: 0.2rem 0; }
-.candidate-error { color: var(--danger, #c0392b); }
-.candidate-history { list-style: none; margin: 0 0 1rem; padding: 0; }
-.candidate-history li { padding: 0.35rem 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
-
-.qualification-task-list { list-style: none; margin: 0.5rem 0 1rem; padding: 0; }
-.qualification-task-list li {
-  display: flex; align-items: center; gap: 0.4rem;
-  padding: 0.3rem 0; border-bottom: 1px solid var(--border); font-size: 0.9rem;
+.empty {
+  color: var(--text-tertiary);
+  padding: 1.5rem 1.75rem;
+}
+.hidden {
+  display: none !important;
 }
 
-.secrets-list { list-style: none; margin: 0 0 1rem; padding: 0; }
+.candidate-current {
+  background: var(--canvas);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  margin: 0 0 1rem;
+}
+.candidate-current p {
+  margin: 0.2rem 0;
+}
+.candidate-error {
+  color: var(--danger, #c0392b);
+}
+.candidate-history {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+}
+.candidate-history li {
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.qualification-task-list {
+  list-style: none;
+  margin: 0.5rem 0 1rem;
+  padding: 0;
+}
+.qualification-task-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.secrets-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+}
 .secret-row {
   display: flex;
   align-items: center;
@@ -619,9 +815,18 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
-.secret-name { font-weight: 500; }
+.secret-name {
+  font-weight: 500;
+}
 
-.repo-chip-list { list-style: none; margin: 0.4rem 0 0; padding: 0; display: flex; gap: 0.35rem; flex-wrap: wrap; }
+.repo-chip-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
 .repo-chip {
   display: inline-flex;
   align-items: center;
@@ -641,24 +846,49 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   cursor: pointer;
   padding: 0.1rem 0.3rem;
 }
-.repo-chip-delete:hover { color: var(--danger); }
-.repo-chip-add { display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
-.repo-chip-add input { flex: 1; margin-top: 0; }
+.repo-chip-delete:hover {
+  color: var(--danger);
+}
+.repo-chip-add {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  align-items: center;
+}
+.repo-chip-add input {
+  flex: 1;
+  margin-top: 0;
+}
 
 /* The schedules page's own list (bwsalmon/agents#547): TaskList's own
    .task-row/.template-row treatment -- the whole row is a click target
    that opens ScheduleOverlay with everything else about that schedule,
    rather than a row with its own inline form and button row. */
-.schedules-list { list-style: none; margin: 0; padding: 0; }
+.schedules-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .schedule-row {
   padding: 0.6rem 1.75rem;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
-.schedule-row:hover { background: var(--surface-hover); }
-.schedule-summary { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-.schedule-title { font-weight: 500; }
-.schedule-meta { margin: 0.25rem 0 0.4rem; }
+.schedule-row:hover {
+  background: var(--surface-hover);
+}
+.schedule-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.schedule-title {
+  font-weight: 500;
+}
+.schedule-meta {
+  margin: 0.25rem 0 0.4rem;
+}
 
 /* The templates page's own list (bwsalmon/agents#545): one row of key
    details per template -- name, target repo, title -- TaskList's own
@@ -666,7 +896,11 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    nor this list has any use for. Clicking a row opens TemplateOverlay
    with everything else about that template, the same "list vs. behind
    a click" split .task-row itself draws against DetailOverlay. */
-.template-list { list-style: none; margin: 0; padding: 0; }
+.template-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
 .template-row {
   display: flex;
   align-items: center;
@@ -675,9 +909,18 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
-.template-row:hover { background: var(--surface-hover); }
-.template-name { font-weight: 500; }
-.template-title { color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.template-row:hover {
+  background: var(--surface-hover);
+}
+.template-name {
+  font-weight: 500;
+}
+.template-title {
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* A schedule-filed task is not the write target, so it gets a tinted
    fill rather than the plain default Chip -- its own category of
@@ -708,7 +951,8 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
    own tests rely on) -- scoped to .repo-field rather than a bare "form
    input" selector so it never fights MUI's own input styling elsewhere
    in the same form. */
-.repo-field input, .repo-field select {
+.repo-field input,
+.repo-field select {
   display: block;
   width: 100%;
   padding: 0.5rem 0.65rem;
@@ -718,12 +962,17 @@ main.board { display: flex; flex-direction: column; overflow: hidden; padding-bo
   color: inherit;
   font: inherit;
 }
-.repo-field input:focus, .repo-field select:focus {
+.repo-field input:focus,
+.repo-field select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
   outline: none;
 }
-form .hint { font-weight: normal; color: var(--text-tertiary); font-size: 0.8rem; }
+form .hint {
+  font-weight: normal;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
 /* .link-button is RepoField's "Choose from list" toggle back out of its
    typed-a-custom-repo state -- chip-remove's own button reset, styled to
    read as a text link rather than a chip's own × since it sits below a
@@ -740,7 +989,11 @@ form .hint { font-weight: normal; color: var(--text-tertiary); font-size: 0.8rem
   text-decoration: underline;
   cursor: pointer;
 }
-fieldset { border: none; padding: 0; margin: 0 0 1.1rem; }
+fieldset {
+  border: none;
+  padding: 0;
+  margin: 0 0 1.1rem;
+}
 fieldset legend {
   display: block;
   width: 100%;
@@ -760,9 +1013,17 @@ fieldset legend {
   gap: 0.3rem 0.75rem;
   font-size: 0.85rem;
 }
-.upgrade-status dt { color: var(--text-tertiary); font-weight: 500; }
+.upgrade-status dt {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
 
-.logs-toolbar { display: flex; align-items: center; gap: 0.75rem; margin: 0 0 0.75rem; }
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 0.75rem;
+}
 .logs-view {
   margin: 0;
   max-height: 60vh;
@@ -781,11 +1042,23 @@ fieldset legend {
    that overflows (which .logs-view does, and should, for a log line)
    would interleave halves of one process's row with the next one's. It
    scrolls sideways instead. */
-.top-view { white-space: pre; word-break: normal; }
-.upgrade-status dd { margin: 0; word-break: break-word; }
-.upgrade-phase-running { color: var(--accent); }
-.upgrade-phase-ok { color: var(--state-completed); }
-.upgrade-phase-failed { color: var(--danger); }
+.top-view {
+  white-space: pre;
+  word-break: normal;
+}
+.upgrade-status dd {
+  margin: 0;
+  word-break: break-word;
+}
+.upgrade-phase-running {
+  color: var(--accent);
+}
+.upgrade-phase-ok {
+  color: var(--state-completed);
+}
+.upgrade-phase-failed {
+  color: var(--danger);
+}
 
 /* ---------- The detail pane: what opening a task, a schedule, a
    template or a suite fills the whole content area beside the sidebar
@@ -826,8 +1099,12 @@ fieldset legend {
 /* Whichever of the two the back button sits directly above starts
    closer to it than it would to the top of the paper: the gap is
    already there in the button's own row. */
-.overlay-pane-back + .overlay-pane { padding-top: 0.75rem; }
-.overlay-pane-header h2 { margin: 0 0 0.5rem; }
+.overlay-pane-back + .overlay-pane {
+  padding-top: 0.75rem;
+}
+.overlay-pane-header h2 {
+  margin: 0 0 0.5rem;
+}
 
 /* A form is a single column of fields however wide the pane is: full
    width would stretch a one-word "Name" input across the screen. Both
@@ -835,28 +1112,68 @@ fieldset legend {
    opened shows starts exactly where the list you opened it from did.
    Settings' tab bodies wear it too (grain/task-115) -- each is a column
    of configuration, whether or not the tab happens to be one <form>. */
-.pane-form { max-width: 44rem; }
+.pane-form {
+  max-width: 44rem;
+}
 
 /* Wider than a form -- two columns of a task use the room -- but still
    capped: a line of prose running the width of a widescreen is no more
    readable than the 900px dialog this replaced. */
-.detail-layout { display: flex; gap: 1.75rem; align-items: flex-start; max-width: 1200px; }
-.detail-main { flex: 1; min-width: 0; }
+.detail-layout {
+  display: flex;
+  gap: 1.75rem;
+  align-items: flex-start;
+  max-width: 1200px;
+}
+.detail-main {
+  flex: 1;
+  min-width: 0;
+}
 /* Sticky so the state, the actions and the dependencies stay put while
    a long timeline scrolls past them -- in a pane tall enough to scroll
    a long way, the buttons would otherwise be a scroll back up. */
-.detail-side { width: 260px; flex: none; position: sticky; top: 0; }
+.detail-side {
+  width: 260px;
+  flex: none;
+  position: sticky;
+  top: 0;
+}
 @media (max-width: 720px) {
-  .overlay-pane { padding: 1.25rem 1rem; }
-  .overlay-pane-back { padding: 0.75rem 1rem 0; }
-  .overlay-pane-header { padding: 0.5rem 1rem 0; }
-  .detail-layout { flex-direction: column; }
-  .detail-side { width: 100%; position: static; }
+  .overlay-pane {
+    padding: 1.25rem 1rem;
+  }
+  .overlay-pane-back {
+    padding: 0.75rem 1rem 0;
+  }
+  .overlay-pane-header {
+    padding: 0.5rem 1rem 0;
+  }
+  .detail-layout {
+    flex-direction: column;
+  }
+  .detail-side {
+    width: 100%;
+    position: static;
+  }
 }
 
-.detail-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
-.detail-header h2 { margin: 0; font-size: 1.15rem; font-weight: 600; }
-.freshness { color: var(--text-tertiary); font-size: 0.8rem; margin-bottom: 1rem; }
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.4rem;
+  flex-wrap: wrap;
+}
+.detail-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+.freshness {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  margin-bottom: 1rem;
+}
 /* No white-space: pre-wrap any more -- a description is rendered as
    markdown (Markdown.jsx), whose own remark-breaks keeps the hard line
    breaks pre-wrap used to be here for, and leaving it on would also
@@ -877,10 +1194,18 @@ fieldset legend {
    as a banner three times the size of the text around it), and the first
    and last blocks lose their outer margin so a one-paragraph comment sits
    exactly where the plain <div> it replaced did. */
-.markdown { word-break: break-word; }
-.markdown > :first-child { margin-top: 0; }
-.markdown > :last-child { margin-bottom: 0; }
-.markdown p { margin: 0 0 0.6rem; }
+.markdown {
+  word-break: break-word;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown p {
+  margin: 0 0 0.6rem;
+}
 .markdown h1,
 .markdown h2,
 .markdown h3,
@@ -892,22 +1217,42 @@ fieldset legend {
   line-height: 1.3;
   color: var(--text);
 }
-.markdown h1 { font-size: 1.15em; }
-.markdown h2 { font-size: 1.08em; }
+.markdown h1 {
+  font-size: 1.15em;
+}
+.markdown h2 {
+  font-size: 1.08em;
+}
 .markdown h3,
 .markdown h4,
 .markdown h5,
-.markdown h6 { font-size: 1em; }
+.markdown h6 {
+  font-size: 1em;
+}
 .markdown ul,
-.markdown ol { margin: 0 0 0.6rem; padding-left: 1.4rem; }
-.markdown li { margin: 0.15rem 0; }
+.markdown ol {
+  margin: 0 0 0.6rem;
+  padding-left: 1.4rem;
+}
+.markdown li {
+  margin: 0.15rem 0;
+}
 .markdown li > ul,
-.markdown li > ol { margin-bottom: 0; }
+.markdown li > ol {
+  margin-bottom: 0;
+}
 /* GFM task lists: the checkbox is the list marker, so the bullet beside
    it is noise. */
-.markdown li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.1rem; }
-.markdown li > input[type="checkbox"] { margin-right: 0.4rem; }
-.markdown a { color: var(--accent); }
+.markdown li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.1rem;
+}
+.markdown li > input[type="checkbox"] {
+  margin-right: 0.4rem;
+}
+.markdown a {
+  color: var(--accent);
+}
 .markdown code {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.88em;
@@ -930,23 +1275,52 @@ fieldset legend {
   border-radius: 6px;
   overflow-x: auto;
 }
-.markdown pre code { background: none; border-radius: 0; padding: 0; font-size: 0.85em; }
+.markdown pre code {
+  background: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: 0.85em;
+}
 .markdown blockquote {
   margin: 0 0 0.6rem;
   padding-left: 0.75rem;
   border-left: 3px solid var(--border-strong);
   color: var(--text-tertiary);
 }
-.markdown hr { border: none; border-top: 1px solid var(--border); margin: 0.9rem 0; }
-.markdown img { max-width: 100%; }
+.markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.9rem 0;
+}
+.markdown img {
+  max-width: 100%;
+}
 /* GFM tables. display: block so a wide one scrolls inside the panel
    instead of stretching it. */
-.markdown table { display: block; overflow-x: auto; border-collapse: collapse; margin: 0 0 0.6rem; }
+.markdown table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 0.6rem;
+}
 .markdown th,
-.markdown td { border: 1px solid var(--border); padding: 0.25rem 0.5rem; text-align: left; }
-.markdown th { background: var(--surface-hover); font-weight: 600; }
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+}
+.markdown th {
+  background: var(--surface-hover);
+  font-weight: 600;
+}
 
-.detail-state { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.detail-state {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
 /* The running task's own status, under the state badge. It wraps here,
    unlike the one-line .task-activity on a list row: this column has the
    height to spare, and a status is worth reading in full where somebody
@@ -961,15 +1335,32 @@ fieldset legend {
   font-style: italic;
 }
 
-.declared { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.1rem; }
-.declared-row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.82rem; }
-.declared-key { color: var(--text-tertiary); }
+.declared {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 1.1rem;
+}
+.declared-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+}
+.declared-key {
+  color: var(--text-tertiary);
+}
 /* pre-wrap because one of these values is prose rather than a word: a
    task's own prompt extension override (grain/task-114) can be several
    lines, and collapsing them would run its sentences together. Every
    other value here is a single token, which pre-wrap leaves exactly as
    it was. */
-.declared-value { color: var(--text-secondary); text-align: right; word-break: break-word; white-space: pre-wrap; }
+.declared-value {
+  color: var(--text-secondary);
+  text-align: right;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
 
 /* .hint is styled above for the forms it started in, and the detail
    pane's side column uses the same class for the same thing -- "No
@@ -977,30 +1368,76 @@ fieldset legend {
    note under the read-only repos picker about what an edit made mid-run
    does and does not reach. Without this they inherit body type in a
    260px column, which reads as prose rather than as an aside. */
-.detail-side .hint { color: var(--text-tertiary); font-size: 0.8rem; font-weight: normal; }
-.detail-side p.hint { margin: 0.4rem 0 0; }
+.detail-side .hint {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  font-weight: normal;
+}
+.detail-side p.hint {
+  margin: 0.4rem 0 0;
+}
 
-.actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin: 0 0 1.1rem; }
-.detail-side .actions { flex-direction: column; }
-.detail-side .actions button { width: 100%; }
+.actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin: 0 0 1.1rem;
+}
+.detail-side .actions {
+  flex-direction: column;
+}
+.detail-side .actions button {
+  width: 100%;
+}
 
 /* Timeline merges every state transition, attempt result and comment
    into one time-ordered feed (bwsalmon/agents#453). Each entry is a dot
    (reusing .badge's own colours) in a fixed-width marker column, joined
    to the next by a connecting line drawn on the marker itself, with a
    timestamp and its content beside it. */
-.timeline { border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 1rem; }
-.timeline h3 { font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-tertiary); margin: 0 0 0.75rem; }
-.timeline-list { list-style: none; margin: 0 0 1rem; padding: 0; }
-.timeline-item { display: flex; gap: 0.75rem; padding-bottom: 1.1rem; }
-.timeline-item:last-child { padding-bottom: 0; }
-.timeline-marker { position: relative; width: 11px; flex: none; display: flex; justify-content: center; padding-top: 0.15rem; }
+.timeline {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+  margin-top: 1rem;
+}
+.timeline h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  margin: 0 0 0.75rem;
+}
+.timeline-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+}
+.timeline-item {
+  display: flex;
+  gap: 0.75rem;
+  padding-bottom: 1.1rem;
+}
+.timeline-item:last-child {
+  padding-bottom: 0;
+}
+.timeline-marker {
+  position: relative;
+  width: 11px;
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding-top: 0.15rem;
+}
 /* Without this, .badge -- a flex item in .timeline-marker -- stretches
    to the marker's full (content-driven) height and centers its dot
    inside that stretched box, so the dot drifts away from the top-aligned
    timestamp and the fixed-offset connecting line below cuts through it
    instead of starting just past it. */
-.timeline-marker .badge { margin: 0; align-self: flex-start; }
+.timeline-marker .badge {
+  margin: 0;
+  align-self: flex-start;
+}
 .timeline-marker::after {
   content: "";
   position: absolute;
@@ -1011,28 +1448,77 @@ fieldset legend {
   margin-left: -1px;
   background: var(--border);
 }
-.timeline-item:last-child .timeline-marker::after { display: none; }
+.timeline-item:last-child .timeline-marker::after {
+  display: none;
+}
 /* An attempt's own row opens AttemptTranscriptOverlay on click or on
    Enter/Space while focused (bwsalmon/agents#446) -- cursor and a subtle
    hover background are this row's only visual difference from a plain
    (non-interactive) transition or comment entry; :focus-visible (above)
    already covers the focus ring. */
-.timeline-item-attempt { cursor: pointer; border-radius: 6px; margin: 0 -0.4rem; padding-left: 0.4rem; padding-right: 0.4rem; }
-.timeline-item-attempt:hover { background: var(--canvas); }
-.badge-comment::before { background: var(--text-placeholder); }
+.timeline-item-attempt {
+  cursor: pointer;
+  border-radius: 6px;
+  margin: 0 -0.4rem;
+  padding-left: 0.4rem;
+  padding-right: 0.4rem;
+}
+.timeline-item-attempt:hover {
+  background: var(--canvas);
+}
+.badge-comment::before {
+  background: var(--text-placeholder);
+}
 /* Timeline's own pull request events (bwsalmon/agents#493) -- GitHub's
    own colours for the three ("PR opened" reuses state-completed's green,
    the same "something new and live" green an open PR gets on github.com;
    "PR merged" gets pr-merged's purple; "PR closed unmerged" reuses
    state-failed's red, github.com's own colour for a closed PR). */
-.badge-pr_opened::before { background: var(--state-completed); }
-.badge-pr_merged::before { background: var(--pr-merged); }
-.badge-pr_closed::before { background: var(--state-failed); }
-.timeline-body { flex: 1; min-width: 0; }
-.timeline-when { color: var(--text-tertiary); font-size: 0.75rem; margin-bottom: 0.15rem; }
-.timeline-title { font-weight: 600; font-size: 0.85rem; color: var(--text-secondary); }
-.timeline-meta { color: var(--text-tertiary); font-size: 0.8rem; }
-.timeline-detail { color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.3rem; word-break: break-word; }
-.timeline-comment-body { color: var(--text-secondary); font-size: 0.9rem; margin-top: 0.15rem; word-break: break-word; }
-.comment-form { display: flex; gap: 0.6rem; margin-top: 0.85rem; align-items: flex-end; }
-.comment-form textarea { flex: 1; }
+.badge-pr_opened::before {
+  background: var(--state-completed);
+}
+.badge-pr_merged::before {
+  background: var(--pr-merged);
+}
+.badge-pr_closed::before {
+  background: var(--state-failed);
+}
+.timeline-body {
+  flex: 1;
+  min-width: 0;
+}
+.timeline-when {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  margin-bottom: 0.15rem;
+}
+.timeline-title {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+.timeline-meta {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
+.timeline-detail {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  margin-top: 0.3rem;
+  word-break: break-word;
+}
+.timeline-comment-body {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin-top: 0.15rem;
+  word-break: break-word;
+}
+.comment-form {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.85rem;
+  align-items: flex-end;
+}
+.comment-form textarea {
+  flex: 1;
+}

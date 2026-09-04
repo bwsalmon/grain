@@ -52,9 +52,18 @@ export function stateRank(t) {
 // backlog underneath a view that no longer matches it.
 export const SORTS = {
   manual: { label: "Backlog order", cmp: null },
-  newest: { label: "Newest first", cmp: (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0) },
-  oldest: { label: "Oldest first", cmp: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0) },
-  title: { label: "Title (A–Z)", cmp: (a, b) => a.title.localeCompare(b.title) },
+  newest: {
+    label: "Newest first",
+    cmp: (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+  },
+  oldest: {
+    label: "Oldest first",
+    cmp: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
+  },
+  title: {
+    label: "Title (A–Z)",
+    cmp: (a, b) => a.title.localeCompare(b.title),
+  },
   state: { label: "State", cmp: (a, b) => stateRank(a) - stateRank(b) },
   repo: { label: "Repo (A–Z)", cmp: byText((t) => t.repo) },
   author: { label: "Author (A–Z)", cmp: byText((t) => t.author) },
@@ -191,8 +200,12 @@ export function optionsFor(f, tasks, config) {
   }
   const label = (v) => (f.labelOf ? f.labelOf(v, config) : v);
   const options = f.order
-    ? f.order.filter((v) => seen.has(v)).map((v) => ({ value: v, label: label(v) }))
-    : [...seen].map((v) => ({ value: v, label: label(v) })).sort((a, b) => a.label.localeCompare(b.label));
+    ? f.order
+        .filter((v) => seen.has(v))
+        .map((v) => ({ value: v, label: label(v) }))
+    : [...seen]
+        .map((v) => ({ value: v, label: label(v) }))
+        .sort((a, b) => a.label.localeCompare(b.label));
   if (none && f.noneLabel) options.push({ value: NONE, label: f.noneLabel });
   return options;
 }
@@ -219,7 +232,10 @@ export function filterViews(tasks, filters, config) {
   return FILTERS.map((f) => {
     const options = optionsFor(f, tasks, config);
     const shown = options.length > 1;
-    const value = shown && options.some((o) => o.value === filters[f.id]) ? filters[f.id] : "";
+    const value =
+      shown && options.some((o) => o.value === filters[f.id])
+        ? filters[f.id]
+        : "";
     return { f, options, shown, value };
   });
 }
@@ -230,6 +246,11 @@ export function filterViews(tasks, filters, config) {
 // The search is over the title and the id, which is what somebody
 // typing "287" or "kanban" is reaching for.
 export function matchesFilters(t, activeFilters, q) {
-  if (!activeFilters.every(({ f, value }) => filterMatches(f, t, value))) return false;
-  return q === "" || t.title.toLowerCase().includes(q) || String(t.id).toLowerCase().includes(q);
+  if (!activeFilters.every(({ f, value }) => filterMatches(f, t, value)))
+    return false;
+  return (
+    q === "" ||
+    t.title.toLowerCase().includes(q) ||
+    String(t.id).toLowerCase().includes(q)
+  );
 }

@@ -1,7 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Alert, Box, Button, Chip, CircularProgress, FormControl, InputLabel, Link,
-  MenuItem, Select, Table, TableBody, TableCell, TableHead, TableRow, Tooltip, Typography,
+  Alert,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  FormControl,
+  InputLabel,
+  Link,
+  MenuItem,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Tooltip,
+  Typography,
 } from "@mui/material";
 import api from "../api.js";
 import Sparkline from "./Sparkline.jsx";
@@ -47,7 +62,8 @@ export function formatSeconds(value) {
   const s = Math.round(value);
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  if (s < 86400)
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 
@@ -75,7 +91,9 @@ export function isThinPercentile(n, percentile) {
 // name so two renders of the same report never disagree. The same order
 // `grain metrics`' own outcomeSummary prints them in.
 export function sortedOutcomes(outcomes) {
-  return Object.entries(outcomes || {}).sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
+  return Object.entries(outcomes || {}).sort(
+    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+  );
 }
 
 // formatBytes renders a result size the way somebody sizing a truncation
@@ -104,17 +122,37 @@ export function percent(rate) {
 // dropped, so a state added server-side still shows up here.
 export function backlogRows(byState) {
   const entries = Object.entries(byState || {}).filter(([, n]) => n > 0);
-  const known = STATE_ORDER.filter((s) => entries.some(([state]) => state === s));
-  const unknown = entries.map(([state]) => state).filter((s) => !STATE_ORDER.includes(s)).sort();
-  return [...known, ...unknown].map((state) => ({ state, count: byState[state] }));
+  const known = STATE_ORDER.filter((s) =>
+    entries.some(([state]) => state === s),
+  );
+  const unknown = entries
+    .map(([state]) => state)
+    .filter((s) => !STATE_ORDER.includes(s))
+    .sort();
+  return [...known, ...unknown].map((state) => ({
+    state,
+    count: byState[state],
+  }));
 }
 
 function Stat({ label, value, sub, title }) {
   const body = (
     <Box>
-      <Typography variant="h6" component="div" sx={{ fontVariantNumeric: "tabular-nums", lineHeight: 1.2 }}>{value}</Typography>
-      <Typography variant="caption" color="text.secondary" component="div">{label}</Typography>
-      {sub && <Typography variant="caption" color="text.secondary" component="div">{sub}</Typography>}
+      <Typography
+        variant="h6"
+        component="div"
+        sx={{ fontVariantNumeric: "tabular-nums", lineHeight: 1.2 }}
+      >
+        {value}
+      </Typography>
+      <Typography variant="caption" color="text.secondary" component="div">
+        {label}
+      </Typography>
+      {sub && (
+        <Typography variant="caption" color="text.secondary" component="div">
+          {sub}
+        </Typography>
+      )}
     </Box>
   );
   return title ? <Tooltip title={title}>{body}</Tooltip> : body;
@@ -128,7 +166,9 @@ function Stat({ label, value, sub, title }) {
 function Trend({ label, data, color }) {
   return (
     <Box>
-      <Typography variant="caption" color="text.secondary" component="div">{label}</Typography>
+      <Typography variant="caption" color="text.secondary" component="div">
+        {label}
+      </Typography>
       <Sparkline data={data} color={color} />
     </Box>
   );
@@ -141,12 +181,22 @@ function Cell({ stage, percentile, seconds }) {
   const thin = isThinPercentile(stage.n, percentile);
   const text = formatSeconds(seconds);
   return (
-    <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums", color: thin ? "text.disabled" : "text.primary" }}>
+    <TableCell
+      align="right"
+      sx={{
+        fontVariantNumeric: "tabular-nums",
+        color: thin ? "text.disabled" : "text.primary",
+      }}
+    >
       {thin ? (
-        <Tooltip title={`Only ${stage.n} sample${stage.n === 1 ? "" : "s"} — at this count this is the maximum under another name, not a p${percentile}.`}>
+        <Tooltip
+          title={`Only ${stage.n} sample${stage.n === 1 ? "" : "s"} — at this count this is the maximum under another name, not a p${percentile}.`}
+        >
           <span>{text}*</span>
         </Tooltip>
-      ) : text}
+      ) : (
+        text
+      )}
     </TableCell>
   );
 }
@@ -192,7 +242,9 @@ export default function MetricsPage({ showError, onOpenTask }) {
     const mine = ++seq.current;
     setLoading(true);
     try {
-      const result = await api(`/api/metrics?window=${encodeURIComponent(selectedWindow)}&buckets=${BUCKETS}`);
+      const result = await api(
+        `/api/metrics?window=${encodeURIComponent(selectedWindow)}&buckets=${BUCKETS}`,
+      );
       if (seq.current === mine) setReport(result);
     } catch (err) {
       showError(err);
@@ -201,12 +253,16 @@ export default function MetricsPage({ showError, onOpenTask }) {
     }
   }, [selectedWindow, showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const buckets = report?.throughput?.buckets || [];
   const latency = report?.latency || [];
   const measured = latency.some((s) => s.n > 0);
-  const thin = latency.some((s) => isThinPercentile(s.n, 90) || isThinPercentile(s.n, 99));
+  const thin = latency.some(
+    (s) => isThinPercentile(s.n, 90) || isThinPercentile(s.n, 99),
+  );
   const outcomes = sortedOutcomes(report?.runs?.outcomes);
   const endings = sortedOutcomes(report?.runs?.endings);
   const backlog = backlogRows(report?.backlog?.byState);
@@ -222,7 +278,15 @@ export default function MetricsPage({ showError, onOpenTask }) {
 
   return (
     <section className="metrics-panel">
-      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1, mb: 1.5 }}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "flex-end",
+          gap: 1,
+          mb: 1.5,
+        }}
+      >
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <FormControl size="small" sx={{ minWidth: 160 }}>
             <InputLabel id="metrics-window-label">Window</InputLabel>
@@ -232,10 +296,21 @@ export default function MetricsPage({ showError, onOpenTask }) {
               value={selectedWindow}
               onChange={(e) => setSelectedWindow(e.target.value)}
             >
-              {WINDOWS.map((w) => <MenuItem key={w.value} value={w.value}>{w.label}</MenuItem>)}
+              {WINDOWS.map((w) => (
+                <MenuItem key={w.value} value={w.value}>
+                  {w.label}
+                </MenuItem>
+              ))}
             </Select>
           </FormControl>
-          <Button size="small" variant="outlined" onClick={refresh} disabled={loading}>Refresh</Button>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={refresh}
+            disabled={loading}
+          >
+            Refresh
+          </Button>
         </Box>
       </Box>
 
@@ -245,19 +320,42 @@ export default function MetricsPage({ showError, onOpenTask }) {
         </Box>
       ) : (
         <Box>
-          <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 2 }}>
-            {new Date(report.since).toLocaleString()} → {new Date(report.until).toLocaleString()}
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            component="div"
+            sx={{ mb: 2 }}
+          >
+            {new Date(report.since).toLocaleString()} →{" "}
+            {new Date(report.until).toLocaleString()}
             {" · "}
             {formatSeconds(report.windowSeconds)}
           </Typography>
 
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>Throughput</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            Throughput
+          </Typography>
           <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3, mb: 1.5 }}>
-            <Stat label="Tasks filed" value={report.throughput.tasksFiled} sub={`${report.throughput.filedPerDay.toFixed(1)}/day`} />
-            <Stat label="Tasks completed" value={report.throughput.tasksCompleted} sub={`${report.throughput.completedPerDay.toFixed(1)}/day`} />
+            <Stat
+              label="Tasks filed"
+              value={report.throughput.tasksFiled}
+              sub={`${report.throughput.filedPerDay.toFixed(1)}/day`}
+            />
+            <Stat
+              label="Tasks completed"
+              value={report.throughput.tasksCompleted}
+              sub={`${report.throughput.completedPerDay.toFixed(1)}/day`}
+            />
             <Stat label="Tasks closed" value={report.throughput.tasksClosed} />
-            <Stat label="Attempts started" value={report.throughput.runsStarted} />
-            <Stat label="Attempts finished" value={report.throughput.runsFinished} sub={`${report.throughput.runsFinishedPerDay.toFixed(1)}/day`} />
+            <Stat
+              label="Attempts started"
+              value={report.throughput.runsStarted}
+            />
+            <Stat
+              label="Attempts finished"
+              value={report.throughput.runsFinished}
+              sub={`${report.throughput.runsFinishedPerDay.toFixed(1)}/day`}
+            />
             <Stat
               label="Attempts per completion"
               value={report.runs.attemptsPerCompletion.toFixed(2)}
@@ -266,56 +364,115 @@ export default function MetricsPage({ showError, onOpenTask }) {
           </Box>
           <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3, mb: 1 }}>
             <Trend label="Filed" data={buckets.map((b) => b.filed)} />
-            <Trend label="Completed" data={buckets.map((b) => b.completed)} color="#2e7d32" />
-            <Trend label="Attempts finished" data={buckets.map((b) => b.runsFinished)} color="#9c27b0" />
+            <Trend
+              label="Completed"
+              data={buckets.map((b) => b.completed)}
+              color="#2e7d32"
+            />
+            <Trend
+              label="Attempts finished"
+              data={buckets.map((b) => b.runsFinished)}
+              color="#9c27b0"
+            />
           </Box>
-          <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 2.5 }}>
-            Oldest to newest across the window. Each line is scaled to its own range, so these are shapes, not counts.
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            component="div"
+            sx={{ mb: 2.5 }}
+          >
+            Oldest to newest across the window. Each line is scaled to its own
+            range, so these are shapes, not counts.
           </Typography>
 
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>Capacity</Typography>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+            Capacity
+          </Typography>
           <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3, mb: 1 }}>
             <Stat
               label="Mean concurrent runs"
-              value={report.runs.maxConcurrent > 0
-                ? `${report.runs.meanConcurrent.toFixed(2)} of ${report.runs.maxConcurrent}`
-                : report.runs.meanConcurrent.toFixed(2)}
-              sub={report.runs.maxConcurrent > 0 ? `${Math.round(report.runs.utilization * 100)}% of the limit` : "no concurrency limit configured"}
+              value={
+                report.runs.maxConcurrent > 0
+                  ? `${report.runs.meanConcurrent.toFixed(2)} of ${report.runs.maxConcurrent}`
+                  : report.runs.meanConcurrent.toFixed(2)
+              }
+              sub={
+                report.runs.maxConcurrent > 0
+                  ? `${Math.round(report.runs.utilization * 100)}% of the limit`
+                  : "no concurrency limit configured"
+              }
             />
             <Stat label="Running right now" value={report.runs.live} />
           </Box>
           {outcomes.length > 0 && (
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: endings.length > 0 ? 1 : 2.5 }}>
+            <Box
+              sx={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 0.7,
+                mb: endings.length > 0 ? 1 : 2.5,
+              }}
+            >
               {outcomes.map(([name, count]) => (
-                <Chip key={name} size="small" variant="outlined" label={`${name} ${count}`} />
+                <Chip
+                  key={name}
+                  size="small"
+                  variant="outlined"
+                  label={`${name} ${count}`}
+                />
               ))}
             </Box>
           )}
           {endings.length > 0 && (
             <>
-              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 0.5 }}>
-                …and how those attempts actually ended. The outcome words above cover more than one ending each:
-                “cancelled” is both a human closing the task and a run hitting its wall-clock cap, and “failed” is both a
-                broken framework and a run that used up its turns. Each has a different fix.
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                component="div"
+                sx={{ mb: 0.5 }}
+              >
+                …and how those attempts actually ended. The outcome words above
+                cover more than one ending each: “cancelled” is both a human
+                closing the task and a run hitting its wall-clock cap, and
+                “failed” is both a broken framework and a run that used up its
+                turns. Each has a different fix.
               </Typography>
-              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: 2.5 }}>
+              <Box
+                sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: 2.5 }}
+              >
                 {endings.map(([name, count]) => (
-                  <Chip key={name} size="small" variant="outlined" label={`${name} ${count}`} />
+                  <Chip
+                    key={name}
+                    size="small"
+                    variant="outlined"
+                    label={`${name} ${count}`}
+                  />
                 ))}
               </Box>
             </>
           )}
 
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>Latency</Typography>
-          <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
-            Stages that <em>ended</em> inside the window, in the order a task passes through them. Each is measured on its
-            own and a missing moment is skipped rather than guessed, so their <code>n</code> legitimately differ and the
-            stages do not add up to the lead time — a task can sit awaiting a reply, back off between attempts, or wait on
-            a dependency, and none of that is a stage anything records the start of.
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+            Latency
+          </Typography>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            component="div"
+            sx={{ mb: 1 }}
+          >
+            Stages that <em>ended</em> inside the window, in the order a task
+            passes through them. Each is measured on its own and a missing
+            moment is skipped rather than guessed, so their <code>n</code>{" "}
+            legitimately differ and the stages do not add up to the lead time —
+            a task can sit awaiting a reply, back off between attempts, or wait
+            on a dependency, and none of that is a stage anything records the
+            start of.
           </Typography>
           {!measured ? (
             <Typography variant="body2" color="text.secondary" sx={{ mb: 2.5 }}>
-              Nothing finished inside this window, so there is no latency to report yet. Try a longer window.
+              Nothing finished inside this window, so there is no latency to
+              report yet. Try a longer window.
             </Typography>
           ) : (
             <>
@@ -340,13 +497,23 @@ export default function MetricsPage({ showError, onOpenTask }) {
                   {latency.map((s) => (
                     <TableRow key={s.stage}>
                       <TableCell>
-                        <Tooltip title={s.description}><span>{s.label}</span></Tooltip>
+                        <Tooltip title={s.description}>
+                          <span>{s.label}</span>
+                        </Tooltip>
                       </TableCell>
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>{s.n}</TableCell>
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
+                        {s.n}
+                      </TableCell>
                       <Cell stage={s} percentile={50} seconds={s.p50Seconds} />
                       <Cell stage={s} percentile={90} seconds={s.p90Seconds} />
                       <Cell stage={s} percentile={99} seconds={s.p99Seconds} />
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
                         {s.n === 0 ? "—" : formatSeconds(s.maxSeconds)}
                       </TableCell>
                     </TableRow>
@@ -354,9 +521,14 @@ export default function MetricsPage({ showError, onOpenTask }) {
                 </TableBody>
               </Table>
               {thin && (
-                <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 2.5 }}>
-                  * Fewer samples than the percentile needs to mean anything: at this <code>n</code> it is the maximum
-                  under another name.
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  component="div"
+                  sx={{ mb: 2.5 }}
+                >
+                  * Fewer samples than the percentile needs to mean anything: at
+                  this <code>n</code> it is the maximum under another name.
                 </Typography>
               )}
             </>
@@ -364,15 +536,36 @@ export default function MetricsPage({ showError, onOpenTask }) {
 
           {tools?.calls > 0 && (
             <>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5, mt: 2.5 }}>Tool use</Typography>
-              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
-                What the window's runs spent their turns on, over the {tools.runs} attempt{tools.runs === 1 ? "" : "s"}{" "}
-                that recorded it. An errored call is an ordinary turn of an agent's loop rather than a broken run, so
-                these rates are never zero — what they are for is the trend, and the comparison between tools.
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mb: 0.5, mt: 2.5 }}
+              >
+                Tool use
+              </Typography>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                component="div"
+                sx={{ mb: 1 }}
+              >
+                What the window's runs spent their turns on, over the{" "}
+                {tools.runs} attempt{tools.runs === 1 ? "" : "s"} that recorded
+                it. An errored call is an ordinary turn of an agent's loop
+                rather than a broken run, so these rates are never zero — what
+                they are for is the trend, and the comparison between tools.
               </Typography>
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3, mb: 1 }}>
-                <Stat label="Tool calls" value={tools.calls} sub={`${tools.callsPerRun.p50} per run at the median`} />
-                <Stat label="Errored calls" value={tools.errored} sub={`${percent(tools.erroredShare)} of all calls`} />
+                <Stat
+                  label="Tool calls"
+                  value={tools.calls}
+                  sub={`${tools.callsPerRun.p50} per run at the median`}
+                />
+                <Stat
+                  label="Errored calls"
+                  value={tools.errored}
+                  sub={`${percent(tools.erroredShare)} of all calls`}
+                />
               </Box>
               <Table size="small" sx={{ mb: 0.5 }}>
                 <TableHead>
@@ -390,20 +583,46 @@ export default function MetricsPage({ showError, onOpenTask }) {
                   {tools.byTool.map((use) => (
                     <TableRow key={use.name}>
                       <TableCell>{use.name}</TableCell>
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>{use.runs}</TableCell>
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>{use.calls}</TableCell>
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
+                        {use.runs}
+                      </TableCell>
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
+                        {use.calls}
+                      </TableCell>
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
                         {use.errored} ({percent(use.errorRate)})
                       </TableCell>
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
-                        {use.timedOut > 0 ? `${use.timedOut} (${percent(use.timeoutRate)})` : "—"}
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
+                        {use.timedOut > 0
+                          ? `${use.timedOut} (${percent(use.timeoutRate)})`
+                          : "—"}
                       </TableCell>
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
                         {formatBytes(use.resultBytes.meanBytes)}
                       </TableCell>
-                      <TableCell align="right" sx={{ fontVariantNumeric: "tabular-nums" }}>
+                      <TableCell
+                        align="right"
+                        sx={{ fontVariantNumeric: "tabular-nums" }}
+                      >
                         <Tooltip title="An upper bound: sizes are kept in base-2 buckets, so the real number is inside the octave below this. It is what should size the cap on a tool result.">
-                          <span>≤ {formatBytes(use.resultBytes.p95AtMostBytes)}</span>
+                          <span>
+                            ≤ {formatBytes(use.resultBytes.p95AtMostBytes)}
+                          </span>
                         </Tooltip>
                       </TableCell>
                     </TableRow>
@@ -415,16 +634,35 @@ export default function MetricsPage({ showError, onOpenTask }) {
 
           {checks?.waits > 0 && (
             <>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5, mt: 2.5 }}>CI waits</Typography>
-              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
-                The loop every run is told to go round: push, wait for checks, fix, push again.{" "}
-                {checks.waits} wait{checks.waits === 1 ? "" : "s"} across {checks.runs} attempt
-                {checks.runs === 1 ? "" : "s"}. Mostly <code>timed_out</code> means the wait's own default is set wrong
-                for this CI; mostly <code>no_checks</code> means runs are being sent to wait for CI that does not exist.
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mb: 0.5, mt: 2.5 }}
+              >
+                CI waits
+              </Typography>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                component="div"
+                sx={{ mb: 1 }}
+              >
+                The loop every run is told to go round: push, wait for checks,
+                fix, push again. {checks.waits} wait
+                {checks.waits === 1 ? "" : "s"} across {checks.runs} attempt
+                {checks.runs === 1 ? "" : "s"}. Mostly <code>timed_out</code>{" "}
+                means the wait's own default is set wrong for this CI; mostly{" "}
+                <code>no_checks</code> means runs are being sent to wait for CI
+                that does not exist.
               </Typography>
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.7, mb: 1 }}>
                 {verdicts.map(([name, count]) => (
-                  <Chip key={name} size="small" variant="outlined" label={`${name} ${count}`} />
+                  <Chip
+                    key={name}
+                    size="small"
+                    variant="outlined"
+                    label={`${name} ${count}`}
+                  />
                 ))}
               </Box>
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
@@ -447,15 +685,26 @@ export default function MetricsPage({ showError, onOpenTask }) {
 
           {pullRequests?.runs > 0 && (
             <>
-              <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5, mt: 2.5 }}>
+              <Typography
+                variant="body2"
+                color="text.secondary"
+                sx={{ mb: 0.5, mt: 2.5 }}
+              >
                 Mid-run pull requests
               </Typography>
-              <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
-                A run can open its own pull request while it still has turns left to fix what the checks say. Over the{" "}
-                {pullRequests.runs} attempt{pullRequests.runs === 1 ? "" : "s"} that were offered it — a task with a
-                repo to push to, and a census recorded. The two fix-task rates are a comparison and not a rate to
-                quote: the link is on the task rather than the attempt, and a branch can go red for reasons no amount
-                of watching would have caught.
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                component="div"
+                sx={{ mb: 1 }}
+              >
+                A run can open its own pull request while it still has turns
+                left to fix what the checks say. Over the {pullRequests.runs}{" "}
+                attempt{pullRequests.runs === 1 ? "" : "s"} that were offered it
+                — a task with a repo to push to, and a census recorded. The two
+                fix-task rates are a comparison and not a rate to quote: the
+                link is on the task rather than the attempt, and a branch can go
+                red for reasons no amount of watching would have caught.
               </Typography>
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
                 <Stat
@@ -479,21 +728,48 @@ export default function MetricsPage({ showError, onOpenTask }) {
             </>
           )}
 
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5, mt: 2.5 }}>Backlog</Typography>
-          <Typography variant="caption" color="text.secondary" component="div" sx={{ mb: 1 }}>
-            Right now, not over the window — what was still unfinished at the moment this report was taken. Read it
-            against the capacity above: work waiting while capacity sat idle is a scheduling problem, not a capacity one.
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mb: 0.5, mt: 2.5 }}
+          >
+            Backlog
+          </Typography>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            component="div"
+            sx={{ mb: 1 }}
+          >
+            Right now, not over the window — what was still unfinished at the
+            moment this report was taken. Read it against the capacity above:
+            work waiting while capacity sat idle is a scheduling problem, not a
+            capacity one.
           </Typography>
           {backlog.length === 0 ? (
-            <Typography variant="body2" color="text.secondary">Nothing unfinished — the backlog is empty.</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Nothing unfinished — the backlog is empty.
+            </Typography>
           ) : (
-            <Box sx={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 0.7 }}>
+            <Box
+              sx={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: 0.7,
+              }}
+            >
               {backlog.map(({ state, count }) => (
                 <Chip
                   key={state}
                   size="small"
                   variant="outlined"
-                  icon={<span className={`dot dot-${state}`} style={{ marginLeft: 8 }} />}
+                  icon={
+                    <span
+                      className={`dot dot-${state}`}
+                      style={{ marginLeft: 8 }}
+                    />
+                  }
                   label={`${STATE_LABELS[state] || state} ${count}`}
                 />
               ))}
@@ -502,19 +778,25 @@ export default function MetricsPage({ showError, onOpenTask }) {
           {oldestTaskId && (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
               Oldest queued:{" "}
-              <Link component="button" type="button" onClick={() => onOpenTask?.(oldestTaskId)}>
+              <Link
+                component="button"
+                type="button"
+                onClick={() => onOpenTask?.(oldestTaskId)}
+              >
                 task {oldestTaskId}
               </Link>
               , waiting {formatSeconds(report.backlog.oldestQueuedSeconds)}.
             </Typography>
           )}
 
-          {report.throughput.tasksFiled === 0 && report.throughput.runsStarted === 0 && (
-            <Alert severity="info" sx={{ mt: 2 }}>
-              Nothing was filed or attempted inside this window. Nothing is stored, so a report is only ever computed from
-              rows that still exist — a longer window is the thing to try first.
-            </Alert>
-          )}
+          {report.throughput.tasksFiled === 0 &&
+            report.throughput.runsStarted === 0 && (
+              <Alert severity="info" sx={{ mt: 2 }}>
+                Nothing was filed or attempted inside this window. Nothing is
+                stored, so a report is only ever computed from rows that still
+                exist — a longer window is the thing to try first.
+              </Alert>
+            )}
         </Box>
       )}
     </section>

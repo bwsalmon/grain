@@ -31,7 +31,11 @@ import MetricsPage from "./MetricsPage.jsx";
 // DebugOverlay gives: the latency and tool-use tables are more columns
 // across than a centered dialog has room for.
 export default function MetricsOverlay({ onClose, onOpenTask, showError }) {
-  const header = <Typography variant="h6" component="h2" sx={{ mt: 0 }}>Metrics</Typography>;
+  const header = (
+    <Typography variant="h6" component="h2" sx={{ mt: 0 }}>
+      Metrics
+    </Typography>
+  );
   return (
     <Overlay onClose={onClose} pane header={header}>
       <MetricsPage showError={showError} onOpenTask={onOpenTask} />

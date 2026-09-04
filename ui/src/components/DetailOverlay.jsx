@@ -1,8 +1,35 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  FormControl,
+  FormControlLabel,
+  Link,
+  ListItemText,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Tooltip,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, frameworkLabel, knownRepos, orphanedPullRequest, runActivity, stateLabel } from "../state.js";
+import {
+  STATE_LABELS,
+  capabilityRows,
+  capabilityUnavailableHint,
+  closablePullRequest,
+  completionPhase,
+  frameworkLabel,
+  knownRepos,
+  orphanedPullRequest,
+  runActivity,
+  stateLabel,
+} from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -20,7 +47,16 @@ import TaskPicker from "./TaskPicker.jsx";
 // sidebar rather than floating in the middle of it (grain/task-94, see
 // Overlay's own `pane`): a task is mostly an agent's own prose, and a
 // long answer wants the room.
-export default function DetailOverlay({ task: t, tasks, config, templates, onClose, onOpenTask, act, showError }) {
+export default function DetailOverlay({
+  task: t,
+  tasks,
+  config,
+  templates,
+  onClose,
+  onOpenTask,
+  act,
+  showError,
+}) {
   const phase = completionPhase(t);
   const orphaned = orphanedPullRequest(t);
   const activity = runActivity(t);
@@ -38,27 +74,63 @@ export default function DetailOverlay({ task: t, tasks, config, templates, onClo
       <div className="detail-layout">
         <div className="detail-main">
           {editing ? (
-            <EditTaskForm t={t} templates={templates} act={act} onDone={() => setEditing(false)} />
+            <EditTaskForm
+              t={t}
+              templates={templates}
+              act={act}
+              onDone={() => setEditing(false)}
+            />
           ) : (
             <>
               <div className="detail-header">
-                <Typography variant="h6" component="h2" sx={{ m: 0, fontWeight: 600, fontSize: "1.15rem" }}>{t.id} {t.title}</Typography>
+                <Typography
+                  variant="h6"
+                  component="h2"
+                  sx={{ m: 0, fontWeight: 600, fontSize: "1.15rem" }}
+                >
+                  {t.id} {t.title}
+                </Typography>
                 {/* The one way in to the whole prompt a task's agent was
                     handed (grain/task-175 moved it off every task row):
                     this is where someone works out why a task went the
                     way it did, and the title and description above are
                     only part of what its agent was actually told. */}
-                <Button size="small" onClick={() => setShowPrompt(true)}>Prompt</Button>
-                <Button size="small" onClick={() => setEditing(true)}>Edit</Button>
+                <Button size="small" onClick={() => setShowPrompt(true)}>
+                  Prompt
+                </Button>
+                <Button size="small" onClick={() => setEditing(true)}>
+                  Edit
+                </Button>
               </div>
 
               <div className="freshness">
                 as of just now
-                {t.pullRequest && <> · <Link href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</Link></>}
+                {t.pullRequest && (
+                  <>
+                    {" "}
+                    ·{" "}
+                    <Link
+                      href={pullRequestUrl(t.pullRequest)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {t.pullRequest}
+                    </Link>
+                  </>
+                )}
                 {t.generatedFrom && (
                   <>
-                    {" "}· generated from{" "}
-                    <Link href="#" onClick={(e) => { e.preventDefault(); onOpenTask(t.generatedFrom); }}>{t.generatedFrom}</Link>
+                    {" "}
+                    · generated from{" "}
+                    <Link
+                      href="#"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        onOpenTask(t.generatedFrom);
+                      }}
+                    >
+                      {t.generatedFrom}
+                    </Link>
                   </>
                 )}
               </div>
@@ -67,16 +139,21 @@ export default function DetailOverlay({ task: t, tasks, config, templates, onClo
                   so it stays a plain string -- only a real description
                   (often an agent's own markdown, for a task another run
                   proposed) goes through the renderer. */}
-              {t.description
-                ? <Markdown className="description">{t.description}</Markdown>
-                : <div className="description">(no description)</div>}
+              {t.description ? (
+                <Markdown className="description">{t.description}</Markdown>
+              ) : (
+                <div className="description">(no description)</div>
+              )}
               <AttachmentLinks taskId={t.id} attachments={t.attachments} />
             </>
           )}
 
           {t.state === "failed" && (
             <Alert severity="error" sx={{ mb: 2 }}>
-              <strong>{t.failedAttempts} consecutive failed attempt{t.failedAttempts === 1 ? "" : "s"}.</strong>
+              <strong>
+                {t.failedAttempts} consecutive failed attempt
+                {t.failedAttempts === 1 ? "" : "s"}.
+              </strong>
               {t.lastFailureReason && <> Last failure: {t.lastFailureReason}</>}
             </Alert>
           )}
@@ -87,10 +164,13 @@ export default function DetailOverlay({ task: t, tasks, config, templates, onClo
               one and why a merged one is not it. */}
           {orphaned && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              <strong>{orphaned} is still open, and grain has stopped watching it.</strong>{" "}
-              Closing this task took it off the merge queue for good, so grain will not merge
-              or update that pull request. Merge or close it on GitHub by hand, or reopen this
-              task to put it back under grain's watch.
+              <strong>
+                {orphaned} is still open, and grain has stopped watching it.
+              </strong>{" "}
+              Closing this task took it off the merge queue for good, so grain
+              will not merge or update that pull request. Merge or close it on
+              GitHub by hand, or reopen this task to put it back under grain's
+              watch.
             </Alert>
           )}
 
@@ -101,8 +181,14 @@ export default function DetailOverlay({ task: t, tasks, config, templates, onClo
 
         <div className="detail-side">
           <div className="detail-state">
-            <span className={`badge badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}>
-              <StateDot state={t.state} title={stateLabel(t)} repairing={t.repairing} />
+            <span
+              className={`badge badge-${t.state}${isLiveRunning(t.state) ? " badge-mark" : ""}`}
+            >
+              <StateDot
+                state={t.state}
+                title={stateLabel(t)}
+                repairing={t.repairing}
+              />
               {stateLabel(t)}
             </span>
             {/* Both chips read as annotations beside the state dot, not a
@@ -110,7 +196,14 @@ export default function DetailOverlay({ task: t, tasks, config, templates, onClo
                 (docs/data-model.md), and a task whose pull request the
                 merge queue gave up on is still "completed" as far as
                 model.State goes. */}
-            {phase && <Chip size="small" color={phase.color} title={phase.title} label={phase.label} />}
+            {phase && (
+              <Chip
+                size="small"
+                color={phase.color}
+                title={phase.title}
+                label={phase.label}
+              />
+            )}
             {t.blocked && <Chip size="small" color="error" label="Blocked" />}
           </div>
           {/* What the run is doing, under the badge that says only that
@@ -122,20 +215,32 @@ export default function DetailOverlay({ task: t, tasks, config, templates, onClo
               answer with less than the list did. */}
           {activity && (
             <div className="detail-activity">
-              {activity.bySetup && <span className="task-activity-by">grain</span>}
+              {activity.bySetup && (
+                <span className="task-activity-by">grain</span>
+              )}
               {activity.note}
-              {activity.age && <span className="task-activity-age">{activity.age}</span>}
+              {activity.age && (
+                <span className="task-activity-age">{activity.age}</span>
+              )}
             </div>
           )}
 
           <Actions t={t} config={config} act={act} />
           <Declared t={t} />
-          <ReadOnlyRepos t={t} tasks={tasks} config={config} act={act} showError={showError} />
+          <ReadOnlyRepos
+            t={t}
+            tasks={tasks}
+            config={config}
+            act={act}
+            showError={showError}
+          />
           <CapabilityToggles t={t} config={config} act={act} />
           <Dependencies t={t} tasks={tasks} act={act} onOpenTask={onOpenTask} />
         </div>
       </div>
-      {showPrompt && <PromptOverlay taskId={t.id} onClose={() => setShowPrompt(false)} />}
+      {showPrompt && (
+        <PromptOverlay taskId={t.id} onClose={() => setShowPrompt(false)} />
+      )}
     </Overlay>
   );
 }
@@ -161,7 +266,9 @@ function EditTaskForm({ t, templates, act, onDone }) {
   // orchestrator.SyncReviews resolves this once the task's own work is
   // done rather than at creation -- which is why the picker locks once
   // there is a review task to point at.
-  const [reviewTemplateId, setReviewTemplateId] = useState(t.reviewTemplateId || "");
+  const [reviewTemplateId, setReviewTemplateId] = useState(
+    t.reviewTemplateId || "",
+  );
   const reviewFiled = Boolean(t.reviewTask);
 
   // Mirrors Timeline's own send(): act() already reports a failure to
@@ -171,17 +278,36 @@ function EditTaskForm({ t, templates, act, onDone }) {
   // set for a reply.
   const save = async () => {
     if (!title.trim()) return;
-    await act(() => api(`/api/tasks/${t.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ title, description, reviewTemplateId }),
-    }), t.id);
+    await act(
+      () =>
+        api(`/api/tasks/${t.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ title, description, reviewTemplateId }),
+        }),
+      t.id,
+    );
     onDone();
   };
 
   return (
     <Stack spacing={1.5} sx={{ mb: 2 }}>
-      <TextField label="Title" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus fullWidth size="small" />
-      <TextField label="Description" value={description} onChange={(e) => setDescription(e.target.value)} multiline rows={5} fullWidth size="small" />
+      <TextField
+        label="Title"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        autoFocus
+        fullWidth
+        size="small"
+      />
+      <TextField
+        label="Description"
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        multiline
+        rows={5}
+        fullWidth
+        size="small"
+      />
       <TextField
         select
         label="Review"
@@ -202,12 +328,16 @@ function EditTaskForm({ t, templates, act, onDone }) {
       >
         <MenuItem value="">No review</MenuItem>
         {(templates || []).map((tmpl) => (
-          <MenuItem key={tmpl.id} value={tmpl.id}>{tmpl.name}</MenuItem>
+          <MenuItem key={tmpl.id} value={tmpl.id}>
+            {tmpl.name}
+          </MenuItem>
         ))}
       </TextField>
       <Stack direction="row" spacing={1} justifyContent="flex-end">
         <Button onClick={onDone}>Cancel</Button>
-        <Button variant="contained" disabled={!title.trim()} onClick={save}>Save</Button>
+        <Button variant="contained" disabled={!title.trim()} onClick={save}>
+          Save
+        </Button>
       </Stack>
     </Stack>
   );
@@ -238,11 +368,14 @@ function Declared({ t }) {
   // convention that keeps them out of the JSON response at all (Task's
   // own omitempty).
   if (t.sandboxCpus) rows.push(["Sandbox vCPUs", String(t.sandboxCpus)]);
-  if (t.sandboxMemoryMb) rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
-  if (t.sandboxDiskGb) rows.push(["Sandbox disk (GiB)", String(t.sandboxDiskGb)]);
+  if (t.sandboxMemoryMb)
+    rows.push(["Sandbox memory (MiB)", String(t.sandboxMemoryMb)]);
+  if (t.sandboxDiskGb)
+    rows.push(["Sandbox disk (GiB)", String(t.sandboxDiskGb)]);
   // Same treatment for a per-task agent framework: shown only when this
   // task overrides the deployment's own, which most do not.
-  if (t.agentFramework) rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);
+  if (t.agentFramework)
+    rows.push(["Agent framework", frameworkLabel(t.agentFramework)]);
   // Same treatment again for a task that replaces the standing
   // instructions its deployment and repo would otherwise give its runs
   // (grain/task-114): shown only when it has one, since most tasks do
@@ -257,7 +390,10 @@ function Declared({ t }) {
   // since gone (ui.Task.reviewTemplateName).
   if (t.reviewTemplateId) {
     const name = t.reviewTemplateName || t.reviewTemplateId;
-    rows.push(["Review", t.reviewTask ? `${name} (task ${t.reviewTask})` : name]);
+    rows.push([
+      "Review",
+      t.reviewTask ? `${name} (task ${t.reviewTask})` : name,
+    ]);
   }
   // Most tasks are not interactive, so this row only shows up for the
   // ones that are -- the same "shown only when set" treatment the
@@ -324,7 +460,10 @@ function ReadOnlyRepos({ t, tasks, config, act, showError }) {
     const previous = reads;
     setReads(next);
     try {
-      await api(`/api/tasks/${t.id}`, { method: "PATCH", body: JSON.stringify({ reads: next }) });
+      await api(`/api/tasks/${t.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ reads: next }),
+      });
     } catch (err) {
       setReads(previous);
       showError(err);
@@ -339,12 +478,17 @@ function ReadOnlyRepos({ t, tasks, config, act, showError }) {
     // "Read-only repos", and a legend saying it again would put the same
     // words on screen twice in a 260px column.
     <fieldset>
-      <ReadOnlyReposField options={knownRepos(config, tasks)} value={reads} onChange={change} />
+      <ReadOnlyReposField
+        options={knownRepos(config, tasks)}
+        value={reads}
+        onChange={change}
+      />
       {t.state === "running" && (
         <p className="hint">
-          This run&apos;s sandbox was checked out when it started, so a repo added now is not cloned
-          into it and the agent is not told about it -- comment if the run needs to know. Fetching
-          is allowed or refused as this list stands, so a removal takes effect immediately.
+          This run&apos;s sandbox was checked out when it started, so a repo
+          added now is not cloned into it and the agent is not told about it --
+          comment if the run needs to know. Fetching is allowed or refused as
+          this list stands, so a removal takes effect immediately.
         </p>
       )}
     </fieldset>
@@ -369,14 +513,24 @@ function Actions({ t, config, act }) {
       () =>
         api(`/api/tasks/${t.id}/close`, {
           method: "POST",
-          body: JSON.stringify({ close_pull_request: Boolean(closable) && closePullRequest }),
+          body: JSON.stringify({
+            close_pull_request: Boolean(closable) && closePullRequest,
+          }),
         }),
-      t.id
+      t.id,
     );
   return (
     <Stack className="actions" spacing={1}>
       {t.state === "proposed" && (
-        <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/approve`, { method: "POST" }), t.id)}>
+        <Button
+          variant="contained"
+          onClick={() =>
+            act(
+              () => api(`/api/tasks/${t.id}/approve`, { method: "POST" }),
+              t.id,
+            )
+          }
+        >
           Approve
         </Button>
       )}
@@ -386,7 +540,16 @@ function Actions({ t, config, act }) {
           than closing it (Client.WithdrawApproval, which refuses the
           states this button is never shown for). */}
       {t.state === "queued" && (
-        <Button variant="outlined" onClick={() => act(() => api(`/api/tasks/${t.id}/withdraw-approval`, { method: "POST" }), t.id)}>
+        <Button
+          variant="outlined"
+          onClick={() =>
+            act(
+              () =>
+                api(`/api/tasks/${t.id}/withdraw-approval`, { method: "POST" }),
+              t.id,
+            )
+          }
+        >
           Withdraw approval
         </Button>
       )}
@@ -395,7 +558,15 @@ function Actions({ t, config, act }) {
           resolution and merging. Already-submitted tasks (autoMerge
           already true) have nothing left for this button to do. */}
       {t.pullRequest && !t.autoMerge && (
-        <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/submit`, { method: "POST" }), t.id)}>
+        <Button
+          variant="contained"
+          onClick={() =>
+            act(
+              () => api(`/api/tasks/${t.id}/submit`, { method: "POST" }),
+              t.id,
+            )
+          }
+        >
           Submit
         </Button>
       )}
@@ -407,11 +578,17 @@ function Actions({ t, config, act }) {
           (bwsalmon/agents#483). */}
       {t.autoMerge && config?.autoMergeDegraded && (
         <Alert severity="warning" sx={{ fontSize: "0.8rem" }}>
-          Queued for auto-merge, but this deployment can't read pull request checks, so it will never merge automatically.
+          Queued for auto-merge, but this deployment can't read pull request
+          checks, so it will never merge automatically.
         </Alert>
       )}
       {t.state === "failed" && (
-        <Button variant="contained" onClick={() => act(() => api(`/api/tasks/${t.id}/retry`, { method: "POST" }), t.id)}>
+        <Button
+          variant="contained"
+          onClick={() =>
+            act(() => api(`/api/tasks/${t.id}/retry`, { method: "POST" }), t.id)
+          }
+        >
           Retry
         </Button>
       )}
@@ -425,7 +602,13 @@ function Actions({ t, config, act }) {
           all rather than a way to lose an agent's work. */}
       {t.state !== "closed" && closable && (
         <FormControlLabel
-          control={<Checkbox size="small" checked={closePullRequest} onChange={(e) => setClosePullRequest(e.target.checked)} />}
+          control={
+            <Checkbox
+              size="small"
+              checked={closePullRequest}
+              onChange={(e) => setClosePullRequest(e.target.checked)}
+            />
+          }
           label={`Close ${closable} too`}
           title={`Closes ${closable} on GitHub without merging it. The branch and its commits are left untouched, and reopening the pull request restores it.`}
           sx={{ display: "flex", m: 0 }}
@@ -433,7 +616,15 @@ function Actions({ t, config, act }) {
         />
       )}
       {t.state === "closed" ? (
-        <Button variant="outlined" onClick={() => act(() => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }), t.id)}>
+        <Button
+          variant="outlined"
+          onClick={() =>
+            act(
+              () => api(`/api/tasks/${t.id}/reopen`, { method: "POST" }),
+              t.id,
+            )
+          }
+        >
           Reopen
         </Button>
       ) : t.state === "running" ? (
@@ -445,7 +636,12 @@ function Actions({ t, config, act }) {
           variant="outlined"
           color="error"
           onClick={() => {
-            if (!confirm(cancelPrompt(closable && closePullRequest ? closable : null))) return;
+            if (
+              !confirm(
+                cancelPrompt(closable && closePullRequest ? closable : null),
+              )
+            )
+              return;
             close();
           }}
         >
@@ -466,7 +662,8 @@ function Actions({ t, config, act }) {
 // confirming it also shuts a pull request. A cancel that leaves the pull
 // request alone reads exactly as it always did.
 function cancelPrompt(ref) {
-  const base = "Cancel this job? Its run will be abandoned: no pull request will be opened for it.";
+  const base =
+    "Cancel this job? Its run will be abandoned: no pull request will be opened for it.";
   if (!ref) return base;
   return `Cancel this job, and close ${ref} on GitHub? Its run will be abandoned. The branch and its commits are kept, and reopening ${ref} restores it.`;
 }
@@ -530,14 +727,21 @@ const OUTCOME_BADGES = {
 // own doc comment), which the label spells out rather than leaving a
 // reader to infer from "closed" alone what a task's own bare "Closed"
 // state transition already uses that word for.
-const PR_EVENT_LABELS = { opened: "PR opened", merged: "PR merged", closed: "PR closed without merging" };
+const PR_EVENT_LABELS = {
+  opened: "PR opened",
+  merged: "PR merged",
+  closed: "PR closed without merging",
+};
 
 // outcome is undefined, not "", for a still-running attempt: the API's
 // own Attempt.Outcome carries `omitempty`, so the wire form drops the
 // key entirely rather than sending an empty string.
 function outcomeLabel(outcome) {
   outcome = outcome || "";
-  return OUTCOME_LABELS[outcome] || (outcome.charAt(0).toUpperCase() + outcome.slice(1));
+  return (
+    OUTCOME_LABELS[outcome] ||
+    outcome.charAt(0).toUpperCase() + outcome.slice(1)
+  );
 }
 
 // timelineEvents merges everything grain has recorded about a task --
@@ -569,7 +773,10 @@ function timelineEvents(t) {
   // need a single node"). Older tasks or edge cases with transitions but
   // no recorded attempts still show the bare transition, since it's the
   // only record of that running period they have.
-  const shownTransitions = attempts.length > 0 ? transitions.filter((tr) => tr.state !== "running") : transitions;
+  const shownTransitions =
+    attempts.length > 0
+      ? transitions.filter((tr) => tr.state !== "running")
+      : transitions;
   const lastTransitionIndex = shownTransitions.length - 1;
 
   shownTransitions.forEach((tr, i) => {
@@ -586,7 +793,11 @@ function timelineEvents(t) {
       // it can be pinned last below even if a synced pull request event
       // lands with a later timestamp (bwsalmon/agents#503).
       closedTransition: tr.state === "closed",
-      render: () => <div className="timeline-title">{STATE_LABELS[tr.state] || tr.state}</div>,
+      render: () => (
+        <div className="timeline-title">
+          {STATE_LABELS[tr.state] || tr.state}
+        </div>
+      ),
     });
   });
 
@@ -594,7 +805,10 @@ function timelineEvents(t) {
     // The very first attempt *is* the task's one "running" node -- calling
     // it out as "Attempt #1" only makes sense once there's a second one to
     // tell it apart from (bwsalmon/agents#503).
-    const title = a.number === 1 ? outcomeLabel(a.outcome) : `Attempt #${a.number} · ${outcomeLabel(a.outcome)}`;
+    const title =
+      a.number === 1
+        ? outcomeLabel(a.outcome)
+        : `Attempt #${a.number} · ${outcomeLabel(a.outcome)}`;
     events.push({
       key: `attempt-${a.number}`,
       at: new Date(a.startedAt),
@@ -612,7 +826,9 @@ function timelineEvents(t) {
           <div className="timeline-title">{title}</div>
           <div className="timeline-meta">
             started {new Date(a.startedAt).toLocaleString()}
-            {a.finishedAt && <> · finished {new Date(a.finishedAt).toLocaleString()}</>}
+            {a.finishedAt && (
+              <> · finished {new Date(a.finishedAt).toLocaleString()}</>
+            )}
           </div>
           {a.detail && <div className="timeline-detail">{a.detail}</div>}
         </>
@@ -628,21 +844,31 @@ function timelineEvents(t) {
   // opened comes out of order at the beginning of the timeline"). Clamping
   // it to this lifecycle's own start keeps it from floating above events
   // that actually happened first.
-  const earliestAt = shownTransitions.length > 0 ? new Date(shownTransitions[0].at) : null;
+  const earliestAt =
+    shownTransitions.length > 0 ? new Date(shownTransitions[0].at) : null;
 
   (t.pullRequestEvents || []).forEach((e, i) => {
     let at = e.at ? new Date(e.at) : null;
-    if (e.kind === "opened" && at && earliestAt && at < earliestAt) at = earliestAt;
+    if (e.kind === "opened" && at && earliestAt && at < earliestAt)
+      at = earliestAt;
     events.push({
       key: `pr-event-${i}`,
       at,
       badge: `pr_${e.kind}`,
       render: () => (
         <>
-          <div className="timeline-title">{PR_EVENT_LABELS[e.kind] || e.kind}</div>
+          <div className="timeline-title">
+            {PR_EVENT_LABELS[e.kind] || e.kind}
+          </div>
           {t.pullRequest && (
             <div className="timeline-meta">
-              <Link href={pullRequestUrl(t.pullRequest)} target="_blank" rel="noopener noreferrer">{t.pullRequest}</Link>
+              <Link
+                href={pullRequestUrl(t.pullRequest)}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {t.pullRequest}
+              </Link>
             </div>
           )}
         </>
@@ -654,15 +880,21 @@ function timelineEvents(t) {
     // onBehalfOf is set when grain relayed somebody else's words -- a
     // question from a dispatched run reads as grain speaking for an
     // agent, not as grain's own.
-    const who = c.onBehalfOf ? `${c.author} on behalf of ${c.onBehalfOf}` : c.author;
+    const who = c.onBehalfOf
+      ? `${c.author} on behalf of ${c.onBehalfOf}`
+      : c.author;
     events.push({
       key: `comment-${i}`,
       at: c.createdAt ? new Date(c.createdAt) : null,
       badge: "comment",
       render: () => (
         <>
-          <div className="timeline-meta">{who} · {c.authorKind}</div>
-          {c.body && <Markdown className="timeline-comment-body">{c.body}</Markdown>}
+          <div className="timeline-meta">
+            {who} · {c.authorKind}
+          </div>
+          {c.body && (
+            <Markdown className="timeline-comment-body">{c.body}</Markdown>
+          )}
           <AttachmentLinks taskId={t.id} attachments={c.attachments} />
         </>
       ),
@@ -702,14 +934,26 @@ function CapabilityToggles({ t, config, act }) {
     const next = e.target.value;
     const added = next.filter((id) => !selected.includes(id));
     const removed = selected.filter((id) => !next.includes(id));
-    added.forEach((id) => act(() => api(`/api/tasks/${t.id}/capabilities`, {
-      method: "POST",
-      body: JSON.stringify({ id, attach: true }),
-    }), t.id));
-    removed.forEach((id) => act(() => api(`/api/tasks/${t.id}/capabilities`, {
-      method: "POST",
-      body: JSON.stringify({ id, attach: false }),
-    }), t.id));
+    added.forEach((id) =>
+      act(
+        () =>
+          api(`/api/tasks/${t.id}/capabilities`, {
+            method: "POST",
+            body: JSON.stringify({ id, attach: true }),
+          }),
+        t.id,
+      ),
+    );
+    removed.forEach((id) =>
+      act(
+        () =>
+          api(`/api/tasks/${t.id}/capabilities`, {
+            method: "POST",
+            body: JSON.stringify({ id, attach: false }),
+          }),
+        t.id,
+      ),
+    );
   };
 
   return (
@@ -722,21 +966,31 @@ function CapabilityToggles({ t, config, act }) {
           inputProps={{ "aria-label": "Capabilities" }}
           value={selected}
           onChange={handleChange}
-          renderValue={(sel) => (sel.length === 0 ? (
-            <span className="hint">None</span>
-          ) : (
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-              {sel.map((id) => {
-                const c = rows.find((cap) => cap.id === id);
-                return <Chip key={id} size="small" label={c ? c.name : id} />;
-              })}
-            </Box>
-          ))}
+          renderValue={(sel) =>
+            sel.length === 0 ? (
+              <span className="hint">None</span>
+            ) : (
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                {sel.map((id) => {
+                  const c = rows.find((cap) => cap.id === id);
+                  return <Chip key={id} size="small" label={c ? c.name : id} />;
+                })}
+              </Box>
+            )
+          }
         >
           {rows.map((c) => {
             const unavailable = capabilityUnavailableHint(c);
             return (
-              <MenuItem key={c.id} value={c.id} title={unavailable ? `${c.description}\n\n${unavailable}` : c.description}>
+              <MenuItem
+                key={c.id}
+                value={c.id}
+                title={
+                  unavailable
+                    ? `${c.description}\n\n${unavailable}`
+                    : c.description
+                }
+              >
                 <Checkbox checked={selected.includes(c.id)} size="small" />
                 <ListItemText
                   primary={c.name}
@@ -785,7 +1039,10 @@ function PendingSecret({ t, act, showError }) {
   const submit = async () => {
     if (value.trim() === "") return;
     try {
-      await api(`/api/tasks/${t.id}/secret`, { method: "PUT", body: JSON.stringify({ value }) });
+      await api(`/api/tasks/${t.id}/secret`, {
+        method: "PUT",
+        body: JSON.stringify({ value }),
+      });
     } catch (err) {
       showError(err);
       return;
@@ -800,9 +1057,10 @@ function PendingSecret({ t, act, showError }) {
       {pending.set
         ? `A value is already stored as ${pending.secret}/${pending.key}; setting one here replaces it.`
         : `Nothing is stored as ${pending.secret}/${pending.key} yet.`}{" "}
-      The value goes straight into grain&apos;s secret store -- it is never shown to the agent, never
-      added to this conversation, and cannot be read back out. Setting it puts the task back in the
-      queue; replying below instead does the same without storing anything.
+      The value goes straight into grain&apos;s secret store -- it is never
+      shown to the agent, never added to this conversation, and cannot be read
+      back out. Setting it puts the task back in the queue; replying below
+      instead does the same without storing anything.
       <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ mt: 1 }}>
         <TextField
           type="password"
@@ -810,7 +1068,9 @@ function PendingSecret({ t, act, showError }) {
           fullWidth
           autoComplete="off"
           label={pending.name}
-          placeholder={pending.set ? "replace the stored value" : "paste a value to store"}
+          placeholder={
+            pending.set ? "replace the stored value" : "paste a value to store"
+          }
           helperText={`stored as ${pending.secret}/${pending.key} -- write-only, never shown or read back`}
           InputLabelProps={{ shrink: true }}
           inputProps={{ "aria-label": `Value for ${pending.name}` }}
@@ -823,7 +1083,13 @@ function PendingSecret({ t, act, showError }) {
             }
           }}
         />
-        <Button type="button" variant="contained" disabled={value.trim() === ""} onClick={submit} sx={{ mt: 0.5 }}>
+        <Button
+          type="button"
+          variant="contained"
+          disabled={value.trim() === ""}
+          onClick={submit}
+          sx={{ mt: 0.5 }}
+        >
           Set secret
         </Button>
       </Stack>
@@ -856,10 +1122,15 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
   const blockedBy = new Set(t.blockedBy || []);
   const byId = new Map((tasks || []).map((other) => [other.id, other]));
 
-  const add = (picked) => act(() => api(`/api/tasks/${t.id}/depends-on`, {
-    method: "POST",
-    body: JSON.stringify({ id: picked.id, attach: true }),
-  }), t.id);
+  const add = (picked) =>
+    act(
+      () =>
+        api(`/api/tasks/${t.id}/depends-on`, {
+          method: "POST",
+          body: JSON.stringify({ id: picked.id, attach: true }),
+        }),
+      t.id,
+    );
 
   return (
     <fieldset>
@@ -873,18 +1144,37 @@ function Dependencies({ t, tasks, act, onOpenTask }) {
           // want of a title would hide the dependency itself.
           const dep = byId.get(id);
           return (
-            <Tooltip key={id} title={dependencyTooltip(id, dep, blocking)} placement="left">
+            <Tooltip
+              key={id}
+              title={dependencyTooltip(id, dep, blocking)}
+              placement="left"
+            >
               <Chip
                 variant={blocking ? "outlined" : "filled"}
                 color={blocking ? "warning" : "default"}
                 label={`${id}${dep ? ` ${dep.title}` : ""}${blocking ? " (open)" : ""}`}
                 onClick={() => onOpenTask(id)}
-                onDelete={() => act(() => api(`/api/tasks/${t.id}/depends-on`, {
-                  method: "POST",
-                  body: JSON.stringify({ id, attach: false }),
-                }), t.id)}
+                onDelete={() =>
+                  act(
+                    () =>
+                      api(`/api/tasks/${t.id}/depends-on`, {
+                        method: "POST",
+                        body: JSON.stringify({ id, attach: false }),
+                      }),
+                    t.id,
+                  )
+                }
                 deleteIcon={<span title={`Remove dependency on ${id}`}>×</span>}
-                sx={{ width: "100%", justifyContent: "space-between", "& .MuiChip-label": { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } }}
+                sx={{
+                  width: "100%",
+                  justifyContent: "space-between",
+                  "& .MuiChip-label": {
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  },
+                }}
               />
             </Tooltip>
           );
@@ -921,11 +1211,17 @@ function Timeline({ t, act, showError }) {
   const send = async () => {
     const body = textareaRef.current.value;
     if (!body.trim() && attachments.length === 0) return;
-    const uploaded = await Promise.all(attachments.map((f) => fileToAttachment(f)));
-    await act(() => api(`/api/tasks/${t.id}/comments`, {
-      method: "POST",
-      body: JSON.stringify({ body, attachments: uploaded }),
-    }), t.id);
+    const uploaded = await Promise.all(
+      attachments.map((f) => fileToAttachment(f)),
+    );
+    await act(
+      () =>
+        api(`/api/tasks/${t.id}/comments`, {
+          method: "POST",
+          body: JSON.stringify({ body, attachments: uploaded }),
+        }),
+      t.id,
+    );
     textareaRef.current.value = "";
     setAttachments([]);
   };
@@ -940,7 +1236,11 @@ function Timeline({ t, act, showError }) {
         <ul className="timeline-list">
           {events.map((e) => (
             <li
-              className={e.attempt ? "timeline-item timeline-item-attempt" : "timeline-item"}
+              className={
+                e.attempt
+                  ? "timeline-item timeline-item-attempt"
+                  : "timeline-item"
+              }
               key={e.key}
               {...(e.attempt && {
                 tabIndex: 0,
@@ -958,14 +1258,24 @@ function Timeline({ t, act, showError }) {
               <div className="timeline-marker">
                 <span
                   className={`badge badge-${e.badge}${
-                    e.badge === "running" ? (e.current ? " badge-mark" : " badge-static") : ""
+                    e.badge === "running"
+                      ? e.current
+                        ? " badge-mark"
+                        : " badge-static"
+                      : ""
                   }`}
                 >
-                  <StateDot state={e.badge} live={e.current} title={STATE_LABELS[e.badge] || e.badge} />
+                  <StateDot
+                    state={e.badge}
+                    live={e.current}
+                    title={STATE_LABELS[e.badge] || e.badge}
+                  />
                 </span>
               </div>
               <div className="timeline-body">
-                {e.at && <div className="timeline-when">{e.at.toLocaleString()}</div>}
+                {e.at && (
+                  <div className="timeline-when">{e.at.toLocaleString()}</div>
+                )}
                 {e.render()}
               </div>
             </li>
@@ -994,7 +1304,9 @@ function Timeline({ t, act, showError }) {
           size="small"
         />
         <AttachmentPicker files={attachments} onChange={setAttachments} />
-        <Button variant="outlined" onClick={send}>Comment</Button>
+        <Button variant="outlined" onClick={send}>
+          Comment
+        </Button>
       </div>
     </div>
   );

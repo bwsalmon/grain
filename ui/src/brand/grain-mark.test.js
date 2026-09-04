@@ -51,7 +51,8 @@ function insideLoops(loops, x, y) {
     for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
       const [xi, yi] = loop[i];
       const [xj, yj] = loop[j];
-      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)
+        inside = !inside;
     }
   }
   return inside;
@@ -72,7 +73,9 @@ describe("the static logo", () => {
     const Rf = f.R * glyphZoom(...LOGO);
     for (const p of sampleGlyph(f, LOGO, grainSpec(f.W).count)) {
       expect(Math.hypot(p.x - f.cx, p.y - f.cy)).toBeLessThanOrEqual(f.R);
-      expect(fillScalar(...LOGO, (p.x - f.cx) / Rf, (p.y - f.cy) / Rf)).toBeGreaterThan(0);
+      expect(
+        fillScalar(...LOGO, (p.x - f.cx) / Rf, (p.y - f.cy) / Rf),
+      ).toBeGreaterThan(0);
     }
   });
 
@@ -92,7 +95,8 @@ describe("the static logo", () => {
     const W = 128;
     const f = frameOf(W);
     const Rf = f.R * glyphZoom(...LOGO);
-    const field = (x, y) => fillScalar(...LOGO, (x - f.cx) / Rf, (y - f.cy) / Rf) > 0;
+    const field = (x, y) =>
+      fillScalar(...LOGO, (x - f.cx) / Rf, (y - f.cy) / Rf) > 0;
     let tested = 0;
     const disagreed = [];
     for (let y = 0; y < W; y++) {
@@ -118,9 +122,9 @@ describe("the static logo", () => {
 
   it("ships a still per theme, in that theme's grain colour", () => {
     for (const [name, theme] of Object.entries(THEMES)) {
-      expect(readFileSync(join(publicDir, `grain-mark-${name}.svg`), "utf8")).toContain(
-        `fill="${theme.grain}"`,
-      );
+      expect(
+        readFileSync(join(publicDir, `grain-mark-${name}.svg`), "utf8"),
+      ).toContain(`fill="${theme.grain}"`);
     }
   });
 });
@@ -139,7 +143,10 @@ describe("grain spec", () => {
       const backing = cssPx * dpr;
       expect(spec.count).toBe(grainSpec(cssPx).count);
       // Grain radius on screen, in CSS pixels: canvas.width * radius / dpr.
-      expect((backing * spec.radius) / dpr).toBeCloseTo(cssPx * spec.radius, 10);
+      expect((backing * spec.radius) / dpr).toBeCloseTo(
+        cssPx * spec.radius,
+        10,
+      );
     }
     expect(grainSpec(cssPx * 2).count).not.toBe(spec.count);
   });

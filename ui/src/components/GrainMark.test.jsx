@@ -1,7 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import GrainMark from "./GrainMark.jsx";
-import { SHEET_FRAMES, SHEET_LOOP_MS, SHEET_SIZES } from "../brand/mark-sheet.js";
+import {
+  SHEET_FRAMES,
+  SHEET_LOOP_MS,
+  SHEET_SIZES,
+} from "../brand/mark-sheet.js";
 
 // A mark small enough to have a sheet plays a recording and needs no
 // canvas. Only the hero-sized live renderer does, and jsdom has none
@@ -50,7 +54,8 @@ afterEach(() => {
   delete window.matchMedia;
 });
 
-const marked = () => screen.getByRole("img", { name: "grain — agents working" });
+const marked = () =>
+  screen.getByRole("img", { name: "grain — agents working" });
 
 describe("GrainMark", () => {
   it("shows the fixed mark as an image when nothing is animating", () => {
@@ -71,9 +76,15 @@ describe("GrainMark", () => {
 
     const mark = marked();
     expect(mark).toHaveClass("grain-mark-sheet");
-    expect(mark.style.getPropertyValue("--mark-sheet")).toBe('url("/grain-mark-20.png")');
-    expect(mark.style.getPropertyValue("--mark-frames")).toBe(String(SHEET_FRAMES));
-    expect(mark.style.getPropertyValue("--mark-loop")).toBe(`${SHEET_LOOP_MS}ms`);
+    expect(mark.style.getPropertyValue("--mark-sheet")).toBe(
+      'url("/grain-mark-20.png")',
+    );
+    expect(mark.style.getPropertyValue("--mark-frames")).toBe(
+      String(SHEET_FRAMES),
+    );
+    expect(mark.style.getPropertyValue("--mark-loop")).toBe(
+      `${SHEET_LOOP_MS}ms`,
+    );
     // A frame is as tall as the mark is wide, which is what makes
     // stepping the mask by --mark-size step exactly one frame.
     expect(mark.style.getPropertyValue("--mark-size")).toBe("20px");

@@ -8,16 +8,21 @@ const options = ["owner/schema", "owner/shared-lib", "other/tooling"];
 describe("ReadOnlyReposField", () => {
   it("offers the known repos as soon as the box is focused", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={() => {}} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={() => {}} />,
+    );
 
     await user.click(screen.getByLabelText(/Read-only repos/));
 
-    for (const repo of options) expect(screen.getByText(repo)).toBeInTheDocument();
+    for (const repo of options)
+      expect(screen.getByText(repo)).toBeInTheDocument();
   });
 
   it("filters the options as the user types, case-insensitively", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={() => {}} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={() => {}} />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "SHARED");
 
@@ -28,7 +33,13 @@ describe("ReadOnlyReposField", () => {
   it("adds a clicked repo to the picked set", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={["owner/schema"]} onChange={onChange} />);
+    render(
+      <ReadOnlyReposField
+        options={options}
+        value={["owner/schema"]}
+        onChange={onChange}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "shared");
     await user.click(screen.getByText("owner/shared-lib"));
@@ -40,7 +51,9 @@ describe("ReadOnlyReposField", () => {
   it("picks the highlighted option with the arrow keys and Enter", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={onChange} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={onChange} />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "owner");
     await user.keyboard("{ArrowDown}");
@@ -51,7 +64,13 @@ describe("ReadOnlyReposField", () => {
 
   it("keeps a repo already picked out of the results, so it cannot be added twice", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={["owner/schema"]} onChange={() => {}} />);
+    render(
+      <ReadOnlyReposField
+        options={options}
+        value={["owner/schema"]}
+        onChange={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "schema");
 
@@ -63,7 +82,13 @@ describe("ReadOnlyReposField", () => {
   it("removes a picked repo when its chip is dismissed", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={["owner/schema", "other/tooling"]} onChange={onChange} />);
+    render(
+      <ReadOnlyReposField
+        options={options}
+        value={["owner/schema", "other/tooling"]}
+        onChange={onChange}
+      />,
+    );
 
     await user.click(screen.getByTitle("Remove owner/schema"));
 
@@ -76,9 +101,14 @@ describe("ReadOnlyReposField", () => {
   it("offers typed text that parses as owner/name as a repo of its own", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={onChange} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={onChange} />,
+    );
 
-    await user.type(screen.getByLabelText(/Read-only repos/), "someone/brand-new");
+    await user.type(
+      screen.getByLabelText(/Read-only repos/),
+      "someone/brand-new",
+    );
     await user.click(screen.getByText("Add someone/brand-new"));
 
     expect(onChange).toHaveBeenCalledWith(["someone/brand-new"]);
@@ -86,7 +116,9 @@ describe("ReadOnlyReposField", () => {
 
   it("does not offer to add text that is not owner/name", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={() => {}} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={() => {}} />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "brand-new");
 
@@ -99,7 +131,9 @@ describe("ReadOnlyReposField", () => {
   it("adds every repo in a comma-separated list at once", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={onChange} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={onChange} />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "a/one, b/two");
     await user.click(screen.getByText("Add a/one, b/two"));
@@ -117,10 +151,13 @@ describe("ReadOnlyReposField", () => {
       <div>
         <ReadOnlyReposField options={options} value={[]} onChange={onChange} />
         <button>elsewhere</button>
-      </div>
+      </div>,
     );
 
-    await user.type(screen.getByLabelText(/Read-only repos/), "someone/brand-new");
+    await user.type(
+      screen.getByLabelText(/Read-only repos/),
+      "someone/brand-new",
+    );
     await user.click(screen.getByText("elsewhere"));
 
     expect(onChange).toHaveBeenCalledWith(["someone/brand-new"]);
@@ -133,7 +170,7 @@ describe("ReadOnlyReposField", () => {
       <div>
         <ReadOnlyReposField options={options} value={[]} onChange={onChange} />
         <button>elsewhere</button>
-      </div>
+      </div>,
     );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "brand-new");
@@ -149,7 +186,9 @@ describe("ReadOnlyReposField", () => {
   it("adds only the clicked repo when the query is itself a prefix that parses", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={onChange} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={onChange} />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "owner/s");
     await user.click(screen.getByText("owner/shared-lib"));
@@ -166,7 +205,7 @@ describe("ReadOnlyReposField", () => {
       <form onSubmit={onSubmit}>
         <ReadOnlyReposField options={options} value={[]} onChange={() => {}} />
         <button type="submit">Save</button>
-      </form>
+      </form>,
     );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "owner/schema");
@@ -177,7 +216,9 @@ describe("ReadOnlyReposField", () => {
 
   it("closes the results on Escape", async () => {
     const user = userEvent.setup();
-    render(<ReadOnlyReposField options={options} value={[]} onChange={() => {}} />);
+    render(
+      <ReadOnlyReposField options={options} value={[]} onChange={() => {}} />,
+    );
 
     await user.type(screen.getByLabelText(/Read-only repos/), "owner");
     expect(screen.getByText("owner/schema")).toBeInTheDocument();

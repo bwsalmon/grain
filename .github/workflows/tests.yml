@@ -87,6 +87,19 @@ jobs:
       - name: Build frontend
         run: make frontend
 
+      # The frontend's half of the same gate, and it reports here rather
+      # than beside the Go `Format` step above because prettier lives in
+      # ui/node_modules: `make frontend` is what runs `npm ci`, so
+      # nothing before this step has it. A job of its own would cost a
+      # second runner and a second install for a check that takes about
+      # a second.
+      #
+      # `make fmt-frontend` rather than an inline `npm run format:check`
+      # for the reason `make fmt` is not an inline gofmt -- one
+      # definition, so reproducing a red build locally is one command.
+      - name: Format frontend
+        run: make fmt-frontend
+
       - name: Build
         run: go build ./...
 

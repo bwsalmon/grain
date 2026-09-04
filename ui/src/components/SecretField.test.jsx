@@ -6,7 +6,12 @@ import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
-const minter = { name: "gcp-key-minter", secret: "gcp-key-minter", key: "value", set: false };
+const minter = {
+  name: "gcp-key-minter",
+  secret: "gcp-key-minter",
+  key: "value",
+  set: false,
+};
 
 describe("SecretField", () => {
   afterEach(() => {
@@ -17,7 +22,13 @@ describe("SecretField", () => {
     api.mockResolvedValueOnce({});
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    render(<SecretField secret={minter} showError={() => {}} onChanged={onChanged} />);
+    render(
+      <SecretField
+        secret={minter}
+        showError={() => {}}
+        onChanged={onChanged}
+      />,
+    );
 
     await user.type(screen.getByLabelText("gcp-key-minter"), "a-key");
     await user.click(screen.getByRole("button", { name: "Set" }));
@@ -35,7 +46,9 @@ describe("SecretField", () => {
   it("clears the box after a successful set", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<SecretField secret={minter} showError={() => {}} onChanged={() => {}} />);
+    render(
+      <SecretField secret={minter} showError={() => {}} onChanged={() => {}} />,
+    );
 
     const box = screen.getByLabelText("gcp-key-minter");
     await user.type(box, "a-key");
@@ -45,7 +58,9 @@ describe("SecretField", () => {
   });
 
   it("cannot be set empty, and cannot be cleared when nothing is set", () => {
-    render(<SecretField secret={minter} showError={() => {}} onChanged={() => {}} />);
+    render(
+      <SecretField secret={minter} showError={() => {}} onChanged={() => {}} />,
+    );
 
     expect(screen.getByRole("button", { name: "Set" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Clear" })).toBeDisabled();
@@ -58,7 +73,12 @@ describe("SecretField", () => {
     const user = userEvent.setup();
     render(
       <SecretField
-        secret={{ name: "github-app/app-id", secret: "github-app", key: "app-id", set: true }}
+        secret={{
+          name: "github-app/app-id",
+          secret: "github-app",
+          key: "app-id",
+          set: true,
+        }}
         showError={() => {}}
         onChanged={onChanged}
       />,
@@ -67,7 +87,9 @@ describe("SecretField", () => {
     expect(screen.getByText("set")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Clear" }));
 
-    expect(api).toHaveBeenCalledWith("/api/secrets/github-app/app-id", { method: "DELETE" });
+    expect(api).toHaveBeenCalledWith("/api/secrets/github-app/app-id", {
+      method: "DELETE",
+    });
     expect(onChanged).toHaveBeenCalled();
   });
 
@@ -76,18 +98,28 @@ describe("SecretField", () => {
     const showError = vi.fn();
     const onChanged = vi.fn();
     const user = userEvent.setup();
-    render(<SecretField secret={minter} showError={showError} onChanged={onChanged} />);
+    render(
+      <SecretField
+        secret={minter}
+        showError={showError}
+        onChanged={onChanged}
+      />,
+    );
 
     await user.type(screen.getByLabelText("gcp-key-minter"), "x");
     await user.click(screen.getByRole("button", { name: "Set" }));
 
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "value is required" }));
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "value is required" }),
+    );
     expect(onChanged).not.toHaveBeenCalled();
   });
 
   describe("SecretFields", () => {
     it("renders nothing for a capability that resolves no credential", () => {
-      const { container } = render(<SecretFields secrets={[]} showError={() => {}} onChanged={() => {}} />);
+      const { container } = render(
+        <SecretFields secrets={[]} showError={() => {}} onChanged={() => {}} />,
+      );
       expect(container).toBeEmptyDOMElement();
     });
 
@@ -95,8 +127,18 @@ describe("SecretField", () => {
       render(
         <SecretFields
           secrets={[
-            { name: "github-app/app-id", secret: "github-app", key: "app-id", set: true },
-            { name: "github-app/private-key", secret: "github-app", key: "private-key", set: false },
+            {
+              name: "github-app/app-id",
+              secret: "github-app",
+              key: "app-id",
+              set: true,
+            },
+            {
+              name: "github-app/private-key",
+              secret: "github-app",
+              key: "private-key",
+              set: false,
+            },
           ]}
           showError={() => {}}
           onChanged={() => {}}
@@ -105,7 +147,9 @@ describe("SecretField", () => {
 
       expect(screen.getByText("Credentials this needs:")).toBeInTheDocument();
       expect(screen.getByLabelText("github-app/app-id")).toBeInTheDocument();
-      expect(screen.getByLabelText("github-app/private-key")).toBeInTheDocument();
+      expect(
+        screen.getByLabelText("github-app/private-key"),
+      ).toBeInTheDocument();
     });
   });
 });

@@ -37,12 +37,16 @@ describe("board columns", () => {
 
   describe("normalizeColumns", () => {
     it("keeps a board it can read as-is", () => {
-      const columns = [{ id: "a", title: "Doing", states: ["running", "queued"] }];
+      const columns = [
+        { id: "a", title: "Doing", states: ["running", "queued"] },
+      ];
       expect(normalizeColumns(columns)).toEqual(columns);
     });
 
     it("drops a state this build has never heard of", () => {
-      const [column] = normalizeColumns([{ id: "a", title: "Doing", states: ["running", "teleported"] }]);
+      const [column] = normalizeColumns([
+        { id: "a", title: "Doing", states: ["running", "teleported"] },
+      ]);
       expect(column.states).toEqual(["running"]);
     });
 
@@ -56,7 +60,9 @@ describe("board columns", () => {
     });
 
     it("names a column with no title of its own after the states it holds", () => {
-      const [column] = normalizeColumns([{ id: "a", title: "  ", states: ["awaiting_reply", "failed"] }]);
+      const [column] = normalizeColumns([
+        { id: "a", title: "  ", states: ["awaiting_reply", "failed"] },
+      ]);
       expect(column.title).toBe("Awaiting reply · Failed");
     });
 
@@ -89,7 +95,9 @@ describe("board columns", () => {
     });
 
     it("round-trips an edited board through localStorage", () => {
-      const columns = [{ id: "mine", title: "Mine", states: ["queued", "running"] }];
+      const columns = [
+        { id: "mine", title: "Mine", states: ["queued", "running"] },
+      ];
       saveColumns(columns);
       expect(loadColumns()).toEqual(columns);
     });
@@ -107,17 +115,34 @@ describe("board columns", () => {
     });
 
     it("normalizes a stored board from a build that spelled states differently", () => {
-      localStorage.setItem(BOARD_STORAGE_KEY, JSON.stringify([{ id: "a", title: "Doing", states: ["running", "beamed_up"] }]));
-      expect(loadColumns()).toEqual([{ id: "a", title: "Doing", states: ["running"] }]);
+      localStorage.setItem(
+        BOARD_STORAGE_KEY,
+        JSON.stringify([
+          { id: "a", title: "Doing", states: ["running", "beamed_up"] },
+        ]),
+      );
+      expect(loadColumns()).toEqual([
+        { id: "a", title: "Doing", states: ["running"] },
+      ]);
     });
 
     // A browser that refuses localStorage outright (private mode, a
     // storage policy) still has to show a board.
     it("survives a localStorage that throws", () => {
-      const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("denied"); });
-      const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("denied"); });
+      const get = vi
+        .spyOn(Storage.prototype, "getItem")
+        .mockImplementation(() => {
+          throw new Error("denied");
+        });
+      const set = vi
+        .spyOn(Storage.prototype, "setItem")
+        .mockImplementation(() => {
+          throw new Error("denied");
+        });
       expect(loadColumns()).toEqual(defaultColumns());
-      expect(() => saveColumns([{ id: "a", title: "A", states: ["queued"] }])).not.toThrow();
+      expect(() =>
+        saveColumns([{ id: "a", title: "A", states: ["queued"] }]),
+      ).not.toThrow();
       get.mockRestore();
       set.mockRestore();
     });
@@ -146,12 +171,23 @@ describe("board columns", () => {
     });
 
     it("keeps the order it was given within a column", () => {
-      const reversed = [{ id: 3, state: "awaiting_reply" }, { id: 2, state: "running" }];
-      expect(groupIntoColumns(reversed, columns).cards.get("doing").map((t) => t.id)).toEqual([3, 2]);
+      const reversed = [
+        { id: 3, state: "awaiting_reply" },
+        { id: 2, state: "running" },
+      ];
+      expect(
+        groupIntoColumns(reversed, columns)
+          .cards.get("doing")
+          .map((t) => t.id),
+      ).toEqual([3, 2]);
     });
 
     it("leaves out a task the caller's own filter rejects, without counting it as hidden", () => {
-      const { cards, hidden } = groupIntoColumns(tasks, columns, (t) => t.id !== 2);
+      const { cards, hidden } = groupIntoColumns(
+        tasks,
+        columns,
+        (t) => t.id !== 2,
+      );
       expect(cards.get("doing").map((t) => t.id)).toEqual([3]);
       expect(hidden).toBe(1);
     });

@@ -147,7 +147,8 @@ function contours(W, res, scalar) {
   const step = W / res;
   const v = new Float64Array((res + 1) * (res + 1));
   for (let j = 0; j <= res; j++) {
-    for (let i = 0; i <= res; i++) v[j * (res + 1) + i] = scalar(i * step, j * step);
+    for (let i = 0; i <= res; i++)
+      v[j * (res + 1) + i] = scalar(i * step, j * step);
   }
   const at = (i, j) => v[j * (res + 1) + i];
   // Zero crossing along a cell edge, linearly interpolated.
@@ -163,7 +164,11 @@ function contours(W, res, scalar) {
       const v10 = at(i + 1, j);
       const v11 = at(i + 1, j + 1);
       const v01 = at(i, j + 1);
-      const code = (v00 > 0 ? 1 : 0) | (v10 > 0 ? 2 : 0) | (v11 > 0 ? 4 : 0) | (v01 > 0 ? 8 : 0);
+      const code =
+        (v00 > 0 ? 1 : 0) |
+        (v10 > 0 ? 2 : 0) |
+        (v11 > 0 ? 4 : 0) |
+        (v01 > 0 ? 8 : 0);
       if (code === 0 || code === 15) continue;
       const p00 = [i * step, j * step];
       const p10 = [(i + 1) * step, j * step];
@@ -176,6 +181,12 @@ function contours(W, res, scalar) {
       // Which edges the contour crosses. Orientation is not tracked:
       // the loops are chained from either end below and filled with
       // evenodd, neither of which depends on a winding direction.
+      //
+      // Hand-packed as a table, one row per configuration, and kept
+      // that way: prettier would put each label and each statement on a
+      // line of its own, turning six lines that read as a lookup into
+      // eighteen that do not.
+      // prettier-ignore
       switch (code) {
         case 1: case 14: segs.push([left(), top()]); break;
         case 2: case 13: segs.push([top(), right()]); break;
@@ -250,7 +261,10 @@ function simplify(points, tol) {
     let fd = tol;
     for (let i = a + 1; i < b; i++) {
       const [px, py] = points[i];
-      const t = l2 > 1e-12 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2)) : 0;
+      const t =
+        l2 > 1e-12
+          ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2))
+          : 0;
       const d = Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
       if (d > fd) {
         fd = d;
@@ -285,7 +299,10 @@ function tracePath(W, res, tol, scalar) {
   return contours(W, res, scalar)
     .map((loop) => simplify(loop, tol))
     .filter((loop) => loop.length > 3)
-    .map((loop) => `M ${loop.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join(" L ")} Z`)
+    .map(
+      (loop) =>
+        `M ${loop.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join(" L ")} Z`,
+    )
     .join(" ");
 }
 
@@ -309,7 +326,9 @@ function renderHeroSVG(theme) {
   const pts = sampleGlyph(frame, LOGO, spec.count);
   const r = (W * spec.radius).toFixed(2);
   const circles = pts
-    .map((p) => `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${r}"/>`)
+    .map(
+      (p) => `<circle cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="${r}"/>`,
+    )
     .join("\n    ");
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${W}">
   <defs><clipPath id="f"><circle cx="${W / 2}" cy="${W / 2}" r="${W * 0.44}"/></clipPath></defs>
@@ -334,7 +353,9 @@ function renderHeroSVG(theme) {
 function renderItemGlyphModule() {
   const entries = Object.entries(ITEM_GLYPHS)
     .map(([kind, spec]) => {
-      const d = tracePath(ITEM_PX, ITEM_RES, ITEM_TOL, (x, y) => itemFillAt(spec, ITEM_PX, x, y));
+      const d = tracePath(ITEM_PX, ITEM_RES, ITEM_TOL, (x, y) =>
+        itemFillAt(spec, ITEM_PX, x, y),
+      );
       const [n, m, sg] = spec.glyph;
       return `  // ${n}·${m} (${sg > 0 ? "+" : "−"}) at ${spec.zoom} -- ${spec.figure}\n  ${kind}:\n    "${d}",`;
     })
@@ -370,7 +391,8 @@ const CRC_TABLE = (() => {
 
 function crc32(buf) {
   let c = ~0;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  for (let i = 0; i < buf.length; i++)
+    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return ~c >>> 0;
 }
 
@@ -455,7 +477,12 @@ for (const [name, theme] of Object.entries(THEMES)) {
   writeFileSync(png, renderLogoPNG(ICON_PX, theme));
   console.log("wrote", png);
 
-  const hero = join(repoRoot, "docs", "brand", `grain-hero-2-3minus-${name}.svg`);
+  const hero = join(
+    repoRoot,
+    "docs",
+    "brand",
+    `grain-hero-2-3minus-${name}.svg`,
+  );
   writeFileSync(hero, renderHeroSVG(theme));
   console.log("wrote", hero);
 }

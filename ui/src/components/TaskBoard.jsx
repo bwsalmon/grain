@@ -1,10 +1,35 @@
 import { useState } from "react";
 import { Button, Checkbox, Chip, Typography } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { STATE_LABELS, capabilityName, completionPhase, runActivity, stackedChip, stateLabel } from "../state.js";
-import { SORTS, filterViews, matchesFilters, sortTasks } from "../taskFilters.js";
-import { boardStates, groupIntoColumns, hiddenStates, loadColumns, saveColumns } from "../board.js";
-import { ListEmpty, ListFilterSelect, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
+import {
+  STATE_LABELS,
+  capabilityName,
+  completionPhase,
+  runActivity,
+  stackedChip,
+  stateLabel,
+} from "../state.js";
+import {
+  SORTS,
+  filterViews,
+  matchesFilters,
+  sortTasks,
+} from "../taskFilters.js";
+import {
+  boardStates,
+  groupIntoColumns,
+  hiddenStates,
+  loadColumns,
+  saveColumns,
+} from "../board.js";
+import {
+  ListEmpty,
+  ListFilterSelect,
+  ListHeader,
+  ListSearchField,
+  ListSortSelect,
+  ListToolbar,
+} from "./ListPrimitives.jsx";
 import BoardColumnsOverlay from "./BoardColumnsOverlay.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
@@ -37,7 +62,15 @@ import StateDot, { isLiveRunning } from "./StateDot.jsx";
 // Like the list, it is only offered under "Backlog order", since
 // dragging a row while looking at "Newest first" would reorder
 // something the screen is not showing.
-export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggleSelect, onSelectAll, onReorder }) {
+export default function TaskBoard({
+  tasks,
+  config,
+  onOpenTask,
+  selected,
+  onToggleSelect,
+  onSelectAll,
+  onReorder,
+}) {
   // The columns this browser last saved, or the default board
   // (board.js). Held here rather than in App: nothing outside this view
   // means anything by them, and the board is mounted for as long as the
@@ -51,7 +84,8 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("manual");
   const [filters, setFilters] = useState({});
-  const setFilter = (id, value) => setFilters((prev) => ({ ...prev, [id]: value }));
+  const setFilter = (id, value) =>
+    setFilters((prev) => ({ ...prev, [id]: value }));
 
   const q = search.trim().toLowerCase();
 
@@ -73,7 +107,11 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
   const narrowed = q !== "" || activeFilters.length > 0;
   const matches = (t) => matchesFilters(t, activeFilters, q);
 
-  const { cards, hidden } = groupIntoColumns(sortTasks(tasks, sortBy), columns, matches);
+  const { cards, hidden } = groupIntoColumns(
+    sortTasks(tasks, sortBy),
+    columns,
+    matches,
+  );
   const shown = columns.reduce((n, c) => n + cards.get(c.id).length, 0);
   const offBoard = hiddenStates(columns);
 
@@ -88,8 +126,14 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
   const [overId, setOverId] = useState(null);
 
   const startDrag = (columnId, t) => {
-    const ids = selected.has(t.id) && selected.size > 1 ? selected : new Set([t.id]);
-    setDragIds(cards.get(columnId).filter((x) => ids.has(x.id)).map((x) => x.id));
+    const ids =
+      selected.has(t.id) && selected.size > 1 ? selected : new Set([t.id]);
+    setDragIds(
+      cards
+        .get(columnId)
+        .filter((x) => ids.has(x.id))
+        .map((x) => x.id),
+    );
     setDragColumn(columnId);
   };
 
@@ -109,9 +153,16 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
   const dropOn = (columnId, targetId) => {
     if (!dragIds || columnId !== dragColumn) return endDrag();
     const dragging = new Set(dragIds);
-    const visible = cards.get(columnId).map((t) => t.id).filter((id) => !dragging.has(id));
+    const visible = cards
+      .get(columnId)
+      .map((t) => t.id)
+      .filter((id) => !dragging.has(id));
     const idx = targetId === null ? visible.length : visible.indexOf(targetId);
-    onReorder(dragIds, idx > 0 ? visible[idx - 1] : null, idx < visible.length ? visible[idx] : null);
+    onReorder(
+      dragIds,
+      idx > 0 ? visible[idx - 1] : null,
+      idx < visible.length ? visible[idx] : null,
+    );
     endDrag();
   };
 
@@ -124,7 +175,10 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
   // is the list's, and "run everything queued" is the reason somebody
   // opens a board in the first place.
   const toggleColumn = (columnId, checked) => {
-    onSelectAll(cards.get(columnId).map((t) => t.id), checked);
+    onSelectAll(
+      cards.get(columnId).map((t) => t.id),
+      checked,
+    );
   };
 
   return (
@@ -132,27 +186,50 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
       <ListHeader
         title="Board"
         count={shown}
-        action={(
-          <Button size="small" sx={{ ml: "auto" }} onClick={() => setEditing(true)}>Columns</Button>
-        )}
+        action={
+          <Button
+            size="small"
+            sx={{ ml: "auto" }}
+            onClick={() => setEditing(true)}
+          >
+            Columns
+          </Button>
+        }
       />
       {tasks.length > 0 && (
         <ListToolbar>
-          <ListSearchField placeholder="Search tasks…" value={search} onChange={setSearch} />
-          <ListSortSelect id="board-sort" value={sortBy} onChange={setSortBy} options={SORTS} />
-          {views.filter((v) => v.shown).map(({ f, options, value }) => (
-            <ListFilterSelect
-              key={f.id}
-              id={`board-filter-${f.id}`}
-              label={f.label}
-              anyLabel={f.anyLabel}
-              value={value}
-              onChange={(v) => setFilter(f.id, v)}
-              options={options}
-            />
-          ))}
+          <ListSearchField
+            placeholder="Search tasks…"
+            value={search}
+            onChange={setSearch}
+          />
+          <ListSortSelect
+            id="board-sort"
+            value={sortBy}
+            onChange={setSortBy}
+            options={SORTS}
+          />
+          {views
+            .filter((v) => v.shown)
+            .map(({ f, options, value }) => (
+              <ListFilterSelect
+                key={f.id}
+                id={`board-filter-${f.id}`}
+                label={f.label}
+                anyLabel={f.anyLabel}
+                value={value}
+                onChange={(v) => setFilter(f.id, v)}
+                options={options}
+              />
+            ))}
           {narrowed && (
-            <Button size="small" title="Clear the search and every filter" onClick={clearNarrowing}>Clear</Button>
+            <Button
+              size="small"
+              title="Clear the search and every filter"
+              onClick={clearNarrowing}
+            >
+              Clear
+            </Button>
           )}
         </ListToolbar>
       )}
@@ -162,16 +239,26 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
           whose "Closed" column somebody removed doesn't quietly look
           like a deployment with fewer tasks in it than it has. */}
       {hidden > 0 && (
-        <Typography variant="caption" color="text.secondary" component="p" className="board-hidden-note">
-          {hidden} task{hidden === 1 ? "" : "s"} in no column ({offBoard.map((s) => STATE_LABELS[s] || s).join(", ")}).{" "}
-          <Button size="small" onClick={() => setEditing(true)}>Edit columns</Button>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          component="p"
+          className="board-hidden-note"
+        >
+          {hidden} task{hidden === 1 ? "" : "s"} in no column (
+          {offBoard.map((s) => STATE_LABELS[s] || s).join(", ")}).{" "}
+          <Button size="small" onClick={() => setEditing(true)}>
+            Edit columns
+          </Button>
         </Typography>
       )}
 
       <div className="board-columns">
         {columns.map((c) => {
           const columnCards = cards.get(c.id);
-          const allSelected = columnCards.length > 0 && columnCards.every((t) => selected.has(t.id));
+          const allSelected =
+            columnCards.length > 0 &&
+            columnCards.every((t) => selected.has(t.id));
           return (
             <section key={c.id} className="board-column">
               <header className="board-column-header">
@@ -180,7 +267,9 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
                     size="small"
                     checked={allSelected}
                     onChange={(e) => toggleColumn(c.id, e.target.checked)}
-                    inputProps={{ "aria-label": `Select every task in ${c.title}` }}
+                    inputProps={{
+                      "aria-label": `Select every task in ${c.title}`,
+                    }}
                   />
                 )}
                 <span className="board-column-title">{c.title}</span>
@@ -190,16 +279,31 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
                 {columnCards.map((t) => (
                   <li
                     key={t.id}
-                    className={overId === t.id && dragIds && dragColumn === c.id && !dragIds.includes(t.id) ? "board-drop-target" : undefined}
+                    className={
+                      overId === t.id &&
+                      dragIds &&
+                      dragColumn === c.id &&
+                      !dragIds.includes(t.id)
+                        ? "board-drop-target"
+                        : undefined
+                    }
                     draggable={reorderEnabled}
                     onDragStart={() => reorderEnabled && startDrag(c.id, t)}
                     onDragEnd={endDrag}
                     onDragOver={(e) => {
-                      if (!dragIds || dragColumn !== c.id || dragIds.includes(t.id)) return;
+                      if (
+                        !dragIds ||
+                        dragColumn !== c.id ||
+                        dragIds.includes(t.id)
+                      )
+                        return;
                       e.preventDefault();
                       setOverId(t.id);
                     }}
-                    onDrop={(e) => { e.preventDefault(); dropOn(c.id, t.id); }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      dropOn(c.id, t.id);
+                    }}
                   >
                     <BoardCard
                       t={t}
@@ -219,14 +323,22 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
                 {reorderEnabled && dragIds && dragColumn === c.id && (
                   <li
                     className={`board-drop-end${overId === `__end__${c.id}` ? " board-drop-target" : ""}`}
-                    onDragOver={(e) => { e.preventDefault(); setOverId(`__end__${c.id}`); }}
-                    onDrop={(e) => { e.preventDefault(); dropOn(c.id, null); }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setOverId(`__end__${c.id}`);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      dropOn(c.id, null);
+                    }}
                   />
                 )}
               </ul>
               {columnCards.length === 0 && (
                 <p className="board-column-empty">
-                  {c.states.length === 0 ? "No states in this column." : "Nothing here."}
+                  {c.states.length === 0
+                    ? "No states in this column."
+                    : "Nothing here."}
                 </p>
               )}
             </section>
@@ -234,15 +346,25 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
         })}
       </div>
 
-      {columns.length === 0 && <ListEmpty>This board has no columns. Add one with “Columns”.</ListEmpty>}
+      {columns.length === 0 && (
+        <ListEmpty>
+          This board has no columns. Add one with “Columns”.
+        </ListEmpty>
+      )}
       {columns.length > 0 && shown === 0 && (
         <ListEmpty>
-          {narrowed ? "No tasks match this search and these filters." : "No tasks in any of these columns."}
+          {narrowed
+            ? "No tasks match this search and these filters."
+            : "No tasks in any of these columns."}
         </ListEmpty>
       )}
 
       {editing && (
-        <BoardColumnsOverlay columns={columns} onSave={saveColumnLayout} onClose={() => setEditing(false)} />
+        <BoardColumnsOverlay
+          columns={columns}
+          onSave={saveColumnLayout}
+          onClose={() => setEditing(false)}
+        />
       )}
     </main>
   );
@@ -254,7 +376,16 @@ export default function TaskBoard({ tasks, config, onOpenTask, selected, onToggl
 // line of fixed columns (handle, number, title, chips) whose whole
 // shape assumes the width of a page -- but it shows the same things and
 // takes the same click, so a task reads the same either way.
-export function BoardCard({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, showState = true }) {
+export function BoardCard({
+  t,
+  config,
+  onOpenTask,
+  selected,
+  onToggleSelect,
+  draggable,
+  dragging,
+  showState = true,
+}) {
   const phase = completionPhase(t);
   const activity = runActivity(t);
   // stateLabel rather than STATE_LABELS, and the repairing flag passed
@@ -295,9 +426,21 @@ export function BoardCard({ t, config, onOpenTask, selected, onToggleSelect, dra
         )}
         <span className="task-number">{t.id}</span>
         {t.blocked && (
-          <Chip size="small" color="error" title={`Waiting on ${t.blockedBy.join(", ")}`} label="Blocked" />
+          <Chip
+            size="small"
+            color="error"
+            title={`Waiting on ${t.blockedBy.join(", ")}`}
+            label="Blocked"
+          />
         )}
-        {phase && <Chip size="small" color={phase.color} title={phase.title} label={phase.label} />}
+        {phase && (
+          <Chip
+            size="small"
+            color={phase.color}
+            title={phase.title}
+            label={phase.label}
+          />
+        )}
       </div>
       <div className="board-card-title">{t.title}</div>
       {activity && (
@@ -306,17 +449,38 @@ export function BoardCard({ t, config, onOpenTask, selected, onToggleSelect, dra
           title={`What this run says it is doing${activity.age ? `, as of ${activity.age === "now" ? "just now" : `${activity.age} ago`}` : ""}`}
         >
           <span className="task-activity-note">{activity.note}</span>
-          {activity.age && <span className="task-activity-age">{activity.age}</span>}
+          {activity.age && (
+            <span className="task-activity-age">{activity.age}</span>
+          )}
         </div>
       )}
       <div className="board-card-chips">
-        {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
-        {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a suite run" label="suite" />}
+        {t.scheduled && (
+          <Chip
+            size="small"
+            className="chip-scheduled"
+            title="filed automatically by a schedule"
+            label="scheduled"
+          />
+        )}
+        {t.suiteRun && (
+          <Chip
+            size="small"
+            className="chip-suite"
+            title="filed automatically by a suite run"
+            label="suite"
+          />
+        )}
         {t.stacked && (
           <Chip size="small" className="chip-stacked" {...stackedChip(t)} />
         )}
         {t.interactive && (
-          <Chip size="small" className="chip-interactive" title="a live chat, not a background task" label="interactive" />
+          <Chip
+            size="small"
+            className="chip-interactive"
+            title="a live chat, not a background task"
+            label="interactive"
+          />
         )}
         {t.repo && <Chip size="small" label={t.repo} />}
         {(t.capabilities || []).map((id) => (

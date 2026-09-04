@@ -27,14 +27,19 @@ describe("ItemGlyph", () => {
     // selected nav entry brightens its label, and the glyph goes with
     // it, in either theme and with no second asset.
     const { container } = render(<ItemGlyph kind="repos" />);
-    expect(glyphOf(container).querySelector("path")).toHaveAttribute("fill", "currentColor");
+    expect(glyphOf(container).querySelector("path")).toHaveAttribute(
+      "fill",
+      "currentColor",
+    );
   });
 
   it("is decorative beside its own label, and named when it stands alone", () => {
     const { container: beside } = render(<ItemGlyph kind="suites" />);
     expect(glyphOf(beside)).toHaveAttribute("aria-hidden", "true");
 
-    const { container: alone } = render(<ItemGlyph kind="suites" title="Suites" />);
+    const { container: alone } = render(
+      <ItemGlyph kind="suites" title="Suites" />,
+    );
     expect(glyphOf(alone)).not.toHaveAttribute("aria-hidden");
     expect(glyphOf(alone)).toHaveAttribute("aria-label", "Suites");
   });

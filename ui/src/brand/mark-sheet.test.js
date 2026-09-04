@@ -4,8 +4,15 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { SHEET_DPR, SHEET_FPS, SHEET_FRAMES, SHEET_LOOP_MS, SHEET_SIZES, hasSheet, sheetHref }
-  from "./mark-sheet.js";
+import {
+  SHEET_DPR,
+  SHEET_FPS,
+  SHEET_FRAMES,
+  SHEET_LOOP_MS,
+  SHEET_SIZES,
+  hasSheet,
+  sheetHref,
+} from "./mark-sheet.js";
 
 // The committed sheets and the constants the player steps them by are
 // two halves of one thing, written by different tools -- the exporter
@@ -20,16 +27,24 @@ const publicDir = join(here, "..", "..", "public");
 /** Width and height out of a PNG's IHDR, which is always the first chunk. */
 function pngSize(file) {
   const b = readFileSync(file);
-  expect(b.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  expect(b.subarray(0, 8)).toEqual(
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  );
   expect(b.toString("ascii", 12, 16)).toBe("IHDR");
-  return { width: b.readUInt32BE(16), height: b.readUInt32BE(20), colourType: b[25] };
+  return {
+    width: b.readUInt32BE(16),
+    height: b.readUInt32BE(20),
+    colourType: b[25],
+  };
 }
 
 describe("the recorded sheets", () => {
   it("are on disk for every size that claims one", () => {
     for (const size of SHEET_SIZES) {
       expect(hasSheet(size)).toBe(true);
-      expect(() => readFileSync(join(publicDir, sheetHref(size).replace(/^\//, "")))).not.toThrow();
+      expect(() =>
+        readFileSync(join(publicDir, sheetHref(size).replace(/^\//, ""))),
+      ).not.toThrow();
     }
   });
 

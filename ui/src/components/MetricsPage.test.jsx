@@ -2,7 +2,12 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import MetricsPage, {
-  backlogRows, formatBytes, formatSeconds, isThinPercentile, percent, sortedOutcomes,
+  backlogRows,
+  formatBytes,
+  formatSeconds,
+  isThinPercentile,
+  percent,
+  sortedOutcomes,
 } from "./MetricsPage.jsx";
 import api from "../api.js";
 
@@ -19,7 +24,12 @@ function stage(name, over = {}) {
     label: name,
     description: `what ${name} measures`,
     n: 0,
-    minSeconds: 0, p50Seconds: 0, p90Seconds: 0, p99Seconds: 0, maxSeconds: 0, meanSeconds: 0,
+    minSeconds: 0,
+    p50Seconds: 0,
+    p90Seconds: 0,
+    p99Seconds: 0,
+    maxSeconds: 0,
+    meanSeconds: 0,
     ...over,
   };
 }
@@ -33,26 +43,82 @@ function report(over = {}) {
     until: "2026-09-03T00:00:00Z",
     windowSeconds: 604800,
     throughput: {
-      tasksFiled: 42, tasksCompleted: 38, tasksClosed: 3,
-      runsStarted: 61, runsFinished: 60,
-      filedPerDay: 6, completedPerDay: 5.4, runsFinishedPerDay: 8.6,
+      tasksFiled: 42,
+      tasksCompleted: 38,
+      tasksClosed: 3,
+      runsStarted: 61,
+      runsFinished: 60,
+      filedPerDay: 6,
+      completedPerDay: 5.4,
+      runsFinishedPerDay: 8.6,
       buckets: [
-        { since: "2026-08-27T00:00:00Z", until: "2026-08-29T08:00:00Z", filed: 10, completed: 8, runsFinished: 15 },
-        { since: "2026-08-29T08:00:00Z", until: "2026-08-31T16:00:00Z", filed: 14, completed: 12, runsFinished: 20 },
-        { since: "2026-08-31T16:00:00Z", until: "2026-09-03T00:00:00Z", filed: 18, completed: 18, runsFinished: 25 },
+        {
+          since: "2026-08-27T00:00:00Z",
+          until: "2026-08-29T08:00:00Z",
+          filed: 10,
+          completed: 8,
+          runsFinished: 15,
+        },
+        {
+          since: "2026-08-29T08:00:00Z",
+          until: "2026-08-31T16:00:00Z",
+          filed: 14,
+          completed: 12,
+          runsFinished: 20,
+        },
+        {
+          since: "2026-08-31T16:00:00Z",
+          until: "2026-09-03T00:00:00Z",
+          filed: 18,
+          completed: 18,
+          runsFinished: 25,
+        },
       ],
     },
     latency: [
-      stage("filed -> approved", { n: 12, p50Seconds: 252, p90Seconds: 3720, p99Seconds: 11400, maxSeconds: 11400 }),
-      stage("approved -> attempt started", { n: 38, p50Seconds: 31, p90Seconds: 130, p99Seconds: 540, maxSeconds: 540 }),
-      stage("one whole attempt", { n: 60, p50Seconds: 768, p90Seconds: 1570, p99Seconds: 3120, maxSeconds: 3120 }),
-      stage("attempt finished -> next attempt started", { n: 4, p50Seconds: 120, p90Seconds: 240, p99Seconds: 360, maxSeconds: 360 }),
-      stage("filed -> completed", { n: 38, p50Seconds: 720, p90Seconds: 3000, p99Seconds: 11400, maxSeconds: 11400 }),
+      stage("filed -> approved", {
+        n: 12,
+        p50Seconds: 252,
+        p90Seconds: 3720,
+        p99Seconds: 11400,
+        maxSeconds: 11400,
+      }),
+      stage("approved -> attempt started", {
+        n: 38,
+        p50Seconds: 31,
+        p90Seconds: 130,
+        p99Seconds: 540,
+        maxSeconds: 540,
+      }),
+      stage("one whole attempt", {
+        n: 60,
+        p50Seconds: 768,
+        p90Seconds: 1570,
+        p99Seconds: 3120,
+        maxSeconds: 3120,
+      }),
+      stage("attempt finished -> next attempt started", {
+        n: 4,
+        p50Seconds: 120,
+        p90Seconds: 240,
+        p99Seconds: 360,
+        maxSeconds: 360,
+      }),
+      stage("filed -> completed", {
+        n: 38,
+        p50Seconds: 720,
+        p90Seconds: 3000,
+        p99Seconds: 11400,
+        maxSeconds: 11400,
+      }),
     ],
     runs: {
       outcomes: { succeeded: 45, failed: 14, cancelled: 1 },
       attemptsPerCompletion: 1.58,
-      meanConcurrent: 0.42, maxConcurrent: 3, utilization: 0.14, live: 2,
+      meanConcurrent: 0.42,
+      maxConcurrent: 3,
+      utilization: 0.14,
+      live: 2,
     },
     backlog: {
       byState: { queued: 4, running: 2, proposed: 1, awaiting_reply: 1 },
@@ -72,30 +138,87 @@ function report(over = {}) {
 function withCensus(over = {}) {
   return report({
     tools: {
-      runs: 2, calls: 110, errored: 15, erroredShare: 15 / 110,
-      callsPerRun: { n: 2, min: 50, p50: 50, p90: 60, p99: 60, max: 60, mean: 55, total: 110 },
+      runs: 2,
+      calls: 110,
+      errored: 15,
+      erroredShare: 15 / 110,
+      callsPerRun: {
+        n: 2,
+        min: 50,
+        p50: 50,
+        p90: 60,
+        p99: 60,
+        max: 60,
+        mean: 55,
+        total: 110,
+      },
       byTool: [
         {
-          name: "run_command", runs: 2, calls: 100, errored: 10, errorRate: 0.1,
-          timedOut: 2, timeoutRate: 0.02,
-          resultBytes: { n: 100, meanBytes: 2048, maxBytes: 70000, p50AtMostBytes: 4095, p95AtMostBytes: 65535, p99AtMostBytes: 131071 },
+          name: "run_command",
+          runs: 2,
+          calls: 100,
+          errored: 10,
+          errorRate: 0.1,
+          timedOut: 2,
+          timeoutRate: 0.02,
+          resultBytes: {
+            n: 100,
+            meanBytes: 2048,
+            maxBytes: 70000,
+            p50AtMostBytes: 4095,
+            p95AtMostBytes: 65535,
+            p99AtMostBytes: 131071,
+          },
         },
         {
-          name: "edit_file", runs: 2, calls: 10, errored: 5, errorRate: 0.5,
-          timedOut: 0, timeoutRate: 0,
-          resultBytes: { n: 10, meanBytes: 40, maxBytes: 80, p50AtMostBytes: 63, p95AtMostBytes: 127, p99AtMostBytes: 127 },
+          name: "edit_file",
+          runs: 2,
+          calls: 10,
+          errored: 5,
+          errorRate: 0.5,
+          timedOut: 0,
+          timeoutRate: 0,
+          resultBytes: {
+            n: 10,
+            meanBytes: 40,
+            maxBytes: 80,
+            p50AtMostBytes: 63,
+            p95AtMostBytes: 127,
+            p99AtMostBytes: 127,
+          },
         },
       ],
     },
     checks: {
-      waits: 4, runs: 2,
+      waits: 4,
+      runs: 2,
       verdicts: { timed_out: 2, failed: 1, passed: 1 },
-      blocked: { n: 4, minSeconds: 240, p50Seconds: 540, p90Seconds: 900, p99Seconds: 900, maxSeconds: 900, meanSeconds: 660 },
-      pushesToGreen: { n: 1, min: 2, p50: 2, p90: 2, p99: 2, max: 2, mean: 2, total: 2 },
+      blocked: {
+        n: 4,
+        minSeconds: 240,
+        p50Seconds: 540,
+        p90Seconds: 900,
+        p99Seconds: 900,
+        maxSeconds: 900,
+        meanSeconds: 660,
+      },
+      pushesToGreen: {
+        n: 1,
+        min: 2,
+        p50: 2,
+        p90: 2,
+        p99: 2,
+        max: 2,
+        mean: 2,
+        total: 2,
+      },
       greenRuns: 1,
     },
     pullRequests: {
-      runs: 8, opened: 3, calls: 7, adoptionRate: 3 / 8,
+      runs: 8,
+      opened: 3,
+      calls: 7,
+      adoptionRate: 3 / 8,
       withTool: { runs: 3, fixTasks: 0, rate: 0 },
       withoutTool: { runs: 5, fixTasks: 2, rate: 0.4 },
     },
@@ -148,9 +271,17 @@ describe("isThinPercentile", () => {
 
 describe("sortedOutcomes", () => {
   it("puts the ending that dominates the window first, breaking ties by name", () => {
-    expect(sortedOutcomes({ failed: 14, succeeded: 45, cancelled: 1 }))
-      .toEqual([["succeeded", 45], ["failed", 14], ["cancelled", 1]]);
-    expect(sortedOutcomes({ zebra: 2, alpha: 2 })).toEqual([["alpha", 2], ["zebra", 2]]);
+    expect(sortedOutcomes({ failed: 14, succeeded: 45, cancelled: 1 })).toEqual(
+      [
+        ["succeeded", 45],
+        ["failed", 14],
+        ["cancelled", 1],
+      ],
+    );
+    expect(sortedOutcomes({ zebra: 2, alpha: 2 })).toEqual([
+      ["alpha", 2],
+      ["zebra", 2],
+    ]);
   });
 
   it("survives a report with no outcomes at all", () => {
@@ -160,16 +291,21 @@ describe("sortedOutcomes", () => {
 
 describe("backlogRows", () => {
   it("orders the backlog the way the sidebar orders states", () => {
-    expect(backlogRows({ running: 2, queued: 4, proposed: 1 }).map((r) => r.state))
-      .toEqual(["proposed", "queued", "running"]);
+    expect(
+      backlogRows({ running: 2, queued: 4, proposed: 1 }).map((r) => r.state),
+    ).toEqual(["proposed", "queued", "running"]);
   });
 
   it("keeps a state this UI does not know about rather than dropping it", () => {
-    expect(backlogRows({ queued: 1, hibernating: 3 }).map((r) => r.state)).toEqual(["queued", "hibernating"]);
+    expect(
+      backlogRows({ queued: 1, hibernating: 3 }).map((r) => r.state),
+    ).toEqual(["queued", "hibernating"]);
   });
 
   it("leaves out states nothing is sitting in", () => {
-    expect(backlogRows({ queued: 2, running: 0 }).map((r) => r.state)).toEqual(["queued"]);
+    expect(backlogRows({ queued: 2, running: 0 }).map((r) => r.state)).toEqual([
+      "queued",
+    ]);
   });
 });
 
@@ -207,7 +343,9 @@ describe("MetricsPage", () => {
     // a polyline through every bucket rather than an empty placeholder.
     const polylines = container.querySelectorAll("polyline");
     expect(polylines).toHaveLength(3);
-    expect(polylines[0].getAttribute("points").trim().split(" ")).toHaveLength(3);
+    expect(polylines[0].getAttribute("points").trim().split(" ")).toHaveLength(
+      3,
+    );
   });
 
   it("shows occupancy against the configured concurrency limit", async () => {
@@ -220,14 +358,25 @@ describe("MetricsPage", () => {
   });
 
   it("says so rather than dividing by nothing when no concurrency limit is set", async () => {
-    api.mockResolvedValue(report({
-      runs: { outcomes: {}, attemptsPerCompletion: 0, meanConcurrent: 0.42, maxConcurrent: 0, utilization: 0, live: 0 },
-    }));
+    api.mockResolvedValue(
+      report({
+        runs: {
+          outcomes: {},
+          attemptsPerCompletion: 0,
+          meanConcurrent: 0.42,
+          maxConcurrent: 0,
+          utilization: 0,
+          live: 0,
+        },
+      }),
+    );
     render(<MetricsPage showError={() => {}} />);
     await screen.findByText("Capacity");
 
     expect(screen.getByText("0.42")).toBeInTheDocument();
-    expect(screen.getByText(/no concurrency limit configured/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/no concurrency limit configured/i),
+    ).toBeInTheDocument();
   });
 
   it("lists the attempt outcomes, commonest first", async () => {
@@ -246,7 +395,9 @@ describe("MetricsPage", () => {
     await screen.findByText("Latency");
 
     const rows = screen.getAllByRole("row").slice(1); // drop the header row
-    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual([
+    expect(
+      rows.map((r) => within(r).getAllByRole("cell")[0].textContent),
+    ).toEqual([
       "filed -> approved",
       "approved -> attempt started",
       "one whole attempt",
@@ -261,8 +412,18 @@ describe("MetricsPage", () => {
     await screen.findByText("Latency");
 
     const row = screen.getByText("filed -> approved").closest("tr");
-    expect(within(row).getAllByRole("cell").map((c) => c.textContent))
-      .toEqual(["filed -> approved", "12", "4m 12s", "1h 2m", "3h 10m*", "3h 10m"]);
+    expect(
+      within(row)
+        .getAllByRole("cell")
+        .map((c) => c.textContent),
+    ).toEqual([
+      "filed -> approved",
+      "12",
+      "4m 12s",
+      "1h 2m",
+      "3h 10m*",
+      "3h 10m",
+    ]);
   });
 
   // README, "Measuring throughput and latency": a p99 over four samples
@@ -274,9 +435,21 @@ describe("MetricsPage", () => {
     await screen.findByText("Latency");
 
     // Four samples support neither a p90 nor a p99; both are the max.
-    const retries = screen.getByText("attempt finished -> next attempt started").closest("tr");
-    expect(within(retries).getAllByRole("cell").map((c) => c.textContent))
-      .toEqual(["attempt finished -> next attempt started", "4", "2m 0s", "4m 0s*", "6m 0s*", "6m 0s"]);
+    const retries = screen
+      .getByText("attempt finished -> next attempt started")
+      .closest("tr");
+    expect(
+      within(retries)
+        .getAllByRole("cell")
+        .map((c) => c.textContent),
+    ).toEqual([
+      "attempt finished -> next attempt started",
+      "4",
+      "2m 0s",
+      "4m 0s*",
+      "6m 0s*",
+      "6m 0s",
+    ]);
 
     // Sixty clears the p90 bar (10 samples) but not the p99 one (100).
     const attempt = screen.getByText("one whole attempt").closest("tr");
@@ -294,7 +467,9 @@ describe("MetricsPage", () => {
     render(<MetricsPage showError={() => {}} />);
     await screen.findByText("Latency");
 
-    expect(screen.getByText(/do not add up to the lead time/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/do not add up to the lead time/i),
+    ).toBeInTheDocument();
   });
 
   it("shows nothing to report rather than a table of dashes when no stage has samples", async () => {
@@ -313,7 +488,9 @@ describe("MetricsPage", () => {
     render(<MetricsPage showError={() => {}} />);
     await screen.findByText("Backlog");
 
-    expect(screen.getByText(/right now, not over the window/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/right now, not over the window/i),
+    ).toBeInTheDocument();
     expect(screen.getByText("Queued 4")).toBeInTheDocument();
     expect(screen.getByText("Awaiting reply 1")).toBeInTheDocument();
   });
@@ -332,9 +509,16 @@ describe("MetricsPage", () => {
   });
 
   it("leaves the oldest-queued line out when nothing is queued", async () => {
-    api.mockResolvedValue(report({
-      backlog: { byState: { running: 1 }, queued: 0, oldestQueuedSeconds: 0, oldestQueuedTaskId: "" },
-    }));
+    api.mockResolvedValue(
+      report({
+        backlog: {
+          byState: { running: 1 },
+          queued: 0,
+          oldestQueuedSeconds: 0,
+          oldestQueuedTaskId: "",
+        },
+      }),
+    );
     render(<MetricsPage showError={() => {}} />);
     await screen.findByText("Backlog");
 
@@ -348,9 +532,15 @@ describe("MetricsPage", () => {
     await screen.findByText("Throughput");
 
     await user.click(screen.getByLabelText(/Window/));
-    await user.click(await screen.findByRole("option", { name: "Last 30 days" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Last 30 days" }),
+    );
 
-    await waitFor(() => expect(api).toHaveBeenLastCalledWith("/api/metrics?window=30d&buckets=24"));
+    await waitFor(() =>
+      expect(api).toHaveBeenLastCalledWith(
+        "/api/metrics?window=30d&buckets=24",
+      ),
+    );
   });
 
   it("re-fetches the same window on Refresh", async () => {
@@ -388,22 +578,42 @@ describe("MetricsPage", () => {
     const showError = vi.fn();
     render(<MetricsPage showError={showError} />);
 
-    await waitFor(() => expect(showError).toHaveBeenCalledWith(new Error("reading task timings: no such table")));
+    await waitFor(() =>
+      expect(showError).toHaveBeenCalledWith(
+        new Error("reading task timings: no such table"),
+      ),
+    );
   });
 
   it("points at a longer window when the one asked for is empty", async () => {
-    api.mockResolvedValue(report({
-      throughput: {
-        tasksFiled: 0, tasksCompleted: 0, tasksClosed: 0, runsStarted: 0, runsFinished: 0,
-        filedPerDay: 0, completedPerDay: 0, runsFinishedPerDay: 0, buckets: [],
-      },
-      latency: [stage("filed -> completed")],
-      backlog: { byState: {}, queued: 0, oldestQueuedSeconds: 0, oldestQueuedTaskId: "" },
-    }));
+    api.mockResolvedValue(
+      report({
+        throughput: {
+          tasksFiled: 0,
+          tasksCompleted: 0,
+          tasksClosed: 0,
+          runsStarted: 0,
+          runsFinished: 0,
+          filedPerDay: 0,
+          completedPerDay: 0,
+          runsFinishedPerDay: 0,
+          buckets: [],
+        },
+        latency: [stage("filed -> completed")],
+        backlog: {
+          byState: {},
+          queued: 0,
+          oldestQueuedSeconds: 0,
+          oldestQueuedTaskId: "",
+        },
+      }),
+    );
     render(<MetricsPage showError={() => {}} />);
     await screen.findByText("Throughput");
 
-    expect(screen.getByText(/nothing was filed or attempted inside this window/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing was filed or attempted inside this window/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/the backlog is empty/i)).toBeInTheDocument();
   });
 
@@ -415,8 +625,12 @@ describe("MetricsPage", () => {
     expect(screen.getByText("110")).toBeInTheDocument();
     expect(screen.getByText("14% of all calls")).toBeInTheDocument();
 
-    const rows = screen.getAllByRole("row").filter((r) => within(r).queryByText(/run_command|edit_file/));
-    expect(rows.map((r) => within(r).getAllByRole("cell")[0].textContent)).toEqual(["run_command", "edit_file"]);
+    const rows = screen
+      .getAllByRole("row")
+      .filter((r) => within(r).queryByText(/run_command|edit_file/));
+    expect(
+      rows.map((r) => within(r).getAllByRole("cell")[0].textContent),
+    ).toEqual(["run_command", "edit_file"]);
     // edit_file's error rate is the "String not found" loop measured, and
     // the reason the table is per tool rather than one number.
     expect(within(rows[1]).getByText("5 (50%)")).toBeInTheDocument();
@@ -439,7 +653,9 @@ describe("MetricsPage", () => {
     // alone is a number several sections of this report can produce.
     expect(screen.getByText(/p90 15m 0s . max 15m 0s/)).toBeInTheDocument();
     expect(screen.getByText("2.0")).toBeInTheDocument();
-    expect(screen.getByText(/over 1 attempt that went green/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/over 1 attempt that went green/i),
+    ).toBeInTheDocument();
   });
 
   it("reports mid-run pull requests as an adoption rate and a comparison", async () => {
@@ -460,13 +676,18 @@ describe("MetricsPage", () => {
   // A window in which no run could have opened its own pull request gets
   // no section at all: zeroes there would read as "no run ever calls it".
   it("says nothing about mid-run pull requests when nobody was offered one", async () => {
-    api.mockResolvedValue(withCensus({
-      pullRequests: {
-        runs: 0, opened: 0, calls: 0, adoptionRate: 0,
-        withTool: { runs: 0, fixTasks: 0, rate: 0 },
-        withoutTool: { runs: 0, fixTasks: 0, rate: 0 },
-      },
-    }));
+    api.mockResolvedValue(
+      withCensus({
+        pullRequests: {
+          runs: 0,
+          opened: 0,
+          calls: 0,
+          adoptionRate: 0,
+          withTool: { runs: 0, fixTasks: 0, rate: 0 },
+          withoutTool: { runs: 0, fixTasks: 0, rate: 0 },
+        },
+      }),
+    );
     render(<MetricsPage showError={() => {}} />);
     await screen.findByText("Tool use");
 
@@ -474,13 +695,19 @@ describe("MetricsPage", () => {
   });
 
   it("splits the endings out of the outcome words", async () => {
-    api.mockResolvedValue(report({
-      runs: {
-        outcomes: { succeeded: 45, cancelled: 2 },
-        endings: { succeeded: 45, runtime_cap: 1, task_closed: 1 },
-        attemptsPerCompletion: 1.5, meanConcurrent: 0.4, maxConcurrent: 3, utilization: 0.13, live: 0,
-      },
-    }));
+    api.mockResolvedValue(
+      report({
+        runs: {
+          outcomes: { succeeded: 45, cancelled: 2 },
+          endings: { succeeded: 45, runtime_cap: 1, task_closed: 1 },
+          attemptsPerCompletion: 1.5,
+          meanConcurrent: 0.4,
+          maxConcurrent: 3,
+          utilization: 0.13,
+          live: 0,
+        },
+      }),
+    );
     render(<MetricsPage showError={() => {}} />);
     await screen.findByText("Capacity");
 

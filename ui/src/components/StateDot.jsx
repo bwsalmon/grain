@@ -33,7 +33,12 @@ export function isLiveRunning(state, live = true) {
   return state === "running" && live;
 }
 
-export default function StateDot({ state, live = true, title, repairing = false }) {
+export default function StateDot({
+  state,
+  live = true,
+  title,
+  repairing = false,
+}) {
   if (!isLiveRunning(state, live)) return null;
   return (
     <GrainMark

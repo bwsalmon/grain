@@ -44,7 +44,14 @@ import { SIDEBAR_WIDTH } from "../theme.js";
 // The centered shape keeps its X: New task, Run a suite and an attempt's
 // transcript are single actions taken over the page you are already on,
 // not somewhere you navigated to, and there is nothing to go "back" to.
-export default function Overlay({ onClose, wide = false, pane = false, backLabel = "Back", header = null, children }) {
+export default function Overlay({
+  onClose,
+  wide = false,
+  pane = false,
+  backLabel = "Back",
+  header = null,
+  children,
+}) {
   if (pane) {
     return (
       <Dialog
@@ -71,7 +78,9 @@ export default function Overlay({ onClose, wide = false, pane = false, backLabel
             the same place, and the same negative margin pulling the
             label out to the pane's own left edge, as RepoPage's. */}
         <div className="overlay-pane-back">
-          <Button onClick={onClose} sx={{ ml: -0.9 }}>&larr; {backLabel}</Button>
+          <Button onClick={onClose} sx={{ ml: -0.9 }}>
+            &larr; {backLabel}
+          </Button>
         </div>
         {header !== null && <div className="overlay-pane-header">{header}</div>}
         {/* The pane's own body scrolls, not the document: the paper is
@@ -83,7 +92,13 @@ export default function Overlay({ onClose, wide = false, pane = false, backLabel
     );
   }
   return (
-    <Dialog open onClose={onClose} maxWidth={wide ? "md" : "sm"} fullWidth scroll="body">
+    <Dialog
+      open
+      onClose={onClose}
+      maxWidth={wide ? "md" : "sm"}
+      fullWidth
+      scroll="body"
+    >
       <IconButton
         aria-label="Close dialog"
         onClick={onClose}
