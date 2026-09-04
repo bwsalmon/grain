@@ -25,10 +25,9 @@ export default function PromptOverlay({ taskId, onClose }) {
   const [prompt, setPrompt] = useState(null);
   const [attempt, setAttempt] = useState(0);
   // Reported in the pane itself rather than through App.jsx's own
-  // showError banner: this overlay is opened straight off a task row,
-  // from lists that have no error plumbing of their own (RepoList's
-  // per-repo sublist among them), and an error about the prompt belongs
-  // where the prompt was going to be.
+  // showError banner: an error about the prompt belongs where the prompt
+  // was going to be, in the pane the reader just opened, rather than in
+  // a banner behind the task page this opens over.
   const [error, setError] = useState(null);
 
   useEffect(() => {
