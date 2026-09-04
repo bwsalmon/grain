@@ -272,11 +272,16 @@ one — readiness (since closed at the VM level by `kontur ready`, and
 still open for anything running *inside* the guest), no per-exec cwd or
 environment (`internal/agent`'s
 `start` uses `cmd.Dir` = the account's home and a hardcoded `PATH`,
-`HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`), no cancellation
-(`cmd/kontur-agent` hands `agent.Serve` the agent's *process* context, so
-dropping a connection closes the guest process's stdin and nothing else)
-— are all real and all worth fixing. They are just not on substrate's
-critical path, because substrate never calls exec.
+`HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`), no cancellation — are all
+real and all worth fixing. They are just not on substrate's critical
+path, because substrate never calls exec.
+
+Cancellation is closed since this was written: `cmd/kontur-agent` gives
+each connection a context of its own, `internal/agent` ends the command's
+whole process group (SIGTERM, then SIGKILL) when that context is
+cancelled or the client goes away, and `execwire.TypeSignal` lets a
+client interrupt a command while keeping the session open to read what it
+prints on the way out. The other two stand.
 
 ## What kontur would actually contribute
 
@@ -356,16 +361,28 @@ substrate, which is the main argument for them.
    and not about anything running in it, so a runtime that wants
    per-container readiness needs item 8's container model first and a
    guest-declared signal (a file, a unit) on top of that. *Small.*
-3. **Per-exec cwd and environment.** `Dir` and `Env` on
+3. **Per-exec cwd and environment.** ~~`Dir` and `Env` on
    `execwire.Request`, honoured in `internal/agent`'s `start`, with
    `loginEnv` as the base rather than the whole. This is what stops
    consumers baking their toolchain into `/usr/local/bin` to land inside
-   a fixed `PATH` — which is exactly why grain does. *Small; a protocol
-   change, so it wants item 1's versioning answer first.*
-4. **Cancellation.** Per-connection context for `agent.Serve`, cancelled
-   when the connection drops, plus a signal frame. Without it a timed-out
-   tool call leaves a process running in a long-lived sandbox. *Small,
-   high value.*
+   a fixed `PATH` — which is exactly why grain does.~~ *Done*, and it
+   brought the first answer to item 1's versioning question with it:
+   `Response.Features` names the optional parts of the protocol an agent
+   implements, and `ReadRequest` refuses a field it has never heard of,
+   so a mismatched pair says so instead of quietly running the wrong
+   thing.
+4. **Cancellation.** ~~Per-connection context for `agent.Serve`,
+   cancelled when the connection drops, plus a signal frame. Without it a
+   timed-out tool call leaves a process running in a long-lived
+   sandbox.~~ *Done.* Both halves landed, and the signal frame is
+   announced through item 3's `Response.Features` rather than through a
+   mechanism of its own: a frame type whose absence changes what happens
+   gets a feature name (`execwire.FeatureSignal`) exactly as an optional
+   request field does, so a client needing a frame an older agent does
+   not have reports the mismatch instead of being stepped over in
+   silence. That is a name for the mismatch, not negotiation — the
+   ship-from-one-commit rule is unchanged, and an external importer would
+   still be the thing that breaks it.
 5. **A VM lifecycle that isn't a process lifecycle.** `Runner` usable by
    a long-lived server that boots, checkpoints, tears down and boots
    again — mismatch 1. *Medium.*

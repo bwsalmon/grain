@@ -1162,6 +1162,29 @@ guest whose network had not come up was one kontur could not ask why. A
 vsock connection is carried by the virtio device itself, so `kontur exec`
 works on a guest with a broken network, no address, or no NIC at all.
 
+**Cancelling a session actually ends the command.** A `^C` or a SIGTERM
+to `kontur exec` -- and, for a caller using `internal/guestexec` directly,
+a cancelled context or an expired deadline -- asks the guest to interrupt
+the command rather than merely hanging up on it: the client sends a
+signal frame (SIGINT), and keeps the session open for a couple of seconds
+afterwards, so whatever the command prints on its way out and the exit
+code it ends with still come back. A command that ignores it is then
+ended for it. Dropping the connection outright does the same thing
+without the polite first step, because `kontur-agent` gives every
+connection a context of its own and `internal/agent` cancels the session
+when the client goes.
+
+Either way the signal reaches the command's whole process group, not just
+the `<shell> -c` at the top of it, and SIGTERM comes before SIGKILL with
+five seconds in between -- so a `kontur exec -- make` that is cancelled
+takes its compiler with it, and a command with a cleanup trap gets to run
+it. This matters most for a long-lived guest driven by something with
+per-call timeouts, where the old behaviour (close the command's stdin and
+leave it running) accumulated one abandoned process per timed-out call.
+The signal frame is announced through the same feature list as the
+optional request fields above, so a client talking to a guest image too
+old to act on one drops the connection instead and says why.
+
 ## Readiness
 
 A VM container is "up" the moment `cloud-hypervisor` is exec'd, which is

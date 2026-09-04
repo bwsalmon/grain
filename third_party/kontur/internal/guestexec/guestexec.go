@@ -50,6 +50,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -80,6 +81,16 @@ const (
 
 	dialTimeout   = 3 * time.Second
 	retryInterval = 500 * time.Millisecond
+
+	// cancelGrace is how long a cancelled session stays open after
+	// asking the guest to interrupt the command, before the connection
+	// is closed regardless. Short, because it is time a caller who has
+	// already cancelled spends waiting; long enough for an interrupted
+	// command to report why it stopped, which is the whole reason for
+	// not closing the connection immediately. The guest's own escalation
+	// to SIGKILL (internal/agent's terminateGrace) sits behind this and
+	// is what guarantees the process actually goes.
+	cancelGrace = 2 * time.Second
 )
 
 // Config holds everything needed to run a command inside the guest.
@@ -340,16 +351,45 @@ func RunLine(ctx context.Context, cfg Config, line string, stdin io.Reader, stdo
 		defer restore()
 	}
 
-	// Closing the connection is what unblocks the read loop below, and
-	// the stdin pump's next write.
+	// Cancellation, in two steps.
+	//
+	// The first asks the guest to interrupt the command, and keeps the
+	// session open afterwards: SIGINT is what a ^C on a terminal would
+	// have delivered, and the point of sending it in band is that the
+	// command's own last words -- the "interrupted, cleaning up" a build
+	// prints, or the stack a test runner dumps -- arrive over a
+	// connection that is still there to carry them.
+	//
+	// The second closes the connection, which is all a client could do
+	// before there was a signal frame, and is what unblocks the read
+	// loop below and the stdin pump's next write. It happens either way,
+	// so a command that ignores SIGINT still costs a caller only
+	// cancelGrace beyond its own cancellation, and the guest's agent
+	// reads the closed connection as "end it" (internal/agent).
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
-			conn.Close()
 		case <-done:
+			return
 		}
+		if !resp.Supports(execwire.FeatureSignal) {
+			// The guest's agent is older than the signal frame, and
+			// would step over one without acting on it. Say so rather
+			// than appear to have asked: an agent and a client from
+			// different commits is a build mistake (see
+			// internal/execwire), and this is the moment it has a
+			// visible consequence.
+			log.Printf("the guest agent predates this client's signal frame; ending the session by closing the connection instead of interrupting the command")
+		} else if err := writeFrame(execwire.TypeSignal, execwire.EncodeSignal(int(syscall.SIGINT))); err == nil {
+			select {
+			case <-time.After(cancelGrace):
+			case <-done:
+				return
+			}
+		}
+		conn.Close()
 	}()
 
 	if stdin != nil {

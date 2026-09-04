@@ -154,6 +154,58 @@ func TestWinsizeAndExitRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSignalRoundTrip(t *testing.T) {
+	for _, want := range []int{1, 2, 9, 15, MaxSignal} {
+		got, err := DecodeSignal(EncodeSignal(want))
+		if err != nil || got != want {
+			t.Fatalf("signal round trip of %d = %d (%v)", want, got, err)
+		}
+	}
+	// Signal 0 is kill(2)'s "does this process exist?", which nothing
+	// here has any business asking, and a number past SIGRTMAX is not a
+	// signal at all -- both are refused at the decode rather than left
+	// for the agent to notice.
+	for _, sig := range []int{0, MaxSignal + 1} {
+		if _, err := DecodeSignal(EncodeSignal(sig)); err == nil {
+			t.Errorf("signal %d decoded without error", sig)
+		}
+	}
+	if _, err := DecodeSignal([]byte{1, 2}); err == nil {
+		t.Error("a short signal payload decoded without error")
+	}
+}
+
+// A frame type an older agent would step over in silence is announced by
+// name like a field is, and reaches a client through the same response
+// it already reads. Nothing refuses a session over it: the point is that
+// a client which wants to signal can tell whether the frame will be
+// acted on, and drop the connection instead when it will not.
+func TestTheSignalFrameIsAnnouncedAsAFeature(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, Response{OK: true, Features: Features}); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ReadResponse(bufio.NewReader(&buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Supports(FeatureSignal) {
+		t.Errorf("an agent from this commit does not report %s", FeatureSignal)
+	}
+
+	// An agent that predates the frame names nothing, which is the case
+	// a client has to be able to recognise. It is not a MissingFeatures
+	// answer, because a request cannot ask for the frame in advance --
+	// the client checks for itself and falls back.
+	older := Response{OK: true}
+	if older.Supports(FeatureSignal) {
+		t.Errorf("a response with no features reported %s", FeatureSignal)
+	}
+	if missing := older.MissingFeatures(Request{Line: "true"}); len(missing) != 0 {
+		t.Errorf("MissingFeatures on a plain request = %v, want the signal frame left out of it", missing)
+	}
+}
+
 // Dir and Env are the two fields a caller sets to move a command out of
 // the account's home directory and away from the fixed login
 // environment, so they have to survive the trip verbatim -- an Env entry

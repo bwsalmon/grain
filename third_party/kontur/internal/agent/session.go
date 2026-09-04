@@ -35,6 +35,28 @@
 // and a session that set only uid and gid would leave every `docker`
 // command failing on the socket's permissions, with nothing about the
 // error naming the group it lost.
+//
+// # Ending a command
+//
+// A session ends for one of three reasons, and only the first is the
+// command's own doing: it exits; the client asks for it to be signalled
+// (execwire.TypeSignal); or the session's context is cancelled, which is
+// what a client dropping the connection and what cmd/kontur-agent
+// closing a connection down both come to. The last two go through
+// terminate, which SIGTERMs and then SIGKILLs, and both reach the
+// command's whole process group rather than the shell at the top of it.
+//
+// The group matters more than it looks. Every session runs
+// `<shell> -c <line>`, and a line that starts anything of its own -- a
+// build, a test runner, a server -- leaves the shell waiting on a child
+// that a signal to the shell alone never touches. start therefore puts
+// the command in a process group of its own, so that signalling the
+// negative pid means this session and nothing else in the guest.
+//
+// None of this existed before: an abandoned session closed the guest
+// command's stdin and left everything else running, which in a
+// long-lived guest is one leaked process per timed-out call, with
+// nothing that reports them.
 package agent
 
 import (
@@ -51,9 +73,18 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bwsalmon/kontur/internal/execwire"
 )
+
+// terminateGrace is how long a command has between the SIGTERM that asks
+// it to stop and the SIGKILL that stops it -- long enough for a shell to
+// run a trap and a build to write out what it was doing, short enough
+// that a guest whose client has already gone is not holding the process
+// for a noticeable time. Nothing is waiting on the difference: by the
+// time either signal is sent, the session's output has nowhere to go.
+const terminateGrace = 5 * time.Second
 
 // Serve handles exactly one exec session on conn and returns when the
 // command has finished and its exit frame has been written.
@@ -62,6 +93,11 @@ import (
 // and returns nil: the session was served correctly, it is the command
 // that could not run. Only a broken connection or a malformed request is
 // an error here.
+//
+// ctx bounds the command, not just this function: cancelling it ends
+// whatever the session started, so a caller that gives Serve a context
+// per connection (cmd/kontur-agent does) leaves nothing behind in the
+// guest when the connection goes.
 func Serve(ctx context.Context, conn io.ReadWriter) error {
 	br := bufio.NewReader(conn)
 
@@ -84,11 +120,20 @@ func Serve(ctx context.Context, conn io.ReadWriter) error {
 		_ = execwire.WriteResponse(conn, execwire.Response{OK: false, Error: err.Error(), Features: execwire.Features})
 		return nil
 	}
+	defer sess.cancel()
+
 	// Every response carries the feature list, refusal or not: it is how
 	// a client that asked for Dir or Env finds out whether this agent is
-	// new enough to have honoured them (see execwire's package comment).
+	// new enough to have honoured them, and how one that may want to
+	// signal the command finds out whether the frame will be acted on
+	// (see execwire's package comment).
 	if err := execwire.WriteResponse(conn, execwire.Response{OK: true, Features: execwire.Features}); err != nil {
-		sess.kill()
+		// The command started and its client is already gone. Cancel
+		// ends it, and reaping it here rather than returning straight
+		// away is what keeps this from leaving a zombie behind in a
+		// guest whose init may never collect one.
+		sess.cancel()
+		_ = sess.reap()
 		return fmt.Errorf("writing the response: %w", err)
 	}
 
@@ -110,9 +155,22 @@ type session struct {
 	pty   *os.File // nil unless the request asked for one
 	slave *os.File // the child's end, closed once the child holds it
 
+	// cancel ends the command. It is the cancel half of the context the
+	// command was started with, so calling it goes through os/exec's own
+	// cancellation and arrives at terminate below.
+	cancel context.CancelFunc
+
 	// mu guards writes to the connection: stdout and stderr are pumped
 	// by separate goroutines into one stream of frames.
 	mu sync.Mutex
+
+	// killMu guards the SIGKILL waiting behind a SIGTERM, and the flag
+	// that says the command has been reaped. Both are needed to stop
+	// that timer firing at a pid the kernel has since given to
+	// something else.
+	killMu    sync.Mutex
+	killTimer *time.Timer
+	reaped    bool
 }
 
 func start(ctx context.Context, req execwire.Request) (*session, error) {
@@ -137,25 +195,44 @@ func start(ctx context.Context, req execwire.Request) (*session, error) {
 		return nil, err
 	}
 
+	s := &session{}
+	ctx, s.cancel = context.WithCancel(ctx)
+
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
+	// os/exec's own cancellation is a SIGKILL to the one process it
+	// started. Replace it with terminate, which asks the whole process
+	// group first and only insists afterwards.
+	cmd.Cancel = s.terminate
 	if cred := acct.credential(); cred != nil {
 		cmd.SysProcAttr.Credential = cred
 	}
 
-	s := &session{cmd: cmd}
+	s.cmd = cmd
 	if req.TTY {
+		// attachPTY asks for a session of its own (Setsid), which
+		// already makes the child a process group leader -- asking for
+		// Setpgid as well would be a setpgid(2) on a session leader,
+		// which fails with EPERM before the command ever runs.
 		if err := s.attachPTY(req.Cols, req.Rows); err != nil {
+			s.cancel()
 			return nil, err
 		}
-	} else if err := s.attachPipes(); err != nil {
-		return nil, err
+	} else {
+		// A process group of its own, so that signalling this session
+		// reaches what `<shell> -c` started and not just the shell.
+		cmd.SysProcAttr.Setpgid = true
+		if err := s.attachPipes(); err != nil {
+			s.cancel()
+			return nil, err
+		}
 	}
 
 	if err := cmd.Start(); err != nil {
 		s.closeFiles()
+		s.cancel()
 		if req.Dir != "" && errors.Is(err, fs.ErrPermission) {
 			// The chdir happens in the forked child, after it has
 			// dropped to the account's credentials, and the errno that
@@ -220,7 +297,7 @@ func (s *session) pump(br *bufio.Reader, w io.Writer) error {
 	// no such race, but there is no harm either: reads on the master end
 	// fail once the child is gone.
 	wg.Wait()
-	err := s.cmd.Wait()
+	err := s.reap()
 
 	return execwire.WriteFrame(w, execwire.TypeExit, execwire.EncodeExit(exitCode(err)))
 }
@@ -251,8 +328,15 @@ func (s *session) copyIn(br *bufio.Reader) {
 			// command's output or its exit code. Close this end
 			// unconditionally -- including the pty, where endStdin
 			// deliberately would not -- so a command blocked on a read
-			// ends rather than waiting on a client that has left.
+			// ends rather than waiting on a client that has left, and
+			// cancel the session, which ends the command itself.
+			//
+			// Closing stdin used to be the whole of this, and it is not
+			// enough: a command that never reads stdin -- almost all of
+			// them -- carried on running in the guest with nobody
+			// waiting for it and nothing left to notice it.
 			s.closeStdin()
+			s.cancel()
 			return
 		}
 		switch typ {
@@ -266,6 +350,20 @@ func (s *session) copyIn(br *bufio.Reader) {
 			cols, rows, err := execwire.DecodeWinsize(payload)
 			if err == nil {
 				s.resize(cols, rows)
+			}
+		case execwire.TypeSignal:
+			// The client interrupting the command, rather than
+			// abandoning it: the session stays open afterwards, so
+			// whatever the command prints on its way out still reaches
+			// the client, and its exit still arrives as an exit frame.
+			//
+			// No permission check, because there is nothing to check
+			// against: whoever can open this session can already run
+			// arbitrary commands as this account, and could send the
+			// same signal with a `kill` of their own.
+			sig, err := execwire.DecodeSignal(payload)
+			if err == nil {
+				_ = s.signalGroup(syscall.Signal(sig))
 			}
 		}
 	}
@@ -302,10 +400,83 @@ func (s *session) closeFiles() {
 	}
 }
 
-func (s *session) kill() {
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+// signalGroup sends sig to the command's process group.
+//
+// The group, not the process: start gives every session a group of its
+// own precisely so that this negative pid means "the command and
+// everything it started" and reaches, say, the compiler a `sh -c 'make'`
+// is sitting waiting on.
+func (s *session) signalGroup(sig syscall.Signal) error {
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+	return s.signalGroupLocked(sig)
+}
+
+// signalGroupLocked is signalGroup with killMu already held, which is
+// what makes the check against reaped mean anything: once the command
+// has been waited for, its pid is the kernel's to hand out again, and a
+// signal frame that arrives a moment late must go nowhere rather than to
+// whatever now holds that number.
+func (s *session) signalGroupLocked(sig syscall.Signal) error {
+	if s.cmd == nil || s.cmd.Process == nil || s.reaped {
+		return os.ErrProcessDone
 	}
+	err := syscall.Kill(-s.cmd.Process.Pid, sig)
+	if errors.Is(err, syscall.ESRCH) {
+		// Either the command is already gone, or -- in the moment
+		// between the fork and the child's own setpgid -- the group does
+		// not exist yet. Signalling the process directly covers the
+		// second without having to tell them apart, and reports
+		// os.ErrProcessDone for the first.
+		return s.cmd.Process.Signal(sig)
+	}
+	return err
+}
+
+// terminate ends the command: SIGTERM to its process group now, SIGKILL
+// to it after terminateGrace if it is still there. It is what the
+// session's context cancellation runs (see start's cmd.Cancel).
+//
+// SIGTERM first rather than a straight kill, because the command is
+// frequently a shell with a trap, a test runner with children of its own
+// or a build holding a lock, and each of those has cleanup that is worth
+// the wait to a guest that goes on living afterwards. SIGKILL after it,
+// because "asked politely and never checked" is how the abandoned
+// processes this exists to stop would come back.
+func (s *session) terminate() error {
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+
+	err := s.signalGroupLocked(syscall.SIGTERM)
+	if errors.Is(err, os.ErrProcessDone) {
+		// Reported rather than swallowed: os/exec reads this exact error
+		// as "there was nothing to cancel", and hands Wait's own result
+		// back to the caller instead of the context's error.
+		return err
+	}
+	if s.killTimer != nil {
+		return err
+	}
+	s.killTimer = time.AfterFunc(terminateGrace, func() {
+		_ = s.signalGroup(syscall.SIGKILL)
+	})
+	return err
+}
+
+// reap waits for the command and calls off any SIGKILL still pending
+// against it, so that nothing is left aimed at a pid the kernel is free
+// to reuse the moment this returns.
+func (s *session) reap() error {
+	err := s.cmd.Wait()
+
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+	s.reaped = true
+	if s.killTimer != nil {
+		s.killTimer.Stop()
+		s.killTimer = nil
+	}
+	return err
 }
 
 // exitCode turns Wait's error into the number to report. A command

@@ -51,6 +51,25 @@
 // Neither is version negotiation, and neither makes a mismatched pair
 // supported. They make one say so.
 //
+// # Frame types need the same line
+//
+// A frame type added later has the same problem and only the first half
+// of the answer, because the frame stream cannot refuse what it does not
+// know: the reader has the length prefix, so it can always step over an
+// unrecognized frame. Skipping it is the right behaviour for a frame
+// whose absence is cosmetic -- a terminal resize nobody applied -- and
+// exactly the wrong one for a frame whose absence changes what happens.
+// TypeSignal asks an agent to interrupt a command, and an agent too old
+// to know the type answers by leaving it running.
+//
+// So a frame type whose absence matters gets a feature name too
+// (FeatureSignal), and the client looks for it in Response.Features
+// before relying on the frame. Unlike the optional request fields, this
+// is not something MissingFeatures should fail a session over: a client
+// that cannot signal has a worse fallback rather than no fallback --
+// dropping the connection, which is all it could do before the frame
+// existed -- so it checks for itself and takes that path.
+//
 // # Trust
 //
 // There is no authentication here, and that is a deliberate consequence
@@ -131,9 +150,17 @@ type Request struct {
 // why a client has to look.
 const FeatureDirEnv = "dir-env"
 
+// FeatureSignal is the feature name an agent reports when it acts on a
+// TypeSignal frame. It is not a Request field, so RequiredFeatures never
+// names it and MissingFeatures never fails a session over it: a client
+// looks for it at the point it wants to signal, and falls back to
+// dropping the connection when it is absent. See "Frame types need the
+// same line" above.
+const FeatureSignal = "signal"
+
 // Features is every feature name an agent built from this commit
 // implements, and so what it reports in its Response.
-var Features = []string{FeatureDirEnv}
+var Features = []string{FeatureDirEnv, FeatureSignal}
 
 // RequiredFeatures names the features an agent must implement for this
 // request to mean what it says -- the optional fields it actually sets,
@@ -155,10 +182,12 @@ type Response struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 
-	// Features names the optional Request fields this agent understands
-	// (see Features and Supports). It is the one capability line in the
-	// protocol, and it exists because an agent that predates a field
-	// ignores it silently -- see "Two ends, one commit" above.
+	// Features names the optional parts of the protocol this agent
+	// understands -- request fields and frame types both (see Features
+	// and Supports). It is the one capability line in the protocol, and
+	// it exists because an agent that predates a field ignores it
+	// silently, and one that predates a frame type steps over it -- see
+	// "Two ends, one commit" above.
 	Features []string `json:"features,omitempty"`
 }
 
@@ -196,7 +225,14 @@ const (
 	TypeStdout     byte = 4 // agent -> client
 	TypeStderr     byte = 5 // agent -> client
 	TypeExit       byte = 6 // agent -> client, 4 bytes: exit code
+	TypeSignal     byte = 7 // client -> agent, 4 bytes: signal number
 )
+
+// MaxSignal is the highest signal number a TypeSignal frame may carry:
+// Linux's real-time signals end at SIGRTMAX, 64. Naming a ceiling here
+// keeps a decoded number safe to hand straight to kill(2) rather than
+// something the agent has to sanity-check for itself.
+const MaxSignal = 64
 
 // ErrPayloadTooLarge is returned by ReadFrame for a length prefix past
 // MaxPayload, rather than attempting the allocation it asks for.
@@ -356,6 +392,28 @@ func DecodeWinsize(payload []byte) (cols, rows uint16, err error) {
 		return 0, 0, fmt.Errorf("execwire: winsize payload is %d bytes, want 4", len(payload))
 	}
 	return binary.BigEndian.Uint16(payload[0:]), binary.BigEndian.Uint16(payload[2:]), nil
+}
+
+// EncodeSignal renders a signal number as a TypeSignal payload.
+func EncodeSignal(sig int) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], uint32(sig))
+	return b[:]
+}
+
+// DecodeSignal reads a payload written by EncodeSignal. Signal 0 is
+// rejected along with everything past MaxSignal: kill(2) reads it as
+// "does this process exist?", which is not something a session has any
+// business asking and not something a client can have meant.
+func DecodeSignal(payload []byte) (int, error) {
+	if len(payload) != 4 {
+		return 0, fmt.Errorf("execwire: signal payload is %d bytes, want 4", len(payload))
+	}
+	sig := binary.BigEndian.Uint32(payload)
+	if sig == 0 || sig > MaxSignal {
+		return 0, fmt.Errorf("execwire: signal %d is outside 1..%d", sig, MaxSignal)
+	}
+	return int(sig), nil
 }
 
 // EncodeExit renders an exit code as a TypeExit payload.

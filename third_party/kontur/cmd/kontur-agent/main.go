@@ -110,7 +110,19 @@ func run(ctx context.Context) error {
 		}
 		go func() {
 			defer conn.Close()
-			if err := agent.Serve(ctx, conn); err != nil {
+
+			// One context per connection, not the process's own. The
+			// command a session starts is bounded by the connection that
+			// asked for it: when that goes -- because the client
+			// finished, timed out, or vanished -- this cancel runs and
+			// internal/agent ends the command rather than leaving it
+			// running in a guest that may live for days. Handing every
+			// session the process context, as this did, meant nothing
+			// ever cancelled one.
+			cctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+
+			if err := agent.Serve(cctx, conn); err != nil {
 				// One session failing says nothing about the next, so
 				// this is reported and dropped rather than fatal. It
 				// lands on the guest's console, which is where a VM's

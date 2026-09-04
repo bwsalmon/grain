@@ -6,16 +6,24 @@ kontur's primary consumer, so a change grain needs belongs on kontur's
 `main` and reaches here by a resync, not by being applied to this copy
 (see "Local patches" below).
 
-This copy is upstream plus **one patch, in flight** ([kontur#70]) -- see
-"Local patches" at the bottom, which is otherwise back to "None". Both of
-the local patches this file used to list have landed on kontur's `main`
-and come back here as ordinary upstream code. Keep it that way: the one
-below is here only because it is the fix for a red build, and it goes
-when its PR merges.
+**This copy is byte-for-byte upstream again**, verified with `diff -r`
+against a fresh checkout (which reports only this file). All three local
+patches this file has listed across the last two resyncs have landed on
+kontur's `main` and come back here as ordinary upstream code -- see
+"Local patches" at the bottom, which is back to saying "None". Keep it
+that way.
 
 This snapshot is kontur's `main` at
-`a9fe8b66aed8bd07e937597bc4de58dd4a8abdf5` (2026-09-04), the merge of
-[bwsalmon/kontur#67](https://github.com/bwsalmon/kontur/pull/67).
+`0aaceac19e4e4ed47737c47bea6a0551bd7d920c` (2026-09-04), the merge of
+[kontur#70].
+
+Deliberately that commit rather than whatever `main`'s tip is as this
+lands. #70 is the last change grain needed, and the tip has since moved
+several times over things grain did not ask for (a `-state-dir` default,
+`vm status`, `kontur resize` idempotency). Vendoring those too would put
+changes through this repo's CI that nothing here is waiting on, and a
+snapshot is a commit rather than a moving reference in the first place.
+Take the tip on the next resync, when something wants what is in it.
 
 The guest base image grain builds on comes from this same tree:
 `scripts/kontur/build-guest.sh` builds it out of the Dockerfile here,
@@ -312,21 +320,17 @@ safety- or correctness-critical should be confirmed against a live
 
 ## Local patches
 
-**One, in flight.** `internal/agent/path.go` and its test, plus the two
-lines in `session.go` that call it: a root exec session gets the sbin
-directories on its PATH, the way `login(1)` and `sshd(8)` give uid 0
-`ENV_SUPATH` rather than `ENV_PATH`. Without it the guest setup script
-dies on `useradd: not found`, since `useradd` lives in `/usr/sbin` -- so
-this is not a patch anyone chose to carry, it is the fix for a red build
-copied in ahead of its merge.
+**None.** All three this file has listed are upstream now, and the way
+they got there is the point of this section rather than a footnote:
 
-It is [kontur#70], byte-for-byte the same change, and it is a no-op the
-moment kontur's `main` carries it. **Drop it by re-vendoring from that
-`main`** -- do not re-diff it by hand, and do not let this section keep
-saying "one" after #70 has merged.
-
-The two this file used to list are upstream now, and the way they got
-there is the point of this section rather than a footnote:
+- **The root exec session's PATH** landed as [kontur#70]. It is the one
+  that shows the process working under time pressure: it was written
+  upstream, copied in here byte-for-byte ahead of its merge because it
+  was the fix for a red build, recorded in this section as the one
+  in-flight patch with instructions to drop it by re-vendoring, and then
+  dropped by re-vendoring. A patch is allowed to exist here for the
+  length of a round trip. It is not allowed to be undocumented, and it is
+  not allowed to be re-applied by hand on the next resync.
 
 - **Flat mode's default-route discovery** landed as [kontur#40]. It was
   applied here directly first, and the file it lived in has since been
@@ -339,11 +343,12 @@ there is the point of this section rather than a footnote:
   this directory deletes a local patch silently, and the only thing that
   catches it is this file saying the patch is there.
 
-So the rule below is not theory. It cost two round trips to kontur to get
-this directory back to a plain copy, and both were cheaper than the
-alternative: a patch nobody re-applies is a sandbox with no DNS, or no
-route off its own segment, discovered weeks later inside a dispatched
-task as something that reads like a blocked network.
+So the rule below is not theory. It cost three round trips to kontur to
+get this directory back to a plain copy, and all three were cheaper than
+the alternative: a patch nobody re-applies is a sandbox with no DNS, or
+no route off its own segment, or a setup script that dies on "useradd:
+not found" -- discovered weeks later inside a dispatched task as
+something that reads like a blocked network.
 
 Otherwise: keep this section at "None". grain is kontur's primary
 consumer, so "upstream wouldn't want this" is rarely true here, and a fix

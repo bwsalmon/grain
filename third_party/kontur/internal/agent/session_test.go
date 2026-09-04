@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -133,6 +134,282 @@ func run(t *testing.T, req execwire.Request, stdin string) result {
 // meant to be refused before anything runs.
 func expectRefusal(req execwire.Request) bool {
 	return req.User == "nosuchaccount"
+}
+
+// live is a session a test drives frame by frame, rather than through
+// run above. Everything about ending a command early -- interrupting it,
+// cancelling it, walking away from it -- has to happen while the command
+// is still running, which run's send-everything-then-read shape cannot
+// express.
+type live struct {
+	t      *testing.T
+	client net.Conn
+	br     *bufio.Reader
+	done   chan error
+}
+
+func startSession(ctx context.Context, t *testing.T, req execwire.Request) *live {
+	t.Helper()
+	if req.User == "" {
+		req.User = currentAccount(t)
+	}
+
+	client, server := net.Pipe()
+	l := &live{t: t, client: client, br: bufio.NewReader(client), done: make(chan error, 1)}
+	go func() {
+		defer server.Close()
+		l.done <- Serve(ctx, server)
+	}()
+	t.Cleanup(func() { client.Close() })
+
+	if err := execwire.WriteRequest(client, req); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := execwire.ReadResponse(l.br)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK {
+		t.Fatalf("the agent refused to start the command: %s", resp.Error)
+	}
+	if !resp.Supports(execwire.FeatureSignal) {
+		t.Errorf("response features = %v, want %s among them", resp.Features, execwire.FeatureSignal)
+	}
+	return l
+}
+
+// awaitOutput reads frames until the session's output contains want,
+// which is how a test knows the command has got as far as the thing it
+// is about to be interrupted in the middle of.
+func (l *live) awaitOutput(want string) {
+	l.t.Helper()
+	var seen strings.Builder
+	for {
+		typ, payload, err := execwire.ReadFrame(l.br)
+		if err != nil {
+			l.t.Fatalf("waiting for %q: %v (output so far %q)", want, err, seen.String())
+		}
+		switch typ {
+		case execwire.TypeStdout, execwire.TypeStderr:
+			seen.Write(payload)
+			if strings.Contains(seen.String(), want) {
+				return
+			}
+		case execwire.TypeExit:
+			l.t.Fatalf("the command exited before printing %q (output %q)", want, seen.String())
+		}
+	}
+}
+
+// awaitExit reads the rest of the session and returns the exit code and
+// everything printed on the way to it.
+func (l *live) awaitExit() (int, string) {
+	l.t.Helper()
+	var out strings.Builder
+	for {
+		typ, payload, err := execwire.ReadFrame(l.br)
+		if err != nil {
+			l.t.Fatalf("reading frames: %v (output so far %q)", err, out.String())
+		}
+		switch typ {
+		case execwire.TypeStdout, execwire.TypeStderr:
+			out.Write(payload)
+		case execwire.TypeExit:
+			code, err := execwire.DecodeExit(payload)
+			if err != nil {
+				l.t.Fatal(err)
+			}
+			select {
+			case err := <-l.done:
+				if err != nil {
+					l.t.Fatalf("Serve: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				l.t.Fatal("Serve did not return after the exit frame")
+			}
+			return code, out.String()
+		}
+	}
+}
+
+// backgroundChild is a command line that starts a child of its own,
+// writes its pid to pidFile and then waits for it -- the shape a
+// `<shell> -c` session takes whenever the line it was given runs
+// anything, and the one where signalling only the shell leaves something
+// behind. It prints "started" once the pid file is written.
+func backgroundChild(pidFile string) string {
+	return fmt.Sprintf("sleep 300 & echo $! >%s; echo started; wait", pidFile)
+}
+
+func readPID(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 1 {
+		t.Fatalf("pid file %s holds %q", path, b)
+	}
+	return pid
+}
+
+// processAlive reports whether pid names a process that is still
+// running.
+//
+// Not kill(pid, 0): that succeeds for a process which has exited and is
+// waiting to be reaped, and a child whose parent shell was killed first
+// is reparented to whatever init this test runs under, which may be in
+// no hurry to collect it. The state field in /proc tells a zombie from a
+// living process, and is the only thing that answers the question these
+// tests are actually asking.
+func processAlive(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	// "pid (comm) state ...", and comm may itself contain spaces and
+	// parentheses, so the state is the field after the last ')'.
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 || i+2 >= len(b) {
+		return false
+	}
+	return b[i+2] != 'Z'
+}
+
+func awaitProcessGone(t *testing.T, pid int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %d was still running %s after the session ended", pid, within)
+}
+
+// A client that goes away has to take the command with it. Closing the
+// guest process's stdin was all this used to do, which for the great
+// majority of commands -- anything that does not read stdin -- meant a
+// process left running in the guest with nobody waiting for it and
+// nothing to notice it. In a long-lived sandbox that is one leak per
+// timed-out call.
+func TestDroppingTheConnectionEndsTheCommandAndWhatItStarted(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	l := startSession(context.Background(), t, execwire.Request{Line: backgroundChild(pidFile)})
+	l.awaitOutput("started")
+	child := readPID(t, pidFile)
+
+	l.client.Close()
+
+	awaitProcessGone(t, child, 10*time.Second)
+	select {
+	case <-l.done:
+		// Whatever Serve says here is about the connection, not the
+		// session: it ends by failing to write an exit frame to a client
+		// that has gone. What matters is that it returns at all, and
+		// that the command above is gone with it.
+	case <-time.After(10 * time.Second):
+		t.Fatal("Serve did not return after the client went away")
+	}
+}
+
+// Cancelling the session's context is what cmd/kontur-agent does when a
+// connection ends, and it asks before it insists: a command gets a
+// SIGTERM it can act on, and only a command that sits through
+// terminateGrace is killed outright.
+func TestCancellingTheContextAsksTheCommandToStopBeforeKillingIt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	l := startSession(ctx, t, execwire.Request{
+		Line: "trap 'echo caught-term; exit 9' TERM; echo ready; while :; do sleep 1; done",
+	})
+	l.awaitOutput("ready")
+
+	cancel()
+
+	code, out := l.awaitExit()
+	if !strings.Contains(out, "caught-term") {
+		t.Errorf("output = %q, want the command's own SIGTERM handler to have run", out)
+	}
+	if code != 9 {
+		t.Errorf("exit = %d, want 9 from the trap rather than a signal death", code)
+	}
+}
+
+// A signal frame is the other half: the client wants the command
+// interrupted but the session kept, so that what the command prints on
+// its way out still arrives and its exit still comes back as an exit
+// code rather than a dropped connection.
+func TestASignalFrameInterruptsTheCommandWithoutEndingTheSession(t *testing.T) {
+	l := startSession(context.Background(), t, execwire.Request{
+		Line: "trap 'echo interrupted; exit 7' INT; echo ready; while :; do sleep 1; done",
+	})
+	l.awaitOutput("ready")
+
+	if err := execwire.WriteFrame(l.client, execwire.TypeSignal, execwire.EncodeSignal(int(syscall.SIGINT))); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := l.awaitExit()
+	if !strings.Contains(out, "interrupted") {
+		t.Errorf("output = %q, want what the command printed on its way out", out)
+	}
+	if code != 7 {
+		t.Errorf("exit = %d, want 7 from the command's INT handler", code)
+	}
+}
+
+// And it reaches the whole process group, not the shell at the top of
+// it. A `<shell> -c` line that started something and is waiting on it is
+// the ordinary case -- a build, a test run, a server -- and a signal
+// delivered only to the shell would leave that child running.
+//
+// SIGTERM rather than SIGINT here because of a shell rule rather than
+// anything about the transport: a non-interactive shell with no job
+// control sets SIGINT to ignored in the background jobs it starts, so a
+// SIGINT would prove nothing about a `sleep 300 &`.
+func TestASignalFrameReachesEverythingTheCommandStarted(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	l := startSession(context.Background(), t, execwire.Request{
+		Line: "trap 'echo interrupted; exit 7' TERM; " + backgroundChild(pidFile),
+	})
+	l.awaitOutput("started")
+	child := readPID(t, pidFile)
+
+	if err := execwire.WriteFrame(l.client, execwire.TypeSignal, execwire.EncodeSignal(int(syscall.SIGTERM))); err != nil {
+		t.Fatal(err)
+	}
+
+	awaitProcessGone(t, child, 5*time.Second)
+	if code, _ := l.awaitExit(); code != 7 {
+		t.Errorf("exit = %d, want 7 from the command's TERM handler", code)
+	}
+}
+
+// A signal number the protocol does not allow is dropped, and dropping
+// it costs the session nothing: the command is still running and still
+// reading its stdin afterwards. Signal 0 is the one to try, since kill(2)
+// reads it as an existence check rather than a signal.
+func TestASignalFrameOutsideTheAllowedRangeIsIgnored(t *testing.T) {
+	l := startSession(context.Background(), t, execwire.Request{Line: "cat"})
+
+	if err := execwire.WriteFrame(l.client, execwire.TypeSignal, execwire.EncodeSignal(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := execwire.WriteFrame(l.client, execwire.TypeStdin, []byte("still here\n")); err != nil {
+		t.Fatal(err)
+	}
+	l.awaitOutput("still here")
+
+	if err := execwire.WriteFrame(l.client, execwire.TypeStdinClose, nil); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := l.awaitExit(); code != 0 {
+		t.Errorf("exit = %d, want the command to have finished normally", code)
+	}
 }
 
 func TestACommandsOutputAndExitCodeComeBack(t *testing.T) {

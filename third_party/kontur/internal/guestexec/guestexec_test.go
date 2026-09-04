@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,6 +50,13 @@ type fakeCHV struct {
 	// else, and its response names no features -- which is what an agent
 	// that ignored those fields looks like from the client's side.
 	olderAgent bool
+
+	// agentWithoutSignal answers the way an agent built before the
+	// signal frame existed would: a response naming no features, and a
+	// session that steps over frames it has no idea what to do with. It
+	// stands in for a guest image and a kontur binary from different
+	// commits.
+	agentWithoutSignal bool
 }
 
 func startFakeCHV(t *testing.T, f *fakeCHV) *fakeCHV {
@@ -107,6 +115,10 @@ func (f *fakeCHV) serve(conn net.Conn) {
 		f.serveAsOlderAgent(conn, br)
 		return
 	}
+	if f.agentWithoutSignal {
+		f.serveAsAnAgentWithoutSignal(conn, br)
+		return
+	}
 	// br may hold bytes already read off the socket, so the agent has to
 	// be given the buffered reader rather than the connection.
 	_ = agent.Serve(context.Background(), bufConn{r: br, Conn: conn})
@@ -147,6 +159,23 @@ func (f *fakeCHV) serveThenHangUp(conn net.Conn, br *bufio.Reader) {
 	}
 	_ = execwire.WriteResponse(conn, execwire.Response{OK: true})
 	_ = execwire.WriteFrame(conn, execwire.TypeStdout, []byte("partial output"))
+}
+
+// serveAsAnAgentWithoutSignal accepts a session, names no features, and
+// then steps over every frame the client sends -- which is precisely
+// what an agent that does not know TypeSignal would do with one.
+func (f *fakeCHV) serveAsAnAgentWithoutSignal(conn net.Conn, br *bufio.Reader) {
+	if _, err := execwire.ReadRequest(br); err != nil {
+		return
+	}
+	if err := execwire.WriteResponse(conn, execwire.Response{OK: true}); err != nil {
+		return
+	}
+	for {
+		if _, _, err := execwire.ReadFrame(br); err != nil {
+			return
+		}
+	}
 }
 
 func testConfig(t *testing.T, f *fakeCHV) Config {
@@ -389,6 +418,89 @@ func TestRun_ContextCancellationEndsTheSession(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("cancelling the context did not end the session")
 	}
+}
+
+// Cancelling is not the same as walking away. The client asks the guest
+// to interrupt the command and keeps the session open long enough to
+// carry the answer, so a cancelled call still gets the command's own
+// last words and its real exit code rather than a dropped connection.
+func TestRun_CancellationInterruptsTheCommandAndStillCollectsItsAnswer(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &trigger{want: "ready", hit: make(chan struct{})}
+	go func() {
+		<-out.hit
+		cancel()
+	}()
+
+	code, err := RunLine(ctx, testConfig(t, f),
+		"trap 'echo interrupted; exit 7' INT; echo ready; while :; do sleep 1; done",
+		nil, out, nil)
+	if err != nil {
+		t.Fatalf("RunLine = %v, want the session to have ended cleanly with an exit code", err)
+	}
+	if code != 7 {
+		t.Errorf("exit = %d, want 7 from the command's own INT handler", code)
+	}
+	if !strings.Contains(out.String(), "interrupted") {
+		t.Errorf("output = %q, want what the command printed on its way out", out.String())
+	}
+}
+
+// Against an agent too old to know the signal frame, cancelling falls
+// straight back to what a client could always do -- close the connection
+// -- rather than spending cancelGrace waiting for an answer that is
+// never coming.
+func TestRun_CancellationDoesNotWaitOnAnAgentThatCannotBeSignalled(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{agentWithoutSignal: true})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	if _, err := RunLine(ctx, testConfig(t, f), "does not matter", nil, nil, nil); err == nil {
+		t.Fatal("RunLine = nil, want an error for a session with no exit status")
+	}
+	if elapsed := time.Since(start); elapsed >= cancelGrace {
+		t.Errorf("took %v to give up, want less than the %v grace an agent that can be signalled gets", elapsed, cancelGrace)
+	}
+}
+
+// trigger is an io.Writer that closes hit the first time everything
+// written to it contains want, so a test can act on a command reaching a
+// known point rather than on a sleep.
+type trigger struct {
+	want string
+	hit  chan struct{}
+
+	mu   sync.Mutex
+	seen strings.Builder
+}
+
+func (w *trigger) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.seen.Write(p)
+	if strings.Contains(w.seen.String(), w.want) {
+		select {
+		case <-w.hit:
+		default:
+			close(w.hit)
+		}
+	}
+	return len(p), nil
+}
+
+func (w *trigger) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.seen.String()
 }
 
 // TestReady_AnswersWhenTheGuestRunsACommand is the whole of "kontur
