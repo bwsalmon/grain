@@ -48,9 +48,19 @@ const (
 //     costs a rewrite of the whole thing.
 //   - lease: a row per capability minted for a run, so it moves with
 //     task_run and for the same reasons.
-//   - task_read: which tasks a human has looked at, written as they
-//     browse the UI. Not state anyone would review, and not state a
-//     restore is much poorer for being an hour behind on.
+//
+// task_read was on this list and should never have been: the name reads
+// like a record of which tasks a human has looked at, and it is nothing
+// of the sort. It is the read-only repos a task may clone
+// (pkg/model/schema.go), written by PutTask in the same transaction as
+// the task row itself, and it is the sibling of task_grant, task_link
+// and task_tag -- all of which are TierState. On the churn clock it made
+// a dump that contradicted itself, since task.json carried a task within
+// thirty seconds and task_read.json carried its read scope up to an hour
+// later, and a restore taken in between gave a task back with no read
+// scope at all: a run dispatched from it would be refused the very repos
+// somebody filed it to read. Nothing about it is a running commentary on
+// anything.
 //
 // There is no metrics table to name here: pkg/metrics derives throughput
 // and latency from task and task_run rather than materialising anything
@@ -75,7 +85,6 @@ var churnTables = map[string]bool{
 	"task_observation": true,
 	"task_run":         true,
 	"lease":            true,
-	"task_read":        true,
 }
 
 // TierOf classifies one table by name.
