@@ -310,9 +310,9 @@ func stateAdopt(ctx context.Context, dataDir string, args []string) error {
 	if archived != "" {
 		fmt.Printf("moved the previous state repository to %s\n", archived)
 	}
-	if err := staterepo.SaveSettings(dataDir, staterepo.Settings{
+	if err := staterepo.SaveSettings(dataDir, adoptedSettings(dataDir, staterepo.Settings{
 		Remote: *remote, Branch: *branch, TokenFile: *tokenFile,
-	}); err != nil {
+	})); err != nil {
 		return err
 	}
 	repo, err := openStateRepo(ctx, dataDir)

@@ -236,6 +236,34 @@ func openStateRepo(ctx context.Context, dataDir string) (*staterepo.Repo, error)
 	return repo, nil
 }
 
+// adoptedSettings is the settings file an adopt leaves behind: what the
+// operator just said about the repository, plus the fields that are
+// about this deployment rather than about any repository.
+//
+// Which is, so far, the two that say whether grain installs the CI step
+// in the state repository and which image it runs. They answer questions
+// about this host -- may its credential push a workflow, which build is
+// it -- so an operator who turned the step off, or pinned it to the tag
+// their deployment runs, has said something that survives being pointed
+// at a different repository. Remote, Branch and TokenFile are the
+// opposite: each of them describes the repository being adopted, and
+// carrying an old one across would be how a deployment ends up pushing
+// with the credential for somewhere else.
+func adoptedSettings(dataDir string, adopted staterepo.Settings) staterepo.Settings {
+	// A settings file that cannot be read is not worth failing an adopt
+	// over: the fields carried across are preferences, and the zero value
+	// of both is grain's own default.
+	previous, err := staterepo.LoadSettings(dataDir)
+	if err != nil {
+		log.Printf("grain: cannot read the current %s (%v); adopting with grain's defaults for "+
+			"the state repository's CI step", staterepo.SettingsFileName, err)
+		return adopted
+	}
+	adopted.CheckImage = previous.CheckImage
+	adopted.NoWorkflow = previous.NoWorkflow
+	return adopted
+}
+
 // recoverDivergedStateRepo answers one question for the two places that
 // have to ask it -- the load at startup and every tick of the sync loop:
 // err is a divergence, and is it one grain can clear by itself?
