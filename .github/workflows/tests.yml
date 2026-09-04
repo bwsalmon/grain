@@ -253,22 +253,27 @@ jobs:
           done
 
   # Nothing in this repository read a workflow file before GitHub ran it,
-  # and two of these four are never run by a pull request at all:
+  # and three of these five are never run by a pull request at all:
   # gcp-smoke.yml and live-agent.yml trigger on `schedule` and
   # `workflow_dispatch` only, deliberately, because each holds a
-  # credential no branch may be allowed to reach. What that costs is that
-  # a YAML error, a typo'd `steps.<id>.outputs.<name>`, or an `if:`
-  # naming a context that is not available in that position is invisible
-  # to `go test ./...`, to tests/deploy's cross-file assertions and to
-  # this workflow's own runs -- and first reports itself as a red
-  # scheduled run on main at 04:41 UTC, some days after the commit that
-  # broke it, with no pull request left to attach the blame to.
+  # credential no branch may be allowed to reach; agy-surface.yml on
+  # `workflow_dispatch` alone, because what it captures is the agy a
+  # runner installs rather than anything about the commit under test.
+  # What that costs is that a YAML error, a typo'd
+  # `steps.<id>.outputs.<name>`, or an `if:` naming a context that is not
+  # available in that position is invisible to `go test ./...`, to
+  # tests/deploy's cross-file assertions and to this workflow's own runs
+  # -- and first reports itself as a red scheduled run on main at 04:41
+  # UTC, some days after the commit that broke it, with no pull request
+  # left to attach the blame to. agy-surface.yml does not even get that
+  # much: no clock runs it, so a break in it would sit in the tree until
+  # whoever next dispatched it wore the failure.
   #
-  # actionlint parses all four of them here instead, on every pull
+  # actionlint parses all five of them here instead, on every pull
   # request, and shells out to shellcheck for every `run:` block -- which
   # is where these workflows keep most of their logic
   # (build-artifacts.yml's tag pushes, gcp-smoke.yml's mint/sweep/revoke
-  # steps).
+  # steps, agy-surface.yml's capture and publish).
   #
   # It needs no credential of its own to check the two that hold one, so
   # it belongs here with everything else that runs on a pull request.
