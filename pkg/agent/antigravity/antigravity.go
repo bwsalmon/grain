@@ -1291,12 +1291,17 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 
 	stdout, runErr := f.run.Run(runCtx, args, stdin, env, workDir(cfg, home), io.MultiWriter(sinks...))
 	result, parseErr := parseTranscript(stdout)
-	// Read once, from the terminal event's own text plus whatever the
+	// Parsed once here rather than at each branch below, since two of
+	// them read the same pass: what agy said about how the run ended is
+	// both the evidence a quota refusal leaves and the sentence that
+	// explains an ordinary failure.
+	events := parseEvents(stdout)
+	// Read from the terminal event's own text plus whatever the
 	// subprocess itself reported, because a quota refusal can arrive
 	// either way: agy usually reports it as a failed terminal status
 	// (parseErr, below) but a hard enough refusal kills the process
 	// first (runErr). See usagelimit.go.
-	limit := usageLimitFailure(parseEvents(stdout).resultText, runErr)
+	limit := usageLimitFailure(events.resultText, runErr)
 	switch {
 	case capWatch.tripped():
 		// The cap cancelled the subprocess, so runErr is that
@@ -1319,7 +1324,16 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		// changed the world.
 		return partialResult(result, stdout), limit
 	case runErr != nil:
-		return partialResult(result, stdout), fmt.Errorf("antigravity: running agy: %w", runErr)
+		// Both halves, not just the exit status. agy reports a run it
+		// could not finish as a terminal result event with a status of
+		// ERROR or FAILURE -- "There was a network issue connecting to
+		// the server, please try again." -- and then exits 1 with
+		// nothing at all on stderr, so this arm used to render the one
+		// failure a reader can act on as "running agy: exit status 1
+		// (stderr: )". events.resultErr is that sentence; the stream is
+		// removed once the run finishes (orchestrator's own cleanup), so
+		// what this returns is the last place it exists.
+		return partialResult(result, stdout), agent.RunFailure("antigravity", "agy", events.resultErr, runErr)
 	case parseErr != nil:
 		// A capture with no terminal result event -- an agy that died
 		// without runErr reaching us, or output truncated mid-stream.
