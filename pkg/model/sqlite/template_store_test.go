@@ -53,6 +53,77 @@ func TestTemplateRoundTrips(t *testing.T) {
 	if !got.CreatedAt.Equal(now) {
 		t.Errorf("createdAt = %v, want %v", got.CreatedAt, now)
 	}
+	if got.Target != nil || got.Base != "" {
+		t.Errorf("binding = (%+v, %q), want a template bound to nothing", got.Target, got.Base)
+	}
+}
+
+// A binding is optional, so both halves of the choice need to survive a
+// round trip: the unbound template above, and this one, bound to a repo
+// and a branch (grain/task-285).
+func TestBoundTemplateRoundTrips(t *testing.T) {
+	store, _, ctx := openStore(t)
+	want := template("template-1")
+	want.Target = &model.RepoRef{Owner: "owner", Name: "payments-api"}
+	want.Base = "release"
+
+	if err := store.PutTemplate(ctx, want); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := store.GetTemplate(ctx, "template-1")
+	if err != nil || got == nil {
+		t.Fatalf("get: %v (nil=%v)", err, got == nil)
+	}
+	if got.Target == nil || *got.Target != *want.Target || got.Base != "release" {
+		t.Fatalf("binding did not survive: (%+v, %q)", got.Target, got.Base)
+	}
+
+	// Unbinding is a write like any other, and has to clear the repo
+	// rather than leave the old one readable underneath.
+	want.Target, want.Base = nil, ""
+	if err := store.PutTemplate(ctx, want); err != nil {
+		t.Fatalf("put unbound: %v", err)
+	}
+	got, err = store.GetTemplate(ctx, "template-1")
+	if err != nil || got == nil {
+		t.Fatalf("get after unbinding: %v (nil=%v)", err, got == nil)
+	}
+	if got.Target != nil || got.Base != "" {
+		t.Fatalf("binding = (%+v, %q), want it cleared", got.Target, got.Base)
+	}
+}
+
+// ListTemplates reads through its own SELECT rather than getTemplate's,
+// so the binding it scans is worth checking separately -- a column list
+// that drifts between the two would otherwise only show up as a
+// template that reads bound one way and unbound the other.
+func TestListTemplatesReadsBindings(t *testing.T) {
+	store, _, ctx := openStore(t)
+	bound := template("template-1")
+	bound.Target = &model.RepoRef{Owner: "owner", Name: "payments-api"}
+	bound.Base = "release"
+	if err := store.PutTemplate(ctx, bound); err != nil {
+		t.Fatalf("put bound: %v", err)
+	}
+	unbound := template("template-2")
+	if err := store.PutTemplate(ctx, unbound); err != nil {
+		t.Fatalf("put unbound: %v", err)
+	}
+
+	list, err := store.ListTemplates(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	byID := map[string]model.Template{}
+	for _, tmpl := range list {
+		byID[tmpl.ID] = tmpl
+	}
+	if got := byID["template-1"]; got.Target == nil || *got.Target != *bound.Target || got.Base != "release" {
+		t.Errorf("template-1 = (%+v, %q), want its binding", got.Target, got.Base)
+	}
+	if got := byID["template-2"]; got.Target != nil || got.Base != "" {
+		t.Errorf("template-2 = (%+v, %q), want no binding", got.Target, got.Base)
+	}
 }
 
 func TestGetTemplateReturnsNilWhenAbsent(t *testing.T) {
@@ -251,13 +322,12 @@ func TestInitMigratesAnExistingDatabaseWithNoTemplateIDColumn(t *testing.T) {
 }
 
 // TestInitMigratesAnExistingDatabaseWithTemplateTargetColumns simulates
-// a database built while template still carried its own
-// target_owner/target_name/base (model.Template's own doc comment on
-// why they moved out) directly rather than through Store, and checks
-// Store.Init's own migration step (ensureTemplateNoTargetColumns) drops
-// those three columns without disturbing the rest of the row --
-// store_test.go's own TestInitMigratesAnExistingDatabaseWithNamedSlots
-// pattern, applied to a drop with no data to backfill anywhere else.
+// a database built while a template *had* to carry a
+// target_owner/target_name/base, directly rather than through Store, and
+// checks Store.Init leaves those three columns and their values alone:
+// what was a mandatory target is exactly what a binding means now
+// (model.Template's own doc comment), so such a row upgrades into a
+// bound template rather than losing where it pointed.
 func TestInitMigratesAnExistingDatabaseWithTemplateTargetColumns(t *testing.T) {
 	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
 	if err != nil {
@@ -300,12 +370,76 @@ func TestInitMigratesAnExistingDatabaseWithTemplateTargetColumns(t *testing.T) {
 	if got.Name != "Dependency bump" || got.Title != "Bump dependencies" {
 		t.Fatalf("got %+v, want the pre-existing row intact", got)
 	}
+	if got.Target == nil || *got.Target != (model.RepoRef{Owner: "owner", Name: "payments-api"}) {
+		t.Fatalf("target = %+v, want the row's own target read back as a binding", got.Target)
+	}
+	if got.Base != "" {
+		t.Fatalf("base = %q, want a binding with no branch pinned", got.Base)
+	}
 
-	// The old columns are gone, not merely ignored -- PutTemplate stops
-	// supplying them, so target_owner/target_name would otherwise fail
-	// every write with a NOT NULL constraint violation.
+	// Writable as well as readable: the columns are NOT NULL in this old
+	// shape, and PutTemplate supplies them on every write, bound or not.
 	if err := store.PutTemplate(ctx, template("template-2")); err != nil {
 		t.Fatalf("put after migrating: %v", err)
+	}
+}
+
+// TestInitMigratesAnExistingDatabaseWithNoTemplateTargetColumns is the
+// other direction: a database built while a template could carry no
+// target at all (the era between the two), which Init has to give the
+// binding columns back -- every template in it staying unbound, which is
+// what it was.
+func TestInitMigratesAnExistingDatabaseWithNoTemplateTargetColumns(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`template`"+` (
+  `+"`id`"+`           TEXT     NOT NULL,
+  `+"`name`"+`         TEXT     NOT NULL,
+  `+"`title`"+`        TEXT     NOT NULL,
+  `+"`body`"+`         TEXT     NOT NULL,
+  `+"`auto_merge`"+`   INTEGER  NOT NULL,
+  `+"`created_at`"+`   DATETIME NOT NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the targetless template table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `template` (`id`,`name`,`title`,`body`,`auto_merge`,`created_at`) VALUES "+
+			"('template-1','Dependency bump','Bump dependencies','Bump every dependency.',0,?)",
+		now); err != nil {
+		t.Fatalf("seeding a targetless template row: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database with no template.target_owner: %v", err)
+	}
+
+	got, err := store.GetTemplate(ctx, "template-1")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.Target != nil || got.Base != "" {
+		t.Fatalf("got %+v, want a template that stayed unbound", got)
+	}
+
+	bound := template("template-2")
+	bound.Target = &model.RepoRef{Owner: "owner", Name: "payments-api"}
+	bound.Base = "release"
+	if err := store.PutTemplate(ctx, bound); err != nil {
+		t.Fatalf("put a bound template after migrating: %v", err)
+	}
+	back, err := store.GetTemplate(ctx, "template-2")
+	if err != nil || back == nil {
+		t.Fatalf("get after migrating: (%+v, %v)", back, err)
+	}
+	if back.Target == nil || *back.Target != *bound.Target || back.Base != "release" {
+		t.Fatalf("binding did not survive the added columns: %+v", back)
 	}
 }
 
