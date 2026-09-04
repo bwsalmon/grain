@@ -66,6 +66,82 @@ answers with a list — an image may speak several
 versions through an upgrade, and a controller should take the highest it
 also speaks rather than refuse a shim that could have served it.
 
+## This is MCP over a poll, not an RPC of our own
+
+Most of what crosses this channel is an MCP tool call. The shim runs an
+MCP server in the container for the agent -- the same `pkg/mcp` that
+serves the sandbox tools today -- and serves everything it can locally.
+The handful of tools needing the store, a GitHub credential or a human it
+cannot serve, so it **holds the call open and forwards it**: the call
+surfaces on the next `grain status`, the controller executes it and hands
+the result back through `grain answer`, and the shim returns that to the
+agent as the tool's own result.
+
+So the controller is an out-of-band executor for tools the grain cannot
+run itself. That is the whole of it, and it needs no MCP transport, no
+session and no connection.
+
+**At most one call is outstanding, always.** The status has one slot, not
+a queue: a grain is blocked on something or it is not. Parallel tool use
+makes two forwarded calls possible in principle, and the shim serialises
+them -- holding the second until the first is settled -- which costs a
+tick on a rare case and buys a controller whose obligation per tick is
+bounded at one. `TestReconcileAnswersAtMostOneCall` holds that.
+
+**`answer.json` is `mcp.Result`'s own shape** -- text plus an error flag --
+so nothing is translated on the way back. The controller produces a tool
+result; the shim passes it through.
+
+### Why the control channel is not itself MCP
+
+It would be reasonable to ask why this is a CLI at all, given the traffic
+is MCP calls and grain already speaks MCP. Two reasons, and neither is
+about MCP being unsuitable for what it does.
+
+**MCP assumes a session; `Reconcile` assumes there is not one.** MCP's
+transports -- stdio and Streamable HTTP -- both open with an `initialize`
+handshake negotiating protocol version and capabilities before any other
+request. Per poll that is three messages before the controller learns
+anything, on a transport where each round trip is a container exec, where
+`grain status` is one exec returning one document. Held open instead, it
+is the persistent connection "Poll, not push" rejected: something to keep
+alive, to reconnect, and a silence that cannot be told from health.
+
+Level-triggering is the deeper mismatch. Every call here is independent
+and idempotent so that running one is always safe and skipping one costs
+latency rather than correctness. A session is state shared between two
+parties, which is the thing that decision removed.
+
+**There are two relationships here, and they are not the same shape:**
+
+| | shape | protocol |
+| --- | --- | --- |
+| agent ↔ shim | one session for the run's life | **MCP** (`pkg/mcp`, unchanged) |
+| controller ↔ shim | independent level-triggered calls | this CLI |
+
+What MCP has that we would otherwise have invented, we took from
+elsewhere or already have better: version negotiation is `grain version`
+with a `supported` list (Kubernetes' string form rather than
+`initialize`'s); error codes are exit codes, which `docker exec`
+propagates for free and which we need regardless to tell exec-failed from
+shim-failed; and progress notifications are the container log stream,
+which survives a disconnected controller and replays from `--since`.
+
+### An open option: MCP frames as the trajectory
+
+`src: "agent"` records have no defined vocabulary yet, and today each of
+`pkg/agent/claude`, `/antigravity` and `/codex` owns a transcript reader
+because "the two event vocabularies differ".
+
+The shim sits between the agent's MCP client and its own server, so it
+could mirror that JSON-RPC traffic into the trajectory verbatim as the
+`agent` records. One well-specified vocabulary for tool calls across every
+framework, at no cost to produce -- the frames are already crossing it.
+
+It only covers tool calls, not the model's own prose, so the
+per-framework readers do not disappear entirely. Recorded as an option
+rather than a decision.
+
 ## What is *not* a CLI call
 
 Half of `pkg/grain`'s Go interface never reaches the shim:
@@ -93,7 +169,7 @@ grain run
         records to its own stdout. Does not exit until the grain is done.
 
 grain status                                     > status.json
-grain answer   --request <id>      < answer.json
+grain answer   --call <id>         < answer.json
 grain signal   --id <id>           < signal.json
 grain version                                     > version.json
 ```
@@ -258,10 +334,12 @@ would be a second exec per grain per tick.
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
   "rebuilds": 1,
-  "requests": [
-    { "id": "r-7", "kind": "open_pull_request", "raised": "2026-09-04T19:40:00Z",
-      "payload": { "title": "Port the staleness check", "body": "..." } }
-  ],
+  "call": {
+    "id": "c-7",
+    "tool": "open_pull_request",
+    "arguments": { "title": "Port the staleness check", "body": "..." },
+    "since": "2026-09-04T19:40:00Z"
+  },
   "health": {
     "container": { "running": true },
     "guest": {
@@ -321,22 +399,24 @@ that commits, pushes and then runs out of turns did the work, and only the
 ending failed. Salvaging that branch is a special case in `runOne`'s error
 path today; here it is a field the ordinary finish path reads.
 
-### `answer.json` → `grain answer --request r-7`
+### `answer.json` → `grain answer --call c-7`
+
+`mcp.Result`'s own two fields, so the shim returns it to the agent as that
+tool's result with nothing to translate:
 
 ```json
-{ "version": "v1", "ok": true,
-  "payload": { "number": 812, "url": "https://github.com/bwsalmon/grain/pull/812" } }
+{ "version": "v1", "text": "opened #812: https://github.com/bwsalmon/grain/pull/812" }
 ```
 
 A refusal is an answer, not an omission:
 
 ```json
-{ "version": "v1", "ok": false,
-  "err": "this deployment has no GitHub credential that can open pull requests" }
+{ "version": "v1", "isError": true,
+  "text": "this deployment has no GitHub credential that can open pull requests" }
 ```
 
-Leaving a request unanswered blocks the agent until its deadline. Telling
-it no is a turn it can act on.
+Leaving a call unanswered blocks the agent until its deadline. Telling it
+no is a turn it can act on.
 
 ### `signal.json` → `grain signal --id sig-20`
 

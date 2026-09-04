@@ -105,12 +105,19 @@ controller request iff it touches the store, GitHub, or a human.**
 | `run_command`, `read_file`, `write_file`, `edit_file` | `docker exec` → `kontur exec` | local, vsock |
 | `recreate_sandbox` | MCP → daemon REST → registry → four `restore*` | local kontur call |
 | `update_status` | MCP → daemon REST → store write | `status.json`, read on poll |
-| `open_pull_request` | MCP → daemon REST | `Request` / `Answer` |
-| `pull_request_status`, `wait_for_checks` | controller's GitHub client | `Request` / `Answer` |
-| `ask_question`, `request_secret` | deferred into the result | `Request` / `Answer` |
-| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | `Request` / `Answer` |
+| `open_pull_request` | MCP → daemon REST | forwarded: `Status.Call` / `Answer` |
+| `pull_request_status`, `wait_for_checks` | controller's GitHub client | forwarded |
+| `ask_question`, `request_secret` | deferred into the result | forwarded |
+| `comment_on_issue`, `propose_task`, `add_review_comment` | deferred into the result | acknowledged locally, reported in `Result.Deferred` |
 
 Two consequences worth stating separately.
+
+A forwarded tool is not translated into a request of our own: the shim
+holds the MCP call open, it surfaces as `Status.Call`, the controller
+executes it, and `Answer` is `mcp.Result`'s own two fields handed straight
+back as the tool's result. At most one is outstanding at a time — the
+status has one slot, not a queue. See `docs/grain-cli.md`, "This is MCP
+over a poll".
 
 **The container needs no daemon URL, no task ID and no bearer token.**
 `agent.RunConfig.TaskID`'s entire justification is "the one fact a forked
@@ -514,7 +521,7 @@ needs a VM. Its ordering is the decision, not an implementation detail:
 | 5 | any | paused | `signal(pause)` |
 | 6 | `provisioning`, over budget | live | `fail(setup-failed)`, `release` |
 | 7a | `provisioned` | prompt not sent | `send-prompt` |
-| 7b | `running` / `blocked` | live | `answer` each request; `signal(addenda)`; mirror activity |
+| 7b | `running` / `blocked` | live | `answer` the one forwarded call; `signal(addenda)`; mirror activity |
 
 Note what row 2 does *not* have: a repair path. A wedged guest never
 reaches the controller — the shim rebuilds it — so `PhaseLost` means the

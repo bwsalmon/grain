@@ -34,12 +34,18 @@
 // rebuilt, so a rebuild replays Spec.Placements rather than coordinating
 // a re-mint with a controller that holds the only copy.
 //
-// Anything that touches the store, GitHub or a human is a Request the
-// grain raises and the controller answers on its next poll. That is the
-// whole of what leaves the container, and it means the container needs no
-// daemon URL, no task ID and no bearer token of its own -- the three
-// things agent.RunConfig currently carries so that a forked mcpserver can
-// call back into the daemon.
+// Anything that touches the store, GitHub or a human is an MCP tool call
+// the shim forwards rather than serves: it surfaces on the next Observe
+// as Status.Call, the controller executes it and hands the result back
+// through Answer, and the shim returns that to the agent as the tool's
+// own result. So the controller is an out-of-band executor for the tools
+// a grain cannot run itself -- MCP over a poll, needing no MCP transport,
+// no session and no connection.
+//
+// That is the whole of what leaves the container, and it means the
+// container needs no daemon URL, no task ID and no bearer token of its
+// own -- the three things agent.RunConfig currently carries so that a
+// forked mcpserver can call back into the daemon.
 //
 // # Why polling
 //
@@ -106,11 +112,18 @@ type Grain interface {
 	// so a field left out here is a second exec per grain per tick.
 	Observe(ctx context.Context) (Status, error)
 
-	// Answer settles a Request the grain raised. Answering an unknown or
-	// already-settled request is a no-op, so a controller that polls
-	// again before the shim has consumed the first answer is harmless --
-	// which is the property that lets Reconcile be re-run freely.
-	Answer(ctx context.Context, req RequestID, ans Answer) error
+	// Answer settles the MCP tool call this grain is blocked on
+	// (Status.Call) -- the shim hands what comes back to the agent as
+	// that tool's result. Answering an unknown or already-settled call is
+	// a no-op, so a controller that polls again before the shim has
+	// consumed the first answer is harmless, which is the property that
+	// lets Reconcile be re-run freely.
+	//
+	// One call at a time, because a grain holds at most one: the shim
+	// serves every tool it can locally and forwards only what needs the
+	// store, GitHub or a human, holding a second such call until the
+	// first is settled.
+	Answer(ctx context.Context, call CallID, ans Answer) error
 
 	// Signal delivers something the grain did not ask for: the prompt at
 	// the start of the second phase, a comment a human added mid-run, a

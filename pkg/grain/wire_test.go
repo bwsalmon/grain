@@ -228,10 +228,11 @@ func TestStatusWireFormat(t *testing.T) {
 		Activity: "waiting for CI",
 		Rebuilds: 1,
 		Setup:    &grain.SetupResult{Output: "9f3c1a2\n"},
-		Requests: []grain.Request{{
-			ID: "r-7", Kind: grain.KindOpenPullRequest,
-			Raised: time.Date(2026, 9, 4, 19, 40, 0, 0, time.UTC),
-		}},
+		Call: &grain.Call{
+			ID: "c-7", Tool: grain.ToolOpenPullRequest,
+			Arguments: json.RawMessage(`{"title":"Port the staleness check"}`),
+			Since:     time.Date(2026, 9, 4, 19, 40, 0, 0, time.UTC),
+		},
 		Health: grain.Health{
 			Container: grain.ContainerHealth{Running: true},
 			Guest: grain.GuestHealth{
@@ -253,13 +254,14 @@ func TestStatusWireFormat(t *testing.T) {
     "exitCode": 0,
     "output": "9f3c1a2\n"
   },
-  "requests": [
-    {
-      "id": "r-7",
-      "kind": "open_pull_request",
-      "raised": "2026-09-04T19:40:00Z"
-    }
-  ],
+  "call": {
+    "id": "c-7",
+    "tool": "open_pull_request",
+    "arguments": {
+      "title": "Port the staleness check"
+    },
+    "since": "2026-09-04T19:40:00Z"
+  },
   "health": {
     "container": {
       "running": true

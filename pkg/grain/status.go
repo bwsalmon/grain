@@ -107,9 +107,17 @@ type Status struct {
 	// comes back. A shim that understood repositories would be a shim
 	// that had to agree with the controller about them.
 	Setup *SetupResult `json:"setup,omitempty"`
-	// Requests are the escape hatches this grain is waiting on. Only the
-	// ones needing the store, GitHub or a human ever appear here.
-	Requests []Request `json:"requests,omitempty"`
+	// Call is the one MCP tool call this grain is waiting on the
+	// controller to serve, or nil when it is waiting on nothing.
+	//
+	// At most one, always. The shim serves every tool it can locally and
+	// forwards only the ones needing the store, GitHub or a human; if two
+	// of those arrive together -- which parallel tool use makes possible
+	// -- it holds the second until the first is answered. Serialising
+	// costs a tick on a case that is already rare, and buys a status with
+	// one slot instead of a queue: "this grain is blocked on X, or it is
+	// not blocked".
+	Call *Call `json:"call,omitempty"`
 	// Result is set exactly when Phase is terminal.
 	Result *Result `json:"result,omitempty"`
 	Health Health  `json:"health"`
@@ -154,44 +162,66 @@ type SetupResult struct {
 	Output string `json:"output,omitempty"`
 }
 
-// RequestID identifies one Request within one grain.
-type RequestID string
+// CallID identifies one forwarded call within one grain.
+type CallID string
 
-// RequestKind is what a Request wants done. Every kind here needs
-// something the container does not have and must not be given: the store,
-// a GitHub credential, or a human. Anything that needs only the sandbox
-// is served inside the grain and never becomes a Request -- rebuilding
-// the guest most of all.
-type RequestKind string
-
+// The tools a grain forwards rather than serves. Each needs something the
+// container does not have and must not be given: the store, a GitHub
+// credential, or a human. Everything else -- the sandbox tools, and
+// rebuilding the guest most of all -- is answered inside the grain and
+// never reaches the controller.
 const (
-	KindOpenPullRequest   RequestKind = "open_pull_request"
-	KindPullRequestStatus RequestKind = "pull_request_status"
-	KindWaitForChecks     RequestKind = "wait_for_checks"
-	KindAskQuestion       RequestKind = "ask_question"
-	KindRequestSecret     RequestKind = "request_secret"
-	KindCommentOnIssue    RequestKind = "comment_on_issue"
-	KindProposeTask       RequestKind = "propose_task"
-	KindAddReviewComment  RequestKind = "add_review_comment"
+	ToolOpenPullRequest   = "open_pull_request"
+	ToolPullRequestStatus = "pull_request_status"
+	ToolWaitForChecks     = "wait_for_checks"
+	ToolAskQuestion       = "ask_question"
+	ToolRequestSecret     = "request_secret"
 )
 
-// Request is one thing a grain has asked the controller to do for it.
-type Request struct {
-	ID      RequestID       `json:"id"`
-	Kind    RequestKind     `json:"kind"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-	Raised  time.Time       `json:"raised"`
+// The tools the shim answers locally with an acknowledgement and reports
+// in Result.Deferred, because their effect needs no answer for the agent
+// to carry on. Making the agent wait a tick to post a comment would buy
+// nothing.
+const (
+	ToolCommentOnIssue   = "comment_on_issue"
+	ToolProposeTask      = "propose_task"
+	ToolAddReviewComment = "add_review_comment"
+)
+
+// Call is one MCP tool call the shim is holding open on the agent's
+// behalf, waiting for the controller to serve it.
+//
+// It is an MCP tools/call forwarded rather than translated: Tool and
+// Arguments are what the agent's own client sent, and the Answer that
+// settles it is what the shim returns as that tool's result. The
+// controller is acting as an out-of-band executor for the tools a grain
+// cannot run itself, reached by being polled rather than by holding a
+// connection -- which is the whole of what "MCP over a poll" means here,
+// and why none of it needs an MCP transport.
+type Call struct {
+	ID   CallID `json:"id"`
+	Tool string `json:"tool"`
+	// Arguments are the call's own, verbatim, so the controller never
+	// depends on the shim having understood them.
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// Since is when the agent made the call, and so how long it has been
+	// blocked -- the number a human wants when a grain has read "blocked"
+	// for an hour.
+	Since time.Time `json:"since"`
 }
 
-// Answer settles a Request. A refusal is an answer: Err set and OK false
-// tells the agent it asked for something it will not get, which is a turn
-// it can act on, rather than leaving it blocked until its deadline.
+// Answer settles a Call. It is mcp.Result's own two fields, so the shim
+// hands it back to the agent as that tool's result with nothing to
+// translate: text plus a flag, reported as a single content block.
+//
+// A refusal is an answer. IsError with a reason tells the agent it asked
+// for something it will not get, which is a turn it can act on; leaving a
+// call unanswered blocks it until its deadline instead.
 type Answer struct {
-	// Contract is the wire version this document is written to.
-	Version string          `json:"version"`
-	OK      bool            `json:"ok"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-	Err     string          `json:"err,omitempty"`
+	// Version is the wire format this document is written to.
+	Version string `json:"version"`
+	Text    string `json:"text"`
+	IsError bool   `json:"isError,omitempty"`
 }
 
 // SignalKind is what a Signal carries.
@@ -255,11 +285,14 @@ type Result struct {
 	// runOne's error path; here it is a field the ordinary finish path
 	// reads.
 	Pushed *PushedBranch `json:"pushed,omitempty"`
-	// Deferred are the escape hatches the agent raised that nobody had to
-	// answer for it to finish -- a question it asked on its way out, a
-	// task it proposed.
-	Deferred []Request `json:"deferred,omitempty"`
-	Usage    Usage     `json:"usage"`
+	// Deferred are the calls the shim answered locally with an
+	// acknowledgement rather than forwarding, for the effects that need
+	// no answer to carry on -- comment_on_issue, propose_task,
+	// add_review_comment. They are reported here so the controller can
+	// carry them out once, at the end, instead of the agent waiting a
+	// tick to post a comment.
+	Deferred []Call `json:"deferred,omitempty"`
+	Usage    Usage  `json:"usage"`
 }
 
 // PushedBranch is a branch and the commit at its head.

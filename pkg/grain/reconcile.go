@@ -83,8 +83,8 @@ const (
 	ActionSendPrompt ActionKind = "send-prompt"
 	// ActionSignal delivers Action.Signal.
 	ActionSignal ActionKind = "signal"
-	// ActionAnswer serves Action.Request -- the one thing that needs the
-	// store, GitHub or a human.
+	// ActionAnswer serves Action.Call -- the one forwarded MCP tool call
+	// this grain is blocked on.
 	ActionAnswer ActionKind = "answer"
 	// ActionRecordActivity copies the grain's own phrase onto the task's
 	// row.
@@ -106,7 +106,7 @@ const (
 type Action struct {
 	Kind     ActionKind
 	Signal   Signal
-	Request  RequestID
+	Call     CallID
 	Outcome  string
 	Detail   string
 	Activity string
@@ -137,7 +137,8 @@ type Action struct {
 //  6. A provisioning grain past its budget is failed. Nothing else about
 //     a grain that cannot finish booting is worth doing.
 //  7. Otherwise: start it if it is waiting for a prompt, and keep it
-//     served if it is running.
+//     served if it is running. "Served" is at most one forwarded call,
+//     because a grain holds at most one.
 func Reconcile(o Observed, p Policy) []Action {
 	st := o.Status
 
@@ -214,12 +215,12 @@ func Reconcile(o Observed, p Policy) []Action {
 		return []Action{{Kind: ActionSendPrompt}}
 	}
 
-	// 7b. Steady state: serve what it is waiting on, tell it what it
+	// 7b. Steady state: serve the call it is blocked on, tell it what it
 	// missed, and keep its row honest. All three are independent, and a
 	// tick that has nothing to do returns nothing at all.
 	var out []Action
-	for _, r := range st.Requests {
-		out = append(out, Action{Kind: ActionAnswer, Request: r.ID})
+	if st.Call != nil {
+		out = append(out, Action{Kind: ActionAnswer, Call: st.Call.ID})
 	}
 	if len(o.Run.PendingAddenda) > 0 {
 		out = append(out, Action{Kind: ActionSignal,

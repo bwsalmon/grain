@@ -198,20 +198,16 @@ func TestReconcile(t *testing.T) {
 		},
 		want: nil,
 	}, {
-		name: "requests are answered, addenda delivered and activity mirrored",
+		name: "a forwarded call is answered, addenda delivered and activity mirrored",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseBlocked, Since: start, Activity: "waiting for CI",
-				Requests: []grain.Request{
-					{ID: "r1", Kind: grain.KindOpenPullRequest},
-					{ID: "r2", Kind: grain.KindAskQuestion},
-				}},
+				Call: &grain.Call{ID: "c1", Tool: grain.ToolOpenPullRequest}},
 			Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "building",
 				PendingAddenda: []string{"also fix the flake"}},
 			Now: start.Add(time.Minute),
 		},
 		want: []grain.ActionKind{
-			grain.ActionAnswer, grain.ActionAnswer,
-			grain.ActionSignal, grain.ActionRecordActivity,
+			grain.ActionAnswer, grain.ActionSignal, grain.ActionRecordActivity,
 		},
 	}}
 
@@ -231,7 +227,7 @@ func TestReconcile(t *testing.T) {
 func TestReconcileIsLevelTriggered(t *testing.T) {
 	obs := grain.Observed{
 		Status: grain.Status{Phase: grain.PhaseRunning, Since: start, Activity: "building",
-			Requests: []grain.Request{{ID: "r1", Kind: grain.KindOpenPullRequest}}},
+			Call: &grain.Call{ID: "c1", Tool: grain.ToolOpenPullRequest}},
 		Run: live(),
 		Now: start.Add(time.Minute),
 	}
@@ -259,5 +255,33 @@ func TestEveryOrphanPhaseIsReleased(t *testing.T) {
 		if !equal(got, []grain.ActionKind{grain.ActionRelease}) {
 			t.Errorf("orphan in phase %q: Reconcile = %v, want [release]", p, got)
 		}
+	}
+}
+
+// A grain holds at most one forwarded call, so a tick can never owe more
+// than one answer. Asserted because the alternative -- a queue -- is what
+// this replaced, and a Status that grew one back would make the
+// controller's obligation per tick unbounded again.
+func TestReconcileAnswersAtMostOneCall(t *testing.T) {
+	obs := grain.Observed{
+		Status: grain.Status{
+			Phase: grain.PhaseBlocked, Since: start, Activity: "waiting for CI",
+			Call: &grain.Call{ID: "c1", Tool: grain.ToolWaitForChecks},
+		},
+		Run: &grain.RunRow{ID: "task-7-1", Live: true, Activity: "waiting for CI",
+			PendingAddenda: []string{"one more thing"}},
+		Now: start.Add(time.Minute),
+	}
+	answers := 0
+	for _, a := range grain.Reconcile(obs, grain.DefaultPolicy()) {
+		if a.Kind == grain.ActionAnswer {
+			answers++
+			if a.Call != "c1" {
+				t.Errorf("answered %q, want c1", a.Call)
+			}
+		}
+	}
+	if answers != 1 {
+		t.Fatalf("Reconcile produced %d answers, want exactly 1", answers)
 	}
 }
