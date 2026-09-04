@@ -114,7 +114,10 @@ jobs:
           test -n "$agy"
           sudo ln -sf "$agy" /usr/local/bin/agy
           agy --version
-          echo "version=$(agy --version 2>&1 | head -n1)" >> "$GITHUB_OUTPUT"
+          # One line, and no terminal colour: this string ends up in the
+          # subject of the commit the publish job makes.
+          version="$(NO_COLOR=1 agy --version 2>&1 | head -n1 | sed -e 's/\x1b\[[0-9;]*[a-zA-Z]//g' -e 's/\r//g')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # The script tolerates every probe failing -- a binary that stopped
       # answering is a finding it writes down rather than an error (see its
