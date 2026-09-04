@@ -62,7 +62,8 @@ export function parsePath(pathname) {
   }
   if (segments[0] === "repos" && segments[1] && segments[2]) {
     const repo = `${segments[1]}/${segments[2]}`;
-    if (segments[3] === "releases") return { view: "repos", repo, showReleases: true };
+    if (segments[3] === "releases")
+      return { view: "repos", repo, showReleases: true };
     return { view: "repos", repo };
   }
   if (segments[0] === "schedules" && segments[1]) {
@@ -85,7 +86,16 @@ export function parsePath(pathname) {
 // every relevant state change to decide whether the address bar needs
 // updating at all.
 export function buildPath({
-  view, taskId, repo, showReleases, scheduleId, templateId, suiteId, showSettings, showDebug, showMetrics,
+  view,
+  taskId,
+  repo,
+  showReleases,
+  scheduleId,
+  templateId,
+  suiteId,
+  showSettings,
+  showDebug,
+  showMetrics,
 }) {
   if (showSettings) return "/settings";
   if (showDebug) return "/debug";
@@ -96,7 +106,8 @@ export function buildPath({
   // that view, so this is belt and braces rather than a case that
   // arises. The same goes for each open item below: a schedule is only
   // showing while the schedules view is.
-  if (view === "repos" && repo) return `/repos/${repo}${showReleases ? "/releases" : ""}`;
+  if (view === "repos" && repo)
+    return `/repos/${repo}${showReleases ? "/releases" : ""}`;
   if (view === "schedules" && scheduleId) return `/schedules/${scheduleId}`;
   if (view === "templates" && templateId) return `/templates/${templateId}`;
   if (view === "suites" && suiteId) return `/suites/${suiteId}`;

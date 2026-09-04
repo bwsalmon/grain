@@ -39,7 +39,9 @@ describe("GitHubTokensSection", () => {
     api.mockResolvedValueOnce({ enabled: false, tokens: [] });
     render(<GitHubTokensSection showError={() => {}} />);
 
-    expect(await screen.findByText(/no local GitHub credential directory/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no local GitHub credential directory/i),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText("Token name")).not.toBeInTheDocument();
   });
 
@@ -53,7 +55,9 @@ describe("GitHubTokensSection", () => {
     // holds for the other one -- the two things an operator is choosing
     // between when they wonder which token a push will use.
     expect(screen.getByText("*")).toBeInTheDocument();
-    expect(screen.getByText("github-credential:release-bot")).toBeInTheDocument();
+    expect(
+      screen.getByText("github-credential:release-bot"),
+    ).toBeInTheDocument();
   });
 
   it("stores a pasted token and clears the form", async () => {
@@ -62,10 +66,11 @@ describe("GitHubTokensSection", () => {
     render(<GitHubTokensSection showError={() => {}} />);
     await screen.findByText("bot");
 
-    api.mockResolvedValueOnce(listing(
-      [bot, { ...releaseBot, offered: false, needsRestart: true }],
-      { restartRequired: true },
-    ));
+    api.mockResolvedValueOnce(
+      listing([bot, { ...releaseBot, offered: false, needsRestart: true }], {
+        restartRequired: true,
+      }),
+    );
     await user.type(screen.getByLabelText("Token name"), "release-bot");
     await user.type(screen.getByLabelText("Token"), "ghp-fake");
     await user.click(screen.getByRole("button", { name: "Save token" }));
@@ -90,13 +95,18 @@ describe("GitHubTokensSection", () => {
     render(<GitHubTokensSection showError={() => {}} />);
     await screen.findByText("release-bot");
 
-    api.mockResolvedValueOnce(listing(
-      [bot, { ...releaseBot, present: false, needsRestart: true }],
-      { restartRequired: true },
-    ));
-    await user.click(screen.getByRole("button", { name: "delete release-bot" }));
+    api.mockResolvedValueOnce(
+      listing([bot, { ...releaseBot, present: false, needsRestart: true }], {
+        restartRequired: true,
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "delete release-bot" }),
+    );
 
-    expect(api).toHaveBeenCalledWith("/api/github-tokens/release-bot", { method: "DELETE" });
+    expect(api).toHaveBeenCalledWith("/api/github-tokens/release-bot", {
+      method: "DELETE",
+    });
     expect(await screen.findByText("no credential file")).toBeInTheDocument();
   });
 

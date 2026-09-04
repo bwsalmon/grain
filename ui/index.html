@@ -1,9 +1,12 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<!-- The static logo, the 2.3 (-) rosette, as a solid fill -- what
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <!-- The static logo, the 2.3 (-) rosette, as a solid fill -- what
      scripts/export-brand-assets.mjs writes. The SVG is the real icon:
      one scale-free file for the 16px tab slot and the 180px installed
      one alike. The PNG is the fallback for browsers with no SVG-favicon
@@ -13,12 +16,23 @@
      light files are what a browser gets before any script runs;
      AppThemeProvider swaps both hrefs for the dark ones once it has
      resolved which theme the app is actually in. -->
-<link id="favicon-png" rel="icon" type="image/png" sizes="128x128" href="/grain-mark-light.png">
-<link id="favicon" rel="icon" type="image/svg+xml" href="/grain-mark-light.svg">
-<title>grain</title>
-</head>
-<body>
-<div id="root"></div>
-<script type="module" src="/src/main.jsx"></script>
-</body>
+    <link
+      id="favicon-png"
+      rel="icon"
+      type="image/png"
+      sizes="128x128"
+      href="/grain-mark-light.png"
+    />
+    <link
+      id="favicon"
+      rel="icon"
+      type="image/svg+xml"
+      href="/grain-mark-light.svg"
+    />
+    <title>grain</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
 </html>

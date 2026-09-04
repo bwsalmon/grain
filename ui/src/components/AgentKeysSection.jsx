@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { Alert, Box, Button, Chip, Stack, TextField, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 
 // The credential each agent framework runs as, set from the same pane
@@ -19,21 +27,21 @@ const FRAMEWORKS = [
     label: "Gemini API key",
     secret: "gemini-api-key",
     setFlag: "geminiApiKeySet",
-    help: "the key the Antigravity CLI (agy) authenticates with -- stored as the \"gemini-api-key\" secret",
+    help: 'the key the Antigravity CLI (agy) authenticates with -- stored as the "gemini-api-key" secret',
   },
   {
     id: "claude",
     label: "Claude Code OAuth token",
     secret: "claude-oauth-token",
     setFlag: "claudeOAuthTokenSet",
-    help: "passed to the claude CLI as CLAUDE_CODE_OAUTH_TOKEN -- stored as the \"claude-oauth-token\" secret",
+    help: 'passed to the claude CLI as CLAUDE_CODE_OAUTH_TOKEN -- stored as the "claude-oauth-token" secret',
   },
   {
     id: "codex",
     label: "OpenAI API key",
     secret: "openai-api-key",
     setFlag: "openaiApiKeySet",
-    help: "passed to the codex CLI as OPENAI_API_KEY -- stored as the \"openai-api-key\" secret",
+    help: 'passed to the codex CLI as OPENAI_API_KEY -- stored as the "openai-api-key" secret',
   },
 ];
 
@@ -67,16 +75,22 @@ export default function AgentKeysSection({ settings, showError }) {
   // thing settings.agentKeysEnabled already did (a mutation that reached
   // the store at all proves it), so keeping the seeded value means one
   // less field two different responses have to agree on.
-  const applyKeys = (resp) => setKeys((prev) => ({
-    ...prev,
-    geminiApiKeySet: !!resp.geminiApiKeySet,
-    claudeOAuthTokenSet: !!resp.claudeOAuthTokenSet,
-    openaiApiKeySet: !!resp.openaiApiKeySet,
-  }));
+  const applyKeys = (resp) =>
+    setKeys((prev) => ({
+      ...prev,
+      geminiApiKeySet: !!resp.geminiApiKeySet,
+      claudeOAuthTokenSet: !!resp.claudeOAuthTokenSet,
+      openaiApiKeySet: !!resp.openaiApiKeySet,
+    }));
 
   const setKey = async (id) => {
     try {
-      applyKeys(await api(`/api/agent-keys/${id}`, { method: "PUT", body: JSON.stringify({ value: values[id] || "" }) }));
+      applyKeys(
+        await api(`/api/agent-keys/${id}`, {
+          method: "PUT",
+          body: JSON.stringify({ value: values[id] || "" }),
+        }),
+      );
       setValues((prev) => ({ ...prev, [id]: "" }));
     } catch (err) {
       showError(err);
@@ -94,8 +108,9 @@ export default function AgentKeysSection({ settings, showError }) {
   if (!keys.enabled) {
     return (
       <Alert severity="info" sx={{ mb: 2 }}>
-        Agent credentials cannot be set from here: this UI has no local secrets directory to write to. A deployment
-        seeds them with -gemini-api-key-file / -claude-oauth-token-file / -openai-api-key-file instead.
+        Agent credentials cannot be set from here: this UI has no local secrets
+        directory to write to. A deployment seeds them with -gemini-api-key-file
+        / -claude-oauth-token-file / -openai-api-key-file instead.
       </Alert>
     );
   }
@@ -104,9 +119,18 @@ export default function AgentKeysSection({ settings, showError }) {
     <Box sx={{ mb: 2 }}>
       {FRAMEWORKS.map((f) => (
         <Box key={f.id} sx={{ mb: 1.5 }}>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={1}
+            sx={{ mb: 0.5 }}
+          >
             <Typography variant="body2">{f.label}</Typography>
-            <Chip size="small" label={keys[f.setFlag] ? "set" : "not set"} color={keys[f.setFlag] ? "success" : "default"} />
+            <Chip
+              size="small"
+              label={keys[f.setFlag] ? "set" : "not set"}
+              color={keys[f.setFlag] ? "success" : "default"}
+            />
           </Stack>
           <Stack direction="row" spacing={1} alignItems="flex-start">
             <TextField
@@ -114,11 +138,17 @@ export default function AgentKeysSection({ settings, showError }) {
               size="small"
               fullWidth
               autoComplete="off"
-              placeholder={keys[f.setFlag] ? "replace the stored value" : "paste a value to store"}
+              placeholder={
+                keys[f.setFlag]
+                  ? "replace the stored value"
+                  : "paste a value to store"
+              }
               helperText={f.help}
               inputProps={{ "aria-label": f.label }}
               value={values[f.id] || ""}
-              onChange={(evt) => setValues((prev) => ({ ...prev, [f.id]: evt.target.value }))}
+              onChange={(evt) =>
+                setValues((prev) => ({ ...prev, [f.id]: evt.target.value }))
+              }
               onKeyDown={(evt) => {
                 if (evt.key === "Enter") {
                   evt.preventDefault();
@@ -150,8 +180,9 @@ export default function AgentKeysSection({ settings, showError }) {
         </Box>
       ))}
       <Typography variant="body2" color="text.secondary">
-        Stored on this host and never read back. A key set here takes effect on the next dispatch -- no restart -- and a
-        run whose framework has none fails with a note saying so rather than the daemon refusing to start.
+        Stored on this host and never read back. A key set here takes effect on
+        the next dispatch -- no restart -- and a run whose framework has none
+        fails with a note saying so rather than the daemon refusing to start.
       </Typography>
     </Box>
   );

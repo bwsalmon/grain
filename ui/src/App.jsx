@@ -45,7 +45,9 @@ export default function App() {
   // /repos, /repos/acme/widgets or /settings lands on that sub-page
   // instead of always opening on the task list first (bwsalmon/agents
   // #548, grain/task-111).
-  const [view, setView] = useState(() => parsePath(window.location.pathname).view);
+  const [view, setView] = useState(
+    () => parsePath(window.location.pathname).view,
+  );
   // openRepo is which repo's own page is showing within the repos view
   // (null shows the repo list instead), and releasesOpen whether that
   // page's release pane is showing over it -- the repo page is the only
@@ -55,8 +57,12 @@ export default function App() {
   // task view's own repoFilter chip used to do: opening a repo lists its
   // tasks *on the repo's page*, so there is no second, filtered flavour
   // of the flat list to keep in step with it.
-  const [openRepo, setOpenRepo] = useState(() => parsePath(window.location.pathname).repo || null);
-  const [releasesOpen, setReleasesOpen] = useState(() => parsePath(window.location.pathname).showReleases === true);
+  const [openRepo, setOpenRepo] = useState(
+    () => parsePath(window.location.pathname).repo || null,
+  );
+  const [releasesOpen, setReleasesOpen] = useState(
+    () => parsePath(window.location.pathname).showReleases === true,
+  );
   // openScheduleId/openTemplateId/openSuiteId are which schedule,
   // template or suite is showing as a pane over its own list -- the
   // openTaskId (below) of the other three lists. They live here rather
@@ -71,9 +77,15 @@ export default function App() {
   // round trip and so a mount effect below. App already holds all three
   // lists in full, so restoring one of these panes is just finding the
   // row this id names once its list has landed.
-  const [openScheduleId, setOpenScheduleId] = useState(() => parsePath(window.location.pathname).scheduleId || null);
-  const [openTemplateId, setOpenTemplateId] = useState(() => parsePath(window.location.pathname).templateId || null);
-  const [openSuiteId, setOpenSuiteId] = useState(() => parsePath(window.location.pathname).suiteId || null);
+  const [openScheduleId, setOpenScheduleId] = useState(
+    () => parsePath(window.location.pathname).scheduleId || null,
+  );
+  const [openTemplateId, setOpenTemplateId] = useState(
+    () => parsePath(window.location.pathname).templateId || null,
+  );
+  const [openSuiteId, setOpenSuiteId] = useState(
+    () => parsePath(window.location.pathname).suiteId || null,
+  );
   const [error, setError] = useState(null);
   const [openTaskId, setOpenTaskId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -83,9 +95,15 @@ export default function App() {
   // "no override", so the overlay falls back to whichever repo page is
   // open, the same as the sidebar's own "+ New task" button does.
   const [newTaskRepo, setNewTaskRepo] = useState(null);
-  const [showSettings, setShowSettings] = useState(() => parsePath(window.location.pathname).showSettings === true);
-  const [showDebug, setShowDebug] = useState(() => parsePath(window.location.pathname).showDebug === true);
-  const [showMetrics, setShowMetrics] = useState(() => parsePath(window.location.pathname).showMetrics === true);
+  const [showSettings, setShowSettings] = useState(
+    () => parsePath(window.location.pathname).showSettings === true,
+  );
+  const [showDebug, setShowDebug] = useState(
+    () => parsePath(window.location.pathname).showDebug === true,
+  );
+  const [showMetrics, setShowMetrics] = useState(
+    () => parsePath(window.location.pathname).showMetrics === true,
+  );
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -122,19 +140,25 @@ export default function App() {
   const refreshSchedules = useCallback(async () => {
     const next = await api("/api/schedules");
     setSchedules(next);
-    setOpenScheduleId((prev) => (prev === null || next.some((s) => s.id === prev) ? prev : null));
+    setOpenScheduleId((prev) =>
+      prev === null || next.some((s) => s.id === prev) ? prev : null,
+    );
   }, []);
 
   const refreshTemplates = useCallback(async () => {
     const next = await api("/api/templates");
     setTemplates(next);
-    setOpenTemplateId((prev) => (prev === null || next.some((t) => t.id === prev) ? prev : null));
+    setOpenTemplateId((prev) =>
+      prev === null || next.some((t) => t.id === prev) ? prev : null,
+    );
   }, []);
 
   const refreshSuites = useCallback(async () => {
     const next = await api("/api/suites");
     setSuites(next);
-    setOpenSuiteId((prev) => (prev === null || next.some((s) => s.id === prev) ? prev : null));
+    setOpenSuiteId((prev) =>
+      prev === null || next.some((s) => s.id === prev) ? prev : null,
+    );
   }, []);
 
   const refreshSuiteRuns = useCallback(async () => {
@@ -178,7 +202,8 @@ export default function App() {
   const toggleSelect = useCallback((id) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }, []);
@@ -187,7 +212,8 @@ export default function App() {
     setSelected((prev) => {
       const next = new Set(prev);
       for (const id of ids) {
-        if (checked) next.add(id); else next.delete(id);
+        if (checked) next.add(id);
+        else next.delete(id);
       }
       return next;
     });
@@ -195,15 +221,18 @@ export default function App() {
 
   const clearSelection = useCallback(() => setSelected(new Set()), []);
 
-  const openTask = useCallback(async (id) => {
-    try {
-      const d = await api(`/api/tasks/${id}`);
-      setOpenTaskId(id);
-      setDetail(d);
-    } catch (err) {
-      showError(err);
-    }
-  }, [showError]);
+  const openTask = useCallback(
+    async (id) => {
+      try {
+        const d = await api(`/api/tasks/${id}`);
+        setOpenTaskId(id);
+        setDetail(d);
+      } catch (err) {
+        showError(err);
+      }
+    },
+    [showError],
+  );
 
   const closeDetail = useCallback(() => {
     setOpenTaskId(null);
@@ -216,10 +245,13 @@ export default function App() {
   // both fill the same area beside the sidebar, and MetricsOverlay is
   // mounted after DetailOverlay here, so leaving it open would put the
   // task the click asked for behind the pane it was clicked in.
-  const openTaskFromMetrics = useCallback((id) => {
-    setShowMetrics(false);
-    openTask(id);
-  }, [openTask]);
+  const openTaskFromMetrics = useCallback(
+    (id) => {
+      setShowMetrics(false);
+      openTask(id);
+    },
+    [openTask],
+  );
 
   // openRepoPage is the repo list's row click: show that repo's own page
   // (RepoPage, grain/task-111), which is where its tasks and everything
@@ -260,24 +292,30 @@ export default function App() {
   // open repo -- and an open schedule, template or suite -- behind, so a
   // later click on that destination lands back on its list rather than
   // on whichever item was last open there.
-  const setViewAndCloseOpen = useCallback((v) => {
-    closeRepoPage();
-    closeOpenItems();
-    setView(v);
-  }, [closeRepoPage, closeOpenItems]);
+  const setViewAndCloseOpen = useCallback(
+    (v) => {
+      closeRepoPage();
+      closeOpenItems();
+      setView(v);
+    },
+    [closeRepoPage, closeOpenItems],
+  );
 
   // act runs a mutation, then re-fetches the task (and the list behind
   // it) so the screen reflects what the store now reports -- never the
   // value the UI optimistically assumed it wrote.
-  const act = useCallback(async (mutate, id) => {
-    try {
-      await mutate();
-      await openTask(id);
-      await refreshList();
-    } catch (err) {
-      showError(err);
-    }
-  }, [openTask, refreshList, showError]);
+  const act = useCallback(
+    async (mutate, id) => {
+      try {
+        await mutate();
+        await openTask(id);
+        await refreshList();
+      } catch (err) {
+        showError(err);
+      }
+    },
+    [openTask, refreshList, showError],
+  );
 
   // actBatch is `act` (above) widened to many tasks at once: run one
   // mutation per id, in parallel, then refresh the list a single time
@@ -287,51 +325,81 @@ export default function App() {
   // multi-select should not stop the others from going through; it
   // reports whether every mutation landed so the caller can decide
   // whether the selection that drove it is still worth keeping.
-  const actBatch = useCallback(async (ids, mutate) => {
-    const results = await Promise.allSettled(ids.map((id) => mutate(id)));
-    await refreshList();
-    const failed = results.filter((r) => r.status === "rejected");
-    if (failed.length > 0) {
-      showError(new Error(`${failed.length} of ${ids.length} task(s) failed: ${failed[0].reason?.message || failed[0].reason}`));
-    }
-    return failed.length === 0;
-  }, [refreshList, showError]);
+  const actBatch = useCallback(
+    async (ids, mutate) => {
+      const results = await Promise.allSettled(ids.map((id) => mutate(id)));
+      await refreshList();
+      const failed = results.filter((r) => r.status === "rejected");
+      if (failed.length > 0) {
+        showError(
+          new Error(
+            `${failed.length} of ${ids.length} task(s) failed: ${failed[0].reason?.message || failed[0].reason}`,
+          ),
+        );
+      }
+      return failed.length === 0;
+    },
+    [refreshList, showError],
+  );
 
   // Only clears the selection once a batch action fully succeeds -- on a
   // partial failure it stays as-is, so whoever is watching can see which
   // rows are still selected and retry rather than having to re-pick them.
-  const runBatch = useCallback((mutate) => {
-    actBatch([...selected], mutate).then((ok) => { if (ok) clearSelection(); });
-  }, [actBatch, selected, clearSelection]);
+  const runBatch = useCallback(
+    (mutate) => {
+      actBatch([...selected], mutate).then((ok) => {
+        if (ok) clearSelection();
+      });
+    },
+    [actBatch, selected, clearSelection],
+  );
 
   // reorderTasks is TaskList's drag-and-drop drop handler (bwsalmon/
   // agents#476): afterId/beforeId are either the id of a task or null,
   // TaskList's own way of saying "no bound on this side" (dropped at the
   // very head or the very tail of the list), which the API expects as an
   // absent field rather than a literal null.
-  const reorderTasks = useCallback(async (ids, afterId, beforeId) => {
-    try {
-      await api("/api/tasks/reorder", {
-        method: "POST",
-        body: JSON.stringify({ ids, afterId: afterId || undefined, beforeId: beforeId || undefined }),
-      });
-      await refreshList();
-    } catch (err) {
-      showError(err);
-    }
-  }, [refreshList, showError]);
+  const reorderTasks = useCallback(
+    async (ids, afterId, beforeId) => {
+      try {
+        await api("/api/tasks/reorder", {
+          method: "POST",
+          body: JSON.stringify({
+            ids,
+            afterId: afterId || undefined,
+            beforeId: beforeId || undefined,
+          }),
+        });
+        await refreshList();
+      } catch (err) {
+        showError(err);
+      }
+    },
+    [refreshList, showError],
+  );
 
   useEffect(() => {
     (async () => {
       try {
         const cfg = await api("/api/config");
         setConfig(cfg);
-        await Promise.all([refreshList(), refreshSchedules(), refreshTemplates(), refreshSuites()]);
+        await Promise.all([
+          refreshList(),
+          refreshSchedules(),
+          refreshTemplates(),
+          refreshSuites(),
+        ]);
       } catch (err) {
         showError(err);
       }
     })();
-  }, [refreshList, refreshSchedules, refreshTemplates, refreshSuites, showError]);
+  }, [
+    refreshList,
+    refreshSchedules,
+    refreshTemplates,
+    refreshSuites,
+    showError,
+  ]);
 
   // The deployment's name in the browser tab (grain/task-69), beside
   // the sidebar badge Sidebar.jsx renders it as. A tab strip is where a
@@ -368,13 +436,21 @@ export default function App() {
           // "Template" and "Suite" pickers (opened from
           // SchedulesList.jsx) need up-to-date lists too, since either can
           // open at any time while this pane is on screen.
-          await Promise.all([refreshSchedules(), refreshTemplates(), refreshSuites()]);
+          await Promise.all([
+            refreshSchedules(),
+            refreshTemplates(),
+            refreshSuites(),
+          ]);
         } else if (view === "templates") {
           await refreshTemplates();
         } else if (view === "suites") {
           // Templates too: SuiteOverlay's own template picker needs an
           // up-to-date list, ScheduleOverlay's own reasoning applied here.
-          await Promise.all([refreshSuites(), refreshTemplates(), refreshSuiteRuns()]);
+          await Promise.all([
+            refreshSuites(),
+            refreshTemplates(),
+            refreshSuiteRuns(),
+          ]);
         }
       } catch (err) {
         // Deliberately quiet -- see app.js's own poll for why.
@@ -392,7 +468,16 @@ export default function App() {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [openTaskId, refreshConfig, refreshList, refreshSchedules, refreshTemplates, refreshSuites, refreshSuiteRuns, view]);
+  }, [
+    openTaskId,
+    refreshConfig,
+    refreshList,
+    refreshSchedules,
+    refreshTemplates,
+    refreshSuites,
+    refreshSuiteRuns,
+    view,
+  ]);
 
   // Opens whatever task /tasks/:id in the URL the page loaded with names
   // -- the view/showSettings equivalent of this runs synchronously in
@@ -440,7 +525,18 @@ export default function App() {
       }
     }
     mountedRef.current = true;
-  }, [view, openTaskId, openRepo, releasesOpen, openScheduleId, openTemplateId, openSuiteId, showSettings, showDebug, showMetrics]);
+  }, [
+    view,
+    openTaskId,
+    openRepo,
+    releasesOpen,
+    openScheduleId,
+    openTemplateId,
+    openSuiteId,
+    showSettings,
+    showDebug,
+    showMetrics,
+  ]);
 
   // Mirrors the browser's own back/forward buttons onto the same state
   // buildPath/parsePath already govern everything else through.
@@ -486,7 +582,12 @@ export default function App() {
         onSelectAll={setSelection}
         onReorder={reorderTasks}
       />
-      <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
+      <BatchActionsBar
+        count={selected.size}
+        config={config}
+        onRun={runBatch}
+        onClear={clearSelection}
+      />
     </>
   );
 
@@ -512,10 +613,18 @@ export default function App() {
             onOpenSettings={() => setShowSettings(true)}
             onOpenDebug={() => setShowDebug(true)}
             onOpenMetrics={() => setShowMetrics(true)}
-            onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
+            onOpenNewTask={() => {
+              setNewTaskRepo(null);
+              setShowNewTask(true);
+            }}
           />
           {view === "repos" && openRepo !== null && releasesOpen ? (
-            <RepoReleases repo={openRepo} templates={templates} onBack={() => setReleasesOpen(false)} showError={showError} />
+            <RepoReleases
+              repo={openRepo}
+              templates={templates}
+              onBack={() => setReleasesOpen(false)}
+              showError={showError}
+            />
           ) : view === "repos" && openRepo !== null ? (
             <RepoPage
               repo={openRepo}
@@ -527,7 +636,10 @@ export default function App() {
               onRefreshConfig={refreshConfig}
               showError={showError}
             >
-              {taskListPane(tasks.filter((t) => t.repo === openRepo), "all")}
+              {taskListPane(
+                tasks.filter((t) => t.repo === openRepo),
+                "all",
+              )}
             </RepoPage>
           ) : view === "repos" ? (
             <RepoList
@@ -587,11 +699,23 @@ export default function App() {
       {config?.reconcilerDown ? (
         <ReconcilerDownBanner />
       ) : config?.agentPause?.paused ? (
-        <AgentPauseBanner pause={config.agentPause} onLifted={refreshConfig} showError={showError} />
+        <AgentPauseBanner
+          pause={config.agentPause}
+          onLifted={refreshConfig}
+          showError={showError}
+        />
       ) : null}
       {error !== null && <ErrorBanner message={error} />}
       {openTaskId !== null && detail !== null && (
-        <DetailOverlay task={detail} tasks={tasks} config={config} onClose={closeDetail} onOpenTask={openTask} act={act} showError={showError} />
+        <DetailOverlay
+          task={detail}
+          tasks={tasks}
+          config={config}
+          onClose={closeDetail}
+          onOpenTask={openTask}
+          act={act}
+          showError={showError}
+        />
       )}
       {showNewTask && (
         <NewTaskOverlay
@@ -611,8 +735,20 @@ export default function App() {
           showError={showError}
         />
       )}
-      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} showError={showError} />}
-      {showMetrics && <MetricsOverlay onClose={() => setShowMetrics(false)} onOpenTask={openTaskFromMetrics} showError={showError} />}
+      {showDebug && (
+        <DebugOverlay
+          config={config}
+          onClose={() => setShowDebug(false)}
+          showError={showError}
+        />
+      )}
+      {showMetrics && (
+        <MetricsOverlay
+          onClose={() => setShowMetrics(false)}
+          onOpenTask={openTaskFromMetrics}
+          showError={showError}
+        />
+      )}
     </div>
   );
 }

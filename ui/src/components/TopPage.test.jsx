@@ -37,13 +37,16 @@ describe("TopPage", () => {
     render(<TopPage showError={() => {}} />);
 
     expect(await screen.findByText(/not available/i)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Refresh" }),
+    ).not.toBeInTheDocument();
   });
 
   it("re-fetches when Refresh is clicked", async () => {
-    api
-      .mockResolvedValueOnce(snapshot)
-      .mockResolvedValueOnce({ enabled: true, lines: ["top - 12:00:05 up 3 days,  load average: 0.10, 0.90, 0.75"] });
+    api.mockResolvedValueOnce(snapshot).mockResolvedValueOnce({
+      enabled: true,
+      lines: ["top - 12:00:05 up 3 days,  load average: 0.10, 0.90, 0.75"],
+    });
     const user = userEvent.setup();
     render(<TopPage showError={() => {}} />);
 

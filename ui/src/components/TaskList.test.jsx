@@ -4,8 +4,21 @@ import { describe, expect, it, vi } from "vitest";
 import TaskList from "./TaskList.jsx";
 
 const tasks = [
-  { id: 1, title: "Fix the thing", state: "queued", capabilities: [], blocked: false },
-  { id: 2, title: "Ship the other thing", state: "running", capabilities: [], blocked: true, blockedBy: [1] },
+  {
+    id: 1,
+    title: "Fix the thing",
+    state: "queued",
+    capabilities: [],
+    blocked: false,
+  },
+  {
+    id: 2,
+    title: "Ship the other thing",
+    state: "running",
+    capabilities: [],
+    blocked: true,
+    blockedBy: [1],
+  },
 ];
 
 function renderList(overrides = {}) {
@@ -23,7 +36,10 @@ function renderList(overrides = {}) {
   // rerender takes another set of overrides, for a test that needs this
   // component to survive a change of props -- a poll bringing new task
   // states, the sidebar's own filter moving -- rather than mount fresh.
-  return { ...props, rerender: (next) => rerender(<TaskList {...props} {...next} />) };
+  return {
+    ...props,
+    rerender: (next) => rerender(<TaskList {...props} {...next} />),
+  };
 }
 
 // row/rowFor is the draggable <li> a task's title sits inside -- what
@@ -38,7 +54,9 @@ describe("TaskList", () => {
     renderList();
     expect(screen.getByText("Fix the thing")).toBeInTheDocument();
     expect(screen.getByText("Ship the other thing")).toBeInTheDocument();
-    expect(document.querySelector(".content-header .count")).toHaveTextContent("2");
+    expect(document.querySelector(".content-header .count")).toHaveTextContent(
+      "2",
+    );
   });
 
   it("filters down to a single state", () => {
@@ -58,8 +76,24 @@ describe("TaskList", () => {
   it("tells a task waiting on Submit apart from one on the merge queue", () => {
     renderList({
       tasks: [
-        { id: 3, title: "Awaiting submit task", state: "awaiting_submit", pullRequest: "acme/widgets#1", autoMerge: false, capabilities: [], blocked: false },
-        { id: 4, title: "Queued for merge task", state: "completed", pullRequest: "acme/widgets#2", autoMerge: true, capabilities: [], blocked: false },
+        {
+          id: 3,
+          title: "Awaiting submit task",
+          state: "awaiting_submit",
+          pullRequest: "acme/widgets#1",
+          autoMerge: false,
+          capabilities: [],
+          blocked: false,
+        },
+        {
+          id: 4,
+          title: "Queued for merge task",
+          state: "completed",
+          pullRequest: "acme/widgets#2",
+          autoMerge: true,
+          capabilities: [],
+          blocked: false,
+        },
       ],
     });
     expect(screen.getAllByTitle("Awaiting submit").length).toBeGreaterThan(0);
@@ -71,8 +105,14 @@ describe("TaskList", () => {
     renderList({
       tasks: [
         {
-          id: 5, title: "Stuck task", state: "completed", pullRequest: "acme/widgets#3",
-          autoMerge: true, mergeQueueBlockedAt: "2026-08-01T00:00:00Z", capabilities: [], blocked: false,
+          id: 5,
+          title: "Stuck task",
+          state: "completed",
+          pullRequest: "acme/widgets#3",
+          autoMerge: true,
+          mergeQueueBlockedAt: "2026-08-01T00:00:00Z",
+          capabilities: [],
+          blocked: false,
         },
       ],
     });
@@ -90,20 +130,30 @@ describe("TaskList", () => {
   describe("hiding closed tasks", () => {
     const withClosed = [
       ...tasks,
-      { id: 3, title: "Long done", state: "closed", capabilities: [], blocked: false },
+      {
+        id: 3,
+        title: "Long done",
+        state: "closed",
+        capabilities: [],
+        blocked: false,
+      },
     ];
 
     it("hides closed tasks by default", () => {
       renderList({ tasks: withClosed });
       expect(screen.queryByText("Long done")).not.toBeInTheDocument();
-      expect(document.querySelector(".content-header .count")).toHaveTextContent("2");
+      expect(
+        document.querySelector(".content-header .count"),
+      ).toHaveTextContent("2");
     });
 
     it("shows closed tasks once the toggle is checked", async () => {
       const user = userEvent.setup();
       renderList({ tasks: withClosed });
 
-      await user.click(screen.getByRole("checkbox", { name: "Show closed tasks" }));
+      await user.click(
+        screen.getByRole("checkbox", { name: "Show closed tasks" }),
+      );
 
       expect(screen.getByText("Long done")).toBeInTheDocument();
     });
@@ -111,18 +161,24 @@ describe("TaskList", () => {
     it("starts showing closed tasks when config.showClosedByDefault is set", () => {
       renderList({ tasks: withClosed, config: { showClosedByDefault: true } });
       expect(screen.getByText("Long done")).toBeInTheDocument();
-      expect(screen.getByRole("checkbox", { name: "Show closed tasks" })).toBeChecked();
+      expect(
+        screen.getByRole("checkbox", { name: "Show closed tasks" }),
+      ).toBeChecked();
     });
 
     it("does not offer the toggle when there are no closed tasks", () => {
       renderList();
-      expect(screen.queryByRole("checkbox", { name: "Show closed tasks" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("checkbox", { name: "Show closed tasks" }),
+      ).not.toBeInTheDocument();
     });
 
     it("does not hide closed tasks while the Closed filter itself is selected", () => {
       renderList({ tasks: withClosed, stateFilter: "closed" });
       expect(screen.getByText("Long done")).toBeInTheDocument();
-      expect(screen.queryByRole("checkbox", { name: "Show closed tasks" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("checkbox", { name: "Show closed tasks" }),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -165,9 +221,27 @@ describe("TaskList", () => {
 
   describe("drag-and-drop reordering (bwsalmon/agents#476)", () => {
     const threeTasks = [
-      { id: 1, title: "First", state: "queued", capabilities: [], blocked: false },
-      { id: 2, title: "Second", state: "queued", capabilities: [], blocked: false },
-      { id: 3, title: "Third", state: "queued", capabilities: [], blocked: false },
+      {
+        id: 1,
+        title: "First",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+      },
+      {
+        id: 2,
+        title: "Second",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+      },
+      {
+        id: 3,
+        title: "Third",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+      },
     ];
 
     it("drops a task onto another, calling onReorder with its new neighbours", () => {
@@ -239,109 +313,167 @@ describe("TaskList", () => {
     // handle sits in rather than letting its own contents slide a handle's
     // width left of every other row's.
     describe("the handle column on a nested merge fix", () => {
-      const parent = { id: 1, title: "First", state: "queued", capabilities: [], blocked: false };
+      const parent = {
+        id: 1,
+        title: "First",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+      };
       const fix = {
-        id: 4, title: "Repair the pull request", state: "queued", capabilities: [], blocked: false,
-        stacked: true, generatedFrom: 1,
+        id: 4,
+        title: "Repair the pull request",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+        stacked: true,
+        generatedFrom: 1,
       };
       const rowOf = (title) => screen.getByText(title).closest(".task-row");
 
       it("holds the column open, and empty, while the rows around it are draggable", () => {
         renderList({ tasks: [parent, fix], onReorder: vi.fn() });
 
-        expect(rowOf("Repair the pull request").querySelector(".task-drag-placeholder")).toBeInTheDocument();
-        expect(rowOf("Repair the pull request").querySelector(".task-drag-handle")).not.toBeInTheDocument();
+        expect(
+          rowOf("Repair the pull request").querySelector(
+            ".task-drag-placeholder",
+          ),
+        ).toBeInTheDocument();
+        expect(
+          rowOf("Repair the pull request").querySelector(".task-drag-handle"),
+        ).not.toBeInTheDocument();
         // The task it is nested under still gets a handle of its own.
-        expect(rowOf("First").querySelector(".task-drag-handle")).toBeInTheDocument();
+        expect(
+          rowOf("First").querySelector(".task-drag-handle"),
+        ).toBeInTheDocument();
       });
 
       it("holds no column open when no row in the list has a handle either", () => {
         renderList({ tasks: [parent, fix] });
 
-        expect(document.querySelector(".task-drag-placeholder")).not.toBeInTheDocument();
+        expect(
+          document.querySelector(".task-drag-placeholder"),
+        ).not.toBeInTheDocument();
       });
     });
 
     it("never starts a drag, and shows no drag handle, without an onReorder prop", () => {
       const { container } = render(
-        <TaskList tasks={threeTasks} stateFilter="all" config={null} onOpenTask={vi.fn()}
-          selected={new Set()} onToggleSelect={vi.fn()} onSelectAll={vi.fn()} />,
+        <TaskList
+          tasks={threeTasks}
+          stateFilter="all"
+          config={null}
+          onOpenTask={vi.fn()}
+          selected={new Set()}
+          onToggleSelect={vi.fn()}
+          onSelectAll={vi.fn()}
+        />,
       );
-      expect(container.querySelector(".task-drag-handle")).not.toBeInTheDocument();
+      expect(
+        container.querySelector(".task-drag-handle"),
+      ).not.toBeInTheDocument();
       expect(rowFor("First")).toHaveAttribute("draggable", "false");
     });
   });
 
   it("badges a task a schedule filed, and leaves an ordinary one unbadged", () => {
     renderList({
-      tasks: [
-        { ...tasks[0], scheduled: true },
-        tasks[1],
-      ],
+      tasks: [{ ...tasks[0], scheduled: true }, tasks[1]],
     });
-    expect(screen.getByTitle("filed automatically by a schedule")).toHaveTextContent("scheduled");
-    expect(screen.queryAllByTitle("filed automatically by a schedule")).toHaveLength(1);
+    expect(
+      screen.getByTitle("filed automatically by a schedule"),
+    ).toHaveTextContent("scheduled");
+    expect(
+      screen.queryAllByTitle("filed automatically by a schedule"),
+    ).toHaveLength(1);
   });
 
   // bwsalmon/agents#642: a suite run files its pass of tasks with nobody
   // typing them in, so they get scheduled's own badge treatment.
   it("badges a task a suite run filed, and leaves an ordinary one unbadged", () => {
     renderList({
-      tasks: [
-        { ...tasks[0], suiteRun: true },
-        tasks[1],
-      ],
+      tasks: [{ ...tasks[0], suiteRun: true }, tasks[1]],
     });
-    expect(screen.getByTitle("filed automatically by a suite run")).toHaveTextContent("suite");
-    expect(screen.queryAllByTitle("filed automatically by a suite run")).toHaveLength(1);
+    expect(
+      screen.getByTitle("filed automatically by a suite run"),
+    ).toHaveTextContent("suite");
+    expect(
+      screen.queryAllByTitle("filed automatically by a suite run"),
+    ).toHaveLength(1);
     // The suite chip is its own thing, not the schedule one relabelled.
-    expect(screen.queryByTitle("filed automatically by a schedule")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTitle("filed automatically by a schedule"),
+    ).not.toBeInTheDocument();
   });
 
   // bwsalmon/agents#378: a stacked task explains itself by sitting under
   // the task it repairs, so the chip is only for the rows where that
   // nesting is missing.
   describe("the merge-fix chip on a stacked task", () => {
-    const parent = { id: 1, title: "Fix the thing", state: "queued", capabilities: [], blocked: false };
+    const parent = {
+      id: 1,
+      title: "Fix the thing",
+      state: "queued",
+      capabilities: [],
+      blocked: false,
+    };
     const fix = {
-      id: 2, title: "Repair the pull request", state: "queued", capabilities: [], blocked: false,
-      stacked: true, generatedFrom: 1,
+      id: 2,
+      title: "Repair the pull request",
+      state: "queued",
+      capabilities: [],
+      blocked: false,
+      stacked: true,
+      generatedFrom: 1,
     };
 
     it("leaves a fix nested under its own parent unchipped", () => {
       renderList({ tasks: [parent, fix] });
-      expect(document.querySelector(".task-sublist")).toHaveTextContent("Repair the pull request");
+      expect(document.querySelector(".task-sublist")).toHaveTextContent(
+        "Repair the pull request",
+      );
       expect(screen.queryByText("merge fix")).not.toBeInTheDocument();
     });
 
     it("chips a fix listed at top level because its parent is filtered out of the view", () => {
-      renderList({ tasks: [{ ...parent, state: "completed" }, fix], stateFilter: "queued" });
+      renderList({
+        tasks: [{ ...parent, state: "completed" }, fix],
+        stateFilter: "queued",
+      });
       expect(document.querySelector(".task-sublist")).not.toBeInTheDocument();
-      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+      expect(
+        screen.getByTitle("the merge queue's own automatic fix for 1"),
+      ).toHaveTextContent("merge fix");
     });
 
     it("chips a fix whose parent is gone entirely", () => {
       renderList({ tasks: [fix] });
-      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
+      expect(
+        screen.getByTitle("the merge queue's own automatic fix for 1"),
+      ).toHaveTextContent("merge fix");
     });
 
     it("chips a fix with no generatedFrom at all, without naming a parent", () => {
       renderList({ tasks: [{ ...fix, generatedFrom: undefined }] });
-      expect(screen.getByTitle("the merge queue's own automatic fix for another task's pull request"))
-        .toHaveTextContent("merge fix");
+      expect(
+        screen.getByTitle(
+          "the merge queue's own automatic fix for another task's pull request",
+        ),
+      ).toHaveTextContent("merge fix");
     });
   });
 
   // bwsalmon/agents#539
   it("badges an interactive task, and leaves an ordinary one unbadged", () => {
     renderList({
-      tasks: [
-        { ...tasks[0], interactive: true },
-        tasks[1],
-      ],
+      tasks: [{ ...tasks[0], interactive: true }, tasks[1]],
     });
-    expect(screen.getByTitle("a live chat, not a background task")).toHaveTextContent("interactive");
-    expect(screen.queryAllByTitle("a live chat, not a background task")).toHaveLength(1);
+    expect(
+      screen.getByTitle("a live chat, not a background task"),
+    ).toHaveTextContent("interactive");
+    expect(
+      screen.queryAllByTitle("a live chat, not a background task"),
+    ).toHaveLength(1);
   });
 
   // bwsalmon/agents#586
@@ -356,7 +488,10 @@ describe("TaskList", () => {
     // At the badge's size the mark plays a pre-recorded sheet rather
     // than painting, so it needs no canvas and renders here the same way
     // it does in a browser -- see GrainMark.test.jsx for the mechanics.
-    expect(runningDot.querySelector(".grain-mark-sheet")).toHaveAttribute("title", "Running");
+    expect(runningDot.querySelector(".grain-mark-sheet")).toHaveAttribute(
+      "title",
+      "Running",
+    );
   });
 
   // A run that is the merge queue repairing this task's own pull request
@@ -366,9 +501,7 @@ describe("TaskList", () => {
   // running has not gone back to the beginning.
   it("marks a task the merge queue is repairing apart from one merely running", () => {
     renderList({
-      tasks: [
-        { ...tasks[1], state: "running", repairing: true },
-      ],
+      tasks: [{ ...tasks[1], state: "running", repairing: true }],
     });
     const dot = rowFor("Ship the other thing").querySelector(".badge");
     const mark = dot.querySelector(".grain-mark-sheet");
@@ -387,48 +520,94 @@ describe("TaskList", () => {
 
       expect(screen.queryByText("Fix the thing")).not.toBeInTheDocument();
       expect(screen.getByText("Ship the other thing")).toBeInTheDocument();
-      expect(document.querySelector(".content-header .count")).toHaveTextContent("1");
+      expect(
+        document.querySelector(".content-header .count"),
+      ).toHaveTextContent("1");
     });
 
     it("filters down to tasks whose id matches the search text, case-insensitively", async () => {
       const user = userEvent.setup();
       renderList({
         tasks: [
-          { id: "abc-1", title: "Fix the thing", state: "queued", capabilities: [], blocked: false },
-          { id: "xyz-2", title: "Ship the other thing", state: "running", capabilities: [], blocked: false },
+          {
+            id: "abc-1",
+            title: "Fix the thing",
+            state: "queued",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: "xyz-2",
+            title: "Ship the other thing",
+            state: "running",
+            capabilities: [],
+            blocked: false,
+          },
         ],
       });
 
       await user.type(screen.getByPlaceholderText("Search tasks…"), "ABC");
 
       expect(screen.getByText("Fix the thing")).toBeInTheDocument();
-      expect(screen.queryByText("Ship the other thing")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("Ship the other thing"),
+      ).not.toBeInTheDocument();
     });
 
     it("shows a search-specific empty message when nothing matches", async () => {
       const user = userEvent.setup();
       renderList();
 
-      await user.type(screen.getByPlaceholderText("Search tasks…"), "nothing matches this");
+      await user.type(
+        screen.getByPlaceholderText("Search tasks…"),
+        "nothing matches this",
+      );
 
-      expect(screen.getByText("No tasks match your search.")).toBeInTheDocument();
+      expect(
+        screen.getByText("No tasks match your search."),
+      ).toBeInTheDocument();
     });
 
     it("hides the toolbar entirely when there are no tasks at all", () => {
       renderList({ tasks: [] });
-      expect(screen.queryByPlaceholderText("Search tasks…")).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText("Search tasks…"),
+      ).not.toBeInTheDocument();
     });
   });
 
   describe("sort (bwsalmon/agents#460)", () => {
     const threeTasks = [
-      { id: 1, title: "Charlie", state: "queued", capabilities: [], blocked: false, createdAt: "2026-01-03T00:00:00Z" },
-      { id: 2, title: "Alpha", state: "queued", capabilities: [], blocked: false, createdAt: "2026-01-01T00:00:00Z" },
-      { id: 3, title: "Bravo", state: "queued", capabilities: [], blocked: false, createdAt: "2026-01-02T00:00:00Z" },
+      {
+        id: 1,
+        title: "Charlie",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+        createdAt: "2026-01-03T00:00:00Z",
+      },
+      {
+        id: 2,
+        title: "Alpha",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: 3,
+        title: "Bravo",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+        createdAt: "2026-01-02T00:00:00Z",
+      },
     ];
 
     function titlesInOrder() {
-      return [...document.querySelectorAll(".task-title")].map((el) => el.textContent);
+      return [...document.querySelectorAll(".task-title")].map(
+        (el) => el.textContent,
+      );
     }
 
     it("defaults to the given (backlog) order", () => {
@@ -441,7 +620,9 @@ describe("TaskList", () => {
       renderList({ tasks: threeTasks });
 
       await user.click(screen.getByLabelText("Sort"));
-      await user.click(await screen.findByRole("option", { name: "Title (A–Z)" }));
+      await user.click(
+        await screen.findByRole("option", { name: "Title (A–Z)" }),
+      );
 
       expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
     });
@@ -451,7 +632,9 @@ describe("TaskList", () => {
       renderList({ tasks: threeTasks });
 
       await user.click(screen.getByLabelText("Sort"));
-      await user.click(await screen.findByRole("option", { name: "Oldest first" }));
+      await user.click(
+        await screen.findByRole("option", { name: "Oldest first" }),
+      );
 
       expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
     });
@@ -463,9 +646,27 @@ describe("TaskList", () => {
       const user = userEvent.setup();
       renderList({
         tasks: [
-          { id: 1, title: "Charlie", state: "completed", capabilities: [], blocked: false },
-          { id: 2, title: "Alpha", state: "proposed", capabilities: [], blocked: false },
-          { id: 3, title: "Bravo", state: "running", capabilities: [], blocked: false },
+          {
+            id: 1,
+            title: "Charlie",
+            state: "completed",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 2,
+            title: "Alpha",
+            state: "proposed",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 3,
+            title: "Bravo",
+            state: "running",
+            capabilities: [],
+            blocked: false,
+          },
         ],
       });
 
@@ -479,14 +680,36 @@ describe("TaskList", () => {
       const user = userEvent.setup();
       renderList({
         tasks: [
-          { id: 1, title: "Charlie", state: "queued", capabilities: [], blocked: false },
-          { id: 2, title: "Alpha", state: "queued", repo: "acme/gadgets", capabilities: [], blocked: false },
-          { id: 3, title: "Bravo", state: "queued", repo: "acme/widgets", capabilities: [], blocked: false },
+          {
+            id: 1,
+            title: "Charlie",
+            state: "queued",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 2,
+            title: "Alpha",
+            state: "queued",
+            repo: "acme/gadgets",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 3,
+            title: "Bravo",
+            state: "queued",
+            repo: "acme/widgets",
+            capabilities: [],
+            blocked: false,
+          },
         ],
       });
 
       await user.click(screen.getByLabelText("Sort"));
-      await user.click(await screen.findByRole("option", { name: "Repo (A–Z)" }));
+      await user.click(
+        await screen.findByRole("option", { name: "Repo (A–Z)" }),
+      );
 
       expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
     });
@@ -495,14 +718,37 @@ describe("TaskList", () => {
       const user = userEvent.setup();
       renderList({
         tasks: [
-          { id: 1, title: "Charlie", state: "queued", author: "grace", capabilities: [], blocked: false },
-          { id: 2, title: "Alpha", state: "queued", author: "ada", capabilities: [], blocked: false },
-          { id: 3, title: "Bravo", state: "queued", author: "bob", capabilities: [], blocked: false },
+          {
+            id: 1,
+            title: "Charlie",
+            state: "queued",
+            author: "grace",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 2,
+            title: "Alpha",
+            state: "queued",
+            author: "ada",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 3,
+            title: "Bravo",
+            state: "queued",
+            author: "bob",
+            capabilities: [],
+            blocked: false,
+          },
         ],
       });
 
       await user.click(screen.getByLabelText("Sort"));
-      await user.click(await screen.findByRole("option", { name: "Author (A–Z)" }));
+      await user.click(
+        await screen.findByRole("option", { name: "Author (A–Z)" }),
+      );
 
       expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
     });
@@ -515,9 +761,13 @@ describe("TaskList", () => {
       expect(rowFor("Charlie")).toHaveAttribute("draggable", "true");
 
       await user.click(screen.getByLabelText("Sort"));
-      await user.click(await screen.findByRole("option", { name: "Title (A–Z)" }));
+      await user.click(
+        await screen.findByRole("option", { name: "Title (A–Z)" }),
+      );
 
-      expect(document.querySelector(".task-drag-handle")).not.toBeInTheDocument();
+      expect(
+        document.querySelector(".task-drag-handle"),
+      ).not.toBeInTheDocument();
       expect(rowFor("Alpha")).toHaveAttribute("draggable", "false");
 
       fireEvent.dragStart(rowFor("Alpha"));
@@ -531,24 +781,50 @@ describe("TaskList", () => {
   // capability, author, how the task got filed, whether it is a chat,
   // whether it merges itself.
   describe("filter (grain/task-288)", () => {
-    const config = { capabilities: [{ id: "gh", name: "GitHub" }, { id: "gcp", name: "Google Cloud" }] };
+    const config = {
+      capabilities: [
+        { id: "gh", name: "GitHub" },
+        { id: "gcp", name: "Google Cloud" },
+      ],
+    };
     const mixed = [
       {
-        id: 1, title: "Widget work", state: "queued", blocked: false,
-        repo: "acme/widgets", base: "main", author: "ada", capabilities: ["gh"], autoMerge: true,
+        id: 1,
+        title: "Widget work",
+        state: "queued",
+        blocked: false,
+        repo: "acme/widgets",
+        base: "main",
+        author: "ada",
+        capabilities: ["gh"],
+        autoMerge: true,
       },
       {
-        id: 2, title: "Gadget work", state: "queued", blocked: false,
-        repo: "acme/gadgets", base: "release", author: "grace", capabilities: ["gcp"], scheduled: true,
+        id: 2,
+        title: "Gadget work",
+        state: "queued",
+        blocked: false,
+        repo: "acme/gadgets",
+        base: "release",
+        author: "grace",
+        capabilities: ["gcp"],
+        scheduled: true,
       },
       {
-        id: 3, title: "Loose work", state: "queued", blocked: false,
-        author: "ada", capabilities: [], interactive: true,
+        id: 3,
+        title: "Loose work",
+        state: "queued",
+        blocked: false,
+        author: "ada",
+        capabilities: [],
+        interactive: true,
       },
     ];
 
     function titles() {
-      return [...document.querySelectorAll(".task-title")].map((el) => el.textContent);
+      return [...document.querySelectorAll(".task-title")].map(
+        (el) => el.textContent,
+      );
     }
 
     async function pick(user, label, option) {
@@ -633,7 +909,9 @@ describe("TaskList", () => {
 
       await user.type(screen.getByPlaceholderText("Search tasks…"), "widget");
       expect(titles()).toEqual([]);
-      expect(screen.getByText("No tasks match your search.")).toBeInTheDocument();
+      expect(
+        screen.getByText("No tasks match your search."),
+      ).toBeInTheDocument();
     });
 
     it("says the filters are what emptied the list", async () => {
@@ -649,7 +927,9 @@ describe("TaskList", () => {
       await pick(user, "Repo", "acme/widgets");
       await pick(user, "Capability", "Google Cloud");
 
-      expect(screen.getByText("No tasks match these filters.")).toBeInTheDocument();
+      expect(
+        screen.getByText("No tasks match these filters."),
+      ).toBeInTheDocument();
     });
 
     it("puts the whole list back with one Clear", async () => {
@@ -663,7 +943,9 @@ describe("TaskList", () => {
       await user.click(screen.getByRole("button", { name: "Clear" }));
 
       expect(titles()).toEqual(["Widget work", "Gadget work", "Loose work"]);
-      expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Clear" }),
+      ).not.toBeInTheDocument();
     });
 
     // The menus are built from the tasks in view, so an attribute they
@@ -672,8 +954,24 @@ describe("TaskList", () => {
     it("offers only the attributes that could narrow the list", () => {
       renderList({
         tasks: [
-          { id: 1, title: "One", state: "queued", repo: "acme/widgets", author: "ada", capabilities: [], blocked: false },
-          { id: 2, title: "Two", state: "queued", repo: "acme/widgets", author: "ada", capabilities: [], blocked: false },
+          {
+            id: 1,
+            title: "One",
+            state: "queued",
+            repo: "acme/widgets",
+            author: "ada",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 2,
+            title: "Two",
+            state: "queued",
+            repo: "acme/widgets",
+            author: "ada",
+            capabilities: [],
+            blocked: false,
+          },
         ],
         config,
       });
@@ -690,12 +988,20 @@ describe("TaskList", () => {
     // not go on hiding everything: it reads as "any" again.
     it("forgets a choice no task in view can match any more", async () => {
       const user = userEvent.setup();
-      const { rerender } = renderList({ tasks: mixed, config, stateFilter: "all" });
+      const { rerender } = renderList({
+        tasks: mixed,
+        config,
+        stateFilter: "all",
+      });
 
       await pick(user, "Repo", "acme/widgets");
       expect(titles()).toEqual(["Widget work"]);
 
-      rerender({ tasks: mixed.map((t) => (t.id === 1 ? { ...t, state: "running" } : t)), config, stateFilter: "queued" });
+      rerender({
+        tasks: mixed.map((t) => (t.id === 1 ? { ...t, state: "running" } : t)),
+        config,
+        stateFilter: "queued",
+      });
 
       expect(titles()).toEqual(["Gadget work", "Loose work"]);
     });
@@ -707,7 +1013,9 @@ describe("TaskList", () => {
   // no prompt affordance at all, and TaskList never fetches one.
   it("carries no per-row prompt button", () => {
     renderList();
-    expect(screen.queryByRole("button", { name: /prompt/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /prompt/i }),
+    ).not.toBeInTheDocument();
   });
 
   // What the run itself says it is doing (grain/task-240, the
@@ -716,17 +1024,26 @@ describe("TaskList", () => {
   // the last half hour?" short of reading a transcript.
   describe("a running task's own status", () => {
     const running = (extra) => ({
-      id: 7, title: "Ship the other thing", state: "running", capabilities: [], blocked: false, ...extra,
+      id: 7,
+      title: "Ship the other thing",
+      state: "running",
+      capabilities: [],
+      blocked: false,
+      ...extra,
     });
 
     it("shows what the run says it is doing, with how long ago it said it", () => {
       renderList({
-        tasks: [running({
-          activity: "waiting for CI on the second push",
-          activityAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
-        })],
+        tasks: [
+          running({
+            activity: "waiting for CI on the second push",
+            activityAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+          }),
+        ],
       });
-      expect(screen.getByText("waiting for CI on the second push")).toBeInTheDocument();
+      expect(
+        screen.getByText("waiting for CI on the second push"),
+      ).toBeInTheDocument();
       expect(screen.getByText("5m")).toBeInTheDocument();
     });
 
@@ -735,7 +1052,9 @@ describe("TaskList", () => {
     it("shows a status with no timestamp on its own", () => {
       renderList({ tasks: [running({ activity: "running the test suite" })] });
       expect(screen.getByText("running the test suite")).toBeInTheDocument();
-      expect(document.querySelector(".task-activity-age")).not.toBeInTheDocument();
+      expect(
+        document.querySelector(".task-activity-age"),
+      ).not.toBeInTheDocument();
     });
 
     // The API only carries one for a live run, but a poll's answer is up
@@ -744,9 +1063,16 @@ describe("TaskList", () => {
     // read as a run still going.
     it("drops the status the moment the task stops running", () => {
       renderList({
-        tasks: [running({ state: "completed", activity: "waiting for CI on the second push" })],
+        tasks: [
+          running({
+            state: "completed",
+            activity: "waiting for CI on the second push",
+          }),
+        ],
       });
-      expect(screen.queryByText("waiting for CI on the second push")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("waiting for CI on the second push"),
+      ).not.toBeInTheDocument();
     });
 
     it("says nothing at all for a run that has not said anything", () => {

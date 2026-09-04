@@ -2,7 +2,13 @@ import { useState } from "react";
 import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
 import TemplateOverlay from "./TemplateOverlay.jsx";
-import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
+import {
+  ListEmpty,
+  ListHeader,
+  ListSearchField,
+  ListSortSelect,
+  ListToolbar,
+} from "./ListPrimitives.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
 
 // SORTS mirrors TaskList's own toolbar Select (bwsalmon/agents#545): a
@@ -12,8 +18,14 @@ import ItemGlyph from "./ItemGlyph.jsx";
 // to have that reads meaningfully in a fixed order.
 const SORTS = {
   name: { label: "Name (A–Z)", cmp: (a, b) => a.name.localeCompare(b.name) },
-  newest: { label: "Newest first", cmp: (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0) },
-  oldest: { label: "Oldest first", cmp: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0) },
+  newest: {
+    label: "Newest first",
+    cmp: (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0),
+  },
+  oldest: {
+    label: "Oldest first",
+    cmp: (a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0),
+  },
 };
 
 // TemplatesList is the templates page's main pane (bwsalmon/agents#545):
@@ -29,7 +41,15 @@ const SORTS = {
 // Which template is open is App.jsx's state (openTemplateId), not this
 // component's, so the URL can name it -- SchedulesList's own doc
 // comment on why (grain/task-139).
-export default function TemplatesList({ templates, config, tasks, openTemplateId, onOpenTemplate, onRefresh, showError }) {
+export default function TemplatesList({
+  templates,
+  config,
+  tasks,
+  openTemplateId,
+  onOpenTemplate,
+  onRefresh,
+  showError,
+}) {
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("name");
   const [showNew, setShowNew] = useState(false);
@@ -41,7 +61,9 @@ export default function TemplatesList({ templates, config, tasks, openTemplateId
 
   const q = search.trim().toLowerCase();
   const matches = (t) =>
-    q === "" || t.name.toLowerCase().includes(q) || t.title.toLowerCase().includes(q) ||
+    q === "" ||
+    t.name.toLowerCase().includes(q) ||
+    t.title.toLowerCase().includes(q) ||
     (t.repo || "").toLowerCase().includes(q);
 
   const visible = templates.filter(matches).sort(SORTS[sortBy].cmp);
@@ -52,31 +74,73 @@ export default function TemplatesList({ templates, config, tasks, openTemplateId
         title="Templates"
         icon={<ItemGlyph kind="templates" size={20} />}
         count={visible.length}
-        action={<Button variant="contained" size="small" sx={{ ml: "auto" }} onClick={() => setShowNew(true)}>+ New template</Button>}
+        action={
+          <Button
+            variant="contained"
+            size="small"
+            sx={{ ml: "auto" }}
+            onClick={() => setShowNew(true)}
+          >
+            + New template
+          </Button>
+        }
       />
       {templates.length > 0 && (
         <ListToolbar>
-          <ListSearchField placeholder="Search templates…" value={search} onChange={setSearch} />
-          <ListSortSelect id="template-sort" value={sortBy} onChange={setSortBy} options={SORTS} />
+          <ListSearchField
+            placeholder="Search templates…"
+            value={search}
+            onChange={setSearch}
+          />
+          <ListSortSelect
+            id="template-sort"
+            value={sortBy}
+            onChange={setSortBy}
+            options={SORTS}
+          />
         </ListToolbar>
       )}
       <ul className="template-list">
         {visible.map((tmpl) => (
-          <li className="template-row" key={tmpl.id} onClick={() => onOpenTemplate(tmpl.id)}>
+          <li
+            className="template-row"
+            key={tmpl.id}
+            onClick={() => onOpenTemplate(tmpl.id)}
+          >
             <span className="template-name">{tmpl.name}</span>
-            {tmpl.repo && <Chip size="small" label={tmpl.base ? `${tmpl.repo} @ ${tmpl.base}` : tmpl.repo} />}
+            {tmpl.repo && (
+              <Chip
+                size="small"
+                label={tmpl.base ? `${tmpl.repo} @ ${tmpl.base}` : tmpl.repo}
+              />
+            )}
             <span className="template-title hint">{tmpl.title}</span>
           </li>
         ))}
       </ul>
       {templates.length === 0 && <ListEmpty>No templates.</ListEmpty>}
-      {templates.length > 0 && visible.length === 0 && <ListEmpty>No templates match your search.</ListEmpty>}
+      {templates.length > 0 && visible.length === 0 && (
+        <ListEmpty>No templates match your search.</ListEmpty>
+      )}
 
       {showNew && (
-        <TemplateOverlay repoOptions={repoOptions} config={config} onClose={() => setShowNew(false)} onSaved={onRefresh} showError={showError} />
+        <TemplateOverlay
+          repoOptions={repoOptions}
+          config={config}
+          onClose={() => setShowNew(false)}
+          onSaved={onRefresh}
+          showError={showError}
+        />
       )}
       {editing && (
-        <TemplateOverlay template={editing} repoOptions={repoOptions} config={config} onClose={() => onOpenTemplate(null)} onSaved={onRefresh} showError={showError} />
+        <TemplateOverlay
+          template={editing}
+          repoOptions={repoOptions}
+          config={config}
+          onClose={() => onOpenTemplate(null)}
+          onSaved={onRefresh}
+          showError={showError}
+        />
       )}
     </main>
   );

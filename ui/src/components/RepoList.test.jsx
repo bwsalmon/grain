@@ -7,11 +7,47 @@ import api from "../api.js";
 vi.mock("../api.js", () => ({ default: vi.fn() }));
 
 const tasks = [
-  { id: "1", title: "Fix the widget", repo: "acme/widgets", state: "queued", blocked: false, capabilities: [] },
-  { id: "2", title: "Ship the widget", repo: "acme/widgets", state: "running", blocked: false, capabilities: [] },
-  { id: "3", title: "Recall the widget", repo: "acme/widgets", state: "queued", blocked: true, blockedBy: ["1"], capabilities: [] },
-  { id: "4", title: "Ship the gadget", repo: "acme/gadgets", state: "completed", blocked: false, capabilities: [] },
-  { id: "5", title: "Untargeted proposal", repo: "", state: "proposed", blocked: false, capabilities: [] },
+  {
+    id: "1",
+    title: "Fix the widget",
+    repo: "acme/widgets",
+    state: "queued",
+    blocked: false,
+    capabilities: [],
+  },
+  {
+    id: "2",
+    title: "Ship the widget",
+    repo: "acme/widgets",
+    state: "running",
+    blocked: false,
+    capabilities: [],
+  },
+  {
+    id: "3",
+    title: "Recall the widget",
+    repo: "acme/widgets",
+    state: "queued",
+    blocked: true,
+    blockedBy: ["1"],
+    capabilities: [],
+  },
+  {
+    id: "4",
+    title: "Ship the gadget",
+    repo: "acme/gadgets",
+    state: "completed",
+    blocked: false,
+    capabilities: [],
+  },
+  {
+    id: "5",
+    title: "Untargeted proposal",
+    repo: "",
+    state: "proposed",
+    blocked: false,
+    capabilities: [],
+  },
 ];
 
 function renderList(overrides = {}) {
@@ -79,7 +115,10 @@ describe("RepoList", () => {
   // instructions of its own, which reach every run against it and can
   // only be read or edited from its page.
   it("also lists a repo known only for its own prompt extension", () => {
-    const config = { targetRepos: [], reposWithPromptExtension: ["acme/prompt-only"] };
+    const config = {
+      targetRepos: [],
+      reposWithPromptExtension: ["acme/prompt-only"],
+    };
     renderList({ config });
 
     const row = screen.getByText("acme/prompt-only").closest("li");
@@ -87,7 +126,10 @@ describe("RepoList", () => {
   });
 
   it("does not mark a repo that carries defaults and has tasks of its own as defaults-only", () => {
-    const config = { targetRepos: [], repoDefaultCapabilities: { "acme/gadgets": ["gcp-key"] } };
+    const config = {
+      targetRepos: [],
+      repoDefaultCapabilities: { "acme/gadgets": ["gcp-key"] },
+    };
     renderList({ config });
 
     const row = screen.getByText("acme/gadgets").closest("li");
@@ -138,7 +180,11 @@ describe("RepoList", () => {
 
   it("shows an empty message when there are no known repos", () => {
     renderList({ tasks: [] });
-    expect(screen.getByText("No repos yet -- add one above, or file a task with a target repo.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "No repos yet -- add one above, or file a task with a target repo.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("adds a repo and refreshes config on success", async () => {
@@ -151,7 +197,10 @@ describe("RepoList", () => {
     await user.type(screen.getByPlaceholderText("owner/name"), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add repo" }));
 
-    expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/widgets" }) });
+    expect(api).toHaveBeenCalledWith("/api/repos", {
+      method: "POST",
+      body: JSON.stringify({ repo: "acme/widgets" }),
+    });
     expect(onRefreshConfig).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
   });
@@ -167,7 +216,9 @@ describe("RepoList", () => {
     await user.type(screen.getByPlaceholderText("owner/name"), "not-a-repo");
     await user.click(screen.getByRole("button", { name: "Add repo" }));
 
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "repo must be owner/name" }));
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "repo must be owner/name" }),
+    );
     expect(onRefreshConfig).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
@@ -178,21 +229,29 @@ describe("RepoList", () => {
   it("says the deployment is unrestricted, and what adding the first repo would mean", () => {
     renderList({ config: { targetRepos: [] } });
 
-    expect(screen.getByText(/an empty allowlist is what means unrestricted/)).toBeInTheDocument();
-    expect(screen.getByText(/restricts it to that one repo/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/an empty allowlist is what means unrestricted/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/restricts it to that one repo/),
+    ).toBeInTheDocument();
   });
 
   it("says a one-repo allowlist allows only that repo", () => {
     renderList({ config: { targetRepos: ["acme/widgets"] } });
 
     expect(screen.getByText(/allows only acme\/widgets/)).toBeInTheDocument();
-    expect(screen.queryByText(/an empty allowlist is what means unrestricted/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/an empty allowlist is what means unrestricted/),
+    ).not.toBeInTheDocument();
   });
 
   it("drops both notes once the allowlist names more than one repo", () => {
     renderList({ config: { targetRepos: ["acme/widgets", "acme/gadgets"] } });
 
-    expect(screen.queryByText(/an empty allowlist is what means unrestricted/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/an empty allowlist is what means unrestricted/),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(/allows only/)).not.toBeInTheDocument();
   });
 
@@ -212,7 +271,10 @@ describe("RepoList", () => {
     const falling = msg.split("Off the allowlist as of this click: ")[1];
     expect(falling).toContain("acme/gadgets");
     expect(falling).not.toContain("acme/widgets");
-    expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/widgets" }) });
+    expect(api).toHaveBeenCalledWith("/api/repos", {
+      method: "POST",
+      body: JSON.stringify({ repo: "acme/widgets" }),
+    });
     vi.unstubAllGlobals();
   });
 
@@ -241,7 +303,10 @@ describe("RepoList", () => {
     await user.click(screen.getByRole("button", { name: "Add repo" }));
 
     expect(confirmed).not.toHaveBeenCalled();
-    expect(api).toHaveBeenCalledWith("/api/repos", { method: "POST", body: JSON.stringify({ repo: "acme/gadgets" }) });
+    expect(api).toHaveBeenCalledWith("/api/repos", {
+      method: "POST",
+      body: JSON.stringify({ repo: "acme/gadgets" }),
+    });
     vi.unstubAllGlobals();
   });
 });

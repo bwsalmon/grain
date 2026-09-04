@@ -9,8 +9,12 @@ import { ThemeModeProvider, useThemeMode } from "./ThemeModeContext.jsx";
 function ResolvedThemeProvider({ children }) {
   const { mode } = useThemeMode();
   const prefersDark = useMediaQuery("(prefers-color-scheme: dark)");
-  const resolvedMode = mode === "auto" ? (prefersDark ? "dark" : "light") : mode;
-  const theme = useMemo(() => (resolvedMode === "dark" ? darkTheme : lightTheme), [resolvedMode]);
+  const resolvedMode =
+    mode === "auto" ? (prefersDark ? "dark" : "light") : mode;
+  const theme = useMemo(
+    () => (resolvedMode === "dark" ? darkTheme : lightTheme),
+    [resolvedMode],
+  );
 
   // style.css keys its own custom properties (state dots, badges, the
   // task list layout -- pieces MUI has no primitive for) off this

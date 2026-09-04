@@ -19,12 +19,31 @@ describe("MetricsOverlay", () => {
     until: "2026-09-03T00:00:00Z",
     windowSeconds: 604800,
     throughput: {
-      tasksFiled: 0, tasksCompleted: 0, tasksClosed: 0, runsStarted: 0, runsFinished: 0,
-      filedPerDay: 0, completedPerDay: 0, runsFinishedPerDay: 0, buckets: [],
+      tasksFiled: 0,
+      tasksCompleted: 0,
+      tasksClosed: 0,
+      runsStarted: 0,
+      runsFinished: 0,
+      filedPerDay: 0,
+      completedPerDay: 0,
+      runsFinishedPerDay: 0,
+      buckets: [],
     },
     latency: [],
-    runs: { outcomes: {}, attemptsPerCompletion: 0, meanConcurrent: 0, maxConcurrent: 0, utilization: 0, live: 0 },
-    backlog: { byState: {}, queued: 0, oldestQueuedSeconds: 0, oldestQueuedTaskId: "" },
+    runs: {
+      outcomes: {},
+      attemptsPerCompletion: 0,
+      meanConcurrent: 0,
+      maxConcurrent: 0,
+      utilization: 0,
+      live: 0,
+    },
+    backlog: {
+      byState: {},
+      queued: 0,
+      oldestQueuedSeconds: 0,
+      oldestQueuedTaskId: "",
+    },
   };
 
   afterEach(() => {
@@ -40,9 +59,12 @@ describe("MetricsOverlay", () => {
 
     // The pane's fixed header is what names it -- the panel itself no
     // longer prints a second "Metrics" title above the window picker.
-    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
-    expect(document.querySelector(".overlay-pane-header"))
-      .toContainElement(screen.getByRole("heading", { name: "Metrics" }));
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass(
+      "MuiDialog-paperFullScreen",
+    );
+    expect(document.querySelector(".overlay-pane-header")).toContainElement(
+      screen.getByRole("heading", { name: "Metrics" }),
+    );
     expect(screen.getAllByRole("heading", { name: "Metrics" })).toHaveLength(1);
   });
 
@@ -52,11 +74,22 @@ describe("MetricsOverlay", () => {
   it("passes the backlog's oldest queued task up to onOpenTask", async () => {
     api.mockResolvedValueOnce({
       ...emptyMetrics,
-      backlog: { byState: { queued: 1 }, queued: 1, oldestQueuedSeconds: 3600, oldestQueuedTaskId: "51" },
+      backlog: {
+        byState: { queued: 1 },
+        queued: 1,
+        oldestQueuedSeconds: 3600,
+        oldestQueuedTaskId: "51",
+      },
     });
     const onOpenTask = vi.fn();
     const user = userEvent.setup();
-    render(<MetricsOverlay onClose={() => {}} onOpenTask={onOpenTask} showError={() => {}} />);
+    render(
+      <MetricsOverlay
+        onClose={() => {}}
+        onOpenTask={onOpenTask}
+        showError={() => {}}
+      />,
+    );
 
     await user.click(await screen.findByRole("button", { name: "task 51" }));
 

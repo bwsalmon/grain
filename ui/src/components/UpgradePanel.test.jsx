@@ -22,7 +22,11 @@ describe("UpgradePanel", () => {
   it("submits the entered branch and shows the resulting status", async () => {
     api
       .mockResolvedValueOnce({ enabled: true, phase: "", branch: "" })
-      .mockResolvedValueOnce({ enabled: true, phase: "running", branch: "grain/issue-396" });
+      .mockResolvedValueOnce({
+        enabled: true,
+        phase: "running",
+        branch: "grain/issue-396",
+      });
     const user = userEvent.setup();
     render(<UpgradePanel showError={() => {}} />);
 
@@ -48,6 +52,8 @@ describe("UpgradePanel", () => {
     render(<UpgradePanel showError={() => {}} />);
 
     expect(await screen.findByText("failed")).toBeInTheDocument();
-    expect(screen.getByText("checkout: git fetch: exit status 128")).toBeInTheDocument();
+    expect(
+      screen.getByText("checkout: git fetch: exit status 128"),
+    ).toBeInTheDocument();
   });
 });

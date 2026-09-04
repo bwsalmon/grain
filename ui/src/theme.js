@@ -23,7 +23,8 @@ export const SIDEBAR_WIDTH = 232;
 const shared = {
   shape: { borderRadius: 6 },
   typography: {
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    fontFamily:
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
     fontSize: 14,
     button: { textTransform: "none", fontWeight: 500 },
   },

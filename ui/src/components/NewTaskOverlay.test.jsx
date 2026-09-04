@@ -20,7 +20,14 @@ describe("NewTaskOverlay", () => {
     const onCreated = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={null} onClose={onClose} onCreated={onCreated} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={null}
+        onClose={onClose}
+        onCreated={onCreated}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
     await user.click(screen.getByLabelText(/No repo/));
@@ -60,7 +67,14 @@ describe("NewTaskOverlay", () => {
   it("seeds Queue immediately and Auto-merge from the deployment's defaults", async () => {
     const config = { approvedByDefault: true, autoMergeByDefault: true };
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     expect(screen.getByLabelText(/Queue immediately/)).toBeChecked();
     expect(screen.getByLabelText(/Auto-merge once checks pass/)).toBeChecked();
@@ -81,7 +95,14 @@ describe("NewTaskOverlay", () => {
   // states one (ui.CreateTaskRequest.AtFront).
   it("seeds the backlog-end picker from what the last task added chose", async () => {
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={{ newestFirst: true }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={{ newestFirst: true }}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     expect(screen.getByLabelText("Add to backlog")).toHaveTextContent(/^Front/);
 
@@ -94,7 +115,14 @@ describe("NewTaskOverlay", () => {
 
   it("files at the other end of the backlog when that end is picked", async () => {
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={{ newestFirst: true }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={{ newestFirst: true }}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
     await user.click(screen.getByLabelText(/No repo/));
@@ -115,8 +143,11 @@ describe("NewTaskOverlay", () => {
     render(
       <NewTaskOverlay
         config={{ newestFirst: false }}
-        onClose={() => {}} onCreated={() => Promise.resolve()} onOpenTask={() => {}} showError={() => {}}
-      />
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        onOpenTask={() => {}}
+        showError={() => {}}
+      />,
     );
 
     await user.type(screen.getByLabelText(/Title/), "Talk this through");
@@ -131,7 +162,14 @@ describe("NewTaskOverlay", () => {
 
   it("greys out Create task until the title and target repo are both filled", async () => {
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={null}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
     const createButton = screen.getByRole("button", { name: "Create task" });
 
     expect(createButton).toBeDisabled();
@@ -150,7 +188,14 @@ describe("NewTaskOverlay", () => {
   // alongside the interactive-session checkbox, so open that first.
   it("includes a sandbox shape override when given", async () => {
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={null}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
     await user.click(screen.getByLabelText(/No repo/));
@@ -160,16 +205,32 @@ describe("NewTaskOverlay", () => {
     await user.type(screen.getByLabelText(/Disk \(GiB\)/), "40");
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
-    expect(api).toHaveBeenCalledWith("/api/tasks", expect.objectContaining({
-      body: expect.stringContaining('"sandboxCpus":4,"sandboxMemoryMb":8192,"sandboxDiskGb":40'),
-    }));
+    expect(api).toHaveBeenCalledWith(
+      "/api/tasks",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          '"sandboxCpus":4,"sandboxMemoryMb":8192,"sandboxDiskGb":40',
+        ),
+      }),
+    );
   });
 
   it("reads and includes a picked file as an attachment", async () => {
-    const upload = { filename: "screenshot.png", contentType: "image/png", content: "ZmFrZQ==" };
+    const upload = {
+      filename: "screenshot.png",
+      contentType: "image/png",
+      content: "ZmFrZQ==",
+    };
     fileToAttachment.mockResolvedValueOnce(upload);
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={null}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
     await user.click(screen.getByLabelText(/No repo/));
@@ -190,42 +251,77 @@ describe("NewTaskOverlay", () => {
   // to spell out from memory.
   it("picks read-only repos from the repos this deployment already knows", async () => {
     const config = { targetRepos: ["acme/widgets", "acme/shared-lib"] };
-    const tasks = [{ id: "12", title: "Fix the login bug", repo: "other/tooling" }];
+    const tasks = [
+      { id: "12", title: "Fix the login bug", repo: "other/tooling" },
+    ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
     await user.click(screen.getByLabelText(/No repo/));
 
     const readsInput = screen.getByLabelText(/Read-only repos/);
     await user.click(readsInput);
-    await user.click(await screen.findByRole("menuitem", { name: "acme/shared-lib" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "acme/shared-lib" }),
+    );
     await user.click(readsInput);
-    await user.click(await screen.findByRole("menuitem", { name: "other/tooling" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "other/tooling" }),
+    );
     // A repo neither the deployment nor any task has named yet still has
     // to be reachable, the gap RepoField's own "Other…" covers.
     await user.type(readsInput, "someone/brand-new");
-    await user.click(await screen.findByRole("menuitem", { name: "Add someone/brand-new" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Add someone/brand-new" }),
+    );
 
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
-    expect(payload.reads).toEqual(["acme/shared-lib", "other/tooling", "someone/brand-new"]);
+    expect(payload.reads).toEqual([
+      "acme/shared-lib",
+      "other/tooling",
+      "someone/brand-new",
+    ]);
   });
 
   it("adds depends-on tasks via the picker and includes checked capabilities", async () => {
-    const config = { capabilities: [{ id: "web-search", name: "Web search" }, { id: "shell", name: "Shell" }] };
+    const config = {
+      capabilities: [
+        { id: "web-search", name: "Web search" },
+        { id: "shell", name: "Shell" },
+      ],
+    };
     const tasks = [
       { id: "12", title: "Fix the login bug" },
       { id: "15", title: "Add dark mode" },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
     await user.click(screen.getByLabelText(/No repo/));
 
-    const dependsOnInput = screen.getByPlaceholderText("Search tasks to depend on…");
+    const dependsOnInput = screen.getByPlaceholderText(
+      "Search tasks to depend on…",
+    );
     await user.type(dependsOnInput, "12");
     await user.click(await screen.findByText("Fix the login bug"));
     await user.type(dependsOnInput, "15");
@@ -248,19 +344,34 @@ describe("NewTaskOverlay", () => {
   it("warns in the picker about a capability this deployment is not configured for", async () => {
     const config = {
       capabilities: [
-        { id: "gemini-key", name: "Gemini key", ready: false, needs: ["GCP project"] },
+        {
+          id: "gemini-key",
+          name: "Gemini key",
+          ready: false,
+          needs: ["GCP project"],
+        },
         { id: "self-debug", name: "Self debug", ready: true },
       ],
     };
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={[]} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={[]}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.click(screen.getByLabelText("Capabilities"));
     const gemini = await screen.findByRole("option", { name: /Gemini key/ });
     expect(gemini).toHaveTextContent("GCP project");
     expect(gemini).toHaveTextContent(/fail to dispatch/);
     // A ready capability gets no such line.
-    expect(screen.getByRole("option", { name: /Self debug/ })).not.toHaveTextContent(/Not ready/);
+    expect(
+      screen.getByRole("option", { name: /Self debug/ }),
+    ).not.toHaveTextContent(/Not ready/);
 
     // Warning, never refusing: it is still tickable, since filing the
     // task first and setting the project second is an ordinary order.
@@ -269,7 +380,9 @@ describe("NewTaskOverlay", () => {
     await user.type(screen.getByLabelText(/Title/), "Ship it");
     await user.click(screen.getByLabelText(/No repo/));
     await user.click(screen.getByRole("button", { name: "Create task" }));
-    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key"]);
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual([
+      "gemini-key",
+    ]);
   });
 
   // grain/task-14: the deployment's own default capabilities arrive
@@ -280,11 +393,21 @@ describe("NewTaskOverlay", () => {
   // unticking one work.
   it("seeds the capability picker from the deployment's defaults", async () => {
     const config = {
-      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      capabilities: [
+        { id: "gcp-key", name: "GCP key" },
+        { id: "gemini-key", name: "Gemini key" },
+      ],
       defaultCapabilities: ["gcp-key"],
     };
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Needs a key");
     await user.click(screen.getByLabelText(/No repo/));
@@ -296,11 +419,21 @@ describe("NewTaskOverlay", () => {
 
   it("files a task without a defaulted capability once it is unticked", async () => {
     const config = {
-      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      capabilities: [
+        { id: "gcp-key", name: "GCP key" },
+        { id: "gemini-key", name: "Gemini key" },
+      ],
       defaultCapabilities: ["gcp-key"],
     };
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "No key needed");
     await user.click(screen.getByLabelText(/No repo/));
@@ -316,13 +449,26 @@ describe("NewTaskOverlay", () => {
   it("shows a picked dependency's whole task on hover", async () => {
     const tasks = [{ id: "12", title: "Fix the login bug" }];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={null} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={null}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
-    await user.type(screen.getByPlaceholderText("Search tasks to depend on…"), "12");
+    await user.type(
+      screen.getByPlaceholderText("Search tasks to depend on…"),
+      "12",
+    );
     await user.click(await screen.findByText("Fix the login bug"));
 
     await user.hover(screen.getByText("12 Fix the login bug"));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("12 Fix the login bug");
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "12 Fix the login bug",
+    );
   });
 
   // grain/task-24: a repo can default capabilities of its own on top of
@@ -331,19 +477,35 @@ describe("NewTaskOverlay", () => {
   // task filed against it.
   it("adds the picked repo's own default capabilities to the deployment's", async () => {
     const config = {
-      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      capabilities: [
+        { id: "gcp-key", name: "GCP key" },
+        { id: "gemini-key", name: "Gemini key" },
+      ],
       targetRepos: ["acme/widgets", "acme/gadgets"],
       defaultCapabilities: ["gemini-key"],
       repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
     };
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Needs a key");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
-    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key", "gcp-key"]);
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual([
+      "gemini-key",
+      "gcp-key",
+    ]);
   });
 
   // Switching away from a repo that adds one drops it again: leaving the
@@ -351,20 +513,38 @@ describe("NewTaskOverlay", () => {
   // the repo it actually targets never asked for.
   it("re-seeds the picker when the repo changes", async () => {
     const config = {
-      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      capabilities: [
+        { id: "gcp-key", name: "GCP key" },
+        { id: "gemini-key", name: "Gemini key" },
+      ],
       targetRepos: ["acme/widgets", "acme/gadgets"],
       defaultCapabilities: ["gemini-key"],
       repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
     };
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Elsewhere");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/gadgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/gadgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
-    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual(["gemini-key"]);
+    expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual([
+      "gemini-key",
+    ]);
   });
 
   // Once the picker has been touched the ticks are the human's own: a
@@ -372,19 +552,32 @@ describe("NewTaskOverlay", () => {
   // a task with something they had already said no to.
   it("leaves a hand-edited capability picker alone when the repo changes", async () => {
     const config = {
-      capabilities: [{ id: "gcp-key", name: "GCP key" }, { id: "gemini-key", name: "Gemini key" }],
+      capabilities: [
+        { id: "gcp-key", name: "GCP key" },
+        { id: "gemini-key", name: "Gemini key" },
+      ],
       targetRepos: ["acme/widgets", "acme/gadgets"],
       defaultCapabilities: ["gemini-key"],
       repoDefaultCapabilities: { "acme/widgets": ["gcp-key"] },
     };
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "My own choice");
     await user.click(screen.getByLabelText("Capabilities"));
     await user.click(await screen.findByRole("option", { name: "Gemini key" }));
     await user.keyboard("{Escape}");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     expect(JSON.parse(api.mock.calls[0][1].body).capabilities).toEqual([]);
@@ -394,10 +587,21 @@ describe("NewTaskOverlay", () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [{ id: "1", title: "Old task", repo: "acme/other" }];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/other");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/other",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -411,15 +615,44 @@ describe("NewTaskOverlay", () => {
   it("prefills Base branch from the picked repo's most recent task", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [
-      { id: "1", title: "Old task", repo: "acme/widgets", base: "main", createdAt: "2026-01-01T00:00:00Z" },
-      { id: "2", title: "Newer task", repo: "acme/widgets", base: "release/2.0", createdAt: "2026-06-01T00:00:00Z" },
-      { id: "3", title: "Other repo task", repo: "acme/other", base: "main", createdAt: "2026-08-01T00:00:00Z" },
+      {
+        id: "1",
+        title: "Old task",
+        repo: "acme/widgets",
+        base: "main",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        title: "Newer task",
+        repo: "acme/widgets",
+        base: "release/2.0",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
+      {
+        id: "3",
+        title: "Other repo task",
+        repo: "acme/other",
+        base: "main",
+        createdAt: "2026-08-01T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -433,14 +666,39 @@ describe("NewTaskOverlay", () => {
   it("does not prefill Base branch from a task that failed", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [
-      { id: "1", title: "Good task", repo: "acme/widgets", base: "release/2.0", state: "completed", createdAt: "2026-01-01T00:00:00Z" },
-      { id: "2", title: "Died on a deleted base", repo: "acme/widgets", base: "grain/issue-642", state: "failed", createdAt: "2026-06-01T00:00:00Z" },
+      {
+        id: "1",
+        title: "Good task",
+        repo: "acme/widgets",
+        base: "release/2.0",
+        state: "completed",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        title: "Died on a deleted base",
+        repo: "acme/widgets",
+        base: "grain/issue-642",
+        state: "failed",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -450,14 +708,39 @@ describe("NewTaskOverlay", () => {
   it("prefills nothing when every task carrying a base for that repo failed", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [
-      { id: "1", title: "Died", repo: "acme/widgets", base: "grain/issue-642", state: "failed", createdAt: "2026-06-01T00:00:00Z" },
-      { id: "2", title: "Closed too", repo: "acme/widgets", base: "grain/issue-642", state: "closed", createdAt: "2026-06-02T00:00:00Z" },
+      {
+        id: "1",
+        title: "Died",
+        repo: "acme/widgets",
+        base: "grain/issue-642",
+        state: "failed",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        title: "Closed too",
+        repo: "acme/widgets",
+        base: "grain/issue-642",
+        state: "closed",
+        createdAt: "2026-06-02T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -471,15 +754,47 @@ describe("NewTaskOverlay", () => {
   it("does not prefill Base branch from a task an agent or automation filed", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [
-      { id: "1", title: "Filed by hand", repo: "acme/widgets", base: "release/2.0", authorKind: "human", createdAt: "2026-01-01T00:00:00Z" },
-      { id: "2", title: "A suite pass", repo: "acme/widgets", base: "suite/run-7", authorKind: "automation", createdAt: "2026-06-01T00:00:00Z" },
-      { id: "3", title: "An agent's proposal", repo: "acme/widgets", base: "grain/task-3", authorKind: "agent", createdAt: "2026-07-01T00:00:00Z" },
+      {
+        id: "1",
+        title: "Filed by hand",
+        repo: "acme/widgets",
+        base: "release/2.0",
+        authorKind: "human",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        title: "A suite pass",
+        repo: "acme/widgets",
+        base: "suite/run-7",
+        authorKind: "automation",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
+      {
+        id: "3",
+        title: "An agent's proposal",
+        repo: "acme/widgets",
+        base: "grain/task-3",
+        authorKind: "agent",
+        createdAt: "2026-07-01T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -491,32 +806,83 @@ describe("NewTaskOverlay", () => {
   // picking it is the no-history case rather than the "most recent task
   // used the default branch" one, and must not clear the field.
   it("treats a repo whose only tasks are system-generated as having no history", async () => {
-    const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/robots"] };
+    const config = {
+      capabilities: [],
+      targetRepos: ["acme/widgets", "acme/robots"],
+    };
     const tasks = [
-      { id: "1", title: "Filed by hand", repo: "acme/widgets", base: "release/2.0", authorKind: "human", createdAt: "2026-01-01T00:00:00Z" },
-      { id: "2", title: "A schedule fired", repo: "acme/robots", base: "nightly", authorKind: "automation", createdAt: "2026-06-01T00:00:00Z" },
+      {
+        id: "1",
+        title: "Filed by hand",
+        repo: "acme/widgets",
+        base: "release/2.0",
+        authorKind: "human",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        title: "A schedule fired",
+        repo: "acme/robots",
+        base: "nightly",
+        authorKind: "automation",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/robots");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/robots",
+    );
     expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
   });
 
   it("leaves a manually-typed Base branch alone when the picked repo has no task history", async () => {
-    const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/fresh"] };
+    const config = {
+      capabilities: [],
+      targetRepos: ["acme/widgets", "acme/fresh"],
+    };
     const tasks = [
-      { id: "1", title: "Old task", repo: "acme/widgets", base: "release/2.0", createdAt: "2026-01-01T00:00:00Z" },
+      {
+        id: "1",
+        title: "Old task",
+        repo: "acme/widgets",
+        base: "release/2.0",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
     await user.type(screen.getByLabelText(/Base branch/), "my-custom-branch");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/fresh");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/fresh",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -526,14 +892,31 @@ describe("NewTaskOverlay", () => {
   it("leaves a manually-typed Base branch alone even when the picked repo has history", async () => {
     const config = { capabilities: [], targetRepos: ["acme/widgets"] };
     const tasks = [
-      { id: "1", title: "Old task", repo: "acme/widgets", base: "release/2.0", createdAt: "2026-01-01T00:00:00Z" },
+      {
+        id: "1",
+        title: "Old task",
+        repo: "acme/widgets",
+        base: "release/2.0",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
     await user.type(screen.getByLabelText(/Base branch/), "my-custom-branch");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -545,18 +928,47 @@ describe("NewTaskOverlay", () => {
   // ("build off the default branch here"), not an absence of one, and
   // should clear out whatever base picking an earlier repo prefilled.
   it("clears a prefilled Base branch when the newly-picked repo's most recent task used the default branch", async () => {
-    const config = { capabilities: [], targetRepos: ["acme/widgets", "acme/other"] };
+    const config = {
+      capabilities: [],
+      targetRepos: ["acme/widgets", "acme/other"],
+    };
     const tasks = [
-      { id: "1", title: "Off a release branch", repo: "acme/widgets", base: "release/2.0", createdAt: "2026-01-01T00:00:00Z" },
-      { id: "2", title: "Off the default branch", repo: "acme/other", base: "", createdAt: "2026-06-01T00:00:00Z" },
+      {
+        id: "1",
+        title: "Off a release branch",
+        repo: "acme/widgets",
+        base: "release/2.0",
+        createdAt: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "2",
+        title: "Off the default branch",
+        repo: "acme/other",
+        base: "",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
     ];
     const user = userEvent.setup();
-    render(<NewTaskOverlay tasks={tasks} config={config} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />);
+    render(
+      <NewTaskOverlay
+        tasks={tasks}
+        config={config}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "Ship it");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/widgets");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/widgets",
+    );
     expect(screen.getByLabelText(/Base branch/)).toHaveValue("release/2.0");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/other");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/other",
+    );
     expect(screen.getByLabelText(/Base branch/)).toHaveValue("");
 
     await user.click(screen.getByRole("button", { name: "Create task" }));
@@ -574,14 +986,22 @@ describe("NewTaskOverlay", () => {
     const onOpenTask = vi.fn();
     const user = userEvent.setup();
     render(
-      <NewTaskOverlay config={null} onClose={() => {}} onCreated={() => Promise.resolve()} onOpenTask={onOpenTask} showError={() => {}} />
+      <NewTaskOverlay
+        config={null}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        onOpenTask={onOpenTask}
+        showError={() => {}}
+      />,
     );
 
     await user.type(screen.getByLabelText(/Title/), "Talk this through");
     await user.click(screen.getByRole("button", { name: "Advanced options" }));
     await user.click(screen.getByLabelText(/Interactive session/));
     await user.click(screen.getByLabelText(/No repo/));
-    expect(screen.queryByLabelText(/Queue immediately/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/Queue immediately/),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -597,7 +1017,12 @@ describe("NewTaskOverlay", () => {
     api.mockResolvedValueOnce({ id: "42" });
     const user = userEvent.setup();
     render(
-      <NewTaskOverlay config={{ agentFramework: "gemini" }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />
+      <NewTaskOverlay
+        config={{ agentFramework: "gemini" }}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
     );
 
     await user.type(screen.getByLabelText(/Title/), "Port the parser");
@@ -616,7 +1041,12 @@ describe("NewTaskOverlay", () => {
   it("names the deployment default in the picker without pinning the task to it", async () => {
     const user = userEvent.setup();
     render(
-      <NewTaskOverlay config={{ agentFramework: "claude" }} onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}} />
+      <NewTaskOverlay
+        config={{ agentFramework: "claude" }}
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
     );
 
     await user.type(screen.getByLabelText(/Title/), "Fix the thing");
@@ -639,19 +1069,27 @@ describe("NewTaskOverlay", () => {
     render(
       <NewTaskOverlay
         config={{ promptExtension: "Run `make lint` before you push." }}
-        onClose={() => {}} onCreated={() => Promise.resolve()} showError={() => {}}
-      />
+        onClose={() => {}}
+        onCreated={() => Promise.resolve()}
+        showError={() => {}}
+      />,
     );
 
     await user.type(screen.getByLabelText(/Title/), "Regenerate the client");
     await user.click(screen.getByLabelText(/No repo/));
     await user.click(screen.getByRole("button", { name: "Advanced options" }));
-    expect(screen.getByText(/Deployment-wide, used when the box above is empty/))
-      .toHaveTextContent("Run `make lint` before you push.");
-    await user.type(screen.getByLabelText(/Prompt extension override/), "Ignore the house rules.");
+    expect(
+      screen.getByText(/Deployment-wide, used when the box above is empty/),
+    ).toHaveTextContent("Run `make lint` before you push.");
+    await user.type(
+      screen.getByLabelText(/Prompt extension override/),
+      "Ignore the house rules.",
+    );
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
-    expect(JSON.parse(api.mock.calls[0][1].body).promptExtension).toBe("Ignore the house rules.");
+    expect(JSON.parse(api.mock.calls[0][1].body).promptExtension).toBe(
+      "Ignore the house rules.",
+    );
   });
 
   it("reports the error and leaves the overlay open when the request fails", async () => {
@@ -659,13 +1097,22 @@ describe("NewTaskOverlay", () => {
     const showError = vi.fn();
     const onClose = vi.fn();
     const user = userEvent.setup();
-    render(<NewTaskOverlay config={null} onClose={onClose} onCreated={() => {}} showError={showError} />);
+    render(
+      <NewTaskOverlay
+        config={null}
+        onClose={onClose}
+        onCreated={() => {}}
+        showError={showError}
+      />,
+    );
 
     await user.type(screen.getByLabelText(/Title/), "x");
     await user.click(screen.getByLabelText(/No repo/));
     await user.click(screen.getByRole("button", { name: "Create task" }));
 
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "title is required" }));
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "title is required" }),
+    );
     expect(onClose).not.toHaveBeenCalled();
   });
 });

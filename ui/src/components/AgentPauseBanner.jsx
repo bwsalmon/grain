@@ -46,7 +46,15 @@ export default function AgentPauseBanner({ pause, onLifted, showError }) {
     <Alert
       severity="warning"
       variant="filled"
-      sx={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 5, borderRadius: 0, justifyContent: "center" }}
+      sx={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        zIndex: 5,
+        borderRadius: 0,
+        justifyContent: "center",
+      }}
       action={
         // "Resume now" is for the operator who has just topped a plan
         // up, or moved this deployment onto the other agent framework:
@@ -74,9 +82,10 @@ export default function AgentPauseBanner({ pause, onLifted, showError }) {
 // lunch actually plans around.
 export function pauseMessage(pause) {
   const until = pause?.until ? new Date(pause.until) : null;
-  const when = until && !Number.isNaN(until.getTime())
-    ? `${until.toLocaleTimeString()} (${formatRemaining(pause.secondsRemaining)})`
-    : "the provider's window resets";
+  const when =
+    until && !Number.isNaN(until.getTime())
+      ? `${until.toLocaleTimeString()} (${formatRemaining(pause.secondsRemaining)})`
+      : "the provider's window resets";
   const reason = pause?.reason ? ` — ${pause.reason}` : "";
   return `Agent usage limit reached: nothing is being dispatched until ${when}.${reason}`;
 }

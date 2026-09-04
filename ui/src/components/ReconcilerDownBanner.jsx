@@ -22,9 +22,18 @@ export default function ReconcilerDownBanner() {
     <Alert
       severity="error"
       variant="filled"
-      sx={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 5, borderRadius: 0, justifyContent: "center" }}
+      sx={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        zIndex: 5,
+        borderRadius: 0,
+        justifyContent: "center",
+      }}
     >
-      This deployment's reconcile loop has stopped -- no tasks are being dispatched or checked. Restart the daemon to recover.
+      This deployment's reconcile loop has stopped -- no tasks are being
+      dispatched or checked. Restart the daemon to recover.
     </Alert>
   );
 }

@@ -1,4 +1,13 @@
-import { Box, Button, Chip, Divider, List, ListItemButton, ListItemText, Typography } from "@mui/material";
+import {
+  Box,
+  Button,
+  Chip,
+  Divider,
+  List,
+  ListItemButton,
+  ListItemText,
+  Typography,
+} from "@mui/material";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
 import { SIDEBAR_WIDTH } from "../theme.js";
 import GrainMark from "./GrainMark.jsx";
@@ -72,11 +81,29 @@ function buildStampTitle(version) {
   const parts = [`Running commit ${version.commit}`];
   const at = parseStampTime(version.committedAt);
   if (at) parts.push(`committed ${at.toLocaleString()}`);
-  if (version.modified) parts.push("built from a tree with uncommitted changes");
+  if (version.modified)
+    parts.push("built from a tree with uncommitted changes");
   return parts.join(", ");
 }
 
-export default function Sidebar({ config, tasks, schedules = [], templates = [], suites = [], view, onSetView, stateFilter, onSetFilter, showSettings = false, showDebug = false, showMetrics = false, onOpenSettings, onOpenDebug, onOpenMetrics, onOpenNewTask }) {
+export default function Sidebar({
+  config,
+  tasks,
+  schedules = [],
+  templates = [],
+  suites = [],
+  view,
+  onSetView,
+  stateFilter,
+  onSetFilter,
+  showSettings = false,
+  showDebug = false,
+  showMetrics = false,
+  onOpenSettings,
+  onOpenDebug,
+  onOpenMetrics,
+  onOpenNewTask,
+}) {
   const counts = {};
   let blocked = 0;
   for (const t of tasks) {
@@ -98,13 +125,23 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
       onClick={() => selectState(id)}
       sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
     >
-      <span className="nav-icon"><span className={`dot ${dotClass}`} /></span>
+      <span className="nav-icon">
+        <span className={`dot ${dotClass}`} />
+      </span>
       <ListItemText
         primary={label}
         sx={{ ml: 1 }}
-        primaryTypographyProps={{ noWrap: true, fontSize: "0.85rem", fontWeight: 500 }}
+        primaryTypographyProps={{
+          noWrap: true,
+          fontSize: "0.85rem",
+          fontWeight: 500,
+        }}
       />
-      <Typography variant="caption" color={active ? "primary" : "text.secondary"} sx={{ fontVariantNumeric: "tabular-nums" }}>
+      <Typography
+        variant="caption"
+        color={active ? "primary" : "text.secondary"}
+        sx={{ fontVariantNumeric: "tabular-nums" }}
+      >
         {count}
       </Typography>
     </ListItemButton>
@@ -133,7 +170,13 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           below it. See docs/brand.md. */}
       <Box sx={{ display: "flex", alignItems: "center", gap: 0.9, px: 0.5 }}>
         <GrainMark size={32} animated={(counts.running || 0) > 0} />
-        <Typography variant="subtitle1" fontWeight={600} letterSpacing="-0.01em" component="h1" sx={{ m: 0 }}>
+        <Typography
+          variant="subtitle1"
+          fontWeight={600}
+          letterSpacing="-0.01em"
+          component="h1"
+          sx={{ m: 0 }}
+        >
           grain
         </Typography>
         {/* The deployment's own name (grain/task-69), next to the
@@ -158,12 +201,31 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
         ) : null}
       </Box>
 
-      <Button variant="contained" fullWidth onClick={onOpenNewTask}>+ New task</Button>
+      <Button variant="contained" fullWidth onClick={onOpenNewTask}>
+        + New task
+      </Button>
 
-      <List component="nav" disablePadding sx={{ display: "flex", flexDirection: "column", gap: 0.2 }}>
-        <NavItem id="all" label="All tasks" dotClass="dot-all" count={tasks.length} active={view === "tasks" && stateFilter === "all"} />
+      <List
+        component="nav"
+        disablePadding
+        sx={{ display: "flex", flexDirection: "column", gap: 0.2 }}
+      >
+        <NavItem
+          id="all"
+          label="All tasks"
+          dotClass="dot-all"
+          count={tasks.length}
+          active={view === "tasks" && stateFilter === "all"}
+        />
         {STATE_ORDER.filter((s) => counts[s]).map((s) => (
-          <NavItem key={s} id={s} label={STATE_LABELS[s]} dotClass={`dot-${s}`} count={counts[s]} active={view === "tasks" && stateFilter === s} />
+          <NavItem
+            key={s}
+            id={s}
+            label={STATE_LABELS[s]}
+            dotClass={`dot-${s}`}
+            count={counts[s]}
+            active={view === "tasks" && stateFilter === s}
+          />
         ))}
         {/* Blocked is not a state (docs/data-model.md) so it gets its own
             nav entry alongside the state ones rather than a slot in
@@ -171,7 +233,13 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
             this is just a faster way to find what dispatch is currently
             skipping over. */}
         {blocked > 0 && (
-          <NavItem id="blocked" label="Blocked" dotClass="dot-blocked" count={blocked} active={view === "tasks" && stateFilter === "blocked"} />
+          <NavItem
+            id="blocked"
+            label="Blocked"
+            dotClass="dot-blocked"
+            count={blocked}
+            active={view === "tasks" && stateFilter === "blocked"}
+          />
         )}
         <Divider sx={{ my: 0.7 }} />
         {/* The four list entries carry their own glyph where the state
@@ -185,40 +253,125 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
             reading the word. The glyph inherits the entry's text
             colour, so it brightens with the label when the entry is
             selected. */}
-        <ListItemButton selected={view === "repos"} onClick={() => onSetView("repos")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="nav-icon"><ItemGlyph kind="repos" /></span>
-          <ListItemText primary="Repos" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
-          <Typography variant="caption" color="text.secondary">{repoCount}</Typography>
+        <ListItemButton
+          selected={view === "repos"}
+          onClick={() => onSetView("repos")}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <span className="nav-icon">
+            <ItemGlyph kind="repos" />
+          </span>
+          <ListItemText
+            primary="Repos"
+            sx={{ ml: 1 }}
+            primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {repoCount}
+          </Typography>
         </ListItemButton>
-        <ListItemButton selected={view === "schedules"} onClick={() => onSetView("schedules")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="nav-icon"><ItemGlyph kind="schedules" /></span>
-          <ListItemText primary="Schedules" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
-          <Typography variant="caption" color="text.secondary">{schedules.length}</Typography>
+        <ListItemButton
+          selected={view === "schedules"}
+          onClick={() => onSetView("schedules")}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <span className="nav-icon">
+            <ItemGlyph kind="schedules" />
+          </span>
+          <ListItemText
+            primary="Schedules"
+            sx={{ ml: 1 }}
+            primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {schedules.length}
+          </Typography>
         </ListItemButton>
-        <ListItemButton selected={view === "templates"} onClick={() => onSetView("templates")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="nav-icon"><ItemGlyph kind="templates" /></span>
-          <ListItemText primary="Templates" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
-          <Typography variant="caption" color="text.secondary">{templates.length}</Typography>
+        <ListItemButton
+          selected={view === "templates"}
+          onClick={() => onSetView("templates")}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <span className="nav-icon">
+            <ItemGlyph kind="templates" />
+          </span>
+          <ListItemText
+            primary="Templates"
+            sx={{ ml: 1 }}
+            primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {templates.length}
+          </Typography>
         </ListItemButton>
-        <ListItemButton selected={view === "suites"} onClick={() => onSetView("suites")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <span className="nav-icon"><ItemGlyph kind="suites" /></span>
-          <ListItemText primary="Suites" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
-          <Typography variant="caption" color="text.secondary">{suites.length}</Typography>
+        <ListItemButton
+          selected={view === "suites"}
+          onClick={() => onSetView("suites")}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <span className="nav-icon">
+            <ItemGlyph kind="suites" />
+          </span>
+          <ListItemText
+            primary="Suites"
+            sx={{ ml: 1 }}
+            primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {suites.length}
+          </Typography>
         </ListItemButton>
       </List>
 
       {/* No dot beside any of them, unlike every nav entry above: those
           count something, and these three are one destination each. */}
-      <List component="nav" disablePadding sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}>
+      <List
+        component="nav"
+        disablePadding
+        sx={{ mt: "auto", display: "flex", flexDirection: "column", gap: 0.2 }}
+      >
         <Divider sx={{ mb: 0.9 }} />
-        <ListItemButton selected={showSettings} onClick={onOpenSettings} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <ListItemText primary="Settings" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showSettings ? "text.primary" : "text.secondary" }} />
+        <ListItemButton
+          selected={showSettings}
+          onClick={onOpenSettings}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <ListItemText
+            primary="Settings"
+            primaryTypographyProps={{
+              fontSize: "0.85rem",
+              fontWeight: 500,
+              color: showSettings ? "text.primary" : "text.secondary",
+            }}
+          />
         </ListItemButton>
-        <ListItemButton selected={showDebug} onClick={onOpenDebug} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <ListItemText primary="Debug" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showDebug ? "text.primary" : "text.secondary" }} />
+        <ListItemButton
+          selected={showDebug}
+          onClick={onOpenDebug}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <ListItemText
+            primary="Debug"
+            primaryTypographyProps={{
+              fontSize: "0.85rem",
+              fontWeight: 500,
+              color: showDebug ? "text.primary" : "text.secondary",
+            }}
+          />
         </ListItemButton>
-        <ListItemButton selected={showMetrics} onClick={onOpenMetrics} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
-          <ListItemText primary="Metrics" primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500, color: showMetrics ? "text.primary" : "text.secondary" }} />
+        <ListItemButton
+          selected={showMetrics}
+          onClick={onOpenMetrics}
+          sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}
+        >
+          <ListItemText
+            primary="Metrics"
+            primaryTypographyProps={{
+              fontSize: "0.85rem",
+              fontWeight: 500,
+              color: showMetrics ? "text.primary" : "text.secondary",
+            }}
+          />
         </ListItemButton>
       </List>
 
@@ -243,7 +396,13 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           color="text.secondary"
           noWrap
           title={buildStampTitle(config.version)}
-          sx={{ px: 0.9, m: 0, fontSize: "0.68rem", opacity: 0.75, fontVariantNumeric: "tabular-nums" }}
+          sx={{
+            px: 0.9,
+            m: 0,
+            fontSize: "0.68rem",
+            opacity: 0.75,
+            fontVariantNumeric: "tabular-nums",
+          }}
         >
           {buildStampLabel(config.version)}
         </Typography>

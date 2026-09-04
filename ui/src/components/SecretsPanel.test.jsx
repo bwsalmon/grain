@@ -43,7 +43,12 @@ describe("SecretsPanel", () => {
         { name: "buildkite", keys: ["token"] },
       ],
     });
-    render(<SecretsPanel showError={() => {}} claimed={["gemini-api-key", "gcp-key-minter"]} />);
+    render(
+      <SecretsPanel
+        showError={() => {}}
+        claimed={["gemini-api-key", "gcp-key-minter"]}
+      />,
+    );
 
     expect(await screen.findByText("buildkite")).toBeInTheDocument();
     expect(screen.queryByText("gemini-api-key")).not.toBeInTheDocument();
@@ -51,24 +56,34 @@ describe("SecretsPanel", () => {
   });
 
   it("shows an empty message when every stored secret is owned elsewhere", async () => {
-    api.mockResolvedValueOnce({ enabled: true, secrets: [{ name: "gemini-api-key", keys: ["value"] }] });
+    api.mockResolvedValueOnce({
+      enabled: true,
+      secrets: [{ name: "gemini-api-key", keys: ["value"] }],
+    });
     render(<SecretsPanel showError={() => {}} claimed={["gemini-api-key"]} />);
 
-    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("No other secrets set."),
+    ).toBeInTheDocument();
   });
 
   it("shows an empty message when enabled with no secrets", async () => {
     api.mockResolvedValueOnce({ enabled: true, secrets: [] });
     render(<SecretsPanel showError={() => {}} />);
 
-    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("No other secrets set."),
+    ).toBeInTheDocument();
   });
 
   it("sets a secret via the form and refreshes", async () => {
     api
       .mockResolvedValueOnce({ enabled: true, secrets: [] })
       .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ enabled: true, secrets: [{ name: "github", keys: ["token"] }] });
+      .mockResolvedValueOnce({
+        enabled: true,
+        secrets: [{ name: "github", keys: ["token"] }],
+      });
     const user = userEvent.setup();
     render(<SecretsPanel showError={() => {}} />);
     await screen.findByText("No other secrets set.");
@@ -87,7 +102,10 @@ describe("SecretsPanel", () => {
 
   it("deletes a single key", async () => {
     api
-      .mockResolvedValueOnce({ enabled: true, secrets: [{ name: "github", keys: ["token"] }] })
+      .mockResolvedValueOnce({
+        enabled: true,
+        secrets: [{ name: "github", keys: ["token"] }],
+      })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ enabled: true, secrets: [] });
     const user = userEvent.setup();
@@ -96,13 +114,20 @@ describe("SecretsPanel", () => {
 
     await user.click(screen.getByTitle("delete github/token"));
 
-    expect(api).toHaveBeenCalledWith("/api/secrets/github/token", { method: "DELETE" });
-    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith("/api/secrets/github/token", {
+      method: "DELETE",
+    });
+    expect(
+      await screen.findByText("No other secrets set."),
+    ).toBeInTheDocument();
   });
 
   it("deletes an entire secret", async () => {
     api
-      .mockResolvedValueOnce({ enabled: true, secrets: [{ name: "github", keys: ["token"] }] })
+      .mockResolvedValueOnce({
+        enabled: true,
+        secrets: [{ name: "github", keys: ["token"] }],
+      })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ enabled: true, secrets: [] });
     const user = userEvent.setup();
@@ -111,12 +136,18 @@ describe("SecretsPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "Delete secret" }));
 
-    expect(api).toHaveBeenCalledWith("/api/secrets/github", { method: "DELETE" });
-    expect(await screen.findByText("No other secrets set.")).toBeInTheDocument();
+    expect(api).toHaveBeenCalledWith("/api/secrets/github", {
+      method: "DELETE",
+    });
+    expect(
+      await screen.findByText("No other secrets set."),
+    ).toBeInTheDocument();
   });
 
   it("reports the error when setting a secret fails", async () => {
-    api.mockResolvedValueOnce({ enabled: true, secrets: [] }).mockRejectedValueOnce(new Error("value is required"));
+    api
+      .mockResolvedValueOnce({ enabled: true, secrets: [] })
+      .mockRejectedValueOnce(new Error("value is required"));
     const showError = vi.fn();
     const user = userEvent.setup();
     render(<SecretsPanel showError={showError} />);
@@ -127,6 +158,8 @@ describe("SecretsPanel", () => {
     await user.type(screen.getByLabelText(/Value/), "x");
     await user.click(screen.getByRole("button", { name: "Set secret" }));
 
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "value is required" }));
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "value is required" }),
+    );
   });
 });

@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Box, Button, Chip, Stack, TextField, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 
 // grain/task-137: the named GitHub tokens this deployment holds, on the
@@ -36,15 +44,19 @@ export default function GitHubTokensSection({ showError }) {
     }
   }, [showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const submit = async (evt) => {
     evt.preventDefault();
     try {
-      setResp(await api(`/api/github-tokens/${encodeURIComponent(name.trim())}`, {
-        method: "PUT",
-        body: JSON.stringify({ value }),
-      }));
+      setResp(
+        await api(`/api/github-tokens/${encodeURIComponent(name.trim())}`, {
+          method: "PUT",
+          body: JSON.stringify({ value }),
+        }),
+      );
       setName("");
       setValue("");
     } catch (err) {
@@ -54,7 +66,11 @@ export default function GitHubTokensSection({ showError }) {
 
   const remove = async (token) => {
     try {
-      setResp(await api(`/api/github-tokens/${encodeURIComponent(token)}`, { method: "DELETE" }));
+      setResp(
+        await api(`/api/github-tokens/${encodeURIComponent(token)}`, {
+          method: "DELETE",
+        }),
+      );
     } catch (err) {
       showError(err);
     }
@@ -72,49 +88,78 @@ export default function GitHubTokensSection({ showError }) {
     <Box sx={{ mt: 3 }}>
       <Typography variant="subtitle2">Named tokens</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-        The GitHub credentials this deployment pushes and pulls with. The default one serves every
-        repo the ladder covers; each of the others is a capability a single task can be given
-        (&quot;GitHub token: &lt;name&gt;&quot;), for work that needs a scope or an account the
-        default deliberately isn&apos;t. Which repos fall back to which credential is still
-        credentials.json on the host{resp.dir ? ` (${resp.dir})` : ""}, not editable from here.
+        The GitHub credentials this deployment pushes and pulls with. The
+        default one serves every repo the ladder covers; each of the others is a
+        capability a single task can be given (&quot;GitHub token:
+        &lt;name&gt;&quot;), for work that needs a scope or an account the
+        default deliberately isn&apos;t. Which repos fall back to which
+        credential is still credentials.json on the host
+        {resp.dir ? ` (${resp.dir})` : ""}, not editable from here.
       </Typography>
       {!resp.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          Not available: this UI has no local GitHub credential directory to write to, which only
-          happens when it is not running beside the git proxy that reads one.
+          Not available: this UI has no local GitHub credential directory to
+          write to, which only happens when it is not running beside the git
+          proxy that reads one.
         </Alert>
       )}
       {resp.enabled && (
         <>
           {resp.restartRequired && (
             <Alert severity="warning" sx={{ mb: 2 }}>
-              Restart the daemon to finish applying the changes below. The credential ladder is read
-              once at startup, so a token added here cannot be ticked on a task -- and one removed
-              here is still offered -- until then.
+              Restart the daemon to finish applying the changes below. The
+              credential ladder is read once at startup, so a token added here
+              cannot be ticked on a task -- and one removed here is still
+              offered -- until then.
             </Alert>
           )}
           <ul className="secrets-list">
             {tokens.map((token) => (
               <li className="secret-row" key={token.name}>
                 <span className="secret-name">{token.name}</span>
-                <Box sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", flex: 1 }}>
-                  {token.default && <Chip size="small" label="deployment default" color="primary" />}
+                <Box
+                  sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", flex: 1 }}
+                >
+                  {token.default && (
+                    <Chip
+                      size="small"
+                      label="deployment default"
+                      color="primary"
+                    />
+                  )}
                   {token.app && <Chip size="small" label="GitHub App" />}
-                  {token.capability && <Chip size="small" label={token.capability} />}
+                  {token.capability && (
+                    <Chip size="small" label={token.capability} />
+                  )}
                   {(token.patterns || []).map((pattern) => (
-                    <Chip key={pattern} size="small" variant="outlined" label={pattern} />
+                    <Chip
+                      key={pattern}
+                      size="small"
+                      variant="outlined"
+                      label={pattern}
+                    />
                   ))}
-                  {!token.present && <Chip size="small" color="error" label="no credential file" />}
-                  {token.needsRestart && <Chip size="small" color="warning" label="restart needed" />}
+                  {!token.present && (
+                    <Chip
+                      size="small"
+                      color="error"
+                      label="no credential file"
+                    />
+                  )}
+                  {token.needsRestart && (
+                    <Chip size="small" color="warning" label="restart needed" />
+                  )}
                 </Box>
                 <Button
                   size="small"
                   variant="outlined"
                   aria-label={`delete ${token.name}`}
                   disabled={!token.present || (token.patterns || []).length > 0}
-                  title={(token.patterns || []).length > 0
-                    ? "credentials.json still maps a repo pattern to this credential -- remove that entry on the host first"
-                    : `delete ${token.name}`}
+                  title={
+                    (token.patterns || []).length > 0
+                      ? "credentials.json still maps a repo pattern to this credential -- remove that entry on the host first"
+                      : `delete ${token.name}`
+                  }
                   onClick={() => remove(token.name)}
                 >
                   Delete
@@ -122,11 +167,13 @@ export default function GitHubTokensSection({ showError }) {
               </li>
             ))}
           </ul>
-          {tokens.length === 0 && <p className="empty">No GitHub credentials configured.</p>}
+          {tokens.length === 0 && (
+            <p className="empty">No GitHub credentials configured.</p>
+          )}
           <form onSubmit={submit}>
             <TextField
               label="Token name"
-              helperText="letters, digits, - and _ -- becomes the capability &quot;GitHub token: &lt;name&gt;&quot;. An existing name replaces that token's value."
+              helperText='letters, digits, - and _ -- becomes the capability "GitHub token: &lt;name&gt;". An existing name replaces that token&apos;s value.'
               value={name}
               onChange={(evt) => setName(evt.target.value)}
               autoComplete="off"
@@ -148,7 +195,11 @@ export default function GitHubTokensSection({ showError }) {
               margin="normal"
             />
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-              <Button type="submit" variant="contained" disabled={name.trim() === "" || value === ""}>
+              <Button
+                type="submit"
+                variant="contained"
+                disabled={name.trim() === "" || value === ""}
+              >
                 Save token
               </Button>
             </Stack>

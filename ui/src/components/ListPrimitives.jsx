@@ -1,4 +1,11 @@
-import { FormControl, InputLabel, MenuItem, Select, TextField, Typography } from "@mui/material";
+import {
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  TextField,
+  Typography,
+} from "@mui/material";
 
 // ListHeader/ListToolbar/ListEmpty are the pieces TaskList, RepoList,
 // TemplatesList, and SchedulesList already agreed to share by convention
@@ -25,7 +32,13 @@ export function ListHeader({ title, count, action, icon, style }) {
   return (
     <div className="content-header" style={style}>
       {icon ? <span className="header-icon">{icon}</span> : null}
-      <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}>{title}</Typography>
+      <Typography
+        variant="h6"
+        component="h2"
+        sx={{ m: 0, fontSize: "1rem", fontWeight: 600 }}
+      >
+        {title}
+      </Typography>
       {count != null && <span className="count">{count}</span>}
       {action}
     </div>
@@ -63,7 +76,11 @@ export function ListSortSelect({ id, value, onChange, options }) {
         value={value}
         onChange={(e) => onChange(e.target.value)}
       >
-        {Object.entries(options).map(([key, { label }]) => <MenuItem key={key} value={key}>{label}</MenuItem>)}
+        {Object.entries(options).map(([key, { label }]) => (
+          <MenuItem key={key} value={key}>
+            {label}
+          </MenuItem>
+        ))}
       </Select>
     </FormControl>
   );
@@ -78,7 +95,14 @@ export function ListSortSelect({ id, value, onChange, options }) {
 // map, because a filter's values are read off whatever the list happens
 // to hold -- a repo name, a capability id, an author -- so the caller,
 // not an object literal's key order, decides what order they come in.
-export function ListFilterSelect({ id, label, anyLabel, value, onChange, options }) {
+export function ListFilterSelect({
+  id,
+  label,
+  anyLabel,
+  value,
+  onChange,
+  options,
+}) {
   const labelId = `${id}-label`;
   return (
     <FormControl size="small" sx={{ minWidth: 150 }}>
@@ -90,7 +114,11 @@ export function ListFilterSelect({ id, label, anyLabel, value, onChange, options
         onChange={(e) => onChange(e.target.value)}
       >
         <MenuItem value="">{anyLabel}</MenuItem>
-        {options.map((o) => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
+        {options.map((o) => (
+          <MenuItem key={o.value} value={o.value}>
+            {o.label}
+          </MenuItem>
+        ))}
       </Select>
     </FormControl>
   );

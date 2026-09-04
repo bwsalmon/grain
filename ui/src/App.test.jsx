@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
@@ -6,11 +12,32 @@ import api from "./api.js";
 
 vi.mock("./api.js", () => ({ default: vi.fn() }));
 
-const config = { defaultTarget: "acme/widgets", actor: "grain", capabilities: [], rebootEnabled: false };
+const config = {
+  defaultTarget: "acme/widgets",
+  actor: "grain",
+  capabilities: [],
+  rebootEnabled: false,
+};
 
 const initialTasks = [
-  { id: "1", title: "Fix bug", state: "queued", repo: "acme/widgets", blocked: false, capabilities: [], reads: [] },
-  { id: "2", title: "Add feature", state: "proposed", repo: "acme/other", blocked: false, capabilities: [], reads: [] },
+  {
+    id: "1",
+    title: "Fix bug",
+    state: "queued",
+    repo: "acme/widgets",
+    blocked: false,
+    capabilities: [],
+    reads: [],
+  },
+  {
+    id: "2",
+    title: "Add feature",
+    state: "proposed",
+    repo: "acme/other",
+    blocked: false,
+    capabilities: [],
+    reads: [],
+  },
 ];
 
 // metricsReport is the shape GET /api/metrics returns (pkg/ui's own
@@ -23,22 +50,56 @@ const metricsReport = {
   until: "2026-09-03T00:00:00Z",
   windowSeconds: 604800,
   throughput: {
-    tasksFiled: 2, tasksCompleted: 1, tasksClosed: 0, runsStarted: 2, runsFinished: 1,
-    filedPerDay: 0.3, completedPerDay: 0.1, runsFinishedPerDay: 0.1, buckets: [],
+    tasksFiled: 2,
+    tasksCompleted: 1,
+    tasksClosed: 0,
+    runsStarted: 2,
+    runsFinished: 1,
+    filedPerDay: 0.3,
+    completedPerDay: 0.1,
+    runsFinishedPerDay: 0.1,
+    buckets: [],
   },
-  latency: [{
-    stage: "lead_time", label: "filed -> completed", description: "the whole of what whoever filed the task waited",
-    n: 1, minSeconds: 60, p50Seconds: 60, p90Seconds: 60, p99Seconds: 60, maxSeconds: 60, meanSeconds: 60,
-  }],
-  runs: { outcomes: { succeeded: 1 }, attemptsPerCompletion: 1, meanConcurrent: 0.1, maxConcurrent: 3, utilization: 0.03, live: 0 },
-  backlog: { byState: { queued: 1, proposed: 1 }, queued: 1, oldestQueuedSeconds: 3600, oldestQueuedTaskId: "1" },
+  latency: [
+    {
+      stage: "lead_time",
+      label: "filed -> completed",
+      description: "the whole of what whoever filed the task waited",
+      n: 1,
+      minSeconds: 60,
+      p50Seconds: 60,
+      p90Seconds: 60,
+      p99Seconds: 60,
+      maxSeconds: 60,
+      meanSeconds: 60,
+    },
+  ],
+  runs: {
+    outcomes: { succeeded: 1 },
+    attemptsPerCompletion: 1,
+    meanConcurrent: 0.1,
+    maxConcurrent: 3,
+    utilization: 0.03,
+    live: 0,
+  },
+  backlog: {
+    byState: { queued: 1, proposed: 1 },
+    queued: 1,
+    oldestQueuedSeconds: 3600,
+    oldestQueuedTaskId: "1",
+  },
 };
 
 // setupApi wires a routing fake covering every endpoint App and the
 // overlays it can open touch, backed by a mutable task list so actions
 // that mutate (create, approve, ...) are reflected the next time the
 // list is refetched -- the same way the real store behaves.
-function setupApi(tasks = initialTasks, schedules = [], templates = [], suites = []) {
+function setupApi(
+  tasks = initialTasks,
+  schedules = [],
+  templates = [],
+  suites = [],
+) {
   let tasksState = [...tasks];
   let schedulesState = [...schedules];
   let templatesState = [...templates];
@@ -46,10 +107,19 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
   api.mockImplementation((path, opts) => {
     const method = opts?.method || "GET";
     if (path === "/api/config") return Promise.resolve(config);
-    if (path === "/api/tasks" && method === "GET") return Promise.resolve(tasksState);
+    if (path === "/api/tasks" && method === "GET")
+      return Promise.resolve(tasksState);
     if (path === "/api/tasks" && method === "POST") {
       const body = JSON.parse(opts.body);
-      const newTask = { id: "3", title: body.title, state: "proposed", repo: body.repo || "", blocked: false, capabilities: [], reads: [] };
+      const newTask = {
+        id: "3",
+        title: body.title,
+        state: "proposed",
+        repo: body.repo || "",
+        blocked: false,
+        capabilities: [],
+        reads: [],
+      };
       tasksState = [...tasksState, newTask];
       return Promise.resolve(newTask);
     }
@@ -64,26 +134,53 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
     const detailMatch = path.match(/^\/api\/tasks\/(\w+)$/);
     if (detailMatch) {
       const t = tasksState.find((t) => t.id === detailMatch[1]);
-      return Promise.resolve({ description: "", comments: [], capabilities: [], ...t });
+      return Promise.resolve({
+        description: "",
+        comments: [],
+        capabilities: [],
+        ...t,
+      });
     }
-    if (/^\/api\/tasks\/\w+\/(approve|submit|retry|close|reopen)$/.test(path)) return Promise.resolve({});
+    if (/^\/api\/tasks\/\w+\/(approve|submit|retry|close|reopen)$/.test(path))
+      return Promise.resolve({});
     if (path === "/api/secrets") return Promise.resolve({ enabled: false });
     if (path === "/api/settings") return Promise.resolve({ configured: false });
     // A repo's own page (RepoPage, grain/task-111) reads both of these
     // on landing.
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/branches$/.test(path) && method === "GET") return Promise.resolve([]);
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/capabilities$/.test(path) && method === "GET") {
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/branches$/.test(path) && method === "GET")
+      return Promise.resolve([]);
+    if (
+      /^\/api\/repos\/[^/]+\/[^/]+\/capabilities$/.test(path) &&
+      method === "GET"
+    ) {
       return Promise.resolve({
-        repo: "", defaultCapabilities: [], deploymentDefaultCapabilities: [], effectiveDefaultCapabilities: [],
+        repo: "",
+        defaultCapabilities: [],
+        deploymentDefaultCapabilities: [],
+        effectiveDefaultCapabilities: [],
       });
     }
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/releases$/.test(path)) return Promise.resolve([]);
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/releases\/[^/]+\/candidates$/.test(path)) return Promise.resolve([]);
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/releases$/.test(path))
+      return Promise.resolve([]);
+    if (/^\/api\/repos\/[^/]+\/[^/]+\/releases\/[^/]+\/candidates$/.test(path))
+      return Promise.resolve([]);
     if (/^\/api\/repos\/[^/]+\/[^/]+\/qualification-plan$/.test(path)) {
-      return Promise.resolve({ configured: false, repo: "", requireApproval: false, autoPromote: false, items: [] });
+      return Promise.resolve({
+        configured: false,
+        repo: "",
+        requireApproval: false,
+        autoPromote: false,
+        items: [],
+      });
     }
-    if (/^\/api\/repos\/[^/]+\/[^/]+\/candidates\/[^/]+\/qualification$/.test(path)) return Promise.resolve(null);
-    if (path === "/api/schedules" && method === "GET") return Promise.resolve(schedulesState);
+    if (
+      /^\/api\/repos\/[^/]+\/[^/]+\/candidates\/[^/]+\/qualification$/.test(
+        path,
+      )
+    )
+      return Promise.resolve(null);
+    if (path === "/api/schedules" && method === "GET")
+      return Promise.resolve(schedulesState);
     if (path === "/api/schedules" && method === "POST") {
       const body = JSON.parse(opts.body);
       // A templateId, given, drives title/description/etc the same way
@@ -93,13 +190,20 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
       // content a real server would hand back. Repo and base are never
       // among them (a template carries no target of its own), so they
       // always come from body, template or not.
-      const fromTemplate = body.templateId ? templatesState.find((t) => t.id === body.templateId) : null;
+      const fromTemplate = body.templateId
+        ? templatesState.find((t) => t.id === body.templateId)
+        : null;
       const newSchedule = {
-        id: "sched-2", enabled: true, nextRunAt: "2026-08-30T00:00:00Z",
+        id: "sched-2",
+        enabled: true,
+        nextRunAt: "2026-08-30T00:00:00Z",
         ...(fromTemplate && {
-          title: fromTemplate.title, description: fromTemplate.description,
-          autoMerge: fromTemplate.autoMerge, capabilities: fromTemplate.capabilities,
-          templateId: fromTemplate.id, templateName: fromTemplate.name,
+          title: fromTemplate.title,
+          description: fromTemplate.description,
+          autoMerge: fromTemplate.autoMerge,
+          capabilities: fromTemplate.capabilities,
+          templateId: fromTemplate.id,
+          templateName: fromTemplate.name,
         }),
         ...body,
       };
@@ -109,14 +213,19 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
     const scheduleMatch = path.match(/^\/api\/schedules\/([\w-]+)$/);
     if (scheduleMatch && method === "PATCH") {
       const body = JSON.parse(opts.body);
-      schedulesState = schedulesState.map((s) => (s.id === scheduleMatch[1] ? { ...s, ...body } : s));
-      return Promise.resolve(schedulesState.find((s) => s.id === scheduleMatch[1]));
+      schedulesState = schedulesState.map((s) =>
+        s.id === scheduleMatch[1] ? { ...s, ...body } : s,
+      );
+      return Promise.resolve(
+        schedulesState.find((s) => s.id === scheduleMatch[1]),
+      );
     }
     if (scheduleMatch && method === "DELETE") {
       schedulesState = schedulesState.filter((s) => s.id !== scheduleMatch[1]);
       return Promise.resolve(null);
     }
-    if (path === "/api/templates" && method === "GET") return Promise.resolve(templatesState);
+    if (path === "/api/templates" && method === "GET")
+      return Promise.resolve(templatesState);
     if (path === "/api/templates" && method === "POST") {
       const body = JSON.parse(opts.body);
       const newTemplate = { id: "template-2", capabilities: [], ...body };
@@ -126,8 +235,12 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
     const templateMatch = path.match(/^\/api\/templates\/([\w-]+)$/);
     if (templateMatch && method === "PATCH") {
       const body = JSON.parse(opts.body);
-      templatesState = templatesState.map((t) => (t.id === templateMatch[1] ? { ...t, ...body } : t));
-      return Promise.resolve(templatesState.find((t) => t.id === templateMatch[1]));
+      templatesState = templatesState.map((t) =>
+        t.id === templateMatch[1] ? { ...t, ...body } : t,
+      );
+      return Promise.resolve(
+        templatesState.find((t) => t.id === templateMatch[1]),
+      );
     }
     if (templateMatch && method === "DELETE") {
       templatesState = templatesState.filter((t) => t.id !== templateMatch[1]);
@@ -140,8 +253,10 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
     // fake's own null default instead would set App's suites state to
     // null, and Sidebar's `suites = []` parameter default only covers
     // undefined, so `suites.length` would take the whole app down.
-    if (path === "/api/suites" && method === "GET") return Promise.resolve(suitesState);
-    if (path === "/api/suite-runs" && method === "GET") return Promise.resolve([]);
+    if (path === "/api/suites" && method === "GET")
+      return Promise.resolve(suitesState);
+    if (path === "/api/suite-runs" && method === "GET")
+      return Promise.resolve([]);
     if (path === "/api/upgrade") return Promise.resolve({ enabled: false });
     if (path === "/api/logs") return Promise.resolve({ enabled: false });
     if (path === "/api/sandboxes") return Promise.resolve({ enabled: false });
@@ -149,9 +264,15 @@ function setupApi(tasks = initialTasks, schedules = [], templates = [], suites =
     return Promise.resolve(null);
   });
   return {
-    get tasksState() { return tasksState; },
-    get schedulesState() { return schedulesState; },
-    get templatesState() { return templatesState; },
+    get tasksState() {
+      return tasksState;
+    },
+    get schedulesState() {
+      return schedulesState;
+    },
+    get templatesState() {
+      return templatesState;
+    },
   };
 }
 
@@ -176,18 +297,25 @@ describe("App", () => {
     render(<App />);
 
     await screen.findByText("Fix bug");
-    expect(screen.queryByText(/reconcile loop has stopped/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/reconcile loop has stopped/i),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a banner when the deployment's reconciler has died (bwsalmon/agents#576)", async () => {
     setupApi();
     const realImpl = api.getMockImplementation();
     api.mockImplementation((path, opts) =>
-      (path === "/api/config" ? Promise.resolve({ ...config, reconcilerDown: true }) : realImpl(path, opts)));
+      path === "/api/config"
+        ? Promise.resolve({ ...config, reconcilerDown: true })
+        : realImpl(path, opts),
+    );
 
     render(<App />);
 
-    expect(await screen.findByText(/reconcile loop has stopped/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/reconcile loop has stopped/i),
+    ).toBeInTheDocument();
   });
 
   // grain/task-132: an operator opening grain during a provider's
@@ -203,11 +331,16 @@ describe("App", () => {
       secondsRemaining: 7200,
     };
     api.mockImplementation((path, opts) =>
-      (path === "/api/config" ? Promise.resolve({ ...config, agentPause }) : realImpl(path, opts)));
+      path === "/api/config"
+        ? Promise.resolve({ ...config, agentPause })
+        : realImpl(path, opts),
+    );
 
     render(<App />);
 
-    expect(await screen.findByText(/agent usage limit reached/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/agent usage limit reached/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/about 2h 0m/)).toBeInTheDocument();
   });
 
@@ -216,7 +349,9 @@ describe("App", () => {
     render(<App />);
 
     await screen.findByText("Fix bug");
-    expect(screen.queryByText(/agent usage limit reached/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/agent usage limit reached/i),
+    ).not.toBeInTheDocument();
   });
 
   // Both banners are pinned to the same strip, and a dead reconcile loop
@@ -226,14 +361,27 @@ describe("App", () => {
     setupApi();
     const realImpl = api.getMockImplementation();
     api.mockImplementation((path, opts) =>
-      (path === "/api/config"
-        ? Promise.resolve({ ...config, reconcilerDown: true, agentPause: { paused: true, until: "2026-09-03T17:00:00Z", secondsRemaining: 7200 } })
-        : realImpl(path, opts)));
+      path === "/api/config"
+        ? Promise.resolve({
+            ...config,
+            reconcilerDown: true,
+            agentPause: {
+              paused: true,
+              until: "2026-09-03T17:00:00Z",
+              secondsRemaining: 7200,
+            },
+          })
+        : realImpl(path, opts),
+    );
 
     render(<App />);
 
-    expect(await screen.findByText(/reconcile loop has stopped/i)).toBeInTheDocument();
-    expect(screen.queryByText(/agent usage limit reached/i)).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/reconcile loop has stopped/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/agent usage limit reached/i),
+    ).not.toBeInTheDocument();
   });
 
   // The banner's own "Resume now" -- an operator who has just topped a
@@ -244,13 +392,26 @@ describe("App", () => {
     let paused = true;
     api.mockImplementation((path, opts) => {
       if (path === "/api/config") {
-        return Promise.resolve(paused
-          ? { ...config, agentPause: { paused: true, until: "2026-09-03T17:00:00Z", secondsRemaining: 7200 } }
-          : config);
+        return Promise.resolve(
+          paused
+            ? {
+                ...config,
+                agentPause: {
+                  paused: true,
+                  until: "2026-09-03T17:00:00Z",
+                  secondsRemaining: 7200,
+                },
+              }
+            : config,
+        );
       }
       if (path === "/api/pause" && opts?.method === "DELETE") {
         paused = false;
-        return Promise.resolve({ enabled: true, lifted: true, pause: { paused: false } });
+        return Promise.resolve({
+          enabled: true,
+          lifted: true,
+          pause: { paused: false },
+        });
       }
       return realImpl(path, opts);
     });
@@ -259,8 +420,14 @@ describe("App", () => {
     await screen.findByText(/agent usage limit reached/i);
     fireEvent.click(screen.getByRole("button", { name: /resume now/i }));
 
-    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/pause", { method: "DELETE" }));
-    await waitFor(() => expect(screen.queryByText(/agent usage limit reached/i)).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith("/api/pause", { method: "DELETE" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/agent usage limit reached/i),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   // grain/task-69: the deployment's name in the tab strip, which is the
@@ -270,7 +437,10 @@ describe("App", () => {
     setupApi();
     const realImpl = api.getMockImplementation();
     api.mockImplementation((path, opts) =>
-      (path === "/api/config" ? Promise.resolve({ ...config, environmentName: "staging" }) : realImpl(path, opts)));
+      path === "/api/config"
+        ? Promise.resolve({ ...config, environmentName: "staging" })
+        : realImpl(path, opts),
+    );
 
     render(<App />);
 
@@ -289,14 +459,20 @@ describe("App", () => {
   it("shows a loading screen with the large mark until config loads (bwsalmon/agents#555)", async () => {
     setupApi();
     let resolveConfig;
-    const configPromise = new Promise((resolve) => { resolveConfig = resolve; });
+    const configPromise = new Promise((resolve) => {
+      resolveConfig = resolve;
+    });
     const realImpl = api.getMockImplementation();
-    api.mockImplementation((path, opts) => (path === "/api/config" ? configPromise : realImpl(path, opts)));
+    api.mockImplementation((path, opts) =>
+      path === "/api/config" ? configPromise : realImpl(path, opts),
+    );
 
     render(<App />);
 
     expect(screen.getByTitle("grain")).toHaveAttribute("width", "320");
-    expect(screen.queryByRole("button", { name: "+ New task" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "+ New task" }),
+    ).not.toBeInTheDocument();
 
     resolveConfig(config);
 
@@ -347,7 +523,8 @@ describe("App", () => {
     const inner = api.getMockImplementation();
     let newestFirst = false;
     api.mockImplementation((path, opts) => {
-      if (path === "/api/config") return Promise.resolve({ ...config, newestFirst });
+      if (path === "/api/config")
+        return Promise.resolve({ ...config, newestFirst });
       if (path === "/api/tasks" && opts?.method === "POST") {
         const body = JSON.parse(opts.body);
         if (typeof body.atFront === "boolean") newestFirst = body.atFront;
@@ -377,9 +554,14 @@ describe("App", () => {
 
     expect(await screen.findByText("config unavailable")).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(screen.queryByText("config unavailable")).not.toBeInTheDocument();
-    }, { timeout: 6000 });
+    await waitFor(
+      () => {
+        expect(
+          screen.queryByText("config unavailable"),
+        ).not.toBeInTheDocument();
+      },
+      { timeout: 6000 },
+    );
   }, 8000);
 
   it("selects a task, runs a batch approve, and clears the selection on success", async () => {
@@ -396,7 +578,9 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: "Approve" }));
 
     expect(await screen.findByText("Fix bug")).toBeInTheDocument();
-    expect(api).toHaveBeenCalledWith("/api/tasks/1/approve", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/tasks/1/approve", {
+      method: "POST",
+    });
     expect(screen.queryByText(/selected/)).not.toBeInTheDocument();
   });
 
@@ -405,7 +589,8 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    const titles = () => [...document.querySelectorAll(".task-title")].map((el) => el.textContent);
+    const titles = () =>
+      [...document.querySelectorAll(".task-title")].map((el) => el.textContent);
     expect(titles()).toEqual(["Fix bug", "Add feature"]);
 
     fireEvent.dragStart(screen.getByText("Add feature").closest("li"));
@@ -432,7 +617,9 @@ describe("App", () => {
 
     await user.click(screen.getByText("acme/other"));
 
-    expect(await screen.findByRole("heading", { name: "acme/other" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "acme/other" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Add feature")).toBeInTheDocument();
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
     expect(window.location.pathname).toBe("/repos/acme/other");
@@ -472,18 +659,34 @@ describe("App", () => {
     await user.click(await screen.findByText("acme/other"));
     await user.click(await screen.findByRole("button", { name: "Releases" }));
 
-    expect(await screen.findByRole("heading", { name: "acme/other releases" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Releases" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "acme/other releases" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Releases" }),
+    ).not.toBeInTheDocument();
     expect(window.location.pathname).toBe("/repos/acme/other/releases");
 
     await user.click(screen.getByRole("button", { name: /acme\/other$/ }));
 
-    expect(await screen.findByRole("heading", { name: "acme/other" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "acme/other" }),
+    ).toBeInTheDocument();
     expect(window.location.pathname).toBe("/repos/acme/other");
   });
 
   it("switches to the schedules pane, showing its own list and count in the sidebar", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = {
+      id: "sched-1",
+      title: "Nightly dependency bump",
+      description: "",
+      repo: "acme/widgets",
+      base: "",
+      autoMerge: false,
+      recurrence: { kind: "everyNHours", everyNHours: 24 },
+      enabled: true,
+      nextRunAt: "2026-08-29T00:00:00Z",
+    };
     setupApi(initialTasks, [schedule]);
     const user = userEvent.setup();
     render(<App />);
@@ -491,13 +694,25 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: /^Schedules/ }));
 
-    expect(await screen.findByRole("heading", { name: "Schedules" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Schedules" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Nightly dependency bump")).toBeInTheDocument();
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
 
   it("edits a schedule from the schedules pane", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = {
+      id: "sched-1",
+      title: "Nightly dependency bump",
+      description: "",
+      repo: "acme/widgets",
+      base: "",
+      autoMerge: false,
+      recurrence: { kind: "everyNHours", everyNHours: 24 },
+      enabled: true,
+      nextRunAt: "2026-08-29T00:00:00Z",
+    };
     setupApi(initialTasks, [schedule]);
     const user = userEvent.setup();
     render(<App />);
@@ -505,14 +720,18 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: /^Schedules/ }));
     await user.click(await screen.findByText("Nightly dependency bump"));
-    expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Edit schedule" }),
+    ).toBeInTheDocument();
 
     const titleField = screen.getByLabelText(/Title/);
     await user.clear(titleField);
     await user.type(titleField, "Weekly dependency bump");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(await screen.findByText("Weekly dependency bump")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Weekly dependency bump"),
+    ).toBeInTheDocument();
   });
 
   // grain/task-139: a schedule, a template and a suite are addressable
@@ -522,7 +741,17 @@ describe("App", () => {
   // link to one that never existed) is App's to correct, since App is
   // what holds the list the id has to be in.
   it("gives an open schedule its own URL, and clears it again on close", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = {
+      id: "sched-1",
+      title: "Nightly dependency bump",
+      description: "",
+      repo: "acme/widgets",
+      base: "",
+      autoMerge: false,
+      recurrence: { kind: "everyNHours", everyNHours: 24 },
+      enabled: true,
+      nextRunAt: "2026-08-29T00:00:00Z",
+    };
     setupApi(initialTasks, [schedule]);
     const user = userEvent.setup();
     render(<App />);
@@ -531,43 +760,80 @@ describe("App", () => {
     await user.click(screen.getByRole("button", { name: /^Schedules/ }));
     await user.click(await screen.findByText("Nightly dependency bump"));
 
-    expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Edit schedule" }),
+    ).toBeInTheDocument();
     expect(window.location.pathname).toBe("/schedules/sched-1");
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Edit schedule" }),
+    ).not.toBeInTheDocument();
     expect(window.location.pathname).toBe("/schedules");
   });
 
   it("opens the schedule /schedules/:id names on a fresh load", async () => {
-    const schedule = { id: "sched-1", title: "Nightly dependency bump", description: "", repo: "acme/widgets", base: "", autoMerge: false, recurrence: { kind: "everyNHours", everyNHours: 24 }, enabled: true, nextRunAt: "2026-08-29T00:00:00Z" };
+    const schedule = {
+      id: "sched-1",
+      title: "Nightly dependency bump",
+      description: "",
+      repo: "acme/widgets",
+      base: "",
+      autoMerge: false,
+      recurrence: { kind: "everyNHours", everyNHours: 24 },
+      enabled: true,
+      nextRunAt: "2026-08-29T00:00:00Z",
+    };
     window.history.replaceState(null, "", "/schedules/sched-1");
     setupApi(initialTasks, [schedule]);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
-    expect(screen.getByLabelText(/Title/)).toHaveValue("Nightly dependency bump");
+    expect(
+      await screen.findByRole("heading", { name: "Edit schedule" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/Title/)).toHaveValue(
+      "Nightly dependency bump",
+    );
     expect(window.location.pathname).toBe("/schedules/sched-1");
   });
 
   it("opens the template /templates/:id names on a fresh load", async () => {
-    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", autoMerge: false, capabilities: [] };
+    const template = {
+      id: "template-1",
+      name: "Dependency bump",
+      title: "Bump dependencies",
+      description: "",
+      autoMerge: false,
+      capabilities: [],
+    };
     window.history.replaceState(null, "", "/templates/template-1");
     setupApi(initialTasks, [], [template]);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Edit template" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Edit template" }),
+    ).toBeInTheDocument();
     expect(window.location.pathname).toBe("/templates/template-1");
   });
 
   it("opens the suite /suites/:id names on a fresh load", async () => {
-    const suite = { id: "suite-1", name: "Nightly sweep", items: [], mode: "until_clean", maxPasses: 5, requireApproval: false, autoMerge: true };
+    const suite = {
+      id: "suite-1",
+      name: "Nightly sweep",
+      items: [],
+      mode: "until_clean",
+      maxPasses: 5,
+      requireApproval: false,
+      autoMerge: true,
+    };
     window.history.replaceState(null, "", "/suites/suite-1");
     setupApi(initialTasks, [], [], [suite]);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Edit suite" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Edit suite" }),
+    ).toBeInTheDocument();
     expect(window.location.pathname).toBe("/suites/suite-1");
   });
 
@@ -576,15 +842,26 @@ describe("App", () => {
     setupApi(initialTasks, []);
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Schedules" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Schedules" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Edit schedule" }),
+    ).not.toBeInTheDocument();
     // The stale id is dropped once the list it named has landed, so the
     // address bar stops pointing at a pane that isn't open.
     await waitFor(() => expect(window.location.pathname).toBe("/schedules"));
   });
 
   it("switches to the templates pane, showing its own list and count in the sidebar", async () => {
-    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", autoMerge: false, capabilities: [] };
+    const template = {
+      id: "template-1",
+      name: "Dependency bump",
+      title: "Bump dependencies",
+      description: "",
+      autoMerge: false,
+      capabilities: [],
+    };
     setupApi(initialTasks, [], [template]);
     const user = userEvent.setup();
     render(<App />);
@@ -592,27 +869,42 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: /^Templates/ }));
 
-    expect(await screen.findByRole("heading", { name: "Templates" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Templates" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Dependency bump")).toBeInTheDocument();
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
 
   it("creates a schedule from a template, hiding the content fields", async () => {
-    const template = { id: "template-1", name: "Dependency bump", title: "Bump dependencies", description: "", autoMerge: false, capabilities: [] };
+    const template = {
+      id: "template-1",
+      name: "Dependency bump",
+      title: "Bump dependencies",
+      description: "",
+      autoMerge: false,
+      capabilities: [],
+    };
     setupApi(initialTasks, [], [template]);
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText("Fix bug");
 
     await user.click(screen.getByRole("button", { name: /^Schedules/ }));
-    await user.click(await screen.findByRole("button", { name: "+ New schedule" }));
+    await user.click(
+      await screen.findByRole("button", { name: "+ New schedule" }),
+    );
     await screen.findByRole("heading", { name: "New schedule" });
 
     await user.click(screen.getByLabelText("Template"));
-    await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Dependency bump" }),
+    );
 
     expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
-    expect(screen.getByText(/come from the selected template/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/come from the selected template/),
+    ).toBeInTheDocument();
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
 
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
@@ -632,7 +924,9 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: button }));
 
-    expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: heading }),
+    ).toBeInTheDocument();
   });
 
   // Upgrade is a tab inside Settings rather than a sidebar entry
@@ -646,20 +940,34 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    expect(screen.queryByRole("button", { name: "Secrets" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Upgrade" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Secrets" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Upgrade" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Settings" }),
+    ).toBeInTheDocument();
 
-    expect(screen.queryByRole("tab", { name: "Secrets" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Secrets" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Capabilities" }));
     expect(await screen.findByText("Other secrets")).toBeInTheDocument();
-    expect(screen.getByText(/this UI was not started with a local secrets directory/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /this UI was not started with a local secrets directory/i,
+      ),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
-    expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no -upgrade-src-dir configured/i),
+    ).toBeInTheDocument();
   });
 
   // bwsalmon/agents#640: Logs and Sandbox health live together on their
@@ -670,12 +978,18 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Logs" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sandbox health" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Debug" }));
 
-    expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no log sources configured/i),
+    ).toBeInTheDocument();
 
     // Sandbox health is a tab of that overlay, not a second pane rendered
     // beside Logs (bwsalmon/agents#640 split them) -- only the active
@@ -684,7 +998,9 @@ describe("App", () => {
     // tab" does.
     await user.click(screen.getByRole("tab", { name: "Sandbox health" }));
 
-    expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no sandbox pool or host stats configured/i),
+    ).toBeInTheDocument();
   });
 
   // grain/task-173: Metrics is a sidebar entry of its own rather than a
@@ -698,8 +1014,12 @@ describe("App", () => {
     await screen.findByText("Fix bug");
 
     await user.click(screen.getByRole("button", { name: "Debug" }));
-    expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: "Metrics" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/no log sources configured/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Metrics" }),
+    ).not.toBeInTheDocument();
   });
 
   // The metrics report's backlog names the oldest queued task, and the
@@ -716,7 +1036,9 @@ describe("App", () => {
     await user.click(await screen.findByRole("button", { name: "task 1" }));
 
     expect(await screen.findByText("1 Fix bug")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Metrics" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Metrics" }),
+    ).not.toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {
@@ -724,11 +1046,18 @@ describe("App", () => {
     render(<App />);
     await screen.findByText("Fix bug");
 
-    const callsBefore = api.mock.calls.filter((c) => c[0] === "/api/tasks").length;
+    const callsBefore = api.mock.calls.filter(
+      (c) => c[0] === "/api/tasks",
+    ).length;
 
-    await waitFor(() => {
-      const callsAfter = api.mock.calls.filter((c) => c[0] === "/api/tasks").length;
-      expect(callsAfter).toBeGreaterThan(callsBefore);
-    }, { timeout: 4000 });
+    await waitFor(
+      () => {
+        const callsAfter = api.mock.calls.filter(
+          (c) => c[0] === "/api/tasks",
+        ).length;
+        expect(callsAfter).toBeGreaterThan(callsBefore);
+      },
+      { timeout: 4000 },
+    );
   }, 6000);
 });

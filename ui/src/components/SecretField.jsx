@@ -59,7 +59,9 @@ export default function SecretField({ secret, showError, onChanged }) {
         fullWidth
         autoComplete="off"
         label={secret.name}
-        placeholder={secret.set ? "replace the stored value" : "paste a value to store"}
+        placeholder={
+          secret.set ? "replace the stored value" : "paste a value to store"
+        }
         helperText={`stored as ${secret.secret}/${secret.key} -- write-only, never shown or read back`}
         InputLabelProps={{ shrink: true }}
         inputProps={{ "aria-label": secret.name }}
@@ -112,10 +114,17 @@ export function SecretFields({ secrets, showError, onChanged }) {
   return (
     <>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-        {list.length === 1 ? "Credential this needs:" : "Credentials this needs:"}
+        {list.length === 1
+          ? "Credential this needs:"
+          : "Credentials this needs:"}
       </Typography>
       {list.map((s) => (
-        <SecretField key={s.name} secret={s} showError={showError} onChanged={onChanged} />
+        <SecretField
+          key={s.name}
+          secret={s}
+          showError={showError}
+          onChanged={onChanged}
+        />
       ))}
     </>
   );

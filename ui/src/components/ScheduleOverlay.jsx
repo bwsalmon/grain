@@ -1,11 +1,33 @@
 import { useState } from "react";
-import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import {
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  FormControl,
+  FormControlLabel,
+  InputLabel,
+  ListItemText,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
 import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
 import RepoField from "./RepoField.jsx";
 
-const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const WEEKDAYS = [
+  "sunday",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+];
 
 function capitalize(s) {
   return s[0].toUpperCase() + s.slice(1);
@@ -18,7 +40,13 @@ function capitalize(s) {
 // even render, and MUI's Select needs a controlled value either way --
 // ScheduleOverlay's submit handler reads them off the same state rather
 // than off the form.
-function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) {
+function RecurrenceFields({
+  defaultValue,
+  kind,
+  setKind,
+  weekday,
+  setWeekday,
+}) {
   return (
     <Box sx={{ mt: 1 }}>
       <FormControl fullWidth margin="normal" size="small">
@@ -68,7 +96,11 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
             value={weekday}
             onChange={(e) => setWeekday(e.target.value)}
           >
-            {WEEKDAYS.map((d) => <MenuItem key={d} value={d}>{capitalize(d)}</MenuItem>)}
+            {WEEKDAYS.map((d) => (
+              <MenuItem key={d} value={d}>
+                {capitalize(d)}
+              </MenuItem>
+            ))}
           </Select>
         </FormControl>
       )}
@@ -124,15 +156,28 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
 // It is offered on a new schedule only -- what a schedule fires is fixed
 // when it is created (ui.UpdateScheduleRequest's own doc comment on why),
 // though which suite a suite-backed one runs stays editable.
-export default function ScheduleOverlay({ schedule, repoOptions, templates = [], suites = [], config, onClose, onSaved, showError }) {
+export default function ScheduleOverlay({
+  schedule,
+  repoOptions,
+  templates = [],
+  suites = [],
+  config,
+  onClose,
+  onSaved,
+  showError,
+}) {
   const isNew = !schedule;
-  const [capabilities, setCapabilities] = useState(schedule?.capabilities || []);
+  const [capabilities, setCapabilities] = useState(
+    schedule?.capabilities || [],
+  );
   // reads is state for the reason capabilities is: its picker
   // (ReadOnlyReposField) is a search box, not a form field submit could
   // read the answer off.
   const [reads, setReads] = useState(schedule?.reads || []);
   const [kind, setKind] = useState(schedule?.recurrence?.kind || "everyNHours");
-  const [weekday, setWeekday] = useState(schedule?.recurrence?.weekday || "monday");
+  const [weekday, setWeekday] = useState(
+    schedule?.recurrence?.weekday || "monday",
+  );
   const [templateId, setTemplateId] = useState(schedule?.templateId || "");
   const [fires, setFires] = useState(schedule?.suiteId ? "suite" : "task");
   const [suiteId, setSuiteId] = useState(schedule?.suiteId || "");
@@ -155,7 +200,8 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
     } else {
       recurrence.timeOfDay = data.get("timeOfDay");
       if (kind === "weekly") recurrence.weekday = weekday;
-      if (kind === "monthly") recurrence.dayOfMonth = Number(data.get("dayOfMonth"));
+      if (kind === "monthly")
+        recurrence.dayOfMonth = Number(data.get("dayOfMonth"));
     }
 
     // Caught here rather than left to the API, which would read a blank
@@ -194,9 +240,15 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
 
     try {
       if (isNew) {
-        await api("/api/schedules", { method: "POST", body: JSON.stringify(payload) });
+        await api("/api/schedules", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
       } else {
-        await api(`/api/schedules/${schedule.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+        await api(`/api/schedules/${schedule.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
       }
       await onSaved();
       onClose();
@@ -219,7 +271,12 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
   };
 
   const remove = async () => {
-    if (!confirm(`Delete the schedule "${schedule.title}"? Tasks it already filed are not affected.`)) return;
+    if (
+      !confirm(
+        `Delete the schedule "${schedule.title}"? Tasks it already filed are not affected.`,
+      )
+    )
+      return;
     try {
       await api(`/api/schedules/${schedule.id}`, { method: "DELETE" });
       await onSaved();
@@ -231,7 +288,9 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
 
   return (
     <Overlay onClose={onClose} pane backLabel="Schedules">
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>{isNew ? "New schedule" : "Edit schedule"}</Typography>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>
+        {isNew ? "New schedule" : "Edit schedule"}
+      </Typography>
       <form className="pane-form" onSubmit={submit}>
         {isNew && (
           <FormControl fullWidth margin="normal" size="small">
@@ -257,7 +316,9 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
               onChange={(e) => setSuiteId(e.target.value)}
             >
               {suites.map((s) => (
-                <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>
+                <MenuItem key={s.id} value={s.id}>
+                  {s.name}
+                </MenuItem>
               ))}
             </Select>
           </FormControl>
@@ -272,30 +333,50 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
             >
               <MenuItem value="">None -- fill in the fields below</MenuItem>
               {templates.map((t) => (
-                <MenuItem key={t.id} value={t.id}>{t.name}</MenuItem>
+                <MenuItem key={t.id} value={t.id}>
+                  {t.name}
+                </MenuItem>
               ))}
             </Select>
           </FormControl>
         )}
         {boundTemplate ? (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2, mb: 1 }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mt: 2, mb: 1 }}
+          >
             Fires against {boundTemplate.repo}
-            {boundTemplate.base ? ` on ${boundTemplate.base}` : ""} -- the selected
-            template is bound to that repo, so this schedule does not choose one.
+            {boundTemplate.base ? ` on ${boundTemplate.base}` : ""} -- the
+            selected template is bound to that repo, so this schedule does not
+            choose one.
           </Typography>
         ) : (
           <>
             <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: "block", mb: 0.5 }}
+              >
                 Target repo <span className="hint">owner/name</span>
               </Typography>
-              <RepoField name="repo" options={repoOptions} defaultValue={schedule?.repo || ""} required />
+              <RepoField
+                name="repo"
+                options={repoOptions}
+                defaultValue={schedule?.repo || ""}
+                required
+              />
             </Box>
             <TextField
               name="base"
               label="Base branch"
               defaultValue={schedule?.base}
-              helperText={firesSuite ? "required: a suite run stacks its tasks against one branch" : "optional"}
+              helperText={
+                firesSuite
+                  ? "required: a suite run stacks its tasks against one branch"
+                  : "optional"
+              }
               placeholder="main"
               required={firesSuite}
               InputLabelProps={{ required: false }}
@@ -306,28 +387,64 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
           </>
         )}
         {firesSuite ? (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mt: 1, mb: 1 }}
+          >
             Every firing starts one run of the selected suite against this repo
             and branch -- the suite decides which tasks run, how many passes,
             and whether they need approval.
           </Typography>
         ) : templateId !== "" ? (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 1 }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mt: 1, mb: 1 }}
+          >
             Title, description, reads, capabilities and auto-merge all come from
             the selected template, and stay in sync with it.
           </Typography>
         ) : (
           <>
-            <TextField name="title" label="Title" defaultValue={schedule?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
-            <TextField name="description" label="Description" defaultValue={schedule?.description} multiline rows={4} fullWidth margin="normal" />
-            <ReadOnlyReposField options={repoOptions} value={reads} onChange={setReads} />
+            <TextField
+              name="title"
+              label="Title"
+              defaultValue={schedule?.title}
+              required
+              InputLabelProps={{ required: false }}
+              autoComplete="off"
+              fullWidth
+              margin="normal"
+            />
+            <TextField
+              name="description"
+              label="Description"
+              defaultValue={schedule?.description}
+              multiline
+              rows={4}
+              fullWidth
+              margin="normal"
+            />
+            <ReadOnlyReposField
+              options={repoOptions}
+              value={reads}
+              onChange={setReads}
+            />
             <FormControlLabel
-              control={<Checkbox name="autoMerge" defaultChecked={schedule?.autoMerge} />}
+              control={
+                <Checkbox
+                  name="autoMerge"
+                  defaultChecked={schedule?.autoMerge}
+                />
+              }
               label="Auto-merge once checks pass"
               sx={{ display: "flex", mt: 1 }}
             />
             <FormControl fullWidth margin="normal" size="small">
-              <InputLabel id="schedule-capabilities-label">Capabilities</InputLabel>
+              <InputLabel id="schedule-capabilities-label">
+                Capabilities
+              </InputLabel>
               <Select
                 labelId="schedule-capabilities-label"
                 label="Capabilities"
@@ -337,15 +454,22 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
                 renderValue={(selected) => (
                   <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
                     {selected.map((id) => {
-                      const c = (config?.capabilities || []).find((cap) => cap.id === id);
-                      return <Chip key={id} size="small" label={c ? c.name : id} />;
+                      const c = (config?.capabilities || []).find(
+                        (cap) => cap.id === id,
+                      );
+                      return (
+                        <Chip key={id} size="small" label={c ? c.name : id} />
+                      );
                     })}
                   </Box>
                 )}
               >
                 {(config?.capabilities || []).map((c) => (
                   <MenuItem key={c.id} value={c.id} title={c.description}>
-                    <Checkbox checked={capabilities.includes(c.id)} size="small" />
+                    <Checkbox
+                      checked={capabilities.includes(c.id)}
+                      size="small"
+                    />
                     <ListItemText primary={c.name} />
                   </MenuItem>
                 ))}
@@ -353,17 +477,34 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
             </FormControl>
           </>
         )}
-        <RecurrenceFields defaultValue={schedule?.recurrence} kind={kind} setKind={setKind} weekday={weekday} setWeekday={setWeekday} />
-        <Stack direction="row" justifyContent={isNew ? "flex-end" : "space-between"} alignItems="center" sx={{ mt: 2 }}>
+        <RecurrenceFields
+          defaultValue={schedule?.recurrence}
+          kind={kind}
+          setKind={setKind}
+          weekday={weekday}
+          setWeekday={setWeekday}
+        />
+        <Stack
+          direction="row"
+          justifyContent={isNew ? "flex-end" : "space-between"}
+          alignItems="center"
+          sx={{ mt: 2 }}
+        >
           {!isNew && (
             <Stack direction="row" spacing={1}>
-              <Button color="error" onClick={remove}>Delete</Button>
-              <Button onClick={toggleEnabled}>{schedule.enabled ? "Pause" : "Resume"}</Button>
+              <Button color="error" onClick={remove}>
+                Delete
+              </Button>
+              <Button onClick={toggleEnabled}>
+                {schedule.enabled ? "Pause" : "Resume"}
+              </Button>
             </Stack>
           )}
           <Stack direction="row" spacing={1}>
             <Button onClick={onClose}>Cancel</Button>
-            <Button type="submit" variant="contained">{isNew ? "Add schedule" : "Save"}</Button>
+            <Button type="submit" variant="contained">
+              {isNew ? "Add schedule" : "Save"}
+            </Button>
           </Stack>
         </Stack>
       </form>

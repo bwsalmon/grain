@@ -1,16 +1,50 @@
 import { useRef, useState } from "react";
-import { Accordion, AccordionDetails, AccordionSummary, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, FormHelperText, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  FormControl,
+  FormControlLabel,
+  FormHelperText,
+  InputLabel,
+  ListItemText,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Tooltip,
+  Typography,
+} from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { capabilityUnavailableHint, defaultCapabilitiesFor, frameworkLabel, knownRepos, lastBaseForRepo, suggestsBase } from "../state.js";
+import {
+  capabilityUnavailableHint,
+  defaultCapabilitiesFor,
+  frameworkLabel,
+  knownRepos,
+  lastBaseForRepo,
+  suggestsBase,
+} from "../state.js";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
 import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
 import RepoField from "./RepoField.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
-export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, onCreated, onOpenTask, showError }) {
+export default function NewTaskOverlay({
+  tasks,
+  config,
+  defaultRepo,
+  onClose,
+  onCreated,
+  onOpenTask,
+  showError,
+}) {
   const formRef = useRef(null);
   const repoOptions = knownRepos(config, tasks);
   // title and repo are lifted to state, unlike most of this form's other
@@ -32,7 +66,9 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // form, so picking a repo (below) can prefill it from
   // lastBaseForRepo without fighting an uncontrolled <input>'s own
   // defaultValue (bwsalmon/agents#641).
-  const [base, setBase] = useState(() => lastBaseForRepo(tasks, defaultRepo || ""));
+  const [base, setBase] = useState(() =>
+    lastBaseForRepo(tasks, defaultRepo || ""),
+  );
   // baseEdited tracks whether the human has typed into Base branch
   // themselves, so handleRepoChange's prefill (below) never clobbers a
   // value they already chose -- only ever a prefill from a previous repo
@@ -57,7 +93,9 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // Create is clicked is exactly what the task is filed with; the server
   // only falls back to its own defaults for a caller that names no list
   // at all (ui.CreateTaskRequest.Capabilities).
-  const [capabilities, setCapabilities] = useState(() => defaultCapabilitiesFor(config, defaultRepo || ""));
+  const [capabilities, setCapabilities] = useState(() =>
+    defaultCapabilitiesFor(config, defaultRepo || ""),
+  );
   // capabilitiesEdited is Base branch's baseEdited above, for the same
   // reason: picking a different repo re-seeds this picker from that
   // repo's own defaults, and must not do so over a choice somebody has
@@ -103,14 +141,19 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
     // alone, which is a real answer rather than the absence of one, and
     // leaving the previous repo's extra capabilities ticked would file
     // the task with capabilities this repo never asked for.
-    if (!capabilitiesEdited.current) setCapabilities(defaultCapabilitiesFor(config, r));
+    if (!capabilitiesEdited.current)
+      setCapabilities(defaultCapabilitiesFor(config, r));
     if (baseEdited.current) return;
-    const hasHistory = (tasks || []).some((t) => t.repo === r && suggestsBase(t));
+    const hasHistory = (tasks || []).some(
+      (t) => t.repo === r && suggestsBase(t),
+    );
     if (hasHistory) setBase(lastBaseForRepo(tasks, r));
   };
 
   const addDependency = (t) => {
-    setDependsOn((prev) => (prev.some((p) => p.id === t.id) ? prev : [...prev, t]));
+    setDependsOn((prev) =>
+      prev.some((p) => p.id === t.id) ? prev : [...prev, t],
+    );
   };
   const removeDependency = (id) => {
     setDependsOn((prev) => prev.filter((p) => p.id !== id));
@@ -123,7 +166,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
     const payload = {
       title: data.get("title"),
       description: data.get("description") || "",
-      repo: noRepo ? "" : (data.get("repo") || ""),
+      repo: noRepo ? "" : data.get("repo") || "",
       noRepo,
       base: data.get("base") || "",
       autoMerge: form.elements.autoMerge.checked,
@@ -152,10 +195,15 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       // checkbox), so there is no end to pick and nothing about it worth
       // remembering for the next task.
       ...(interactive ? {} : { atFront }),
-      attachments: await Promise.all(attachments.map((f) => fileToAttachment(f))),
+      attachments: await Promise.all(
+        attachments.map((f) => fileToAttachment(f)),
+      ),
     };
     try {
-      const task = await api("/api/tasks", { method: "POST", body: JSON.stringify(payload) });
+      const task = await api("/api/tasks", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
       form.reset();
       setTitle("");
       setRepo(defaultRepo || "");
@@ -183,7 +231,9 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
 
   return (
     <Overlay onClose={onClose}>
-      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>New task</Typography>
+      <Typography variant="h6" component="h2" sx={{ mt: 0 }}>
+        New task
+      </Typography>
       <form ref={formRef} onSubmit={submit}>
         <TextField
           name="title"
@@ -196,11 +246,22 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
-        <TextField name="description" label="Description" multiline rows={5} fullWidth margin="normal" />
+        <TextField
+          name="description"
+          label="Description"
+          multiline
+          rows={5}
+          fullWidth
+          margin="normal"
+        />
         <AttachmentPicker files={attachments} onChange={setAttachments} />
         <Box sx={{ mt: 2, mb: 1 }}>
           <Box component="label" sx={{ display: "block", mb: 0.5 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: "block", mb: 0.5 }}
+            >
               Target repo <span className="hint">owner/name, required</span>
             </Typography>
             {/* Pre-filled from the repo the "+ New task" button was
@@ -210,7 +271,12 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
                 checked, so its <select>/<input> never submits a stray
                 value alongside noRepo. */}
             {!noRepo && (
-              <RepoField name="repo" options={repoOptions} defaultValue={defaultRepo || ""} onChange={handleRepoChange} />
+              <RepoField
+                name="repo"
+                options={repoOptions}
+                defaultValue={defaultRepo || ""}
+                onChange={handleRepoChange}
+              />
             )}
           </Box>
           <FormControlLabel
@@ -225,7 +291,8 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
                   // resolve, so it starts with the deployment's set
                   // alone -- the same answer CreateTask gives a task
                   // whose Target is nil.
-                  if (!capabilitiesEdited.current) setCapabilities(defaultCapabilitiesFor(config, ""));
+                  if (!capabilitiesEdited.current)
+                    setCapabilities(defaultCapabilitiesFor(config, ""));
                 }}
               />
             }
@@ -242,11 +309,23 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           fullWidth
           margin="normal"
           value={base}
-          onChange={(e) => { baseEdited.current = true; setBase(e.target.value); }}
+          onChange={(e) => {
+            baseEdited.current = true;
+            setBase(e.target.value);
+          }}
         />
-        <ReadOnlyReposField options={repoOptions} value={reads} onChange={setReads} />
+        <ReadOnlyReposField
+          options={repoOptions}
+          value={reads}
+          onChange={setReads}
+        />
         <FormControlLabel
-          control={<Checkbox name="autoMerge" defaultChecked={!!config?.autoMergeByDefault} />}
+          control={
+            <Checkbox
+              name="autoMerge"
+              defaultChecked={!!config?.autoMergeByDefault}
+            />
+          }
           label="Auto-merge once checks pass"
           sx={{ display: "flex", mt: 1 }}
         />
@@ -257,11 +336,16 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             label="Capabilities"
             multiple
             value={capabilities}
-            onChange={(e) => { capabilitiesEdited.current = true; setCapabilities(e.target.value); }}
+            onChange={(e) => {
+              capabilitiesEdited.current = true;
+              setCapabilities(e.target.value);
+            }}
             renderValue={(selected) => (
               <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
                 {selected.map((id) => {
-                  const c = (config?.capabilities || []).find((cap) => cap.id === id);
+                  const c = (config?.capabilities || []).find(
+                    (cap) => cap.id === id,
+                  );
                   return <Chip key={id} size="small" label={c ? c.name : id} />;
                 })}
               </Box>
@@ -270,8 +354,19 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             {(config?.capabilities || []).map((c) => {
               const unavailable = capabilityUnavailableHint(c);
               return (
-                <MenuItem key={c.id} value={c.id} title={unavailable ? `${c.description}\n\n${unavailable}` : c.description}>
-                  <Checkbox checked={capabilities.includes(c.id)} size="small" />
+                <MenuItem
+                  key={c.id}
+                  value={c.id}
+                  title={
+                    unavailable
+                      ? `${c.description}\n\n${unavailable}`
+                      : c.description
+                  }
+                >
+                  <Checkbox
+                    checked={capabilities.includes(c.id)}
+                    size="small"
+                  />
                   <ListItemText
                     primary={c.name}
                     secondary={unavailable || null}
@@ -283,14 +378,17 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           </Select>
           {defaultCapabilitiesFor(config, noRepo ? "" : repo).length > 0 && (
             <FormHelperText>
-              Pre-ticked ones are the defaults for this repo -- this deployment&apos;s (Settings &gt;
-              Capabilities) plus anything the repo itself adds (Repos &gt; Capabilities). Untick any this task
+              Pre-ticked ones are the defaults for this repo -- this
+              deployment&apos;s (Settings &gt; Capabilities) plus anything the
+              repo itself adds (Repos &gt; Capabilities). Untick any this task
               should not have.
             </FormHelperText>
           )}
         </FormControl>
         <fieldset>
-          <legend>Depends on <span className="hint">optional</span></legend>
+          <legend>
+            Depends on <span className="hint">optional</span>
+          </legend>
           {dependsOn.length > 0 && (
             // One full-width chip per line, the shape DetailOverlay's
             // dependency list uses: a picked task then reads as a row,
@@ -298,12 +396,27 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
             // happens to be, wrapped in beside the others.
             <Stack spacing={0.6} sx={{ mb: 1 }}>
               {dependsOn.map((t) => (
-                <Tooltip key={t.id} title={`${t.id} ${t.title}`} placement="left">
+                <Tooltip
+                  key={t.id}
+                  title={`${t.id} ${t.title}`}
+                  placement="left"
+                >
                   <Chip
                     label={`${t.id} ${t.title}`}
                     onDelete={() => removeDependency(t.id)}
-                    deleteIcon={<span title={`Remove dependency on ${t.id}`}>×</span>}
-                    sx={{ width: "100%", justifyContent: "space-between", "& .MuiChip-label": { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" } }}
+                    deleteIcon={
+                      <span title={`Remove dependency on ${t.id}`}>×</span>
+                    }
+                    sx={{
+                      width: "100%",
+                      justifyContent: "space-between",
+                      "& .MuiChip-label": {
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      },
+                    }}
                   />
                 </Tooltip>
               ))}
@@ -317,12 +430,21 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           />
         </fieldset>
         <Accordion disableGutters sx={{ mt: 2 }}>
-          <AccordionSummary expandIcon={<ExpandMoreIcon />} aria-controls="new-task-advanced-content" id="new-task-advanced-header">
+          <AccordionSummary
+            expandIcon={<ExpandMoreIcon />}
+            aria-controls="new-task-advanced-content"
+            id="new-task-advanced-header"
+          >
             <Typography>Advanced options</Typography>
           </AccordionSummary>
           <AccordionDetails>
             <FormControlLabel
-              control={<Checkbox checked={interactive} onChange={(e) => setInteractive(e.target.checked)} />}
+              control={
+                <Checkbox
+                  checked={interactive}
+                  onChange={(e) => setInteractive(e.target.checked)}
+                />
+              }
               label="Interactive session (open a live chat here instead of running in the background)"
               sx={{ display: "flex" }}
             />
@@ -367,12 +489,22 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               size="small"
             />
             {config?.promptExtension && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 2, whiteSpace: "pre-wrap" }}>
-                Deployment-wide, used when the box above is empty: {config.promptExtension}
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: "block", mb: 2, whiteSpace: "pre-wrap" }}
+              >
+                Deployment-wide, used when the box above is empty:{" "}
+                {config.promptExtension}
               </Typography>
             )}
             <fieldset>
-              <legend>Sandbox shape override <span className="hint">optional, kontur-managed deployments only</span></legend>
+              <legend>
+                Sandbox shape override{" "}
+                <span className="hint">
+                  optional, kontur-managed deployments only
+                </span>
+              </legend>
               <TextField
                 name="sandboxCpus"
                 label="vCPUs"
@@ -410,13 +542,22 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           </AccordionDetails>
         </Accordion>
         {interactive ? (
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", mt: 1 }}
+          >
             Interactive sessions always queue immediately, ahead of the backlog.
           </Typography>
         ) : (
           <>
             <FormControlLabel
-              control={<Checkbox name="approved" defaultChecked={!!config?.approvedByDefault} />}
+              control={
+                <Checkbox
+                  name="approved"
+                  defaultChecked={!!config?.approvedByDefault}
+                />
+              }
               label="Queue immediately (unchecked files it as a proposal, needing approval)"
               sx={{ display: "flex", mt: 1 }}
             />
@@ -436,13 +577,21 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
               margin="normal"
               size="small"
             >
-              <MenuItem value="end">End -- runs after everything already queued</MenuItem>
-              <MenuItem value="front">Front -- runs next, ahead of everything already queued</MenuItem>
+              <MenuItem value="end">
+                End -- runs after everything already queued
+              </MenuItem>
+              <MenuItem value="front">
+                Front -- runs next, ahead of everything already queued
+              </MenuItem>
             </TextField>
           </>
         )}
         <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-          <Button type="submit" variant="contained" disabled={!title.trim() || (!noRepo && !repo.trim())}>
+          <Button
+            type="submit"
+            variant="contained"
+            disabled={!title.trim() || (!noRepo && !repo.trim())}
+          >
             Create task
           </Button>
         </Stack>

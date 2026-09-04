@@ -30,7 +30,13 @@ const noop = () => {};
 // clicking a row still opens the pane the way it does in the app.
 function ControlledSchedulesList(props) {
   const [openScheduleId, setOpenScheduleId] = useState(null);
-  return <SchedulesList openScheduleId={openScheduleId} onOpenSchedule={setOpenScheduleId} {...props} />;
+  return (
+    <SchedulesList
+      openScheduleId={openScheduleId}
+      onOpenSchedule={setOpenScheduleId}
+      {...props}
+    />
+  );
 }
 
 // The body api was last called with, parsed rather than compared as a
@@ -48,7 +54,14 @@ describe("SchedulesList", () => {
   });
 
   it("lists the schedules it is given, showing just their key details", () => {
-    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     expect(screen.getByText("Nightly dependency bump")).toBeInTheDocument();
     expect(screen.getByText("acme/widgets")).toBeInTheDocument();
@@ -64,18 +77,46 @@ describe("SchedulesList", () => {
   // the heading's accessible name.
   it("heads the page with the schedules glyph, without renaming the heading", () => {
     const { container } = render(
-      <ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />,
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
     );
 
-    expect(container.querySelector('svg[data-glyph="schedules"]')).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Schedules" })).toBeInTheDocument();
+    expect(
+      container.querySelector('svg[data-glyph="schedules"]'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Schedules" }),
+    ).toBeInTheDocument();
   });
 
   it("describes daily, weekly and monthly recurrences", () => {
-    const daily = { ...schedule, id: "sched-daily", recurrence: { kind: "daily", timeOfDay: "09:00" } };
-    const weekly = { ...schedule, id: "sched-weekly", recurrence: { kind: "weekly", timeOfDay: "14:30", weekday: "friday" } };
-    const monthly = { ...schedule, id: "sched-monthly", recurrence: { kind: "monthly", timeOfDay: "00:00", dayOfMonth: 31 } };
-    render(<ControlledSchedulesList schedules={[daily, weekly, monthly]} tasks={[]} onRefresh={noop} showError={noop} />);
+    const daily = {
+      ...schedule,
+      id: "sched-daily",
+      recurrence: { kind: "daily", timeOfDay: "09:00" },
+    };
+    const weekly = {
+      ...schedule,
+      id: "sched-weekly",
+      recurrence: { kind: "weekly", timeOfDay: "14:30", weekday: "friday" },
+    };
+    const monthly = {
+      ...schedule,
+      id: "sched-monthly",
+      recurrence: { kind: "monthly", timeOfDay: "00:00", dayOfMonth: 31 },
+    };
+    render(
+      <ControlledSchedulesList
+        schedules={[daily, weekly, monthly]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     expect(screen.getByText("daily at 09:00")).toBeInTheDocument();
     expect(screen.getByText("Fridays at 14:30")).toBeInTheDocument();
@@ -83,53 +124,104 @@ describe("SchedulesList", () => {
   });
 
   it("shows a Paused chip for a disabled schedule", () => {
-    render(<ControlledSchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[{ ...schedule, enabled: false }]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     expect(screen.getByText("Paused")).toBeInTheDocument();
   });
 
   it("shows an empty message when there are none", () => {
-    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     expect(screen.getByText("No schedules yet.")).toBeInTheDocument();
     // Nothing to search or sort when the list is empty.
-    expect(screen.queryByPlaceholderText("Search schedules…")).not.toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("Search schedules…"),
+    ).not.toBeInTheDocument();
   });
 
   it("filters the list by title or repo", async () => {
-    const other = { ...schedule, id: "sched-2", title: "Weekly digest", repo: "acme/other" };
+    const other = {
+      ...schedule,
+      id: "sched-2",
+      title: "Weekly digest",
+      repo: "acme/other",
+    };
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[schedule, other]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule, other]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.type(screen.getByPlaceholderText("Search schedules…"), "digest");
 
     expect(screen.getByText("Weekly digest")).toBeInTheDocument();
-    expect(screen.queryByText("Nightly dependency bump")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Nightly dependency bump"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a message when a search matches nothing", async () => {
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.type(screen.getByPlaceholderText("Search schedules…"), "nope");
 
-    expect(screen.getByText("No schedules match your search.")).toBeInTheDocument();
+    expect(
+      screen.getByText("No schedules match your search."),
+    ).toBeInTheDocument();
   });
 
   it("opens a blank overlay from the + button and submits a new schedule, defaulting to every 24 hours", async () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        tasks={[]}
+        onRefresh={onRefresh}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
-    expect(screen.getByRole("heading", { name: "New schedule" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "New schedule" }),
+    ).toBeInTheDocument();
 
     await user.type(screen.getByLabelText(/Title/), "Nightly dependency bump");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
-    expect(api).toHaveBeenCalledWith("/api/schedules", expect.objectContaining({ method: "POST" }));
+    expect(api).toHaveBeenCalledWith(
+      "/api/schedules",
+      expect.objectContaining({ method: "POST" }),
+    );
     expect(lastBody()).toEqual({
       templateId: "",
       recurrence: { kind: "everyNHours", everyNHours: 24 },
@@ -142,19 +234,30 @@ describe("SchedulesList", () => {
       capabilities: [],
     });
     expect(onRefresh).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "New schedule" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "New schedule" }),
+    ).not.toBeInTheDocument();
   });
 
   it("submits a daily recurrence with the chosen time", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Morning report");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByLabelText("Repeat"));
-    await user.click(await screen.findByRole("option", { name: "Daily, at a time" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Daily, at a time" }),
+    );
     const timeField = screen.getByLabelText(/Time \(UTC\)/);
     await user.clear(timeField);
     await user.type(timeField, "07:15");
@@ -167,13 +270,22 @@ describe("SchedulesList", () => {
   it("submits a weekly recurrence with the chosen day and time", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Weekly digest");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByLabelText("Repeat"));
-    await user.click(await screen.findByRole("option", { name: "Weekly, on a day and time" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Weekly, on a day and time" }),
+    );
     await user.click(screen.getByLabelText("Day of week"));
     await user.click(await screen.findByRole("option", { name: "Friday" }));
     const timeField = screen.getByLabelText(/Time \(UTC\)/);
@@ -182,26 +294,43 @@ describe("SchedulesList", () => {
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
-    expect(payload.recurrence).toEqual({ kind: "weekly", timeOfDay: "16:00", weekday: "friday" });
+    expect(payload.recurrence).toEqual({
+      kind: "weekly",
+      timeOfDay: "16:00",
+      weekday: "friday",
+    });
   });
 
   it("submits a monthly recurrence with the chosen day of month and time", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Monthly cleanup");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByLabelText("Repeat"));
-    await user.click(await screen.findByRole("option", { name: "Monthly, on a day and time" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Monthly, on a day and time" }),
+    );
     const dayField = screen.getByLabelText(/Day of month/);
     await user.clear(dayField);
     await user.type(dayField, "31");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
-    expect(payload.recurrence).toEqual({ kind: "monthly", timeOfDay: "09:00", dayOfMonth: 31 });
+    expect(payload.recurrence).toEqual({
+      kind: "monthly",
+      timeOfDay: "09:00",
+      dayOfMonth: 31,
+    });
   });
 
   // grain/task-241: the read-only repos box is a picker over the repos
@@ -213,7 +342,15 @@ describe("SchedulesList", () => {
     const withReads = { ...schedule, reads: ["owner/schema"] };
     const config = { targetRepos: ["acme/widgets", "owner/shared-lib"] };
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[withReads]} config={config} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[withReads]}
+        config={config}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
     expect(screen.getByTitle("Remove owner/schema")).toBeInTheDocument();
@@ -221,7 +358,9 @@ describe("SchedulesList", () => {
     await user.click(screen.getByLabelText(/Read-only repos/));
     // By role, not by text: the target repo's own dropdown is offering
     // the same repos as <option>s a few fields up.
-    await user.click(await screen.findByRole("menuitem", { name: "owner/shared-lib" }));
+    await user.click(
+      await screen.findByRole("menuitem", { name: "owner/shared-lib" }),
+    );
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(lastBody().reads).toEqual(["owner/schema", "owner/shared-lib"]);
@@ -232,14 +371,30 @@ describe("SchedulesList", () => {
   // reach the schedule rather than being dropped at submit.
   it("takes a read-only repo typed straight into the box, and includes checked capabilities", async () => {
     api.mockResolvedValueOnce({});
-    const config = { capabilities: [{ id: "gemini-key", name: "Gemini key" }, { id: "self-debug", name: "Self debug" }] };
+    const config = {
+      capabilities: [
+        { id: "gemini-key", name: "Gemini key" },
+        { id: "self-debug", name: "Self debug" },
+      ],
+    };
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} config={config} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        config={config}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
-    await user.type(screen.getByLabelText(/Read-only repos/), "owner/shared-lib");
+    await user.type(
+      screen.getByLabelText(/Read-only repos/),
+      "owner/shared-lib",
+    );
     await user.click(screen.getByLabelText("Capabilities"));
     await user.click(await screen.findByRole("option", { name: "Gemini key" }));
     await user.keyboard("{Escape}");
@@ -254,22 +409,42 @@ describe("SchedulesList", () => {
   // the same as opening a task, a template or a suite.
   it("opens a schedule as a full pane", async () => {
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
 
-    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
-    expect(document.querySelector(".overlay-pane .pane-form")).toBeInTheDocument();
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass(
+      "MuiDialog-paperFullScreen",
+    );
+    expect(
+      document.querySelector(".overlay-pane .pane-form"),
+    ).toBeInTheDocument();
   });
 
   it("opens a row's overlay pre-filled and saves changes via PATCH", async () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={onRefresh}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
-    expect(screen.getByRole("heading", { name: "Edit schedule" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Edit schedule" }),
+    ).toBeInTheDocument();
 
     const titleField = screen.getByLabelText(/Title/);
     expect(titleField).toHaveValue("Nightly dependency bump");
@@ -278,7 +453,10 @@ describe("SchedulesList", () => {
     await user.type(titleField, "Weekly dependency bump");
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", expect.objectContaining({ method: "PATCH" }));
+    expect(api).toHaveBeenCalledWith(
+      "/api/schedules/sched-1",
+      expect.objectContaining({ method: "PATCH" }),
+    );
     expect(lastBody()).toEqual({
       templateId: "",
       recurrence: { kind: "everyNHours", everyNHours: 24 },
@@ -291,19 +469,30 @@ describe("SchedulesList", () => {
       capabilities: [],
     });
     expect(onRefresh).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Edit schedule" }),
+    ).not.toBeInTheDocument();
   });
 
   it("cancels an edit without saving", async () => {
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
     expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Save" }),
+    ).not.toBeInTheDocument();
     expect(api).not.toHaveBeenCalled();
   });
 
@@ -311,7 +500,14 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={onRefresh}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
     await user.click(screen.getByRole("button", { name: "Pause" }));
@@ -321,12 +517,21 @@ describe("SchedulesList", () => {
       body: JSON.stringify({ enabled: false }),
     });
     expect(onRefresh).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "Edit schedule" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Edit schedule" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows Resume as the pause/resume action for a disabled schedule", async () => {
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[{ ...schedule, enabled: false }]} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[{ ...schedule, enabled: false }]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
 
@@ -338,12 +543,21 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[schedule]} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[schedule]}
+        tasks={[]}
+        onRefresh={onRefresh}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
     await user.click(screen.getByRole("button", { name: "Delete" }));
 
-    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", { method: "DELETE" });
+    expect(api).toHaveBeenCalledWith("/api/schedules/sched-1", {
+      method: "DELETE",
+    });
     expect(onRefresh).toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
@@ -353,11 +567,22 @@ describe("SchedulesList", () => {
     const config = { targetRepos: ["acme/widgets", "acme/other"] };
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} config={config} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        config={config}
+        tasks={[]}
+        onRefresh={onRefresh}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Nightly dependency bump");
-    await user.selectOptions(screen.getByLabelText(/Target repo/), "acme/other");
+    await user.selectOptions(
+      screen.getByLabelText(/Target repo/),
+      "acme/other",
+    );
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
@@ -368,11 +593,21 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const templates = [{ id: "template-1", name: "Dependency bump" }];
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        templates={templates}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Template"));
-    await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Dependency bump" }),
+    );
 
     expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
     // Repo and base are not among an unbound template's own content, so
@@ -395,17 +630,36 @@ describe("SchedulesList", () => {
   // where this schedule will fire instead.
   it("replaces repo/base with the binding when the chosen template is bound", async () => {
     api.mockResolvedValueOnce({});
-    const templates = [{ id: "template-1", name: "Dependency bump", repo: "acme/widgets", base: "release" }];
+    const templates = [
+      {
+        id: "template-1",
+        name: "Dependency bump",
+        repo: "acme/widgets",
+        base: "release",
+      },
+    ];
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        templates={templates}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Template"));
-    await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Dependency bump" }),
+    );
 
     expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText(/Base branch/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Fires against acme\/widgets on release/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Fires against acme\/widgets on release/),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
@@ -420,9 +674,21 @@ describe("SchedulesList", () => {
   it("pre-fills the template select when editing a template-backed schedule, and can detach from it", async () => {
     api.mockResolvedValueOnce({});
     const templates = [{ id: "template-1", name: "Dependency bump" }];
-    const templateBacked = { ...schedule, templateId: "template-1", templateName: "Dependency bump" };
+    const templateBacked = {
+      ...schedule,
+      templateId: "template-1",
+      templateName: "Dependency bump",
+    };
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[templateBacked]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[templateBacked]}
+        templates={templates}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Nightly dependency bump"));
     const templateSelect = screen.getByLabelText("Template");
@@ -430,8 +696,14 @@ describe("SchedulesList", () => {
     expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
 
     await user.click(templateSelect);
-    await user.click(await screen.findByRole("option", { name: "None -- fill in the fields below" }));
-    expect(screen.getByLabelText(/^Title/)).toHaveValue("Nightly dependency bump");
+    await user.click(
+      await screen.findByRole("option", {
+        name: "None -- fill in the fields below",
+      }),
+    );
+    expect(screen.getByLabelText(/^Title/)).toHaveValue(
+      "Nightly dependency bump",
+    );
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -444,27 +716,53 @@ describe("SchedulesList", () => {
     api.mockRejectedValueOnce(new Error("everyNHours must be positive"));
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} tasks={[]} onRefresh={noop} showError={showError} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        tasks={[]}
+        onRefresh={noop}
+        showError={showError}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "x");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "everyNHours must be positive" }));
-    expect(screen.getByRole("heading", { name: "New schedule" })).toBeInTheDocument();
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "everyNHours must be positive" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "New schedule" }),
+    ).toBeInTheDocument();
   });
 
   // --- schedules that run a suite ---------------------------------
 
-  const suites = [{ id: "suite-1", name: "Bug sweep" }, { id: "suite-2", name: "Dependency sweep" }];
+  const suites = [
+    { id: "suite-1", name: "Bug sweep" },
+    { id: "suite-2", name: "Dependency sweep" },
+  ];
   const suiteBacked = {
-    ...schedule, id: "sched-suite", title: "Bug sweep", base: "main",
-    suiteId: "suite-1", suiteName: "Bug sweep",
+    ...schedule,
+    id: "sched-suite",
+    title: "Bug sweep",
+    base: "main",
+    suiteId: "suite-1",
+    suiteName: "Bug sweep",
   };
 
   it("shows which suite a suite-backed schedule runs", () => {
-    render(<ControlledSchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[suiteBacked]}
+        suites={suites}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     expect(screen.getByText("Suite: Bug sweep")).toBeInTheDocument();
   });
@@ -473,7 +771,15 @@ describe("SchedulesList", () => {
     api.mockResolvedValueOnce({});
     const onRefresh = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={onRefresh} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        suites={suites}
+        tasks={[]}
+        onRefresh={onRefresh}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Fires"));
@@ -505,7 +811,15 @@ describe("SchedulesList", () => {
   it("refuses to submit a suite-backed schedule with no suite chosen", async () => {
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[]} suites={suites} tasks={[]} onRefresh={noop} showError={showError} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[]}
+        suites={suites}
+        tasks={[]}
+        onRefresh={noop}
+        showError={showError}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.click(screen.getByLabelText("Fires"));
@@ -516,7 +830,10 @@ describe("SchedulesList", () => {
 
     expect(api).not.toHaveBeenCalled();
     expect(showError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "choose a suite for this schedule to run" }));
+      expect.objectContaining({
+        message: "choose a suite for this schedule to run",
+      }),
+    );
   });
 
   // What a schedule fires is fixed when it is created (ui.
@@ -525,14 +842,24 @@ describe("SchedulesList", () => {
   it("repoints an existing suite-backed schedule at another suite", async () => {
     api.mockResolvedValueOnce({});
     const user = userEvent.setup();
-    render(<ControlledSchedulesList schedules={[suiteBacked]} suites={suites} tasks={[]} onRefresh={noop} showError={noop} />);
+    render(
+      <ControlledSchedulesList
+        schedules={[suiteBacked]}
+        suites={suites}
+        tasks={[]}
+        onRefresh={noop}
+        showError={noop}
+      />,
+    );
 
     await user.click(screen.getByText("Bug sweep"));
     expect(screen.queryByLabelText("Fires")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Suite")).toHaveTextContent("Bug sweep");
 
     await user.click(screen.getByLabelText("Suite"));
-    await user.click(await screen.findByRole("option", { name: "Dependency sweep" }));
+    await user.click(
+      await screen.findByRole("option", { name: "Dependency sweep" }),
+    );
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
