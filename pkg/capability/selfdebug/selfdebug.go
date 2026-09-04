@@ -23,9 +23,10 @@
 // with the file tools every run already has, rather than through four
 // tools and a REST hop built to serve them.
 //
-// How they reach a run is `grain mcpserver -self-debug`, passed by a
-// Framework only for a task holding this grant (agent.RunConfig.
-// SelfDebug, agent.SelfDebugArgs). orchestrator.Config.GrantTools also
+// How they reach a run is `grain mcpserver -grant self-debug`, passed
+// by a Framework only for a task holding this grant
+// (agent.RunConfig.Grants, agent.GrantArgs).
+// orchestrator.Config.GrantTools also
 // adds SourceTools straight to a run's in-process tool set for an
 // Interactive task (see orchestrator/cycle.go's runOne), which is where
 // this started and which no CLI-driving Framework can consume -- the
