@@ -130,6 +130,25 @@ describe("Sidebar", () => {
     expect(onSetView).toHaveBeenCalledWith("schedules");
   });
 
+  // The four list entries used to be four identical invisible dots, so
+  // the label was the only thing telling them apart. Each carries its
+  // own Chladni figure now (ItemGlyph.jsx, docs/brand.md) -- and a
+  // wrong-glyph-per-row bug is exactly the sort of thing nobody notices
+  // by eye, which is what this pins.
+  it("marks each list entry with its own glyph", () => {
+    render(<Sidebar {...baseProps} config={null} tasks={[]} />);
+
+    for (const [label, kind] of [
+      ["Repos", "repos"],
+      ["Schedules", "schedules"],
+      ["Templates", "templates"],
+      ["Suites", "suites"],
+    ]) {
+      const entry = screen.getByRole("button", { name: new RegExp(`^${label}`) });
+      expect(entry.querySelector(`svg[data-glyph="${kind}"]`)).toBeInTheDocument();
+    }
+  });
+
   // grain/task-69: the deployment's own name, beside the wordmark, so a
   // staging tab and a production tab are not pixel-identical. Nothing at
   // all when the deployment is unnamed, which is grain's own shape for
