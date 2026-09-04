@@ -348,8 +348,10 @@ attempt.
 
 ## What a grain does not know
 
-The `Spec` carries four things and a name: `framework`, `shape`, `setup`,
-`placements`, and the grain's own `id`. There is no task in it, no
+The `Spec` carries four things: `framework`, `shape`, `setup` and
+`placements`. There is no id — the container is the identity, and a
+controller execs into one specific container, so a grain is never told a
+name it makes no use of. There is no task in it either, no
 repository, no branch, no git credential and no capability model —
 because **a grain knows how to run an agent in a sandbox, and nothing
 about why.**

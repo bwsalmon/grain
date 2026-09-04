@@ -16,8 +16,21 @@ artifacts — the daemon binary and the sandbox image.
 
 ## Versioning
 
-`grain.Contract` (currently `1`) is stamped on every document in both
-directions. That is the whole of negotiation.
+`contract` is the wire version: one number on each document so the two
+ends can detect that they disagree. `grain.Contract` is currently `1`, and
+stamping it on every document in both directions is the whole of
+negotiation.
+
+It exists because the shim ships in the sandbox image and the controller
+in the daemon binary — separately released, separately pinnable. JSON
+ignores fields it does not recognise, so without a version the failure is
+silent: an old shim handed a spec with a renamed `setup` runs no setup,
+and the agent starts flailing in an empty guest.
+
+It is on *every* document rather than negotiated once at create because of
+reattach. An upgraded daemon meets grains its predecessor created, in both
+directions, so a status written by an older shim and a signal written by a
+newer controller each have to say what they are.
 
 A receiver that does not recognise a document's contract **must refuse it
 and name both versions**, never interpret it on a best effort: a refusal
@@ -112,12 +125,11 @@ takes an `--id` even though a signal replies to nothing.
 
 ### `spec.json` → `grain configure`
 
-Written once, at create. Four things and a name:
+Written once, at create. Four things:
 
 ```json
 {
   "contract": 1,
-  "id": "task-311-2",
   "framework": "claude",
   "shape": { "cpus": 2, "memoryMB": 8192, "diskGB": 30 },
   "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && git checkout -b grain/task-311 && ./scripts/setup.sh && git rev-parse HEAD",
@@ -190,7 +202,6 @@ would be a second exec per grain per tick.
 ```json
 {
   "contract": 1,
-  "id": "task-311-2",
   "phase": "blocked",
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
@@ -214,9 +225,14 @@ would be a second exec per grain per tick.
 }
 ```
 
-There is no task, repo or framework echoed back: the controller keys by
-`id` and looks the rest up in its own store, which is the one place any
-of it is true.
+**There is no id, and nothing else echoed back either.** The container is
+the identity: a controller execs into one specific container to get a
+status, so the answer cannot be ambiguous about whose it is, and a grain
+telling you its own name would repeat what you had to know to ask. The
+Go `Status` carries an `ID` a backend fills in from the container it read;
+it never travels. No task, repo or framework comes back either — the
+controller keys by that id and looks the rest up in its own store, which
+is the one place any of it is true.
 
 `phase` is one of `provisioning`, `provisioned`, `running`, `blocked`,
 `succeeded`, `failed`, `cancelled`, `lost`, `released`. `since` is when it

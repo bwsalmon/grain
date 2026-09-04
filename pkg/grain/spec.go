@@ -30,14 +30,10 @@ type Spec struct {
 	// Contract is the wire version this document is written to. See
 	// Contract's own doc comment for what a receiver does with it.
 	Contract int `json:"contract"`
-	// ID is this grain's name, the run it serves (dispatch.RunID).
-	//
-	// The shim could read it off its own hostname, which the container
-	// runtime derives from the same name -- it is here so that a Status
-	// says which grain it describes without a reader having to know where
-	// it came from. Documents read by people during an incident should
-	// identify themselves; it is one field.
-	ID ID `json:"id"`
+
+	// There is no id here. The container is the identity: a controller
+	// execs into one specific container to configure it, and the shim
+	// never needs to be told a name it makes no use of.
 
 	// Framework names an agent profile the sandbox image provides --
 	// "claude", "antigravity", "codex". It is a name and not a

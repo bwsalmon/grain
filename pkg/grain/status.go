@@ -67,10 +67,17 @@ func (p Phase) Terminal() bool {
 type Status struct {
 	// Contract is the wire version this document is written to.
 	Contract int `json:"contract"`
-	// ID is the grain this describes. There is no task, repo or framework
-	// echoed back beside it: the controller keys by this and looks the
-	// rest up in its own store, which is the one place any of it is true.
-	ID ID `json:"id"`
+	// ID is the grain this describes, and is deliberately not on the
+	// wire: a backend fills it in from the container it read the document
+	// out of, because the container is the identity. A controller execs
+	// into one specific container to get a status, so the answer cannot
+	// be ambiguous about whose it is, and a grain telling you its own
+	// name would be repeating what you had to know to ask.
+	//
+	// Nothing else is echoed back either -- no task, no repo, no
+	// framework. The controller keys by this and looks the rest up in its
+	// own store, which is the one place any of it is true.
+	ID ID `json:"-"`
 
 	Phase Phase `json:"phase"`
 	// Since is when Phase was entered. Every timeout the controller

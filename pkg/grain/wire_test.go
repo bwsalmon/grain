@@ -27,7 +27,6 @@ func marshal(t *testing.T, v any) string {
 func TestSpecWireFormat(t *testing.T) {
 	spec := grain.Spec{
 		Contract:  grain.Contract,
-		ID:        "task-311-2",
 		Framework: "claude",
 		Shape:     grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
 		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh",
@@ -40,7 +39,6 @@ func TestSpecWireFormat(t *testing.T) {
 
 	want := `{
   "contract": 1,
-  "id": "task-311-2",
   "framework": "claude",
   "shape": {
     "cpus": 2,
@@ -90,7 +88,7 @@ func TestSpecWireFormat(t *testing.T) {
 // contract.
 func TestSpecCarriesNoTaskModel(t *testing.T) {
 	full := marshal(t, grain.Spec{
-		Contract: grain.Contract, ID: "task-311-2", Framework: "claude",
+		Contract: grain.Contract, Framework: "claude",
 		Shape: grain.Shape{CPUs: 2}, Setup: "true",
 		Placements: []grain.Placement{{Path: "/p", Mode: "0600"}},
 		MaxRuntime: grain.Duration(time.Hour),
@@ -98,6 +96,9 @@ func TestSpecCarriesNoTaskModel(t *testing.T) {
 	for _, absent := range []string{
 		"\"task\"", "\"repo\"", "\"branch\"", "\"base\"", "\"target\"",
 		"\"gitToken\"", "\"grants\"", "\"proxyBase\"", "\"attempt\"", "\"maxTurns\"",
+		// The container is the identity; a grain is never told a name it
+		// makes no use of.
+		"\"id\"",
 		// Every capability grain has places into the sandbox, and
 		// model.SideController has never had a producer, so a placement
 		// needs no side to land on.
@@ -113,7 +114,7 @@ func TestSpecCarriesNoTaskModel(t *testing.T) {
 func TestStatusWireFormat(t *testing.T) {
 	st := grain.Status{
 		Contract: grain.Contract,
-		ID:       "task-311-2",
+		ID:       "task-311-2", // set by the backend, never on the wire
 		Phase:    grain.PhaseBlocked,
 		Since:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
 		Activity: "waiting for CI",
@@ -136,7 +137,6 @@ func TestStatusWireFormat(t *testing.T) {
 
 	want := `{
   "contract": 1,
-  "id": "task-311-2",
   "phase": "blocked",
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
