@@ -90,8 +90,7 @@ func TestRunCycleTellsABootstrapTaskItHoldsTheGrant(t *testing.T) {
 	}
 }
 
-// The configuration agent's own pair, which is what ui.client's
-// configurationCapabilities attaches: both grants reach one run at once.
+// Two tool-only grants on one task: both reach the same run at once.
 func TestRunCycleCarriesEveryToolGrantATaskHolds(t *testing.T) {
 	grants := []model.Grant{
 		{Capability: "bootstrap-playbooks", Via: model.GrantByLabel},

@@ -12,7 +12,6 @@ import BatchActionsBar from "./components/BatchActionsBar.jsx";
 import ErrorBanner from "./components/ErrorBanner.jsx";
 import DetailOverlay from "./components/DetailOverlay.jsx";
 import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
-import ConfigurationAgentButton from "./components/ConfigurationAgentButton.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import DebugOverlay from "./components/DebugOverlay.jsx";
 import MetricsOverlay from "./components/MetricsOverlay.jsx";
@@ -579,9 +578,6 @@ export default function App() {
             </div>
           )}
         </>
-      )}
-      {config !== null && (
-        <ConfigurationAgentButton defaultRepo={openRepo} onOpenTask={openTask} showError={showError} />
       )}
       {/* One banner at a time: both are pinned to the same strip at the
           top of the page, and a dead reconcile loop is the larger fact
