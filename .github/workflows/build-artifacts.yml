@@ -207,9 +207,11 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
           sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/guest:sha-${GITHUB_SHA:0:7}"
           make image IMAGE="${image}:sha-${GITHUB_SHA:0:7}" SANDBOX_IMAGE="$sandbox"
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
-          echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=$image"
+            echo "tag=sha-${GITHUB_SHA:0:7}"
+            echo "sandbox=$sandbox"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         with:
