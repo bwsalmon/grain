@@ -162,7 +162,16 @@ Two more things move inside by the same rule:
 ## Poll, not push
 
 **Decision: the controller polls, over the container runtime's exec.** The
-grain never initiates. Four options were weighed:
+grain never initiates.
+
+The shape this produces is worth naming, because it is what the whole
+design turns out to be: **a polled MCP server.** The agent talks to an
+ordinary MCP server in its container; that server answers the sandbox
+tools itself and, for anything else, holds the call open and waits to be
+asked for it rather than dialling anyone. See
+[`docs/grain-cli.md`](grain-cli.md).
+
+Four options were weighed:
 
 1. **Poll via exec** — `grain status` per grain per tick.
 2. **Push with a credential** — the shim holds a token and posts to the

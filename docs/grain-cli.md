@@ -4,15 +4,42 @@
 > the design; this is the contract that design implies. `pkg/grain` carries
 > the types, and `wire_test.go` pins every document below as literal JSON.
 
-The controller reaches a grain over the container runtime — `docker exec`
-/ `kubectl exec` for state, `docker logs` / `kubectl logs` for the
-trajectory. There is no service, no port and no session: each call is one
-process, with argv in, JSON on stdout and an exit code back.
+**A grain is a polled MCP server.**
 
-So the interface that has to be stable is **a CLI, not an RPC schema**.
-`pkg/grain`'s Go types are the controller-side facade; what is written
+That is the whole of it, and everything below follows. The agent talks to
+an ordinary MCP server in its container. That server answers what it can
+itself — six built-in tools, all about the sandbox — and for anything else
+it holds the call open and waits to be *asked* for it rather than dialling
+anyone: the controller polls, sees the outstanding call, executes it, and
+hands back an `mcp.Result` the shim returns as the tool's own result.
+
+So grain's job on this channel is **presenting tools and relaying frames**.
+It has no vocabulary for the tools it forwards: they are ordinary MCP
+declarations somebody else wrote, and the only ones it understands are its
+own.
+
+The transport is the container runtime — `docker exec` / `kubectl exec`
+for state, `docker logs` / `kubectl logs` for the trajectory. No service,
+no port, no session: each call is one process, argv in, JSON on stdout, an
+exit code back. So what has to stay stable is **a CLI, not an RPC schema**;
+`pkg/grain`'s Go types are the controller-side facade, and what is written
 down here is what actually crosses between two separately released
 artifacts — the daemon binary and the sandbox image.
+
+### Where the framing stops
+
+Two things on this channel are not MCP, and knowing which is which is the
+rule for anything added later:
+
+| | carries | shape |
+| --- | --- | --- |
+| **Tools** | one outstanding `call`, its `answer` | MCP — declared, forwarded, unbounded in kind |
+| **Lifecycle** | `phase`, `since`, `activity`, `health`, `seq`, `setup`; `signal` inbound | not MCP — a small fixed set |
+
+A prompt is not a tool call, and neither is a cancellation. When something
+new needs to cross, the question to ask is which column it belongs in: a
+tool is a declaration and costs grain nothing, and lifecycle is a change to
+this contract.
 
 ## Versioning
 
