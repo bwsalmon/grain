@@ -81,10 +81,9 @@ type RunConfig struct {
 	Branch string
 	// SelfDebug reports that this run's task holds the self-debug grant
 	// (pkg/capability/selfdebug), and is what turns on the read-only
-	// tools that grant is for: reading grain's own source, and reading
-	// grain's other tasks -- their prompts, their session transcripts and
-	// the errors their attempts recorded. A Framework passes it on as its
-	// forked "mcpserver" subprocess's own -self-debug.
+	// tools that grant is for: reading grain's own source. A Framework
+	// passes it on as its forked "mcpserver" subprocess's own
+	// -self-debug.
 	//
 	// It is a field here, rather than the grant being read out of Tools,
 	// because Tools has no consumer left (see above): a Framework that
@@ -181,8 +180,7 @@ func RunDeadlineArgs(ctx context.Context) []string {
 // The source directory is omitted rather than passed empty when a
 // deployment has none. Both are the same to mcpserver -- the source
 // tools say they have nothing to read either way -- but an empty flag
-// value in a process's own arguments reads like a bug, and this way the
-// arguments say plainly which of the two halves this run really got.
+// value in a process's own arguments reads like a bug.
 func SelfDebugArgs(cfg RunConfig) []string {
 	if !cfg.SelfDebug {
 		return nil
