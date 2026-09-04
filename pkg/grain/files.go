@@ -64,10 +64,30 @@ const (
 	// survive shell quoting on its way through a runtime's env handling.
 	FileSetup = Root + "/setup"
 	// FileToken is the bearer token this grain authenticates to
-	// Spec.ControllerURL with -- container-side, because the agent is
-	// what uses it. The same secret also reaches the guest as a
-	// placement, where git needs it; same value, two consumers, two sides
-	// of the vsock boundary.
+	// Spec.ControllerURL with. It is root-owned and 0600, and the agent
+	// runs as a different uid, so **the agent cannot read it**.
+	//
+	// That is deliberate and it is what makes the shim a proxy rather
+	// than a bystander. The agent points at LocalControllerURL, an
+	// ordinary loopback address the shim serves; the shim adds the
+	// Authorization header and forwards to Spec.ControllerURL. A byte
+	// proxy, not an MCP-aware one -- it terminates no session, merges no
+	// tool list and holds no call, so MCP's own session id and resumable
+	// SSE still do the reconnecting.
+	//
+	// The asymmetry that lets this work: an agent needs its own model
+	// credential (FileCredential, which its uid can therefore read) and
+	// does not need this one. So the credential it must have stays
+	// reachable and the credential it must not have does not.
+	//
+	// What it buys is that a compromised agent cannot exfiltrate a token
+	// that authenticates as this grain, and cannot use it to reach
+	// anything else the controller serves. Under NAT both the container
+	// *and the guest* have egress -- masquerade gives the sandbox one too
+	// -- so "only the container may talk to the controller" is not
+	// enforceable at the network layer, where agent and sandbox share a
+	// source address. The token is what enforces it, which is why the
+	// token is the thing to keep out of reach.
 	FileToken = Root + "/token"
 	// DirPlacements holds the files to copy into the guest, in a tree
 	// that mirrors their guest paths: a placement at /home/agent/.netrc
@@ -95,6 +115,22 @@ const (
 // before it could write one. Under docker nothing reads this file, and
 // writing it anyway costs a few hundred bytes.
 const FileTerminationLog = "/dev/termination-log"
+
+// LocalControllerURL is what the agent's MCP config points at: a loopback
+// address in the container that the shim serves and forwards to
+// Spec.ControllerURL, adding the bearer token the agent cannot read.
+//
+// Loopback needs no authentication of its own. It is reachable only from
+// inside this container's network namespace, which is the trusted side of
+// the vsock boundary -- the guest is on the far side, and reaches this
+// address not at all.
+//
+// The shim serving it is a byte proxy, not an MCP-aware one: it adds a
+// header and copies, terminating no session, merging no tool list and
+// holding no call. So MCP's own session id and resumable SSE still do the
+// reconnecting, and a request in flight when something blips is one
+// request rather than a whole session.
+const LocalControllerURL = "http://127.0.0.1:8419/mcp"
 
 // ModeSetup is the mode FileSetup is written with. Executable, because a
 // script that has to be invoked through an interpreter cannot carry its

@@ -569,6 +569,31 @@ one value with two consumers on two sides of the vsock boundary.
 
 ### What it costs
 
+**Reachability, which needed two answers.** An exec pipe reached exactly
+one container by construction. An address is reachable by anything with a
+route — and under NAT that includes the *guest*, since masquerade gives
+the sandbox egress of its own. So agent and sandbox share a source address
+and the network layer cannot tell them apart, which is NAT's documented
+cost showing up in a second place.
+
+Two things close it. The MCP endpoint is **its own listener**, so
+reachability to it is not reachability to the daemon's REST API and UI —
+otherwise direct HTTP would quietly undo "the container needs no daemon
+URL", a property this design was claiming. And the token is **kept out of
+the agent's reach**: root-owned and 0600 at `/grain/token`, with the agent
+on a different uid, pointed at a loopback address the shim forwards from
+after adding the header.
+
+That last works because of an asymmetry worth naming: an agent needs its
+own model credential and does not need the controller token. So the one it
+must have stays readable and the one it must not have does not — and a
+compromised agent cannot exfiltrate a credential that authenticates as its
+grain.
+
+The shim doing the forwarding is a byte proxy, not the MCP-aware one
+design 2 needed: it adds a header and copies, so no session is terminated
+and MCP's own resumption still applies.
+
 **A network dependency between grain and controller** that exec did not
 have. Under NAT the container has a stack anyway (that is why NAT was
 chosen), and under flat the model-API tunnel carries TCP, so the same

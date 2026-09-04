@@ -121,19 +121,30 @@ type Spec struct {
 	// runs there.
 	Placements []Placement `json:"placements,omitempty"`
 
-	// ControllerURL is the controller's MCP endpoint, which the agent
-	// reaches directly over Streamable HTTP for every tool that is not a
-	// built-in. The shim writes it into its framework's MCP config and
-	// otherwise takes no part: an MCP client talks to several servers as
-	// a matter of course, so the agent simply has two.
+	// ControllerURL is the controller's MCP endpoint. The *shim* dials
+	// it; the agent is pointed at LocalControllerURL instead and the shim
+	// forwards, adding the bearer token the agent cannot read.
+	//
+	// It must be its own listener, separate from the daemon's REST API
+	// and UI. Under NAT the container has egress and so does the guest,
+	// so anything the controller serves at a reachable address is
+	// reachable by both -- and the whole of what a grain should be able
+	// to reach is a set of MCP tools. Sharing a listener with the API
+	// would make network reachability to one reachability to the other,
+	// undoing a property this design otherwise has: a container with no
+	// path to the daemon.
 	//
 	// Empty leaves a grain with its six sandbox tools and no way to reach
 	// anything outside -- which is right for a HostGrains test and wrong
 	// for a real run.
 	ControllerURL string `json:"controllerURL,omitempty"`
 
-	// Token authenticates this grain to that endpoint. It is the *same*
-	// per-grain token the git proxy already mints
+	// Token authenticates this grain to that endpoint, and the agent
+	// never sees it: it lands at FileToken, root-owned and 0600, and the
+	// shim adds it to each forwarded request. See FileToken for why that
+	// is worth a proxy hop.
+	//
+	// It is the *same* per-grain token the git proxy already mints
 	// (gitproxy.SandboxTokenStore.EnsureToken), revoked by the same
 	// Revoke at reap and resolved to a live run by the same
 	// model.Store.GitScope -- one more consumer of machinery that exists,
@@ -148,6 +159,12 @@ type Spec struct {
 	// Container-side, at FileToken -- unlike the git credential, which is
 	// the same secret placed in the guest because git runs there. Same
 	// value, two consumers, two sides of the vsock boundary.
+	//
+	// That the guest holds it for git is not a way around the above: git
+	// reaches the *proxy*, whose scope is this run's repos
+	// (model.Store.GitScope), and the MCP endpoint is a different service
+	// that must check what a token is being presented for rather than
+	// only who it belongs to.
 	Token string `json:"token,omitempty"`
 
 	// MaxRuntime is how long the agent may run before the shim stops it

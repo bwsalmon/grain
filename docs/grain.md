@@ -114,9 +114,30 @@ picks up where it was. There is nothing here that holds a call, replays
 one, or reattaches — and nothing that has to wait for a controller before
 starting an agent.
 
-**Which grain is calling comes from the bearer token at `/grain/token`.**
-An exec pipe authenticated by construction — the controller chose which
-container to exec into — and an address does not, so something has to say.
+**The agent never holds the token.** `/grain/token` is root-owned and
+`0600`, and the agent runs as a different uid: it points at a loopback
+address the shim serves, and the shim adds the `Authorization` header and
+forwards. A byte proxy, not an MCP-aware one — it terminates no session,
+merges no tool list, holds no call, so MCP's own session id and resumable
+SSE still do the reconnecting.
+
+The asymmetry that makes this clean: **an agent needs its own model
+credential and does not need the controller token.** So `/grain/credential`
+stays readable by it and `/grain/token` does not.
+
+It matters because **under NAT the guest has egress too** — masquerade
+gives the sandbox its own path out — so agent and sandbox share a source
+address and "only the container may reach the controller" is not
+enforceable at the network layer. The token is what enforces it, which is
+why the token is the thing to keep out of reach. And it is why the MCP
+endpoint **must be its own listener**, separate from the daemon's REST API
+and UI: otherwise reachability to one is reachability to the other, and a
+container with no path to the daemon — a property this design otherwise
+has — quietly stops being true.
+
+**Which grain is calling comes from that token.** An exec pipe
+authenticated by construction — the controller chose which container to
+exec into — and an address does not, so something has to say.
 That token is the *same* one the git proxy already mints per grain
 (`SandboxTokenStore.EnsureToken`), revoked by the same `Revoke` at reap and
 resolved to a live run by the same `Store.GitScope`. One more consumer of

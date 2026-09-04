@@ -407,3 +407,48 @@ func TestStatusRidesTheRecordStream(t *testing.T) {
 		t.Errorf("status round-tripped as %+v", got)
 	}
 }
+
+// The agent must not be able to read the token that authenticates its
+// grain to the controller: it does not need it (the shim adds it to each
+// forwarded request) and a compromised agent holding one could reach
+// whatever else that token opens.
+//
+// Asserted on the rendered files because the mode is the whole of the
+// mechanism -- the agent runs as a different uid, and 0600 on a
+// root-owned file is what puts this out of its reach while leaving the
+// model credential, which it does need, readable.
+func TestTokenIsNotReadableByTheAgent(t *testing.T) {
+	files, err := grain.Spec{
+		Version:   grain.Version,
+		Token:     "sbx_9f3c1a",
+		Framework: grain.FrameworkSpec{Name: "claude", Credential: "sk-ant-oat01-..."},
+	}.Files()
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	tok, ok := files[grain.FileToken]
+	if !ok {
+		t.Fatalf("no token file; got %v", keys(files))
+	}
+	if tok.Mode != "0600" {
+		t.Errorf("token mode = %q, want 0600", tok.Mode)
+	}
+	// And the agent's own credential stays reachable, because it needs
+	// that one. Same mode, different owner -- the asymmetry is in who the
+	// file belongs to, not how wide it is.
+	if cred := files[grain.FileCredential]; cred.Content == "" {
+		t.Error("the model credential is missing; the agent needs that one")
+	}
+	// The agent is pointed at loopback, never at the controller itself.
+	if !strings.HasPrefix(grain.LocalControllerURL, "http://127.0.0.1") {
+		t.Errorf("LocalControllerURL = %q, want a loopback address", grain.LocalControllerURL)
+	}
+}
+
+func keys(m map[string]grain.File) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
