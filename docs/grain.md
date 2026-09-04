@@ -109,10 +109,15 @@ no cross-goroutine coordination.
 Two more things move inside by the same rule:
 
 - **`ConfigureGitCredentials`** comes off the sandbox interface and
-  becomes `Spec.GitToken` plus the shim. The controller still mints it —
-  it is the proxy's token — and revokes it at reap.
+  becomes an ordinary `Placement`. The controller still mints the token —
+  it is the proxy's — and revokes it at reap; writing it is the same work
+  said uniformly, which takes a method off the interface and a special
+  case out of the setup path.
 - **`prepareCheckout`** (~500 lines of `checkout.go`, currently cloning
-  through MCP round trips) moves into the shim, driven by the Spec.
+  through MCP round trips) becomes part of `Spec.Setup` — a script the
+  controller composes and the shim runs without reading. A clone is git
+  commands in the guest and nothing more, and this is what keeps
+  repositories, branches and proxy URLs out of the wire entirely.
 
 ## Poll, not push
 
@@ -310,17 +315,76 @@ earlier attempts pushed, and those can only be read from the checkout,
 which is now inside the grain. That is an ordering inversion, and the fix
 is poll-native:
 
-1. `Create(Spec)` — no prompt. The grain boots, places, clones, runs the
-   repo's setup command, and reports `PhaseProvisioned` with the checkout
-   facts in `Status.Checkout`.
+1. `Create(Spec)` — no prompt. The grain boots, places, runs `Spec.Setup`
+   (which the controller composed, clone included), and reports
+   `PhaseProvisioned` with that script's exit code and output in
+   `Status.Setup`.
 2. The controller polls, assembles the prompt — folding in anything a
-   human added since dispatch — and `Signal`s it.
+   human added since dispatch — and `Signal`s it. It wrote that setup
+   script, so it can end the script with whatever the prompt needs read
+   back (`git rev-parse HEAD`, the commits earlier attempts pushed) and
+   parse its own output. The shim stays ignorant of all of it.
 3. `PhaseRunning`.
 
 It costs one tick on an hour-long run. It buys two things: a checkout
 failure is diagnosed before a single model token is spent, and
 addenda-since-dispatch fold in for free instead of waiting for the next
 attempt.
+
+## What a grain does not know
+
+The `Spec` carries four things and a name: `framework`, `shape`, `setup`,
+`placements`, and the grain's own `id`. There is no task in it, no
+repository, no branch, no git credential and no capability model —
+because **a grain knows how to run an agent in a sandbox, and nothing
+about why.**
+
+Everything task-shaped reaches it in one of three shapes instead:
+
+- **in the prompt**, assembled by the controller from its store and
+  delivered by `Signal` once the sandbox is real;
+- **in `setup`**, a script the controller composes — the clone included;
+- **in a `placement`**, which is where a credential goes, git's among
+  them.
+
+The boundary is worth more than the fields it saves. A shim that
+understood repositories would have to agree with the controller about
+branch naming, proxy URLs, what to do with a half-made checkout and what
+a task is — an interface between two separately released artifacts,
+carrying grain's whole task model across it. A shim that runs a script
+and places files has no opinions to keep in sync, and `wire_test.go`
+asserts on the marshalled document that none of it has crept back.
+
+**`framework` is a name, not a configuration.** How a CLI is launched,
+which flags it takes, where its MCP config must live and whether it needs
+a private HOME are facts about that binary — and the binary ships in this
+image. Today the daemon owns all of it (`pkg/agent/claude`,
+`/antigravity`, `/codex`, ~5,700 lines; see antigravity's own doc comment
+on `agy` having no `--mcp-config`, so each run gets a private HOME holding
+one file). That knowledge sits in a different artifact from the CLI it
+describes, so upgrading the CLI can require upgrading the daemon. Moving
+it into the image versions the two together and makes adding a framework
+an image change rather than a controller release.
+`ContractReport.Frameworks` is how a controller checks before dispatching,
+so a task naming a framework the image lacks fails at create rather than
+inside a guest nobody is watching yet.
+
+Two things fell out of drawing it this way:
+
+- **`grants` is gone.** Both capabilities it carried only ever made
+  content readable — grain's own source for `self-debug`, the embedded
+  runbooks for `bootstrap-playbooks`. The sandbox image is built from that
+  source and that binary, so both are already in it: what is left is a
+  line in the prompt saying where, and no tool registration, no flag and
+  no Spec field.
+- **`limits` collapsed to one field.** Turns are a framework's own flag,
+  and `Config.MaxAgentTurns`' doc comment already concedes both default to
+  no cap and that "what actually bounds a runaway run is MaxRunRuntime".
+  Rebuilds belong to `Policy.MaxRebuilds` alone — the controller has the
+  view. `maxRuntime` survives because stopping the agent is how a run ends
+  with a `Result` rather than being destroyed mid-thought, and because a
+  runaway agent spends money and should not depend on a controller being
+  up to notice.
 
 ## The interface
 

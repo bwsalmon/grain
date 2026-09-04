@@ -28,54 +28,26 @@ func TestSpecWireFormat(t *testing.T) {
 	spec := grain.Spec{
 		Contract:  grain.Contract,
 		ID:        "task-311-2",
-		Task:      grain.TaskRef{ID: "task-311", Title: "Port the staleness check", Attempt: 2},
 		Framework: "claude",
-		Repo: grain.RepoSpec{
-			Target: "bwsalmon/grain", Base: "main", Branch: "grain/task-311",
-			Reads: []string{"bwsalmon/kontur"}, ProxyBase: "http://10.0.2.1:8080",
-		},
-		Shape:  grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
-		Limits: grain.Limits{MaxRuntime: grain.Duration(2 * time.Hour), MaxRebuilds: 3},
-		Setup:  "./scripts/setup.sh",
-		Grants: []string{"self-debug"},
+		Shape:     grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
+		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh",
 		Placements: []grain.Placement{
 			{Dest: grain.DestContainer, Path: "/root/.claude/.credentials.json", Content: "{...}", Mode: "0600"},
-			{Dest: grain.DestGuest, Path: "/home/agent/key.json", Content: "{...}", Mode: "0600"},
+			{Dest: grain.DestGuest, Path: "/home/agent/.git-credentials", Content: "https://x:sbx_9f3c1a@10.0.2.1:8080", Mode: "0600"},
 		},
-		GitToken: "sbx_9f3c1a",
+		MaxRuntime: grain.Duration(2 * time.Hour),
 	}
 
 	want := `{
   "contract": 1,
   "id": "task-311-2",
-  "task": {
-    "id": "task-311",
-    "title": "Port the staleness check",
-    "attempt": 2
-  },
   "framework": "claude",
-  "repo": {
-    "target": "bwsalmon/grain",
-    "base": "main",
-    "branch": "grain/task-311",
-    "reads": [
-      "bwsalmon/kontur"
-    ],
-    "proxyBase": "http://10.0.2.1:8080"
-  },
   "shape": {
     "cpus": 2,
     "memoryMB": 8192,
     "diskGB": 30
   },
-  "limits": {
-    "maxRuntime": "2h0m0s",
-    "maxRebuilds": 3
-  },
-  "setup": "./scripts/setup.sh",
-  "grants": [
-    "self-debug"
-  ],
+  "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w \u0026\u0026 cd /w \u0026\u0026 ./scripts/setup.sh",
   "placements": [
     {
       "dest": "container",
@@ -85,12 +57,12 @@ func TestSpecWireFormat(t *testing.T) {
     },
     {
       "dest": "guest",
-      "path": "/home/agent/key.json",
-      "content": "{...}",
+      "path": "/home/agent/.git-credentials",
+      "content": "https://x:sbx_9f3c1a@10.0.2.1:8080",
       "mode": "0600"
     }
   ],
-  "gitToken": "sbx_9f3c1a"
+  "maxRuntime": "2h0m0s"
 }`
 	if got := marshal(t, spec); got != want {
 		t.Fatalf("Spec wire format changed.\n got:\n%s\nwant:\n%s", got, want)
@@ -100,11 +72,39 @@ func TestSpecWireFormat(t *testing.T) {
 	if err := json.Unmarshal([]byte(want), &back); err != nil {
 		t.Fatalf("unmarshalling: %v", err)
 	}
-	if time.Duration(back.Limits.MaxRuntime) != 2*time.Hour {
-		t.Errorf("MaxRuntime round-tripped as %s, want 2h0m0s", back.Limits.MaxRuntime)
+	if time.Duration(back.MaxRuntime) != 2*time.Hour {
+		t.Errorf("MaxRuntime round-tripped as %s, want 2h0m0s", back.MaxRuntime)
 	}
 	if back.Placements[1].Dest != grain.DestGuest {
 		t.Errorf("Dest round-tripped as %q, want %q", back.Placements[1].Dest, grain.DestGuest)
+	}
+}
+
+// The Spec deliberately carries no task, repository, branch, git
+// credential or capability model: a grain runs an agent in a sandbox and
+// knows nothing about why. Everything task-shaped reaches it as a prompt,
+// as the setup script, or as a placement.
+//
+// Asserted on the marshalled document rather than the type, because what
+// matters is that none of it is on the wire between two separately
+// released artifacts -- and because a field added back would round-trip
+// perfectly and still put grain's task model into the sandbox image's
+// contract.
+func TestSpecCarriesNoTaskModel(t *testing.T) {
+	full := marshal(t, grain.Spec{
+		Contract: grain.Contract, ID: "task-311-2", Framework: "claude",
+		Shape: grain.Shape{CPUs: 2}, Setup: "true",
+		Placements: []grain.Placement{{Dest: grain.DestGuest, Path: "/p", Mode: "0600"}},
+		MaxRuntime: grain.Duration(time.Hour),
+	})
+	for _, absent := range []string{
+		"\"task\"", "\"repo\"", "\"branch\"", "\"base\"", "\"target\"",
+		"\"gitToken\"", "\"grants\"", "\"proxyBase\"", "\"attempt\"", "\"maxTurns\"",
+	} {
+		if strings.Contains(full, absent) {
+			t.Errorf("Spec carries %s; a grain has no use for it "+
+				"(see the Spec doc comment for where it belongs instead)", absent)
+		}
 	}
 }
 
@@ -112,11 +112,11 @@ func TestStatusWireFormat(t *testing.T) {
 	st := grain.Status{
 		Contract: grain.Contract,
 		ID:       "task-311-2",
-		Ref:      grain.TaskRef{ID: "task-311", Attempt: 2},
 		Phase:    grain.PhaseBlocked,
 		Since:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
 		Activity: "waiting for CI",
 		Rebuilds: 1,
+		Setup:    &grain.SetupResult{Output: "9f3c1a2\n"},
 		Requests: []grain.Request{{
 			ID: "r-7", Kind: grain.KindOpenPullRequest,
 			Raised: time.Date(2026, 9, 4, 19, 40, 0, 0, time.UTC),
@@ -135,14 +135,14 @@ func TestStatusWireFormat(t *testing.T) {
 	want := `{
   "contract": 1,
   "id": "task-311-2",
-  "ref": {
-    "id": "task-311",
-    "attempt": 2
-  },
   "phase": "blocked",
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
   "rebuilds": 1,
+  "setup": {
+    "exitCode": 0,
+    "output": "9f3c1a2\n"
+  },
   "requests": [
     {
       "id": "r-7",

@@ -112,48 +112,65 @@ takes an `--id` even though a signal replies to nothing.
 
 ### `spec.json` → `grain configure`
 
-Written once, at create. Everything a run needs, and everything a rebuild
-needs to put a fresh guest back the way this one was — which is why a
-rebuild needs no controller.
+Written once, at create. Four things and a name:
 
 ```json
 {
   "contract": 1,
   "id": "task-311-2",
-  "task": { "id": "task-311", "title": "Port the staleness check", "attempt": 2 },
   "framework": "claude",
-  "repo": {
-    "target": "bwsalmon/grain",
-    "base": "main",
-    "branch": "grain/task-311",
-    "reads": ["bwsalmon/kontur"],
-    "proxyBase": "http://10.0.2.1:8080"
-  },
   "shape": { "cpus": 2, "memoryMB": 8192, "diskGB": 30 },
-  "limits": { "maxRuntime": "2h0m0s", "maxRebuilds": 3 },
-  "setup": "./scripts/setup.sh",
-  "grants": ["self-debug"],
+  "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && git checkout -b grain/task-311 && ./scripts/setup.sh && git rev-parse HEAD",
   "placements": [
     { "dest": "container", "path": "/root/.claude/.credentials.json", "content": "{...}", "mode": "0600" },
-    { "dest": "guest", "path": "/home/agent/key.json", "content": "{...}", "mode": "0600" }
+    { "dest": "guest", "path": "/home/agent/.git-credentials", "content": "https://x:sbx_9f3c1a@10.0.2.1:8080", "mode": "0600" }
   ],
-  "gitToken": "sbx_9f3c1a"
+  "maxRuntime": "2h0m0s"
 }
 ```
 
-Two things to notice. **`dest` is the credential boundary**: `container`
-lands beside the agent where the guest cannot read it, `guest` lands where
-the repo's own build can. The current `PlaceFile` has one destination, so
-today everything a capability mints goes into the sandbox — model-facing
-keys included.
+**What is not here is the point.** No task, no repository, no branch, no
+git credential field and no capability model: a grain knows how to run an
+agent in a sandbox and nothing about why. Everything task-shaped arrives
+in one of three shapes — in the prompt (delivered by signal), in `setup`
+(a script the controller composes, clone included), or in a `placement`
+(which is where a credential goes, git's among them).
 
-And **there is no prompt here**. The controller assembles it from the
-store and delivers it later by signal, because it cannot be written until
-the checkout exists — see "the two-phase start" in `docs/grain.md`.
+A shim that understood repositories would have to agree with the
+controller about branch naming, proxy URLs, what to do with a half-made
+checkout and what a task is — grain's whole task model, crossing an
+interface between two separately released artifacts. A shim that runs a
+script and places files has no opinions to keep in sync.
+`wire_test.go`'s `TestSpecCarriesNoTaskModel` asserts on the marshalled
+document that none of it has crept back.
+
+**`dest` is the credential boundary.** `container` lands beside the agent
+where the guest cannot read it; `guest` lands where the repo's own build
+can. The current `PlaceFile` has one destination, so today everything a
+capability mints goes into the sandbox — model-facing keys included.
+
+**`framework` is a name, not a configuration.** How that CLI is launched,
+which flags it takes and whether it needs a private HOME are facts about
+the binary, and the binary is in this image. `grain contract` reports
+which profiles an image carries, so a task naming one it lacks fails at
+create rather than inside a guest.
+
+**`setup` is opaque to the shim**, which runs it and reports its exit code
+and output without reading either. That is also how the two-phase start
+gets its facts: the controller wrote the script, so it ends it with
+whatever the prompt needs read back — `git rev-parse HEAD`, a log of what
+earlier attempts pushed — and parses its own output.
+
+**`maxRuntime` is the only limit.** Turns are a framework's own flag, and
+`Config.MaxAgentTurns`' doc comment already concedes both frameworks
+default to no cap. Rebuilds are `Policy.MaxRebuilds`' alone. This one
+survives because stopping the agent ends a run with a `Result` rather than
+destroying it mid-thought, and because a runaway agent spends money and
+should not depend on a controller being up to notice.
 
 Durations cross as strings. Go's own marshalling gives nanoseconds as an
-integer, which is correct and unreadable, and these documents get read by
-people during incidents.
+integer, which is correct and unreadable, and these get read by people
+during incidents.
 
 ### `status.json` ← `grain status`
 
@@ -164,7 +181,6 @@ would be a second exec per grain per tick.
 {
   "contract": 1,
   "id": "task-311-2",
-  "ref": { "id": "task-311", "attempt": 2 },
   "phase": "blocked",
   "since": "2026-09-04T19:41:12Z",
   "activity": "waiting for CI",
@@ -187,6 +203,10 @@ would be a second exec per grain per tick.
   "consumed": ["sig-19"]
 }
 ```
+
+There is no task, repo or framework echoed back: the controller keys by
+`id` and looks the rest up in its own store, which is the one place any
+of it is true.
 
 `phase` is one of `provisioning`, `provisioned`, `running`, `blocked`,
 `succeeded`, `failed`, `cancelled`, `lost`, `released`. `since` is when it
@@ -256,8 +276,14 @@ flight has no address anything can deliver to.
 ### `contract.json` ← `grain contract`
 
 ```json
-{ "contract": 1, "supported": [1], "build": "grain 2.4.1 (9f3c1a2)" }
+{ "contract": 1, "supported": [1],
+  "frameworks": ["claude", "codex"],
+  "build": "grain 2.4.1 (9f3c1a2)" }
 ```
+
+`frameworks` is what this image can actually run. A controller checks it
+before dispatching a task that names one, so the failure lands at create
+with a name in it rather than inside a guest nobody is watching yet.
 
 ### Trajectory records ← `docker logs`
 

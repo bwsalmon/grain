@@ -68,7 +68,14 @@ type Record struct {
 // highest it also speaks rather than refuse a shim that could have served
 // it.
 type ContractReport struct {
-	Contract  int    `json:"contract"`
-	Supported []int  `json:"supported"`
-	Build     string `json:"build,omitempty"`
+	Contract  int   `json:"contract"`
+	Supported []int `json:"supported"`
+	// Frameworks are the agent profiles this image carries, the names
+	// Spec.Framework may take. They are reported rather than assumed
+	// because the profiles ship in the image and the tasks naming them
+	// are written against a controller: a task asking for a framework
+	// this image lacks should fail at create, saying so, rather than at
+	// launch inside a guest nobody is watching yet.
+	Frameworks []string `json:"frameworks,omitempty"`
+	Build      string   `json:"build,omitempty"`
 }

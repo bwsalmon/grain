@@ -174,7 +174,7 @@ func TestReconcile(t *testing.T) {
 		name: "a provisioned grain is sent its prompt",
 		obs: grain.Observed{
 			Status: grain.Status{Phase: grain.PhaseProvisioned, Since: start,
-				Checkout: &grain.CheckoutFacts{Head: "deadbeef"}},
+				Setup: &grain.SetupResult{Output: "deadbeef\n"}},
 			Run: live(),
 			Now: start.Add(time.Minute),
 		},

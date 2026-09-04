@@ -66,10 +66,11 @@ func (p Phase) Terminal() bool {
 // field split out is a second exec per grain per tick.
 type Status struct {
 	// Contract is the wire version this document is written to.
-	Contract  int     `json:"contract"`
-	ID        ID      `json:"id"`
-	Ref       TaskRef `json:"ref"`
-	Framework string  `json:"framework,omitempty"`
+	Contract int `json:"contract"`
+	// ID is the grain this describes. There is no task, repo or framework
+	// echoed back beside it: the controller keys by this and looks the
+	// rest up in its own store, which is the one place any of it is true.
+	ID ID `json:"id"`
 
 	Phase Phase `json:"phase"`
 	// Since is when Phase was entered. Every timeout the controller
@@ -87,12 +88,18 @@ type Status struct {
 	// controller can see a grain thrashing and end it.
 	Rebuilds int `json:"rebuilds,omitempty"`
 
-	// Checkout is set from PhaseProvisioned onwards: the facts about the
-	// working tree that only exist once there is one, and that the
-	// controller's prompt needs (previousAttemptsSection reads the
-	// commits earlier attempts pushed, which can only be read from the
-	// checkout they are in).
-	Checkout *CheckoutFacts `json:"checkout,omitempty"`
+	// Setup is what Spec.Setup did, once it has run. The shim reports its
+	// exit code and output without reading either: the controller wrote
+	// that script, so it is the one that knows what its output means.
+	//
+	// This is how the two-phase start gets its facts. The controller's
+	// prompt needs things that exist only once there is a working tree --
+	// previousAttemptsSection reads the commits earlier attempts pushed,
+	// which can only be read from the checkout they are in -- so it ends
+	// its own script with the commands that print them and parses what
+	// comes back. A shim that understood repositories would be a shim
+	// that had to agree with the controller about them.
+	Setup *SetupResult `json:"setup,omitempty"`
 	// Requests are the escape hatches this grain is waiting on. Only the
 	// ones needing the store, GitHub or a human ever appear here.
 	Requests []Request `json:"requests,omitempty"`
@@ -127,12 +134,17 @@ type Status struct {
 	Consumed []string `json:"consumed,omitempty"`
 }
 
-// CheckoutFacts is what the controller learns from a grain's working tree.
-type CheckoutFacts struct {
-	Head string `json:"head,omitempty"`
-	// Commits are what previous attempts on this branch pushed, oldest
-	// first, capped by the controller's own limit.
-	Commits []string `json:"commits,omitempty"`
+// SetupResult is how Spec.Setup ended, verbatim and uninterpreted.
+type SetupResult struct {
+	// ExitCode is the script's own. Non-zero is what turns
+	// PhaseProvisioning into a terminal failure rather than
+	// PhaseProvisioned, and is the whole of the shim's opinion about it.
+	ExitCode int `json:"exitCode"`
+	// Output is the script's combined stdout and stderr, truncated to a
+	// bound the shim chooses. Combined rather than split because a setup
+	// script's diagnosis is routinely interleaved across both, and the
+	// controller is reading it to find out what went wrong.
+	Output string `json:"output,omitempty"`
 }
 
 // RequestID identifies one Request within one grain.

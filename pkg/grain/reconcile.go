@@ -15,10 +15,12 @@ type Policy struct {
 	// a guest that never answered, is exactly the grain that cannot
 	// report being stuck.
 	ProvisionBudget time.Duration
-	// MaxRebuilds backstops Limits.MaxRebuilds, which the shim enforces.
-	// Both exist because they fail differently: the shim's is the fast
-	// one, and this is the one that still works when the shim is what is
-	// wrong.
+	// MaxRebuilds is where self-repair stops being repair. A grain
+	// decides on its own to throw a wedged guest away and build a fresh
+	// one -- the controller never orders it and only sees Status.Rebuilds
+	// go up -- so this is the whole of the rule, held by the one side
+	// with a view of how the run is going rather than duplicated in the
+	// shim.
 	MaxRebuilds int
 }
 
