@@ -134,6 +134,7 @@ var Tables = []string{
   ` + "`completed_at`" + `                DATETIME NULL,
   ` + "`pending_question_comment_id`" + ` INTEGER  NULL,
   ` + "`baseline_comment_id`" + `         INTEGER  NULL,
+  ` + "`pending_secret`" + `              TEXT     NULL,
   ` + "`merge_queue_blocked_at`" + `      DATETIME NULL,
   ` + "`merge_queue_refreshed_at`" + `    DATETIME NULL,
   ` + "`observed_at`" + `                 DATETIME NULL,

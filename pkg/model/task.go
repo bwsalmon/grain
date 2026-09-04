@@ -565,6 +565,29 @@ type Observation struct {
 	// a fresh read is compared. Losing one degrades rather than corrupts.
 	PendingQuestionCommentID *int64
 	BaselineCommentID        *int64
+	// PendingSecret is the credential a parked run asked a human to set
+	// -- mcp's request_secret escape hatch, relayed by
+	// orchestrator.ProcessResult exactly the way a question is. It holds
+	// a *name* in the form secrets.Store.Resolve takes ("stripe-api-key",
+	// or "github-app/app-id"), never material: docs/data-model.md's "no
+	// secret store in the model" is about values, and this is the same
+	// kind of pointer a CredentialRef already is.
+	//
+	// It is set alongside PendingQuestionCommentID rather than instead of
+	// it, because the parking is the same parking: the task sits in
+	// awaiting_reply, out of task_ready, until a human acts. What this
+	// field adds is *what* to offer them -- a UI holding it renders a
+	// write-only box addressed at that name (ui.TaskDetail.PendingSecret)
+	// instead of only a reply box, and the value it takes goes straight
+	// into the secret store, never through the conversation and never
+	// back to the run that asked.
+	//
+	// Cleared when the secret is set (ui.Client.SetPendingSecret) and
+	// when a human replies in words instead (ui.Client.AddComment): both
+	// un-park the task, and an input left offered on a task nobody is
+	// waiting to hear from would be an offer to write a value nothing
+	// asked for.
+	PendingSecret string
 	// MergeQueueBlockedAt is set once the merge queue has stopped driving
 	// this task, for any of the three reasons it ever does: the automatic
 	// fix it filed ran and closed and the PR is still conflicted or
