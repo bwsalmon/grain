@@ -222,6 +222,24 @@ func (c *HTTPClient) RecreateSandbox(ctx context.Context, id string) (SandboxRec
 	return recreation, nil
 }
 
+// SetTaskActivity is Client.SetTaskActivity over the wire: record what
+// id's live run is doing right now, for the task list to show while it
+// runs.
+//
+// Its caller, like the two above, is `grain mcpserver`
+// (cmd/grain/mcpserver.go) rather than the CLI. The note travels this way
+// for the plainest of the reasons any of them do: the run is in a
+// sandbox, the task is a row in the daemon's store, and this is the only
+// route between the two.
+func (c *HTTPClient) SetTaskActivity(ctx context.Context, id, note string) (Activity, error) {
+	var activity Activity
+	if err := c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/activity",
+		activityRequest{Note: note}, &activity); err != nil {
+		return Activity{}, err
+	}
+	return activity, nil
+}
+
 // Config reads the deployment's fixed configuration -- who the daemon
 // attributes every task and comment written through this API to, its
 // default target repo, and the capabilities it offers. Unlike the

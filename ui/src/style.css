@@ -275,6 +275,36 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* What a running task's own agent says it is doing (update_status), set
+   quietly beside the title: it is the row's one live detail, so it reads
+   as an aside to the title rather than as a chip in the row's fixed
+   vocabulary. It gives way to the title when the row runs out of width
+   -- a truncated status is still a glance, where a truncated title is a
+   task you can no longer identify -- and its age is dimmer again, since
+   it only matters when the phrase itself has stopped changing. */
+.task-activity {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-style: italic;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.task-activity-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-activity-age {
+  color: var(--text-tertiary);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
 .chips { display: flex; gap: 0.35rem; flex-wrap: nowrap; flex: none; }
 .badge {
   display: inline-flex;
@@ -793,6 +823,19 @@ fieldset legend {
 .markdown th { background: var(--surface-hover); font-weight: 600; }
 
 .detail-state { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem; }
+/* The running task's own status, under the state badge. It wraps here,
+   unlike the one-line .task-activity on a list row: this column has the
+   height to spare, and a status is worth reading in full where somebody
+   has already opened the task to find out what is happening. */
+.detail-activity {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: -0.6rem 0 1rem;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-style: italic;
+}
 
 .declared { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 1.1rem; }
 .declared-row { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.82rem; }

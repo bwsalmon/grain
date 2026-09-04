@@ -125,6 +125,24 @@ type Task struct {
 	// own State now (model.StateAwaitingSubmit), so the badge says it
 	// rather than contradicting it.
 	MergeQueueBlockedAt *time.Time `json:"mergeQueueBlockedAt,omitempty"`
+	// Activity is what this task's live run says it is doing right now --
+	// one short phrase the run wrote for itself through the update_status
+	// tool (model.Run.Activity), with ActivityAt the moment it wrote it.
+	//
+	// Both are empty for every task that is not running, and for a running
+	// task whose agent has not said anything yet: a run is under no
+	// obligation to narrate itself, so their absence is the ordinary case
+	// and never a sign of trouble. TaskList.jsx shows the phrase on the
+	// row and leans on ActivityAt to say how long it has stood, since
+	// "waiting for CI" ten seconds old and the same words an hour old mean
+	// opposite things.
+	//
+	// It rides on the list shape rather than only on TaskDetail --
+	// unlike Comments or Attempts -- because a list is exactly where it
+	// earns its place: the question it answers is "what are my running
+	// tasks doing?", asked of all of them at once.
+	Activity   string     `json:"activity,omitempty"`
+	ActivityAt *time.Time `json:"activityAt,omitempty"`
 }
 
 // Comment is one entry in a task's conversation.
@@ -259,8 +277,12 @@ type Attempt struct {
 // every task ID a blocking link might target, whether that task reads
 // closed -- the caller resolves it (Client.ListTasks over the whole
 // store in one query, Client.Task over just this task's own targets) so
-// this function stays free of the store itself.
-func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueueBlockedAt *time.Time) Task {
+// this function stays free of the store itself. activity is the same
+// arrangement for the task's live run's own synopsis, resolved by the
+// caller for the same reason and nil for a task with no live run or one
+// whose run has said nothing.
+func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueueBlockedAt *time.Time,
+	activity *model.RunActivity) Task {
 	out := Task{
 		ID:                  t.ID,
 		Title:               t.Title,
@@ -282,6 +304,9 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		SuiteRun:            t.Origin.Reason == model.ReasonSuite,
 		CreatedAt:           t.CreatedAt,
 		MergeQueueBlockedAt: mergeQueueBlockedAt,
+	}
+	if activity != nil {
+		out.Activity, out.ActivityAt = activity.Note, activity.At
 	}
 	if t.Target != nil {
 		out.Repo = t.Target.String()

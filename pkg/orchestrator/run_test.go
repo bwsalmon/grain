@@ -322,6 +322,41 @@ func TestBuildPromptOffersOpenPullRequestOnlyToARunThatHasIt(t *testing.T) {
 	}
 }
 
+// update_status is registered by the same -server/-task pair
+// open_pull_request is, so the prompt names it on exactly the same
+// condition -- and it needs naming for a reason of its own: it is the one
+// tool here whose whole value is to somebody outside the run, which makes
+// it the one a run working on its own task would never go looking for.
+// Unlike open_pull_request it has nothing to do with a branch, so a task
+// with no repo at all gets the paragraph too: a run that spends an hour
+// answering a question can say what it is doing just as usefully as one
+// that pushes.
+func TestBuildPromptAsksForAStatusOnlyFromARunThatCanSendOne(t *testing.T) {
+	task := model.Task{
+		ID: "t1", Title: "Do the thing", Body: "details",
+		Target: &model.RepoRef{Owner: "acme", Name: "widgets"},
+	}
+	prompt := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, true,
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
+	for _, want := range []string{"update_status", "one short phrase", "when what you are doing changes"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not mention %q: %q", want, prompt)
+		}
+	}
+
+	without := orchestrator.BuildPrompt(task, orchestrator.CheckoutDir, false,
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
+	if strings.Contains(without, "update_status") {
+		t.Errorf("prompt names a tool this run's mcpserver never registered: %q", without)
+	}
+
+	bare := orchestrator.BuildPrompt(model.Task{ID: "t2", Title: "Think", Body: "details"}, "", true,
+		orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
+	if !strings.Contains(bare, "update_status") {
+		t.Errorf("prompt withholds the status tool from a task with no repo: %q", bare)
+	}
+}
+
 // The prompt's half of the fact only the Framework holds: RunDispatch
 // asks the one it is about to run, so a deployment whose daemon serves a
 // UI/API tells its runs about open_pull_request and one without says

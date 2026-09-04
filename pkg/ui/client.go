@@ -241,13 +241,24 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// And once more for what each running task says it is doing: one
+	// query over the live runs that have a synopsis, rather than a read
+	// per task, on the same reasoning as the two above.
+	activity, err := c.Store.TaskActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Task, 0, len(tasks))
 	for _, t := range tasks {
 		var blockedAt *time.Time
 		if at, ok := mergeQueueBlocked[t.ID]; ok {
 			blockedAt = &at
 		}
-		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt))
+		var doing *model.RunActivity
+		if a, ok := activity[t.ID]; ok {
+			doing = &a
+		}
+		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, doing))
 	}
 	return out, nil
 }
@@ -305,7 +316,11 @@ func (c *Client) Task(ctx context.Context, id string) (Task, error) {
 	if obs != nil {
 		blockedAt = obs.MergeQueueBlockedAt
 	}
-	return taskFrom(*t, state, closed, blockedAt), nil
+	activity, err := c.Store.TaskActivityOf(ctx, id)
+	if err != nil {
+		return Task{}, err
+	}
+	return taskFrom(*t, state, closed, blockedAt, activity), nil
 }
 
 // closedTargets resolves whether each of a task's own blocking-link
@@ -376,8 +391,12 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 	if obs != nil {
 		blockedAt = obs.MergeQueueBlockedAt
 	}
+	activity, err := c.Store.TaskActivityOf(ctx, id)
+	if err != nil {
+		return TaskDetail{}, err
+	}
 	detail := TaskDetail{
-		Task:        taskFrom(*t, state, closed, blockedAt),
+		Task:        taskFrom(*t, state, closed, blockedAt, activity),
 		Comments:    make([]Comment, 0, len(comments)),
 		Attachments: taskAttachments,
 	}

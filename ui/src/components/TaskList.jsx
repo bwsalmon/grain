@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
-import { STATE_LABELS, capabilityName, completionPhase } from "../state.js";
+import { STATE_LABELS, capabilityName, completionPhase, runActivity } from "../state.js";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
 import StateDot, { isLiveRunning } from "./StateDot.jsx";
 
@@ -237,6 +237,12 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // held open and empty instead.
 export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, dragPlaceholder, nested }) {
   const phase = completionPhase(t);
+  // What the run itself says it is doing, for as long as it is running
+  // (state.js's runActivity). It sits between the title and the chips
+  // rather than in the chip row: it is a sentence somebody wrote, not a
+  // label off a fixed vocabulary, and it is the one thing on this row
+  // that changes while you watch it.
+  const activity = runActivity(t);
   return (
     <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
       {draggable ? (
@@ -265,6 +271,15 @@ export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, dragg
       </span>
       <span className="task-number">{t.id}</span>
       <span className="task-title">{t.title}</span>
+      {activity && (
+        <span
+          className="task-activity"
+          title={`What this run says it is doing${activity.age ? `, as of ${activity.age === "now" ? "just now" : `${activity.age} ago`}` : ""}`}
+        >
+          <span className="task-activity-note">{activity.note}</span>
+          {activity.age && <span className="task-activity-age">{activity.age}</span>}
+        </span>
+      )}
       <span className="chips">
         {t.scheduled && <Chip size="small" className="chip-scheduled" title="filed automatically by a schedule" label="scheduled" />}
         {t.suiteRun && <Chip size="small" className="chip-suite" title="filed automatically by a suite run" label="suite" />}

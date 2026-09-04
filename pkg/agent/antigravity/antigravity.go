@@ -322,8 +322,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // publishedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools, NewOpenPullRequestTools and
-// NewRecreateSandboxTools register, plus selfdebug.SourceTools' and
+// NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
+// and NewStatusTools register, plus selfdebug.SourceTools' and
 // bootstrap.PlaybookTools' -- bare, as the "mcpserver" subcommand
 // registers them. Computed from those
 // constructors directly rather than hand-copied, so this can never drift
@@ -363,6 +363,12 @@ func publishedTools() []string {
 	// open_pull_request is, so it is named here on the same terms. nil
 	// is a SandboxRecreator no run ever gets -- this only wants the name.
 	for _, t := range mcp.NewRecreateSandboxTools(nil) {
+		names = append(names, t.Name)
+	}
+	// update_status comes from that same pair, and is named here on those
+	// same terms. nil is a StatusReporter no run ever gets -- this only
+	// wants the name.
+	for _, t := range mcp.NewStatusTools(nil) {
 		names = append(names, t.Name)
 	}
 	// The capability grants' own tools, named on the same terms again:
