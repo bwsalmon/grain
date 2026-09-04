@@ -610,12 +610,17 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 
 	stdout, runErr := f.run.Run(runCtx, args, cfg.Prompt, env, cfg.SandboxRoot, io.MultiWriter(sinks...))
 	result, parseErr := parseTranscript(stdout)
-	// Read once, from the stream's own account of the failure plus
-	// whatever the subprocess itself reported, because a quota refusal
-	// can arrive either way: codex usually reports it as a failed turn
-	// (parseErr, below) but a hard enough refusal kills the process
-	// first (runErr). See usagelimit.go.
-	limit := usageLimitFailure(parseEvents(stdout).failureText(), runErr)
+	// Parsed once here rather than at each branch below, since two of
+	// them read the same pass: what codex said about how the run ended
+	// is both the evidence a quota refusal leaves and the sentence that
+	// explains an ordinary failure.
+	events := parseEvents(stdout)
+	// Read from the stream's own account of the failure plus whatever
+	// the subprocess itself reported, because a quota refusal can arrive
+	// either way: codex usually reports it as a failed turn (parseErr,
+	// below) but a hard enough refusal kills the process first (runErr).
+	// See usagelimit.go.
+	limit := usageLimitFailure(events.failureText(), runErr)
 	switch {
 	case capWatch.tripped():
 		// The cap cancelled the subprocess, so runErr is that
@@ -637,7 +642,16 @@ func (f *Framework) Run(ctx context.Context, cfg agent.RunConfig) (*agent.Result
 		// changed the world.
 		return partialResult(result, stdout), limit
 	case runErr != nil:
-		return partialResult(result, stdout), fmt.Errorf("codex: running codex: %w", runErr)
+		// Both halves, not just the exit status: codex reports a run it
+		// could not finish in the stream and then exits non-zero with
+		// nothing useful on stderr, and this arm used to render the pair
+		// as the unactionable "running codex: exit status 1 (stderr: )".
+		// events.resultErr is the terminal failure's own sentence -- a
+		// non-terminal error event is deliberately not read here, since
+		// codex reports each failed attempt of a reconnect that then
+		// succeeded as one, and blaming a failure on a recovery would be
+		// worse than saying nothing.
+		return partialResult(result, stdout), agent.RunFailure("codex", "codex", events.resultErr, runErr)
 	case parseErr != nil:
 		// A capture with no terminal event -- a codex that died without
 		// runErr reaching us, or output truncated mid-stream.

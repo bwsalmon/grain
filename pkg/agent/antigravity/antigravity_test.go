@@ -3,6 +3,7 @@ package antigravity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,6 +26,11 @@ type recordingRunner struct {
 	env    []string
 	dir    string
 	stdout string
+	// err is what the subprocess itself returned, for the failures that
+	// only exist as an exit status: an agy that exited non-zero after
+	// writing its own account of the run to stdout, or one that died
+	// before writing anything at all.
+	err error
 	// homeAtRun is a copy of the MCP config found in the HOME this run
 	// was given, and settingsAtRun a copy of agy's own settings file
 	// beside it -- both read while the run is notionally in flight, since
@@ -67,7 +73,7 @@ func (r *recordingRunner) Run(_ context.Context, args []string, stdin string, en
 	if tee != nil {
 		io.WriteString(tee, r.stdout)
 	}
-	return r.stdout, nil
+	return r.stdout, r.err
 }
 
 func okStream() string {
@@ -1108,5 +1114,61 @@ func TestJoinNamesReadsAsProse(t *testing.T) {
 		if got := joinNames(parts); got != want {
 			t.Errorf("joinNames(%v) = %q, want %q", parts, got, want)
 		}
+	}
+}
+
+// TestRunReportsAgysOwnErrorAlongsideItsExitStatus pins the shape a real
+// failed run has: agy writes what went wrong into its terminal result
+// event and *then* exits 1 with nothing at all on stderr. Reporting only
+// the exit status left the daemon's log saying "running agy: exit status
+// 1 (stderr: )", and since the stream-json capture is removed when the
+// run finishes, the sentence dropped here was the last copy of the only
+// account of the failure anywhere.
+func TestRunReportsAgysOwnErrorAlongsideItsExitStatus(t *testing.T) {
+	exitErr := errors.New("exit status 1 (stderr: )")
+	r := &recordingRunner{
+		stdout: stream(
+			initLine,
+			`{"event":"result","result":{"status":"ERROR","response":"",`+
+				`"error":"There was a network issue connecting to the server, please try again."}}`,
+		),
+		err: exitErr,
+	}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	result, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("Run err = nil, want the failure")
+	}
+	if !strings.Contains(err.Error(), "There was a network issue") {
+		t.Errorf("Run err = %q, want agy's own account of why the run failed", err)
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Errorf("Run err = %q, want the exit status kept alongside it", err)
+	}
+	if !errors.Is(err, exitErr) {
+		t.Errorf("Run err = %q, want the subprocess's own error still wrapped in it", err)
+	}
+	// agent.Framework's contract, unchanged by any of this: a run that
+	// pushed a branch before the network gave out still comes back with
+	// what it did.
+	if result == nil {
+		t.Error("Run returned no Result at all, want the partial one alongside the failure")
+	}
+}
+
+// An agy that died before saying anything -- a missing binary, a signal --
+// has left nothing but its exit status, and that is what Run reports:
+// there is no stream sentence to lead with.
+func TestRunReportsTheExitStatusAloneWhenAgySaidNothing(t *testing.T) {
+	r := &recordingRunner{stdout: "", err: errors.New("fork/exec agy: no such file or directory")}
+	f := newFramework(r, "/usr/local/bin/grain")
+
+	_, err := f.Run(context.Background(), agent.RunConfig{Prompt: "go", SandboxRoot: t.TempDir()})
+	if err == nil {
+		t.Fatal("Run err = nil, want the failure")
+	}
+	if !strings.Contains(err.Error(), "antigravity: running agy: fork/exec agy") {
+		t.Errorf("Run err = %q, want the subprocess's own failure named", err)
 	}
 }
