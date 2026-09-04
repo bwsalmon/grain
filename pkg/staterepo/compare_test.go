@@ -34,6 +34,15 @@ func sameDatabase(t *testing.T, ctx context.Context, a, b *sql.DB, what string) 
 	if other := realTables(t, ctx, b); !equalStrings(tables, other) {
 		t.Fatalf("%s: the two databases do not have the same tables:\n%v\n%v", what, tables, other)
 	}
+	sameTables(t, ctx, a, b, tables, what)
+}
+
+// sameTables is sameDatabase over a named subset -- what a caller wants
+// when the two are expected to agree about the state tier and not about
+// grain's own churn, which is exported on a slower clock and so is
+// legitimately behind.
+func sameTables(t *testing.T, ctx context.Context, a, b *sql.DB, tables []string, what string) {
+	t.Helper()
 	for _, table := range tables {
 		left := dumpRows(t, ctx, a, table)
 		right := dumpRows(t, ctx, b, table)
