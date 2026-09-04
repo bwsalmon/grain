@@ -420,13 +420,6 @@ func reconcileDispatch(ctx context.Context, deps Deps, now time.Time) error {
 	// reconciler: the pause lifts because a later tick found its instant
 	// passed, not because anything here holds a timer.
 	//
-	// The configuration agent waits too, unlike every other exemption it
-	// has (dispatch.dispatchConfiguration starts it regardless of how
-	// much of this deployment's capacity is spent). Capacity is grain's
-	// own choice and can be overridden; budget is the provider's, and a
-	// configuration run dispatched now would reach the same refusal
-	// without ever answering the question it was filed for.
-	//
 	// Silent per tick on purpose: Pause logs the one line worth having
 	// when it closes and the one worth having when it opens again, and a
 	// line per tick for however many hours a provider's window lasts
@@ -701,11 +694,11 @@ func runOne(ctx context.Context, deps Deps, d dispatch.Dispatch, now time.Time) 
 	//
 	// Whether a missing sandboxRoot actually matters is decided later, by
 	// applyPlacements: not every grant materializes a SideSandbox
-	// placement (self-debug and self-repair, the Configuration agent's
-	// own grants, materialize none at all -- they only add tools), so
-	// erroring here on len(task.Grants) > 0 alone used to fail every
-	// Configuration agent task dispatched onto a non-rooted sandbox
-	// (bwsalmon/agents#643), whether or not it had anything to place.
+	// placement (self-debug and self-repair materialize none at all --
+	// they only add tools), so erroring here on len(task.Grants) > 0
+	// alone used to fail every task holding only those, dispatched onto
+	// a non-rooted sandbox (bwsalmon/agents#643), whether or not it had
+	// anything to place.
 	//
 	// placer is the third way, and the one a kontur VM answers with for
 	// the grants that DO place something: a route into a sandbox with no

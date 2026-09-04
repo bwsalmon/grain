@@ -132,8 +132,7 @@ func TestRunCycleReleasesTheSandboxAfterAFailedDispatch(t *testing.T) {
 // TestRunCycleDispatchesAGrantWithNoPlacementOntoANonRootedSandbox is a
 // regression test for bwsalmon/agents#643: a grant like self-debug or
 // self-repair materializes no SideSandbox placement at all, so a task
-// holding one -- every Configuration agent task, since ui.Client always
-// grants both -- must still dispatch cleanly onto a sandbox with no local
+// holding one must still dispatch cleanly onto a sandbox with no local
 // directory (recordingSandbox is one; see its own doc comment). Before
 // the fix, runOne refused any task with Grants at all once its sandbox
 // wasn't rootedSandbox, whether or not those grants ever needed one.
