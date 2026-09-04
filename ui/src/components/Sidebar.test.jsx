@@ -118,6 +118,28 @@ describe("Sidebar", () => {
     expectOnly("Metrics");
   });
 
+  // grain/task-287: the board is a destination of its own, not one of
+  // the state entries above it -- those each ask for one state and
+  // always land on the flat list, and a board's own columns are what
+  // decide the states it shows.
+  it("switches to the board view when clicked", async () => {
+    const onSetView = vi.fn();
+    const user = userEvent.setup();
+    render(<Sidebar {...baseProps} config={null} tasks={tasks} onSetView={onSetView} />);
+
+    await user.click(screen.getByRole("button", { name: "Board" }));
+
+    expect(onSetView).toHaveBeenCalledWith("board");
+  });
+
+  it("marks the board entry while the board is the view", () => {
+    const { rerender } = render(<Sidebar {...baseProps} config={null} tasks={tasks} view="tasks" />);
+    expect(screen.getByRole("button", { name: "Board" })).not.toHaveClass("Mui-selected");
+
+    rerender(<Sidebar {...baseProps} config={null} tasks={tasks} view="board" />);
+    expect(screen.getByRole("button", { name: "Board" })).toHaveClass("Mui-selected");
+  });
+
   it("switches to the schedules view and shows its count when clicked", async () => {
     const onSetView = vi.fn();
     const schedules = [{ id: "sched-1" }, { id: "sched-2" }];

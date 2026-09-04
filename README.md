@@ -2927,6 +2927,47 @@ nobody can act on (`-state in_progress`) stops the command with the list
 of values that work, before the request, rather than printing an empty
 listing that reads like a deployment with no such tasks.
 
+**The same tasks as a Kanban board, with the operator's own columns
+(grain/task-287).** The flat list answers "what is the backlog, in
+order". The other question asked of a deployment all day -- "where is
+everything right now" -- is answered by scrolling one list and reading
+eight different state badges off it. So `TaskBoard.jsx` lays the same
+tasks out in columns, one card each, reached from `Board` on the rail
+and from `/board`.
+
+Two things make it a board rather than a second list. The columns are
+the operator's: `BoardColumnsOverlay.jsx` names them, says which states
+each collects and what order they run in, and a state in no column is
+off the board altogether -- which is how closed tasks stay out of the
+way by default, and how "which tasks show up" is answered without a
+second vocabulary. And the toolbar over it is the list's own, moved to
+`taskFilters.js` so both views narrow by the same attributes with the
+same wording rather than growing two drifting copies of one toolbar; the
+menus are built from the tasks the columns admit, so a board with no
+Closed column never offers a repo only closed tasks carry.
+
+The layout lives in `localStorage`, next to the theme mode
+(`ThemeModeContext.jsx`), for the same reason: this is how one person
+wants to look at the deployment, not a fact about it -- nothing behind
+`/api/config` changes when a column is renamed, and it keeps the whole
+feature a frontend change with no settings key or migration behind it.
+`board.js` is what makes that safe to read back: a stored layout naming
+a state this build has never heard of, claiming one state in two
+columns, or holding something that isn't a board at all is normalized or
+dropped on the way in rather than rendered.
+
+What the board deliberately does not do is let a card be dragged into
+another column. A task's state is derived by the daemon from what has
+actually happened to it (`model.StateOf`, `docs/data-model.md`), not
+stored as a field the UI could set, so there is no write behind "drop
+this in Running"; the gestures that really move a task between these
+columns are the ones on the task itself, which is why a card opens the
+task. Dragging *within* a column is real, and is the list's own drag --
+`Store.Reorder`, in the same "between these two neighbours" terms, and
+offered only under backlog order. Cards carry the list's checkbox and
+feed the same selection, so the batch-actions bar works from either
+view: select a whole column and run it.
+
 **`grain demo` (bwsalmon/agents#276, folded into its own subcommand by
 #363) for trying out the frontend on its own.** A real `grain daemon`
 needs a real Gemini key, a real store, and a real deployment's tasks to

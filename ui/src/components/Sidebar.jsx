@@ -173,6 +173,19 @@ export default function Sidebar({ config, tasks, schedules = [], templates = [],
           <NavItem id="blocked" label="Blocked" dotClass="dot-blocked" count={blocked} active={view === "tasks" && stateFilter === "blocked"} />
         )}
         <Divider sx={{ my: 0.7 }} />
+        {/* The board (TaskBoard.jsx, grain/task-287) is the same tasks
+            as the entries above it, in columns of the operator's own
+            choosing -- so it sits here among the destinations rather
+            than in the state list, whose entries each answer "show me
+            this one state" and always land on the flat list.
+            No count beside it, unlike its neighbours: what a board is
+            showing is decided by its own columns, which live in the
+            board and not here, and "all tasks" is already counted at
+            the top of this rail. */}
+        <ListItemButton selected={view === "board"} onClick={() => onSetView("board")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
+          <span className="dot dot-all" />
+          <ListItemText primary="Board" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
+        </ListItemButton>
         <ListItemButton selected={view === "repos"} onClick={() => onSetView("repos")} sx={{ borderRadius: 1.5, py: 0.6, px: 0.9 }}>
           <span className="dot dot-all" />
           <ListItemText primary="Repos" sx={{ ml: 1 }} primaryTypographyProps={{ fontSize: "0.85rem", fontWeight: 500 }} />
