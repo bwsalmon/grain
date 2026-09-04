@@ -75,7 +75,7 @@ CONTAINER_USER ?= $(shell id -u):$(shell id -g)
 # from .git. GO_VERSION is passed for the same reason `builder` passes
 # it -- one version, read out of go.mod.
 IMAGE ?= grain:dev
-.PHONY: all build test test-e2e vet fmt clean builder container-build image frontend loadtest $(CMDS)
+.PHONY: all build test test-e2e vet fmt clean builder container-build image frontend loadtest soak $(CMDS)
 
 all: vet test build
 
@@ -206,6 +206,18 @@ vet: frontend
 # GRAIN_LOAD_TEST_* env var below is optional.
 loadtest: frontend
 	GRAIN_LOAD_TEST=1 go test ./tests/e2e/... -run TestLoadSustainedConcurrency -v -timeout 30m
+
+# The state repository soak (pkg/staterepo/soak_test.go) turned all the
+# way up. Unlike `loadtest` above this one is not skipped by `make test`
+# -- sixty rounds of it run on every commit, which is under a minute --
+# so this target is for the long form: a couple of thousand rounds of
+# merges, failed pushes, divergences, restarts and restores, which is
+# what a change to that package deserves before it goes anywhere.
+# GRAIN_STATEREPO_SOAK_SEED reproduces a run that failed; every failure
+# prints the seed it came from.
+soak: frontend
+	GRAIN_STATEREPO_SOAK_ROUNDS=$${GRAIN_STATEREPO_SOAK_ROUNDS:-2000} \
+		go test ./pkg/staterepo/ -run TestSoak -v -timeout 120m
 
 # CI has no equivalent fmt check; this just fails the way `go vet` does
 # when a file needs gofmt, instead of only listing it.

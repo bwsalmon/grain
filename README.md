@@ -2958,6 +2958,43 @@ and the pane says the thing an operator actually needs to hear -- that
 this deployment has diverged from its remote and is not syncing -- rather
 than leaving it to be read out of a git error.
 
+### The copying itself is soaked rather than reasoned about
+
+Everything above is a rule about *when* rows move. What was missing was a
+test of the thing underneath all of them -- that a value written into the
+database and read back out of a clone is the same value -- and of what
+happens when the rules meet each other in an order nobody chose.
+
+`pkg/staterepo/soak_test.go` is that: rounds of tasks filed, runs started
+and finished, observations stamped, settings edited in the UI, pull
+requests merged against the repository (a template retitled, added,
+deleted, a file that is not part of the dump), pushes that fail and
+strand grain's own export on the host, merges landing on top of those so
+the two diverge, restarts taking the daemon's own startup path, the clock
+crossing a churn interval, and restores onto a fresh clone with a fresh
+database. Every round it checks that the working tree is clean, that
+grain has made no merge commit, that the dump names no task it does not
+have, that every task ever filed is still in the database with the repos
+it may read, that the settings live are the ones last merged, that the
+repository's state tier is the database's, and that an export of an
+untouched database commits nothing. At the end it restores the remote
+into an empty database and compares the two row by row -- and storage
+class by storage class, since SQLite types values rather than columns and
+a round trip that turned the text `42` into the integer 42 would compare
+equal on the value alone.
+
+Sixty rounds run on every commit; `make soak` turns it up to a couple of
+thousand. It found, or would have found, four things that each produced a
+repository that looked right and handed back a database that was not the
+one exported: an export that was not a snapshot (a table read per
+statement, so a task filed between two of them left a run in the dump
+whose task was not there), text that was not valid UTF-8 silently
+replaced with U+FFFD by `encoding/json`, a start that recovered a
+divergence importing the remote's older dump over everything the failed
+pushes had stranded in the database, and `task_read` -- the repos a task
+may clone, not a record of what a human has read -- exported on the churn
+clock, an hour after the task it belongs to.
+
 ## Deployment configuration lives in the store too
 
 bwsalmon/agents#320 asked the same "the store is the record" question
