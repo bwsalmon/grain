@@ -428,3 +428,51 @@ func keys(m map[string]grain.File) []string {
 	}
 	return out
 }
+
+// A status record carries a whole Status, because that is what lets a
+// controller read a grain off the log stream it already tails. Pinned as
+// literal JSON for the same reason every other document is: the reader
+// and the writer ship in different artifacts.
+func TestStatusRidesTheRecordStream(t *testing.T) {
+	st := grain.Status{
+		Version: grain.Version, Phase: grain.PhaseRunning,
+		Since:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
+		Activity: "running the test suite", Seq: 4471,
+	}
+	body, err := json.Marshal(st)
+	if err != nil {
+		t.Fatalf("marshalling status: %v", err)
+	}
+	rec := grain.Record{
+		Version: grain.Version, Seq: st.Seq,
+		T:    time.Date(2026, 9, 4, 19, 41, 12, 0, time.UTC),
+		Src:  grain.SrcShim,
+		Kind: grain.KindStatus,
+		Data: body,
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshalling record: %v", err)
+	}
+	if strings.ContainsAny(string(line), "\n\r") {
+		t.Fatalf("a status record spans lines: %s", line)
+	}
+
+	// A reader tailing the stream gets the Status back whole -- it is a
+	// snapshot, not a delta, which is what keeps Reconcile level-triggered
+	// when it is fed from here instead of from an exec.
+	var back grain.Record
+	if err := json.Unmarshal(line, &back); err != nil {
+		t.Fatalf("reading the record back: %v", err)
+	}
+	if back.Kind != grain.KindStatus || back.Src != grain.SrcShim {
+		t.Fatalf("record round-tripped as src=%q kind=%q", back.Src, back.Kind)
+	}
+	var got grain.Status
+	if err := json.Unmarshal(back.Data, &got); err != nil {
+		t.Fatalf("reading the status back: %v", err)
+	}
+	if got.Phase != grain.PhaseRunning || got.Activity != st.Activity || got.Seq != st.Seq {
+		t.Errorf("status round-tripped as %+v", got)
+	}
+}

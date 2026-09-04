@@ -387,16 +387,56 @@ Sharing the stream with the guest console makes tagged records mandatory —
 docker and nowhere else — which turns the collision into something useful:
 a run killed by the provisioning budget can quote the last console lines.
 
-## An optimisation not taken
+## Removing the status exec: what was checked
 
-`List` is `docker ps` plus a `status` exec per grain — N execs per tick,
-nothing at grain's size. Since the shim already emits tagged records,
-**status snapshots could ride the same log stream**, making the tail the
-steady-state path and `grain status` the fallback for a grain gone quiet.
+Once status was the only thing costing an exec per grain per tick, the
+question was whether a native runtime path could carry it instead.
 
-It stays level-triggered (a full snapshot, not a delta) and absence stays
-detectable, so it does not reopen poll versus push. The place to go if exec
-cost ever matters.
+**Docker `HEALTHCHECK`** is the real candidate: the daemon runs a command
+on its own schedule and `docker inspect` exposes `.State.Health.Log[]` with
+each probe's exit code and output, so a healthcheck running `grain status`
+would put the document where a plain inspect reads it, with the daemon
+doing the exec. **Rejected**: docker-only, output capped at a few KB — which
+a status carrying a call's arguments can approach — and a schedule fixed at
+create rather than chosen by the shim.
+
+**Kubernetes has no equivalent.** Probes are boolean; a probe's output
+surfaces only in an Event, only on failure, truncated. Pod annotations
+would need the container to call the API, which is push and needs a
+credential. The termination message is terminal-only, and already taken.
+That asymmetry decided it, the same way it decided the second-NIC option
+for the network.
+
+**What was taken instead: the log stream**, which works identically on both
+and which the controller already tails. Status snapshots as `kind: "status"`
+records make `List` exec-free in the steady state, stay level-triggered
+because each is a full snapshot, and keep absence meaningful because
+container state still comes from the runtime listing.
+
+`grain status` stays as the fallback rather than being deleted — it costs
+one subcommand of a binary that already exists and buys the ability to ask
+when a stream has gone stale. Honestly, it is less independent than it
+looks: on Kubernetes exec and logs both go through the API server and
+largely fail together, so it is a genuine second route only under docker.
+
+## Can stdout and stderr be told apart?
+
+**Docker: yes.** Each entry is tagged with its stream and the API can
+return them separately. **Kubernetes: no.** The CRI log file format carries
+the stream per line, but the pod log API returns only the message; a
+node-local log agent could see it, nothing through the API server can.
+
+So fd-splitting works under one backend and not the other, and the source
+tag lives in the record instead. The discipline it *does* buy is worth
+keeping regardless: **stdout is records only, stderr is the shim's
+human-facing diagnostics** — otherwise a stray warning or panic trace is
+indistinguishable from a damaged record.
+
+This also corrected an earlier description. The guest console does not
+share the stream raw: kontur is the shim's child, so its console output is
+captured and re-emitted as `src: "console"` records. Wrapping is what makes
+a console line addressable at all, which is what a `setup-failed` detail
+quoting the last few lines depends on.
 
 ## Cancellation, and the signal verb that went with it
 

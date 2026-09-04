@@ -5,16 +5,55 @@ import (
 	"time"
 )
 
-// Source says who produced a trajectory record. It exists because the
-// container's stdout has more than one writer: kontur already routes the
-// guest's serial console there (internal/hypervisor/args.go's "--serial
-// tty", in its own words "so it shows up under kubectl logs"), and the
-// shim writes the agent's trajectory to the same stream.
+// Source says who produced a record. Three things share one stream by
+// design -- the shim's own narration, the agent's output, and the guest's
+// serial console -- so a tag is how they are told apart.
 //
-// Tagging is not optional and cannot be replaced by writing one of them
-// to stderr: `kubectl logs` merges stdout and stderr, so separating by
-// file descriptor works under docker and nowhere else.
+// The shim wraps all three rather than letting any of them through raw.
+// kontur routes the guest console to its own stdio
+// (internal/hypervisor/args.go's "--serial tty", "so it shows up under
+// kubectl logs"), and as the shim's child that output is the shim's to
+// capture and re-emit as records. Wrapping is what makes a console line
+// addressable: a run killed by the provisioning budget can quote the last
+// few in its detail, which raw interleaved text could not support.
+//
+// Which is why **stdout carries records and nothing else**, and anything
+// the shim wants to say to a human goes to stderr. Without that rule a
+// stray line -- a library's warning, a panic trace -- is indistinguishable
+// from a damaged record, and "skip what does not parse" stops being a rule
+// about damage and becomes one about mixed content.
+//
+// File descriptors cannot do this job even where the discipline holds.
+// Docker tags each entry with its stream and its API can return them
+// separately, but Kubernetes' pod log API strips it: the CRI log file
+// carries the stream per line and the API returns only the message. So
+// separating by fd works under one backend and not the other, and the tag
+// is in the record instead.
 type Source string
+
+// Record kinds the shim itself emits. Both are this package's vocabulary;
+// an agent's are its framework's.
+const (
+	// KindStatus carries a whole Status, and is what lets a controller
+	// learn a grain's state without an exec at all: it already tails this
+	// stream for the trajectory, so in the steady state reading a grain
+	// costs nothing extra.
+	//
+	// A full snapshot rather than a delta, so this stays level-triggered
+	// -- the property Reconcile rests on -- and absence stays meaningful:
+	// the container's own state comes from the pod listing, so "running
+	// but nothing recent here" is a distinguishable, and more
+	// informative, state than an exec that hangs.
+	//
+	// Emitted on change plus a slow heartbeat, never on a fast fixed
+	// interval. The kubelet rotates container logs at 10 MB across 5
+	// files by default, and status records would otherwise eat the budget
+	// the trajectory needs.
+	KindStatus = "status"
+	// KindPhase is a transition on its own, for a reader following the
+	// stream rather than sampling it.
+	KindPhase = "phase"
+)
 
 const (
 	// SrcShim is the shim's own narration: phase transitions, rebuilds,
@@ -54,9 +93,9 @@ type Record struct {
 	T   time.Time `json:"t"`
 	Src Source    `json:"src"`
 	// Kind is the record's own type within Src, and is Src's to define:
-	// the shim's vocabulary is small and this package's, the agent's is
-	// whichever framework produced it. Empty where Data is the whole
-	// content, as it is for a console line.
+	// the shim's vocabulary is small and this package's (KindStatus,
+	// KindPhase), the agent's is whichever framework produced it. Empty
+	// where Data is the whole content, as it is for a console line.
 	Kind string          `json:"kind,omitempty"`
 	Data json.RawMessage `json:"data,omitempty"`
 }

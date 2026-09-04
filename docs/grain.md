@@ -218,11 +218,31 @@ passes straight through in kontur's vocabulary.
 
 Both are the controller reaching in; the grain never dials out.
 
-**State.** Every method is idempotent, none blocks on the work, and
-`Observe` returns the whole of what can be seen rather than a delta — the
-same level-triggered discipline `orchestrator.Reconciler` already states.
-A grain the controller cannot reach is `PhaseLost`, with a rule for it; a
-grain that stopped *pushing* would be silence indistinguishable from
+**State rides the same stream.** The shim emits its whole `Status` as a
+`kind: "status"` record, so `List` is served from two things a controller
+reads anyway — the runtime's own container listing, for which grains exist
+and whether each is running, and the log tail it already follows for the
+trajectory. **In the steady state that is no exec per grain at all.**
+
+A full snapshot rather than a delta, so this stays level-triggered — the
+property `Reconcile` rests on — and absence stays meaningful: container
+state comes from the listing, so "running but nothing recent on the
+stream" is a wedged shim, which is a distinguishable and more informative
+state than an exec that hangs.
+
+Emitted **on change plus a slow heartbeat**, never on a fast fixed
+interval: the kubelet rotates at 10 MB across 5 files, and status records
+would otherwise eat the budget the trajectory needs.
+
+`grain status` remains as the fallback — for when a stream has gone stale
+and the controller wants a fresh answer rather than the last one a grain
+chose to give. Worth being honest that it is less independent than it
+looks on Kubernetes, where exec and logs both go through the API server
+and largely fail together; it is genuinely a second route only under
+docker.
+
+A grain the controller cannot reach at all is `PhaseLost`, with a rule for
+it; a grain that stopped *pushing* would be silence indistinguishable from
 health.
 
 **Trajectory.** The shim writes tagged records to the container's stdout
@@ -456,17 +476,31 @@ writing it costs a few hundred bytes.
 One JSON object per line on the container's stdout.
 
 ```json
-{"version":"v1","seq":41,"t":"…","src":"shim","kind":"phase","data":{"phase":"running"}}
+{"version":"v1","seq":41,"t":"…","src":"shim","kind":"status","data":{"version":"v1","phase":"running","activity":"running the test suite","seq":41,…}}
 {"version":"v1","seq":42,"t":"…","src":"console","data":"[    0.512] EXT4-fs (vda): mounted"}
 {"version":"v1","seq":43,"t":"…","src":"agent","kind":"tool_use","data":{"name":"run_command"}}
 ```
 
-**`src` is required and cannot be replaced by writing one source to
-stderr**: kontur already routes the guest console to this stream, and
-`kubectl logs` merges stdout and stderr, so splitting by fd works under
-docker and nowhere else. Sharing the stream with the console is what makes
-a failed boot legible — a run killed by the provisioning budget can quote
-the last console lines rather than reporting only that time ran out.
+**stdout carries records and nothing else.** Three things share the stream
+by design — the shim's narration, the agent's output, and the guest's
+serial console — and the shim wraps all three rather than letting any
+through raw. kontur routes the console to its own stdio (`--serial tty`,
+"so it shows up under `kubectl logs`"), and as the shim's child that
+output is the shim's to capture and re-emit. Wrapping is what makes a
+console line addressable: a run killed by the provisioning budget can
+quote the last few in its detail, which raw interleaved text could not
+support.
+
+Anything the shim wants to say to a human goes to **stderr**. Without that
+rule a stray line — a library warning, a panic trace — is
+indistinguishable from a damaged record, and "skip what does not parse"
+stops being a rule about damage and becomes one about mixed content.
+
+**File descriptors cannot do this job**, which is why `src` is in the
+record. Docker tags each entry with its stream and its API can return them
+separately; Kubernetes' pod log API strips it — the CRI log file carries
+the stream per line and the API returns only the message. So fd-splitting
+works under one backend and not the other.
 
 `version` is on every line because a reader may join anywhere; a record
 never spans lines, and an unparseable one is skipped, since the tail of a

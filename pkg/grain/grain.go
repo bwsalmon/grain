@@ -90,6 +90,18 @@ type Grains interface {
 	// reattach-after-restart and the reaping of grains no live run
 	// claims. There is no separate orphan pass because there is nothing
 	// a separate pass would learn that this does not.
+	//
+	// It is served from two things a controller reads anyway: the
+	// container runtime's own listing, for which grains exist and whether
+	// each is running, and the log stream each one is already tailed for,
+	// whose latest KindStatus record is that grain's state. So the
+	// steady state costs no exec per grain at all -- Observe is what a
+	// controller falls back to when a grain has gone quiet and it wants a
+	// fresh answer rather than the last one the grain chose to give.
+	//
+	// A grain whose container is running and whose stream has nothing
+	// recent is not a gap in this: it is a wedged shim, which is a state
+	// worth being able to see.
 	List(ctx context.Context) ([]Status, error)
 
 	// Get re-attaches to one grain by name.
@@ -107,9 +119,18 @@ type Grains interface {
 type Grain interface {
 	ID() ID
 
-	// Observe is the whole of what the controller can see: one call, one
-	// round trip, everything. Fat by design -- the poll is the only read,
-	// so a field left out here is a second exec per grain per tick.
+	// Observe asks a grain for its state directly. It is the same
+	// document List reads off the log stream, and exists for when that
+	// stream has gone stale: a controller that wants a fresh answer
+	// rather than the last one a grain chose to emit.
+	//
+	// Fat by design -- one call, one round trip, everything -- because a
+	// field left out here is a second exec on the path that is already
+	// the expensive one.
+	//
+	// Less independent than it looks on Kubernetes, where exec and logs
+	// both go through the API server and largely fail together. It is
+	// genuinely a second route only under docker.
 	Observe(ctx context.Context) (Status, error)
 
 	// Answer settles the MCP tool call this grain is blocked on
