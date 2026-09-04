@@ -6,6 +6,7 @@ import fileToAttachment from "../attachments.js";
 import { capabilityUnavailableHint, defaultCapabilitiesFor, frameworkLabel, knownRepos, lastBaseForRepo, suggestsBase } from "../state.js";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import Overlay from "./Overlay.jsx";
+import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
 import RepoField from "./RepoField.jsx";
 import TaskPicker from "./TaskPicker.jsx";
 
@@ -41,6 +42,11 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
   // title lets the chips below the picker read as "task 12 Fix the
   // thing" instead of a bare number nobody can place.
   const [dependsOn, setDependsOn] = useState([]);
+  // reads is the read-only repos picked below, held here rather than
+  // left as a form field for the reason capabilities and dependsOn are:
+  // its picker (ReadOnlyReposField) is a search box over knownRepos, not
+  // an <input> FormData could read the answer off.
+  const [reads, setReads] = useState([]);
   // capabilities starts as whatever a task against this repo would be
   // filed holding: this deployment's own default set plus whatever the
   // picked repo adds to it (defaultCapabilitiesFor, over GET
@@ -114,8 +120,6 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
     evt.preventDefault();
     const form = evt.target;
     const data = new FormData(form);
-    const reads = (data.get("reads") || "")
-      .split(",").map((repo) => repo.trim()).filter((repo) => repo !== "");
     const payload = {
       title: data.get("title"),
       description: data.get("description") || "",
@@ -158,6 +162,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       setNoRepo(false);
       setBase(lastBaseForRepo(tasks, defaultRepo || ""));
       setDependsOn([]);
+      setReads([]);
       setCapabilities(defaultCapabilitiesFor(config, defaultRepo || ""));
       capabilitiesEdited.current = false;
       setAttachments([]);
@@ -239,15 +244,7 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
           value={base}
           onChange={(e) => { baseEdited.current = true; setBase(e.target.value); }}
         />
-        <TextField
-          name="reads"
-          label="Read-only repos"
-          helperText="owner/name, comma-separated, optional"
-          placeholder="owner/shared-lib, owner/schema"
-          autoComplete="off"
-          fullWidth
-          margin="normal"
-        />
+        <ReadOnlyReposField options={repoOptions} value={reads} onChange={setReads} />
         <FormControlLabel
           control={<Checkbox name="autoMerge" defaultChecked={!!config?.autoMergeByDefault} />}
           label="Auto-merge once checks pass"

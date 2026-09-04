@@ -200,13 +200,22 @@ jobs:
       # makes a rollback to an older grain ask for its own older sandbox
       # rather than today's. It names the immutable sha- tag, never the
       # branch tag, for exactly that reason.
+      #
+      # GRAIN_IMAGE_REF stamps in the tag this image is being published
+      # under (cmd/grain/grainimage.go), so a deployment can say which
+      # build it is. That is what it writes into the CI step in its own
+      # state repository, whose `grain state check` has to run a build
+      # that knows the same schema as the deployment; the sha- tag, again
+      # never the branch tag, so a deployment held at an older one names
+      # itself rather than main.
       - name: Build the image
         id: build
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY,,}/grain"
           sandbox="ghcr.io/${GITHUB_REPOSITORY,,}/guest:sha-${GITHUB_SHA:0:7}"
-          make image IMAGE="${image}:sha-${GITHUB_SHA:0:7}" SANDBOX_IMAGE="$sandbox"
+          make image IMAGE="${image}:sha-${GITHUB_SHA:0:7}" SANDBOX_IMAGE="$sandbox" \
+            GRAIN_IMAGE_REF="${image}:sha-${GITHUB_SHA:0:7}"
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "tag=sha-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
           echo "sandbox=$sandbox" >> "$GITHUB_OUTPUT"

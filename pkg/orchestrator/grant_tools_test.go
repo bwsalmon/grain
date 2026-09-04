@@ -79,8 +79,8 @@ func TestRunCycleAddsGrantToolsForAnInteractiveTasksGrant(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(framework),
-		Config:        grantToolsConfig(),
+		Framework:  orchestrator.StaticFramework(framework),
+		Config:     grantToolsConfig(),
 		MaxWorkers: 1,
 	}
 
@@ -106,8 +106,8 @@ func TestRunCycleDoesNotAddGrantToolsForANonInteractiveTask(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(framework),
-		Config:        grantToolsConfig(),
+		Framework:  orchestrator.StaticFramework(framework),
+		Config:     grantToolsConfig(),
 		MaxWorkers: 1,
 	}
 
@@ -134,8 +134,8 @@ func TestRunCycleAddsNoGrantToolsForAGrantWithNoEntry(t *testing.T) {
 	framework := &toolCapturingFramework{}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(framework),
-		Config:        grantToolsConfig(),
+		Framework:  orchestrator.StaticFramework(framework),
+		Config:     grantToolsConfig(),
 		MaxWorkers: 1,
 	}
 

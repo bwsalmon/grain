@@ -2068,6 +2068,17 @@ value in a Secret — `name`, or `name/key` when a secret carries more than
 one. Extensible because a new capability needing a new secret is an
 operator writing a new subdirectory, never a schema change.
 
+**A run can ask for a name too, and still never see a value.**
+`Observation.PendingSecret` (grain/task-230) holds the credential name a
+run's `request_secret` call asked a human to set -- a name, so it is the
+same kind of pointer a `CredentialRef` is and breaks none of the rule
+above. What it buys is the one path by which a *new* secret gets into a
+deployment because a run needed it: the task parks the way it does on a
+question, the task pane offers a write-only box addressed at that name,
+and the value goes from the browser to `pkg/secrets` without passing
+through the task's conversation -- which is exactly where a reply would
+have put it, and which is also the next run's prompt.
+
 **A capability's `Requires` lists names, never values, and is safe to
 publish.** `CapabilitySpec.Requires` (`model/capability.go`) is this
 document's `requires` field, widened from one name to every name a

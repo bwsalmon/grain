@@ -232,8 +232,10 @@ func TestPullBringsBackAMergedChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening: %v", err)
 	}
-	if err := store.PutTask(ctx, task("a1b2")); err != nil {
-		t.Fatalf("putting: %v", err)
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
 	}
 	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("loading: %v", err)
@@ -241,27 +243,110 @@ func TestPullBringsBackAMergedChange(t *testing.T) {
 
 	// Somebody else -- an agent's merged pull request, in the real thing --
 	// edits the dump and pushes it.
-	work := filepath.Join(t.TempDir(), "clone")
-	git(t, "", "clone", "--quiet", remote, work)
-	path := filepath.Join(work, staterepo.TablesDir, "task.json")
-	edited := strings.Replace(read(t, path), "Rename the endpoint", "Retitled by a pull request", 1)
-	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
-		t.Fatalf("editing the dump: %v", err)
-	}
-	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "Retitle")
-	git(t, work, "push", "--quiet", "origin", "main")
+	mergeIntoRemote(t, remote, "template.json", "Run the nightly sweep", "Retitled by a pull request")
 
 	// grain pulls, and the merged file is what its database now says.
 	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("loading after the merge: %v", err)
 	}
-	got, err := store.GetTask(ctx, "a1b2")
+	got, err := store.GetTemplate(ctx, "tpl-1")
 	if err != nil || got == nil {
-		t.Fatalf("reading the task: %v %v", got, err)
+		t.Fatalf("reading the template: %v %v", got, err)
 	}
 	if got.Title != "Retitled by a pull request" {
 		t.Fatalf("the merged change did not reach the database: %q", got.Title)
 	}
+}
+
+// The window this closed. A merged pull request that grain has not taken
+// up yet leaves HEAD ahead of the commit this host recorded, and a Load
+// that read that as "replace grain's own record from the dump" replaced
+// it with a dump written at the last export -- up to an export interval
+// ago -- so every task, comment and branch written in between went.
+//
+// Half a minute is not much of a window until you notice how an operator
+// gets into it: merge a settings pull request, restart grain to make it
+// take effect. That is a habit from before Apply existed, and it lands
+// the restart squarely inside it.
+func TestARestartWithAMergePendingKeepsWhatTheDatabaseHas(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTemplate(ctx, model.Template{
+		ID: "tpl-1", Name: "nightly", Title: "Run the nightly sweep", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("putting a template: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	// A settings pull request, merged, and no tick of the sync loop has
+	// come round to pull it down yet.
+	mergeIntoRemote(t, remote, "template.json", "Run the nightly sweep", "Merged")
+
+	// grain files a task and the process stops before its next export.
+	if err := store.PutTask(ctx, task("filed-just-before-the-stop")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+
+	reopened, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	if err := staterepo.Load(ctx, reopened, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading after the restart: %v", err)
+	}
+
+	got, err := store.GetTask(ctx, "filed-just-before-the-stop")
+	if err != nil {
+		t.Fatalf("reading the task: %v", err)
+	}
+	if got == nil {
+		t.Fatal("a restart with a merge pending rolled the task back")
+	}
+	// And the merge it restarted for is live all the same.
+	tpl, err := store.GetTemplate(ctx, "tpl-1")
+	if err != nil || tpl == nil {
+		t.Fatalf("reading the template: %v %v", tpl, err)
+	}
+	if tpl.Title != "Merged" {
+		t.Fatalf("the merged settings change did not take effect: %q", tpl.Title)
+	}
+	// The export that follows puts the task on the remote, on top of the
+	// merge, which is what makes keeping it in the database enough.
+	if _, err := staterepo.Sync(ctx, reopened, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after the restart: %v", err)
+	}
+	out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json")
+	if !strings.Contains(out, "filed-just-before-the-stop") {
+		t.Fatalf("the task never reached the remote:\n%s", out)
+	}
+}
+
+// mergeIntoRemote is somebody's pull request against the state
+// repository, merged: a clone of the remote with one string in one dump
+// file replaced, committed and pushed by a hand that is not grain's.
+func mergeIntoRemote(t *testing.T, remote, file, from, to string) {
+	t.Helper()
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	path := filepath.Join(work, staterepo.TablesDir, file)
+	before := read(t, path)
+	edited := strings.Replace(before, from, to, 1)
+	if edited == before {
+		t.Fatalf("%s does not hold %q to edit:\n%s", file, from, before)
+	}
+	if err := os.WriteFile(path, []byte(edited), 0o644); err != nil {
+		t.Fatalf("editing the dump: %v", err)
+	}
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-am", "Retitle")
+	git(t, work, "push", "--quiet", "origin", "main")
 }
 
 func TestAdoptingAnEmptyRemoteSeedsIt(t *testing.T) {
@@ -727,5 +812,48 @@ func TestSyncRefusesToCommitOverAMergedChange(t *testing.T) {
 	// And with it loaded, exporting works again.
 	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("syncing after loading the merge: %v", err)
+	}
+}
+
+// An empty remote whose HEAD advertises something other than the branch
+// grain wants -- `git init --bare` on a host with no init.defaultBranch,
+// or any repository old enough to have been created as master.
+//
+// bareRemote above always says --initial-branch=main, which is why every
+// other test here passes over the case that broke: Repo.clone renames
+// the branch it landed on to Config.Branch, and the rename was skipped
+// whenever the check for "which branch did we land on" failed -- which
+// it did on every clone of an empty repository, since HEAD there points
+// at a branch with no commit for rev-parse to resolve. The commits then
+// piled up on master while every push named main, and `grain state
+// adopt` ended at git's own "src refspec main does not match any"
+// (found by hand, task 244).
+func TestSyncPushesToAnEmptyRemoteWhoseHeadIsNotTheWantedBranch(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=master", remote).CombinedOutput(); err != nil {
+		t.Fatalf("creating a bare remote: %v: %s", err, out)
+	}
+
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening against a remote: %v", err)
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing: %v", err)
+	}
+
+	out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json")
+	if !strings.Contains(out, "a1b2") {
+		t.Fatalf("the remote's main does not hold the task:\n%s", out)
 	}
 }

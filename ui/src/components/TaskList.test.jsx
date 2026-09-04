@@ -19,8 +19,11 @@ function renderList(overrides = {}) {
     onSelectAll: vi.fn(),
     ...overrides,
   };
-  render(<TaskList {...props} />);
-  return props;
+  const { rerender } = render(<TaskList {...props} />);
+  // rerender takes another set of overrides, for a test that needs this
+  // component to survive a change of props -- a poll bringing new task
+  // states, the sidebar's own filter moving -- rather than mount fresh.
+  return { ...props, rerender: (next) => rerender(<TaskList {...props} {...next} />) };
 }
 
 // row/rowFor is the draggable <li> a task's title sits inside -- what
@@ -453,6 +456,57 @@ describe("TaskList", () => {
       expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
     });
 
+    // grain/task-288: the same menu now orders on the other attributes a
+    // row shows -- state, repo, author -- with the backlog's own order
+    // kept inside each group, since the sort is stable.
+    it("sorts by state in the sidebar's own order", async () => {
+      const user = userEvent.setup();
+      renderList({
+        tasks: [
+          { id: 1, title: "Charlie", state: "completed", capabilities: [], blocked: false },
+          { id: 2, title: "Alpha", state: "proposed", capabilities: [], blocked: false },
+          { id: 3, title: "Bravo", state: "running", capabilities: [], blocked: false },
+        ],
+      });
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(await screen.findByRole("option", { name: "State" }));
+
+      expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
+    });
+
+    it("sorts by repo, with the tasks that have none last", async () => {
+      const user = userEvent.setup();
+      renderList({
+        tasks: [
+          { id: 1, title: "Charlie", state: "queued", capabilities: [], blocked: false },
+          { id: 2, title: "Alpha", state: "queued", repo: "acme/gadgets", capabilities: [], blocked: false },
+          { id: 3, title: "Bravo", state: "queued", repo: "acme/widgets", capabilities: [], blocked: false },
+        ],
+      });
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(await screen.findByRole("option", { name: "Repo (A–Z)" }));
+
+      expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
+    });
+
+    it("sorts by author", async () => {
+      const user = userEvent.setup();
+      renderList({
+        tasks: [
+          { id: 1, title: "Charlie", state: "queued", author: "grace", capabilities: [], blocked: false },
+          { id: 2, title: "Alpha", state: "queued", author: "ada", capabilities: [], blocked: false },
+          { id: 3, title: "Bravo", state: "queued", author: "bob", capabilities: [], blocked: false },
+        ],
+      });
+
+      await user.click(screen.getByLabelText("Sort"));
+      await user.click(await screen.findByRole("option", { name: "Author (A–Z)" }));
+
+      expect(titlesInOrder()).toEqual(["Alpha", "Bravo", "Charlie"]);
+    });
+
     it("disables drag-and-drop reordering once a non-backlog sort is chosen", async () => {
       const onReorder = vi.fn();
       const user = userEvent.setup();
@@ -472,6 +526,181 @@ describe("TaskList", () => {
     });
   });
 
+  // grain/task-288: the toolbar narrows on the attributes the sidebar's
+  // own state filter says nothing about -- repo, base branch,
+  // capability, author, how the task got filed, whether it is a chat,
+  // whether it merges itself.
+  describe("filter (grain/task-288)", () => {
+    const config = { capabilities: [{ id: "gh", name: "GitHub" }, { id: "gcp", name: "Google Cloud" }] };
+    const mixed = [
+      {
+        id: 1, title: "Widget work", state: "queued", blocked: false,
+        repo: "acme/widgets", base: "main", author: "ada", capabilities: ["gh"], autoMerge: true,
+      },
+      {
+        id: 2, title: "Gadget work", state: "queued", blocked: false,
+        repo: "acme/gadgets", base: "release", author: "grace", capabilities: ["gcp"], scheduled: true,
+      },
+      {
+        id: 3, title: "Loose work", state: "queued", blocked: false,
+        author: "ada", capabilities: [], interactive: true,
+      },
+    ];
+
+    function titles() {
+      return [...document.querySelectorAll(".task-title")].map((el) => el.textContent);
+    }
+
+    async function pick(user, label, option) {
+      await user.click(screen.getByLabelText(label));
+      await user.click(await screen.findByRole("option", { name: option }));
+    }
+
+    it("narrows to one repo, and offers the tasks with no repo as their own answer", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Repo", "acme/widgets");
+      expect(titles()).toEqual(["Widget work"]);
+
+      await pick(user, "Repo", "No repo");
+      expect(titles()).toEqual(["Loose work"]);
+    });
+
+    it("narrows to one base branch", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Base", "release");
+
+      expect(titles()).toEqual(["Gadget work"]);
+    });
+
+    it("narrows to one capability, by the name the deployment gives it", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Capability", "Google Cloud");
+
+      expect(titles()).toEqual(["Gadget work"]);
+    });
+
+    it("narrows to one author", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Author", "ada");
+
+      expect(titles()).toEqual(["Widget work", "Loose work"]);
+    });
+
+    it("narrows to how the task was filed", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Origin", "Scheduled");
+      expect(titles()).toEqual(["Gadget work"]);
+
+      await pick(user, "Origin", "Filed by hand");
+      expect(titles()).toEqual(["Widget work", "Loose work"]);
+    });
+
+    it("tells an interactive chat from a background task", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Kind", "Interactive");
+
+      expect(titles()).toEqual(["Loose work"]);
+    });
+
+    it("narrows to the tasks that merge themselves", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Auto-merge", "On");
+
+      expect(titles()).toEqual(["Widget work"]);
+    });
+
+    it("combines the filters with each other and with the search box", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Author", "ada");
+      await pick(user, "Auto-merge", "Off");
+      expect(titles()).toEqual(["Loose work"]);
+
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "widget");
+      expect(titles()).toEqual([]);
+      expect(screen.getByText("No tasks match your search.")).toBeInTheDocument();
+    });
+
+    it("says the filters are what emptied the list", async () => {
+      const user = userEvent.setup();
+      renderList({
+        tasks: [
+          { ...mixed[0], capabilities: [] },
+          { ...mixed[1], capabilities: ["gcp"] },
+        ],
+        config,
+      });
+
+      await pick(user, "Repo", "acme/widgets");
+      await pick(user, "Capability", "Google Cloud");
+
+      expect(screen.getByText("No tasks match these filters.")).toBeInTheDocument();
+    });
+
+    it("puts the whole list back with one Clear", async () => {
+      const user = userEvent.setup();
+      renderList({ tasks: mixed, config });
+
+      await pick(user, "Repo", "acme/widgets");
+      await user.type(screen.getByPlaceholderText("Search tasks…"), "widget");
+      expect(titles()).toEqual(["Widget work"]);
+
+      await user.click(screen.getByRole("button", { name: "Clear" }));
+
+      expect(titles()).toEqual(["Widget work", "Gadget work", "Loose work"]);
+      expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
+    });
+
+    // The menus are built from the tasks in view, so an attribute they
+    // all share -- the repo, on a repo's own page -- can narrow nothing
+    // and is not offered at all.
+    it("offers only the attributes that could narrow the list", () => {
+      renderList({
+        tasks: [
+          { id: 1, title: "One", state: "queued", repo: "acme/widgets", author: "ada", capabilities: [], blocked: false },
+          { id: 2, title: "Two", state: "queued", repo: "acme/widgets", author: "ada", capabilities: [], blocked: false },
+        ],
+        config,
+      });
+
+      expect(screen.queryByLabelText("Repo")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Author")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Capability")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Origin")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Kind")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Auto-merge")).not.toBeInTheDocument();
+    });
+
+    // A choice the sidebar's state filter has since made impossible must
+    // not go on hiding everything: it reads as "any" again.
+    it("forgets a choice no task in view can match any more", async () => {
+      const user = userEvent.setup();
+      const { rerender } = renderList({ tasks: mixed, config, stateFilter: "all" });
+
+      await pick(user, "Repo", "acme/widgets");
+      expect(titles()).toEqual(["Widget work"]);
+
+      rerender({ tasks: mixed.map((t) => (t.id === 1 ? { ...t, state: "running" } : t)), config, stateFilter: "queued" });
+
+      expect(titles()).toEqual(["Gadget work", "Loose work"]);
+    });
+  });
+
   // grain/task-175: the prompt an agent was handed is reached from the
   // task's own page (DetailOverlay's Prompt button), not from a button
   // on every row of every list the task appears in -- so a row carries
@@ -479,5 +708,50 @@ describe("TaskList", () => {
   it("carries no per-row prompt button", () => {
     renderList();
     expect(screen.queryByRole("button", { name: /prompt/i })).not.toBeInTheDocument();
+  });
+
+  // What the run itself says it is doing (grain/task-240, the
+  // update_status tool): the one thing on a row that changes while you
+  // watch it, and the only answer to "what has this task been doing for
+  // the last half hour?" short of reading a transcript.
+  describe("a running task's own status", () => {
+    const running = (extra) => ({
+      id: 7, title: "Ship the other thing", state: "running", capabilities: [], blocked: false, ...extra,
+    });
+
+    it("shows what the run says it is doing, with how long ago it said it", () => {
+      renderList({
+        tasks: [running({
+          activity: "waiting for CI on the second push",
+          activityAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        })],
+      });
+      expect(screen.getByText("waiting for CI on the second push")).toBeInTheDocument();
+      expect(screen.getByText("5m")).toBeInTheDocument();
+    });
+
+    // A synopsis with no timestamp -- a row written by an older build --
+    // is shown alone rather than with an invented age.
+    it("shows a status with no timestamp on its own", () => {
+      renderList({ tasks: [running({ activity: "running the test suite" })] });
+      expect(screen.getByText("running the test suite")).toBeInTheDocument();
+      expect(document.querySelector(".task-activity-age")).not.toBeInTheDocument();
+    });
+
+    // The API only carries one for a live run, but a poll's answer is up
+    // to three seconds old: a task that has just finished must not keep
+    // showing what it was doing, which beside a "Completed" badge would
+    // read as a run still going.
+    it("drops the status the moment the task stops running", () => {
+      renderList({
+        tasks: [running({ state: "completed", activity: "waiting for CI on the second push" })],
+      });
+      expect(screen.queryByText("waiting for CI on the second push")).not.toBeInTheDocument();
+    });
+
+    it("says nothing at all for a run that has not said anything", () => {
+      renderList({ tasks: [running()] });
+      expect(document.querySelector(".task-activity")).not.toBeInTheDocument();
+    });
   });
 });

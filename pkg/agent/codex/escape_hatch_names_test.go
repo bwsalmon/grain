@@ -21,7 +21,7 @@ import (
 // already qualified, in either spelling, must not be the one that brings
 // that failure back.
 func TestEscapeHatchToolCallsAreRecordedUnderTheirBareNames(t *testing.T) {
-	for _, tool := range []string{"ask_question", "comment_on_issue", "propose_task"} {
+	for _, tool := range []string{"ask_question", "request_secret", "comment_on_issue", "propose_task"} {
 		for _, reported := range []string{tool, mcp.QualifiedToolName(tool), mcpServerName + "__" + tool} {
 			t.Run(tool+"/"+reported, func(t *testing.T) {
 				got, err := parseTranscript(strings.Join([]string{

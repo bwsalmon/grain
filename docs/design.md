@@ -657,6 +657,20 @@ calls `create_comment`. The boundary the split-surface argument draws is
 preserved; what moved is that the orchestrator now has a `create_comment`
 operation to call at all, where before it had none.
 
+**The same exception, run backwards:** `request_secret`
+(`pkg/mcp/mock_tools.go`, grain/task-230) lets a blocked run ask for a
+credential the deployment does not hold. It relays a *request* by the
+same route `ask_question` does -- the tool writes nothing itself, and
+grain, on the controller, is what turns the call into a comment and a
+park. What comes back does not come back to the agent at all: the human
+types the value into grain's own UI, it goes straight into the encrypted
+secret store on the controller (`pkg/secrets`), and the run learns
+nothing but that it was set. So the sandbox gains no credential it was
+not already granted, and the one channel that could have carried a
+secret to an agent in plain text -- a reply in the task's conversation,
+which is also the next run's prompt -- is the thing this exists to stop
+anyone reaching for.
+
 **A second exception, on the same terms:** `pull_request_status`
 (`pkg/mcp/pullrequest_tools.go`) and `wait_for_checks`
 (`pkg/mcp/wait_for_checks_tool.go`) let a run see what CI made of the

@@ -118,7 +118,14 @@ ARG BUILDVCS=auto
 # exact sha- tag of the sandbox image built from this same commit, so the
 # two halves of a kontur deployment can never be two different commits.
 ARG SANDBOX_IMAGE=
-RUN make build BUILDVCS=${BUILDVCS} SANDBOX_IMAGE=${SANDBOX_IMAGE}
+# GRAIN_IMAGE_REF stamps in what this image is *called*
+# (cmd/grain/grainimage.go), which is how a deployment can write the tag
+# it runs into the CI step of its own state repository -- a check run by
+# some other build fails on the schema stamp rather than on the change.
+# Empty leaves the source default, the tag CI keeps pointed at main; CI
+# passes the exact sha- tag it is about to publish this image under.
+ARG GRAIN_IMAGE_REF=
+RUN make build BUILDVCS=${BUILDVCS} SANDBOX_IMAGE=${SANDBOX_IMAGE} GRAIN_IMAGE_REF=${GRAIN_IMAGE_REF}
 
 # konturctl only -- not `kontur` or `kontur-mem-agent`, which run inside
 # each sandbox VM's own container (the image

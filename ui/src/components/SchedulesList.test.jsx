@@ -191,7 +191,33 @@ describe("SchedulesList", () => {
     expect(payload.recurrence).toEqual({ kind: "monthly", timeOfDay: "09:00", dayOfMonth: 31 });
   });
 
-  it("parses read-only repos and includes checked capabilities", async () => {
+  // grain/task-241: the read-only repos box is a picker over the repos
+  // this deployment already knows about, and what a schedule carries
+  // shows as chips -- typing a repo the list has never seen still works,
+  // which the test below this one covers.
+  it("shows a schedule's read-only repos as chips and picks more from the known repos", async () => {
+    api.mockResolvedValueOnce({});
+    const withReads = { ...schedule, reads: ["owner/schema"] };
+    const config = { targetRepos: ["acme/widgets", "owner/shared-lib"] };
+    const user = userEvent.setup();
+    render(<ControlledSchedulesList schedules={[withReads]} config={config} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByText("Nightly dependency bump"));
+    expect(screen.getByTitle("Remove owner/schema")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText(/Read-only repos/));
+    // By role, not by text: the target repo's own dropdown is offering
+    // the same repos as <option>s a few fields up.
+    await user.click(await screen.findByRole("menuitem", { name: "owner/shared-lib" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(lastBody().reads).toEqual(["owner/schema", "owner/shared-lib"]);
+  });
+
+  // The typed-not-picked path: this box was a plain text field before it
+  // was a picker, so a repo typed into it and left there still has to
+  // reach the schedule rather than being dropped at submit.
+  it("takes a read-only repo typed straight into the box, and includes checked capabilities", async () => {
     api.mockResolvedValueOnce({});
     const config = { capabilities: [{ id: "gemini-key", name: "Gemini key" }, { id: "self-debug", name: "Self debug" }] };
     const user = userEvent.setup();
@@ -200,14 +226,14 @@ describe("SchedulesList", () => {
     await user.click(screen.getByRole("button", { name: "+ New schedule" }));
     await user.type(screen.getByLabelText(/Title/), "Ship the other thing");
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
-    await user.type(screen.getByLabelText(/Read-only repos/), "owner/shared-lib, owner/schema ");
+    await user.type(screen.getByLabelText(/Read-only repos/), "owner/shared-lib");
     await user.click(screen.getByLabelText("Capabilities"));
     await user.click(await screen.findByRole("option", { name: "Gemini key" }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
 
     const payload = JSON.parse(api.mock.calls[0][1].body);
-    expect(payload.reads).toEqual(["owner/shared-lib", "owner/schema"]);
+    expect(payload.reads).toEqual(["owner/shared-lib"]);
     expect(payload.capabilities).toEqual(["gemini-key"]);
   });
 
@@ -336,8 +362,8 @@ describe("SchedulesList", () => {
     await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
 
     expect(screen.queryByLabelText(/^Title/)).not.toBeInTheDocument();
-    // Repo and base are never among a template's own content (a
-    // template carries no target of its own), so they still render.
+    // Repo and base are not among an unbound template's own content, so
+    // they still render (the bound case is the next test).
     await user.type(screen.getByLabelText(/Target repo/), "acme/widgets");
 
     await user.click(screen.getByRole("button", { name: "Add schedule" }));
@@ -349,6 +375,33 @@ describe("SchedulesList", () => {
       base: "",
       recurrence: { kind: "everyNHours", everyNHours: 24 },
     });
+  });
+
+  // grain/task-285: a template bound to a repo already decides where its
+  // firings go, so the form stops asking for a repo and branch and says
+  // where this schedule will fire instead.
+  it("replaces repo/base with the binding when the chosen template is bound", async () => {
+    api.mockResolvedValueOnce({});
+    const templates = [{ id: "template-1", name: "Dependency bump", repo: "acme/widgets", base: "release" }];
+    const user = userEvent.setup();
+    render(<ControlledSchedulesList schedules={[]} templates={templates} tasks={[]} onRefresh={noop} showError={noop} />);
+
+    await user.click(screen.getByRole("button", { name: "+ New schedule" }));
+    await user.click(screen.getByLabelText("Template"));
+    await user.click(await screen.findByRole("option", { name: "Dependency bump" }));
+
+    expect(screen.queryByLabelText(/Target repo/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Base branch/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Fires against acme\/widgets on release/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Add schedule" }));
+
+    const payload = JSON.parse(api.mock.calls[0][1].body);
+    expect(payload.templateId).toBe("template-1");
+    // Sent empty rather than guessed at here: the API fills both in from
+    // the binding (ui.CreateSchedule).
+    expect(payload.repo).toBe("");
+    expect(payload.base).toBe("");
   });
 
   it("pre-fills the template select when editing a template-backed schedule, and can detach from it", async () => {

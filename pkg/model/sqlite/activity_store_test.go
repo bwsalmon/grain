@@ -1,0 +1,260 @@
+package sqlite_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/bwsalmon/grain/pkg/model"
+	"github.com/bwsalmon/grain/pkg/model/sqlite"
+)
+
+// startedTask files one approved task and puts a live run on it, which is
+// the only state in which a synopsis means anything.
+func startedTask(t *testing.T, store *model.Store, ctx context.Context, id string) {
+	t.Helper()
+	if err := store.PutTask(ctx, task(id, true)); err != nil {
+		t.Fatalf("creating %s: %v", id, err)
+	}
+	if err := store.StartRun(ctx, model.Run{
+		ID: "run-" + id, TaskID: id, Sandbox: "sandbox-" + id,
+		Attempt: 1, StartedAt: now,
+	}, model.Limits{}); err != nil {
+		t.Fatalf("starting a run on %s: %v", id, err)
+	}
+}
+
+// The whole round trip: a live run says what it is doing, and both the
+// per-task read and the whole-store one hand it back with the time it was
+// said.
+func TestTaskActivityRoundTrips(t *testing.T) {
+	store, _, ctx := openStore(t)
+	startedTask(t, store, ctx, "a1b2")
+
+	at := now.Add(3 * time.Minute)
+	live, err := store.SetTaskActivity(ctx, "a1b2", "waiting for CI on the second push", at)
+	if err != nil || !live {
+		t.Fatalf("SetTaskActivity = (%v, %v), want (true, nil)", live, err)
+	}
+
+	got, err := store.TaskActivityOf(ctx, "a1b2")
+	if err != nil {
+		t.Fatalf("TaskActivityOf: %v", err)
+	}
+	if got == nil || got.Note != "waiting for CI on the second push" {
+		t.Fatalf("TaskActivityOf = %+v, want the note just written", got)
+	}
+	if got.At == nil || !got.At.Equal(at) {
+		t.Errorf("TaskActivityOf At = %v, want %v", got.At, at)
+	}
+
+	all, err := store.TaskActivity(ctx)
+	if err != nil {
+		t.Fatalf("TaskActivity: %v", err)
+	}
+	if a, ok := all["a1b2"]; !ok || a.Note != "waiting for CI on the second push" {
+		t.Fatalf("TaskActivity = %+v, want a1b2's own note in it", all)
+	}
+}
+
+// Each call replaces the last: the row carries what the run is doing now,
+// never a log of what it has done.
+func TestSetTaskActivityReplacesTheLastOne(t *testing.T) {
+	store, _, ctx := openStore(t)
+	startedTask(t, store, ctx, "a1b2")
+
+	if _, err := store.SetTaskActivity(ctx, "a1b2", "reading the dispatch path", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetTaskActivity(ctx, "a1b2", "running the test suite", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.TaskActivityOf(ctx, "a1b2")
+	if err != nil || got == nil {
+		t.Fatalf("TaskActivityOf = (%+v, %v)", got, err)
+	}
+	if got.Note != "running the test suite" {
+		t.Errorf("note = %q, want the most recent one", got.Note)
+	}
+}
+
+// A call that arrives after the run is over records nothing and says so,
+// rather than failing: the run has done nothing wrong, there is simply
+// nobody left to show it to. The finished run keeps whatever it last
+// said, which is what leaves a record of where a cancelled run got to --
+// but nothing reads it back as current.
+func TestSetTaskActivityOnAFinishedRunRecordsNothing(t *testing.T) {
+	store, _, ctx := openStore(t)
+	startedTask(t, store, ctx, "a1b2")
+	if _, err := store.SetTaskActivity(ctx, "a1b2", "waiting for CI", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(ctx, "run-a1b2", now.Add(time.Hour), "succeeded", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := store.SetTaskActivity(ctx, "a1b2", "too late", now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatalf("SetTaskActivity after the run finished: %v", err)
+	}
+	if live {
+		t.Error("SetTaskActivity = true, want false: the run was over")
+	}
+
+	got, err := store.TaskActivityOf(ctx, "a1b2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("TaskActivityOf on a finished task = %+v, want nil", got)
+	}
+	if all, err := store.TaskActivity(ctx); err != nil || len(all) != 0 {
+		t.Errorf("TaskActivity = (%v, %v), want no live runs", all, err)
+	}
+
+	// The finished run itself still carries what it last said.
+	runs, err := store.Runs(ctx, "a1b2")
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("Runs = (%v, %v)", runs, err)
+	}
+	if runs[0].Activity != "waiting for CI" {
+		t.Errorf("finished run's Activity = %q, want what it last said", runs[0].Activity)
+	}
+	if runs[0].ActivityAt == nil {
+		t.Error("finished run's ActivityAt = nil, want when it said it")
+	}
+}
+
+// A task nobody has dispatched, and a live run that has never called the
+// tool, both read as "nothing to show" -- absent from the map rather than
+// present and empty, so a caller never has to tell an empty note from a
+// missing one.
+func TestTaskActivityOmitsTasksWithNothingToSay(t *testing.T) {
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+	startedTask(t, store, ctx, "c3d4")
+
+	got, err := store.TaskActivityOf(ctx, "a1b2")
+	if err != nil || got != nil {
+		t.Errorf("TaskActivityOf a task with no run = (%+v, %v), want (nil, nil)", got, err)
+	}
+	got, err = store.TaskActivityOf(ctx, "c3d4")
+	if err != nil || got != nil {
+		t.Errorf("TaskActivityOf a silent run = (%+v, %v), want (nil, nil)", got, err)
+	}
+	all, err := store.TaskActivity(ctx)
+	if err != nil || len(all) != 0 {
+		t.Errorf("TaskActivity = (%v, %v), want nothing", all, err)
+	}
+}
+
+// Naming a task that does not exist writes nothing and reports no live
+// run, the same answer a task whose run is over gets. The daemon checks
+// the task itself (ui.Client.SetTaskActivity answers 404), so this is
+// only about the store never inventing a row.
+func TestSetTaskActivityOnAnUnknownTaskRecordsNothing(t *testing.T) {
+	store, _, ctx := openStore(t)
+	live, err := store.SetTaskActivity(ctx, "nope", "hello", now)
+	if err != nil || live {
+		t.Fatalf("SetTaskActivity on an unknown task = (%v, %v), want (false, nil)", live, err)
+	}
+}
+
+// A store written before task_run.activity existed keeps working: Init
+// adds both columns (Store.ensureTaskRunActivityColumns), the runs
+// recorded before them read back with no synopsis rather than failing the
+// query, and the live one can record a synopsis for real -- the same
+// shape the prompt and transcript migrations pin for the columns before
+// them.
+func TestInitMigratesAnExistingDatabaseMissingActivity(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_run`"+` (
+  `+"`id`"+`               TEXT     NOT NULL,
+  `+"`task_id`"+`          TEXT     NOT NULL,
+  `+"`sandbox`"+`          TEXT     NOT NULL,
+  `+"`unit`"+`             TEXT     NULL,
+  `+"`attempt`"+`          INTEGER  NOT NULL,
+  `+"`started_at`"+`       DATETIME NOT NULL,
+  `+"`agent_started_at`"+` DATETIME NULL,
+  `+"`finished_at`"+`      DATETIME NULL,
+  `+"`outcome`"+`          TEXT     NULL,
+  `+"`detail`"+`           TEXT     NULL,
+  `+"`transcript`"+`       TEXT     NULL,
+  `+"`prompt`"+`           TEXT     NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating the task_run table as it was before the activity columns: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `task_run` (`id`,`task_id`,`sandbox`,`attempt`,`started_at`) "+
+			"VALUES ('r1','a1b2','s1',1,?)", now); err != nil {
+		t.Fatalf("seeding a run recorded before the columns existed: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing task_run.activity: %v", err)
+	}
+
+	got, err := store.TaskActivityOf(ctx, "a1b2")
+	if err != nil || got != nil {
+		t.Fatalf("TaskActivityOf after migrating = (%+v, %v), want (nil, nil)", got, err)
+	}
+	if live, err := store.SetTaskActivity(ctx, "a1b2", "waiting for CI", now); err != nil || !live {
+		t.Fatalf("SetTaskActivity after migrating = (%v, %v), want (true, nil)", live, err)
+	}
+	if got, err := store.TaskActivityOf(ctx, "a1b2"); err != nil || got == nil || got.Note != "waiting for CI" {
+		t.Fatalf("TaskActivityOf after set = (%+v, %v), want the synopsis now durable", got, err)
+	}
+}
+
+// Half a migration is still a migration: a process that died between the
+// two ALTERs leaves a database with `activity` and no `activity_at`, and
+// the next start has to finish the job rather than failing on a column
+// that is already there (ensureTaskRunActivityColumns probes each on its
+// own).
+func TestInitMigratesADatabaseMissingOnlyActivityAt(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`task_run`"+` (
+  `+"`id`"+`               TEXT     NOT NULL,
+  `+"`task_id`"+`          TEXT     NOT NULL,
+  `+"`sandbox`"+`          TEXT     NOT NULL,
+  `+"`unit`"+`             TEXT     NULL,
+  `+"`attempt`"+`          INTEGER  NOT NULL,
+  `+"`started_at`"+`       DATETIME NOT NULL,
+  `+"`agent_started_at`"+` DATETIME NULL,
+  `+"`finished_at`"+`      DATETIME NULL,
+  `+"`outcome`"+`          TEXT     NULL,
+  `+"`detail`"+`           TEXT     NULL,
+  `+"`transcript`"+`       TEXT     NULL,
+  `+"`prompt`"+`           TEXT     NULL,
+  `+"`activity`"+`         TEXT     NULL,
+  PRIMARY KEY (`+"`id`"+`)
+)`); err != nil {
+		t.Fatalf("creating a half-migrated task_run table: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against a half-migrated database: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"SELECT `activity`,`activity_at` FROM `task_run` WHERE 1 = 0"); err != nil {
+		t.Fatalf("both columns should be there after Init: %v", err)
+	}
+}

@@ -83,12 +83,12 @@ func asyncDeps(t *testing.T, store *model.Store, fw *blockingFramework, maxWorke
 	_, client := newSim(t, "acme", "widgets", "main")
 	runs := &orchestrator.InFlight{}
 	return orchestrator.Deps{
-		Store:         store,
-		Client:        client,
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     orchestrator.StaticFramework(fw),
+		Store:      store,
+		Client:     client,
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  orchestrator.StaticFramework(fw),
 		MaxWorkers: maxWorkers,
-		Runs:          runs,
+		Runs:       runs,
 	}, runs
 }
 

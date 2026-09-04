@@ -69,6 +69,14 @@ func gcpSmokeWorkflow(t *testing.T) string {
 	return read(t, ".github", "workflows", "gcp-smoke.yml")
 }
 
+// agySurfaceWorkflow is the fifth, and the only one that holds no
+// credential and no schedule: the dispatch-only job that installs agy and
+// writes down what it says about itself (scripts/agy-surface.sh,
+// docs/agy-surface.md).
+func agySurfaceWorkflow(t *testing.T) string {
+	return read(t, ".github", "workflows", "agy-surface.yml")
+}
+
 // executable asserts a file in the checkout is one CI can run by path.
 // A script invoked as `./scripts/foo.sh` by a workflow nothing triggers
 // on a push is a script whose lost +x bit is found by the schedule, at

@@ -1,9 +1,6 @@
 package gitproxy
 
-import (
-	"strconv"
-	"testing"
-)
+import "testing"
 
 func TestParsePathParsesInfoRefs(t *testing.T) {
 	req, ok := ParsePath("/owner/repo.git/info/refs")
@@ -61,24 +58,20 @@ func TestIsValidGitRequestChecksAcceptForPackEndpoints(t *testing.T) {
 	}
 }
 
-func TestPktLineLengthPrefix(t *testing.T) {
-	got := PktLine([]byte("hello\n"))
-	want := "000ahello\n"
-	if string(got) != want {
-		t.Errorf("PktLine = %q, want %q", got, want)
+// What a refusal looks like on the wire. git prints the body of a
+// non-200 response verbatim, as "remote: " lines, and only when it is
+// told the body is text -- so a length prefix in front of the message
+// is noise an operator reads, and a missing Content-Type is a message
+// they never see at all.
+func TestDenialIsPlainTextGitWillPrint(t *testing.T) {
+	resp := Denial(500, "no credential configured for owner/repo")
+	if resp.Status != 500 {
+		t.Errorf("status = %d, want 500", resp.Status)
 	}
-}
-
-func TestErrPktIsAValidPktLine(t *testing.T) {
-	out := ErrPkt("nope")
-	length, err := strconv.ParseInt(string(out[:4]), 16, 64)
-	if err != nil {
-		t.Fatal(err)
+	if got := string(resp.Body); got != "no credential configured for owner/repo\n" {
+		t.Errorf("body = %q, want the bare message and a newline", got)
 	}
-	if int(length) != len(out) {
-		t.Errorf("length prefix %d, want %d", length, len(out))
-	}
-	if string(out[4:]) != "ERR nope\n" {
-		t.Errorf("body = %q", out[4:])
+	if got := resp.Headers["Content-Type"]; got != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want plain text", got)
 	}
 }

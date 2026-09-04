@@ -88,6 +88,7 @@ import (
 
 	"github.com/bwsalmon/grain/pkg/agent/antigravity"
 	"github.com/bwsalmon/grain/pkg/kontur"
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
 
@@ -133,6 +134,9 @@ func main() {
 		case "sandbox-image":
 			sandboxImageCmd(args[1:])
 			return
+		case "image":
+			grainImageCmd(args[1:])
+			return
 		case antigravity.HookSubcommand:
 			agyToolHook(args[1:])
 			return
@@ -155,6 +159,7 @@ const usage = `usage: grain [global flags] <command> [args]
        grain sync [flags]      reconcile a live deployment's settings and/or GCP infrastructure from a config file (see sync.go)
        grain schema-version    print pkg/model.SchemaVersion and exit (see schemaversion.go)
        grain sandbox-image     print the sandbox container this build expects and exit (see sandboximage.go)
+       grain image             print the image this build is published as and exit (see grainimage.go)
        grain agy-tool-hook     answer one of agy's PreToolUse hooks on stdin/stdout (see agyhook.go)
 
 Global flags (must come before the command):
@@ -164,7 +169,8 @@ Global flags (must come before the command):
   -json           print machine-readable JSON instead of a human-readable table
 
 Commands:
-  list                                 list every task
+  list [flags]                         list tasks (-state/-repo/-capability/-author/-origin and
+                                       friends narrow the list, -sort orders it -- see list.go)
   get <id>                             show one task and its conversation
   create -title T [flags]              file a new task (-position front|end picks which end of
                                        the backlog it joins, and is remembered for the next one)
@@ -304,19 +310,6 @@ func respond(ctx context.Context, c *ui.HTTPClient, out *printer, id string) err
 		return err
 	}
 	out.task(task)
-	return nil
-}
-
-func cmdList(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
-	fs := flag.NewFlagSet("grain list", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	tasks, err := c.ListTasks(ctx)
-	if err != nil {
-		return err
-	}
-	out.tasks(tasks)
 	return nil
 }
 
@@ -551,6 +544,17 @@ func cmdComment(ctx context.Context, c *ui.HTTPClient, out *printer, args []stri
 	if err != nil {
 		return err
 	}
+	// Go's flag package stops at the first non-flag argument, so
+	// `grain comment 3 -attach shot.png "look at this"` parses no flags
+	// at all: it files a comment whose body is the literal words
+	// "-attach shot.png look at this", and the file is silently not
+	// attached (found by hand, task 244). A bare body word that names
+	// one of this command's own flags is that mistake far more often
+	// than it is prose -- and prose survives it, since a quoted body is
+	// one argument and never looks like a flag.
+	if name, ok := misplacedFlag(fs, fs.Args()[1:]); ok {
+		return fmt.Errorf("-%s has to come before the task id: grain comment -%s <path> %s <body>", name, name, fs.Arg(0))
+	}
 	body := strings.Join(fs.Args()[1:], " ")
 	attachments, err := loadAttachments(attach)
 	if err != nil {
@@ -563,6 +567,23 @@ func cmdComment(ctx context.Context, c *ui.HTTPClient, out *printer, args []stri
 		return err
 	}
 	return respond(ctx, c, out, id)
+}
+
+// misplacedFlag reports the first word in args that names a flag defined
+// on fs -- a flag written after the positional arguments, where
+// flag.Parse has already stopped looking at them.
+func misplacedFlag(fs *flag.FlagSet, args []string) (string, bool) {
+	for _, arg := range args {
+		name := strings.TrimLeft(arg, "-")
+		if name == arg || name == "" {
+			continue // not a flag-shaped word, or a bare "--"
+		}
+		name, _, _ = strings.Cut(name, "=")
+		if fs.Lookup(name) != nil {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // loadAttachments reads each path in paths off local disk and returns it
@@ -672,6 +693,16 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 	pollInterval := fs.String("poll-interval", "", "how often the daemon runs a reconcile cycle, e.g. 30s")
 	maxWorkers := fs.Int("max-workers", 0, "maximum number of ordinary tasks dispatched at once")
 	maxMergers := fs.Int("max-mergers", 0, "capacity on top of -max-workers only the merge queue's own fix tasks may use (0 lets them contend for it like anything else)")
+	// The one setting the Settings pane could change and this could not
+	// (found by hand, task 244): an operator on a host with no browser
+	// reachable -- which is every deployment scripts/setup.sh installs,
+	// where the UI binds to loopback -- could read and set all three
+	// model names here but neither see nor change which framework
+	// actually runs. Validated by ui.UpdateSettings, the same as the
+	// pane's own field, rather than a second copy of the vocabulary
+	// here.
+	agentFramework := fs.String("agent-framework", "",
+		"which agent framework a run is driven by unless its task names another: "+model.AgentFrameworkNames())
 	geminiModel := fs.String("gemini-model", "", "Gemini model the antigravity agent framework calls")
 	claudeModel := fs.String("claude-model", "", "Claude model the claude agent framework calls")
 	codexModel := fs.String("codex-model", "", "model the codex agent framework calls")
@@ -748,6 +779,9 @@ func cmdSettings(ctx context.Context, c *ui.HTTPClient, out *printer, args []str
 		case "max-mergers":
 			v := *maxMergers
 			req.MaxMergers = &v
+		case "agent-framework":
+			v := *agentFramework
+			req.AgentFramework = &v
 		case "gemini-model":
 			v := *geminiModel
 			req.GeminiModel = &v
@@ -867,6 +901,19 @@ func (p *printer) detail(d ui.TaskDetail) {
 			fmt.Printf("last failure:    %s\n", d.LastFailureReason)
 		}
 	}
+	// A task parked on a credential looks exactly like one parked on a
+	// question from here -- awaiting_reply, with the request as the last
+	// comment -- so the one thing this says is the one thing that
+	// differs: what it is waiting for, and that answering it is a box in
+	// the UI rather than a reply here. `grain secrets set` would store
+	// the same value and leave the task parked, since nothing about a
+	// write to the secret store tells this task it was answered.
+	if d.PendingSecret != nil {
+		fmt.Printf("waiting on secret: %s (stored as %s/%s, %s)\n",
+			d.PendingSecret.Name, d.PendingSecret.Secret, d.PendingSecret.Key,
+			map[bool]string{true: "already set", false: "not set"}[d.PendingSecret.Set])
+		fmt.Println("                   set it in this task's pane in the UI -- that stores the value and queues the task again")
+	}
 	if len(d.Transitions) > 0 {
 		fmt.Println("\nhistory:")
 		for _, tr := range d.Transitions {
@@ -920,6 +967,9 @@ func (p *printer) settings(s ui.Settings) {
 	fmt.Printf("poll interval:  %s\n", s.PollInterval)
 	fmt.Printf("max workers:    %d\n", s.MaxWorkers)
 	fmt.Printf("max mergers:    %d\n", s.MaxMergers)
+	// Ahead of the three model names, which are each only in effect when
+	// this line names their framework.
+	fmt.Printf("agent framework: %s\n", s.AgentFramework)
 	fmt.Printf("gemini model:   %s\n", s.GeminiModel)
 	fmt.Printf("claude model:   %s\n", s.ClaudeModel)
 	fmt.Printf("codex model:    %s\n", s.CodexModel)

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
+import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
+import RepoField from "./RepoField.jsx";
 
 // TemplateOverlay is the templates page's own sub page (bwsalmon/
 // agents#545): the "+" on TemplatesList opens this blank, and clicking
@@ -12,24 +14,32 @@ import Overlay from "./Overlay.jsx";
 // stop being the one list on this page that also carries an always-open
 // form of its own.
 //
-// No target repo or branch here: a template carries no target of its
-// own (model.TaskTemplate's own doc comment on why) -- whatever fires
-// from this template (ScheduleOverlay.jsx, SuiteRunOverlay.jsx) asks for
-// a repo and branch of its own at the point of use instead.
-export default function TemplateOverlay({ template, config, onClose, onSaved, showError }) {
+// The target repo and branch here are the optional binding
+// (grain/task-285), which is why they are not required and why the form
+// says so: left blank -- the ordinary case -- whatever fires this
+// template (ScheduleOverlay.jsx, SuiteRunOverlay.jsx) asks for a repo
+// and branch of its own at the point of use. Filled in, they are what
+// every firing targets instead, and those pickers stop asking.
+// Re-submitting this form with the repo cleared unbinds the template,
+// which is exactly what ui.UpdateTemplateRequest reads an empty repo as.
+export default function TemplateOverlay({ template, repoOptions = [], config, onClose, onSaved, showError }) {
   const isNew = !template;
   const [capabilities, setCapabilities] = useState(template?.capabilities || []);
+  // reads is state for the reason capabilities is: its picker
+  // (ReadOnlyReposField) is a search box, not a form field submit could
+  // read the answer off.
+  const [reads, setReads] = useState(template?.reads || []);
 
   const submit = async (evt) => {
     evt.preventDefault();
     const form = evt.target;
     const data = new FormData(form);
-    const reads = (data.get("reads") || "")
-      .split(",").map((r) => r.trim()).filter((r) => r !== "");
     const payload = {
       name: data.get("name"),
       title: data.get("title"),
       description: data.get("description") || "",
+      repo: data.get("repo") || "",
+      base: data.get("base") || "",
       autoMerge: form.elements.autoMerge.checked,
       reads,
       capabilities,
@@ -63,16 +73,23 @@ export default function TemplateOverlay({ template, config, onClose, onSaved, sh
         <TextField name="name" label="Name" defaultValue={template?.name} required InputLabelProps={{ required: false }} helperText="shown wherever a template is picked" autoComplete="off" fullWidth margin="normal" />
         <TextField name="title" label="Task title" defaultValue={template?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
         <TextField name="description" label="Description" defaultValue={template?.description} multiline rows={4} fullWidth margin="normal" />
+        <Box component="label" sx={{ display: "block", mt: 2, mb: 1 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
+            Target repo <span className="hint">optional -- leave empty to let whatever fires this template choose</span>
+          </Typography>
+          <RepoField name="repo" options={repoOptions} defaultValue={template?.repo || ""} />
+        </Box>
         <TextField
-          name="reads"
-          label="Read-only repos"
-          defaultValue={(template?.reads || []).join(", ")}
-          helperText="owner/name, comma-separated, optional"
-          placeholder="owner/shared-lib, owner/schema"
+          name="base"
+          label="Base branch"
+          defaultValue={template?.base}
+          helperText="optional, and only used with a target repo"
+          placeholder="main"
           autoComplete="off"
           fullWidth
           margin="normal"
         />
+        <ReadOnlyReposField options={repoOptions} value={reads} onChange={setReads} />
         <FormControlLabel
           control={<Checkbox name="autoMerge" defaultChecked={template?.autoMerge} />}
           label="Auto-merge once checks pass"

@@ -92,6 +92,43 @@ export function completionPhase(t) {
   return null;
 }
 
+// runActivity is what a task's live run says it is doing right now
+// (ui.Task.Activity, written by the run itself through the update_status
+// tool), or null when there is nothing to show.
+//
+// The state check is the whole of the filtering. The API only ever
+// carries a synopsis for a task with a live run, but a poll's answer is
+// up to POLL_INTERVAL_MS old and a task that has just finished would
+// otherwise keep showing what it was doing a moment before it stopped --
+// which reads, next to a "Completed" badge, as a run still going.
+//
+// age is the same phrase's other half: "waiting for CI" said ten seconds
+// ago and the same words left standing for an hour mean opposite things,
+// and only the age tells them apart. It is null for a synopsis with no
+// timestamp -- a row written by an older build -- in which case the note
+// is shown alone rather than with a made-up age.
+export function runActivity(t, now = Date.now()) {
+  if (!t.activity || t.state !== "running") return null;
+  return { note: t.activity, age: t.activityAt ? relativeAge(t.activityAt, now) : null };
+}
+
+// relativeAge renders how long ago an ISO timestamp was, as short as it
+// can be said: "now" under a minute, then minutes, then hours, then days.
+// It is deliberately coarse -- this sits beside a task title, where the
+// question is "is this current?" rather than "how current?" -- and never
+// renders a future time as a negative, since a clock skewed by a second
+// between the daemon and the browser is not worth showing anybody.
+export function relativeAge(iso, now = Date.now()) {
+  const seconds = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
+  if (!Number.isFinite(seconds)) return null;
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 // orphanedPullRequest names the pull request a closed task has left open
 // behind it, or null when there is none to name.
 //

@@ -768,7 +768,7 @@ func run(ctx context.Context, cfg config) error {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			if err := runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live, forbidden); err != nil {
+			if err := runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live, forbidden, stateManager.settingsRepo); err != nil {
 				// reconcilerDown is what turns this log line into
 				// something GET /api/config (and, through it, the UI
 				// itself) can also see -- bwsalmon/agents#576: before
@@ -796,7 +796,7 @@ func run(ctx context.Context, cfg config) error {
 		return nil
 	}
 
-	return runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live, forbidden)
+	return runDaemon(ctx, cfg, store, sandboxes, transcriptDir, live, forbidden, stateManager.settingsRepo)
 }
 
 // orphanReaper is the startup sweep both sandbox backends implement:
@@ -827,7 +827,16 @@ type orphanReaper interface {
 // take the UI server run() already started down with it
 // (bwsalmon/agents#550). It returns once ctx is cancelled, the same as
 // reconcile itself does; a non-nil error means it never got that far.
-func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, transcriptDir string, live *liveConfig, forbidden *gitproxy.ForbiddenSet) (err error) {
+//
+// settingsRepo is the state manager's own answer to which repository
+// this deployment's settings live in (stateManager.settingsRepo), passed
+// as the function it is rather than as a value read here: run() opens
+// the state repository long before this, but the UI can point the
+// installation at a different one while this loop runs, and every run
+// dispatched after that has to be told about the repository grain reads
+// now. It travels no further than orchestrator.Config.StateRepo, which
+// is where what a run is told about it is decided.
+func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes orchestrator.Sandboxes, transcriptDir string, live *liveConfig, forbidden *gitproxy.ForbiddenSet, settingsRepo func() model.RepoRef) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
@@ -953,6 +962,14 @@ func runDaemon(ctx context.Context, cfg config, store *model.Store, sandboxes or
 			// and the lift button on it -- is about the gate this loop
 			// actually consults (agentPause's own doc comment).
 			Pause: agentPause,
+			// Which repository this deployment's own settings live in,
+			// so that a run dispatched into it is told it is changing
+			// the grain that dispatched it, and every other run is told
+			// where the settings it might want changed actually are.
+			// Nothing in a sandbox can work either out: the git proxy
+			// serves every repo from one address, and no file in a
+			// checkout says which grain reads it.
+			StateRepo: settingsRepo,
 		},
 		MintSandboxToken:   tokens.EnsureToken,
 		RevokeSandboxToken: tokens.Revoke,
@@ -2521,10 +2538,10 @@ func startUIServer(cfg config, store *model.Store, transcriptDir string, sandbox
 		// The bootstrap pane: this process owns the state repository its
 		// store is exported to, so the UI it serves is the one place that
 		// can offer the choice of where state lives (pkg/ui/staterepo.go).
-		StateRepo: stateRepo,
-		Reboot:       rebootHost(cfg.rebootCmd),
-		TargetRepos:  cfg.targetRepos,
-		Credentials:  uiCredentials,
+		StateRepo:   stateRepo,
+		Reboot:      rebootHost(cfg.rebootCmd),
+		TargetRepos: cfg.targetRepos,
+		Credentials: uiCredentials,
 		// "daemon" reads back this same process's own journal (it always
 		// runs as grain-daemon.service -- scripts/setup.sh's own unit --
 		// under a real deployment); "git-proxy-audit" reads the audit log

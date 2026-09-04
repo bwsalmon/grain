@@ -88,3 +88,84 @@ func TestGrantsSubsetOfIsFalseForAWiderRequest(t *testing.T) {
 		t.Error("a capability not in allowed should make this false")
 	}
 }
+
+func TestSameBranchComparesTheTargetAndTheBase(t *testing.T) {
+	widgets := &RepoRef{Owner: "acme", Name: "widgets"}
+	gadgets := &RepoRef{Owner: "acme", Name: "gadgets"}
+	for _, tc := range []struct {
+		name string
+		a, b Task
+		want bool
+	}{
+		{"both on the default branch", Task{Target: widgets}, Task{Target: widgets}, true},
+		{"both on the same named base",
+			Task{Target: widgets, Base: "release/2.0"},
+			Task{Target: widgets, Base: "release/2.0"}, true},
+		{"a named base against the default branch",
+			Task{Target: widgets, Base: "release/2.0"},
+			Task{Target: widgets}, false},
+		{"different bases", Task{Target: widgets, Base: "release/2.0"},
+			Task{Target: widgets, Base: "release/1.0"}, false},
+		{"different repos", Task{Target: widgets}, Task{Target: gadgets}, false},
+		// GitHub resolves owner and name case-insensitively, so these
+		// are one branch of one repo however they were typed.
+		{"the same repo written differently",
+			Task{Target: &RepoRef{Owner: "ACME", Name: "Widgets"}},
+			Task{Target: widgets}, true},
+		{"neither writes anywhere", Task{}, Task{}, true},
+		{"one writes nowhere", Task{}, Task{Target: widgets}, false},
+	} {
+		if got := SameBranch(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: SameBranch = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// ParseRepo's own gate: a paste that is not owner/name is either
+// normalised to it or refused here, because nothing downstream of this
+// function looks at a RepoRef again before building a clone URL out of
+// it. Found by hand (task 244): `grain create -repo
+// https://github.com/bwsalmon/grain` used to file a task whose owner
+// was "https:".
+func TestParseRepoNormalisesTheFormsAnOperatorPastes(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"acme/widgets", "acme/widgets"},
+		{"  acme/widgets  ", "acme/widgets"},
+		{"https://github.com/acme/widgets", "acme/widgets"},
+		{"https://github.com/acme/widgets/", "acme/widgets"},
+		{"https://github.com/acme/widgets.git", "acme/widgets"},
+		{"http://github.example.com/acme/widgets", "acme/widgets"},
+		{"git@github.com:acme/widgets.git", "acme/widgets"},
+		{"ssh://git@github.com/acme/widgets.git", "acme/widgets"},
+	} {
+		got, err := ParseRepo(tc.in)
+		if err != nil {
+			t.Errorf("ParseRepo(%q): %v", tc.in, err)
+			continue
+		}
+		if got.String() != tc.want {
+			t.Errorf("ParseRepo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParseRepoRefusesWhatWouldNotSurviveBeingPutInAURL(t *testing.T) {
+	for _, in := range []string{
+		"",
+		"not-a-repo",
+		"acme/",
+		"/widgets",
+		"acme/widgets/extra",
+		"https://github.com/acme",
+		"acme/wid gets",
+		"acme/../etc",
+		"../acme/widgets",
+		"acme/widgets#fragment",
+		"acme/widgets?query",
+		"acme/wid\ngets",
+	} {
+		if got, err := ParseRepo(in); err == nil {
+			t.Errorf("ParseRepo(%q) = %q, want an error", in, got)
+		}
+	}
+}
