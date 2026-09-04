@@ -38,9 +38,10 @@ import (
 const stateUsage = `usage: grain state -data-dir DIR <command> [args]
 
 -data-dir must name the same root a colocated ` + "`grain daemon`" + ` was
-started with. This edits files on disk, not a running daemon; stop the
-daemon before adopting or importing, since both replace every row in the
-database.
+started with; it defaults to $GRAIN_DATA_DIR when that is set, which a host
+installed by scripts/setup.sh exports already. This edits files on disk, not
+a running daemon; stop the daemon before adopting or importing, since both
+replace every row in the database.
 
 Commands:
   status                    where this installation's state lives, and whether it is committed
@@ -79,7 +80,7 @@ func stateCmd(args []string) {
 func runState(args []string) error {
 	fs := flag.NewFlagSet("grain state", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, stateUsage) }
-	dataDir := fs.String("data-dir", "", "root directory a colocated `grain daemon` was started with (required)")
+	dataDir := fs.String("data-dir", dataDirDefault(), "root directory a colocated `grain daemon` was started with (required; $"+dataDirEnvVar+" supplies the default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
