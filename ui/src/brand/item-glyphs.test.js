@@ -31,7 +31,8 @@ function insideLoops(loops, x, y) {
     for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
       const [xi, yi] = loop[i];
       const [xj, yj] = loop[j];
-      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)
+        inside = !inside;
     }
   }
   return inside;
@@ -44,7 +45,8 @@ function fieldMask(kind, res) {
   const mask = [];
   for (let j = 0; j < res; j++) {
     const row = [];
-    for (let i = 0; i < res; i++) row.push(itemFillAt(spec, W, (i + 0.5) * step, (j + 0.5) * step) > 0);
+    for (let i = 0; i < res; i++)
+      row.push(itemFillAt(spec, W, (i + 0.5) * step, (j + 0.5) * step) > 0);
     mask.push(row);
   }
   return mask;
@@ -67,7 +69,8 @@ describe("the item glyphs", () => {
     // hourglass and 1·2 (+) is the mark's diamond, which are different
     // figures of the same resonance.
     const spinner = new Set(GLYPHS.map(String));
-    for (const kind of ITEM_KINDS) expect(spinner.has(String(ITEM_GLYPHS[kind].glyph))).toBe(false);
+    for (const kind of ITEM_KINDS)
+      expect(spinner.has(String(ITEM_GLYPHS[kind].glyph))).toBe(false);
   });
 
   it("is four integer resonances at four distinct framings", () => {
@@ -94,7 +97,9 @@ describe("the item glyphs", () => {
     // of percent two near-identical framings would leave, which is the
     // failure worth catching.
     const res = 48;
-    const masks = Object.fromEntries(ITEM_KINDS.map((kind) => [kind, fieldMask(kind, res)]));
+    const masks = Object.fromEntries(
+      ITEM_KINDS.map((kind) => [kind, fieldMask(kind, res)]),
+    );
     for (const a of ITEM_KINDS) {
       for (const b of ITEM_KINDS) {
         if (a >= b) continue;
@@ -109,7 +114,10 @@ describe("the item glyphs", () => {
             if (masks[a][j][i] !== masks[b][j][i]) differing++;
           }
         }
-        expect({ pair: `${a}/${b}`, differing: differing / inFrame > 0.2 }).toEqual({
+        expect({
+          pair: `${a}/${b}`,
+          differing: differing / inFrame > 0.2,
+        }).toEqual({
           pair: `${a}/${b}`,
           differing: true,
         });

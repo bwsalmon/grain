@@ -30,14 +30,23 @@ export default function AttachmentPicker({ files, onChange }) {
           "Attach files" two elements to mean. */}
       <input ref={inputRef} type="file" multiple hidden onChange={add} />
       <Tooltip title="Attach files">
-        <IconButton size="small" aria-label="Attach files" onClick={() => inputRef.current.click()}>
+        <IconButton
+          size="small"
+          aria-label="Attach files"
+          onClick={() => inputRef.current.click()}
+        >
           <AttachFileIcon fontSize="small" />
         </IconButton>
       </Tooltip>
       {files.length > 0 && (
         <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5, mt: 0.5 }}>
           {files.map((f, i) => (
-            <Chip key={`${f.name}-${i}`} size="small" label={f.name} onDelete={() => remove(i)} />
+            <Chip
+              key={`${f.name}-${i}`}
+              size="small"
+              label={f.name}
+              onDelete={() => remove(i)}
+            />
           ))}
         </Box>
       )}

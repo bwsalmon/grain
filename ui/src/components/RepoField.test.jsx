@@ -14,8 +14,12 @@ describe("RepoField", () => {
     render(<RepoField name="repo" options={["acme/widgets", "acme/other"]} />);
     const field = screen.getByRole("combobox");
     expect(field.tagName).toBe("SELECT");
-    expect(screen.getByRole("option", { name: "acme/widgets" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "acme/other" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "acme/widgets" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "acme/other" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "—" })).toBeInTheDocument();
   });
 
@@ -25,12 +29,24 @@ describe("RepoField", () => {
   });
 
   it("starts as a dropdown pre-selecting a default value that is one of the options", () => {
-    render(<RepoField name="repo" options={["acme/widgets", "acme/other"]} defaultValue="acme/other" />);
+    render(
+      <RepoField
+        name="repo"
+        options={["acme/widgets", "acme/other"]}
+        defaultValue="acme/other"
+      />,
+    );
     expect(screen.getByRole("combobox")).toHaveValue("acme/other");
   });
 
   it("starts as a text input when the default value is not one of the options", () => {
-    render(<RepoField name="repo" options={["acme/widgets"]} defaultValue="acme/unlisted" />);
+    render(
+      <RepoField
+        name="repo"
+        options={["acme/widgets"]}
+        defaultValue="acme/unlisted"
+      />,
+    );
     expect(screen.getByRole("textbox")).toHaveValue("acme/unlisted");
   });
 
@@ -50,7 +66,13 @@ describe("RepoField", () => {
   it("reports the picked value to onChange as the dropdown selection changes", async () => {
     const onChange = vi.fn();
     const user = userEvent.setup();
-    render(<RepoField name="repo" options={["acme/widgets", "acme/other"]} onChange={onChange} />);
+    render(
+      <RepoField
+        name="repo"
+        options={["acme/widgets", "acme/other"]}
+        onChange={onChange}
+      />,
+    );
 
     await user.selectOptions(screen.getByRole("combobox"), "acme/other");
     expect(onChange).toHaveBeenCalledWith("acme/other");

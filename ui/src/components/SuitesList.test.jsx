@@ -58,7 +58,13 @@ const suiteRow = (name) => screen.getAllByText(name)[0];
 // clicking a row still opens the pane the way it does in the app.
 function ControlledSuitesList(props) {
   const [openSuiteId, setOpenSuiteId] = useState(null);
-  return <SuitesList openSuiteId={openSuiteId} onOpenSuite={setOpenSuiteId} {...props} />;
+  return (
+    <SuitesList
+      openSuiteId={openSuiteId}
+      onOpenSuite={setOpenSuiteId}
+      {...props}
+    />
+  );
 }
 
 function renderList(props = {}) {
@@ -92,13 +98,18 @@ describe("SuitesList", () => {
 
   it("pluralises the template count and flags a suite that requires approval", () => {
     renderList({
-      suites: [{
-        ...suite,
-        items: [{ templateId: "template-smoke" }, { templateId: "template-lint" }],
-        mode: "count",
-        count: 3,
-        requireApproval: true,
-      }],
+      suites: [
+        {
+          ...suite,
+          items: [
+            { templateId: "template-smoke" },
+            { templateId: "template-lint" },
+          ],
+          mode: "count",
+          count: 3,
+          requireApproval: true,
+        },
+      ],
     });
 
     expect(screen.getByText("2 templates")).toBeInTheDocument();
@@ -116,10 +127,16 @@ describe("SuitesList", () => {
   });
 
   it("shows a failed run's own error", () => {
-    renderList({ suiteRuns: [{ ...run, status: "failed", error: "pass 1 had a task that failed" }] });
+    renderList({
+      suiteRuns: [
+        { ...run, status: "failed", error: "pass 1 had a task that failed" },
+      ],
+    });
 
     expect(screen.getByText("Failed")).toBeInTheDocument();
-    expect(screen.getByText("pass 1 had a task that failed")).toBeInTheDocument();
+    expect(
+      screen.getByText("pass 1 had a task that failed"),
+    ).toBeInTheDocument();
   });
 
   it("shows empty messages for both lists when there is nothing yet", () => {
@@ -136,7 +153,9 @@ describe("SuitesList", () => {
     renderList({ suites: [], suiteRuns: [], onRefresh });
 
     await user.click(screen.getByRole("button", { name: "+ New suite" }));
-    expect(screen.getByRole("heading", { name: "New suite" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "New suite" }),
+    ).toBeInTheDocument();
 
     await user.type(screen.getByLabelText(/Name/), "Nightly sweep");
     await user.click(screen.getByLabelText("Templates"));
@@ -156,7 +175,9 @@ describe("SuitesList", () => {
       }),
     });
     expect(onRefresh).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "New suite" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "New suite" }),
+    ).not.toBeInTheDocument();
   });
 
   it("creates a template inline from the suite overlay and preselects it", async () => {
@@ -172,11 +193,21 @@ describe("SuitesList", () => {
     await user.click(screen.getByRole("button", { name: "+ New template" }));
 
     const templateDialog = screen.getAllByRole("dialog").at(-1);
-    expect(within(templateDialog).getByRole("heading", { name: "New template" })).toBeInTheDocument();
+    expect(
+      within(templateDialog).getByRole("heading", { name: "New template" }),
+    ).toBeInTheDocument();
 
-    await user.type(within(templateDialog).getByLabelText(/Name/), "New template");
-    await user.type(within(templateDialog).getByLabelText(/Task title/), "Bump dependencies");
-    await user.click(within(templateDialog).getByRole("button", { name: "Add template" }));
+    await user.type(
+      within(templateDialog).getByLabelText(/Name/),
+      "New template",
+    );
+    await user.type(
+      within(templateDialog).getByLabelText(/Task title/),
+      "Bump dependencies",
+    );
+    await user.click(
+      within(templateDialog).getByRole("button", { name: "Add template" }),
+    );
 
     expect(api).toHaveBeenCalledWith("/api/templates", {
       method: "POST",
@@ -192,7 +223,9 @@ describe("SuitesList", () => {
       }),
     });
     expect(onRefreshTemplates).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "New template" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "New template" }),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Add suite" }));
 
@@ -220,7 +253,11 @@ describe("SuitesList", () => {
     await user.click(await screen.findByRole("option", { name: /Lint/ }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByLabelText("Run mode"));
-    await user.click(await screen.findByRole("option", { name: "Run a fixed number of times" }));
+    await user.click(
+      await screen.findByRole("option", {
+        name: "Run a fixed number of times",
+      }),
+    );
     const countField = screen.getByLabelText(/Number of times/);
     await user.clear(countField);
     await user.type(countField, "3");
@@ -240,8 +277,12 @@ describe("SuitesList", () => {
 
     await user.click(suiteRow("Nightly sweep"));
 
-    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
-    expect(document.querySelector(".overlay-pane .pane-form")).toBeInTheDocument();
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass(
+      "MuiDialog-paperFullScreen",
+    );
+    expect(
+      document.querySelector(".overlay-pane .pane-form"),
+    ).toBeInTheDocument();
   });
 
   it("opens a row's overlay pre-filled and saves changes via PATCH", async () => {
@@ -251,7 +292,9 @@ describe("SuitesList", () => {
     renderList({ onRefresh });
 
     await user.click(suiteRow("Nightly sweep"));
-    expect(screen.getByRole("heading", { name: "Edit suite" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Edit suite" }),
+    ).toBeInTheDocument();
 
     const nameField = screen.getByLabelText(/Name/);
     expect(nameField).toHaveValue("Nightly sweep");
@@ -285,7 +328,9 @@ describe("SuitesList", () => {
     await user.click(suiteRow("Nightly sweep"));
     await user.click(screen.getByRole("button", { name: "Delete" }));
 
-    expect(api).toHaveBeenCalledWith("/api/suites/suite-1", { method: "DELETE" });
+    expect(api).toHaveBeenCalledWith("/api/suites/suite-1", {
+      method: "DELETE",
+    });
     expect(onRefresh).toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
@@ -309,7 +354,9 @@ describe("SuitesList", () => {
     renderList({ onRefreshRuns });
 
     await user.click(screen.getByRole("button", { name: "Run…" }));
-    expect(screen.getByRole("heading", { name: "Run a suite" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Run a suite" }),
+    ).toBeInTheDocument();
     // The clicked suite comes preselected, so the common case is repo,
     // branch, go.
     expect(screen.getByLabelText("Suite")).toHaveTextContent("Nightly sweep");
@@ -320,10 +367,16 @@ describe("SuitesList", () => {
 
     expect(api).toHaveBeenCalledWith("/api/suite-runs", {
       method: "POST",
-      body: JSON.stringify({ suiteId: "suite-1", repo: "acme/widgets", base: "release-1" }),
+      body: JSON.stringify({
+        suiteId: "suite-1",
+        repo: "acme/widgets",
+        base: "release-1",
+      }),
     });
     expect(onRefreshRuns).toHaveBeenCalled();
-    expect(screen.queryByRole("heading", { name: "Run a suite" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Run a suite" }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not open the edit overlay when the Run action is clicked", async () => {
@@ -332,7 +385,9 @@ describe("SuitesList", () => {
 
     await user.click(screen.getByRole("button", { name: "Run…" }));
 
-    expect(screen.queryByRole("heading", { name: "Edit suite" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Edit suite" }),
+    ).not.toBeInTheDocument();
   });
 
   it("reports the error and leaves the run overlay open when starting one fails", async () => {
@@ -346,7 +401,11 @@ describe("SuitesList", () => {
     await user.type(screen.getByLabelText(/Branch/), "release-1");
     await user.click(screen.getByRole("button", { name: "Run" }));
 
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "base is required" }));
-    expect(screen.getByRole("heading", { name: "Run a suite" })).toBeInTheDocument();
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "base is required" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Run a suite" }),
+    ).toBeInTheDocument();
   });
 });

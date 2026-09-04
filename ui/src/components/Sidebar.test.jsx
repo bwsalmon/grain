@@ -24,35 +24,64 @@ describe("Sidebar", () => {
   it("counts tasks per state and lists only states that are present", () => {
     render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
 
-    expect(screen.getByRole("button", { name: /All tasks 3/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Queued 2/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Running 1/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Queued for merge/ })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /All tasks 3/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Queued 2/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Running 1/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Queued for merge/ }),
+    ).not.toBeInTheDocument();
   });
 
   // The whole point of making the wait a state rather than a chip: it is
   // countable, so "what is sitting here waiting on me?" has an entry in
   // the rail and a filter behind it.
   it("counts tasks waiting on a Submit click under their own entry", () => {
-    render(<Sidebar {...baseProps} config={null} tasks={[...tasks, { id: 4, state: "awaiting_submit", blocked: false }]} />);
-    expect(screen.getByRole("button", { name: /Awaiting submit 1/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Queued for merge/ })).not.toBeInTheDocument();
+    render(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={[...tasks, { id: 4, state: "awaiting_submit", blocked: false }]}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /Awaiting submit 1/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Queued for merge/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a blocked nav entry only when a task is blocked", () => {
     render(<Sidebar {...baseProps} config={null} tasks={tasks} />);
-    expect(screen.getByRole("button", { name: /Blocked 1/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Blocked 1/ }),
+    ).toBeInTheDocument();
   });
 
   it("omits the blocked nav entry when nothing is blocked", () => {
     render(<Sidebar {...baseProps} config={null} tasks={[tasks[0]]} />);
-    expect(screen.queryByRole("button", { name: /Blocked/ })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Blocked/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("calls onSetFilter with the clicked state", async () => {
     const onSetFilter = vi.fn();
     const user = userEvent.setup();
-    render(<Sidebar {...baseProps} config={null} tasks={tasks} onSetFilter={onSetFilter} />);
+    render(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={tasks}
+        onSetFilter={onSetFilter}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: /Running 1/ }));
 
@@ -104,7 +133,9 @@ describe("Sidebar", () => {
         }
       }
     };
-    const { rerender } = render(<Sidebar {...baseProps} config={null} tasks={[]} />);
+    const { rerender } = render(
+      <Sidebar {...baseProps} config={null} tasks={[]} />,
+    );
 
     expectOnly(null);
 
@@ -125,7 +156,14 @@ describe("Sidebar", () => {
   it("switches to the board view when clicked", async () => {
     const onSetView = vi.fn();
     const user = userEvent.setup();
-    render(<Sidebar {...baseProps} config={null} tasks={tasks} onSetView={onSetView} />);
+    render(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={tasks}
+        onSetView={onSetView}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Board" }));
 
@@ -133,18 +171,34 @@ describe("Sidebar", () => {
   });
 
   it("marks the board entry while the board is the view", () => {
-    const { rerender } = render(<Sidebar {...baseProps} config={null} tasks={tasks} view="tasks" />);
-    expect(screen.getByRole("button", { name: "Board" })).not.toHaveClass("Mui-selected");
+    const { rerender } = render(
+      <Sidebar {...baseProps} config={null} tasks={tasks} view="tasks" />,
+    );
+    expect(screen.getByRole("button", { name: "Board" })).not.toHaveClass(
+      "Mui-selected",
+    );
 
-    rerender(<Sidebar {...baseProps} config={null} tasks={tasks} view="board" />);
-    expect(screen.getByRole("button", { name: "Board" })).toHaveClass("Mui-selected");
+    rerender(
+      <Sidebar {...baseProps} config={null} tasks={tasks} view="board" />,
+    );
+    expect(screen.getByRole("button", { name: "Board" })).toHaveClass(
+      "Mui-selected",
+    );
   });
 
   it("switches to the schedules view and shows its count when clicked", async () => {
     const onSetView = vi.fn();
     const schedules = [{ id: "sched-1" }, { id: "sched-2" }];
     const user = userEvent.setup();
-    render(<Sidebar {...baseProps} config={null} tasks={[]} schedules={schedules} onSetView={onSetView} />);
+    render(
+      <Sidebar
+        {...baseProps}
+        config={null}
+        tasks={[]}
+        schedules={schedules}
+        onSetView={onSetView}
+      />,
+    );
 
     const button = screen.getByRole("button", { name: /Schedules 2/ });
     await user.click(button);
@@ -166,8 +220,12 @@ describe("Sidebar", () => {
       ["Templates", "templates"],
       ["Suites", "suites"],
     ]) {
-      const entry = screen.getByRole("button", { name: new RegExp(`^${label}`) });
-      expect(entry.querySelector(`svg[data-glyph="${kind}"]`)).toBeInTheDocument();
+      const entry = screen.getByRole("button", {
+        name: new RegExp(`^${label}`),
+      });
+      expect(
+        entry.querySelector(`svg[data-glyph="${kind}"]`),
+      ).toBeInTheDocument();
     }
   });
 
@@ -176,12 +234,20 @@ describe("Sidebar", () => {
   // all when the deployment is unnamed, which is grain's own shape for
   // an operator running one of these.
   it("shows the environment name beside the wordmark when one is configured", () => {
-    render(<Sidebar {...baseProps} config={{ environmentName: "staging" }} tasks={[]} />);
+    render(
+      <Sidebar
+        {...baseProps}
+        config={{ environmentName: "staging" }}
+        tasks={[]}
+      />,
+    );
     expect(screen.getByText("staging")).toBeInTheDocument();
   });
 
   it("shows no environment badge when the deployment is unnamed", () => {
-    render(<Sidebar {...baseProps} config={{ environmentName: "" }} tasks={[]} />);
+    render(
+      <Sidebar {...baseProps} config={{ environmentName: "" }} tasks={[]} />,
+    );
     expect(screen.queryByTitle(/^Environment:/)).not.toBeInTheDocument();
   });
 
@@ -193,21 +259,42 @@ describe("Sidebar", () => {
     render(
       <Sidebar
         {...baseProps}
-        config={{ version: { commit: "0fbfb4619f0a1c2d3e4f5a6b7c8d9e0f11223344", committedAt: "2026-09-03T14:02:11Z" } }}
+        config={{
+          version: {
+            commit: "0fbfb4619f0a1c2d3e4f5a6b7c8d9e0f11223344",
+            committedAt: "2026-09-03T14:02:11Z",
+          },
+        }}
         tasks={[]}
       />,
     );
 
     expect(screen.getByText("0fbfb46 · 2026-09-03 14:02Z")).toBeInTheDocument();
-    expect(screen.getByTitle(/Running commit 0fbfb4619f0a1c2d3e4f5a6b7c8d9e0f11223344/)).toBeInTheDocument();
+    expect(
+      screen.getByTitle(
+        /Running commit 0fbfb4619f0a1c2d3e4f5a6b7c8d9e0f11223344/,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("marks a build made from a modified tree", () => {
     render(
-      <Sidebar {...baseProps} config={{ version: { commit: "0fbfb46199", committedAt: "2026-09-03T14:02:11Z", modified: true } }} tasks={[]} />,
+      <Sidebar
+        {...baseProps}
+        config={{
+          version: {
+            commit: "0fbfb46199",
+            committedAt: "2026-09-03T14:02:11Z",
+            modified: true,
+          },
+        }}
+        tasks={[]}
+      />,
     );
 
-    expect(screen.getByText("0fbfb46-dirty · 2026-09-03 14:02Z")).toBeInTheDocument();
+    expect(
+      screen.getByText("0fbfb46-dirty · 2026-09-03 14:02Z"),
+    ).toBeInTheDocument();
     expect(screen.getByTitle(/uncommitted changes/)).toBeInTheDocument();
   });
 
@@ -215,10 +302,24 @@ describe("Sidebar", () => {
   // (-buildvcs=false, and every `go test` binary) prints nothing rather
   // than an empty line or an "Invalid Date".
   it("prints the commit alone when the stamp carries no usable time", () => {
-    const { rerender } = render(<Sidebar {...baseProps} config={{ version: { commit: "0fbfb46199" } }} tasks={[]} />);
+    const { rerender } = render(
+      <Sidebar
+        {...baseProps}
+        config={{ version: { commit: "0fbfb46199" } }}
+        tasks={[]}
+      />,
+    );
     expect(screen.getByText("0fbfb46")).toBeInTheDocument();
 
-    rerender(<Sidebar {...baseProps} config={{ version: { commit: "0fbfb46199", committedAt: "not a timestamp" } }} tasks={[]} />);
+    rerender(
+      <Sidebar
+        {...baseProps}
+        config={{
+          version: { commit: "0fbfb46199", committedAt: "not a timestamp" },
+        }}
+        tasks={[]}
+      />,
+    );
     expect(screen.getByText("0fbfb46")).toBeInTheDocument();
   });
 
@@ -234,8 +335,12 @@ describe("Sidebar", () => {
   it("does not show Logs or Sandbox health as their own nav entries", () => {
     render(<Sidebar {...baseProps} config={null} tasks={[]} />);
 
-    expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Logs" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sandbox health" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Debug" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Metrics" })).toBeInTheDocument();
   });

@@ -1,8 +1,20 @@
 import { useState } from "react";
-import { Alert, Button, Chip, Stack, TextField, Typography } from "@mui/material";
+import {
+  Alert,
+  Button,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 import { STATE_LABELS, STATE_ORDER, repoRows } from "../state.js";
-import { ListEmpty, ListHeader, ListSearchField, ListToolbar } from "./ListPrimitives.jsx";
+import {
+  ListEmpty,
+  ListHeader,
+  ListSearchField,
+  ListToolbar,
+} from "./ListPrimitives.jsx";
 import ItemGlyph from "./ItemGlyph.jsx";
 
 // RepoList is the repo index: one row per known repo -- every
@@ -50,13 +62,21 @@ import ItemGlyph from "./ItemGlyph.jsx";
 // filter title or TemplatesList/SchedulesList's "+ New X" button) above
 // a .task-list-toolbar search box, then flat divider rows -- so the four
 // list pages read as one design instead of four.
-export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, showError }) {
+export default function RepoList({
+  tasks,
+  config,
+  onOpenRepo,
+  onRefreshConfig,
+  showError,
+}) {
   const [newRepo, setNewRepo] = useState("");
   const [search, setSearch] = useState("");
   const repos = repoRows(config, tasks);
 
   const q = search.trim().toLowerCase();
-  const visible = repos.filter((r) => q === "" || r.repo.toLowerCase().includes(q));
+  const visible = repos.filter(
+    (r) => q === "" || r.repo.toLowerCase().includes(q),
+  );
   const targetRepos = config?.targetRepos || [];
 
   // firstAddWarning is what the confirmation says before the first repo
@@ -79,13 +99,15 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
   const firstAddWarning = (repo) => {
     if (targetRepos.length > 0) return null;
     const falling = repos.map((r) => r.repo).filter((r) => r !== repo);
-    let msg = `Add ${repo} as the only repo this deployment allows?\n\n`
-      + "This deployment doesn't restrict target repos today -- an empty allowlist is what means "
-      + `unrestricted -- so adding ${repo} narrows it to that one repo rather than widening anything.`;
+    let msg =
+      `Add ${repo} as the only repo this deployment allows?\n\n` +
+      "This deployment doesn't restrict target repos today -- an empty allowlist is what means " +
+      `unrestricted -- so adding ${repo} narrows it to that one repo rather than widening anything.`;
     if (falling.length > 0) {
-      msg += `\n\nOff the allowlist as of this click: ${falling.join(", ")}. `
-        + "Tasks already filed against them are unaffected, but the next one is parked instead of "
-        + "dispatched until the repo is added back here.";
+      msg +=
+        `\n\nOff the allowlist as of this click: ${falling.join(", ")}. ` +
+        "Tasks already filed against them are unaffected, but the next one is parked instead of " +
+        "dispatched until the repo is added back here.";
     }
     return msg;
   };
@@ -97,7 +119,10 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
     const warning = firstAddWarning(repo);
     if (warning !== null && !confirm(warning)) return;
     try {
-      await api("/api/repos", { method: "POST", body: JSON.stringify({ repo }) });
+      await api("/api/repos", {
+        method: "POST",
+        body: JSON.stringify({ repo }),
+      });
       setNewRepo("");
       await onRefreshConfig();
     } catch (err) {
@@ -112,8 +137,14 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
         icon={<ItemGlyph kind="repos" size={20} />}
         count={visible.length}
         style={{ alignItems: "center" }}
-        action={(
-          <Stack component="form" direction="row" spacing={1} onSubmit={addRepo} sx={{ ml: "auto" }}>
+        action={
+          <Stack
+            component="form"
+            direction="row"
+            spacing={1}
+            onSubmit={addRepo}
+            sx={{ ml: "auto" }}
+          >
             <TextField
               value={newRepo}
               onChange={(evt) => setNewRepo(evt.target.value)}
@@ -121,9 +152,11 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
               size="small"
               autoComplete="off"
             />
-            <Button type="submit" variant="outlined" size="small">Add repo</Button>
+            <Button type="submit" variant="outlined" size="small">
+              Add repo
+            </Button>
           </Stack>
-        )}
+        }
       />
       {/* The standing half of grain/task-45's answer, keyed on the
           allowlist as it stands rather than on any transition: empty is
@@ -133,20 +166,27 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
           are severity="info". */}
       {targetRepos.length === 0 && (
         <Alert severity="info" sx={{ mx: "1.75rem", mt: 2 }}>
-          This deployment allows a task to target any repo: an empty allowlist is what means unrestricted.
-          Adding the first repo here restricts it to that one repo rather than widening anything, and a task
-          filed against any other repo is parked instead of dispatched until that repo is added too.
+          This deployment allows a task to target any repo: an empty allowlist
+          is what means unrestricted. Adding the first repo here restricts it to
+          that one repo rather than widening anything, and a task filed against
+          any other repo is parked instead of dispatched until that repo is
+          added too.
         </Alert>
       )}
       {targetRepos.length === 1 && (
         <Alert severity="info" sx={{ mx: "1.75rem", mt: 2 }}>
-          This deployment allows only {targetRepos[0]}. A task filed against any other repo is parked instead
-          of dispatched until that repo is added here; removing this one allows any repo again.
+          This deployment allows only {targetRepos[0]}. A task filed against any
+          other repo is parked instead of dispatched until that repo is added
+          here; removing this one allows any repo again.
         </Alert>
       )}
       {repos.length > 0 && (
         <ListToolbar>
-          <ListSearchField placeholder="Search repos…" value={search} onChange={setSearch} />
+          <ListSearchField
+            placeholder="Search repos…"
+            value={search}
+            onChange={setSearch}
+          />
         </ListToolbar>
       )}
       <ul className="repo-list">
@@ -170,9 +210,20 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
                       mark (bwsalmon/agents#586) -- there is no single task for
                       the mark to represent. */}
                   {STATE_ORDER.filter((s) => r.counts[s]).map((s) => (
-                    <Chip key={s} size="small" className={`badge badge-${s}`} label={`${STATE_LABELS[s]} ${r.counts[s]}`} />
+                    <Chip
+                      key={s}
+                      size="small"
+                      className={`badge badge-${s}`}
+                      label={`${STATE_LABELS[s]} ${r.counts[s]}`}
+                    />
                   ))}
-                  {r.blocked > 0 && <Chip size="small" color="error" label={`Blocked ${r.blocked}`} />}
+                  {r.blocked > 0 && (
+                    <Chip
+                      size="small"
+                      color="error"
+                      label={`Blocked ${r.blocked}`}
+                    />
+                  )}
                   {defaultsOnly && (
                     <Chip
                       size="small"
@@ -182,7 +233,11 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
                     />
                   )}
                 </span>
-                <Typography variant="caption" color="text.secondary" whiteSpace="nowrap">
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  whiteSpace="nowrap"
+                >
                   {r.total} task{r.total === 1 ? "" : "s"}
                 </Typography>
               </div>
@@ -191,7 +246,9 @@ export default function RepoList({ tasks, config, onOpenRepo, onRefreshConfig, s
         })}
       </ul>
       {repos.length === 0 && (
-        <ListEmpty>No repos yet -- add one above, or file a task with a target repo.</ListEmpty>
+        <ListEmpty>
+          No repos yet -- add one above, or file a task with a target repo.
+        </ListEmpty>
       )}
       {repos.length > 0 && visible.length === 0 && (
         <ListEmpty>No repos match your search.</ListEmpty>

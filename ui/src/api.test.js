@@ -17,7 +17,10 @@ describe("api", () => {
   });
 
   it("returns the parsed body on a JSON 2xx response", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(200, { id: 7 })));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(200, { id: 7 })),
+    );
 
     await expect(api("/api/tasks/7")).resolves.toEqual({ id: 7 });
   });
@@ -36,32 +39,49 @@ describe("api", () => {
   });
 
   it("returns null for a non-JSON response body", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: true,
-      status: 204,
-      statusText: "No Content",
-      headers: new Map(),
-      json: () => Promise.reject(new Error("should not be called")),
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 204,
+        statusText: "No Content",
+        headers: new Map(),
+        json: () => Promise.reject(new Error("should not be called")),
+      }),
+    );
 
-    await expect(api("/api/tasks/7/approve", { method: "POST" })).resolves.toBeNull();
+    await expect(
+      api("/api/tasks/7/approve", { method: "POST" }),
+    ).resolves.toBeNull();
   });
 
   it("throws the server's error message on a non-2xx JSON response", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(400, { error: "title is required" })));
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(jsonResponse(400, { error: "title is required" })),
+    );
 
-    await expect(api("/api/tasks", { method: "POST" })).rejects.toThrow("title is required");
+    await expect(api("/api/tasks", { method: "POST" })).rejects.toThrow(
+      "title is required",
+    );
   });
 
   it("falls back to the status line when a non-2xx response carries no JSON error", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: "Internal Server Error",
-      headers: new Map(),
-      json: () => Promise.reject(new Error("should not be called")),
-    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        headers: new Map(),
+        json: () => Promise.reject(new Error("should not be called")),
+      }),
+    );
 
-    await expect(api("/api/tasks")).rejects.toThrow("500 Internal Server Error");
+    await expect(api("/api/tasks")).rejects.toThrow(
+      "500 Internal Server Error",
+    );
   });
 });

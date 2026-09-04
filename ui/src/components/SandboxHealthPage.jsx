@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Box, Button, Chip, CircularProgress, Table, TableBody, TableCell, TableHead, TableRow, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 import Sparkline from "./Sparkline.jsx";
 
@@ -45,7 +57,8 @@ function formatDisk(usedMB, totalMB) {
 // failed) and are skipped rather than plotted as zero, which would read
 // as a real dip in usage instead of a missing sample.
 function pushSample(series, value) {
-  if (value === null || value === undefined || Number.isNaN(value)) return series;
+  if (value === null || value === undefined || Number.isNaN(value))
+    return series;
   return [...series, value].slice(-HISTORY_LENGTH);
 }
 
@@ -77,20 +90,24 @@ function appendDiskHistory(prev, disks) {
 export function appendHistory(prev, result) {
   const host = result?.host
     ? {
-      cpu: pushSample(prev.host.cpu, result.host.loadAverage1),
-      mem: pushSample(prev.host.mem, result.host.memoryUsedMB),
-      disks: appendDiskHistory(prev.host.disks, result.host.disks),
-    }
+        cpu: pushSample(prev.host.cpu, result.host.loadAverage1),
+        mem: pushSample(prev.host.mem, result.host.memoryUsedMB),
+        disks: appendDiskHistory(prev.host.disks, result.host.disks),
+      }
     : prev.host;
 
   const sandboxes = { ...prev.sandboxes };
   for (const s of result?.sandboxes || []) {
     const existing = sandboxes[s.sandbox] || emptySeries;
-    const load1 = s.ready && s.loadAverage ? parseFloat(s.loadAverage.split(" ")[0]) : null;
+    const load1 =
+      s.ready && s.loadAverage ? parseFloat(s.loadAverage.split(" ")[0]) : null;
     sandboxes[s.sandbox] = {
       cpu: pushSample(existing.cpu, load1),
       mem: pushSample(existing.mem, s.ready ? s.memoryUsedMB : null),
-      disk: pushSample(existing.disk, s.ready && s.diskTotalMB ? s.diskUsedMB : null),
+      disk: pushSample(
+        existing.disk,
+        s.ready && s.diskTotalMB ? s.diskUsedMB : null,
+      ),
     };
   }
   return { host, sandboxes };
@@ -130,18 +147,29 @@ function HostDisks({ disks, history }) {
         {disks.map((d) => (
           <TableRow key={d.path}>
             <TableCell>{(d.holds || []).join(", ")}</TableCell>
-            <TableCell sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}>{d.path}</TableCell>
+            <TableCell sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}>
+              {d.path}
+            </TableCell>
             <TableCell>
               {/* A filesystem that has stopped answering says why rather
                   than showing a bare dash. This is the reading an
                   operator is here for, and "the sandbox volume is no
                   longer mounted" is the answer they want -- not a row
                   that has simply gone quiet. */}
-              {d.error
-                ? <Chip size="small" color="warning" label={d.error} />
-                : formatDisk(d.usedMB, d.totalMB)}
+              {d.error ? (
+                <Chip size="small" color="warning" label={d.error} />
+              ) : (
+                formatDisk(d.usedMB, d.totalMB)
+              )}
             </TableCell>
-            <TableCell><Sparkline data={history[d.path] || []} width={80} height={24} color="#2e7d32" /></TableCell>
+            <TableCell>
+              <Sparkline
+                data={history[d.path] || []}
+                width={80}
+                height={24}
+                color="#2e7d32"
+              />
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>
@@ -165,7 +193,10 @@ function HostDisks({ disks, history }) {
 // the Debug overlay this panel sits alongside.
 export default function SandboxHealthPage({ showError }) {
   const [data, setData] = useState(null);
-  const [history, setHistory] = useState({ host: emptyHostSeries, sandboxes: {} });
+  const [history, setHistory] = useState({
+    host: emptyHostSeries,
+    sandboxes: {},
+  });
 
   const refresh = useCallback(async () => {
     try {
@@ -177,7 +208,9 @@ export default function SandboxHealthPage({ showError }) {
     }
   }, [showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
     const interval = setInterval(refresh, REFRESH_MS);
@@ -186,9 +219,20 @@ export default function SandboxHealthPage({ showError }) {
 
   return (
     <section className="sandbox-health-panel">
-      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", mb: 1 }}>
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          mb: 1,
+        }}
+      >
         <Typography variant="subtitle2">Sandbox health</Typography>
-        {data?.enabled && <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>}
+        {data?.enabled && (
+          <Button size="small" variant="outlined" onClick={refresh}>
+            Refresh
+          </Button>
+        )}
       </Box>
       {data === null && (
         <Box sx={{ display: "flex", justifyContent: "center", py: 3 }}>
@@ -197,29 +241,59 @@ export default function SandboxHealthPage({ showError }) {
       )}
       {data !== null && !data.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          Not available: this deployment has no sandbox pool or host stats configured.
+          Not available: this deployment has no sandbox pool or host stats
+          configured.
         </Alert>
       )}
       {data !== null && data.enabled && (
         <Box>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: "0.5rem" }}>Host</Typography>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mb: "0.5rem" }}
+          >
+            Host
+          </Typography>
           {data.hostError && (
-            <Alert severity="warning" sx={{ mb: "1rem" }}>Host stats unavailable: {data.hostError}</Alert>
+            <Alert severity="warning" sx={{ mb: "1rem" }}>
+              Host stats unavailable: {data.hostError}
+            </Alert>
           )}
           {data.host && (
             <>
               <Typography variant="body2" sx={{ mb: "1rem" }}>
-                Load average (1/5/15 min): {data.host.loadAverage1.toFixed(2)} / {data.host.loadAverage5.toFixed(2)} / {data.host.loadAverage15.toFixed(2)}
+                Load average (1/5/15 min): {data.host.loadAverage1.toFixed(2)} /{" "}
+                {data.host.loadAverage5.toFixed(2)} /{" "}
+                {data.host.loadAverage15.toFixed(2)}
                 {" · "}
-                Memory: {formatMemory(data.host.memoryUsedMB, data.host.memoryTotalMB)}
+                Memory:{" "}
+                {formatMemory(data.host.memoryUsedMB, data.host.memoryTotalMB)}
               </Typography>
-              <div style={{ display: "flex", gap: "2.5rem", marginBottom: "1.5rem" }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "2.5rem",
+                  marginBottom: "1.5rem",
+                }}
+              >
                 <div>
-                  <Typography variant="caption" color="text.secondary" component="div">CPU (1 min load average)</Typography>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    component="div"
+                  >
+                    CPU (1 min load average)
+                  </Typography>
                   <Sparkline data={history.host.cpu} />
                 </div>
                 <div>
-                  <Typography variant="caption" color="text.secondary" component="div">Memory (MB)</Typography>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    component="div"
+                  >
+                    Memory (MB)
+                  </Typography>
                   <Sparkline data={history.host.mem} color="#9c27b0" />
                 </div>
               </div>
@@ -227,14 +301,26 @@ export default function SandboxHealthPage({ showError }) {
             </>
           )}
           {!data.host && !data.hostError && (
-            <Typography variant="body2" color="text.secondary" sx={{ mb: "1rem" }}>
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{ mb: "1rem" }}
+            >
               Not configured for this deployment.
             </Typography>
           )}
 
-          <Typography variant="body2" color="text.secondary" sx={{ mb: "0.5rem" }}>Sandboxes</Typography>
-          {(!data.sandboxes || data.sandboxes.length === 0) ? (
-            <Typography variant="body2" color="text.secondary">No runs in flight, so no sandboxes exist.</Typography>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mb: "0.5rem" }}
+          >
+            Sandboxes
+          </Typography>
+          {!data.sandboxes || data.sandboxes.length === 0 ? (
+            <Typography variant="body2" color="text.secondary">
+              No runs in flight, so no sandboxes exist.
+            </Typography>
           ) : (
             <Table size="small">
               <TableHead>
@@ -258,18 +344,44 @@ export default function SandboxHealthPage({ showError }) {
                     <TableRow key={s.sandbox}>
                       <TableCell>{s.sandbox}</TableCell>
                       <TableCell>{s.backend}</TableCell>
-                      <TableCell sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}>{s.name}</TableCell>
+                      <TableCell
+                        sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}
+                      >
+                        {s.name}
+                      </TableCell>
                       <TableCell>
-                        {s.error
-                          ? <Chip size="small" color="error" label={s.error} />
-                          : <Chip size="small" color="success" label="ready" />}
+                        {s.error ? (
+                          <Chip size="small" color="error" label={s.error} />
+                        ) : (
+                          <Chip size="small" color="success" label="ready" />
+                        )}
                       </TableCell>
                       <TableCell>{s.loadAverage || "—"}</TableCell>
-                      <TableCell><Sparkline data={series.cpu} width={80} height={24} /></TableCell>
-                      <TableCell>{formatMemory(s.memoryUsedMB, s.memoryTotalMB)}</TableCell>
-                      <TableCell><Sparkline data={series.mem} width={80} height={24} color="#9c27b0" /></TableCell>
-                      <TableCell>{formatDisk(s.diskUsedMB, s.diskTotalMB)}</TableCell>
-                      <TableCell><Sparkline data={series.disk} width={80} height={24} color="#2e7d32" /></TableCell>
+                      <TableCell>
+                        <Sparkline data={series.cpu} width={80} height={24} />
+                      </TableCell>
+                      <TableCell>
+                        {formatMemory(s.memoryUsedMB, s.memoryTotalMB)}
+                      </TableCell>
+                      <TableCell>
+                        <Sparkline
+                          data={series.mem}
+                          width={80}
+                          height={24}
+                          color="#9c27b0"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        {formatDisk(s.diskUsedMB, s.diskTotalMB)}
+                      </TableCell>
+                      <TableCell>
+                        <Sparkline
+                          data={series.disk}
+                          width={80}
+                          height={24}
+                          color="#2e7d32"
+                        />
+                      </TableCell>
                     </TableRow>
                   );
                 })}

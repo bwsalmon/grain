@@ -48,11 +48,19 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass(
+      "MuiDialog-paperFullScreen",
+    );
     const head = document.querySelector(".overlay-pane-header");
-    expect(head).toContainElement(screen.getByRole("tab", { name: "Capabilities" }));
-    expect(head).toContainElement(screen.getByRole("heading", { name: "Settings" }));
-    expect(document.querySelector(".overlay-pane .pane-form")).toBeInTheDocument();
+    expect(head).toContainElement(
+      screen.getByRole("tab", { name: "Capabilities" }),
+    );
+    expect(head).toContainElement(
+      screen.getByRole("heading", { name: "Settings" }),
+    );
+    expect(
+      document.querySelector(".overlay-pane .pane-form"),
+    ).toBeInTheDocument();
   });
 
   it("populates the Agents tab with them", async () => {
@@ -75,7 +83,9 @@ describe("SettingsOverlay", () => {
     await screen.findByDisplayValue("30s");
 
     expect(screen.queryByLabelText(/Gemini model/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("radio", { name: "Antigravity" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("radio", { name: "Antigravity" }),
+    ).not.toBeInTheDocument();
   });
 
   it("points to the repos pane instead of editing target repos itself", async () => {
@@ -83,7 +93,9 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    expect(screen.getByText(/Target repos are managed from the Repos pane/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Target repos are managed from the Repos pane/),
+    ).toBeInTheDocument();
     expect(screen.queryByText("acme/widgets")).not.toBeInTheDocument();
   });
 
@@ -99,14 +111,20 @@ describe("SettingsOverlay", () => {
   // rather than only in Secrets, seeded from the Settings response the
   // pane already fetched (no second request).
   it("offers a key field per agent framework, marked set or not", async () => {
-    api.mockResolvedValueOnce({ ...settings, agentKeysEnabled: true, claudeOAuthTokenSet: true });
+    api.mockResolvedValueOnce({
+      ...settings,
+      agentKeysEnabled: true,
+      claudeOAuthTokenSet: true,
+    });
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
     await user.click(screen.getByRole("tab", { name: "Agents" }));
 
     expect(screen.getByLabelText("Gemini API key")).toBeInTheDocument();
-    expect(screen.getByLabelText("Claude Code OAuth token")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Claude Code OAuth token"),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("OpenAI API key")).toBeInTheDocument();
     expect(screen.getByText("set")).toBeInTheDocument();
     // One chip per framework with no key stored: two of the three here.
@@ -179,7 +197,13 @@ describe("SettingsOverlay", () => {
     api.mockResolvedValueOnce(settings).mockResolvedValueOnce({});
     const onSaved = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
-    render(<SettingsOverlay onClose={() => {}} onSaved={onSaved} showError={() => {}} />);
+    render(
+      <SettingsOverlay
+        onClose={() => {}}
+        onSaved={onSaved}
+        showError={() => {}}
+      />,
+    );
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -190,17 +214,27 @@ describe("SettingsOverlay", () => {
   // A save that failed wrote nothing, so there is nothing to re-read --
   // and the error the pane reports has to be the save's own.
   it("does not refresh the config when the save failed", async () => {
-    api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("store is down"));
+    api
+      .mockResolvedValueOnce(settings)
+      .mockRejectedValueOnce(new Error("store is down"));
     const onSaved = vi.fn();
     const showError = vi.fn();
     const user = userEvent.setup();
-    render(<SettingsOverlay onClose={() => {}} onSaved={onSaved} showError={showError} />);
+    render(
+      <SettingsOverlay
+        onClose={() => {}}
+        onSaved={onSaved}
+        showError={showError}
+      />,
+    );
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(onSaved).not.toHaveBeenCalled();
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "store is down" }));
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "store is down" }),
+    );
   });
 
   it("sends an empty payload when nothing changed", async () => {
@@ -211,7 +245,10 @@ describe("SettingsOverlay", () => {
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({}),
+    });
   });
 
   // bwsalmon/agents#476: the global backlog-order switch.
@@ -221,7 +258,9 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    const checkbox = screen.getByRole("checkbox", { name: /Work through the backlog newest-first/ });
+    const checkbox = screen.getByRole("checkbox", {
+      name: /Work through the backlog newest-first/,
+    });
     expect(checkbox).not.toBeChecked();
     await user.click(checkbox);
 
@@ -234,15 +273,24 @@ describe("SettingsOverlay", () => {
   });
 
   it("leaves newestFirst out of the payload when already on and left alone", async () => {
-    api.mockResolvedValueOnce({ ...settings, newestFirst: true }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({ ...settings, newestFirst: true })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    expect(screen.getByRole("checkbox", { name: /Work through the backlog newest-first/ })).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", {
+        name: /Work through the backlog newest-first/,
+      }),
+    ).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({}),
+    });
   });
 
   // bwsalmon/agents#534: the deployment-wide default sandbox shape.
@@ -269,7 +317,13 @@ describe("SettingsOverlay", () => {
   });
 
   it("leaves sandboxCpus/sandboxMemoryMb out of the payload when unchanged", async () => {
-    api.mockResolvedValueOnce({ ...settings, sandboxCpus: 4, sandboxMemoryMb: 8192 }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({
+        ...settings,
+        sandboxCpus: 4,
+        sandboxMemoryMb: 8192,
+      })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -279,7 +333,10 @@ describe("SettingsOverlay", () => {
     expect(screen.getByLabelText(/Sandbox memory/)).toHaveValue(8192);
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({}),
+    });
   });
 
   // grain/task-41: the same treatment for the third dimension of that
@@ -307,7 +364,9 @@ describe("SettingsOverlay", () => {
   });
 
   it("sends an explicit 0 when sandboxDiskGb is cleared back to blank", async () => {
-    api.mockResolvedValueOnce({ ...settings, sandboxDiskGb: 40 }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({ ...settings, sandboxDiskGb: 40 })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -346,7 +405,13 @@ describe("SettingsOverlay", () => {
   // than being silently skipped as "left alone" the way every other field's
   // empty box is.
   it("sends an explicit 0 when a sandbox shape override is cleared back to blank", async () => {
-    api.mockResolvedValueOnce({ ...settings, sandboxCpus: 4, sandboxMemoryMb: 8192 }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({
+        ...settings,
+        sandboxCpus: 4,
+        sandboxMemoryMb: 8192,
+      })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -382,7 +447,9 @@ describe("SettingsOverlay", () => {
   // Clearing the box is a real change, not "leave it alone": unnaming a
   // deployment has to be sendable, so "" goes in the payload.
   it("sends an empty environmentName when a configured name is cleared", async () => {
-    api.mockResolvedValueOnce({ ...settings, environmentName: "staging" }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({ ...settings, environmentName: "staging" })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -403,7 +470,9 @@ describe("SettingsOverlay", () => {
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    const checkbox = screen.getByRole("checkbox", { name: /Show closed tasks by default/ });
+    const checkbox = screen.getByRole("checkbox", {
+      name: /Show closed tasks by default/,
+    });
     expect(checkbox).not.toBeChecked();
     await user.click(checkbox);
 
@@ -416,15 +485,22 @@ describe("SettingsOverlay", () => {
   });
 
   it("leaves showClosedByDefault out of the payload when already on and left alone", async () => {
-    api.mockResolvedValueOnce({ ...settings, showClosedByDefault: true }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({ ...settings, showClosedByDefault: true })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
-    expect(screen.getByRole("checkbox", { name: /Show closed tasks by default/ })).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: /Show closed tasks by default/ }),
+    ).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({}),
+    });
   });
 
   // bwsalmon/agents#609: which agent.Framework a run is driven by.
@@ -447,7 +523,9 @@ describe("SettingsOverlay", () => {
   });
 
   it("leaves agentFramework out of the payload when already claude and left alone", async () => {
-    api.mockResolvedValueOnce({ ...settings, agentFramework: "claude" }).mockResolvedValueOnce({});
+    api
+      .mockResolvedValueOnce({ ...settings, agentFramework: "claude" })
+      .mockResolvedValueOnce({});
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
@@ -456,11 +534,16 @@ describe("SettingsOverlay", () => {
     expect(screen.getByRole("radio", { name: "Claude" })).toBeChecked();
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(api).toHaveBeenCalledWith("/api/settings", { method: "PUT", body: JSON.stringify({}) });
+    expect(api).toHaveBeenCalledWith("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({}),
+    });
   });
 
   it("reports the error and does not close on a failed save", async () => {
-    api.mockResolvedValueOnce(settings).mockRejectedValueOnce(new Error("pollInterval must be positive"));
+    api
+      .mockResolvedValueOnce(settings)
+      .mockRejectedValueOnce(new Error("pollInterval must be positive"));
     const showError = vi.fn();
     const onClose = vi.fn();
     const user = userEvent.setup();
@@ -469,7 +552,9 @@ describe("SettingsOverlay", () => {
 
     await user.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(showError).toHaveBeenCalledWith(expect.objectContaining({ message: "pollInterval must be positive" }));
+    expect(showError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "pollInterval must be positive" }),
+    );
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -497,16 +582,28 @@ describe("SettingsOverlay", () => {
 
   it("switches to the Capabilities tab, offers the GCP fields and shows the panel", async () => {
     const capabilities = [
-      { id: "self-debug", name: "Self debug", description: "Read grain's own source", ready: true },
       {
-        id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: false,
+        id: "self-debug",
+        name: "Self debug",
+        description: "Read grain's own source",
+        ready: true,
+      },
+      {
+        id: "gcp-key",
+        name: "GCP key",
+        description: "Mint a GCP key",
+        ready: false,
         missingConfig: ["GCP project", "GCP service account email"],
       },
     ];
     // The tab's own second request: "Other secrets" at its foot lists
     // whatever nothing above claims (grain/task-110).
     api
-      .mockResolvedValueOnce({ ...settings, capabilities, gcpProject: "acme-proj" })
+      .mockResolvedValueOnce({
+        ...settings,
+        capabilities,
+        gcpProject: "acme-proj",
+      })
       .mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
@@ -517,7 +614,9 @@ describe("SettingsOverlay", () => {
     expect(screen.getByDisplayValue("acme-proj")).toBeInTheDocument();
     expect(await screen.findByText("Self debug")).toBeInTheDocument();
     expect(screen.getByText("GCP key")).toBeInTheDocument();
-    expect(screen.getByText(/Needs: GCP project, GCP service account email/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Needs: GCP project, GCP service account email/),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
   });
 
@@ -546,9 +645,27 @@ describe("SettingsOverlay", () => {
   // default no task could be granted by hand would fail at every filing.
   it("picks default capabilities on the Capabilities tab and sends the whole set", async () => {
     const capabilities = [
-      { id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true },
-      { id: "gemini-key", name: "Gemini key", description: "Mint a Gemini key", ready: true, grantable: true },
-      { id: "retired", name: "Retired", description: "No picker row", ready: true, grantable: false },
+      {
+        id: "gcp-key",
+        name: "GCP key",
+        description: "Mint a GCP key",
+        ready: true,
+        grantable: true,
+      },
+      {
+        id: "gemini-key",
+        name: "Gemini key",
+        description: "Mint a Gemini key",
+        ready: true,
+        grantable: true,
+      },
+      {
+        id: "retired",
+        name: "Retired",
+        description: "No picker row",
+        ready: true,
+        grantable: false,
+      },
     ];
     api
       .mockResolvedValueOnce({ ...settings, capabilities })
@@ -560,7 +677,9 @@ describe("SettingsOverlay", () => {
     await user.click(screen.getByRole("tab", { name: "Capabilities" }));
 
     await user.click(screen.getByLabelText("Default capabilities"));
-    expect(screen.queryByRole("option", { name: "Retired" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Retired" }),
+    ).not.toBeInTheDocument();
     await user.click(await screen.findByRole("option", { name: "GCP key" }));
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "Save" }));
@@ -579,9 +698,21 @@ describe("SettingsOverlay", () => {
   // capability" -- a pane nobody can save. The extra row is what clears
   // it.
   it("offers a row for a stored default capability this build no longer lists", async () => {
-    const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
+    const capabilities = [
+      {
+        id: "gcp-key",
+        name: "GCP key",
+        description: "Mint a GCP key",
+        ready: true,
+        grantable: true,
+      },
+    ];
     api
-      .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key", "scratch-repo"] })
+      .mockResolvedValueOnce({
+        ...settings,
+        capabilities,
+        defaultCapabilities: ["gcp-key", "scratch-repo"],
+      })
       .mockResolvedValueOnce({ enabled: false })
       .mockResolvedValueOnce({});
     const user = userEvent.setup();
@@ -604,9 +735,21 @@ describe("SettingsOverlay", () => {
   });
 
   it("leaves default capabilities out of the payload when they are not touched", async () => {
-    const capabilities = [{ id: "gcp-key", name: "GCP key", description: "Mint a GCP key", ready: true, grantable: true }];
+    const capabilities = [
+      {
+        id: "gcp-key",
+        name: "GCP key",
+        description: "Mint a GCP key",
+        ready: true,
+        grantable: true,
+      },
+    ];
     api
-      .mockResolvedValueOnce({ ...settings, capabilities, defaultCapabilities: ["gcp-key"] })
+      .mockResolvedValueOnce({
+        ...settings,
+        capabilities,
+        defaultCapabilities: ["gcp-key"],
+      })
       .mockResolvedValueOnce({ enabled: false })
       .mockResolvedValueOnce({});
     const user = userEvent.setup();
@@ -636,7 +779,14 @@ describe("SettingsOverlay", () => {
         ready: false,
         grantable: true,
         missingSecrets: ["gcp-key-minter"],
-        secrets: [{ name: "gcp-key-minter", secret: "gcp-key-minter", key: "value", set: false }],
+        secrets: [
+          {
+            name: "gcp-key-minter",
+            secret: "gcp-key-minter",
+            key: "value",
+            set: false,
+          },
+        ],
       },
     ];
 
@@ -645,7 +795,9 @@ describe("SettingsOverlay", () => {
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
 
-      expect(screen.queryByRole("tab", { name: "Secrets" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("tab", { name: "Secrets" }),
+      ).not.toBeInTheDocument();
     });
 
     it("sets a capability's own secret from the Capabilities tab, then re-reads settings", async () => {
@@ -653,7 +805,10 @@ describe("SettingsOverlay", () => {
         .mockResolvedValueOnce({ ...settings, capabilities })
         .mockResolvedValueOnce({ enabled: true, secrets: [] })
         .mockResolvedValueOnce({})
-        .mockResolvedValueOnce({ ...settings, capabilities: [{ ...capabilities[0], ready: true }] });
+        .mockResolvedValueOnce({
+          ...settings,
+          capabilities: [{ ...capabilities[0], ready: true }],
+        });
       const user = userEvent.setup();
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
@@ -672,14 +827,16 @@ describe("SettingsOverlay", () => {
     });
 
     it("lists a secret nothing on the pane claims, and leaves out the ones something does", async () => {
-      api.mockResolvedValueOnce({ ...settings, capabilities }).mockResolvedValueOnce({
-        enabled: true,
-        secrets: [
-          { name: "gcp-key-minter", keys: ["value"] },
-          { name: "gemini-api-key", keys: ["value"] },
-          { name: "buildkite", keys: ["token"] },
-        ],
-      });
+      api
+        .mockResolvedValueOnce({ ...settings, capabilities })
+        .mockResolvedValueOnce({
+          enabled: true,
+          secrets: [
+            { name: "gcp-key-minter", keys: ["value"] },
+            { name: "gemini-api-key", keys: ["value"] },
+            { name: "buildkite", keys: ["token"] },
+          ],
+        });
       const user = userEvent.setup();
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
@@ -693,19 +850,25 @@ describe("SettingsOverlay", () => {
       // "Other secrets" list has: the minter's name appears above too,
       // on the gcp-key field that owns it.
       expect(screen.getByTitle("delete buildkite/token")).toBeInTheDocument();
-      expect(screen.queryByTitle("delete gcp-key-minter/value")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTitle("delete gcp-key-minter/value"),
+      ).not.toBeInTheDocument();
     });
   });
 
   it("switches to the Upgrade tab and shows its panel", async () => {
-    api.mockResolvedValueOnce(settings).mockResolvedValueOnce({ enabled: false });
+    api
+      .mockResolvedValueOnce(settings)
+      .mockResolvedValueOnce({ enabled: false });
     const user = userEvent.setup();
     render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
     await screen.findByDisplayValue("30s");
 
     await user.click(screen.getByRole("tab", { name: "Upgrade" }));
 
-    expect(await screen.findByText(/no -upgrade-src-dir configured/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no -upgrade-src-dir configured/i),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText(/Poll interval/)).not.toBeInTheDocument();
   });
 
@@ -734,7 +897,10 @@ describe("SettingsOverlay", () => {
 
       expect(screen.getByRole("radio", { name: "Dark" })).toBeChecked();
       expect(localStorage.getItem("grain.themeMode")).toBe("dark");
-      expect(api).not.toHaveBeenCalledWith("/api/settings", expect.objectContaining({ method: "PUT" }));
+      expect(api).not.toHaveBeenCalledWith(
+        "/api/settings",
+        expect.objectContaining({ method: "PUT" }),
+      );
     });
 
     it("reflects a previously stored mode", async () => {
@@ -757,7 +923,11 @@ describe("SettingsOverlay", () => {
     const restartRequired = ["githubHost", "githubInsecureHttp"];
 
     it("annotates a restart-only field before anything has been changed", async () => {
-      api.mockResolvedValueOnce({ ...settings, restartRequired, pendingRestart: [] });
+      api.mockResolvedValueOnce({
+        ...settings,
+        restartRequired,
+        pendingRestart: [],
+      });
       const user = userEvent.setup();
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
@@ -765,19 +935,29 @@ describe("SettingsOverlay", () => {
       await user.click(screen.getByRole("tab", { name: "GitHub" }));
 
       expect(screen.getAllByText("needs restart").length).toBe(2);
-      expect(screen.getAllByText(/Takes effect when the daemon restarts/).length).toBe(2);
-      expect(screen.queryByText(/Saved, but not applied yet/)).not.toBeInTheDocument();
+      expect(
+        screen.getAllByText(/Takes effect when the daemon restarts/).length,
+      ).toBe(2);
+      expect(
+        screen.queryByText(/Saved, but not applied yet/),
+      ).not.toBeInTheDocument();
     });
 
     it("says which settings are saved but not applied yet", async () => {
-      api.mockResolvedValueOnce({ ...settings, restartRequired, pendingRestart: ["githubHost"] });
+      api.mockResolvedValueOnce({
+        ...settings,
+        restartRequired,
+        pendingRestart: ["githubHost"],
+      });
       const user = userEvent.setup();
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
 
       // The banner is on the overlay itself, so it is visible from
       // whichever tab happens to be open.
-      expect(screen.getByText(/Saved, but not applied yet: GitHub host/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Saved, but not applied yet: GitHub host/),
+      ).toBeInTheDocument();
 
       await user.click(screen.getByRole("tab", { name: "GitHub" }));
 
@@ -789,7 +969,11 @@ describe("SettingsOverlay", () => {
     });
 
     it("annotates nothing when the deployment reports no restart-only settings", async () => {
-      api.mockResolvedValueOnce({ ...settings, restartRequired: [], pendingRestart: [] });
+      api.mockResolvedValueOnce({
+        ...settings,
+        restartRequired: [],
+        pendingRestart: [],
+      });
       const user = userEvent.setup();
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
@@ -797,7 +981,9 @@ describe("SettingsOverlay", () => {
       await user.click(screen.getByRole("tab", { name: "GitHub" }));
 
       expect(screen.queryByText("needs restart")).not.toBeInTheDocument();
-      expect(screen.queryByText(/Takes effect when the daemon restarts/)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Takes effect when the daemon restarts/),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -805,15 +991,19 @@ describe("SettingsOverlay", () => {
   // on the Agents tab because it is about what the agent is told.
   describe("prompt extension", () => {
     it("populates the box with what the deployment already says", async () => {
-      api.mockResolvedValueOnce({ ...settings, promptExtension: "Run `make lint` before you push." });
+      api.mockResolvedValueOnce({
+        ...settings,
+        promptExtension: "Run `make lint` before you push.",
+      });
       const user = userEvent.setup();
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
 
       await user.click(screen.getByRole("tab", { name: "Agents" }));
 
-      expect(screen.getByLabelText(/Standing instructions for every run/))
-        .toHaveValue("Run `make lint` before you push.");
+      expect(
+        screen.getByLabelText(/Standing instructions for every run/),
+      ).toHaveValue("Run `make lint` before you push.");
     });
 
     it("sends the edited text with the Agents tab's own save", async () => {
@@ -823,7 +1013,10 @@ describe("SettingsOverlay", () => {
       await screen.findByDisplayValue("30s");
       await user.click(screen.getByRole("tab", { name: "Agents" }));
 
-      await user.type(screen.getByLabelText(/Standing instructions for every run/), "Run `make lint`.");
+      await user.type(
+        screen.getByLabelText(/Standing instructions for every run/),
+        "Run `make lint`.",
+      );
       await user.click(screen.getByRole("button", { name: "Save" }));
 
       expect(api).toHaveBeenCalledWith("/api/settings", {
@@ -835,13 +1028,20 @@ describe("SettingsOverlay", () => {
     // Cleared back to blank is a deliberate "tell runs nothing extra",
     // not "leave it alone" -- so it has to reach the PUT as "".
     it("sends an empty string when the box is cleared", async () => {
-      api.mockResolvedValueOnce({ ...settings, promptExtension: "Run `make lint`." }).mockResolvedValueOnce({});
+      api
+        .mockResolvedValueOnce({
+          ...settings,
+          promptExtension: "Run `make lint`.",
+        })
+        .mockResolvedValueOnce({});
       const user = userEvent.setup();
       render(<SettingsOverlay onClose={() => {}} showError={() => {}} />);
       await screen.findByDisplayValue("30s");
       await user.click(screen.getByRole("tab", { name: "Agents" }));
 
-      await user.clear(screen.getByLabelText(/Standing instructions for every run/));
+      await user.clear(
+        screen.getByLabelText(/Standing instructions for every run/),
+      );
       await user.click(screen.getByRole("button", { name: "Save" }));
 
       expect(api).toHaveBeenCalledWith("/api/settings", {

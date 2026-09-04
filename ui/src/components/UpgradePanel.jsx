@@ -36,7 +36,9 @@ export default function UpgradePanel({ showError }) {
     }
   }, [showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
     if (!status || status.phase !== "running") return;
@@ -49,7 +51,12 @@ export default function UpgradePanel({ showError }) {
     const trimmed = branch.trim();
     if (trimmed === "") return;
     try {
-      setStatus(await api("/api/upgrade", { method: "POST", body: JSON.stringify({ branch: trimmed }) }));
+      setStatus(
+        await api("/api/upgrade", {
+          method: "POST",
+          body: JSON.stringify({ branch: trimmed }),
+        }),
+      );
     } catch (err) {
       showError(err);
     }
@@ -63,16 +70,22 @@ export default function UpgradePanel({ showError }) {
     <>
       {!status.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          Not available: this deployment has no -upgrade-src-dir configured (bwsalmon/agents#396), so there is
-          nothing here that can check out, build and install a branch.
+          Not available: this deployment has no -upgrade-src-dir configured
+          (bwsalmon/agents#396), so there is nothing here that can check out,
+          build and install a branch.
         </Alert>
       )}
       {status.enabled && (
         <>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: -1, mb: 2 }}>
-            Fetches the branch below into this deployment's own checkout, rebuilds bin/grain with the
-            containerised build, installs it, and restarts to run it -- one upgrade at a time, with no
-            rollback if it goes wrong.
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{ mt: -1, mb: 2 }}
+          >
+            Fetches the branch below into this deployment's own checkout,
+            rebuilds bin/grain with the containerised build, installs it, and
+            restarts to run it -- one upgrade at a time, with no rollback if it
+            goes wrong.
           </Typography>
           <form onSubmit={submit}>
             <TextField
@@ -99,8 +112,15 @@ export default function UpgradePanel({ showError }) {
               <dt>Branch</dt>
               <dd>{status.branch}</dd>
               <dt>Status</dt>
-              <dd className={`upgrade-phase upgrade-phase-${status.phase}`}>{status.phase}</dd>
-              {status.detail && <><dt>Detail</dt><dd>{status.detail}</dd></>}
+              <dd className={`upgrade-phase upgrade-phase-${status.phase}`}>
+                {status.phase}
+              </dd>
+              {status.detail && (
+                <>
+                  <dt>Detail</dt>
+                  <dd>{status.detail}</dd>
+                </>
+              )}
             </dl>
           )}
         </>

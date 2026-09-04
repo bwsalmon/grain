@@ -21,7 +21,10 @@ describe("LogsPage", () => {
 
   it("fetches and shows the first source's log lines", async () => {
     api
-      .mockResolvedValueOnce({ enabled: true, sources: ["daemon", "git-proxy-audit"] })
+      .mockResolvedValueOnce({
+        enabled: true,
+        sources: ["daemon", "git-proxy-audit"],
+      })
       .mockResolvedValueOnce({ lines: ["one", "two"] });
     render(<LogsPage showError={() => {}} />);
 
@@ -46,7 +49,10 @@ describe("LogsPage", () => {
 
   it("switches sources from the picker and re-fetches", async () => {
     api
-      .mockResolvedValueOnce({ enabled: true, sources: ["daemon", "git-proxy-audit"] })
+      .mockResolvedValueOnce({
+        enabled: true,
+        sources: ["daemon", "git-proxy-audit"],
+      })
       .mockResolvedValueOnce({ lines: ["daemon line"] })
       .mockResolvedValueOnce({ lines: ["audit line"] });
     const user = userEvent.setup();
@@ -55,7 +61,9 @@ describe("LogsPage", () => {
     expect(await screen.findByText(/daemon line/)).toBeInTheDocument();
 
     await user.click(screen.getByLabelText(/Source/));
-    await user.click(await screen.findByRole("option", { name: "git-proxy-audit" }));
+    await user.click(
+      await screen.findByRole("option", { name: "git-proxy-audit" }),
+    );
 
     expect(await screen.findByText(/audit line/)).toBeInTheDocument();
     expect(api).toHaveBeenLastCalledWith("/api/logs/git-proxy-audit?lines=500");

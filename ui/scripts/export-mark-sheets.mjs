@@ -47,7 +47,10 @@ const frontend = join(here, "..");
 // The module, inlined into the capture page with its exports stripped so
 // it can be a plain inline module script. It is read rather than
 // imported so the browser runs the same bytes the app ships.
-const moduleSource = readFileSync(join(frontend, "src", "brand", "grain-mark.js"), "utf8")
+const moduleSource = readFileSync(
+  join(frontend, "src", "brand", "grain-mark.js"),
+  "utf8",
+)
   .replace(/^export function /gm, "function ")
   .replace(/^export const /gm, "const ");
 
@@ -134,7 +137,8 @@ const CRC_TABLE = (() => {
 
 function crc32(buf) {
   let c = ~0;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  for (let i = 0; i < buf.length; i++)
+    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
   return ~c >>> 0;
 }
 
@@ -177,7 +181,8 @@ function maskPNG(width, height, alpha) {
       row[x * 2 + 1] = alpha[y * width + x];
     }
     raw[y * (1 + stride)] = 2; // filter: Up
-    for (let i = 0; i < stride; i++) raw[y * (1 + stride) + 1 + i] = (row[i] - prev[i]) & 0xff;
+    for (let i = 0; i < stride; i++)
+      raw[y * (1 + stride) + 1 + i] = (row[i] - prev[i]) & 0xff;
     row.copy(prev);
   }
   return Buffer.concat([
@@ -193,7 +198,11 @@ function maskPNG(width, height, alpha) {
 // CHROMIUM_PATH is for an image that already carries a browser rather
 // than downloading Playwright's own -- a CI runner, a sandbox.
 const browser = await chromium
-  .launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
+  .launch(
+    process.env.CHROMIUM_PATH
+      ? { executablePath: process.env.CHROMIUM_PATH }
+      : {},
+  )
   .catch((err) => {
     throw new Error(
       `could not launch a browser to record the sheets: ${err.message}\n` +

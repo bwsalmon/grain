@@ -9,7 +9,9 @@ import { test, expect } from "@playwright/test";
 // tasks.spec.js's own doc comment says jsdom component tests can't be
 // trusted to catch; the same goes for the page those clicks land on now.
 
-test("opens a repo's own page from a plain list row and files a task scoped to it", async ({ page }) => {
+test("opens a repo's own page from a plain list row and files a task scoped to it", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByRole("button", { name: /^Repos/ }).click();
 
@@ -36,7 +38,9 @@ test("opens a repo's own page from a plain list row and files a task scoped to i
   await expect(page.locator(".task-row", { hasText: title })).toBeVisible();
 });
 
-test("reaches a repo's branches, capabilities and releases from its page", async ({ page }) => {
+test("reaches a repo's branches, capabilities and releases from its page", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByRole("button", { name: /^Repos/ }).click();
 
@@ -47,11 +51,17 @@ test("reaches a repo's branches, capabilities and releases from its page", async
   // All three forms are on the page itself rather than behind a toggle,
   // and each is filled in by a read that has to have landed.
   await expect(page.getByLabel("Branch name")).toBeVisible();
-  await expect(page.getByText(`A task filed against ${repoName} starts with:`)).toBeVisible();
-  await expect(page.getByLabel(new RegExp(`Prompt extension for ${repoName}`))).toBeVisible();
+  await expect(
+    page.getByText(`A task filed against ${repoName} starts with:`),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel(new RegExp(`Prompt extension for ${repoName}`)),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Releases" }).click();
-  await expect(page.getByRole("heading", { name: `${repoName} releases` })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: `${repoName} releases` }),
+  ).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/repos/${repoName}/releases$`));
 
   // Back out of releases lands on the repo page, not on the list.

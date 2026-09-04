@@ -1,5 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Box, Chip, ClickAwayListener, ListItemText, MenuItem, MenuList, Paper, Popper, Stack, TextField, Typography } from "@mui/material";
+import {
+  Box,
+  Chip,
+  ClickAwayListener,
+  ListItemText,
+  MenuItem,
+  MenuList,
+  Paper,
+  Popper,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 
 // looksLikeRepo mirrors model.ParseRepo, which is what the server runs a
 // read-only repo through (ui.parseReads): owner/name, split on the first
@@ -19,7 +31,10 @@ export function looksLikeRepo(text) {
 // older task, or out of somebody's notes, still lands in one go instead
 // of having to be picked apart by hand.
 export function parseRepoList(text) {
-  const parts = text.split(",").map((r) => r.trim()).filter((r) => r !== "");
+  const parts = text
+    .split(",")
+    .map((r) => r.trim())
+    .filter((r) => r !== "");
   if (parts.length === 0 || !parts.every(looksLikeRepo)) return [];
   return parts;
 }
@@ -46,7 +61,11 @@ export function parseRepoList(text) {
 // of owner/name strings), not in here, because all three forms that use
 // this already submit as JSON built from state rather than from the DOM
 // -- the same way each of them handles its capabilities picker.
-export default function ReadOnlyReposField({ options = [], value = [], onChange }) {
+export default function ReadOnlyReposField({
+  options = [],
+  value = [],
+  onChange,
+}) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
@@ -69,17 +88,30 @@ export default function ReadOnlyReposField({ options = [], value = [], onChange 
   // list already covers -- an exact match on an option would otherwise
   // show the same repo twice, once as itself and once as "add".
   const typed = parseRepoList(query).filter((r) => !picked.has(r));
-  const custom = typed.length > 0 && !(typed.length === 1 && matches.includes(typed[0])) ? typed : null;
+  const custom =
+    typed.length > 0 && !(typed.length === 1 && matches.includes(typed[0]))
+      ? typed
+      : null;
 
   // rows is what the arrow keys walk and Enter picks: the matching
   // options, then the "add what I typed" row, as one list so both are
   // reachable the same way.
   const rows = [
     ...matches.map((r) => ({ key: r, label: r, repos: [r] })),
-    ...(custom ? [{ key: "__custom__", label: `Add ${custom.join(", ")}`, repos: custom }] : []),
+    ...(custom
+      ? [
+          {
+            key: "__custom__",
+            label: `Add ${custom.join(", ")}`,
+            repos: custom,
+          },
+        ]
+      : []),
   ];
 
-  useEffect(() => { setHighlight(0); }, [query]);
+  useEffect(() => {
+    setHighlight(0);
+  }, [query]);
 
   const setQueryText = (text) => {
     queryRef.current = text;
@@ -116,7 +148,10 @@ export default function ReadOnlyReposField({ options = [], value = [], onChange 
   const remove = (repo) => onChange(value.filter((r) => r !== repo));
 
   const onKeyDown = (e) => {
-    if (e.key === "Escape") { setOpen(false); return; }
+    if (e.key === "Escape") {
+      setOpen(false);
+      return;
+    }
     if (e.key === "Enter") {
       // Swallowed whether or not it picks anything: this box sits inside
       // a form, and Enter on it must never be the one that submits the
@@ -127,14 +162,25 @@ export default function ReadOnlyReposField({ options = [], value = [], onChange 
       return;
     }
     if (rows.length === 0) return;
-    if (e.key === "ArrowDown") { e.preventDefault(); setHighlight((h) => Math.min(h + 1, rows.length - 1)); }
-    else if (e.key === "ArrowUp") { e.preventDefault(); setHighlight((h) => Math.max(h - 1, 0)); }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlight((h) => Math.min(h + 1, rows.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => Math.max(h - 1, 0));
+    }
   };
 
   return (
     <Box sx={{ mt: 2, mb: 1 }}>
       {value.length > 0 && (
-        <Stack direction="row" flexWrap="wrap" useFlexGap gap={0.5} sx={{ mb: 1 }}>
+        <Stack
+          direction="row"
+          flexWrap="wrap"
+          useFlexGap
+          gap={0.5}
+          sx={{ mb: 1 }}
+        >
           {value.map((r) => (
             <Chip
               key={r}
@@ -156,7 +202,10 @@ export default function ReadOnlyReposField({ options = [], value = [], onChange 
             autoComplete="off"
             fullWidth
             size="small"
-            onChange={(e) => { setQueryText(e.target.value); setOpen(true); }}
+            onChange={(e) => {
+              setQueryText(e.target.value);
+              setOpen(true);
+            }}
             onFocus={() => setOpen(true)}
             // Clicking the box reopens the list as well as focusing it:
             // picking a repo leaves the focus where it was, so after one
@@ -166,17 +215,28 @@ export default function ReadOnlyReposField({ options = [], value = [], onChange 
             onBlur={commitTyped}
             onKeyDown={onKeyDown}
           />
-          <Popper open={open} anchorEl={anchorRef.current} placement="bottom-start" style={{ width: anchorRef.current?.offsetWidth, zIndex: 1300 }}>
+          <Popper
+            open={open}
+            anchorEl={anchorRef.current}
+            placement="bottom-start"
+            style={{ width: anchorRef.current?.offsetWidth, zIndex: 1300 }}
+          >
             {/* Mousedown on a result must not blur the box: the blur
                 handler above would commit the half-typed query as a repo
                 of its own, on the way to picking the result that was
                 actually clicked. */}
-            <Paper variant="outlined" sx={{ mt: 0.5, maxHeight: 220, overflowY: "auto" }} onMouseDown={(e) => e.preventDefault()}>
+            <Paper
+              variant="outlined"
+              sx={{ mt: 0.5, maxHeight: 220, overflowY: "auto" }}
+              onMouseDown={(e) => e.preventDefault()}
+            >
               <MenuList dense>
                 {rows.length === 0 && (
                   <MenuItem disabled>
                     <Typography variant="body2" color="text.secondary">
-                      {q === "" ? "No repos to suggest -- type owner/name" : "No matching repos -- type owner/name"}
+                      {q === ""
+                        ? "No repos to suggest -- type owner/name"
+                        : "No matching repos -- type owner/name"}
                     </Typography>
                   </MenuItem>
                 )}
@@ -187,7 +247,10 @@ export default function ReadOnlyReposField({ options = [], value = [], onChange 
                     onClick={() => pick(row)}
                     onMouseEnter={() => setHighlight(i)}
                   >
-                    <ListItemText primary={row.label} primaryTypographyProps={{ noWrap: true }} />
+                    <ListItemText
+                      primary={row.label}
+                      primaryTypographyProps={{ noWrap: true }}
+                    />
                   </MenuItem>
                 ))}
               </MenuList>

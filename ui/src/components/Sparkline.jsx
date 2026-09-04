@@ -6,10 +6,20 @@
 // min and max -- these are relative trend lines, not absolute-scale charts,
 // so callers that need an absolute reference (e.g. "out of total RAM") show
 // that as text alongside the chart rather than as part of it.
-export default function Sparkline({ data, width = 120, height = 32, color = "#1976d2" }) {
+export default function Sparkline({
+  data,
+  width = 120,
+  height = 32,
+  color = "#1976d2",
+}) {
   if (!data || data.length < 2) {
     return (
-      <svg width={width} height={height} role="img" aria-label="Not enough data yet">
+      <svg
+        width={width}
+        height={height}
+        role="img"
+        aria-label="Not enough data yet"
+      >
         <title>Not enough data yet</title>
       </svg>
     );
@@ -28,7 +38,12 @@ export default function Sparkline({ data, width = 120, height = 32, color = "#19
 
   const last = data[data.length - 1];
   return (
-    <svg width={width} height={height} role="img" aria-label={`Trend, latest value ${last}`}>
+    <svg
+      width={width}
+      height={height}
+      role="img"
+      aria-label={`Trend, latest value ${last}`}
+    >
       <title>{`Trend, latest value ${last}`}</title>
       <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" />
     </svg>

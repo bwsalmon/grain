@@ -61,15 +61,21 @@ test("files a new task through the New task overlay", async ({ page }) => {
 test("shows the full prompt from the task's own page", async ({ page }) => {
   await page.goto("/");
 
-  await page.locator(".task-row", { hasText: "Bump the Go toolchain to 1.24" }).click();
+  await page
+    .locator(".task-row", { hasText: "Bump the Go toolchain to 1.24" })
+    .click();
   await expect(page.locator(".detail-header")).toBeVisible();
   await page.getByRole("button", { name: "Prompt" }).click();
 
   // The prompt opens as its own pane over the task's, so it is picked
   // out by its own heading rather than by being the only dialog on
   // screen -- the task page is still behind it.
-  const prompt = page.locator(".MuiDialog-paper", { has: page.getByRole("heading", { name: /^Prompt for/ }) });
-  await expect(prompt.getByText(/Push your change to a new branch named/)).toBeVisible();
+  const prompt = page.locator(".MuiDialog-paper", {
+    has: page.getByRole("heading", { name: /^Prompt for/ }),
+  });
+  await expect(
+    prompt.getByText(/Push your change to a new branch named/),
+  ).toBeVisible();
 });
 
 // grain/task-94: a task opens into the whole content area beside the
@@ -101,7 +107,9 @@ test("opens a task into the pane beside the sidebar", async ({ page }) => {
 // top-left corner, not an X in the top-right that only the panes had.
 // Which corner a button is actually in is a question about where it
 // lands on screen, so it is asked here rather than of jsdom.
-test("leaves a task's pane by a back button in its top-left corner", async ({ page }) => {
+test("leaves a task's pane by a back button in its top-left corner", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.locator(".task-row").first().click();
   await expect(page.locator(".detail-header h2")).toBeVisible();
@@ -140,5 +148,7 @@ test("approves a proposed task from its detail view", async ({ page }) => {
   await page.getByRole("button", { name: "Approve" }).click();
 
   await expect(page.locator(".detail-state .badge-queued")).toBeVisible();
-  await expect(page.locator(".task-row", { hasText: title }).locator(".badge-queued")).toBeVisible();
+  await expect(
+    page.locator(".task-row", { hasText: title }).locator(".badge-queued"),
+  ).toBeVisible();
 });

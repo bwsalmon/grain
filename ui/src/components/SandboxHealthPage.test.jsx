@@ -13,14 +13,20 @@ describe("SandboxHealthPage", () => {
 
   it("shows the header and a spinner while the initial fetch is in flight", async () => {
     let resolve;
-    api.mockReturnValueOnce(new Promise((r) => { resolve = r; }));
+    api.mockReturnValueOnce(
+      new Promise((r) => {
+        resolve = r;
+      }),
+    );
     render(<SandboxHealthPage showError={() => {}} />);
 
     expect(screen.getByText("Sandbox health")).toBeInTheDocument();
     expect(screen.getByRole("progressbar")).toBeInTheDocument();
 
     resolve({ enabled: true, sandboxes: [], host: null });
-    expect(await screen.findByText("No runs in flight, so no sandboxes exist.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("No runs in flight, so no sandboxes exist."),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
@@ -43,14 +49,26 @@ describe("SandboxHealthPage", () => {
         memoryUsedMB: 512,
         memoryTotalMB: 1024,
         disks: [
-          { holds: ["store"], path: "/var/lib/grain", usedMB: 4096, totalMB: 20480 },
-          { holds: ["sandboxes", "docker"], path: "/var/lib/grain-sandbox", usedMB: 61440, totalMB: 102400 },
+          {
+            holds: ["store"],
+            path: "/var/lib/grain",
+            usedMB: 4096,
+            totalMB: 20480,
+          },
+          {
+            holds: ["sandboxes", "docker"],
+            path: "/var/lib/grain-sandbox",
+            usedMB: 61440,
+            totalMB: 102400,
+          },
         ],
       },
     });
     render(<SandboxHealthPage showError={() => {}} />);
 
-    expect(await screen.findByText(/0\.50 \/ 0\.40 \/ 0\.30/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/0\.50 \/ 0\.40 \/ 0\.30/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/512 \/ 1024 MB/)).toBeInTheDocument();
     // Shown in GB rather than in the MB it arrives as: a data disk is
     // counted in tens of gigabytes, and "4096 / 20480 MB" answers "how
@@ -63,7 +81,9 @@ describe("SandboxHealthPage", () => {
     expect(screen.getByText("/var/lib/grain-sandbox")).toBeInTheDocument();
     // One row, not two, for a sandbox root and a docker data root the
     // daemon found to be the same filesystem -- named for both.
-    expect(screen.getByRole("cell", { name: "sandboxes, docker" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("cell", { name: "sandboxes, docker" }),
+    ).toBeInTheDocument();
   });
 
   it("says why a disk it cannot read has no figure", async () => {
@@ -77,8 +97,18 @@ describe("SandboxHealthPage", () => {
         memoryUsedMB: 512,
         memoryTotalMB: 1024,
         disks: [
-          { holds: ["store"], path: "/var/lib/grain", usedMB: 4096, totalMB: 20480 },
-          { holds: ["sandboxes"], path: "/var/lib/grain-sandbox", error: "sysstat: statfs /var/lib/grain-sandbox: no such file or directory" },
+          {
+            holds: ["store"],
+            path: "/var/lib/grain",
+            usedMB: 4096,
+            totalMB: 20480,
+          },
+          {
+            holds: ["sandboxes"],
+            path: "/var/lib/grain-sandbox",
+            error:
+              "sysstat: statfs /var/lib/grain-sandbox: no such file or directory",
+          },
         ],
       },
     });
@@ -87,7 +117,9 @@ describe("SandboxHealthPage", () => {
     // A volume that has stopped answering is exactly what an operator
     // opens this pane for, so the row says so rather than going quiet --
     // and the disks either side of it keep their figures.
-    expect(await screen.findByText(/statfs \/var\/lib\/grain-sandbox/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/statfs \/var\/lib\/grain-sandbox/),
+    ).toBeInTheDocument();
     expect(screen.getByText("4.0 / 20.0 GB")).toBeInTheDocument();
   });
 
@@ -95,8 +127,24 @@ describe("SandboxHealthPage", () => {
     api.mockResolvedValueOnce({
       enabled: true,
       sandboxes: [
-        { sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200, diskUsedMB: 3072, diskTotalMB: 20480 },
-        { sandbox: "t2-r1", backend: "kontur", name: "g-t2-r1", ready: false, error: "connection refused" },
+        {
+          sandbox: "t1-r1",
+          backend: "kontur",
+          name: "g-t1-r1",
+          ready: true,
+          loadAverage: "0.1 0.2 0.3",
+          memoryUsedMB: 100,
+          memoryTotalMB: 200,
+          diskUsedMB: 3072,
+          diskTotalMB: 20480,
+        },
+        {
+          sandbox: "t2-r1",
+          backend: "kontur",
+          name: "g-t2-r1",
+          ready: false,
+          error: "connection refused",
+        },
       ],
       host: null,
     });
@@ -118,7 +166,9 @@ describe("SandboxHealthPage", () => {
     // a slot number that meant nothing outside the dispatch loop; it
     // leads with the run id now, which is also what model.Run.Sandbox
     // records, so a row joins straight onto the run it belongs to.
-    expect(screen.getByRole("columnheader", { name: "Run" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "Run" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "t1-r1" })).toBeInTheDocument();
     expect(screen.getByRole("cell", { name: "t2-r1" })).toBeInTheDocument();
   });
@@ -126,7 +176,14 @@ describe("SandboxHealthPage", () => {
   it("shows a host error without hiding the sandbox list", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
-      sandboxes: [{ sandbox: "t1-r1", backend: "host", name: "/tmp/sandbox-0", ready: true }],
+      sandboxes: [
+        {
+          sandbox: "t1-r1",
+          backend: "host",
+          name: "/tmp/sandbox-0",
+          ready: true,
+        },
+      ],
       hostError: "not on linux",
     });
     render(<SandboxHealthPage showError={() => {}} />);
@@ -138,11 +195,19 @@ describe("SandboxHealthPage", () => {
   it("re-fetches when Refresh is clicked", async () => {
     api
       .mockResolvedValueOnce({ enabled: true, sandboxes: [], host: null })
-      .mockResolvedValueOnce({ enabled: true, sandboxes: [{ sandbox: "t1-r1", backend: "host", name: "/tmp/s0", ready: true }], host: null });
+      .mockResolvedValueOnce({
+        enabled: true,
+        sandboxes: [
+          { sandbox: "t1-r1", backend: "host", name: "/tmp/s0", ready: true },
+        ],
+        host: null,
+      });
     const user = userEvent.setup();
     render(<SandboxHealthPage showError={() => {}} />);
 
-    expect(await screen.findByText("No runs in flight, so no sandboxes exist.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("No runs in flight, so no sandboxes exist."),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Refresh" }));
 
     expect(await screen.findByText("/tmp/s0")).toBeInTheDocument();
@@ -151,12 +216,30 @@ describe("SandboxHealthPage", () => {
   it("labels the host and per-sandbox trend charts", async () => {
     api.mockResolvedValueOnce({
       enabled: true,
-      sandboxes: [{ sandbox: "t1-r1", backend: "kontur", name: "g-t1-r1", ready: true, loadAverage: "0.1 0.2 0.3", memoryUsedMB: 100, memoryTotalMB: 200 }],
-      host: { loadAverage1: 0.5, loadAverage5: 0.4, loadAverage15: 0.3, memoryUsedMB: 512, memoryTotalMB: 1024 },
+      sandboxes: [
+        {
+          sandbox: "t1-r1",
+          backend: "kontur",
+          name: "g-t1-r1",
+          ready: true,
+          loadAverage: "0.1 0.2 0.3",
+          memoryUsedMB: 100,
+          memoryTotalMB: 200,
+        },
+      ],
+      host: {
+        loadAverage1: 0.5,
+        loadAverage5: 0.4,
+        loadAverage15: 0.3,
+        memoryUsedMB: 512,
+        memoryTotalMB: 1024,
+      },
     });
     render(<SandboxHealthPage showError={() => {}} />);
 
-    expect(await screen.findByText("CPU (1 min load average)")).toBeInTheDocument();
+    expect(
+      await screen.findByText("CPU (1 min load average)"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Memory (MB)")).toBeInTheDocument();
     // The host's disk trends live in the disk table's own Trend column
     // now, one per filesystem, rather than in a third chart beside these
@@ -169,8 +252,28 @@ describe("SandboxHealthPage", () => {
 
   it("accumulates trend history across polls", async () => {
     api
-      .mockResolvedValueOnce({ enabled: true, sandboxes: [], host: { loadAverage1: 0.5, loadAverage5: 0.4, loadAverage15: 0.3, memoryUsedMB: 100, memoryTotalMB: 1000 } })
-      .mockResolvedValueOnce({ enabled: true, sandboxes: [], host: { loadAverage1: 0.6, loadAverage5: 0.4, loadAverage15: 0.3, memoryUsedMB: 200, memoryTotalMB: 1000 } });
+      .mockResolvedValueOnce({
+        enabled: true,
+        sandboxes: [],
+        host: {
+          loadAverage1: 0.5,
+          loadAverage5: 0.4,
+          loadAverage15: 0.3,
+          memoryUsedMB: 100,
+          memoryTotalMB: 1000,
+        },
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        sandboxes: [],
+        host: {
+          loadAverage1: 0.6,
+          loadAverage5: 0.4,
+          loadAverage15: 0.3,
+          memoryUsedMB: 200,
+          memoryTotalMB: 1000,
+        },
+      });
     const user = userEvent.setup();
     render(<SandboxHealthPage showError={() => {}} />);
 
@@ -182,7 +285,9 @@ describe("SandboxHealthPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Refresh" }));
 
-    expect(await screen.findByLabelText("Trend, latest value 0.6")).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText("Trend, latest value 0.6"),
+    ).toBeInTheDocument();
   });
 });
 
@@ -196,17 +301,37 @@ describe("appendHistory", () => {
   it("keeps a separate series per sandbox, keyed by name", () => {
     const result = appendHistory(empty, {
       sandboxes: [
-        { sandbox: "t1-r1", ready: true, loadAverage: "0.25 0.5 0.75", memoryUsedMB: 40 },
-        { sandbox: "t2-r1", ready: true, loadAverage: "1.5 1.0 0.5", memoryUsedMB: 90 },
+        {
+          sandbox: "t1-r1",
+          ready: true,
+          loadAverage: "0.25 0.5 0.75",
+          memoryUsedMB: 40,
+        },
+        {
+          sandbox: "t2-r1",
+          ready: true,
+          loadAverage: "1.5 1.0 0.5",
+          memoryUsedMB: 90,
+        },
       ],
     });
     expect(Object.keys(result.sandboxes).sort()).toEqual(["t1-r1", "t2-r1"]);
-    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40], disk: [] });
-    expect(result.sandboxes["t2-r1"]).toEqual({ cpu: [1.5], mem: [90], disk: [] });
+    expect(result.sandboxes["t1-r1"]).toEqual({
+      cpu: [0.25],
+      mem: [40],
+      disk: [],
+    });
+    expect(result.sandboxes["t2-r1"]).toEqual({
+      cpu: [1.5],
+      mem: [90],
+      disk: [],
+    });
   });
 
   it("skips a poll with no host stats", () => {
-    expect(appendHistory(empty, { enabled: true, sandboxes: [] })).toEqual(empty);
+    expect(appendHistory(empty, { enabled: true, sandboxes: [] })).toEqual(
+      empty,
+    );
   });
 
   it("appends host CPU, memory and one disk series per filesystem", () => {
@@ -215,8 +340,18 @@ describe("appendHistory", () => {
         loadAverage1: 1.5,
         memoryUsedMB: 300,
         disks: [
-          { holds: ["store"], path: "/var/lib/grain", usedMB: 4000, totalMB: 20000 },
-          { holds: ["sandboxes", "docker"], path: "/var/lib/grain-sandbox", usedMB: 61000, totalMB: 100000 },
+          {
+            holds: ["store"],
+            path: "/var/lib/grain",
+            usedMB: 4000,
+            totalMB: 20000,
+          },
+          {
+            holds: ["sandboxes", "docker"],
+            path: "/var/lib/grain-sandbox",
+            usedMB: 61000,
+            totalMB: 100000,
+          },
         ],
       },
       sandboxes: [],
@@ -238,51 +373,84 @@ describe("appendHistory", () => {
       host: {
         loadAverage1: 1.5,
         memoryUsedMB: 300,
-        disks: [{ holds: ["sandboxes"], path: "/var/lib/grain-sandbox", usedMB: 0, totalMB: 0, error: "no such file or directory" }],
+        disks: [
+          {
+            holds: ["sandboxes"],
+            path: "/var/lib/grain-sandbox",
+            usedMB: 0,
+            totalMB: 0,
+            error: "no such file or directory",
+          },
+        ],
       },
       sandboxes: [],
     });
-    expect(result.host).toEqual({ cpu: [1.5], mem: [300], disks: { "/var/lib/grain-sandbox": [] } });
+    expect(result.host).toEqual({
+      cpu: [1.5],
+      mem: [300],
+      disks: { "/var/lib/grain-sandbox": [] },
+    });
   });
 
   // A filesystem the host has stopped reporting takes its series with it
   // rather than accumulating forever behind a chart nothing draws.
   it("drops the series of a filesystem no longer reported", () => {
     const first = appendHistory(empty, {
-      host: { loadAverage1: 1.5, memoryUsedMB: 300, disks: [{ holds: ["docker"], path: "/docker", usedMB: 10, totalMB: 100 }] },
+      host: {
+        loadAverage1: 1.5,
+        memoryUsedMB: 300,
+        disks: [
+          { holds: ["docker"], path: "/docker", usedMB: 10, totalMB: 100 },
+        ],
+      },
       sandboxes: [],
     });
     const second = appendHistory(first, {
-      host: { loadAverage1: 1.5, memoryUsedMB: 300, disks: [{ holds: ["store"], path: "/store", usedMB: 20, totalMB: 100 }] },
+      host: {
+        loadAverage1: 1.5,
+        memoryUsedMB: 300,
+        disks: [{ holds: ["store"], path: "/store", usedMB: 20, totalMB: 100 }],
+      },
       sandboxes: [],
     });
     expect(second.host.disks).toEqual({ "/store": [20] });
   });
 
   it("skips a sandbox that is not ready", () => {
-    const result = appendHistory(empty, { sandboxes: [{ sandbox: "t1-r1", ready: false, error: "boom" }] });
+    const result = appendHistory(empty, {
+      sandboxes: [{ sandbox: "t1-r1", ready: false, error: "boom" }],
+    });
     expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [], mem: [], disk: [] });
   });
 
   it("appends a ready sandbox's load average, memory and disk", () => {
     const result = appendHistory(empty, {
-      sandboxes: [{
-        sandbox: "t1-r1",
-        ready: true,
-        loadAverage: "0.25 0.5 0.75",
-        memoryUsedMB: 40,
-        memoryTotalMB: 100,
-        diskUsedMB: 3072,
-        diskTotalMB: 20480,
-      }],
+      sandboxes: [
+        {
+          sandbox: "t1-r1",
+          ready: true,
+          loadAverage: "0.25 0.5 0.75",
+          memoryUsedMB: 40,
+          memoryTotalMB: 100,
+          diskUsedMB: 3072,
+          diskTotalMB: 20480,
+        },
+      ],
     });
-    expect(result.sandboxes["t1-r1"]).toEqual({ cpu: [0.25], mem: [40], disk: [3072] });
+    expect(result.sandboxes["t1-r1"]).toEqual({
+      cpu: [0.25],
+      mem: [40],
+      disk: [3072],
+    });
   });
 
   it("caps each series at 60 samples", () => {
     let history = empty;
     for (let i = 0; i < 65; i++) {
-      history = appendHistory(history, { host: { loadAverage1: i, memoryUsedMB: i }, sandboxes: [] });
+      history = appendHistory(history, {
+        host: { loadAverage1: i, memoryUsedMB: i },
+        sandboxes: [],
+      });
     }
     expect(history.host.cpu).toHaveLength(60);
     expect(history.host.cpu[0]).toBe(5);

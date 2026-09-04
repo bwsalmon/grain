@@ -21,11 +21,21 @@ describe("DebugOverlay", () => {
 
   it("shows Logs by default, with Sandbox health, Top and Restart as other tabs", async () => {
     api.mockResolvedValueOnce(noLogs);
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
 
-    expect(await screen.findByText(/no log sources configured|not available/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no log sources configured|not available/i),
+    ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Logs" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Sandbox health" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: "Sandbox health" }),
+    ).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Top" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Restart" })).toBeInTheDocument();
     expect(api).toHaveBeenCalledTimes(1);
@@ -35,10 +45,18 @@ describe("DebugOverlay", () => {
   // destination of its own now (MetricsOverlay.jsx), not a tab in here.
   it("does not show Metrics as a tab", async () => {
     api.mockResolvedValueOnce(noLogs);
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured|not available/i);
 
-    expect(screen.queryByRole("tab", { name: "Metrics" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "Metrics" }),
+    ).not.toBeInTheDocument();
   });
 
   // grain/task-115: these panels fill the content area beside the
@@ -47,24 +65,44 @@ describe("DebugOverlay", () => {
   // strip is the pane's fixed header, so it stays put while one scrolls.
   it("fills the pane beside the sidebar, with its tabs in the fixed header", async () => {
     api.mockResolvedValueOnce(noLogs);
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured|not available/i);
 
-    expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
+    expect(document.querySelector(".MuiDialog-paper")).toHaveClass(
+      "MuiDialog-paperFullScreen",
+    );
     const head = document.querySelector(".overlay-pane-header");
-    expect(head).toContainElement(screen.getByRole("tab", { name: "Sandbox health" }));
-    expect(head).toContainElement(screen.getByRole("heading", { name: "Debug" }));
+    expect(head).toContainElement(
+      screen.getByRole("tab", { name: "Sandbox health" }),
+    );
+    expect(head).toContainElement(
+      screen.getByRole("heading", { name: "Debug" }),
+    );
   });
 
   it("shows Sandbox health on its own tab", async () => {
     api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce(noSandboxes);
     const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
 
     await user.click(screen.getByRole("tab", { name: "Sandbox health" }));
 
-    expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/no sandbox pool or host stats configured/i),
+    ).toBeInTheDocument();
   });
 
   // grain/task-120: `top` on the daemon's own machine, next to the
@@ -76,7 +114,13 @@ describe("DebugOverlay", () => {
       lines: ["top - 12:00:00 up 3 days,  load average: 1.10, 0.90, 0.75"],
     });
     const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
 
     await user.click(screen.getByRole("tab", { name: "Top" }));
@@ -88,31 +132,55 @@ describe("DebugOverlay", () => {
   it("shows the reboot control on the Restart tab when reboot is enabled", async () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
 
     await user.click(screen.getByRole("tab", { name: "Restart" }));
 
-    expect(screen.getByRole("button", { name: "Reboot host" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Reboot host" }),
+    ).toBeInTheDocument();
   });
 
   it("does not show the reboot control on the Restart tab when reboot is not enabled", async () => {
     api.mockResolvedValueOnce(noLogs);
     const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: false }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: false }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
 
     await user.click(screen.getByRole("tab", { name: "Restart" }));
 
-    expect(screen.queryByRole("button", { name: "Reboot host" })).not.toBeInTheDocument();
-    expect(screen.getByText(/rebooting the host is not enabled/i)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reboot host" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/rebooting the host is not enabled/i),
+    ).toBeInTheDocument();
   });
 
   it("reboots the host after confirmation", async () => {
     api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce({});
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
     await user.click(screen.getByRole("tab", { name: "Restart" }));
 
@@ -126,7 +194,13 @@ describe("DebugOverlay", () => {
     api.mockResolvedValueOnce(noLogs);
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(false));
     const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={() => {}}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
     await user.click(screen.getByRole("tab", { name: "Restart" }));
 
@@ -143,11 +217,19 @@ describe("DebugOverlay", () => {
   // used to surface as an error banner on the one action where it is
   // actually a sign of success, making the button look broken.
   it("does not show an error when the connection drops as the reboot itself would cause", async () => {
-    api.mockResolvedValueOnce(noLogs).mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    api
+      .mockResolvedValueOnce(noLogs)
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const user = userEvent.setup();
     const showError = vi.fn();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={showError}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
     await user.click(screen.getByRole("tab", { name: "Restart" }));
 
@@ -158,17 +240,27 @@ describe("DebugOverlay", () => {
   });
 
   it("still shows an error for a real reboot failure", async () => {
-    api.mockResolvedValueOnce(noLogs).mockRejectedValueOnce(new Error("reboot is not available"));
+    api
+      .mockResolvedValueOnce(noLogs)
+      .mockRejectedValueOnce(new Error("reboot is not available"));
     vi.stubGlobal("confirm", vi.fn().mockReturnValue(true));
     const user = userEvent.setup();
     const showError = vi.fn();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={showError} />);
+    render(
+      <DebugOverlay
+        config={{ rebootEnabled: true }}
+        onClose={() => {}}
+        showError={showError}
+      />,
+    );
     await screen.findByText(/no log sources configured/i);
     await user.click(screen.getByRole("tab", { name: "Restart" }));
 
     await user.click(screen.getByRole("button", { name: "Reboot host" }));
 
-    expect(showError).toHaveBeenCalledWith(new Error("reboot is not available"));
+    expect(showError).toHaveBeenCalledWith(
+      new Error("reboot is not available"),
+    );
     vi.unstubAllGlobals();
   });
 });

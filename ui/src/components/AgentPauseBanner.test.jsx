@@ -1,6 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import AgentPauseBanner, { formatRemaining, pauseMessage } from "./AgentPauseBanner.jsx";
+import AgentPauseBanner, {
+  formatRemaining,
+  pauseMessage,
+} from "./AgentPauseBanner.jsx";
 import api from "../api.js";
 
 vi.mock("../api.js", () => ({ default: vi.fn() }));
@@ -16,7 +19,9 @@ describe("AgentPauseBanner", () => {
   it("says what grain is doing, until when, and what the provider said", () => {
     render(<AgentPauseBanner pause={pause} />);
 
-    expect(screen.getByText(/nothing is being dispatched/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing is being dispatched/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/about 2h 0m/)).toBeInTheDocument();
     // The provider's own sentence verbatim: it names the framework and
     // the window, which is the half an operator can act on.
@@ -24,13 +29,19 @@ describe("AgentPauseBanner", () => {
   });
 
   it("lifts the pause and lets the caller re-read the config", async () => {
-    api.mockResolvedValue({ enabled: true, lifted: true, pause: { paused: false } });
+    api.mockResolvedValue({
+      enabled: true,
+      lifted: true,
+      pause: { paused: false },
+    });
     const onLifted = vi.fn().mockResolvedValue(undefined);
     render(<AgentPauseBanner pause={pause} onLifted={onLifted} />);
 
     fireEvent.click(screen.getByRole("button", { name: /resume now/i }));
 
-    await waitFor(() => expect(api).toHaveBeenCalledWith("/api/pause", { method: "DELETE" }));
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith("/api/pause", { method: "DELETE" }),
+    );
     await waitFor(() => expect(onLifted).toHaveBeenCalled());
   });
 
@@ -38,7 +49,13 @@ describe("AgentPauseBanner", () => {
     api.mockRejectedValue(new Error("nope"));
     const showError = vi.fn();
     const onLifted = vi.fn();
-    render(<AgentPauseBanner pause={pause} onLifted={onLifted} showError={showError} />);
+    render(
+      <AgentPauseBanner
+        pause={pause}
+        onLifted={onLifted}
+        showError={showError}
+      />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: /resume now/i }));
 
@@ -50,7 +67,9 @@ describe("AgentPauseBanner", () => {
   });
 
   it("still says something useful when the pause names no instant", () => {
-    expect(pauseMessage({ paused: true })).toMatch(/until the provider's window resets/);
+    expect(pauseMessage({ paused: true })).toMatch(
+      /until the provider's window resets/,
+    );
   });
 
   it("rounds a countdown to hours and minutes", () => {

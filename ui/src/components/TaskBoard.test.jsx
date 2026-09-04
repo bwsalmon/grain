@@ -5,10 +5,34 @@ import TaskBoard from "./TaskBoard.jsx";
 import { BOARD_STORAGE_KEY } from "../board.js";
 
 const tasks = [
-  { id: 1, title: "Fix the thing", state: "queued", capabilities: [], blocked: false },
-  { id: 2, title: "Ship the other thing", state: "running", capabilities: [], blocked: false },
-  { id: 3, title: "Answer me", state: "awaiting_reply", capabilities: [], blocked: false },
-  { id: 4, title: "Long done", state: "closed", capabilities: [], blocked: false },
+  {
+    id: 1,
+    title: "Fix the thing",
+    state: "queued",
+    capabilities: [],
+    blocked: false,
+  },
+  {
+    id: 2,
+    title: "Ship the other thing",
+    state: "running",
+    capabilities: [],
+    blocked: false,
+  },
+  {
+    id: 3,
+    title: "Answer me",
+    state: "awaiting_reply",
+    capabilities: [],
+    blocked: false,
+  },
+  {
+    id: 4,
+    title: "Long done",
+    state: "closed",
+    capabilities: [],
+    blocked: false,
+  },
 ];
 
 function renderBoard(overrides = {}) {
@@ -32,7 +56,9 @@ function column(title) {
 }
 
 function cardsIn(title) {
-  return [...column(title).querySelectorAll(".board-card-title")].map((el) => el.textContent);
+  return [...column(title).querySelectorAll(".board-card-title")].map(
+    (el) => el.textContent,
+  );
 }
 
 function cardFor(text) {
@@ -55,12 +81,16 @@ describe("TaskBoard", () => {
     it("leaves closed tasks off the board, and says how many it is not showing", () => {
       renderBoard();
       expect(screen.queryByText("Long done")).not.toBeInTheDocument();
-      expect(screen.getByText(/1 task in no column \(Closed\)/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/1 task in no column \(Closed\)/),
+      ).toBeInTheDocument();
     });
 
     it("counts what is on the board, and what is in each column", () => {
       renderBoard();
-      expect(document.querySelector(".content-header .count")).toHaveTextContent("3");
+      expect(
+        document.querySelector(".content-header .count"),
+      ).toHaveTextContent("3");
       expect(column("Queued").querySelector(".count")).toHaveTextContent("1");
       expect(column("Proposed").querySelector(".count")).toHaveTextContent("0");
     });
@@ -82,10 +112,17 @@ describe("TaskBoard", () => {
   describe("what a card shows", () => {
     it("carries the same chips a row does", () => {
       renderBoard({
-        tasks: [{
-          id: 7, title: "Scheduled work", state: "queued", repo: "acme/widgets",
-          capabilities: ["web-search"], blocked: false, scheduled: true,
-        }],
+        tasks: [
+          {
+            id: 7,
+            title: "Scheduled work",
+            state: "queued",
+            repo: "acme/widgets",
+            capabilities: ["web-search"],
+            blocked: false,
+            scheduled: true,
+          },
+        ],
         config: { capabilities: [{ id: "web-search", name: "Web search" }] },
       });
       expect(screen.getByText("scheduled")).toBeInTheDocument();
@@ -100,27 +137,64 @@ describe("TaskBoard", () => {
     it("tells a review apart from a merge fix on a stacked card", () => {
       renderBoard({
         tasks: [
-          { id: 10, title: "Repair the pull request", state: "queued", capabilities: [], blocked: false, stacked: true, generatedFrom: 1 },
-          { id: 11, title: "Review the change", state: "queued", capabilities: [], blocked: false, stacked: true, review: true, generatedFrom: 2 },
+          {
+            id: 10,
+            title: "Repair the pull request",
+            state: "queued",
+            capabilities: [],
+            blocked: false,
+            stacked: true,
+            generatedFrom: 1,
+          },
+          {
+            id: 11,
+            title: "Review the change",
+            state: "queued",
+            capabilities: [],
+            blocked: false,
+            stacked: true,
+            review: true,
+            generatedFrom: 2,
+          },
         ],
       });
-      expect(screen.getByTitle("the merge queue's own automatic fix for 1")).toHaveTextContent("merge fix");
-      expect(screen.getByTitle("a review of 2's own code, run before it merges")).toHaveTextContent("review");
+      expect(
+        screen.getByTitle("the merge queue's own automatic fix for 1"),
+      ).toHaveTextContent("merge fix");
+      expect(
+        screen.getByTitle("a review of 2's own code, run before it merges"),
+      ).toHaveTextContent("review");
     });
 
     it("says what a running task's own agent is doing", () => {
       renderBoard({
-        tasks: [{
-          id: 8, title: "Busy", state: "running", capabilities: [], blocked: false,
-          activity: "waiting for CI", activityAt: new Date().toISOString(),
-        }],
+        tasks: [
+          {
+            id: 8,
+            title: "Busy",
+            state: "running",
+            capabilities: [],
+            blocked: false,
+            activity: "waiting for CI",
+            activityAt: new Date().toISOString(),
+          },
+        ],
       });
       expect(screen.getByText("waiting for CI")).toBeInTheDocument();
     });
 
     it("says a task is blocked, and on what", () => {
       renderBoard({
-        tasks: [{ id: 9, title: "Waiting on 1", state: "queued", capabilities: [], blocked: true, blockedBy: [1] }],
+        tasks: [
+          {
+            id: 9,
+            title: "Waiting on 1",
+            state: "queued",
+            capabilities: [],
+            blocked: true,
+            blockedBy: [1],
+          },
+        ],
       });
       expect(screen.getByTitle("Waiting on 1")).toBeInTheDocument();
     });
@@ -130,14 +204,30 @@ describe("TaskBoard", () => {
     it("shows a state dot only where a column holds more than one state", () => {
       renderBoard();
       expect(cardFor("Answer me").querySelector(".badge")).toBeInTheDocument();
-      expect(cardFor("Fix the thing").querySelector(".badge")).not.toBeInTheDocument();
+      expect(
+        cardFor("Fix the thing").querySelector(".badge"),
+      ).not.toBeInTheDocument();
     });
   });
 
   describe("narrowing which tasks show up", () => {
     const wider = [
-      { id: 1, title: "Alpha", state: "queued", repo: "acme/widgets", capabilities: [], blocked: false },
-      { id: 2, title: "Beta", state: "running", repo: "acme/gadgets", capabilities: [], blocked: false },
+      {
+        id: 1,
+        title: "Alpha",
+        state: "queued",
+        repo: "acme/widgets",
+        capabilities: [],
+        blocked: false,
+      },
+      {
+        id: 2,
+        title: "Beta",
+        state: "running",
+        repo: "acme/gadgets",
+        capabilities: [],
+        blocked: false,
+      },
     ];
 
     it("searches by title", async () => {
@@ -168,8 +258,13 @@ describe("TaskBoard", () => {
     it("says so when the search and filters leave nothing", async () => {
       const user = userEvent.setup();
       renderBoard({ tasks: wider });
-      await user.type(screen.getByPlaceholderText("Search tasks…"), "nothing matches this");
-      expect(screen.getByText("No tasks match this search and these filters.")).toBeInTheDocument();
+      await user.type(
+        screen.getByPlaceholderText("Search tasks…"),
+        "nothing matches this",
+      );
+      expect(
+        screen.getByText("No tasks match this search and these filters."),
+      ).toBeInTheDocument();
     });
 
     // The filter menus are built from the tasks the columns admit, so a
@@ -178,8 +273,22 @@ describe("TaskBoard", () => {
     it("does not offer a filter value only an off-board task has", () => {
       renderBoard({
         tasks: [
-          { id: 1, title: "Alpha", state: "queued", repo: "acme/widgets", capabilities: [], blocked: false },
-          { id: 2, title: "Old", state: "closed", repo: "acme/archive", capabilities: [], blocked: false },
+          {
+            id: 1,
+            title: "Alpha",
+            state: "queued",
+            repo: "acme/widgets",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 2,
+            title: "Old",
+            state: "closed",
+            repo: "acme/archive",
+            capabilities: [],
+            blocked: false,
+          },
         ],
       });
       expect(screen.queryByLabelText("Repo")).not.toBeInTheDocument();
@@ -189,8 +298,20 @@ describe("TaskBoard", () => {
       const user = userEvent.setup();
       renderBoard({
         tasks: [
-          { id: 1, title: "Zulu", state: "queued", capabilities: [], blocked: false },
-          { id: 2, title: "Alpha", state: "queued", capabilities: [], blocked: false },
+          {
+            id: 1,
+            title: "Zulu",
+            state: "queued",
+            capabilities: [],
+            blocked: false,
+          },
+          {
+            id: 2,
+            title: "Alpha",
+            state: "queued",
+            capabilities: [],
+            blocked: false,
+          },
         ],
       });
       expect(cardsIn("Queued")).toEqual(["Zulu", "Alpha"]);
@@ -202,11 +323,23 @@ describe("TaskBoard", () => {
 
   describe("customizing the columns", () => {
     it("lays the board out the way this browser last saved it", () => {
-      localStorage.setItem(BOARD_STORAGE_KEY, JSON.stringify([
-        { id: "everything", title: "Everything", states: ["queued", "running", "awaiting_reply", "closed"] },
-      ]));
+      localStorage.setItem(
+        BOARD_STORAGE_KEY,
+        JSON.stringify([
+          {
+            id: "everything",
+            title: "Everything",
+            states: ["queued", "running", "awaiting_reply", "closed"],
+          },
+        ]),
+      );
       renderBoard();
-      expect(cardsIn("Everything")).toEqual(["Fix the thing", "Ship the other thing", "Answer me", "Long done"]);
+      expect(cardsIn("Everything")).toEqual([
+        "Fix the thing",
+        "Ship the other thing",
+        "Answer me",
+        "Long done",
+      ]);
       expect(screen.queryByText(/in no column/)).not.toBeInTheDocument();
     });
 
@@ -228,7 +361,9 @@ describe("TaskBoard", () => {
       await user.click(screen.getByRole("button", { name: "Save" }));
 
       expect(cardsIn("Archive")).toEqual(["Long done"]);
-      expect(JSON.parse(localStorage.getItem(BOARD_STORAGE_KEY)).at(-1)).toMatchObject({
+      expect(
+        JSON.parse(localStorage.getItem(BOARD_STORAGE_KEY)).at(-1),
+      ).toMatchObject({
         title: "Archive",
         states: ["closed"],
       });
@@ -265,22 +400,54 @@ describe("TaskBoard", () => {
     it("selects a whole column at once", async () => {
       const user = userEvent.setup();
       const { onSelectAll } = renderBoard();
-      await user.click(screen.getByRole("checkbox", { name: "Select every task in Needs you" }));
+      await user.click(
+        screen.getByRole("checkbox", {
+          name: "Select every task in Needs you",
+        }),
+      );
       expect(onSelectAll).toHaveBeenCalledWith([3], true);
     });
 
     it("offers no column checkbox for a column with nothing in it", () => {
       renderBoard();
-      expect(screen.queryByRole("checkbox", { name: "Select every task in Proposed" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("checkbox", {
+          name: "Select every task in Proposed",
+        }),
+      ).not.toBeInTheDocument();
     });
   });
 
   describe("dragging to reorder", () => {
     const queued = [
-      { id: 1, title: "First", state: "queued", capabilities: [], blocked: false },
-      { id: 2, title: "Second", state: "queued", capabilities: [], blocked: false },
-      { id: 3, title: "Third", state: "queued", capabilities: [], blocked: false },
-      { id: 4, title: "Elsewhere", state: "running", capabilities: [], blocked: false },
+      {
+        id: 1,
+        title: "First",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+      },
+      {
+        id: 2,
+        title: "Second",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+      },
+      {
+        id: 3,
+        title: "Third",
+        state: "queued",
+        capabilities: [],
+        blocked: false,
+      },
+      {
+        id: 4,
+        title: "Elsewhere",
+        state: "running",
+        capabilities: [],
+        blocked: false,
+      },
     ];
 
     it("reorders the backlog between the two cards a drop landed between", () => {
@@ -322,7 +489,9 @@ describe("TaskBoard", () => {
     it("never starts a drag without an onReorder prop", () => {
       renderBoard({ tasks: queued });
       expect(cardFor("First")).toHaveAttribute("draggable", "false");
-      expect(document.querySelector(".task-drag-handle")).not.toBeInTheDocument();
+      expect(
+        document.querySelector(".task-drag-handle"),
+      ).not.toBeInTheDocument();
     });
 
     it("stops offering drags once a display-only sort is chosen", async () => {

@@ -11,7 +11,11 @@ export default function fileToAttachment(file) {
       // reader.result is "data:<mime>;base64,<data>" -- everything after
       // the first comma is the part the API wants.
       const content = reader.result.slice(reader.result.indexOf(",") + 1);
-      resolve({ filename: file.name, contentType: file.type || "application/octet-stream", content });
+      resolve({
+        filename: file.name,
+        contentType: file.type || "application/octet-stream",
+        content,
+      });
     };
     reader.readAsDataURL(file);
   });

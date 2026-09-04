@@ -19,15 +19,25 @@ describe("AgentKeysSection", () => {
   });
 
   it("says so, and offers nothing to type into, when there is no secrets store", () => {
-    render(<AgentKeysSection settings={{ agentKeysEnabled: false }} showError={() => {}} />);
+    render(
+      <AgentKeysSection
+        settings={{ agentKeysEnabled: false }}
+        showError={() => {}}
+      />,
+    );
 
     expect(screen.getByText(/cannot be set from here/i)).toBeInTheDocument();
-    expect(screen.queryByLabelText("Claude Code OAuth token")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Claude Code OAuth token"),
+    ).not.toBeInTheDocument();
   });
 
   it("reports which keys are already set, without showing a value", () => {
     render(
-      <AgentKeysSection settings={{ ...enabled, claudeOAuthTokenSet: true }} showError={() => {}} />,
+      <AgentKeysSection
+        settings={{ ...enabled, claudeOAuthTokenSet: true }}
+        showError={() => {}}
+      />,
     );
 
     expect(screen.getByText("Gemini API key")).toBeInTheDocument();
@@ -44,7 +54,10 @@ describe("AgentKeysSection", () => {
     const user = userEvent.setup();
     render(<AgentKeysSection settings={enabled} showError={() => {}} />);
 
-    await user.type(screen.getByLabelText("Claude Code OAuth token"), "sk-ant-oat01-fake");
+    await user.type(
+      screen.getByLabelText("Claude Code OAuth token"),
+      "sk-ant-oat01-fake",
+    );
     await user.click(screen.getAllByRole("button", { name: "Set" })[1]);
 
     expect(api).toHaveBeenCalledWith("/api/agent-keys/claude", {
@@ -61,11 +74,18 @@ describe("AgentKeysSection", () => {
   it("clears a stored key", async () => {
     api.mockResolvedValueOnce({ ...enabled, geminiApiKeySet: false });
     const user = userEvent.setup();
-    render(<AgentKeysSection settings={{ ...enabled, geminiApiKeySet: true }} showError={() => {}} />);
+    render(
+      <AgentKeysSection
+        settings={{ ...enabled, geminiApiKeySet: true }}
+        showError={() => {}}
+      />,
+    );
 
     await user.click(screen.getAllByRole("button", { name: "Clear" })[0]);
 
-    expect(api).toHaveBeenCalledWith("/api/agent-keys/antigravity", { method: "DELETE" });
+    expect(api).toHaveBeenCalledWith("/api/agent-keys/antigravity", {
+      method: "DELETE",
+    });
     expect(await screen.findAllByText("not set")).toHaveLength(3);
   });
 

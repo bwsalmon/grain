@@ -19,7 +19,14 @@ describe("CapabilitiesPanel", () => {
   it("marks a ready capability Ready with no missing hints", () => {
     render(
       <CapabilitiesPanel
-        capabilities={[{ id: "self-debug", name: "Self debug", description: "Read grain's own source", ready: true }]}
+        capabilities={[
+          {
+            id: "self-debug",
+            name: "Self debug",
+            description: "Read grain's own source",
+            ready: true,
+          },
+        ]}
       />,
     );
     expect(screen.getByText("Self debug")).toBeInTheDocument();
@@ -35,7 +42,8 @@ describe("CapabilitiesPanel", () => {
           {
             id: "gcp-key",
             name: "GCP key",
-            description: "Mint a short-lived GCP service-account key for this task",
+            description:
+              "Mint a short-lived GCP service-account key for this task",
             ready: false,
             missingConfig: ["GCP project", "GCP service account email"],
             missingSecrets: ["gcp-key-minter"],
@@ -44,8 +52,12 @@ describe("CapabilitiesPanel", () => {
       />,
     );
     expect(screen.getByText("Not ready")).toBeInTheDocument();
-    expect(screen.getByText(/Needs: GCP project, GCP service account email/)).toBeInTheDocument();
-    expect(screen.getByText(/Missing secrets: gcp-key-minter/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Needs: GCP project, GCP service account email/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Missing secrets: gcp-key-minter/),
+    ).toBeInTheDocument();
   });
 
   // A capability can be perfectly configured and still be one no task
@@ -55,7 +67,13 @@ describe("CapabilitiesPanel", () => {
     render(
       <CapabilitiesPanel
         capabilities={[
-          { id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, grantable: false },
+          {
+            id: "gcp-key",
+            name: "GCP key",
+            description: "Mint a key",
+            ready: true,
+            grantable: false,
+          },
         ]}
       />,
     );
@@ -68,12 +86,20 @@ describe("CapabilitiesPanel", () => {
     render(
       <CapabilitiesPanel
         capabilities={[
-          { id: "gemini-key", name: "Gemini key", description: "Mint a key", ready: true, grantable: true },
+          {
+            id: "gemini-key",
+            name: "Gemini key",
+            description: "Mint a key",
+            ready: true,
+            grantable: true,
+          },
         ]}
       />,
     );
     expect(screen.queryByText("Not grantable")).not.toBeInTheDocument();
-    expect(screen.queryByText(/No task can be granted this/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/No task can be granted this/),
+    ).not.toBeInTheDocument();
   });
 
   // grain/task-14: a capability every new task is filed holding is
@@ -98,19 +124,29 @@ describe("CapabilitiesPanel", () => {
       />,
     );
     expect(screen.getByText("Default")).toBeInTheDocument();
-    expect(screen.getByText(/Every new task is filed holding this/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Every new task is filed holding this/),
+    ).toBeInTheDocument();
   });
 
   it("says nothing about defaults for a capability that is not one", () => {
     render(
       <CapabilitiesPanel
         capabilities={[
-          { id: "gemini-key", name: "Gemini key", description: "Mint a key", ready: false, grantable: true },
+          {
+            id: "gemini-key",
+            name: "Gemini key",
+            description: "Mint a key",
+            ready: false,
+            grantable: true,
+          },
         ]}
       />,
     );
     expect(screen.queryByText("Default")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Every new task is filed holding this/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Every new task is filed holding this/),
+    ).not.toBeInTheDocument();
   });
 
   // grain/task-24: with a second, per-repo layer, the pane has to say
@@ -134,7 +170,9 @@ describe("CapabilitiesPanel", () => {
     );
     expect(screen.queryByText("Default")).not.toBeInTheDocument();
     expect(screen.getByText("Default in 2 repos")).toBeInTheDocument();
-    expect(screen.getByText(/acme\/widgets, acme\/gadgets/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/acme\/widgets, acme\/gadgets/),
+    ).toBeInTheDocument();
   });
 
   // grain/task-110: a capability's own credentials are set from the row
@@ -154,7 +192,14 @@ describe("CapabilitiesPanel", () => {
             ready: false,
             grantable: true,
             missingSecrets: ["gcp-key-minter"],
-            secrets: [{ name: "gcp-key-minter", secret: "gcp-key-minter", key: "value", set: false }],
+            secrets: [
+              {
+                name: "gcp-key-minter",
+                secret: "gcp-key-minter",
+                key: "value",
+                set: false,
+              },
+            ],
           },
         ]}
         showError={() => {}}
@@ -178,14 +223,25 @@ describe("CapabilitiesPanel", () => {
   it("offers no secret field for a capability that reports none", () => {
     render(
       <CapabilitiesPanel
-        capabilities={[{ id: "github-sandbox", name: "GitHub sandbox", description: "Sandbox repo", ready: true }]}
+        capabilities={[
+          {
+            id: "github-sandbox",
+            name: "GitHub sandbox",
+            description: "Sandbox repo",
+            ready: true,
+          },
+        ]}
         showError={() => {}}
         onSecretsChanged={() => {}}
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "Set" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/Credentials? this needs:/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Set" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Credentials? this needs:/),
+    ).not.toBeInTheDocument();
   });
 
   // grain/task-172: "Ready" here means configured, and only the service
@@ -196,13 +252,22 @@ describe("CapabilitiesPanel", () => {
       id: "gcp-key",
       ok: true,
       credentials: ["gcp-key-minter"],
-      detail: "GCP accepted the key held in `gcp-key-minter` and listed 2 user-managed key(s) on agent@example.",
+      detail:
+        "GCP accepted the key held in `gcp-key-minter` and listed 2 user-managed key(s) on agent@example.",
       checkedAt: "2026-09-03T10:00:00Z",
     });
     const user = userEvent.setup();
     render(
       <CapabilitiesPanel
-        capabilities={[{ id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, checkable: true }]}
+        capabilities={[
+          {
+            id: "gcp-key",
+            name: "GCP key",
+            description: "Mint a key",
+            ready: true,
+            checkable: true,
+          },
+        ]}
         showError={() => {}}
         onSecretsChanged={() => {}}
       />,
@@ -210,9 +275,13 @@ describe("CapabilitiesPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "Test credential" }));
 
-    expect(api).toHaveBeenCalledWith("/api/capabilities/gcp-key/check", { method: "POST" });
+    expect(api).toHaveBeenCalledWith("/api/capabilities/gcp-key/check", {
+      method: "POST",
+    });
     expect(screen.getByText("Credential works")).toBeInTheDocument();
-    expect(screen.getByText(/listed 2 user-managed key\(s\)/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/listed 2 user-managed key\(s\)/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/checked as gcp-key-minter/)).toBeInTheDocument();
   });
 
@@ -224,13 +293,22 @@ describe("CapabilitiesPanel", () => {
       id: "gcp-key",
       ok: false,
       credentials: ["gcp-key-minter"],
-      detail: "GCP will not issue a token for the minter credential held in the `gcp-key-minter` secret.",
+      detail:
+        "GCP will not issue a token for the minter credential held in the `gcp-key-minter` secret.",
       checkedAt: "2026-09-03T10:00:00Z",
     });
     const user = userEvent.setup();
     render(
       <CapabilitiesPanel
-        capabilities={[{ id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, checkable: true }]}
+        capabilities={[
+          {
+            id: "gcp-key",
+            name: "GCP key",
+            description: "Mint a key",
+            ready: true,
+            checkable: true,
+          },
+        ]}
         showError={() => {}}
         onSecretsChanged={() => {}}
       />,
@@ -247,12 +325,22 @@ describe("CapabilitiesPanel", () => {
   // unwired deployment, a capability this build does not know -- and
   // belongs in the error banner, not drawn as a verdict on a credential.
   it("reports a failed request through showError rather than as a refusal", async () => {
-    api.mockRejectedValueOnce(new Error("testing a capability's credential is not available"));
+    api.mockRejectedValueOnce(
+      new Error("testing a capability's credential is not available"),
+    );
     const showError = vi.fn();
     const user = userEvent.setup();
     render(
       <CapabilitiesPanel
-        capabilities={[{ id: "gcp-key", name: "GCP key", description: "Mint a key", ready: true, checkable: true }]}
+        capabilities={[
+          {
+            id: "gcp-key",
+            name: "GCP key",
+            description: "Mint a key",
+            ready: true,
+            checkable: true,
+          },
+        ]}
         showError={showError}
         onSecretsChanged={() => {}}
       />,
@@ -270,16 +358,31 @@ describe("CapabilitiesPanel", () => {
   it("offers no test for a capability that reports none", () => {
     render(
       <CapabilitiesPanel
-        capabilities={[{ id: "self-debug", name: "Self debug", description: "Read grain's source", ready: true }]}
+        capabilities={[
+          {
+            id: "self-debug",
+            name: "Self debug",
+            description: "Read grain's source",
+            ready: true,
+          },
+        ]}
         showError={() => {}}
         onSecretsChanged={() => {}}
       />,
     );
-    expect(screen.queryByRole("button", { name: "Test credential" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Test credential" }),
+    ).not.toBeInTheDocument();
   });
 
   it("falls back to the id when no display name is given", () => {
-    render(<CapabilitiesPanel capabilities={[{ id: "some-new-capability", description: "", ready: true }]} />);
+    render(
+      <CapabilitiesPanel
+        capabilities={[
+          { id: "some-new-capability", description: "", ready: true },
+        ]}
+      />,
+    );
     expect(screen.getByText("some-new-capability")).toBeInTheDocument();
   });
 });

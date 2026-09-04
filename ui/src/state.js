@@ -1,5 +1,14 @@
 // model.State's own vocabulary, in model.StateOf's precedence order.
-export const STATE_ORDER = ["proposed", "queued", "running", "awaiting_reply", "failed", "awaiting_submit", "completed", "closed"];
+export const STATE_ORDER = [
+  "proposed",
+  "queued",
+  "running",
+  "awaiting_reply",
+  "failed",
+  "awaiting_submit",
+  "completed",
+  "closed",
+];
 
 export const STATE_LABELS = {
   proposed: "Proposed",
@@ -86,7 +95,8 @@ export function completionPhase(t) {
     return {
       label: "Merge blocked",
       color: "error",
-      title: "The merge queue gave up on landing this automatically -- its own comment says why. Sort it out by hand, or close it.",
+      title:
+        "The merge queue gave up on landing this automatically -- its own comment says why. Sort it out by hand, or close it.",
     };
   }
   return null;
@@ -129,7 +139,10 @@ export function runActivity(t, now = Date.now()) {
 // renders a future time as a negative, since a clock skewed by a second
 // between the daemon and the browser is not worth showing anybody.
 export function relativeAge(iso, now = Date.now()) {
-  const seconds = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
+  const seconds = Math.max(
+    0,
+    Math.round((now - new Date(iso).getTime()) / 1000),
+  );
   if (!Number.isFinite(seconds)) return null;
   if (seconds < 60) return "now";
   const minutes = Math.floor(seconds / 60);
@@ -182,7 +195,9 @@ export function closablePullRequest(t) {
 // pullRequestFinished is the shared half of the two above: a pull request
 // that merged or closed on GitHub is done with, whichever way it went.
 function pullRequestFinished(t) {
-  return (t.pullRequestEvents || []).some((e) => e.kind === "merged" || e.kind === "closed");
+  return (t.pullRequestEvents || []).some(
+    (e) => e.kind === "merged" || e.kind === "closed",
+  );
 }
 
 export function capabilityName(config, id) {
@@ -193,7 +208,8 @@ export function capabilityName(config, id) {
 // RETIRED_CAPABILITY_HINT labels a capability that is selected somewhere
 // but no longer offered -- worded as an instruction because turning it
 // off is the only thing its row is there for (capabilityRows below).
-export const RETIRED_CAPABILITY_HINT = "No longer offered -- untick to remove it";
+export const RETIRED_CAPABILITY_HINT =
+  "No longer offered -- untick to remove it";
 
 // capabilityRows is the listing any capability picker has to be built
 // from: the rows this build offers, plus a row of its own for each
@@ -224,7 +240,12 @@ export function capabilityRows(offered, selected) {
   return rows.concat(
     (selected || [])
       .filter((id) => !rows.some((c) => c.id === id))
-      .map((id) => ({ id, name: id, description: RETIRED_CAPABILITY_HINT, retired: true })),
+      .map((id) => ({
+        id,
+        name: id,
+        description: RETIRED_CAPABILITY_HINT,
+        retired: true,
+      })),
   );
 }
 
@@ -255,7 +276,8 @@ export function capabilityRows(offered, selected) {
 export function capabilityUnavailableHint(c) {
   if (!c || c.ready !== false) return "";
   const needs = c.needs || [];
-  const gap = needs.length > 0 ? ` -- needs ${needs.join(", ")}` : " on this deployment";
+  const gap =
+    needs.length > 0 ? ` -- needs ${needs.join(", ")}` : " on this deployment";
   return `Not ready${gap}. A task holding this will fail to dispatch until that is set (Settings > Capabilities).`;
 }
 
@@ -355,9 +377,10 @@ export function repoRows(config, tasks) {
         counts: {},
         blocked: 0,
         configured: false,
-        defaults: (config?.repoDefaultCapabilities?.[repo] || []).length > 0
-          || (config?.reposWithPromptExtension || []).includes(repo)
-          || (config?.reposWithSetupCommand || []).includes(repo),
+        defaults:
+          (config?.repoDefaultCapabilities?.[repo] || []).length > 0 ||
+          (config?.reposWithPromptExtension || []).includes(repo) ||
+          (config?.reposWithSetupCommand || []).includes(repo),
       });
     }
     return byRepo.get(repo);
@@ -368,7 +391,9 @@ export function repoRows(config, tasks) {
   // An absent key and an empty list mean the same thing here (nothing
   // added), the way ui.configResponse.RepoDefaultCapabilities says they
   // do, so an empty one is not a repo to put a row up for.
-  for (const [repo, ids] of Object.entries(config?.repoDefaultCapabilities || {})) {
+  for (const [repo, ids] of Object.entries(
+    config?.repoDefaultCapabilities || {},
+  )) {
     if ((ids || []).length > 0) row(repo);
   }
   // The other half of that same third source: a repo whose only
@@ -474,7 +499,8 @@ export function lastBaseForRepo(tasks, repo) {
   for (const t of tasks || []) {
     if (t.repo !== repo) continue;
     if (!suggestsBase(t)) continue;
-    if (!latest || new Date(t.createdAt || 0) > new Date(latest.createdAt || 0)) latest = t;
+    if (!latest || new Date(t.createdAt || 0) > new Date(latest.createdAt || 0))
+      latest = t;
   }
   return latest ? latest.base || "" : "";
 }

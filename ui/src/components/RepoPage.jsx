@@ -1,7 +1,30 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Box, Button, Checkbox, Chip, FormControl, FormHelperText, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Checkbox,
+  Chip,
+  FormControl,
+  FormHelperText,
+  InputLabel,
+  ListItemText,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
-import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, capabilityUnavailableHint, repoRows, unionCapabilities } from "../state.js";
+import {
+  STATE_LABELS,
+  STATE_ORDER,
+  capabilityName,
+  capabilityRows,
+  capabilityUnavailableHint,
+  repoRows,
+  unionCapabilities,
+} from "../state.js";
 
 // RepoPage is one repo's own page (grain/task-111), at /repos/{owner}/
 // {name} -- the repo-side counterpart of a task's own /tasks/{id} page.
@@ -26,7 +49,17 @@ import { STATE_LABELS, STATE_ORDER, capabilityName, capabilityRows, capabilityUn
 // already has instead of a second, poorer list of its own. App keeps the
 // selection and reorder wiring it already owns for that list rather than
 // threading it through here.
-export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpenReleases, onRefreshConfig, showError, children }) {
+export default function RepoPage({
+  repo,
+  tasks,
+  config,
+  onBack,
+  onNewTask,
+  onOpenReleases,
+  onRefreshConfig,
+  showError,
+  children,
+}) {
   const [owner, name] = repo.split("/");
   const [branches, setBranches] = useState([]);
   // caps is what GET /api/repos/{owner}/{name}/capabilities last said --
@@ -62,8 +95,14 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   // open -- has no row, and gets an empty one rather than crashing the
   // page: its forms still work, since none of them needs the repo to be
   // known first.
-  const row = repoRows(config, tasks).find((r) => r.repo === repo)
-    || { repo, total: 0, counts: {}, blocked: 0, configured: false, defaults: false };
+  const row = repoRows(config, tasks).find((r) => r.repo === repo) || {
+    repo,
+    total: 0,
+    counts: {},
+    blocked: 0,
+    configured: false,
+    defaults: false,
+  };
 
   const loadBranches = useCallback(async () => {
     try {
@@ -107,10 +146,18 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   // way the list page's own fold-out forms did: this page is *about*
   // this repo, so there is nothing else the GETs could be competing
   // with.
-  useEffect(() => { loadBranches(); }, [loadBranches]);
-  useEffect(() => { loadCapabilities(); }, [loadCapabilities]);
-  useEffect(() => { loadPromptExtension(); }, [loadPromptExtension]);
-  useEffect(() => { loadSetupCommand(); }, [loadSetupCommand]);
+  useEffect(() => {
+    loadBranches();
+  }, [loadBranches]);
+  useEffect(() => {
+    loadCapabilities();
+  }, [loadCapabilities]);
+  useEffect(() => {
+    loadPromptExtension();
+  }, [loadPromptExtension]);
+  useEffect(() => {
+    loadSetupCommand();
+  }, [loadSetupCommand]);
 
   // capsEffective is what a task filed against this repo would actually
   // start out holding -- the line the capabilities form ends on. The
@@ -127,15 +174,22 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   // chosen before a build retired it stays visible in the picker above
   // to be unticked. But a task filed here does not start out holding
   // one, so this line must not say it does.
-  const capsEffective = unionCapabilities(caps?.deploymentDefaultCapabilities, capsSelection)
-    .filter((id) => (config?.capabilities || []).some((c) => c.id === id));
+  const capsEffective = unionCapabilities(
+    caps?.deploymentDefaultCapabilities,
+    capsSelection,
+  ).filter((id) => (config?.capabilities || []).some((c) => c.id === id));
 
   // Removing the repo from the allowlist leaves this page describing a
   // repo the deployment no longer allows -- and, if nothing else here
   // mentions it, one the list page no longer shows either -- so it goes
   // back to that list rather than staying put.
   const removeRepo = async () => {
-    if (!confirm(`Remove ${repo} from target repos? Tasks that already target it are not affected, but new tasks won't be able to until it's added back.`)) return;
+    if (
+      !confirm(
+        `Remove ${repo} from target repos? Tasks that already target it are not affected, but new tasks won't be able to until it's added back.`,
+      )
+    )
+      return;
     try {
       await api(`/api/repos/${owner}/${name}`, { method: "DELETE" });
       await onRefreshConfig();
@@ -157,7 +211,10 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
     const branchName = form.elements.branchName.value.trim();
     if (branchName === "") return;
     try {
-      await api(`/api/repos/${owner}/${name}/branches`, { method: "POST", body: JSON.stringify({ name: branchName }) });
+      await api(`/api/repos/${owner}/${name}/branches`, {
+        method: "POST",
+        body: JSON.stringify({ name: branchName }),
+      });
       form.reset();
       await loadBranches();
     } catch (err) {
@@ -201,10 +258,13 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   const savePromptExtension = async (evt) => {
     evt.preventDefault();
     try {
-      const updated = await api(`/api/repos/${owner}/${name}/prompt-extension`, {
-        method: "PUT",
-        body: JSON.stringify({ promptExtension: promptText.trim() }),
-      });
+      const updated = await api(
+        `/api/repos/${owner}/${name}/prompt-extension`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ promptExtension: promptText.trim() }),
+        },
+      );
       setPrompt(updated);
       setPromptText(updated.promptExtension || "");
       await onRefreshConfig();
@@ -238,9 +298,23 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
   return (
     <div className="main-column">
       <div className="repo-page-header">
-        <Button onClick={onBack} sx={{ ml: -0.9, alignSelf: "flex-start" }}>&larr; Repos</Button>
-        <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap" useFlexGap>
-          <Typography variant="h6" component="h2" sx={{ m: 0, fontSize: "1.15rem", fontWeight: 600 }}>{repo}</Typography>
+        <Button onClick={onBack} sx={{ ml: -0.9, alignSelf: "flex-start" }}>
+          &larr; Repos
+        </Button>
+        <Stack
+          direction="row"
+          alignItems="center"
+          spacing={1}
+          flexWrap="wrap"
+          useFlexGap
+        >
+          <Typography
+            variant="h6"
+            component="h2"
+            sx={{ m: 0, fontSize: "1.15rem", fontWeight: 600 }}
+          >
+            {repo}
+          </Typography>
           <span className="chips">
             {/* Each chip counts this repo's tasks in one state, not one
                 task's own status, so "running" keeps the plain CSS spin
@@ -248,18 +322,52 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
                 mark (bwsalmon/agents#586) -- there is no single task for
                 the mark to represent. */}
             {STATE_ORDER.filter((s) => row.counts[s]).map((s) => (
-              <Chip key={s} size="small" className={`badge badge-${s}`} label={`${STATE_LABELS[s]} ${row.counts[s]}`} />
+              <Chip
+                key={s}
+                size="small"
+                className={`badge badge-${s}`}
+                label={`${STATE_LABELS[s]} ${row.counts[s]}`}
+              />
             ))}
-            {row.blocked > 0 && <Chip size="small" color="error" label={`Blocked ${row.blocked}`} />}
+            {row.blocked > 0 && (
+              <Chip
+                size="small"
+                color="error"
+                label={`Blocked ${row.blocked}`}
+              />
+            )}
           </span>
-          <Typography variant="caption" color="text.secondary" whiteSpace="nowrap">
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            whiteSpace="nowrap"
+          >
             {row.total} task{row.total === 1 ? "" : "s"}
           </Typography>
           <Box sx={{ flex: 1 }} />
-          <Button size="small" variant="contained" onClick={() => onNewTask(repo)}>New task</Button>
-          <Button size="small" variant="outlined" onClick={() => onOpenReleases(repo)}>Releases</Button>
+          <Button
+            size="small"
+            variant="contained"
+            onClick={() => onNewTask(repo)}
+          >
+            New task
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => onOpenReleases(repo)}
+          >
+            Releases
+          </Button>
           {row.configured && (
-            <Button size="small" variant="outlined" color="error" onClick={removeRepo}>Remove</Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="error"
+              onClick={removeRepo}
+            >
+              Remove
+            </Button>
           )}
         </Stack>
 
@@ -271,28 +379,46 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
             here. */}
         {row.defaults && !row.configured && row.total === 0 && (
           <Alert severity="info">
-            No tasks, and not on this deployment&apos;s target repos -- {repo} is known here only because it
-            carries configuration of its own -- default capabilities, standing instructions, a setup
-            command, or any of them -- below.
+            No tasks, and not on this deployment&apos;s target repos -- {repo}{" "}
+            is known here only because it carries configuration of its own --
+            default capabilities, standing instructions, a setup command, or any
+            of them -- below.
           </Alert>
         )}
 
         <Box>
-          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Branches</Typography>
-          <Stack component="form" direction="row" spacing={1} alignItems="flex-start" onSubmit={addBranch}>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+            Branches
+          </Typography>
+          <Stack
+            component="form"
+            direction="row"
+            spacing={1}
+            alignItems="flex-start"
+            onSubmit={addBranch}
+          >
             <TextField
-              name="branchName" label="Branch name" placeholder="feature/foo"
+              name="branchName"
+              label="Branch name"
+              placeholder="feature/foo"
               helperText="Created from the repo's current default branch, or adopted as it stands if it already exists"
-              autoComplete="off" required InputLabelProps={{ required: false }} size="small"
+              autoComplete="off"
+              required
+              InputLabelProps={{ required: false }}
+              size="small"
             />
-            <Button type="submit" variant="outlined" size="small">Add branch</Button>
+            <Button type="submit" variant="outlined" size="small">
+              Add branch
+            </Button>
           </Stack>
           {branches.length > 0 && (
             <ul className="candidate-history" style={{ marginTop: "0.75rem" }}>
               {branches.map((b) => (
                 <li key={`${b.name}-${b.createdAt}`}>
                   <strong>{b.name}</strong> -- {b.status}
-                  {b.error && <span className="candidate-error"> ({b.error})</span>}
+                  {b.error && (
+                    <span className="candidate-error"> ({b.error})</span>
+                  )}
                 </li>
               ))}
             </ul>
@@ -300,13 +426,19 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
         </Box>
 
         <Box>
-          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Default capabilities</Typography>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+            Default capabilities
+          </Typography>
           {caps === null ? (
-            <Typography variant="body2" color="text.secondary">Loading capabilities…</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Loading capabilities…
+            </Typography>
           ) : (
             <Stack component="form" spacing={1} onSubmit={saveCapabilities}>
               <FormControl fullWidth size="small">
-                <InputLabel id="repo-capabilities-label">Default capabilities</InputLabel>
+                <InputLabel id="repo-capabilities-label">
+                  Default capabilities
+                </InputLabel>
                 <Select
                   labelId="repo-capabilities-label"
                   label="Default capabilities"
@@ -316,7 +448,11 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
                   renderValue={(chosen) => (
                     <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
                       {chosen.map((id) => (
-                        <Chip key={id} size="small" label={capabilityName(config, id)} />
+                        <Chip
+                          key={id}
+                          size="small"
+                          label={capabilityName(config, id)}
+                        />
                       ))}
                     </Box>
                   )}
@@ -338,53 +474,73 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
                       as "not on here". An id this repo stored before the
                       build retired it gets a row too, purely so it can be
                       unticked (capabilityRows, state.js). */}
-                  {capabilityRows(config?.capabilities, capsSelection).map((c) => (
-                    <MenuItem key={c.id} value={c.id} title={c.description}>
-                      <Checkbox checked={capsSelection.includes(c.id)} size="small" />
-                      <ListItemText
-                        primary={c.name}
-                        secondary={c.retired
-                          ? c.description
-                          /* A default this deployment cannot honour is worth
+                  {capabilityRows(config?.capabilities, capsSelection).map(
+                    (c) => (
+                      <MenuItem key={c.id} value={c.id} title={c.description}>
+                        <Checkbox
+                          checked={capsSelection.includes(c.id)}
+                          size="small"
+                        />
+                        <ListItemText
+                          primary={c.name}
+                          secondary={
+                            c.retired
+                              ? c.description
+                              : /* A default this deployment cannot honour is worth
                              more warning here than on one task, not less: it
                              fails every task filed against this repo, and the
                              person who set it is not the one who sees them
                              fail. */
-                          : capabilityUnavailableHint(c)
-                            || ((caps.deploymentDefaultCapabilities || []).includes(c.id)
-                              ? "already a deployment default -- on here either way"
-                              : null)}
-                        secondaryTypographyProps={capabilityUnavailableHint(c)
-                          ? { color: "warning.main" }
-                          : undefined}
-                      />
-                    </MenuItem>
-                  ))}
+                                capabilityUnavailableHint(c) ||
+                                ((
+                                  caps.deploymentDefaultCapabilities || []
+                                ).includes(c.id)
+                                  ? "already a deployment default -- on here either way"
+                                  : null)
+                          }
+                          secondaryTypographyProps={
+                            capabilityUnavailableHint(c)
+                              ? { color: "warning.main" }
+                              : undefined
+                          }
+                        />
+                      </MenuItem>
+                    ),
+                  )}
                 </Select>
                 <FormHelperText>
-                  Added to this deployment&apos;s own defaults, never subtracted from them -- a repo can
-                  only widen what a task filed against it starts with. Whoever files one can still untick
-                  any of these on the new-task form, and tasks already filed keep what they were filed
-                  with.
+                  Added to this deployment&apos;s own defaults, never subtracted
+                  from them -- a repo can only widen what a task filed against
+                  it starts with. Whoever files one can still untick any of
+                  these on the new-task form, and tasks already filed keep what
+                  they were filed with.
                 </FormHelperText>
               </FormControl>
               <Typography variant="body2" color="text.secondary">
                 A task filed against {repo} starts with:{" "}
                 {capsEffective.length === 0
                   ? "nothing -- only what whoever files it ticks"
-                  : capsEffective.map((id) => capabilityName(config, id)).join(", ")}
+                  : capsEffective
+                      .map((id) => capabilityName(config, id))
+                      .join(", ")}
               </Typography>
               <Stack direction="row" justifyContent="flex-end">
-                <Button type="submit" variant="contained" size="small">Save capabilities</Button>
+                <Button type="submit" variant="contained" size="small">
+                  Save capabilities
+                </Button>
               </Stack>
             </Stack>
           )}
         </Box>
 
         <Box>
-          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Prompt extension</Typography>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+            Prompt extension
+          </Typography>
           {prompt === null ? (
-            <Typography variant="body2" color="text.secondary">Loading prompt extension…</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Loading prompt extension…
+            </Typography>
           ) : (
             <Stack component="form" spacing={1} onSubmit={savePromptExtension}>
               <TextField
@@ -407,21 +563,31 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
                   DeploymentPromptExtension). */}
               <Typography variant="body2" color="text.secondary">
                 Deployment-wide, set in Settings &rarr; Agents:{" "}
-                {prompt.deploymentPromptExtension
-                  ? <Box component="span" sx={{ whiteSpace: "pre-wrap" }}>{prompt.deploymentPromptExtension}</Box>
-                  : "nothing"}
+                {prompt.deploymentPromptExtension ? (
+                  <Box component="span" sx={{ whiteSpace: "pre-wrap" }}>
+                    {prompt.deploymentPromptExtension}
+                  </Box>
+                ) : (
+                  "nothing"
+                )}
               </Typography>
               <Stack direction="row" justifyContent="flex-end">
-                <Button type="submit" variant="contained" size="small">Save prompt extension</Button>
+                <Button type="submit" variant="contained" size="small">
+                  Save prompt extension
+                </Button>
               </Stack>
             </Stack>
           )}
         </Box>
 
         <Box>
-          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Setup command</Typography>
+          <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+            Setup command
+          </Typography>
           {setup === null ? (
-            <Typography variant="body2" color="text.secondary">Loading setup command…</Typography>
+            <Typography variant="body2" color="text.secondary">
+              Loading setup command…
+            </Typography>
           ) : (
             <Stack component="form" spacing={1} onSubmit={saveSetupCommand}>
               <TextField
@@ -438,7 +604,9 @@ export default function RepoPage({ repo, tasks, config, onBack, onNewTask, onOpe
                 size="small"
               />
               <Stack direction="row" justifyContent="flex-end">
-                <Button type="submit" variant="contained" size="small">Save setup command</Button>
+                <Button type="submit" variant="contained" size="small">
+                  Save setup command
+                </Button>
               </Stack>
             </Stack>
           )}

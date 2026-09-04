@@ -1,10 +1,26 @@
 import { useState } from "react";
-import { Box, Button, FormControl, IconButton, InputLabel, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
+import {
+  Box,
+  Button,
+  FormControl,
+  IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import { STATE_LABELS, STATE_ORDER } from "../state.js";
-import { defaultColumns, hiddenStates, newColumn, normalizeColumns } from "../board.js";
+import {
+  defaultColumns,
+  hiddenStates,
+  newColumn,
+  normalizeColumns,
+} from "../board.js";
 import Overlay from "./Overlay.jsx";
 
 // BoardColumnsOverlay edits the board's columns: what they are called,
@@ -22,26 +38,35 @@ import Overlay from "./Overlay.jsx";
 // what Save hands it, which keeps "what is on screen" and "what is
 // stored" the same decision in one place.
 export default function BoardColumnsOverlay({ columns, onSave, onClose }) {
-  const [draft, setDraft] = useState(() => columns.map((c) => ({ ...c, states: [...c.states] })));
+  const [draft, setDraft] = useState(() =>
+    columns.map((c) => ({ ...c, states: [...c.states] })),
+  );
 
-  const update = (id, change) => setDraft((prev) => prev.map((c) => (c.id === id ? { ...c, ...change } : c)));
+  const update = (id, change) =>
+    setDraft((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...change } : c)),
+    );
 
   // A state belongs to exactly one column: assigning it here takes it
   // out of whichever column had it. The alternative -- letting two
   // columns claim "Running" and quietly showing the task in the leftmost
   // -- would render a board that disagrees with the editor that made it.
-  const setStates = (id, states) => setDraft((prev) => prev.map((c) => {
-    if (c.id === id) return { ...c, states };
-    return { ...c, states: c.states.filter((s) => !states.includes(s)) };
-  }));
+  const setStates = (id, states) =>
+    setDraft((prev) =>
+      prev.map((c) => {
+        if (c.id === id) return { ...c, states };
+        return { ...c, states: c.states.filter((s) => !states.includes(s)) };
+      }),
+    );
 
-  const move = (index, delta) => setDraft((prev) => {
-    const next = [...prev];
-    const to = index + delta;
-    if (to < 0 || to >= next.length) return prev;
-    [next[index], next[to]] = [next[to], next[index]];
-    return next;
-  });
+  const move = (index, delta) =>
+    setDraft((prev) => {
+      const next = [...prev];
+      const to = index + delta;
+      if (to < 0 || to >= next.length) return prev;
+      [next[index], next[to]] = [next[to], next[index]];
+      return next;
+    });
 
   const remove = (id) => setDraft((prev) => prev.filter((c) => c.id !== id));
 
@@ -65,16 +90,22 @@ export default function BoardColumnsOverlay({ columns, onSave, onClose }) {
 
   return (
     <Overlay onClose={onClose} wide>
-      <Typography variant="h6" component="h2" sx={{ mb: 0.5 }}>Board columns</Typography>
+      <Typography variant="h6" component="h2" sx={{ mb: 0.5 }}>
+        Board columns
+      </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Each column collects the states you give it, left to right. A state can only be in one
-        column, and a state in no column is left off the board altogether — which is how closed
-        tasks stay out of the way by default. Kept in this browser, like the theme.
+        Each column collects the states you give it, left to right. A state can
+        only be in one column, and a state in no column is left off the board
+        altogether — which is how closed tasks stay out of the way by default.
+        Kept in this browser, like the theme.
       </Typography>
 
       <Stack spacing={1.2}>
         {draft.map((c, i) => (
-          <Box key={c.id} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <Box
+            key={c.id}
+            sx={{ display: "flex", alignItems: "center", gap: 1 }}
+          >
             <TextField
               size="small"
               label="Title"
@@ -90,22 +121,55 @@ export default function BoardColumnsOverlay({ columns, onSave, onClose }) {
                 labelId={`board-col-${c.id}-label`}
                 label="States"
                 value={c.states}
-                onChange={(e) => setStates(c.id, typeof e.target.value === "string" ? e.target.value.split(",") : e.target.value)}
-                renderValue={(picked) => (picked.length === 0 ? "No states" : picked.map((s) => STATE_LABELS[s] || s).join(", "))}
+                onChange={(e) =>
+                  setStates(
+                    c.id,
+                    typeof e.target.value === "string"
+                      ? e.target.value.split(",")
+                      : e.target.value,
+                  )
+                }
+                renderValue={(picked) =>
+                  picked.length === 0
+                    ? "No states"
+                    : picked.map((s) => STATE_LABELS[s] || s).join(", ")
+                }
                 displayEmpty
               >
                 {STATE_ORDER.map((s) => (
-                  <MenuItem key={s} value={s}>{STATE_LABELS[s] || s}</MenuItem>
+                  <MenuItem key={s} value={s}>
+                    {STATE_LABELS[s] || s}
+                  </MenuItem>
                 ))}
               </Select>
             </FormControl>
-            <IconButton size="small" aria-label={`Move ${c.title} left`} disabled={i === 0} onClick={() => move(i, -1)}>
-              <ArrowUpwardIcon fontSize="small" sx={{ transform: "rotate(-90deg)" }} />
+            <IconButton
+              size="small"
+              aria-label={`Move ${c.title} left`}
+              disabled={i === 0}
+              onClick={() => move(i, -1)}
+            >
+              <ArrowUpwardIcon
+                fontSize="small"
+                sx={{ transform: "rotate(-90deg)" }}
+              />
             </IconButton>
-            <IconButton size="small" aria-label={`Move ${c.title} right`} disabled={i === draft.length - 1} onClick={() => move(i, 1)}>
-              <ArrowDownwardIcon fontSize="small" sx={{ transform: "rotate(-90deg)" }} />
+            <IconButton
+              size="small"
+              aria-label={`Move ${c.title} right`}
+              disabled={i === draft.length - 1}
+              onClick={() => move(i, 1)}
+            >
+              <ArrowDownwardIcon
+                fontSize="small"
+                sx={{ transform: "rotate(-90deg)" }}
+              />
             </IconButton>
-            <IconButton size="small" aria-label={`Remove ${c.title}`} onClick={() => remove(c.id)}>
+            <IconButton
+              size="small"
+              aria-label={`Remove ${c.title}`}
+              onClick={() => remove(c.id)}
+            >
               <DeleteOutlineIcon fontSize="small" />
             </IconButton>
           </Box>
@@ -119,17 +183,30 @@ export default function BoardColumnsOverlay({ columns, onSave, onClose }) {
       )}
 
       {offBoard.length > 0 && (
-        <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1.5 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          component="p"
+          sx={{ mt: 1.5 }}
+        >
           Off the board: {offBoard.map((s) => STATE_LABELS[s] || s).join(", ")}.
         </Typography>
       )}
 
       <Box sx={{ display: "flex", gap: 1, mt: 2.5 }}>
-        <Button size="small" onClick={add}>+ Add column</Button>
-        <Button size="small" onClick={() => setDraft(defaultColumns())}>Reset to default</Button>
+        <Button size="small" onClick={add}>
+          + Add column
+        </Button>
+        <Button size="small" onClick={() => setDraft(defaultColumns())}>
+          Reset to default
+        </Button>
         <Box sx={{ flex: 1 }} />
-        <Button size="small" onClick={onClose}>Cancel</Button>
-        <Button size="small" variant="contained" onClick={save}>Save</Button>
+        <Button size="small" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button size="small" variant="contained" onClick={save}>
+          Save
+        </Button>
       </Box>
     </Overlay>
   );

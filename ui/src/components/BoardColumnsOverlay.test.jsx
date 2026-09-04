@@ -29,7 +29,10 @@ describe("BoardColumnsOverlay", () => {
     await user.clear(screen.getByLabelText("Column 1 title"));
     await user.type(screen.getByLabelText("Column 1 title"), "Backlog");
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(onSave.mock.calls[0][0][0]).toMatchObject({ title: "Backlog", states: ["proposed", "queued"] });
+    expect(onSave.mock.calls[0][0][0]).toMatchObject({
+      title: "Backlog",
+      states: ["proposed", "queued"],
+    });
   });
 
   it("adds a column, and removes one", async () => {
@@ -38,7 +41,10 @@ describe("BoardColumnsOverlay", () => {
     await user.click(screen.getByRole("button", { name: "Remove Doing" }));
     await user.click(screen.getByRole("button", { name: "+ Add column" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(onSave.mock.calls[0][0].map((c) => c.title)).toEqual(["Waiting", "New column"]);
+    expect(onSave.mock.calls[0][0].map((c) => c.title)).toEqual([
+      "Waiting",
+      "New column",
+    ]);
   });
 
   it("reorders the columns", async () => {
@@ -46,13 +52,20 @@ describe("BoardColumnsOverlay", () => {
     const { onSave } = renderEditor();
     await user.click(screen.getByRole("button", { name: "Move Doing left" }));
     await user.click(screen.getByRole("button", { name: "Save" }));
-    expect(onSave.mock.calls[0][0].map((c) => c.title)).toEqual(["Doing", "Waiting"]);
+    expect(onSave.mock.calls[0][0].map((c) => c.title)).toEqual([
+      "Doing",
+      "Waiting",
+    ]);
   });
 
   it("will not move the first column further left, or the last further right", () => {
     renderEditor();
-    expect(screen.getByRole("button", { name: "Move Waiting left" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Move Doing right" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Move Waiting left" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Move Doing right" }),
+    ).toBeDisabled();
   });
 
   // One state, one column: giving a state to a column takes it away
@@ -72,7 +85,9 @@ describe("BoardColumnsOverlay", () => {
   it("says which states the board will not be showing", async () => {
     const user = userEvent.setup();
     renderEditor();
-    expect(screen.getByText(/Off the board:/)).toHaveTextContent("Awaiting reply");
+    expect(screen.getByText(/Off the board:/)).toHaveTextContent(
+      "Awaiting reply",
+    );
     await user.click(screen.getByRole("button", { name: "Remove Doing" }));
     expect(screen.getByText(/Off the board:/)).toHaveTextContent("Running");
   });

@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Button, FormControl, InputLabel, MenuItem, Select, Typography } from "@mui/material";
+import {
+  Alert,
+  Button,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 
 // REFRESH_MS is how often this panel re-fetches the selected source's log
@@ -39,14 +47,18 @@ export default function LogsPage({ showError }) {
   const refresh = useCallback(async () => {
     if (!source) return;
     try {
-      const res = await api(`/api/logs/${encodeURIComponent(source)}?lines=${LINES_TO_FETCH}`);
+      const res = await api(
+        `/api/logs/${encodeURIComponent(source)}?lines=${LINES_TO_FETCH}`,
+      );
       setLines(res.lines || []);
     } catch (err) {
       showError(err);
     }
   }, [source, showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
     if (!source) return;
@@ -58,10 +70,13 @@ export default function LogsPage({ showError }) {
 
   return (
     <section className="logs-panel">
-      <Typography variant="subtitle2" sx={{ mb: 1 }}>Logs</Typography>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Logs
+      </Typography>
       {!sources.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          Not available: this deployment has no log sources configured (bwsalmon/agents#444).
+          Not available: this deployment has no log sources configured
+          (bwsalmon/agents#444).
         </Alert>
       )}
       {sources.enabled && (
@@ -75,12 +90,20 @@ export default function LogsPage({ showError }) {
                 value={source || ""}
                 onChange={(e) => setSource(e.target.value)}
               >
-                {sources.sources.map((s) => <MenuItem key={s} value={s}>{s}</MenuItem>)}
+                {sources.sources.map((s) => (
+                  <MenuItem key={s} value={s}>
+                    {s}
+                  </MenuItem>
+                ))}
               </Select>
             </FormControl>
-            <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>
+            <Button size="small" variant="outlined" onClick={refresh}>
+              Refresh
+            </Button>
           </div>
-          <pre className="logs-view">{lines.length > 0 ? lines.join("\n") : "(no log lines)"}</pre>
+          <pre className="logs-view">
+            {lines.length > 0 ? lines.join("\n") : "(no log lines)"}
+          </pre>
         </>
       )}
     </section>

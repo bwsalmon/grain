@@ -1,5 +1,13 @@
 import { useState } from "react";
-import { Alert, AlertTitle, Box, Button, Chip, Stack, Typography } from "@mui/material";
+import {
+  Alert,
+  AlertTitle,
+  Box,
+  Button,
+  Chip,
+  Stack,
+  Typography,
+} from "@mui/material";
 import { SecretFields } from "./SecretField.jsx";
 import api from "../api.js";
 
@@ -27,7 +35,12 @@ function CredentialCheck({ capability, showError }) {
   const run = async () => {
     setBusy(true);
     try {
-      setCheck(await api(`/api/capabilities/${encodeURIComponent(capability.id)}/check`, { method: "POST" }));
+      setCheck(
+        await api(
+          `/api/capabilities/${encodeURIComponent(capability.id)}/check`,
+          { method: "POST" },
+        ),
+      );
     } catch (err) {
       // A request that never got an answer is grain's own problem (an
       // unwired deployment, an id this build does not know), so it goes
@@ -41,13 +54,19 @@ function CredentialCheck({ capability, showError }) {
 
   return (
     <Box sx={{ mt: 1 }}>
-      <Button type="button" size="small" variant="outlined" disabled={busy} onClick={run}>
+      <Button
+        type="button"
+        size="small"
+        variant="outlined"
+        disabled={busy}
+        onClick={run}
+      >
         {busy ? "Testing…" : "Test credential"}
       </Button>
       <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
-        Makes one harmless call as this capability&apos;s standing credential -- a listing, never a
-        mint -- and reports what the service said. &quot;Ready&quot; above only means this deployment
-        is configured for it.
+        Makes one harmless call as this capability&apos;s standing credential --
+        a listing, never a mint -- and reports what the service said.
+        &quot;Ready&quot; above only means this deployment is configured for it.
       </Typography>
       {check && (
         <Alert severity={check.ok ? "success" : "warning"} sx={{ mt: 1 }}>
@@ -55,12 +74,18 @@ function CredentialCheck({ capability, showError }) {
               not as grain failing: the remedy is pasting a current
               value into the field below, and the sentence under this
               says which secret and where. */}
-          <AlertTitle>{check.ok ? "Credential works" : "Credential refused"}</AlertTitle>
+          <AlertTitle>
+            {check.ok ? "Credential works" : "Credential refused"}
+          </AlertTitle>
           {check.detail}
           <Typography variant="caption" component="div" sx={{ mt: 0.5 }}>
-            {(check.credentials || []).length > 0 && <>checked as {check.credentials.join(", ")} · </>}
-            {check.checkedAt ? new Date(check.checkedAt).toLocaleString() : "just now"} -- a
-            point-in-time answer, not a badge
+            {(check.credentials || []).length > 0 && (
+              <>checked as {check.credentials.join(", ")} · </>
+            )}
+            {check.checkedAt
+              ? new Date(check.checkedAt).toLocaleString()
+              : "just now"}{" "}
+            -- a point-in-time answer, not a badge
           </Typography>
         </Alert>
       )}
@@ -100,27 +125,44 @@ function CredentialCheck({ capability, showError }) {
 // cap.default rather than folded into it: with two layers, a single
 // "Default" chip would describe a deployment-wide default that only some
 // tasks actually get.
-export default function CapabilitiesPanel({ capabilities, showError, onSecretsChanged }) {
+export default function CapabilitiesPanel({
+  capabilities,
+  showError,
+  onSecretsChanged,
+}) {
   const list = capabilities || [];
   return (
     <>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Every capability grain ships a provider for -- plus one per named GitHub token this
-        deployment has configured beyond its default one, which a task can be given to push and
-        pull through that token instead -- and whether this deployment is currently
-        configured for it to work. Each one&apos;s own credentials are set here too, beneath it;
-        the agent frameworks&apos; keys live on the Agents tab, beside the choice of framework.
-        A capability marked "not grantable" is one no task can ask for at all, however this
-        deployment is configured; one marked "default" is attached to every new task as it is
-        filed, and one marked "default in" only to tasks filed against the repos named (set on
-        the repos page, per repo). Whether a capability is configured is all this page can tell
-        on its own -- for the ones holding a standing credential, "Test credential" asks the
-        service that issued it whether the value stored here still works.
+        Every capability grain ships a provider for -- plus one per named GitHub
+        token this deployment has configured beyond its default one, which a
+        task can be given to push and pull through that token instead -- and
+        whether this deployment is currently configured for it to work. Each
+        one&apos;s own credentials are set here too, beneath it; the agent
+        frameworks&apos; keys live on the Agents tab, beside the choice of
+        framework. A capability marked "not grantable" is one no task can ask
+        for at all, however this deployment is configured; one marked "default"
+        is attached to every new task as it is filed, and one marked "default
+        in" only to tasks filed against the repos named (set on the repos page,
+        per repo). Whether a capability is configured is all this page can tell
+        on its own -- for the ones holding a standing credential, "Test
+        credential" asks the service that issued it whether the value stored
+        here still works.
       </Typography>
-      {list.length === 0 && <Alert severity="info">No capabilities known.</Alert>}
+      {list.length === 0 && (
+        <Alert severity="info">No capabilities known.</Alert>
+      )}
       <Stack spacing={1.5}>
         {list.map((cap) => (
-          <Box key={cap.id} sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1, p: 1.5 }}>
+          <Box
+            key={cap.id}
+            sx={{
+              border: "1px solid",
+              borderColor: "divider",
+              borderRadius: 1,
+              p: 1.5,
+            }}
+          >
             <Stack direction="row" spacing={1} alignItems="center">
               <Typography variant="subtitle2">{cap.name || cap.id}</Typography>
               <Chip
@@ -130,13 +172,25 @@ export default function CapabilitiesPanel({ capabilities, showError, onSecretsCh
                 variant={cap.ready ? "filled" : "outlined"}
               />
               {cap.grantable === false && (
-                <Chip size="small" label="Not grantable" color="warning" variant="filled" />
+                <Chip
+                  size="small"
+                  label="Not grantable"
+                  color="warning"
+                  variant="filled"
+                />
               )}
               {/* Which capabilities are defaulted is chosen in the form
                   above; this only reports it, so the readiness of one
                   every task is filed holding is visible in the same
                   line as the fact that it is. */}
-              {cap.default && <Chip size="small" label="Default" color="info" variant="outlined" />}
+              {cap.default && (
+                <Chip
+                  size="small"
+                  label="Default"
+                  color="info"
+                  variant="outlined"
+                />
+              )}
               {/* Shown alongside "Default", not instead of it: a repo can
                   restate one the deployment already gives, and dropping
                   it deployment-wide leaves the repo's own entry standing. */}
@@ -159,22 +213,28 @@ export default function CapabilitiesPanel({ capabilities, showError, onSecretsCh
                 the one who most needs to see it. */}
             {cap.grantable === false && (
               <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
-                No task can be granted this: grain registers a provider for it, but the task
-                capability picker does not offer it, so attaching it is rejected as an unknown
-                capability. Configuration cannot fix this one.
+                No task can be granted this: grain registers a provider for it,
+                but the task capability picker does not offer it, so attaching
+                it is rejected as an unknown capability. Configuration cannot
+                fix this one.
               </Typography>
             )}
             {cap.default && cap.ready === false && (
               <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
-                Every new task is filed holding this, and it is not ready: each of those tasks will fail to
-                dispatch until the gap below is closed, or this capability is dropped from the defaults above.
+                Every new task is filed holding this, and it is not ready: each
+                of those tasks will fail to dispatch until the gap below is
+                closed, or this capability is dropped from the defaults above.
               </Typography>
             )}
             {(cap.defaultRepos || []).length > 0 && (
               <Typography variant="body2" className="hint" sx={{ mt: 0.5 }}>
-                Defaulted on: {cap.defaultRepos.join(", ")} -- every task filed against one of those repos
-                starts holding this{cap.ready === false ? ", and will fail to dispatch until the gap below is closed" : ""}.
-                Change it on the repos page, under that repo&apos;s Capabilities.
+                Defaulted on: {cap.defaultRepos.join(", ")} -- every task filed
+                against one of those repos starts holding this
+                {cap.ready === false
+                  ? ", and will fail to dispatch until the gap below is closed"
+                  : ""}
+                . Change it on the repos page, under that repo&apos;s
+                Capabilities.
               </Typography>
             )}
             {(cap.missingConfig || []).length > 0 && (
@@ -192,12 +252,18 @@ export default function CapabilitiesPanel({ capabilities, showError, onSecretsCh
                 capability with nothing missing still gets them so a
                 credential can be rotated or cleared from the same
                 place it was set. */}
-            <SecretFields secrets={cap.secrets} showError={showError} onChanged={onSecretsChanged} />
+            <SecretFields
+              secrets={cap.secrets}
+              showError={showError}
+              onChanged={onSecretsChanged}
+            />
             {/* Under the fields, because a refused check is answered by
                 typing into one of them -- and offered only where this
                 deployment can actually make the call (cap.checkable),
                 so no pane ever shows a button that could not work. */}
-            {cap.checkable && <CredentialCheck capability={cap} showError={showError} />}
+            {cap.checkable && (
+              <CredentialCheck capability={cap} showError={showError} />
+            )}
           </Box>
         ))}
       </Stack>

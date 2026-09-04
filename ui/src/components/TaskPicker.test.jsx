@@ -107,7 +107,7 @@ describe("TaskPicker", () => {
       <div>
         <TaskPicker tasks={tasks} onPick={() => {}} />
         <button>outside</button>
-      </div>
+      </div>,
     );
 
     await user.type(screen.getByRole("textbox"), "login");

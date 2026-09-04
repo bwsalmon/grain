@@ -20,7 +20,11 @@ test("lays the seeded tasks out in the board's columns", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
   // The seeded running task, in the column that collects "running".
   const running = page.locator(".board-column", { hasText: "Running" }).first();
-  await expect(running.locator(".board-card", { hasText: "Bump the Go toolchain to 1.24" })).toBeVisible();
+  await expect(
+    running.locator(".board-card", {
+      hasText: "Bump the Go toolchain to 1.24",
+    }),
+  ).toBeVisible();
   // Closed tasks are off the default board, and it says so rather than
   // quietly showing fewer tasks than the deployment has.
   await expect(page.getByText("Spike: websocket transport")).toHaveCount(0);
@@ -48,17 +52,24 @@ test("keeps an edited column layout across a reload", async ({ page }) => {
   await page.getByRole("button", { name: "Save" }).click();
 
   const archive = page.locator(".board-column", { hasText: "Archive" });
-  await expect(archive.locator(".board-card", { hasText: "Spike: websocket transport" })).toBeVisible();
+  await expect(
+    archive.locator(".board-card", { hasText: "Spike: websocket transport" }),
+  ).toBeVisible();
 
   await page.reload();
 
-  await expect(page.locator(".board-column", { hasText: "Archive" })
-    .locator(".board-card", { hasText: "Spike: websocket transport" })).toBeVisible();
+  await expect(
+    page
+      .locator(".board-column", { hasText: "Archive" })
+      .locator(".board-card", { hasText: "Spike: websocket transport" }),
+  ).toBeVisible();
 
   // Put the default board back, so a rerun of this suite starts from the
   // same place a first run did.
   await page.getByRole("button", { name: "Columns" }).click();
   await page.getByRole("button", { name: "Reset to default" }).click();
   await page.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator(".board-column", { hasText: "Archive" })).toHaveCount(0);
+  await expect(
+    page.locator(".board-column", { hasText: "Archive" }),
+  ).toHaveCount(0);
 });

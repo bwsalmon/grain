@@ -11,14 +11,16 @@ describe("AttemptTranscriptOverlay", () => {
   });
 
   it("fetches and shows the attempt's transcript", async () => {
-    api.mockResolvedValueOnce({ transcript: "> read_file(out.txt)\nPONG\n\nfound it" });
+    api.mockResolvedValueOnce({
+      transcript: "> read_file(out.txt)\nPONG\n\nfound it",
+    });
     render(
       <AttemptTranscriptOverlay
         taskId="12"
         attempt={{ number: 1, finishedAt: "2026-08-28T12:10:00Z" }}
         onClose={() => {}}
         showError={() => {}}
-      />
+      />,
     );
 
     expect(await screen.findByText(/found it/)).toBeInTheDocument();
@@ -34,10 +36,12 @@ describe("AttemptTranscriptOverlay", () => {
         attempt={{ number: 1, finishedAt: "2026-08-28T12:10:00Z" }}
         onClose={() => {}}
         showError={() => {}}
-      />
+      />,
     );
 
-    expect(await screen.findByText("(no transcript recorded)")).toBeInTheDocument();
+    expect(
+      await screen.findByText("(no transcript recorded)"),
+    ).toBeInTheDocument();
   });
 
   it("tells a still-running attempt apart from a finished one with nothing recorded", async () => {
@@ -48,7 +52,7 @@ describe("AttemptTranscriptOverlay", () => {
         attempt={{ number: 2 }}
         onClose={() => {}}
         showError={() => {}}
-      />
+      />,
     );
 
     expect(await screen.findByText(/Still running/)).toBeInTheDocument();
@@ -63,9 +67,11 @@ describe("AttemptTranscriptOverlay", () => {
         attempt={{ number: 1, finishedAt: "2026-08-28T12:10:00Z" }}
         onClose={() => {}}
         showError={showError}
-      />
+      />,
     );
 
-    await waitFor(() => expect(showError).toHaveBeenCalledWith(new Error("boom")));
+    await waitFor(() =>
+      expect(showError).toHaveBeenCalledWith(new Error("boom")),
+    );
   });
 });

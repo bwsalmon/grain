@@ -15,7 +15,8 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
 
   if (count === 0) return null;
 
-  const run = (mutate) => onRun((id) => api(`/api/tasks/${id}${mutate}`, { method: "POST" }));
+  const run = (mutate) =>
+    onRun((id) => api(`/api/tasks/${id}${mutate}`, { method: "POST" }));
 
   return (
     <Paper
@@ -23,10 +24,20 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
       square
       sx={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 4 }}
     >
-      <Stack direction="row" alignItems="center" spacing={1.2} flexWrap="wrap" sx={{ px: 3, py: 1.3 }}>
+      <Stack
+        direction="row"
+        alignItems="center"
+        spacing={1.2}
+        flexWrap="wrap"
+        sx={{ px: 3, py: 1.3 }}
+      >
         <Typography fontWeight={500}>{count} selected</Typography>
-        <Button variant="outlined" size="small" onClick={() => run("/approve")}>Approve</Button>
-        <Button variant="outlined" size="small" onClick={() => run("/submit")}>Submit</Button>
+        <Button variant="outlined" size="small" onClick={() => run("/approve")}>
+          Approve
+        </Button>
+        <Button variant="outlined" size="small" onClick={() => run("/submit")}>
+          Submit
+        </Button>
         <Button
           variant="outlined"
           size="small"
@@ -38,7 +49,9 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
         >
           Close
         </Button>
-        <Button variant="outlined" size="small" onClick={() => run("/reopen")}>Reopen</Button>
+        <Button variant="outlined" size="small" onClick={() => run("/reopen")}>
+          Reopen
+        </Button>
 
         <Select
           native
@@ -49,17 +62,23 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
         >
           <option value="">Capability…</option>
           {(config?.capabilities || []).map((c) => (
-            <option key={c.id} value={c.id}>{c.name}</option>
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
           ))}
         </Select>
         <Button
           variant="outlined"
           size="small"
           disabled={!capabilityId}
-          onClick={() => onRun((id) => api(`/api/tasks/${id}/capabilities`, {
-            method: "POST",
-            body: JSON.stringify({ id: capabilityId, attach: true }),
-          }))}
+          onClick={() =>
+            onRun((id) =>
+              api(`/api/tasks/${id}/capabilities`, {
+                method: "POST",
+                body: JSON.stringify({ id: capabilityId, attach: true }),
+              }),
+            )
+          }
         >
           Attach
         </Button>
@@ -67,16 +86,22 @@ export default function BatchActionsBar({ count, config, onRun, onClear }) {
           variant="outlined"
           size="small"
           disabled={!capabilityId}
-          onClick={() => onRun((id) => api(`/api/tasks/${id}/capabilities`, {
-            method: "POST",
-            body: JSON.stringify({ id: capabilityId, attach: false }),
-          }))}
+          onClick={() =>
+            onRun((id) =>
+              api(`/api/tasks/${id}/capabilities`, {
+                method: "POST",
+                body: JSON.stringify({ id: capabilityId, attach: false }),
+              }),
+            )
+          }
         >
           Detach
         </Button>
 
         <Box sx={{ flex: 1 }} />
-        <Button variant="outlined" size="small" onClick={onClear}>Clear selection</Button>
+        <Button variant="outlined" size="small" onClick={onClear}>
+          Clear selection
+        </Button>
       </Stack>
     </Paper>
   );

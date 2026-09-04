@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Box, Button, Checkbox, FormControlLabel, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Checkbox,
+  FormControlLabel,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 
 // REFRESH_MS is LogsPage's own cadence, for the same reason: every panel
@@ -46,7 +53,9 @@ export default function TopPage({ showError }) {
     }
   }, [showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   // The poll stops while auto-refresh is off, and never starts at all on
   // a deployment with no reader configured -- there is nothing behind the
@@ -62,7 +71,9 @@ export default function TopPage({ showError }) {
 
   return (
     <section className="top-panel">
-      <Typography variant="subtitle2" sx={{ mb: 1 }}>Top</Typography>
+      <Typography variant="subtitle2" sx={{ mb: 1 }}>
+        Top
+      </Typography>
       {!data.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
           Not available: this deployment has no process snapshot configured.
@@ -71,17 +82,31 @@ export default function TopPage({ showError }) {
       {data.enabled && (
         <>
           <Box className="logs-toolbar">
-            <Typography variant="body2" color="text.secondary" sx={{ flexGrow: 1 }}>
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{ flexGrow: 1 }}
+            >
               Processes on the machine the daemon runs on, busiest first.
             </Typography>
             <FormControlLabel
-              control={<Checkbox size="small" checked={auto} onChange={(e) => setAuto(e.target.checked)} />}
+              control={
+                <Checkbox
+                  size="small"
+                  checked={auto}
+                  onChange={(e) => setAuto(e.target.checked)}
+                />
+              }
               label="Auto-refresh"
             />
-            <Button size="small" variant="outlined" onClick={refresh}>Refresh</Button>
+            <Button size="small" variant="outlined" onClick={refresh}>
+              Refresh
+            </Button>
           </Box>
           <pre className="logs-view top-view">
-            {data.lines && data.lines.length > 0 ? data.lines.join("\n") : "(no output)"}
+            {data.lines && data.lines.length > 0
+              ? data.lines.join("\n")
+              : "(no output)"}
           </pre>
         </>
       )}

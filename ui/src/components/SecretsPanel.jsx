@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Box, Button, Chip, Stack, TextField, Typography } from "@mui/material";
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Stack,
+  TextField,
+  Typography,
+} from "@mui/material";
 import api from "../api.js";
 
 // bwsalmon/agents#357: this pane can set and delete secrets on a server
@@ -35,11 +43,16 @@ export default function SecretsPanel({ showError, claimed }) {
     }
   }, [showError]);
 
-  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const deleteKey = async (secret, key) => {
     try {
-      await api(`/api/secrets/${encodeURIComponent(secret)}/${encodeURIComponent(key)}`, { method: "DELETE" });
+      await api(
+        `/api/secrets/${encodeURIComponent(secret)}/${encodeURIComponent(key)}`,
+        { method: "DELETE" },
+      );
       await refresh();
     } catch (err) {
       showError(err);
@@ -48,7 +61,9 @@ export default function SecretsPanel({ showError, claimed }) {
 
   const deleteSecret = async (secret) => {
     try {
-      await api(`/api/secrets/${encodeURIComponent(secret)}`, { method: "DELETE" });
+      await api(`/api/secrets/${encodeURIComponent(secret)}`, {
+        method: "DELETE",
+      });
       await refresh();
     } catch (err) {
       showError(err);
@@ -62,10 +77,13 @@ export default function SecretsPanel({ showError, claimed }) {
     const key = form.elements.key.value.trim();
     const value = form.elements.value.value;
     try {
-      await api(`/api/secrets/${encodeURIComponent(secret)}/${encodeURIComponent(key)}`, {
-        method: "PUT",
-        body: JSON.stringify({ value }),
-      });
+      await api(
+        `/api/secrets/${encodeURIComponent(secret)}/${encodeURIComponent(key)}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ value }),
+        },
+      );
       form.reset();
       await refresh();
     } catch (err) {
@@ -85,17 +103,18 @@ export default function SecretsPanel({ showError, claimed }) {
     <Box sx={{ mt: 3 }}>
       <Typography variant="subtitle2">Other secrets</Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-        Everything in this deployment&apos;s secrets store that nothing above claims -- the agent
-        credentials are set on the Agents tab, and each capability&apos;s own beside it here. Names
-        and keys only, never values: a secret can be set, replaced and deleted from here, and never
-        read back.
+        Everything in this deployment&apos;s secrets store that nothing above
+        claims -- the agent credentials are set on the Agents tab, and each
+        capability&apos;s own beside it here. Names and keys only, never values:
+        a secret can be set, replaced and deleted from here, and never read
+        back.
       </Typography>
       {!resp.enabled && (
         <Alert severity="info" sx={{ mb: 2 }}>
-          Not available: this UI was not started with a local secrets directory to write to
-          (see -server-data-dir), which only works when the UI runs on the same host as the
-          server (bwsalmon/agents#357). You can only set and delete secrets here, never read
-          one back.
+          Not available: this UI was not started with a local secrets directory
+          to write to (see -server-data-dir), which only works when the UI runs
+          on the same host as the server (bwsalmon/agents#357). You can only set
+          and delete secrets here, never read one back.
         </Alert>
       )}
       {resp.enabled && (
@@ -104,30 +123,70 @@ export default function SecretsPanel({ showError, claimed }) {
             {others.map((s) => (
               <li className="secret-row" key={s.name}>
                 <span className="secret-name">{s.name}</span>
-                <Box sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", flex: 1 }}>
+                <Box
+                  sx={{ display: "flex", gap: 0.6, flexWrap: "wrap", flex: 1 }}
+                >
                   {s.keys.map((key) => (
                     <Chip
                       key={key}
                       size="small"
                       label={key}
                       onDelete={() => deleteKey(s.name, key)}
-                      deleteIcon={<span title={`delete ${s.name}/${key}`}>×</span>}
+                      deleteIcon={
+                        <span title={`delete ${s.name}/${key}`}>×</span>
+                      }
                     />
                   ))}
                 </Box>
-                <Button size="small" variant="outlined" onClick={() => deleteSecret(s.name)}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => deleteSecret(s.name)}
+                >
                   Delete secret
                 </Button>
               </li>
             ))}
           </ul>
-          {others.length === 0 && <p className="empty">No other secrets set.</p>}
+          {others.length === 0 && (
+            <p className="empty">No other secrets set.</p>
+          )}
           <form onSubmit={submit}>
-            <TextField name="secret" label="Secret" placeholder="github" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
-            <TextField name="key" label="Key" placeholder="token" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
-            <TextField name="value" label="Value" helperText="write-only -- never shown or read back" type="password" autoComplete="off" required InputLabelProps={{ required: false }} fullWidth margin="normal" />
+            <TextField
+              name="secret"
+              label="Secret"
+              placeholder="github"
+              autoComplete="off"
+              required
+              InputLabelProps={{ required: false }}
+              fullWidth
+              margin="normal"
+            />
+            <TextField
+              name="key"
+              label="Key"
+              placeholder="token"
+              autoComplete="off"
+              required
+              InputLabelProps={{ required: false }}
+              fullWidth
+              margin="normal"
+            />
+            <TextField
+              name="value"
+              label="Value"
+              helperText="write-only -- never shown or read back"
+              type="password"
+              autoComplete="off"
+              required
+              InputLabelProps={{ required: false }}
+              fullWidth
+              margin="normal"
+            />
             <Stack direction="row" justifyContent="flex-end" sx={{ mt: 2 }}>
-              <Button type="submit" variant="contained">Set secret</Button>
+              <Button type="submit" variant="contained">
+                Set secret
+              </Button>
             </Stack>
           </form>
         </>
