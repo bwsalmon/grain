@@ -133,10 +133,47 @@ Somebody who wants an agent to be able to do something new writes **a plain
 MCP server** — the spec, any official SDK — and the controller serves or
 aggregates it. That server is unaware of the container and the VM.
 
-Two things to check per framework: that the CLI takes URL-type MCP servers
-(`claude` does; agy and codex want verifying), and that it handles a server
-reconnecting. A CLI that speaks only stdio would need the shim to bridge
-for that framework alone.
+### What the three CLIs actually support
+
+Checked, not assumed:
+
+| CLI | remote MCP | transport | bearer token |
+| --- | --- | --- | --- |
+| `claude` | yes | `--transport http` **or** `sse` | `--header "Authorization: Bearer …"` |
+| `codex` | yes | **Streamable HTTP** only (`McpServerTransportConfig::StreamableHttp { url }`) | `bearer_token_env_var`, `http_headers`, `env_http_headers` |
+| `agy` | yes | **SSE only** (`serverUrl`) | `--header`, per `agy mcp add` |
+
+Sources: `claude mcp add --help` on the installed binary ("Transport type
+(stdio, sse, http)"); `codex-rs/config/src/mcp_types.rs`, whose transport
+enum has exactly `Stdio` and `StreamableHttp` and cites the spec's
+streamable-http section; and `docs/agy-surface.md`, which records
+Antigravity's schema as "two transport mechanisms for MCP: **Stdio** …
+and **SSE** (for remote services)" with `serverUrl`.
+
+**So the controller must serve both transports**, because no single one
+covers all three:
+
+| endpoint serves | claude | codex | agy |
+| --- | :---: | :---: | :---: |
+| Streamable HTTP only | ✓ | ✓ | ✗ |
+| HTTP+SSE only | ✓ | ✗ | ✓ |
+| both | ✓ | ✓ | ✓ |
+
+That is not onerous — HTTP+SSE is the older, well-specified transport and
+server SDKs generally still carry it for compatibility — but it is a real
+requirement rather than a detail, and the alternative is that one
+framework needs the shim to bridge stdio for it alone.
+
+`codex` has the best of the three auth shapes: `bearer_token_env_var`
+names an environment variable rather than embedding the secret in the
+config file, so the shim reads `/grain/token` and exports it. The other
+two take a header, which means the token is written into their config
+file — same trust zone, but worth knowing.
+
+One caution specific to agy, already measured in `docs/agy-surface.md`: a
+*known* key of the wrong JSON type does not warn or partially load, it
+drops the whole server entry, and `agy mcp list` then shows nothing. So
+its config wants writing exactly.
 
 ## What a grain does not know
 

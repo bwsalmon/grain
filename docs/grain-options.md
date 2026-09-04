@@ -574,9 +574,14 @@ have. Under NAT the container has a stack anyway (that is why NAT was
 chosen), and under flat the model-API tunnel carries TCP, so the same
 local listener serves both — it does not force the network decision.
 
-**Per-framework HTTP MCP support.** `claude` takes URL-type servers; agy
-and codex want verifying. A CLI that speaks only stdio would need the shim
-to bridge for that framework alone, which is design 2 for one case.
+**Two transports, not one.** All three CLIs do remote MCP, but not the
+same remote MCP: `claude` takes `--transport http` or `sse`, `codex` has
+only `Stdio` and `StreamableHttp` (`codex-rs/config/src/mcp_types.rs`),
+and `agy` has only SSE with `serverUrl` (`docs/agy-surface.md`). No single
+transport covers all three, so the controller serves both — HTTP+SSE being
+the older, well-specified one that SDKs generally still carry. The
+alternative is bridging stdio in the shim for whichever framework is left
+out, which is the exec-attached design for one case.
 
 ### And the message-tool design, considered
 
