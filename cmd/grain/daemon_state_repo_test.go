@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/model"
 	"github.com/bwsalmon/grain/pkg/staterepo"
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -504,19 +505,36 @@ func TestADivergedStateRepositoryDoesNotStopTheDaemonFromStarting(t *testing.T) 
 	cancel()
 	<-runErr
 
+	// A row written after that last push, so it lives in the database and
+	// in the export commit below and nowhere else. That is the whole of
+	// what a recovery has to not throw away: the reset is safe precisely
+	// because the database still holds what the discarded commits held,
+	// and a start that imported the remote's older dump over it would
+	// make that argument false.
+	store, db, err := openStore(dataDir)
+	if err != nil {
+		t.Fatalf("opening the store: %v", err)
+	}
+	stranded := model.Task{
+		ID: "stranded", Intent: model.IntentImplement, Title: "Filed while the push was failing",
+		Origin: model.Origin{
+			Attribution: model.Attribution{Actor: model.Principal{Kind: model.PrincipalHuman, ID: "tester"}},
+			Reason:      model.ReasonDirect,
+		},
+		Target:  &model.RepoRef{Owner: "owner", Name: "payments-api"},
+		Binding: model.BindingDirective,
+	}
+	if err := store.PutTask(context.Background(), stranded); err != nil {
+		t.Fatalf("filing the stranded task: %v", err)
+	}
 	// An export committed on this host and never pushed -- grain's own
 	// author, and nothing but the dump in it -- with a merge landing on
 	// the remote on the other side of the same parent.
 	stateDir := filepath.Join(dataDir, "state-repo")
-	dump := filepath.Join(stateDir, staterepo.TablesDir, "task.json")
-	data, err := os.ReadFile(dump)
-	if err != nil {
-		t.Fatalf("reading the dump: %v", err)
+	if err := staterepo.Export(context.Background(), db, stateDir); err != nil {
+		t.Fatalf("exporting: %v", err)
 	}
-	if err := os.WriteFile(dump, []byte(strings.Replace(string(data),
-		"Filed before the divergence", "Retitled by an export that never got out", 1)), 0o644); err != nil {
-		t.Fatalf("writing the dump: %v", err)
-	}
+	db.Close()
 	gitIn(t, stateDir, "-c", "user.email=grain@a-container-that-has-gone", "-c", "user.name=grain",
 		"commit", "-am", "Update grain state")
 
@@ -551,8 +569,24 @@ func TestADivergedStateRepositoryDoesNotStopTheDaemonFromStarting(t *testing.T) 
 	if _, err := second.Task(ctx2, created.ID); err != nil {
 		t.Fatalf("the task did not survive the recovery: %v", err)
 	}
+	if _, err := second.Task(ctx2, "stranded"); err != nil {
+		t.Fatalf("the task that existed only in the commits the recovery reset away "+
+			"did not survive it: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(stateDir, "NOTES.md")); err != nil {
 		t.Fatalf("the merged change never arrived: %v", err)
+	}
+	// And what the recovery kept goes back out to the remote, rather than
+	// living only on this host until the next thing goes wrong.
+	if code, body := post(t, "http://"+secondAddr+"/api/state-repo/sync"); code != http.StatusOK {
+		t.Fatalf("sync returned %d: %s", code, body)
+	}
+	out, err := exec.Command("git", "-C", remote, "show", "main:"+staterepo.TablesDir+"/task.json").CombinedOutput()
+	if err != nil {
+		t.Fatalf("reading the remote's dump: %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "stranded") {
+		t.Fatalf("the recovered task never reached the remote:\n%s", out)
 	}
 }
 
