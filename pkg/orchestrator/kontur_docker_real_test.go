@@ -147,12 +147,14 @@ func buildKonturctl(t *testing.T) string {
 // bwsalmon/kontur#36, so there is nothing to unpack and nothing for the
 // caller to mount.
 //
-// No SSH key goes into it. This helper used to generate a throwaway
-// keypair and hand the build the public half, because that was the only
-// entry in the guest's authorized_keys. kontur generates a keypair inside
-// each VM's own container at boot and hands the guest the public half on
-// the kernel command line (bwsalmon/kontur#35), so the image carries no
-// key and the callers below configure no ExecKeyPath.
+// No SSH key goes into it, and no sshd either. This helper used to
+// generate a throwaway keypair and hand the build the public half,
+// because that was the only entry in the guest's authorized_keys; then
+// kontur generated one per boot in the VM's own container
+// (bwsalmon/kontur#35). Since bwsalmon/kontur#46 `kontur exec` reaches
+// the guest over virtio-vsock and there is no key, no authorized_keys and
+// no sshd anywhere in the picture, so the callers below configure no
+// ExecKeyPath.
 //
 // Cached by tag: the build boots a VM and installs several hundred MB of
 // packages inside it, which is the most expensive single step in this
@@ -237,19 +239,18 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 			// what that image carries.
 			"-kontur-image", image,
 			"-guest-port", "22",
-			// kontur authorizes this boot's generated key for root; the
-			// account SSHUser names has to be named too, or `kontur exec`
-			// logs in as someone the guest never authorized. Same flag
+			// The guest agent runs as root and drops to the account it
+			// is asked for, so this is the account grain's commands run
+			// as rather than an authorization decision. Same flag
 			// scripts/setup.sh passes in a real deployment.
 			"-guest-user", "debian",
 			// Each VM gets a writable root: a thin qcow2 created inside
 			// its own container, backed by the image's disk, which is
 			// only ever read (bwsalmon/kontur#37). konturctl's default is
-			// read-only, and without a writable root the guest fails
-			// kontur-ssh-host-keys.service's first-boot `ssh-keygen -A`
-			// -- so sshd never has a host key, and the guest never
-			// becomes reachable within ReadyTimeout at all (confirmed by
-			// hand: such a VM reports "/dev/vda / ext4 ro,relatime" in
+			// read-only, and a read-only root is not something a guest
+			// grain dispatches work into can be: every checkout, build
+			// and package install writes to it (confirmed by hand: such
+			// a VM reports "/dev/vda / ext4 ro,relatime" in
 			// /proc/mounts). The same flag scripts/setup.sh's own
 			// GRAIN_KONTUR_ENABLE=1 branch passes in a real deployment.
 			"-disk-mode=overlay",
@@ -331,37 +332,24 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 			len(failures), len(slots), strings.Join(failures, "\n  "))
 	}
 
-	// Both VMs are reached at the *same* guest address, and that is the
-	// point rather than a defect: under flat mode (the default) netshim
-	// gives each VM its own network namespace, so each guest takes the
-	// same control-link address inside its own, and `kontur exec` reaches
-	// it by exec'ing into that VM's own container (KONTUR_EXEC_ADDR).
+	// Each VM has its own guest transport, and it is a socket in its own
+	// container rather than an address anywhere: `kontur exec` reaches
+	// the guest over virtio-vsock now, so there is no per-VM address to
+	// collide or to derive.
 	//
-	// This assertion used to be the opposite -- that the two addresses
-	// differed, "want BaseIP-derived distinct ones" -- which was true
-	// while KonturConfig derived an -ip per slot. It would now fail on a
-	// perfectly healthy pair of VMs, and it is worth more inverted than
-	// deleted: two guests answering independently on one address is the
-	// evidence for the claim that removing that derivation is safe.
-	addrs := map[string]string{}
+	// This assertion has been inverted twice, and both inversions are the
+	// record of what the transport stopped depending on. It first said
+	// the two guest addresses *differed*, which was true while
+	// KonturConfig derived an -ip per slot; then that they were the
+	// *same*, which was true while flat mode gave each VM its own
+	// namespace and `kontur exec` dialed a fixed control-link address in
+	// it (KONTUR_EXEC_ADDR). Since bwsalmon/kontur#46 there is no address
+	// in the picture at all, and the thing worth asserting is that each
+	// VM really has its own socket -- two guests answering independently
+	// with nothing per-VM configured anywhere is the evidence that
+	// removing the derivation was safe.
 	for _, name := range names {
-		out, err := exec.Command("docker", "inspect", "-f",
-			`{{range .Config.Env}}{{println .}}{{end}}`, "kontur-vm-"+name).CombinedOutput()
-		if err != nil {
-			t.Fatalf("docker inspect on %s: %v\n%s", name, err, out)
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(line, "KONTUR_EXEC_ADDR=") {
-				addrs[name] = strings.TrimPrefix(line, "KONTUR_EXEC_ADDR=")
-			}
-		}
-		if addrs[name] == "" {
-			t.Fatalf("%s: no KONTUR_EXEC_ADDR in the VM container's env:\n%s", name, out)
-		}
-	}
-	if addrs[names[0]] != addrs[names[1]] {
-		t.Errorf("VMs got different guest addresses %q and %q, want the same one: under flat mode each VM has its own network namespace, so nothing derives a per-VM address",
-			addrs[names[0]], addrs[names[1]])
+		assertGuestVsockSocket(t, name)
 	}
 
 	// Each guest actually runs and answers a distinct command, for two
@@ -408,22 +396,21 @@ func TestKonturSandboxesAcquireCreatesTwoRealVMsConcurrently(t *testing.T) {
 // this test exists for, all of which depends on code neither this repo
 // nor its fakes own:
 //
-//   - That `kontur exec` authenticates against *this* guest image at all,
-//     with no key configured anywhere. Since bwsalmon/kontur#35 that
-//     rests on a chain nothing here owns and no fake can stand in for:
-//     `kontur run` generates a keypair in the VM's container, appends the
-//     public half to the guest's kernel command line, and the guest's own
-//     kontur-authorized-key service decodes it and installs it -- for
-//     root, and for the account "-guest-user debian" names, before sshd
-//     starts. Every link has to hold, and a break in any of them looks
-//     identical from here: a guest that never becomes reachable. This is
-//     the only test that can tell them apart from each other, or from a
-//     guest that simply booted slowly.
-//   - That KONTUR_EXEC_ADDR is really set, by the real internal/dockervm,
-//     to somewhere the guest really answers on. Everything else here
-//     rests on it, and nothing in this repo sets it.
+//   - That `kontur exec` reaches *this* guest image at all, with nothing
+//     configured anywhere. Since bwsalmon/kontur#46 that rests on a chain
+//     nothing here owns and no fake can stand in for: `kontur run`
+//     attaches a virtio-vsock device and holds the host end as a unix
+//     socket in the VM's container, the guest's own kontur-agent listens
+//     on the matching port, and the two agree on a wire format neither
+//     side negotiates. Every link has to hold, and a break in any of them
+//     looks identical from here: a guest that never becomes reachable.
+//     This is the only test that can tell them apart from each other, or
+//     from a guest that simply booted slowly.
+//   - That the socket is really there, put on the real VM container by
+//     the real internal/dockervm. Everything else here rests on it, and
+//     nothing in this repo creates it.
 //   - That a guest command's exit status survives both hops (the guest's
-//     sshd to `kontur exec`, then `kontur exec`'s own os.Exit to
+//     agent to `kontur exec`, then `kontur exec`'s own os.Exit to
 //     `docker exec`), including the exit 1 that DockerExecRunner has to
 //     tell apart from its own failure to reach the guest at all.
 //   - That stdin survives both hops, which write_file depends on (it
@@ -454,9 +441,9 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 			// installs the rule either way, so leaving it wrong would
 			// only mean building a VM whose forwarded port goes nowhere.
 			"-guest-port", "22",
-			// kontur authorizes this boot's generated key for root; the
-			// account SSHUser names has to be named too, or `kontur exec`
-			// logs in as someone the guest never authorized. Same flag
+			// The guest agent runs as root and drops to the account it
+			// is asked for, so this is the account grain's commands run
+			// as rather than an authorization decision. Same flag
 			// scripts/setup.sh passes in a real deployment.
 			"-guest-user", "debian",
 			// No -ip/-port: this VM is built in flat mode (KonturConfig's
@@ -516,29 +503,16 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 		}
 	}
 
-	// Confirm the variable this whole transport rests on is really set on
-	// the real VM container, by the real internal/dockervm -- and points
-	// at the guest's flat-mode control-link address. Nothing in this repo
-	// sets it, so nothing in this repo would notice it changing.
-	//
-	// 169.254.100.2 rather than a -ip this test chose: under flat mode
-	// (the default since 7a58bec) there is no per-VM address to assign --
-	// konturctl rejects -ip outright -- so this is netshim's own fixed
-	// control-link guest address (ControlGuestIP, one past its default
-	// 169.254.100.1 bridge address), confirmed by hand against a real VM.
-	envOut, err := exec.Command("docker", "inspect", "-f",
-		`{{range .Config.Env}}{{println .}}{{end}}`, "kontur-vm-"+name).CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, envOut)
-	}
-	if want := "KONTUR_EXEC_ADDR=169.254.100.2:22"; !strings.Contains(string(envOut), want) {
-		t.Errorf("VM container env = %q, want it to carry %q -- `kontur exec` has no other way to know where the guest is", envOut, want)
-	}
+	// Confirm the thing this whole transport rests on really exists on
+	// the real VM container, put there by the real internal/dockervm.
+	// Nothing in this repo creates it, so nothing in this repo would
+	// notice it changing.
+	assertGuestVsockSocket(t, name)
 
 	// This needs no retry loop around the first tool call. A readiness
 	// wait that only watched a TCP port start answering -- what reaching
 	// the guest over a forwarded port used to do -- would clear before
-	// the guest had finished booting to a usable sshd; waitForGuestExec's
+	// the guest had finished booting to a usable agent; waitForGuestExec's
 	// probe is a whole command *running in the guest*, so Acquire
 	// returning here already means the guest ran one. Asserting that directly, rather
 	// than retrying and hiding it, is what would catch that guarantee
@@ -559,7 +533,7 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	assertGuestResolvesNames(t, byName["run_command"])
 	assertSandboxDiskSizeApplies(t, k, stateDir, byName["run_command"])
 
-	// A guest command's own exit status has to survive the guest's sshd
+	// A guest command's own exit status has to survive the guest's agent
 	// -> `kontur exec` -> `docker exec` chain intact. 42 proves the
 	// status is carried rather than collapsed to a success/failure bit;
 	// 1 is the one that matters most, since it is exactly what
@@ -633,9 +607,9 @@ func TestKonturSandboxesAgainstARealDockerBackedVM(t *testing.T) {
 	assertRebuildKeepsTheRunReachable(t, sb, byName["run_command"], name, remotePath)
 
 	// The VM container should still be running: the guest booted all the
-	// way to sshd and cloud-hypervisor supervises it rather than exiting
-	// once it has -- the same end state the SSH test asserts, reached
-	// without anything outside this container ever connecting to it.
+	// way to a listening agent and cloud-hypervisor supervises it rather
+	// than exiting once it has -- reached without anything outside this
+	// container ever connecting to it.
 	statusOut, err := exec.Command("docker", "inspect", "-f", "{{.State.Status}}", "kontur-vm-"+name).CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker inspect on the real VM container: %v\n%s", err, statusOut)
@@ -741,14 +715,18 @@ func dockerInspect(t *testing.T, container, format string) string {
 // assigned the namespace, and the last piece of that identity is the
 // namespace's default route -- which the guest can only learn from the
 // "ip=" parameter netshim derives for it (its own DiscoverIdentity and
-// FlatGuestConfig, in third_party/kontur). Every other part of the
-// takeover fails loudly: a guest with the wrong address or MAC is a
-// guest `kontur exec` cannot reach, so it never becomes ready and this
-// suite fails on that. A missing gateway fails silently instead. The VM
-// boots, sshd answers over the control link, every tool call in this
-// test passes -- and the run inside it cannot reach the git proxy, a
-// package registry, or GitHub, because the guest's routing table stops
-// at its own subnet.
+// GuestConfig, in third_party/kontur). A missing gateway fails silently:
+// the VM boots, every tool call in this test passes -- and the run inside
+// it cannot reach the git proxy, a package registry, or GitHub, because
+// the guest's routing table stops at its own subnet.
+//
+// That silence got deeper, not shallower, when `kontur exec` moved to
+// vsock. A guest with the wrong address or MAC used to be a guest
+// `kontur exec` could not reach, so the whole identity takeover was
+// covered by readiness alone. Now nothing about the guest's networking
+// is on the path to running a command in it, and these two assertions
+// are the only thing standing between a guest with no network at all and
+// a green run.
 //
 // That is exactly what happened: netshim looked for the default route by
 // testing "Dst == nil", which a route read back off the kernel never has
@@ -934,6 +912,56 @@ func assertGuestResolvesNames(t *testing.T, runCommand *mcp.Tool) {
 	})
 	if lookup.IsError || !strings.Contains(lookup.Text, "github.com") {
 		t.Errorf("resolving github.com inside the guest failed: %s\nthe guest has a resolver on paper (above) but cannot use it", lookup.Text)
+		dumpGuestNetwork(t, runCommand)
+	}
+}
+
+// assertGuestVsockSocket checks that the VM's own container holds the
+// host end of the guest's virtio-vsock device, which is what `kontur
+// exec` connects to and the only thing the guest transport depends on
+// since bwsalmon/kontur#46 replaced ssh with it.
+//
+// Under cloud-hypervisor's hybrid vsock the host end is an ordinary unix
+// socket, at internal/config's defaultVsockSocket. It is asserted here
+// rather than taken on trust because nothing in this repo creates it: a
+// kontur that stopped attaching a vsock device, or moved the socket,
+// would show up in grain only as a guest that never becomes reachable.
+func assertGuestVsockSocket(t *testing.T, vmName string) {
+	t.Helper()
+
+	const socket = "/run/kontur/vsock.sock"
+	out, err := exec.Command("docker", "exec", "kontur-vm-"+vmName,
+		"test", "-S", socket).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s: no %s in the VM container: %v\n%s -- `kontur exec` has no other way to reach the guest",
+			vmName, socket, err, out)
+	}
+}
+
+// dumpGuestNetwork prints what the guest's own stack looks like, for a
+// failure that says the guest cannot reach or resolve anything.
+//
+// Worth the lines because the symptom is now several removes from the
+// cause: `kontur exec` runs over vsock, so a guest whose NIC was never
+// configured at all answers commands perfectly well and fails only on
+// what needs the network -- the loud "unreachable guest" that used to
+// stand for a broken ip= parameter is gone. The address, the table and
+// the command line the two are derived from tell those cases apart:
+// no address at all (kontur-net-cmdline, klibc ipconfig), an address but
+// no default route (the gateway field of ip=, or kontur-configure-routes
+// pruning it), or neither derived because the parameter never arrived.
+func dumpGuestNetwork(t *testing.T, runCommand *mcp.Tool) {
+	t.Helper()
+
+	for _, cmd := range []string{
+		"ip -4 addr show",
+		"ip -4 route show",
+		"cat /proc/cmdline",
+		"cat /etc/resolv.conf",
+		"systemctl --no-pager --full status kontur-net-cmdline kontur-net-routes kontur-configure-dns 2>&1 | tail -40",
+	} {
+		result := runCommand.Handler(context.Background(), map[string]any{"command": cmd})
+		t.Logf("guest %q:\n%s", cmd, result.Text)
 	}
 }
 
@@ -972,5 +1000,6 @@ func assertGuestHasEgress(t *testing.T, runCommand *mcp.Tool, vmName string) {
 	if !strings.Contains(result.Text, "default via "+gateway) {
 		t.Errorf("guest default route = %q, want it to carry %q -- without it the guest has no route off its own segment, and so no egress at all",
 			strings.TrimSpace(result.Text), "default via "+gateway)
+		dumpGuestNetwork(t, runCommand)
 	}
 }
