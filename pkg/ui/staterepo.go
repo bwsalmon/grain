@@ -84,6 +84,15 @@ type StateRepoStatus struct {
 	// far -- grain has stopped exporting rather than committing over the
 	// merge, and what loads what is waiting is the next start.
 	RemoteAhead bool `json:"remoteAhead,omitempty"`
+	// Diverged reports that this deployment's working tree and its remote
+	// have both moved past their common parent, and that grain could not
+	// resolve it: nothing is being pulled in and nothing is being pushed
+	// out until somebody does. Its own field, again, because it is the
+	// one condition here that needs a human at a terminal -- grain clears
+	// a divergence made only of its own exports by itself, without ever
+	// reaching this pane, so a deployment that reports one is reporting a
+	// commit that is somebody's to resolve. Error, alongside, says which.
+	Diverged bool `json:"diverged,omitempty"`
 	// Error is a last-sync failure worth showing (an expired credential,
 	// an unreachable remote), rather than one this pane's own request
 	// caused. Empty when the last sync was fine.

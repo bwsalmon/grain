@@ -613,7 +613,19 @@ func run(ctx context.Context, cfg config) error {
 		return fmt.Errorf("opening the state repository: %w", err)
 	}
 	if err := staterepo.Load(ctx, stateRepo, db, model.SchemaVersion); err != nil {
-		return fmt.Errorf("loading the state repository: %w", err)
+		// A repository that diverged from its remote is the one failure
+		// here worth a second attempt: a push that failed before somebody
+		// merged a change leaves a local commit that is nothing but this
+		// database's own dump, and refusing to start over it strands the
+		// deployment on a commit it could have thrown away. Anything else
+		// -- and any divergence that is not grain's own -- is still a
+		// start that stops and says so.
+		if !recoverDivergedStateRepo(ctx, stateRepo, err) {
+			return fmt.Errorf("loading the state repository: %w", err)
+		}
+		if err := staterepo.Load(ctx, stateRepo, db, model.SchemaVersion); err != nil {
+			return fmt.Errorf("loading the state repository: %w", err)
+		}
 	}
 	// One manager over that repository, shared by the timer below and the
 	// UI's bootstrap pane: adopting a different repository swaps the

@@ -388,6 +388,12 @@ func (r *Repo) Push(ctx context.Context) error {
 // something happened that this package's model does not describe, and
 // failing loudly with the two commits named beats resolving a conflict
 // in a database dump by guesswork.
+//
+// That refusal is marked with ErrDiverged rather than left as whatever
+// git said, because it is the one failure here a caller can do something
+// about: RecoverDiverged (diverge.go) clears the case where the only
+// commits in the way are grain's own exports, which is what a push that
+// failed before a merge landed leaves behind.
 func (r *Repo) Pull(ctx context.Context) (bool, error) {
 	if r.cfg.Remote == "" {
 		return false, nil
@@ -408,8 +414,16 @@ func (r *Repo) Pull(ctx context.Context) (bool, error) {
 		return true, nil
 	}
 	if _, err := r.git(ctx, "merge", "--ff-only", "--quiet", "FETCH_HEAD"); err != nil {
-		return false, fmt.Errorf("staterepo: %s and origin/%s have diverged; "+
-			"grain will not merge a database dump by guesswork: %w", r.branch, r.branch, err)
+		// A merge that will not fast-forward is usually divergence and is
+		// not always: a working tree with local modifications refuses the
+		// same way. Asked rather than assumed, so that the sentinel a
+		// caller keys recovery off means what it says.
+		if ahead, aerr := r.commitsIn(ctx, "FETCH_HEAD..HEAD"); aerr == nil && len(ahead) > 0 {
+			return false, fmt.Errorf("%w: %s and origin/%s have both moved past their common "+
+				"parent; grain will not merge a database dump by guesswork: %w",
+				ErrDiverged, r.branch, r.branch, err)
+		}
+		return false, fmt.Errorf("staterepo: fast-forwarding %s to origin/%s: %w", r.branch, r.branch, err)
 	}
 	after, _ := r.git(ctx, "rev-parse", "HEAD")
 	return strings.TrimSpace(before) != strings.TrimSpace(after), nil

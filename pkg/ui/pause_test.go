@@ -5,9 +5,13 @@ package ui_test
 // GET /api/config carries for the banner.
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/bwsalmon/grain/pkg/ui"
 )
 
 // fakePause stands in for *orchestrator.Pause, which pkg/ui cannot
@@ -192,5 +196,102 @@ func TestConfigCarriesThePauseForTheBanner(t *testing.T) {
 	}](t, do(t, srv, http.MethodGet, "/api/config", ""))
 	if got.AgentPause != nil {
 		t.Fatalf("agentPause = %+v on an unpaused deployment, want it omitted", *got.AgentPause)
+	}
+}
+
+// HTTPClient's own half of the same two routes (grain/task-182): what
+// `grain pause` and `grain pause -lift` call, over a real round trip.
+// The distinction worth proving here is the one an operator acts on --
+// "not paused" and "this daemon has no gate to ask" are different
+// answers, and only the first one means dispatch is running.
+func pauseHTTPClient(t *testing.T, pause ui.AgentPause) (*ui.HTTPClient, context.Context) {
+	t.Helper()
+	client, _, ctx := testClient(t)
+	client.Config.AgentPause = pause
+	srv := httptest.NewServer(ui.NewServerWithClient(client))
+	t.Cleanup(srv.Close)
+	return ui.NewHTTPClient(srv.URL), ctx
+}
+
+func TestHTTPClientAgentPauseReadsTheWindowWithoutClearingIt(t *testing.T) {
+	until := baseTime.Add(2 * time.Hour)
+	pause := &fakePause{until: until, reason: "claude: usage limit reached; resets at " + until.Format(time.RFC3339)}
+	c, ctx := pauseHTTPClient(t, pause)
+
+	status, enabled, err := c.AgentPause(ctx)
+	if err != nil {
+		t.Fatalf("AgentPause: %v", err)
+	}
+	if !enabled || !status.Paused {
+		t.Fatalf("AgentPause = %+v, enabled %t; want an enabled, paused reading", status, enabled)
+	}
+	if !status.Until.Equal(until) || status.SecondsRemaining != (2*time.Hour).Seconds() {
+		t.Fatalf("AgentPause = %+v, want until %s and two hours remaining", status, until)
+	}
+	if status.Reason == "" {
+		t.Error("reason is empty, want the provider's own sentence")
+	}
+	if pause.lifts != 0 || pause.until.IsZero() {
+		t.Errorf("reading through the CLI cleared the gate (lifts = %d): only the reconcile loop may do that", pause.lifts)
+	}
+}
+
+func TestHTTPClientAgentPauseSeparatesUnpausedFromUnwired(t *testing.T) {
+	c, ctx := pauseHTTPClient(t, &fakePause{})
+	status, enabled, err := c.AgentPause(ctx)
+	if err != nil {
+		t.Fatalf("AgentPause: %v", err)
+	}
+	if !enabled || status.Paused {
+		t.Fatalf("AgentPause = %+v, enabled %t; want an enabled reading that says nothing is paused", status, enabled)
+	}
+
+	// No gate wired at all: not an error -- the route answers 200 -- but
+	// enabled false, so a CLI can say it has been told nothing rather
+	// than report a deployment it cannot see into as running.
+	unwired, _, ctx := testClient(t)
+	srv := httptest.NewServer(ui.NewServerWithClient(unwired))
+	t.Cleanup(srv.Close)
+	_, enabled, err = ui.NewHTTPClient(srv.URL).AgentPause(ctx)
+	if err != nil {
+		t.Fatalf("AgentPause with no gate wired: %v", err)
+	}
+	if enabled {
+		t.Error("enabled = true with no Config.AgentPause")
+	}
+}
+
+func TestHTTPClientLiftAgentPause(t *testing.T) {
+	pause := &fakePause{until: baseTime.Add(time.Hour), reason: "gemini: usage limit reached"}
+	c, ctx := pauseHTTPClient(t, pause)
+
+	status, lifted, err := c.LiftAgentPause(ctx)
+	if err != nil {
+		t.Fatalf("LiftAgentPause: %v", err)
+	}
+	if !lifted || status.Paused {
+		t.Fatalf("LiftAgentPause = %+v, lifted %t; want it lifted and the state left behind unpaused", status, lifted)
+	}
+
+	// Lifting again is not an error: an operator's own command and an
+	// expiring window are racing to do the same thing.
+	if _, lifted, err = c.LiftAgentPause(ctx); err != nil {
+		t.Fatalf("second LiftAgentPause: %v", err)
+	}
+	if lifted {
+		t.Error("lifted = true on the second call, want false: there was nothing left to lift")
+	}
+}
+
+// A lift against a deployment with no gate is an error rather than a
+// quiet success, so `grain pause -lift` cannot report having resumed a
+// deployment it never touched.
+func TestHTTPClientLiftAgentPauseErrsWithNoGateWired(t *testing.T) {
+	client, _, ctx := testClient(t)
+	srv := httptest.NewServer(ui.NewServerWithClient(client))
+	t.Cleanup(srv.Close)
+
+	if _, _, err := ui.NewHTTPClient(srv.URL).LiftAgentPause(ctx); err == nil {
+		t.Fatal("LiftAgentPause with no gate wired returned no error")
 	}
 }
