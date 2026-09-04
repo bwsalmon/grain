@@ -1,0 +1,158 @@
+# The one check in this repository that runs a real model: tests/e2e's
+# TestLiveIssueCompletesEndToEnd, driving the real `agy` binary against a
+# real Gemini API key and asserting that the run comes up holding grain's
+# MCP tools and reaches its sandbox through one.
+#
+# It exists because nothing else can see what it sees. Every other test
+# of that wiring drives a scripted runner or a stub CLI, which reads
+# whichever file the test told it to read -- which is how
+# agent/antigravity wrote its MCP config to ~/.gemini/settings.json for
+# weeks, loaded no servers into any live run, and kept a green suite the
+# whole time. See README's "Proving a live run actually gets the tools".
+#
+# # Why a schedule, and not a push
+#
+# Because of what drifts. The thing this test catches is agy's own
+# on-disk layout, its flags and its event shape moving under us -- and
+# the Dockerfile installs agy from its vendor's installer with no version
+# pinned, so the agent a deployment runs can change on a day nobody
+# touched this repository. Sampling that per commit answers a question
+# nobody asked; sampling it daily bounds the time a broken agy path can
+# ship at about a day, for one model run.
+#
+# Per-push was the alternative considered (task 180) and the cadence
+# settles it: main took 787 merges in the two weeks to 2026-09-04, ~56 a
+# day and 170 on its busiest. That is 56 live model
+# runs a day to re-answer a question whose answer only changes when agy
+# ships, and -- since the model is free to decline, or to be rate-limited
+# -- roughly one red main per day per point of flake, on the same
+# workflow whose green tick otherwise means "this commit's image is
+# good".
+#
+# # Why an environment, and not just a secret
+#
+# `push`-triggered-therefore-trusted does not hold here.
+# build-artifacts.yml makes that argument for its GITHUB_TOKEN on the
+# grounds that a push event only fires for a branch someone with write
+# access created -- but in this repository most branches are pushed by
+# grain's own agents, from unreviewed
+# runs, and a workflow file on such a branch is code no human
+# has read. A *repository* secret is readable by any workflow on any
+# branch push, whichever file declares it, so an `if github.ref ==
+# 'refs/heads/main'` written here would be a convention on a file the
+# branch gets to rewrite, not a boundary.
+#
+# The boundary GitHub actually enforces is the environment below.
+# GEMINI_API_KEY must be an environment secret on `live-agent`, with a
+# deployment branch policy naming the default branch alone: a job on any
+# other ref is then refused the secret by GitHub before it starts,
+# whatever its copy of this file says. Required reviewers are
+# deliberately *not* asked for -- gating a nightly on someone clicking
+# approve is the same "runs when a human remembers" gap this job exists
+# to close. The blast radius is bounded the other way instead: give this
+# a key of its own, restricted to generativelanguage.googleapis.com (the
+# restriction pkg/capability/geminikey applies to every key it mints),
+# and rotate it independently of the daemon's operating key.
+name: live-agent
+
+on:
+  # Nightly, well away from the hour, so a failure is at most a day old.
+  schedule:
+    - cron: "37 7 * * *"
+  # And on demand: a change to pkg/agent/antigravity, or an agy release
+  # worth checking, should not have to wait for the clock.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-agy:
+    name: live agy run
+    runs-on: ubuntu-latest
+    # The test's own run is capped at 120s by its context and 15 turns by
+    # MaxTurns; the rest is checkout, a Go build and the agy install, and
+    # this job runs the test twice when the first attempt fails.
+    timeout-minutes: 25
+    # Where GEMINI_API_KEY lives -- see this file's header. Not a
+    # repository secret: the deployment branch policy on this environment
+    # is the only thing that keeps a branch's own workflow from reading
+    # the key.
+    environment: live-agent
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The same installer the Dockerfile runs, deliberately unpinned in
+      # both places: what this job should be checking is the agy a freshly
+      # built image would carry, not one this file froze months ago. The
+      # binary is found rather than assumed for the reason the Dockerfile
+      # gives (its path is documented only by Google), and `agy --version`
+      # is what makes "found something named agy" mean "installed
+      # something that runs".
+      - name: Install the agy CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 120 https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh
+          test -s /tmp/agy-install.sh
+          bash /tmp/agy-install.sh
+          rm -f /tmp/agy-install.sh
+          agy="$(find "$HOME" -type f -name agy -perm -u+x 2>/dev/null | head -n1 || true)"
+          test -n "$agy"
+          sudo ln -sf "$agy" /usr/local/bin/agy
+          agy --version
+
+      # A missing key must fail here rather than at `go test`, where the
+      # message would be the test's own and would not say what to create.
+      # (The test would fail too -- GRAIN_LIVE_AGENT_TEST below turns its
+      # skips into failures for exactly this reason -- so this step is
+      # about the diagnosis, not about catching it.)
+      #
+      # Until a maintainer creates the environment and the secret, this
+      # job is red every night, on purpose: it blocks no merge, and a
+      # silent skip here would put us back where this workflow started,
+      # with an assertion nothing ever runs.
+      - name: Require a credential
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "${GEMINI_API_KEY:-}" ]; then
+            echo "::error::No GEMINI_API_KEY reached this job. It must be a secret on the 'live-agent' environment (Settings -> Environments), with a deployment branch policy naming the default branch alone -- see this workflow's header for why it must not be a repository secret." >&2
+            exit 1
+          fi
+          echo "a credential is present (${#GEMINI_API_KEY} characters)"
+
+      # -count=1 so a cached "ok" can never stand in for a live run, -v
+      # because the advertised tool roster it logs is the line to read
+      # when this fails, and GRAIN_LIVE_AGENT_TEST=1 so an unset key or a
+      # missing agy fails rather than skipping -- a skip and a pass are
+      # the same `ok` in go test's summary.
+      #
+      # Twice, on failure. The failure this job exists for -- a live agy
+      # that loads none of grain's tools -- is deterministic and fails
+      # both attempts; a model that declined to do as it was asked, or an
+      # API that answered 429, usually does not do it twice. One retry
+      # keeps most of that noise out of a maintainer's inbox without
+      # hiding a real regression, and both attempts stay in the log.
+      - name: Live agy run
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GRAIN_LIVE_AGENT_TEST: "1"
+        run: |
+          set -uo pipefail
+          for attempt in 1 2; do
+            echo "::group::live agy run, attempt $attempt of 2"
+            if go test ./tests/e2e/ -run TestLiveIssueCompletesEndToEnd \
+                 -count=1 -v -timeout 10m; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::attempt $attempt failed"
+          done
+          echo "::error::the live agy test failed twice; read the advertised tool roster in attempt 1's log -- a roster with neither call_mcp_tool nor an mcp_grain-sandbox_* name is grain's wiring, and anything after it is the model or the API." >&2
+          exit 1

@@ -259,9 +259,17 @@ export default function RepoReleases({ repo, templates = [], onBack, showError }
 
             <Typography variant="subtitle1" sx={{ mt: 2 }}>Merge back to default</Typography>
             {current.status === "merged" ? (
-              <p className="hint">
-                Merge requested{current.pullRequestUrl ? <> -- <a href={current.pullRequestUrl} target="_blank" rel="noreferrer">pull request</a></> : "."}
-              </p>
+              current.mergeNote ? (
+                // A release whose prod branch carried nothing the default
+                // branch did not already have: merged, with no pull
+                // request, and the note is what says so rather than
+                // leaving "Merge requested." next to a missing link.
+                <p className="hint">Nothing to merge back -- {current.mergeNote}</p>
+              ) : (
+                <p className="hint">
+                  Merge requested{current.pullRequestUrl ? <> -- <a href={current.pullRequestUrl} target="_blank" rel="noreferrer">pull request</a></> : "."}
+                </p>
+              )
             ) : (
               <Stack direction="row" spacing={1} sx={{ mb: 2 }}>
                 <Button variant="outlined" disabled={!canRequestMerge} onClick={requestMerge}>

@@ -637,6 +637,10 @@ var Tables = []string{
 	// lives in release.go, not the schema. last_error is the reconciler's
 	// own report of why provisioning or a requested merge has not landed
 	// yet -- cleared the moment the attempt that follows succeeds.
+	// merge_note is the opposite of an error and is why it is not kept in
+	// last_error: a release that reached `merged` with no pull request of
+	// its own, because its prod branch carried nothing the default branch
+	// did not already have, says so here (Release.MergeNote).
 	`CREATE TABLE IF NOT EXISTS ` + "`release`" + ` (
   ` + "`id`" + `                INTEGER PRIMARY KEY AUTOINCREMENT,
   ` + "`owner`" + `             TEXT     NOT NULL,
@@ -646,7 +650,8 @@ var Tables = []string{
   ` + "`created_at`" + `        DATETIME NOT NULL,
   ` + "`merged_at`" + `         DATETIME NULL,
   ` + "`pull_request_url`" + `  TEXT     NULL,
-  ` + "`last_error`" + `        TEXT     NULL
+  ` + "`last_error`" + `        TEXT     NULL,
+  ` + "`merge_note`" + `        TEXT     NULL
 )`,
 
 	// What GetRelease and ListReleases both need: every release for one

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/github"
@@ -121,6 +122,17 @@ func provisionOnGitHub(ctx context.Context, store *model.Store, client github.Cl
 // Nothing here waits for that pull request to actually be merged on
 // GitHub -- Release's own doc comment on why ReleaseMerged is terminal --
 // so this reconciler's job ends the moment the pull request exists.
+//
+// Unless there is no pull request to open. A prod branch that carries no
+// commits the default branch does not already have is refused by GitHub
+// with a 422, forever (github.IsNoCommitsBetween), and every other
+// failure here is recorded onto LastError for the next cycle to retry --
+// which for this one means retrying a call that can never succeed, on
+// every cycle, with nothing to cap it the way a task's own failure streak
+// caps a task. So it is recognised instead, and settled:
+// nothingToMergeBack. Two ways, the same two EnsurePullRequest reads it:
+// the compare below, before asking, and the refusal itself, for the cycle
+// where the compare could not be read or the branches moved in between.
 func requestMergeOnGitHub(ctx context.Context, store *model.Store, client github.Client, r model.Release, now time.Time) error {
 	owner, repo := r.Repo.Owner, r.Repo.Name
 
@@ -134,9 +146,20 @@ func requestMergeOnGitHub(ctx context.Context, store *model.Store, client github
 		return recordReleaseError(ctx, store, r.ID, fmt.Errorf("checking for an existing merge pull request: %w", err))
 	}
 	if pr == nil {
+		// known false -- no compare to be had, or a read that failed --
+		// is not an empty branch: the pull request is attempted anyway,
+		// and the 422 below is the second line of defence. See
+		// branchCommits' own doc comment on why the two are kept apart.
+		commits, known := branchCommits(client, r.Repo, def, r.ProdBranch())
+		if known && len(commits) == 0 {
+			return nothingToMergeBack(ctx, store, r, def, now)
+		}
 		title := fmt.Sprintf("Merge release %s into %s", r.Name, def)
 		body := fmt.Sprintf("Promotes release %q (branch %q) back into %s.", r.Name, r.ProdBranch(), def)
 		created, err := client.CreatePullRequest(owner, repo, r.ProdBranch(), def, title, body)
+		if err != nil && github.IsNoCommitsBetween(err) {
+			return nothingToMergeBack(ctx, store, r, def, now)
+		}
 		if err != nil {
 			return recordReleaseError(ctx, store, r.ID, fmt.Errorf("opening merge pull request: %w", err))
 		}
@@ -145,6 +168,34 @@ func requestMergeOnGitHub(ctx context.Context, store *model.Store, client github
 
 	if err := store.MarkReleaseMerged(ctx, r.ID, pr.HTMLURL, now); err != nil {
 		return fmt.Errorf("orchestrator: marking release %d merged: %w", r.ID, err)
+	}
+	return nil
+}
+
+// nothingToMergeBack settles a release whose ProdBranch adds nothing to
+// def: there is no pull request to open, and there never will be, so the
+// release is recorded as merged with a note saying why it has no pull
+// request of its own rather than left in merge_requested for the next
+// cycle to ask GitHub the same refused question again.
+//
+// Merged, and not an error, because that is what actually happened: the
+// release's commits are already on the default branch, which is the whole
+// of what merging back was for. A release cut from the default branch and
+// never merged into is exactly this shape, and so is one whose commits
+// reached the default branch some other way -- a hotfix cherry-picked, or
+// the prod branch merged by hand -- and none of those is a fault anyone
+// needs to fix. See Store.MarkReleaseNothingToMerge on why the name is
+// freed rather than held by a terminal error status.
+func nothingToMergeBack(ctx context.Context, store *model.Store, r model.Release, def string, now time.Time) error {
+	log.Printf("orchestrator: release %s of %s has nothing to merge back: %s carries no commits %q "+
+		"does not already have, so no merge pull request can be opened for it",
+		r.Name, r.Repo, r.ProdBranch(), def)
+
+	note := fmt.Sprintf("%s carried no commits %s did not already have, so GitHub had no pull request "+
+		"to open -- everything on this release is already on %s, and it is recorded as merged.",
+		r.ProdBranch(), def, def)
+	if err := store.MarkReleaseNothingToMerge(ctx, r.ID, note, now); err != nil {
+		return fmt.Errorf("orchestrator: marking release %d as having nothing to merge: %w", r.ID, err)
 	}
 	return nil
 }
