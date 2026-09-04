@@ -56,8 +56,10 @@ type Counts struct {
 // every sample, which means a row per tool call rather than per tool per
 // run -- hundreds a run, read whole on every report. A bound within a
 // factor of two is enough for the question these exist to answer: what
-// cap keeps most answers intact (mcp.maxToolResultBytes, still a guess
-// until this is read against a real deployment).
+// cap keeps most answers intact. It was, in the event --
+// mcp.maxToolResultBytes is 16 KB rather than the 64 KB guess it was
+// left at because of what these said about run_command's and read_file's
+// answers over one real deployment's 90 days (grain/task-183).
 type Sizes struct {
 	N         int
 	Mean      int64
