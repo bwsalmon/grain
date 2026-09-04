@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TaskBoard from "./TaskBoard.jsx";
 import { BOARD_STORAGE_KEY } from "../board.js";
+import { NO_NARROWING } from "../taskFilters.js";
 
 const tasks = [
   {
@@ -35,6 +37,20 @@ const tasks = [
   },
 ];
 
+// Narrowed holds what the toolbar is asking, which is App's job now
+// that the search text, the sort order and the filters live there and
+// in the URL (grain/task-317) rather than inside the board itself.
+function Narrowed({ props }) {
+  const [narrowing, setNarrowing] = useState(props.narrowing || NO_NARROWING);
+  return (
+    <TaskBoard
+      {...props}
+      narrowing={narrowing}
+      onNarrow={(patch) => setNarrowing((prev) => ({ ...prev, ...patch }))}
+    />
+  );
+}
+
 function renderBoard(overrides = {}) {
   const props = {
     tasks,
@@ -45,7 +61,7 @@ function renderBoard(overrides = {}) {
     onSelectAll: vi.fn(),
     ...overrides,
   };
-  render(<TaskBoard {...props} />);
+  render(<Narrowed props={props} />);
   return props;
 }
 

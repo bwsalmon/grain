@@ -65,6 +65,8 @@ import StateDot, { isLiveRunning } from "./StateDot.jsx";
 export default function TaskBoard({
   tasks,
   config,
+  narrowing,
+  onNarrow,
   onOpenTask,
   selected,
   onToggleSelect,
@@ -78,14 +80,17 @@ export default function TaskBoard({
   const [columns, setColumns] = useState(() => loadColumns());
   const [editing, setEditing] = useState(false);
 
-  // Same three local refinements as TaskList, and local for the same
-  // reason: they refine the view currently on screen rather than
-  // standing for a question about which tasks matter.
-  const [search, setSearch] = useState("");
-  const [sortBy, setSortBy] = useState("manual");
-  const [filters, setFilters] = useState({});
+  // The same three refinements as TaskList, held in the same place: App
+  // owns them and the query string is where they live (paths.js,
+  // grain/task-317). Shared with the list rather than kept per view for
+  // the reason in this file's own header -- narrowing to one repo means
+  // the same thing on both -- so moving between the list and the board
+  // keeps the question you were asking, and only the layout changes.
+  const { search, sortBy, filters } = narrowing;
+  const setSearch = (value) => onNarrow({ search: value });
+  const setSortBy = (value) => onNarrow({ sortBy: value });
   const setFilter = (id, value) =>
-    setFilters((prev) => ({ ...prev, [id]: value }));
+    onNarrow({ filters: { ...filters, [id]: value } });
 
   const q = search.trim().toLowerCase();
 
@@ -166,10 +171,7 @@ export default function TaskBoard({
     endDrag();
   };
 
-  const clearNarrowing = () => {
-    setSearch("");
-    setFilters({});
-  };
+  const clearNarrowing = () => onNarrow({ search: "", filters: {} });
 
   // A column's own "select all": the batch actions bar under the board
   // is the list's, and "run everything queued" is the reason somebody
