@@ -1559,14 +1559,37 @@ child rather than an orphan.
 
 **It has no way to empty its native tool roster.** `claude` takes
 `--tools ''`, which is how `agent/claude` guarantees a run reaches the
-sandbox only through grain's own MCP tools. agy has no equivalent, so
-that guarantee is weaker here: what this package does instead is give the
-subprocess a `HOME` with exactly one MCP server in it and a working
-directory that is the sandbox, and report -- as a transcript line, on the
-run itself -- any tool agy's own `init` event advertises beyond the ones
-grain published. A deployment that needs a hard guarantee should run
-against a kontur sandbox, where the controller's filesystem is not
+sandbox only through grain's own MCP tools, and `codex` takes a read-only
+sandbox that leaves its own tools unable to do damage. agy takes neither,
+so a run always sees agy's `run_command`, `view_file`, `write_to_file` and
+the rest beside grain's, and those execute wherever agy does -- on the
+controller. Three things stand in for the switch. The private `HOME` holds
+exactly one MCP server, so grain's tools are the only MCP tools there are.
+They are registered eagerly, so the model sees them rather than having to
+go looking. And the run's prompt opens by naming *both* rosters: which
+`mcp_grain-sandbox_*` tools reach the sandbox, which of agy's own to treat
+as unavailable, and the fact that the two rosters share names -- so a
+model reaching for "run\_command" picks a tool by its prefix rather than by
+its verb, which is the mistake the bare rule ("use grain's tools") leaves
+available. `verifyToolRoster` then notes, on the run itself, a roster with
+no route to grain at all. A deployment that needs a hard guarantee should
+run against a kontur sandbox, where the controller's filesystem is not
 reachable from the guest at all.
+
+**Whether agy can be told to deny its native tools outright is open**, and
+this is where the answer belongs when someone has the binary in front of
+them. What is established, against agy 1.1.25: there is no `--tools` and
+no `--strict-mcp-config`, and the `disabledTools` key in the MCP config
+governs an MCP *server's* tools rather than agy's own. That key is a trap
+rather than a near miss -- grain's tools and agy's share names, so listing
+`run_command` there would deny the run grain's `run_command` and leave
+agy's in place, which is the exact opposite of what it looks like it does.
+Guessing at anything else is worse than leaving it: an unknown key goes
+into the same `settings.json` a run authenticates from, and an unknown
+flag fails every run before it starts. So the prompt carries the rule
+until a mechanism is confirmed live, and confirming it is a job for the
+nightly live test (below), which is the only thing here that runs a real
+agy.
 
 Two smaller notes. The prompt travels over stdin as a `stream-json` user
 event, not as the argument to `--print`: untrusted issue content must
