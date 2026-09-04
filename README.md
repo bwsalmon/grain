@@ -2912,6 +2912,44 @@ tick could not apply is. The pane says so in those terms -- a merge to
 load and a restart to load it with -- rather than showing a git error,
 and the journal says it once rather than every thirty seconds.
 
+### A divergence grain made is a divergence grain can clear
+
+Asking first closes the window, and does not close it completely: grain
+commits its export and then pushes it, and a push that fails -- an
+installation token that expired between the two, a remote that was
+briefly unreachable -- leaves the commit on this host. If a pull request
+is merged before that push is retried, the remote holds a commit on the
+other side of the same parent. `Pull` is fast-forward only and refuses,
+naming both branches, rather than resolving a conflict in a database dump
+by guesswork.
+
+That refusal is right and nothing used to clear it. Every tick logged the
+same divergence, the pane showed it, no merged change was ever applied
+and no export ever reached the remote until an operator went to the host
+and fixed the working tree by hand. Before the daemon pulled on its own
+timer that was a once-per-restart problem; afterwards it was a permanent
+one, and a start that hit it did not come up at all.
+
+There is exactly one case grain can resolve without deciding anything on
+anyone's behalf, and `RecoverDiverged` (`pkg/staterepo/diverge.go`) is
+it: every local commit the remote has not got is grain's own export --
+grain's author, and a diff touching only the files an export writes
+(`tables/`, the schema stamp, the README, the `.gitignore`). Those
+commits hold a dump of a database that is still sitting right here, so
+resetting the working tree onto the remote's branch loses nothing by
+construction: the settings that were merged are applied, the database is
+exported again on top of them, and both directions are moving again
+within one cycle. It runs from the sync loop and from the load at
+startup, so a restart is not the fix and is not made worse by being one.
+
+Everything else stays a refusal. A commit somebody made by hand in the
+working tree might hold something that exists nowhere else, and a merge
+commit is somebody's earlier resolution; neither is grain's to throw
+away, so the divergence is reported with the commit and its author named,
+and the pane says the thing an operator actually needs to hear -- that
+this deployment has diverged from its remote and is not syncing -- rather
+than leaving it to be read out of a git error.
+
 ## Deployment configuration lives in the store too
 
 bwsalmon/agents#320 asked the same "the store is the record" question

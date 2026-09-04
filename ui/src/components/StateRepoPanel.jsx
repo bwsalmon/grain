@@ -117,7 +117,18 @@ export default function StateRepoPanel({ showError }) {
           as it is and nothing here is lost.
         </Alert>
       )}
-      {status.error && <Alert severity="warning" sx={{ mt: 2 }}>{status.error}</Alert>}
+      {status.diverged && (
+        <Alert severity="error" sx={{ mt: 2 }}>
+          This deployment has diverged from its remote and is not syncing. Its working tree and the remote branch
+          have both moved past the same commit, so nothing merged here is reaching grain and nothing grain exports
+          is reaching the remote. grain resolves this by itself when the only commits in the way are its own
+          exports; this one holds a commit it will not throw away, so it needs somebody at{" "}
+          <code>{status.dir}</code> to decide what happens to it.
+        </Alert>
+      )}
+      {status.error && (
+        <Alert severity={status.diverged ? "info" : "warning"} sx={{ mt: 2 }}>{status.error}</Alert>
+      )}
       {schemaMismatch && (
         <Alert severity="error" sx={{ mt: 2 }}>
           The repository holds schema {status.schemaVersion} and this build knows {status.buildSchemaVersion}. grain

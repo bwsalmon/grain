@@ -85,6 +85,17 @@ func (m *stateManager) syncAll(ctx context.Context) (bool, error) {
 // true for a human asking for a sync outright.
 func (m *stateManager) cycle(ctx context.Context, all bool) (bool, error) {
 	applied, applyErr := staterepo.Apply(ctx, m.repo, m.db, model.SchemaVersion)
+	// A divergence grain made itself -- an export it committed and could
+	// not push, overtaken by a merge -- is cleared here and the pull tried
+	// again, rather than repeated verbatim on every tick until an operator
+	// goes to the host. The reset throws away commits that hold nothing
+	// but this database's own dump; the export below writes it all back
+	// out on top of what was merged, so both directions come back in the
+	// same cycle. A divergence anybody else made is not cleared, and falls
+	// through to be reported like any other failure.
+	if recoverDivergedStateRepo(ctx, m.repo, applyErr) {
+		applied, applyErr = staterepo.Apply(ctx, m.repo, m.db, model.SchemaVersion)
+	}
 	if errors.Is(applyErr, staterepo.ErrNotApplied) {
 		// The working tree is at a commit the database has not taken up --
 		// a dump this build cannot read, or rows it could not insert. The
@@ -156,9 +167,18 @@ func (m *stateManager) status(ctx context.Context) ui.StateRepoStatus {
 		// A merge waiting to be loaded is a state, not a failure, and the
 		// pane says a different thing about it -- so it is reported as
 		// itself rather than as the last error to have come out of git.
-		if errors.Is(m.lastErr, staterepo.ErrRemoteAhead) {
+		switch {
+		// Divergence first: a diverged repository is also a repository
+		// whose remote is ahead, and of the two that is the one an
+		// operator can do nothing about. It keeps its Error as well as
+		// its flag, because the message names the commit in the way and
+		// who wrote it, which is the whole of what there is to act on.
+		case errors.Is(m.lastErr, staterepo.ErrDiverged):
+			out.Diverged = true
+			out.Error = m.lastErr.Error()
+		case errors.Is(m.lastErr, staterepo.ErrRemoteAhead):
 			out.RemoteAhead = true
-		} else {
+		default:
 			out.Error = m.lastErr.Error()
 		}
 	}
@@ -290,8 +310,12 @@ func (m *stateManager) Sync(ctx context.Context) (ui.StateRepoStatus, error) {
 	// "The remote holds a commit this deployment has not taken up" is an
 	// answer to "sync now", not a failure of it: the pane gets a status
 	// saying so rather than an error banner, since what it asks for next
-	// is a restart and not another sync.
-	if _, err := m.cycle(ctx, true); err != nil && !errors.Is(err, staterepo.ErrRemoteAhead) {
+	// is a restart and not another sync. A divergence grain would not
+	// resolve is the same kind of answer -- the status carries both the
+	// flag and the message, and pressing Sync again would only produce
+	// the same one.
+	if _, err := m.cycle(ctx, true); err != nil &&
+		!errors.Is(err, staterepo.ErrRemoteAhead) && !errors.Is(err, staterepo.ErrDiverged) {
 		return ui.StateRepoStatus{}, err
 	}
 	return m.status(ctx), nil
