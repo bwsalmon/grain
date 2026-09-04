@@ -527,7 +527,12 @@ func TestOnlyTheScheduledLiveJobHoldsAModelCredential(t *testing.T) {
 	contains(t, live, "workflow_dispatch:")
 	contains(t, live, "environment: live-agent")
 	contains(t, live, "GRAIN_LIVE_AGENT_TEST")
-	contains(t, live, "-run TestLiveIssueCompletesEndToEnd")
+	// The whole of tests/e2e's live set, by prefix rather than by name:
+	// there are two of them now (the run that proves a live agy reaches
+	// its sandbox, and the one that proves it honours grain's tool
+	// denial), and a job naming one test is a job that silently stops
+	// running the next one somebody adds.
+	contains(t, live, "-run 'TestLive'")
 	// -count=1: a cached "ok" from a run where the test skipped must
 	// never stand in for a live one, the same reason the container and
 	// real-VM suites pass it.
