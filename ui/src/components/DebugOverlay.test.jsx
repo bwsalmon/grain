@@ -14,27 +14,12 @@ vi.mock("../api.js", () => ({ default: vi.fn() }));
 describe("DebugOverlay", () => {
   const noLogs = { enabled: false };
   const noSandboxes = { enabled: false };
-  // A report from a deployment that has not done anything yet: every
-  // field GET /api/metrics always sends, all at zero. MetricsPage.test
-  // .jsx covers what the panel does with real numbers.
-  const emptyMetrics = {
-    since: "2026-08-27T00:00:00Z",
-    until: "2026-09-03T00:00:00Z",
-    windowSeconds: 604800,
-    throughput: {
-      tasksFiled: 0, tasksCompleted: 0, tasksClosed: 0, runsStarted: 0, runsFinished: 0,
-      filedPerDay: 0, completedPerDay: 0, runsFinishedPerDay: 0, buckets: [],
-    },
-    latency: [],
-    runs: { outcomes: {}, attemptsPerCompletion: 0, meanConcurrent: 0, maxConcurrent: 0, utilization: 0, live: 0 },
-    backlog: { byState: {}, queued: 0, oldestQueuedSeconds: 0, oldestQueuedTaskId: "" },
-  };
 
   afterEach(() => {
     api.mockReset();
   });
 
-  it("shows Logs by default, with Sandbox health, Top, Metrics and Restart as other tabs", async () => {
+  it("shows Logs by default, with Sandbox health, Top and Restart as other tabs", async () => {
     api.mockResolvedValueOnce(noLogs);
     render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
 
@@ -42,9 +27,18 @@ describe("DebugOverlay", () => {
     expect(screen.getByRole("tab", { name: "Logs" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Sandbox health" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Top" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Metrics" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Restart" })).toBeInTheDocument();
     expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  // grain/task-173: the throughput and latency report is a sidebar
+  // destination of its own now (MetricsOverlay.jsx), not a tab in here.
+  it("does not show Metrics as a tab", async () => {
+    api.mockResolvedValueOnce(noLogs);
+    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
+    await screen.findByText(/no log sources configured|not available/i);
+
+    expect(screen.queryByRole("tab", { name: "Metrics" })).not.toBeInTheDocument();
   });
 
   // grain/task-115: these panels fill the content area beside the
@@ -58,7 +52,7 @@ describe("DebugOverlay", () => {
 
     expect(document.querySelector(".MuiDialog-paper")).toHaveClass("MuiDialog-paperFullScreen");
     const head = document.querySelector(".overlay-pane-header");
-    expect(head).toContainElement(screen.getByRole("tab", { name: "Metrics" }));
+    expect(head).toContainElement(screen.getByRole("tab", { name: "Sandbox health" }));
     expect(head).toContainElement(screen.getByRole("heading", { name: "Debug" }));
   });
 
@@ -89,40 +83,6 @@ describe("DebugOverlay", () => {
 
     expect(await screen.findByText(/load average: 1.10/)).toBeInTheDocument();
     expect(api).toHaveBeenLastCalledWith("/api/host/top?lines=60");
-  });
-
-  // The throughput and latency report joined these rather than taking a
-  // sidebar entry of its own, and fetches only once its tab is the
-  // active one, the same as the panels above.
-  it("shows Metrics on its own tab, over GET /api/metrics", async () => {
-    api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce(emptyMetrics);
-    const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} showError={() => {}} />);
-    await screen.findByText(/no log sources configured/i);
-
-    await user.click(screen.getByRole("tab", { name: "Metrics" }));
-
-    expect(await screen.findByText("Throughput")).toBeInTheDocument();
-    expect(api).toHaveBeenLastCalledWith("/api/metrics?window=7d&buckets=24");
-  });
-
-  // onOpenTask is the one link out of any of these panels: the metrics
-  // backlog names the oldest queued task. App uses it to close this
-  // overlay and open that task -- see App.test.jsx's own end of it.
-  it("passes the metrics backlog's oldest queued task up to onOpenTask", async () => {
-    api.mockResolvedValueOnce(noLogs).mockResolvedValueOnce({
-      ...emptyMetrics,
-      backlog: { byState: { queued: 1 }, queued: 1, oldestQueuedSeconds: 3600, oldestQueuedTaskId: "51" },
-    });
-    const onOpenTask = vi.fn();
-    const user = userEvent.setup();
-    render(<DebugOverlay config={{ rebootEnabled: true }} onClose={() => {}} onOpenTask={onOpenTask} showError={() => {}} />);
-    await screen.findByText(/no log sources configured/i);
-
-    await user.click(screen.getByRole("tab", { name: "Metrics" }));
-    await user.click(await screen.findByRole("button", { name: "task 51" }));
-
-    expect(onOpenTask).toHaveBeenCalledWith("51");
   });
 
   it("shows the reboot control on the Restart tab when reboot is enabled", async () => {

@@ -14,8 +14,8 @@ const initialTasks = [
 ];
 
 // metricsReport is the shape GET /api/metrics returns (pkg/ui's own
-// MetricsReport), trimmed to what the Metrics panel of the Debug
-// overlay reads. Its oldest queued task is "Fix bug", the one task in
+// MetricsReport), trimmed to what the Metrics pane reads. Its oldest
+// queued task is "Fix bug", the one task in
 // initialTasks that is actually queued, so the link out of the backlog
 // has somewhere real to land.
 const metricsReport = {
@@ -587,7 +587,8 @@ describe("App", () => {
 
   it.each([
     ["Settings", "Settings"],
-    ["Debugging", "Debug"],
+    ["Debug", "Debug"],
+    ["Metrics", "Metrics"],
   ])("opens the %s overlay from the sidebar", async (button, heading) => {
     setupApi();
     const user = userEvent.setup();
@@ -627,8 +628,8 @@ describe("App", () => {
   });
 
   // bwsalmon/agents#640: Logs and Sandbox health live together on their
-  // own "Debugging" sidebar entry, not inside Settings.
-  it("shows Logs and Sandbox health on the Debugging overlay, not as their own sidebar entries", async () => {
+  // own "Debug" sidebar entry, not inside Settings.
+  it("shows Logs and Sandbox health on the Debug overlay, not as their own sidebar entries", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
@@ -637,7 +638,7 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "Logs" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sandbox health" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Debugging" }));
+    await user.click(screen.getByRole("button", { name: "Debug" }));
 
     expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
 
@@ -651,22 +652,36 @@ describe("App", () => {
     expect(await screen.findByText(/no sandbox pool or host stats configured/i)).toBeInTheDocument();
   });
 
-  // The metrics report's backlog names the oldest queued task, and the
-  // useful thing to do with that is go and look at it. Two stacked
-  // dialogs would put the task behind the pane the click came from, so
-  // App closes the Debug overlay on the way through.
-  it("opens the oldest queued task from the Metrics panel, leaving the Debug overlay behind", async () => {
+  // grain/task-173: Metrics is a sidebar entry of its own rather than a
+  // tab of the Debug pane -- a throughput report is what somebody opens
+  // when nothing is wrong, which is the opposite of what the rest of
+  // that pane is for.
+  it("opens Metrics from its own sidebar entry, not from a tab of the Debug pane", async () => {
     setupApi();
     const user = userEvent.setup();
     render(<App />);
     await screen.findByText("Fix bug");
 
-    await user.click(screen.getByRole("button", { name: "Debugging" }));
-    await user.click(await screen.findByRole("tab", { name: "Metrics" }));
+    await user.click(screen.getByRole("button", { name: "Debug" }));
+    expect(await screen.findByText(/no log sources configured/i)).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Metrics" })).not.toBeInTheDocument();
+  });
+
+  // The metrics report's backlog names the oldest queued task, and the
+  // useful thing to do with that is go and look at it. Two stacked
+  // dialogs would put the task behind the pane the click came from, so
+  // App closes the Metrics overlay on the way through.
+  it("opens the oldest queued task from the Metrics pane, leaving that pane behind", async () => {
+    setupApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "Metrics" }));
     await user.click(await screen.findByRole("button", { name: "task 1" }));
 
     expect(await screen.findByText("1 Fix bug")).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: "Metrics" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Metrics" })).not.toBeInTheDocument();
   });
 
   it("polls the task list on an interval", async () => {

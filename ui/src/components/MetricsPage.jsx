@@ -30,8 +30,8 @@ const DEFAULT_WINDOW = "7d";
 // mostly zeroes.
 const BUCKETS = 24;
 
-// Unlike the Logs and Sandbox health panels this sits beside, there is no
-// poll here: a report costs a full scan of `task` and `task_run` every
+// Unlike the Logs and Sandbox health panels on the Debug pane, there is
+// no poll here: a report costs a full scan of `task` and `task_run` every
 // time it is asked for (README, "Measuring throughput and latency"), and
 // nothing it shows moves fast enough to be worth that every few seconds.
 // It loads once, reloads when the window changes, and otherwise waits for
@@ -151,13 +151,17 @@ function Cell({ stage, percentile, seconds }) {
   );
 }
 
-// MetricsPage is the Metrics panel of DebugOverlay.jsx: what this
-// deployment delivered over a window and where a task's wall-clock time
-// went getting there, from GET /api/metrics (pkg/metrics computes it;
-// `grain metrics` prints the same report at a terminal). It sits with
-// Logs and Sandbox health rather than in Settings for the same reason
-// they do -- it is a read-only view of how the deployment is behaving,
-// not a knob on it.
+// MetricsPage is the body of MetricsOverlay.jsx: what this deployment
+// delivered over a window and where a task's wall-clock time went
+// getting there, from GET /api/metrics (pkg/metrics computes it;
+// `grain metrics` prints the same report at a terminal). It is a
+// destination of its own on the sidebar rather than a Settings tab
+// because it is a read-only view of how the deployment is behaving, not
+// a knob on it -- and its own entry rather than a Debug tab because it
+// is the question asked when nothing is wrong (grain/task-173).
+//
+// The pane's header is what carries the "Metrics" title; this panel
+// starts straight in on the window picker and Refresh.
 //
 // Two things the README's own "Measuring throughput and latency" section
 // insists on are presentation decisions here, not just wording:
@@ -217,8 +221,7 @@ export default function MetricsPage({ showError, onOpenTask }) {
 
   return (
     <section className="metrics-panel">
-      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 1, mb: 1.5 }}>
-        <Typography variant="subtitle2">Metrics</Typography>
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 1, mb: 1.5 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
           <FormControl size="small" sx={{ minWidth: 160 }}>
             <InputLabel id="metrics-window-label">Window</InputLabel>

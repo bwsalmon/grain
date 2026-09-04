@@ -2325,9 +2325,9 @@ starts exactly where the list you opened it from started. Dialogs that
 are an *action* rather than a thing you opened — New task, Run a suite,
 an attempt's transcript — stay centered boxes.
 
-**Settings and Debugging are panes too (grain/task-115).** Those two were
+**Settings and Debug are panes too (grain/task-115).** Those two were
 the largest things still drawn as centered boxes, and neither is really
-an action: Settings is six tabs of deployment configuration, Debugging is
+an action: Settings is six tabs of deployment configuration, Debug is
 four panels of live diagnostics, and both are destinations with a URL of
 their own (`/settings`, `/debug`) that an operator navigates around
 rather than a form to fill in and dismiss. The shapes were fighting the
@@ -2341,11 +2341,36 @@ Panes that open a *thing* (a task, a schedule) pass none and scroll their
 whole body as before. Settings caps its tab bodies at the same
 `.pane-form` width its forms already used — a "Poll interval" box an arm's
 length wide is the porthole's opposite failure, not its fix — while
-Debugging deliberately caps nothing, since the tables and log lines in
+Debug deliberately caps nothing, since the tables and log lines in
 there are what wanted the room in the first place. The sidebar marks
-whichever of the two is open the way it already marks the current view:
+whichever pane is open the way it already marks the current view:
 the rail is on screen the whole time now, so it should say what is
 covering the rest of it.
+
+**Metrics is its own destination on the sidebar (grain/task-173).** That
+pane's nav entry is called "Debug" rather than "Debugging" now, and the
+throughput and latency report is no longer a tab inside it: it sits
+beside Settings and Debug, at `/metrics`. Metrics landed there
+originally because it is the same *kind* of thing Logs, Sandbox health
+and Top are — a read-only, deployment-wide view rather than a knob — and
+that is still true. It is not the same *question*, though, and the
+question is what a nav entry sorts by. The other three panels are opened
+because something is wrong right now: a task is stuck, the machine is
+loaded, an agent is failing. They are read while that lasts and closed
+when it is over. The report is the opposite: it is opened when nothing
+is wrong, on whatever cadence somebody reviews how the deployment is
+doing, and the numbers it moves are weekly ones. Filing it under the
+word "debug" told an operator to open it at the wrong times, and two
+clicks and a tab strip is the wrong price for something read on a
+schedule. Splitting it out is also what makes it linkable: `/metrics`
+is a URL that goes in a document or a standup note, where "open Debug,
+click Metrics" is an instruction. The pane's header carries the title
+now, so `MetricsPage` drops the "Metrics" heading it used to print above
+its own window picker, and `DebugOverlay` no longer takes an
+`onOpenTask` — the one link out of any of these panels (the backlog's
+oldest queued task) belongs to the report, and it is App that closes the
+metrics pane on the way to that task, since two stacked panes would put
+it behind the one the click came from.
 
 **A repo is a page of its own, the way a task is (grain/task-111).**
 Everything grain knew about one repo used to hang off that repo's row in
@@ -4794,10 +4819,11 @@ deep queue is a scheduling problem; saturated capacity next to a deep
 queue is a capacity one. They are the first two numbers any optimization
 here should have to move.
 
-**The UI reads the same report,** as the Metrics tab of the Debugging
-pane — alongside Logs and Sandbox health, since all three are read-only
-views of how the deployment is behaving rather than knobs on it. The
-window picker sends the same strings `-window` takes, the throughput
+**The UI reads the same report,** in a pane of its own at `/metrics`,
+reached from the sidebar beside Settings and Debug. (It was a tab of the
+Debug pane until grain/task-173 — see "Metrics is its own destination
+on the sidebar" above for why it left.) The window picker sends the same
+strings `-window` takes, the throughput
 buckets are drawn as sparklines, and the two presentation rules above
 are enforced rather than described: the latency stages are a table of
 independent distributions and never a stacked bar, which would draw a
@@ -4806,9 +4832,9 @@ is a section of its own headed "right now, not over the window". Each
 stage's `n` sits beside its percentiles, and a percentile with too few
 samples behind it to mean what its name says — fewer than 10 for a p90,
 100 for a p99 — is dimmed and footnoted rather than shown as if it were
-one. Unlike the panels beside it there is no poll: a report costs a full
-scan every time it is asked for, so it loads once and reloads when the
-window changes or Refresh is clicked.
+one. Unlike the Debug pane's own panels there is no poll: a report costs
+a full scan every time it is asked for, so it loads once and reloads
+when the window changes or Refresh is clicked.
 
 What this still does not have is a history of its own: because nothing
 is stored, a report can only ever be computed from rows that still
@@ -5274,7 +5300,7 @@ about anyone's host. A per-task override is still the escape hatch for
 the one job that needs more, and still the only way to ask for *less*
 than the deployment's own shape.
 
-## `top`, in the Debugging pane
+## `top`, in the Debug pane
 
 Sandbox health can say the daemon's machine is under pressure. It has
 never been able to say by what. Load average, memory and disk are
@@ -5283,7 +5309,7 @@ aggregates by construction — `pkg/sysstat` reads `/proc/loadavg` and
 pane could show a load of 12 and leave the only question anybody actually
 has at that point ("which process?") to an SSH session and a terminal.
 
-The Debugging pane has a Top tab now: `GET /api/host/top`, `pkg/hosttop`,
+The Debug pane has a Top tab now: `GET /api/host/top`, `pkg/hosttop`,
 `top` itself. Shelling out rather than walking `/proc/[pid]/stat` and
 reimplementing its accounting is the same call `pkg/systemlog.Journalctl`
 already made for `journalctl` — `procps` is a package, the output is what

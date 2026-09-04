@@ -875,7 +875,7 @@ other too.
   so `dockerd` waits for the volume rather than racing it and quietly
   filling the boot disk under a mount point.
 
-  The UI's own host status (Debugging → Sandbox health) reports this
+  The UI's own host status (Debug → Sandbox health) reports this
   volume as well as the data disk, one row per filesystem: the daemon
   reads `-data-dir`, `-sandbox-dir` and docker's data root and folds
   together whichever turn out to be the same disk, which here means the

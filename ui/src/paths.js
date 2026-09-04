@@ -16,17 +16,20 @@
 // own Debug tab (bwsalmon/agents#623) and so lost their own paths, the
 // same way Upgrade lives there without ever having had a path of its
 // own (and Secrets did too, until grain/task-110 gave each secret to
-// whatever uses it). Debugging (Logs, Sandbox health and the reboot
+// whatever uses it). Debug (Logs, Sandbox health, Top and the reboot
 // control together) is a sidebar destination again now (bwsalmon/
 // agents#640), with /debug as its own path -- a stale bookmark to the
 // old /logs or /sandboxes still just falls back to the tasks view like
-// any other unrecognized path.
+// any other unrecognized path. Metrics left that pane for a sidebar
+// entry of its own (grain/task-173) and took /metrics with it, so the
+// report an operator reads weekly is a link they can keep.
 
 const VIEWS = ["tasks", "repos", "schedules", "templates", "suites"];
 
 // parsePath turns a URL path into the {view, taskId, repo, showReleases,
-// scheduleId, templateId, suiteId, showSettings, showDebug} App needs in
-// order to restore on load or on a back/forward navigation. Anything it
+// scheduleId, templateId, suiteId, showSettings, showDebug, showMetrics}
+// App needs in order to restore on load or on a back/forward
+// navigation. Anything it
 // doesn't recognize -- an unknown segment, a stray trailing slash --
 // falls back to the default tasks view rather than erroring, the same as
 // an unknown in-app route today just lands on "/".
@@ -50,6 +53,9 @@ export function parsePath(pathname) {
   }
   if (segments[0] === "debug") {
     return { view: "tasks", showDebug: true };
+  }
+  if (segments[0] === "metrics") {
+    return { view: "tasks", showMetrics: true };
   }
   if (segments[0] === "tasks" && segments[1]) {
     return { view: "tasks", taskId: segments[1] };
@@ -79,10 +85,11 @@ export function parsePath(pathname) {
 // every relevant state change to decide whether the address bar needs
 // updating at all.
 export function buildPath({
-  view, taskId, repo, showReleases, scheduleId, templateId, suiteId, showSettings, showDebug,
+  view, taskId, repo, showReleases, scheduleId, templateId, suiteId, showSettings, showDebug, showMetrics,
 }) {
   if (showSettings) return "/settings";
   if (showDebug) return "/debug";
+  if (showMetrics) return "/metrics";
   if (taskId) return `/tasks/${taskId}`;
   // An open repo only means anything within the repos view -- App keeps
   // the two together, and the sidebar clears the repo on the way out of

@@ -15,6 +15,7 @@ import NewTaskOverlay from "./components/NewTaskOverlay.jsx";
 import ConfigurationAgentButton from "./components/ConfigurationAgentButton.jsx";
 import SettingsOverlay from "./components/SettingsOverlay.jsx";
 import DebugOverlay from "./components/DebugOverlay.jsx";
+import MetricsOverlay from "./components/MetricsOverlay.jsx";
 import RepoReleases from "./components/RepoReleases.jsx";
 import LoadingScreen from "./components/LoadingScreen.jsx";
 import ReconcilerDownBanner from "./components/ReconcilerDownBanner.jsx";
@@ -85,6 +86,7 @@ export default function App() {
   const [newTaskRepo, setNewTaskRepo] = useState(null);
   const [showSettings, setShowSettings] = useState(() => parsePath(window.location.pathname).showSettings === true);
   const [showDebug, setShowDebug] = useState(() => parsePath(window.location.pathname).showDebug === true);
+  const [showMetrics, setShowMetrics] = useState(() => parsePath(window.location.pathname).showMetrics === true);
   const [selected, setSelected] = useState(() => new Set());
   const polling = useRef(false);
 
@@ -197,14 +199,14 @@ export default function App() {
     setDetail(null);
   }, []);
 
-  // openTaskFromDebug is the one link out of the Debug pane: the
-  // metrics panel names the oldest queued task, and clicking it should
-  // land on that task. It closes the debug pane on the way -- both fill
-  // the same area beside the sidebar, and DebugOverlay is mounted after
-  // DetailOverlay here, so leaving it open would put the task the click
-  // asked for behind the pane it was clicked in.
-  const openTaskFromDebug = useCallback((id) => {
-    setShowDebug(false);
+  // openTaskFromMetrics is the one link out of the Metrics pane: the
+  // report's backlog names the oldest queued task, and clicking it
+  // should land on that task. It closes the metrics pane on the way --
+  // both fill the same area beside the sidebar, and MetricsOverlay is
+  // mounted after DetailOverlay here, so leaving it open would put the
+  // task the click asked for behind the pane it was clicked in.
+  const openTaskFromMetrics = useCallback((id) => {
+    setShowMetrics(false);
     openTask(id);
   }, [openTask]);
 
@@ -414,6 +416,7 @@ export default function App() {
       suiteId: openSuiteId,
       showSettings,
       showDebug,
+      showMetrics,
     });
     if (path !== window.location.pathname) {
       // The very first correction (e.g. an unrecognized path normalized
@@ -426,7 +429,7 @@ export default function App() {
       }
     }
     mountedRef.current = true;
-  }, [view, openTaskId, openRepo, releasesOpen, openScheduleId, openTemplateId, openSuiteId, showSettings, showDebug]);
+  }, [view, openTaskId, openRepo, releasesOpen, openScheduleId, openTemplateId, openSuiteId, showSettings, showDebug, showMetrics]);
 
   // Mirrors the browser's own back/forward buttons onto the same state
   // buildPath/parsePath already govern everything else through.
@@ -435,6 +438,7 @@ export default function App() {
       const parsed = parsePath(window.location.pathname);
       setShowSettings(parsed.showSettings === true);
       setShowDebug(parsed.showDebug === true);
+      setShowMetrics(parsed.showMetrics === true);
       setView(parsed.view);
       setOpenRepo(parsed.repo || null);
       setReleasesOpen(parsed.showReleases === true);
@@ -493,8 +497,10 @@ export default function App() {
             onSetFilter={setStateFilter}
             showSettings={showSettings}
             showDebug={showDebug}
+            showMetrics={showMetrics}
             onOpenSettings={() => setShowSettings(true)}
             onOpenDebug={() => setShowDebug(true)}
+            onOpenMetrics={() => setShowMetrics(true)}
             onOpenNewTask={() => { setNewTaskRepo(null); setShowNewTask(true); }}
           />
           {view === "repos" && openRepo !== null && releasesOpen ? (
@@ -596,7 +602,8 @@ export default function App() {
           showError={showError}
         />
       )}
-      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} onOpenTask={openTaskFromDebug} showError={showError} />}
+      {showDebug && <DebugOverlay config={config} onClose={() => setShowDebug(false)} showError={showError} />}
+      {showMetrics && <MetricsOverlay onClose={() => setShowMetrics(false)} onOpenTask={openTaskFromMetrics} showError={showError} />}
     </div>
   );
 }
