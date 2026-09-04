@@ -3148,6 +3148,27 @@ a run that edits one produces a diff that is either overwritten by the
 next export or merged into a history that then disagrees with what
 happened.
 
+The prompt also says *whose* tree it is, which the tree itself cannot. A
+dump is the same shape whoever exported it, so `tables/` beside a
+`schema-version` stamp marks another installation's state, or a copy
+somebody is editing offline, exactly as readily as this deployment's
+own; and nothing in an ordinary repo says where the settings an agent
+might want changed actually live. Neither is discoverable from inside a
+sandbox, where the git proxy serves every repository from one address.
+So the deployment answers it: `orchestrator.Config.StateRepo` is
+`cmd/grain`'s `stateManager.settingsRepo`, read per dispatch rather than
+snapshotted so that adopting a different repository reaches the next run
+rather than the next restart, and `settingsRepoSection` tells every
+dispatch one of three things — that the repo it is working in *is* this
+deployment's settings, so what merges here changes the grain that
+dispatched it; that they are in `owner/name` and this is not them, which
+is what an ordinary dispatch hears, with a warning of its own for a
+checkout that does hold a dump; or, for an installation whose state is
+local-only and so has no repository to name, nothing at all. A run
+without that fact opens its pull request against a repository that
+changes nothing here, or spends its turns looking for settings that were
+never in the tree it was handed.
+
 `grain state check DIR` says whether the result will load. It imports
 the directory into a database it throws away and reports what broke, by
 file and by row. `staterepo.Import` was always the validator -- one

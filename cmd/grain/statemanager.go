@@ -185,6 +185,35 @@ func (m *stateManager) cycle(ctx context.Context, all bool) (bool, error) {
 	return applied || changed, m.lastErr
 }
 
+// settingsRepo is which repository this deployment's settings live in,
+// as owner/name, for the one caller that needs it in that shape: the
+// reconcile loop's orchestrator.Config.StateRepo, which is how every
+// dispatched run is told whether the checkout it has been handed is this
+// grain's own settings (orchestrator's settingsRepoSection).
+//
+// Read through the manager's lock, and per call rather than once, for
+// the reason everything else here goes through it: an adopt replaces the
+// repository under a running daemon, and a run dispatched after that
+// must be told about the repository this deployment reads now -- not the
+// one it read when the process started.
+//
+// The zero RepoRef for a local-only installation, and for a remote no
+// owner/name can be picked out of. Both mean "nothing to name", which
+// the prompt renders as saying nothing at all; a URL grain cannot parse
+// is not something a run could file a pull request against either.
+func (m *stateManager) settingsRepo() model.RepoRef {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.repo == nil {
+		return model.RepoRef{}
+	}
+	owner, name, ok := repoFromRemote(m.repo.Remote())
+	if !ok {
+		return model.RepoRef{}
+	}
+	return model.RepoRef{Owner: owner, Name: name}
+}
+
 func (m *stateManager) Status(ctx context.Context) (ui.StateRepoStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
