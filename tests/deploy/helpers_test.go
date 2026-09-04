@@ -56,6 +56,12 @@ func testsWorkflow(t *testing.T) string {
 	return read(t, ".github", "workflows", "tests.yml")
 }
 
+// liveAgentWorkflow is the third one, and the only one that holds a model
+// credential: the nightly live agy run (tests/e2e/live_test.go).
+func liveAgentWorkflow(t *testing.T) string {
+	return read(t, ".github", "workflows", "live-agent.yml")
+}
+
 // setupCode is setup.sh with its comment lines dropped.
 //
 // That file is more comment than code, and much of that comment is about

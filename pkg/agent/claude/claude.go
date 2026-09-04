@@ -284,8 +284,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // allowedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
-// and NewTaskTools register, plus selfdebug.SourceTools' and
+// NewPullRequestTools, NewOpenPullRequestTools and
+// NewRecreateSandboxTools register, plus selfdebug.SourceTools' and
 // bootstrap.PlaybookTools', mcp__-prefixed
 // the way claude reports them once loaded from --mcp-config -- computed
 // from those constructors
@@ -332,12 +332,9 @@ func allowedTools() []string {
 	// mcpserver registers each set only for a run whose task holds that
 	// grant (-grant), and this list only filters what it registers, so a
 	// run without the grant is unaffected by their being named here. ""
-	// is a source directory and nil a TaskReader no run ever gets -- this
-	// only wants the names.
+	// is a source directory no run ever gets -- this only wants the
+	// names.
 	for _, t := range selfdebug.SourceTools("") {
-		names = append(names, mcp.QualifiedToolName(t.Name))
-	}
-	for _, t := range mcp.NewTaskTools(nil) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	for _, t := range bootstrap.PlaybookTools() {
@@ -423,9 +420,8 @@ func mcpConfigJSON(grainBinaryPath string, mcpArgs []string) ([]byte, error) {
 // its pull request, are both independent of which backend its sandbox
 // runs on. So is agent.GrantArgs, which passes on the tool-granting
 // capabilities this run's task holds -- and so whether that server
-// serves the read-only tools for grain's own source and task records
-// (self-debug) or for grain's own bootstrap playbooks
-// (bootstrap-playbooks).
+// serves the read-only tools for grain's own source (self-debug) or for
+// grain's own bootstrap playbooks (bootstrap-playbooks).
 //
 // So is agent.RunDeadlineArgs, which is why ctx is here at all: the
 // deadline on the ctx this run was given is what grain will cancel it

@@ -17,7 +17,10 @@
 # worth stealing -- the same argument the config repo's plan.yml makes for
 # never authenticating a plan-on-PR job. The suites that need a built
 # image (tests/container and tests/installer) skip here and run in
-# build-artifacts.yml on push instead.
+# build-artifacts.yml on push instead; the one test that needs a model
+# credential (tests/e2e's live agy run) skips here and runs nightly in
+# live-agent.yml, which holds that credential in an environment no branch
+# can reach.
 name: tests
 
 on:
@@ -78,7 +81,9 @@ jobs:
 
       # gitproxy's live_test.go and tests/e2e's live_test.go each gate
       # themselves (missing `git`, unset GEMINI_API_KEY) -- they skip on a
-      # runner that has none of that rather than failing.
+      # runner that has none of that rather than failing. The second of
+      # those is run for real by live-agent.yml, nightly; this step's "ok"
+      # says nothing about it.
       #
       # pkg/orchestrator's own real-VM tests gate on GRAIN_REAL_VM_TESTS,
       # which only the real-vm job below sets, so they skip here. Do not

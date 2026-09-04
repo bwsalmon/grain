@@ -493,6 +493,52 @@ func TestTheImagesAreTheOnlyPublishedRelease(t *testing.T) {
 	}
 }
 
+// The model credential lives in exactly one workflow, and that workflow
+// is one no branch can trigger.
+//
+// live-agent.yml runs tests/e2e's live agy test nightly, which means CI
+// now holds a GEMINI_API_KEY somewhere -- and where it is held is the
+// whole safety argument. The other two workflows must stay free of it:
+// tests.yml runs code from an unreviewed PR branch, and
+// build-artifacts.yml runs on `branches: ['**']`, which in this
+// repository means every branch grain's own agents push. Adding
+// `${{ secrets.* }}` to either would hand a model credential to code no
+// human has read, and nothing else in the tree would notice.
+//
+// The trigger is asserted for the same reason: a `push:` added to
+// live-agent.yml would put the key back on every branch, since a
+// repository's secrets are readable by any workflow on any branch push
+// regardless of which file declares them. What keeps the key to the
+// default branch is the `environment:` -- GitHub refuses the secret to a
+// job on a ref the environment's branch policy does not name -- so the
+// environment has to be there too.
+func TestOnlyTheScheduledLiveJobHoldsAModelCredential(t *testing.T) {
+	for name, text := range map[string]string{
+		"tests.yml":           testsWorkflow(t),
+		"build-artifacts.yml": workflow(t),
+	} {
+		if strings.Contains(stripComments(text), "secrets.") {
+			t.Errorf("%s reads a secret: it is triggered by branches nobody has reviewed, and is only safe to trigger that way while it holds nothing worth stealing", name)
+		}
+	}
+
+	live := stripComments(liveAgentWorkflow(t))
+	contains(t, live, "schedule:")
+	contains(t, live, "workflow_dispatch:")
+	contains(t, live, "environment: live-agent")
+	contains(t, live, "GRAIN_LIVE_AGENT_TEST")
+	contains(t, live, "-run TestLiveIssueCompletesEndToEnd")
+	// -count=1: a cached "ok" from a run where the test skipped must
+	// never stand in for a live one, the same reason the container and
+	// real-VM suites pass it.
+	contains(t, live, "-count=1")
+	for _, forbidden := range []string{"push:", "pull_request:"} {
+		if strings.Contains(upTo(t, live, "jobs:"), forbidden) {
+			t.Errorf("live-agent.yml triggers on %s: the credential it holds would then be readable by any branch, which is what the environment exists to prevent", forbidden)
+		}
+	}
+}
+
 // A deployment is told nothing about its sandbox image.
 //
 // One image, not two: the guest a task runs and the container it runs in

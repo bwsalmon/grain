@@ -300,9 +300,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 // its pull request, are both independent of which backend its sandbox
 // runs on. So is agent.GrantArgs, which passes on the tool-granting
 // capabilities this run's task holds -- and so whether that server
-// serves the read-only tools for grain's own source and task records
-// (self-debug) or for grain's own bootstrap playbooks
-// (bootstrap-playbooks).
+// serves the read-only tools for grain's own source (self-debug) or for
+// grain's own bootstrap playbooks (bootstrap-playbooks).
 //
 // So is agent.RunDeadlineArgs, which is why ctx is here at all: the
 // deadline on the ctx this run was given is what grain will cancel it

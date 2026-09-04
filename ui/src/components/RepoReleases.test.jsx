@@ -189,6 +189,23 @@ describe("RepoReleases", () => {
     expect(await screen.findByText(/Merge requested/)).toBeInTheDocument();
   });
 
+  // A release whose prod branch carried nothing the default branch did
+  // not already have merges without a pull request at all, and says why
+  // -- otherwise this pane showed a bare "Merge requested." next to a
+  // link that was never coming.
+  it("says why a merged release has no pull request when there was nothing to merge back", async () => {
+    const settled = {
+      ...activeRelease, status: "merged",
+      mergeNote: "myfeat carried no commits main did not already have, so GitHub had no pull request to open.",
+    };
+    setupApi({ releases: [settled], candidates: [promotedCandidate] });
+    render(<RepoReleases repo="acme/widgets" onBack={() => {}} showError={() => {}} />);
+
+    expect(await screen.findByText(/Nothing to merge back/)).toBeInTheDocument();
+    expect(screen.getByText(/carried no commits main did not already have/)).toBeInTheDocument();
+    expect(screen.queryByText(/Merge requested/)).not.toBeInTheDocument();
+  });
+
   // The back button names the repo, not the repo list: this pane opens
   // from that repo's own page now (grain/task-111), which is one step
   // up rather than two.

@@ -1411,9 +1411,7 @@ no Runner" stays true of the package itself even though a deployment can
 now wire one in from outside it. `selfdebug.SourceTools` is read-only --
 `read_grain_source`/`list_grain_source`, confined to whatever directory
 a deployment's `-upgrade-src-dir` already names, needing no confirmation
-of any kind, since nothing it exposes can change anything -- and the same
-grant now also carries `pkg/mcp`'s four task tools, for reading grain's
-*other* tasks (see below).
+of any kind, since nothing it exposes can change anything.
 `selfrepair.HostCommandTools`' `run_host_command` is the opposite: it
 runs a shell command directly against the same host `grain daemon`
 itself runs on -- no sandbox, no adapter, the real machine -- so every
@@ -1457,23 +1455,36 @@ configuration agent to reach for both tools since bwsalmon/agents#620,
 while `Config.GrantTools` was the only thing assembling them — the prompt
 named a tool that was on no run's roster.
 
-`-grant self-debug` turns on two halves of one question. `selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`
-answer what grain is *built* to do. `mcp.NewTaskTools`'
-`list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
-`read_grain_task_transcript` answer what this deployment actually *did*:
-another task's record, every attempt it has had with the error each one
-recorded, the prompt its agent was really handed, and its session
-transcript — a still-running attempt's included, since the daemon serves
-one from `Config.LiveTranscripts`. Those reads take the same hop
-`open_pull_request` takes for its write: `cmd/grain/mcpserver.go`'s
-`daemonTasks` asks the daemon over its REST API, so that process still
-holds no store handle and `docs/design.md`'s split surface is untouched.
-Both halves refuse politely rather than disappearing when a deployment
-has no source checkout, or an `mcpserver` no daemon to ask, so a run's
-tool roster is a property of the vocabulary rather than of one
+`-grant self-debug` turns on `selfdebug.SourceTools`'
+`read_grain_source`/`list_grain_source`, which answer what grain is
+*built* to do. They refuse politely rather than disappearing when a
+deployment has no source checkout (`-grain-src-dir` unset), so a run's
+tool roster is a property of the grants it holds rather than of one
 deployment's configuration.
-Closing that gap means giving the `mcpserver` subcommand a route back to
-the store, which is a design question rather than a missing flag: the
+
+The other half of that question — what this deployment actually *did* —
+used to be four more tools on the same grant (`mcp.NewTaskTools`'
+`list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
+`read_grain_task_transcript`, reading another task's record, its
+attempts, the prompt its agent was really handed and its session
+transcript through `cmd/grain/mcpserver.go`'s `daemonTasks` over the
+daemon's REST API). They are gone, and the state repository is why: the
+rows they rendered are files in it now (`tables/task.json`,
+`tables/task_comment.json`, `tables/task_run.json`, prompts and
+transcripts included — see "The store is a git repository again"), so a
+task that needs to read what this deployment did is given read access to
+that repository, and reads it with `read_file` and `run_command` like
+any other checkout. Four tools, a `TaskReader` interface, an adapter in
+`cmd/grain` and two `ui.HTTPClient` methods, all to render what a clone
+already hands over. What that trades away is freshness: `task_run` is a
+churn-tier table (below), so an attempt's transcript reaches the
+repository on `ChurnInterval` rather than immediately, and a
+still-running attempt's transcript-in-progress — which the daemon did
+serve, from `Config.LiveTranscripts` — is not in a clone at all.
+
+Closing `selfrepair`'s own gap — a tool that blocks mid-call on a human's
+reply in the task's chat — means giving the `mcpserver` subcommand a
+route back to the store, which is a design question rather than a missing flag: the
 isolation that makes the subprocess frameworks safe is exactly that it
 holds no store handle. What it does hold is deliberately narrow and
 deliberately not that: a read-only GitHub client scoped to one branch
@@ -1688,13 +1699,73 @@ scripted run cannot show, separately and in this order:
   branch, the line in `NOTES.md` -- are what say it reached this run's
   own sandbox rather than merely existing on a roster.
 
-**CI cannot run this, by design.** `tests.yml` holds no credential at
-all: it triggers on `pull_request`, which runs code from an unreviewed
-branch, and is only safe to trigger that way for as long as there is
-nothing in it worth stealing. Giving that job a `GEMINI_API_KEY` to make
-this one test run would hand every PR branch the deployment's own model
-credential. So the test stays gated and stays skipped there, and this is
-a check a **maintainer runs by hand**:
+**A nightly job runs it now, and no push-triggered job ever will.**
+`.github/workflows/live-agent.yml` runs this one test on a `schedule`
+(and on `workflow_dispatch`), on a runner it installs `agy` onto from the
+same unpinned installer the Dockerfile uses, holding a `GEMINI_API_KEY`.
+Leaving it to whoever remembers was the same shape of gap that let
+`~/.gemini/settings.json` survive in the first place. Three alternatives
+were weighed and rejected:
+
+- **Not `tests.yml`.** That workflow holds no credential at all: it
+  triggers on `pull_request`, which runs code from an unreviewed branch,
+  and is only safe to trigger that way for as long as there is nothing in
+  it worth stealing. Giving that job a key would hand every PR branch the
+  deployment's own model credential.
+- **Not every push to `main`** (nor `build-artifacts.yml`, which already
+  holds a credential and triggers on `push`). The cadence settles it:
+  `main` took 787 merges in the two weeks to 2026-09-04 -- about 56 a
+  day, 170 on its busiest. What this test catches is agy's own layout,
+  flags and event shape drifting, and that drifts when agy ships, not
+  when grain commits, so re-asking it 56 times a day buys nothing over
+  asking it once. The model is also free to decline, or to be
+  rate-limited: per-push means a regularly red `main`, on the very
+  workflow whose green tick otherwise means "the image published from
+  this commit came up".
+- **Not weekly either.** The Dockerfile installs `agy` from its vendor's
+  installer with nothing pinned, so the agent a freshly built image
+  carries can change on a day nobody touched this repository. Nightly
+  costs six more model runs a week than weekly and cuts the worst-case
+  detection window from seven days to one.
+
+**`push`-triggered-therefore-trusted is not sound here**, which is the
+part worth writing down. `build-artifacts.yml` makes that argument for
+its `GITHUB_TOKEN`: a `push` event only fires for a branch in this
+repository, which takes write access to create. True, and insufficient
+for a model credential -- nearly every branch here is pushed by one of
+grain's *own agent runs*, so a workflow file on a branch is code no human
+has read. And a *repository* secret is readable by any workflow on any
+branch push, whichever file declares it, so an `if: github.ref ==
+'refs/heads/main'` guard would be a convention written in a file the
+branch gets to rewrite, not a boundary.
+
+So the boundary is the one GitHub enforces, and it is what a maintainer
+has to create for this job to work:
+
+- `GEMINI_API_KEY` as a secret on a **`live-agent` environment**, not a
+  repository secret, with a deployment branch policy naming the default
+  branch alone. A job on any other ref is then refused the secret before
+  it starts, whatever that branch's copy of the workflow says.
+- **No required reviewers** on that environment. Gating a nightly on
+  someone clicking approve is the same "runs when a human remembers" gap
+  this job exists to close. Bound the blast radius the other way instead:
+  give it a key of its own, restricted to
+  `generativelanguage.googleapis.com` -- the restriction
+  `pkg/capability/geminikey` puts on every key it mints -- and rotate it
+  independently of the daemon's operating key.
+
+Until both exist the job's "Require a credential" step fails every night,
+on purpose and with the instructions in the error: it blocks no merge,
+and a job that skipped quietly would be this same gap in a new place. The
+job runs the test twice before reporting a failure, because the
+regression it exists for (a live agy holding none of grain's tools) fails
+both attempts while a model that declined once usually does not decline
+twice. `tests/deploy` asserts the arrangement rather than trusting it:
+that the two branch-triggered workflows read no `secrets.*` at all, and
+that this one triggers on nothing but the schedule and a manual dispatch.
+
+**A maintainer can still run it by hand**, which is what a change to
+`pkg/agent/antigravity` wants rather than waiting for the clock:
 
 ```
 GRAIN_LIVE_AGENT_TEST=1 GEMINI_API_KEY=... \
@@ -1707,8 +1778,9 @@ live run needs the binary as well as the key). `GRAIN_LIVE_AGENT_TEST` is
 there because a skip and a pass are the same `ok` in `go test`'s summary:
 with it set, an unset key or a missing `agy` fails the run instead of
 skipping it, so nobody comes away believing the roster was checked when
-nothing checked it. The `-v` output logs the whole advertised roster,
-which is the line to read.
+nothing checked it -- and it is what the nightly job sets for the same
+reason. The `-v` output logs the whole advertised roster, which is the
+line to read.
 
 **Last exercised: 2026-09-04, against agy 1.1.25 and a live Gemini API
 key.** It passed, and it had to be repaired first: the run was cut off
@@ -2735,6 +2807,14 @@ contents replace this installation's database, or an empty repository
 grain seeds from what it has. The last two are one operation, because
 adopting cannot tell them apart up front and does not need to.
 
+An empty repository is worth formatting before it is adopted:
+`grain state format`, in a clone of it, writes the README, the
+`.gitignore` and the CI step that validates every later pull request
+against it (see "A task can change the settings" below). It is optional
+-- grain seeds a repository that has had nothing done to it just the same
+-- and it is the only way that CI step gets there, since grain's own
+pushes deliberately never carry a workflow file.
+
 Adopting is destructive in one direction on purpose -- the repository is
 the source of truth, and adopting one means taking its answer -- so the
 previous working tree is moved aside with a timestamped name rather than
@@ -2793,6 +2873,34 @@ deployment. As a CI step in the state repository (`grain state check .`
 needs no `-data-dir`, no store and no daemon) it fails the pull request
 instead.
 
+`grain state ci DIR` is what puts it there. It writes
+`.github/workflows/grain-state-check.yml` into a clone of the state
+repository: a checkout and one `docker run` of grain's own published
+image, on pull requests alone -- grain commits to that repository itself
+every time its database changes, and validating those pushes would spend
+a CI run per task state change on a dump grain had just written out of
+the database the check imports it back into. The image is a flag, because
+the check only means anything against a build that knows the same schema
+as the deployment (`grain state status` prints both numbers). Neither
+this nor `format` below commits anything, and that is deliberate: a push
+adding a file under `.github/workflows` is refused unless the credential
+making it may write workflows, and a commit sitting in the deployment's
+own working tree that its sync loop can never push would wedge every
+later sync behind it.
+
+`grain state format DIR` is the step before adopting: an operator has
+made an empty repository on GitHub and cloned it, and this lays out the
+parts of a state repository that are not the dump -- the README that says
+what the tree is, the `.gitignore` that keeps a stray key out of it, and
+that same CI step. It writes no `tables/` and no `schema-version`, which
+is what keeps the bootstrap's two cases apart: a repository with a dump
+in it is one adopting *imports over the database*, so a format that wrote
+an empty dump would turn "grain seeds this empty repository from what it
+has" into "this empty repository replaces grain's state", and an operator
+who formatted one and then adopted it would have emptied their own
+deployment. It refuses a directory that already holds a dump and points
+at `grain state ci`, which is the command that has something to do there.
+
 And the encrypted secrets file is not in there any more, for the reason
 the section above gives: a repository a sandbox may clone is a
 repository a sandbox may read whole.
@@ -2820,6 +2928,44 @@ waiting is loaded at the next start, whole, the way every other thing a
 tick could not apply is. The pane says so in those terms -- a merge to
 load and a restart to load it with -- rather than showing a git error,
 and the journal says it once rather than every thirty seconds.
+
+### A divergence grain made is a divergence grain can clear
+
+Asking first closes the window, and does not close it completely: grain
+commits its export and then pushes it, and a push that fails -- an
+installation token that expired between the two, a remote that was
+briefly unreachable -- leaves the commit on this host. If a pull request
+is merged before that push is retried, the remote holds a commit on the
+other side of the same parent. `Pull` is fast-forward only and refuses,
+naming both branches, rather than resolving a conflict in a database dump
+by guesswork.
+
+That refusal is right and nothing used to clear it. Every tick logged the
+same divergence, the pane showed it, no merged change was ever applied
+and no export ever reached the remote until an operator went to the host
+and fixed the working tree by hand. Before the daemon pulled on its own
+timer that was a once-per-restart problem; afterwards it was a permanent
+one, and a start that hit it did not come up at all.
+
+There is exactly one case grain can resolve without deciding anything on
+anyone's behalf, and `RecoverDiverged` (`pkg/staterepo/diverge.go`) is
+it: every local commit the remote has not got is grain's own export --
+grain's author, and a diff touching only the files an export writes
+(`tables/`, the schema stamp, the README, the `.gitignore`). Those
+commits hold a dump of a database that is still sitting right here, so
+resetting the working tree onto the remote's branch loses nothing by
+construction: the settings that were merged are applied, the database is
+exported again on top of them, and both directions are moving again
+within one cycle. It runs from the sync loop and from the load at
+startup, so a restart is not the fix and is not made worse by being one.
+
+Everything else stays a refusal. A commit somebody made by hand in the
+working tree might hold something that exists nowhere else, and a merge
+commit is somebody's earlier resolution; neither is grain's to throw
+away, so the divergence is reported with the commit and its author named,
+and the pane says the thing an operator actually needs to hear -- that
+this deployment has diverged from its remote and is not syncing -- rather
+than leaving it to be read out of a git error.
 
 ## Deployment configuration lives in the store too
 
@@ -5298,6 +5444,21 @@ streak counts — so what it buys is the next tick dispatching rather than
 skipping. If the limit is in fact still in force, that run meets it and
 pauses again, which is the same self-correcting shape as a window that
 expires without having really reset.
+
+Both halves are on the CLI too (`cmd/grain/pause.go`), since an operator
+ssh'd into the deployment, or driving it with `grain -server`, has no
+banner to read. `grain pause` prints the reading — what the provider
+said, when dispatch resumes and how long that is from now — and `grain
+pause -lift` is the same DELETE the button sends. It is spelled as a noun
+with a flag, the way `grain settings` is, rather than as a `grain resume`
+verb: every verb in this CLI acts on the task its argument names
+(`approve`, `retry`, `reopen`), so a bare `grain resume` would read as
+one of those with the id left off. A deployment whose UI was handed no
+gate at all (`enabled: false` — a UI served without a reconcile loop
+behind it) says exactly that rather than "nothing is paused", which is
+the one wrong answer here: it is what an operator would act on to rule
+the usage limit out. `grain metrics` still says nothing about any of
+this, for the reason above.
 
 ## Every sandbox is built at a size grain chose
 

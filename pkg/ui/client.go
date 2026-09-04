@@ -694,10 +694,7 @@ const configurationPrompt = "You are grain's own configuration agent, opened for
 	"question about how grain or this deployment works, a problem to debug, or a change to make to " +
 	"grain's own configuration or the host it runs on. You hold the self-debug, self-repair and " +
 	"bootstrap-playbooks grants: read grain's own source to explain or debug its behavior " +
-	"(read_grain_source, list_grain_source), read this deployment's own other tasks -- what each one " +
-	"asked for, every attempt it made and the error each recorded, the prompt its agent was actually " +
-	"handed and its session transcript (list_grain_tasks, read_grain_task, read_grain_task_prompt, " +
-	"read_grain_task_transcript) -- run commands " +
+	"(read_grain_source, list_grain_source), run commands " +
 	"directly on the host it runs on (each one needs a live human reply in this chat, approve or deny, " +
 	"before it runs), and read grain's own bootstrap playbooks (list_bootstrap_playbooks, " +
 	"read_bootstrap_playbook) for setting up GCP service accounts, the primary GitHub connection, " +

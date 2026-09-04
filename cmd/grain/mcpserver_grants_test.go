@@ -25,11 +25,11 @@ func toolNames(tools []mcp.Tool) []string {
 	return names
 }
 
-// The bootstrap-playbooks grant needs no daemon and no source checkout:
-// the playbooks are embedded in this binary, so the grant's name is the
-// only thing that has to reach this process.
+// The bootstrap-playbooks grant needs no source checkout: the playbooks
+// are embedded in this binary, so the grant's name is the only thing
+// that has to reach this process.
 func TestGrantedToolsServesThePlaybooksForTheBootstrapGrant(t *testing.T) {
-	names := toolNames(grantedTools(grantNames{"bootstrap-playbooks"}, "", nil))
+	names := toolNames(grantedTools(grantNames{"bootstrap-playbooks"}, ""))
 	for _, want := range []string{"list_bootstrap_playbooks", "read_bootstrap_playbook"} {
 		if !slices.Contains(names, want) {
 			t.Errorf("grantedTools = %v, want %s among them", names, want)
@@ -42,10 +42,9 @@ func TestGrantedToolsServesThePlaybooksForTheBootstrapGrant(t *testing.T) {
 
 // The configuration agent holds both grants at once, and gets both sets.
 func TestGrantedToolsServesEveryGrantsTools(t *testing.T) {
-	names := toolNames(grantedTools(grantNames{"self-debug", "bootstrap-playbooks"}, "/src", nil))
+	names := toolNames(grantedTools(grantNames{"self-debug", "bootstrap-playbooks"}, "/src"))
 	for _, want := range []string{
 		"read_grain_source", "list_grain_source",
-		"list_grain_tasks", "read_grain_task", "read_grain_task_prompt", "read_grain_task_transcript",
 		"list_bootstrap_playbooks", "read_bootstrap_playbook",
 	} {
 		if !slices.Contains(names, want) {
@@ -57,7 +56,7 @@ func TestGrantedToolsServesEveryGrantsTools(t *testing.T) {
 // An ordinary run's roster is exactly the sandbox tools and the escape
 // hatches, as it was before any of this existed.
 func TestGrantedToolsServesNothingWithoutAGrant(t *testing.T) {
-	if tools := grantedTools(nil, "/src", nil); len(tools) != 0 {
+	if tools := grantedTools(nil, "/src"); len(tools) != 0 {
 		t.Errorf("grantedTools = %v, want none for a run holding no grant", toolNames(tools))
 	}
 }
@@ -65,7 +64,7 @@ func TestGrantedToolsServesNothingWithoutAGrant(t *testing.T) {
 // A playbook really is readable through the tool the grant hands over --
 // the end of the road that starts at a human attaching the label.
 func TestTheBootstrapGrantsToolsReadAnEmbeddedPlaybook(t *testing.T) {
-	tools := grantedTools(grantNames{"bootstrap-playbooks"}, "", nil)
+	tools := grantedTools(grantNames{"bootstrap-playbooks"}, "")
 	var list, read mcp.Tool
 	for _, tool := range tools {
 		switch tool.Name {

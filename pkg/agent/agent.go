@@ -83,12 +83,11 @@ type RunConfig struct {
 	// Grants names the capability grants this run's task holds whose
 	// whole effect is which tools the run gets --
 	// "self-debug" (pkg/capability/selfdebug), for reading grain's own
-	// source and grain's other tasks, and "bootstrap-playbooks"
-	// (pkg/capability/bootstrap), for reading the setup runbooks embedded
-	// in this binary. A Framework passes each one on as a "-grant <name>"
-	// argument of its forked "mcpserver" subprocess, which is where those
-	// tools are actually built (GrantArgs, and cmd/grain/mcpserver.go's
-	// flag of that name).
+	// source, and "bootstrap-playbooks" (pkg/capability/bootstrap), for
+	// reading the setup runbooks embedded in this binary. A Framework
+	// passes each one on as a "-grant <name>" argument of its forked
+	// "mcpserver" subprocess, which is where those tools are actually
+	// built (GrantArgs, and cmd/grain/mcpserver.go's flag of that name).
 	//
 	// They are names here, rather than the tools themselves in Tools,
 	// because Tools has no consumer left (see above): a Framework that

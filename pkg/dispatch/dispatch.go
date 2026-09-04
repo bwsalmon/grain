@@ -181,7 +181,12 @@ type options struct {
 //
 // A caller that passes this is saying only "not yet, not from me": a
 // task passed over here is dispatched by a later cycle as soon as busy
-// stops saying so, on whatever the store says about it then.
+// stops saying so, on whatever the store says about it then -- and on
+// what the store says *then*, not on what it said at the top of the
+// cycle, which is what stillReady is for. The two are one guard: busy
+// covers the window while the result is being applied, and the readiness
+// re-read covers a cycle that entered that window before it and left it
+// after it.
 func Busy(busy func(taskID string) bool) Option {
 	return func(o *options) { o.busy = busy }
 }
@@ -247,6 +252,14 @@ func (o options) skip(taskID string) bool {
 // capacity it would otherwise have taken, so a task further down the
 // ready order is not made to wait behind one that is not actually
 // eligible yet.
+//
+// What the view cannot do on its own is stay true for the length of a
+// cycle: Ready is read once, up front, and a run of a candidate further
+// down that list can end while the cycle is still working through it.
+// Each candidate's readiness is therefore re-read immediately before its
+// run is recorded (stillReady, whose doc comment has the interleaving),
+// so a task the caller finished with mid-cycle is passed over rather
+// than started a second time.
 func Cycle(ctx context.Context, store *model.Store, limits model.Limits, now time.Time, opts ...Option) ([]Dispatch, error) {
 	o := newOptions(opts)
 	// The configuration agent (Task.Configuration, bwsalmon/agents#621)
@@ -300,6 +313,13 @@ func Cycle(ctx context.Context, store *model.Store, limits model.Limits, now tim
 		if !eligible {
 			continue
 		}
+		still, err := stillReady(ctx, store, candidate)
+		if err != nil {
+			return nil, err
+		}
+		if !still {
+			continue
+		}
 
 		d, err := startTask(ctx, store, candidate, now, limits)
 		if err != nil {
@@ -345,6 +365,13 @@ func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Tim
 		if !eligible {
 			continue
 		}
+		still, err := stillReady(ctx, store, taskID)
+		if err != nil {
+			return nil, err
+		}
+		if !still {
+			continue
+		}
 		d, err := startTask(ctx, store, taskID, now, model.Limits{})
 		if err != nil {
 			return nil, fmt.Errorf("dispatch: starting configuration run for %s: %w", taskID, err)
@@ -352,6 +379,38 @@ func dispatchConfiguration(ctx context.Context, store *model.Store, now time.Tim
 		out = append(out, d)
 	}
 	return out, nil
+}
+
+// stillReady is the last look before a run is recorded: whether taskID
+// is *still* what the ready list said it was when this cycle read it
+// (Store.IsReady).
+//
+// A cycle reads task_ready once and then spends real time on each
+// candidate -- a busy check, a streak read, a run started for whatever
+// came earlier in the order -- and the run of a candidate can end during
+// any of it. When it does, the store's answer changes twice in quick
+// succession: the run's row is finished first (the task reads 'queued'
+// again, which is the window Busy covers), and the completion its result
+// implies is recorded a moment later, after which the task is not ready
+// at all. A cycle that read the list before the second write and asked
+// busy after the caller had finished with the task saw "queued" and "not
+// busy" -- both true when they were read, neither true together -- and
+// started a second run of a task that was already done.
+//
+// Ordering is the whole of why this works: busy going false is the
+// caller saying it has finished turning that run's result into what it
+// implies, so a readiness read taken *after* that (this one, at the end
+// of the loop body, rather than the bulk read at the top) sees every
+// effect of the run. What is left is the ordinary race any two processes
+// share -- a human closing the task in the instant before StartRun's own
+// transaction -- which is not this one, and which costs a run nobody
+// asked for rather than a duplicate of one already made.
+func stillReady(ctx context.Context, store *model.Store, taskID string) (bool, error) {
+	ready, err := store.IsReady(ctx, taskID)
+	if err != nil {
+		return false, fmt.Errorf("dispatch: re-reading whether %s is still ready: %w", taskID, err)
+	}
+	return ready, nil
 }
 
 // startTask records taskID's next run (Store.Attempts + 1) and starts

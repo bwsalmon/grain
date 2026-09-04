@@ -433,6 +433,65 @@ func TestMarkReleaseErrorRecordsTheMessageWithoutChangingStatus(t *testing.T) {
 	}
 }
 
+// The other way a release reaches merged: its prod branch carried
+// nothing the default branch did not already have, so there is no pull
+// request to record and a note saying so instead. Terminal like any
+// other merge -- out of PendingReleases, and its name free again --
+// which is the whole point of settling it here rather than leaving it in
+// merge_requested for the reconciler to retry forever.
+func TestMarkReleaseNothingToMergeSettlesTheReleaseWithANoteAndNoPullRequest(t *testing.T) {
+	store, _, ctx := openStore(t)
+	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.MarkReleaseProvisioned(ctx, r.ID); err != nil {
+		t.Fatalf("mark provisioned: %v", err)
+	}
+	if _, err := store.RequestReleaseMerge(ctx, widgets, "myfeat"); err != nil {
+		t.Fatalf("request merge: %v", err)
+	}
+	if err := store.MarkReleaseError(ctx, r.ID, "422 from GitHub"); err != nil {
+		t.Fatalf("mark error: %v", err)
+	}
+
+	const note = "myfeat carried no commits main did not already have"
+	if err := store.MarkReleaseNothingToMerge(ctx, r.ID, note, now.Add(time.Hour)); err != nil {
+		t.Fatalf("mark nothing to merge: %v", err)
+	}
+
+	got, err := store.GetRelease(ctx, widgets, "myfeat")
+	if err != nil || got == nil {
+		t.Fatalf("get: (%+v, %v)", got, err)
+	}
+	if got.Status != model.ReleaseMerged {
+		t.Fatalf("got status %q, want merged", got.Status)
+	}
+	if got.MergeNote != note {
+		t.Fatalf("got note %q, want %q", got.MergeNote, note)
+	}
+	if got.PullRequestURL != "" {
+		t.Fatalf("got pull request URL %q, want none", got.PullRequestURL)
+	}
+	if got.LastError != "" {
+		t.Fatalf("got error %q, want the earlier 422 cleared -- nothing here failed", got.LastError)
+	}
+	if got.MergedAt == nil || !got.MergedAt.Equal(now.Add(time.Hour)) {
+		t.Fatalf("got MergedAt %v, want %v", got.MergedAt, now.Add(time.Hour))
+	}
+
+	pending, err := store.PendingReleases(ctx)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("got %+v pending, want the settled release out of the reconciler's way", pending)
+	}
+	if _, err := store.CreateRelease(ctx, widgets, "myfeat", now.Add(2*time.Hour)); err != nil {
+		t.Fatalf("expected the name to be free again: %v", err)
+	}
+}
+
 func TestListCandidatesReturnsNewestFirst(t *testing.T) {
 	store, _, ctx := openStore(t)
 	r, err := store.CreateRelease(ctx, widgets, "myfeat", now)
