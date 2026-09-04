@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import TaskList from "./TaskList.jsx";
 
 const tasks = [
@@ -450,6 +450,63 @@ describe("TaskList", () => {
       fireEvent.dragStart(rowFor("Alpha"));
       fireEvent.drop(rowFor("Bravo"));
       expect(onReorder).not.toHaveBeenCalled();
+    });
+  });
+
+  // grain/task-218: a task filed onto the end of the backlog gets a row
+  // at the bottom of a list that reads in dispatch order, so the list
+  // points it out -- scrolled into view and marked -- rather than
+  // leaving whoever filed it looking at an unchanged screen.
+  describe("highlighting a just-filed task (grain/task-218)", () => {
+    // jsdom implements no scrolling at all, so scrollIntoView is not on
+    // Element.prototype to begin with; these tests put it there and take
+    // it back off, which is also what proves TaskList's own call is
+    // guarded against its absence.
+    function stubScrollIntoView() {
+      const scrollIntoView = vi.fn();
+      Element.prototype.scrollIntoView = scrollIntoView;
+      return scrollIntoView;
+    }
+
+    afterEach(() => {
+      delete Element.prototype.scrollIntoView;
+    });
+
+    it("marks the highlighted row and scrolls it into view", () => {
+      const scrollIntoView = stubScrollIntoView();
+      renderList({ highlightId: 2 });
+
+      expect(screen.getByText("Ship the other thing").closest(".task-row")).toHaveClass("task-row-new");
+      expect(screen.getByText("Fix the thing").closest(".task-row")).not.toHaveClass("task-row-new");
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      // The scrolled element is the highlighted row's own <li>.
+      expect(scrollIntoView.mock.instances[0]).toBe(rowFor("Ship the other thing"));
+    });
+
+    it("marks nothing and scrolls nowhere without a highlight", () => {
+      const scrollIntoView = stubScrollIntoView();
+      renderList();
+
+      expect(document.querySelector(".task-row-new")).not.toBeInTheDocument();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    // A highlighted task the current filter is hiding has no row to
+    // scroll to; the list should say so by doing nothing, not by
+    // scrolling to whatever happens to be in that row's place.
+    it("scrolls nowhere when the highlighted task is filtered out", () => {
+      const scrollIntoView = stubScrollIntoView();
+      renderList({ highlightId: 1, stateFilter: "running" });
+
+      expect(screen.queryByText("Fix the thing")).not.toBeInTheDocument();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    // Nothing here needs scrolling to exist: a browser too old for it,
+    // or a test environment without it, still gets the marked row.
+    it("still marks the row where scrollIntoView is unavailable", () => {
+      renderList({ highlightId: 2 });
+      expect(screen.getByText("Ship the other thing").closest(".task-row")).toHaveClass("task-row-new");
     });
   });
 

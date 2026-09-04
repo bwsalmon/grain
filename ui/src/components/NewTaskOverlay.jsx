@@ -163,7 +163,13 @@ export default function NewTaskOverlay({ tasks, config, defaultRepo, onClose, on
       setAttachments([]);
       setInteractive(false);
       onClose();
-      await onCreated();
+      // onCreated is told which task was just filed so the list behind
+      // this overlay can point it out (App's own highlightTaskId): with
+      // the default "end of the backlog" the new row lands at the
+      // bottom, which on a deployment with more than a screenful of
+      // tasks is off-screen and looks like nothing happened
+      // (grain/task-218).
+      await onCreated(task.id);
       // An interactive task's whole point is the chat, not the task
       // list it was just filed from -- open it straight away rather
       // than making whoever asked for a live conversation go find it

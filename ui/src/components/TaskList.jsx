@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Checkbox, Chip, FormControlLabel } from "@mui/material";
 import DragIndicatorIcon from "@mui/icons-material/DragIndicator";
 import { STATE_LABELS, capabilityName, completionPhase } from "../state.js";
@@ -50,7 +50,15 @@ function groupByStack(tasks, matches) {
   return { topLevel, children };
 }
 
-export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll, onReorder }) {
+// highlightId is one task this list should point out -- today, the one
+// just filed from the new-task overlay (App's own highlightTaskId).
+// Since grain/task-201 the list reads top-to-bottom in dispatch order,
+// so a task filed onto the end of the backlog gets a row at the *bottom*
+// of the list, which on a long backlog is off-screen: without this,
+// filing a task looks like it did nothing at all. The row is scrolled
+// into view and marked (.task-row-new) for as long as the caller keeps
+// this set at it.
+export default function TaskList({ tasks, stateFilter, config, onOpenTask, selected, onToggleSelect, onSelectAll, onReorder, highlightId = null }) {
   // search and sortBy are local, not lifted to App.jsx alongside
   // stateFilter: unlike that one, they are a refinement of the list
   // currently on screen rather than a standing question about "which
@@ -99,6 +107,19 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
   // drives the actual move -- that only happens in onDrop.
   const [dragIds, setDragIds] = useState(null);
   const [overId, setOverId] = useState(null);
+
+  // Scrolls the highlighted row into view once, when the id changes --
+  // not on every render, so the list does not fight whoever is scrolling
+  // it while the mark is still up. The ref is only attached to that one
+  // row, so a highlighted task the current filter or search is hiding
+  // simply leaves it null and nothing scrolls. scrollIntoView is guarded
+  // because jsdom does not implement it, and "nearest" because a row
+  // already on screen needs no scrolling at all.
+  const highlightRef = useRef(null);
+  useEffect(() => {
+    if (highlightId === null) return;
+    highlightRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [highlightId]);
 
   // dropOn resolves a drop at targetId (or at the very end, when
   // targetId is null) to the two backlog neighbours -- among the tasks
@@ -164,6 +185,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
         {topLevel.map((t) => (
           <li
             key={t.id}
+            ref={t.id === highlightId ? highlightRef : undefined}
             className={overId === t.id && dragIds && !dragIds.includes(t.id) ? "task-drop-target" : undefined}
             draggable={reorderEnabled}
             onDragStart={() => reorderEnabled && startDrag(t)}
@@ -176,7 +198,7 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
             onDrop={(e) => { e.preventDefault(); dropOn(t.id); }}
           >
             <TaskRow t={t} config={config} onOpenTask={onOpenTask} selected={selected} onToggleSelect={onToggleSelect}
-              draggable={reorderEnabled} dragging={dragIds?.includes(t.id) ?? false} />
+              draggable={reorderEnabled} dragging={dragIds?.includes(t.id) ?? false} highlighted={t.id === highlightId} />
             {children.has(t.id) && (
               <ul className="task-sublist">
                 {children.get(t.id).map((c) => (
@@ -235,10 +257,17 @@ export default function TaskList({ tasks, stateFilter, config, onOpenTask, selec
 // Without it that row's badge, number and title would each sit a handle's
 // width left of every other row's, so the column the handle occupies is
 // held open and empty instead.
-export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, dragPlaceholder, nested }) {
+// highlighted marks this row as the one the list is currently pointing
+// out (TaskList's own highlightId): a wash of colour that fades off the
+// row, so a just-filed task is findable at a glance without the row
+// permanently reading as different from its neighbours.
+export function TaskRow({ t, config, onOpenTask, selected, onToggleSelect, draggable, dragging, dragPlaceholder, nested, highlighted }) {
   const phase = completionPhase(t);
   return (
-    <div className={`task-row${dragging ? " task-row-dragging" : ""}`} onClick={() => onOpenTask(t.id)}>
+    <div
+      className={`task-row${dragging ? " task-row-dragging" : ""}${highlighted ? " task-row-new" : ""}`}
+      onClick={() => onOpenTask(t.id)}
+    >
       {draggable ? (
         <DragIndicatorIcon
           className="task-drag-handle"

@@ -337,6 +337,41 @@ describe("App", () => {
     expect(await screen.findByText("Ship it")).toBeInTheDocument();
   });
 
+  // grain/task-218: since the list reads top-to-bottom in dispatch order
+  // (grain/task-201), a task filed onto the end of the backlog turns up
+  // at the *bottom* of the list -- below the fold on any real backlog.
+  // So the new row is scrolled into view and marked for a few seconds,
+  // rather than the overlay just closing on an apparently unchanged
+  // screen.
+  it("scrolls the just-filed task into view and marks it, then drops the mark", async () => {
+    setupApi();
+    // jsdom implements no scrolling, so scrollIntoView is not on
+    // Element.prototype at all until a test puts it there; TaskList only
+    // calls it if it is.
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("Fix bug");
+
+    await user.click(screen.getByRole("button", { name: "+ New task" }));
+    await user.type(screen.getByLabelText(/Title/), "Ship it");
+    await user.click(screen.getByLabelText(/No repo/));
+    await user.click(screen.getByRole("button", { name: "Create task" }));
+
+    const row = (await screen.findByText("Ship it")).closest(".task-row");
+    // The row lands as soon as the list is refetched; the mark follows a
+    // config refetch later, so it is waited for rather than asserted on
+    // the spot.
+    await waitFor(() => expect(row).toHaveClass("task-row-new"), { timeout: 4000 });
+    expect(scrollIntoView).toHaveBeenCalled();
+    // The mark means "this is the one you just filed", so it goes away
+    // on its own rather than sticking to the row for the rest of the
+    // session (App's own NEW_TASK_HIGHLIGHT_MS).
+    await waitFor(() => expect(row).not.toHaveClass("task-row-new"), { timeout: 6000 });
+    delete Element.prototype.scrollIntoView;
+  }, 15000);
+
   // grain/task-202: filing a task also writes which end of the backlog
   // new work joins, and the new-task form seeds its picker from that
   // (config.newestFirst). The config is otherwise fetched once, at

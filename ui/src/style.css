@@ -260,6 +260,27 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
    the end of the list. */
 .task-drop-target { box-shadow: inset 0 2px 0 var(--accent); }
 .task-drop-end { min-height: 2.5rem; }
+/* .task-row-new points out a task that was just filed (grain/task-218).
+   The list reads in dispatch order, so with the default "end of the
+   backlog" the new row appears at the bottom rather than the top; the
+   row is scrolled into view (TaskList's highlightId) and washed with
+   the accent, fading back to the ordinary row over a few seconds so the
+   mark cannot be mistaken for something the task itself means. The wash
+   is the accent rather than :hover's own colour, so it still reads as a
+   mark on a row the pointer happens to be resting on. App drops the
+   class a little after this fade ends (NEW_TASK_HIGHLIGHT_MS), so the
+   fade is never cut off half-way. */
+.task-row-new { animation: task-row-new-fade 3s ease-out; }
+@keyframes task-row-new-fade {
+  from { background: var(--accent-subtle); }
+  to { background: transparent; }
+}
+/* Nothing moves for a reader who asked for less motion -- but the point
+   of the mark is finding the row, so it stays put and coloured for as
+   long as the class is on it instead of fading away. */
+@media (prefers-reduced-motion: reduce) {
+  .task-row-new { animation: none; background: var(--accent-subtle); }
+}
 .task-number {
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;

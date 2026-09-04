@@ -30,6 +30,18 @@ import AgentPauseBanner from "./components/AgentPauseBanner.jsx";
 // list of a handful of rows against a store on the same machine.
 const POLL_INTERVAL_MS = 3000;
 
+// NEW_TASK_HIGHLIGHT_MS is how long a just-filed task's row stays marked
+// in the list after the new-task overlay closes.
+//
+// What is actually seen is the CSS fade the mark carries
+// (.task-row-new, 3s), so this is the slightly longer outer bound that
+// keeps the class on the row until that fade has run to the end rather
+// than cutting it off. Either way the mark is gone long before anyone
+// could take it for something the task itself means. The row is
+// scrolled into view regardless (TaskList's own highlightId); this is
+// only how long it stays marked once it is on screen.
+const NEW_TASK_HIGHLIGHT_MS = 4000;
+
 export default function App() {
   const [config, setConfig] = useState(null);
   const [tasks, setTasks] = useState([]);
@@ -88,6 +100,11 @@ export default function App() {
   const [showDebug, setShowDebug] = useState(() => parsePath(window.location.pathname).showDebug === true);
   const [showMetrics, setShowMetrics] = useState(() => parsePath(window.location.pathname).showMetrics === true);
   const [selected, setSelected] = useState(() => new Set());
+  // highlightTaskId is the task the list should point out right now --
+  // the one just filed from the new-task overlay, and nothing else so
+  // far. It is set for NEW_TASK_HIGHLIGHT_MS and then cleared (the
+  // effect below), so it never outlives the moment it explains.
+  const [highlightTaskId, setHighlightTaskId] = useState(null);
   const polling = useRef(false);
 
   const showError = useCallback((err) => {
@@ -171,10 +188,30 @@ export default function App() {
   // (ui.CreateTaskRequest.AtFront, config.newestFirst), and the form
   // seeds its picker from that -- so without re-reading the config here,
   // the choice would only show up on the next full page load.
-  const refreshAfterCreate = useCallback(async () => {
+  //
+  // It is also where the new row gets pointed out: since grain/task-201
+  // the list reads top-to-bottom in dispatch order, so with newestFirst
+  // off -- the default -- a new task joins the *end* of the backlog and
+  // its row lands at the bottom of the list, off-screen on any
+  // deployment with more than a screenful of tasks. Handing the id to
+  // TaskList scrolls that row into view and marks it for a few seconds,
+  // so filing a task visibly does something either way round
+  // (grain/task-218).
+  const refreshAfterCreate = useCallback(async (id) => {
     await refreshList();
     await refreshConfig();
+    setHighlightTaskId(id ?? null);
   }, [refreshList, refreshConfig]);
+
+  // Clears the highlight a few seconds after it is set -- restarted
+  // rather than stacked if a second task is filed before the first one's
+  // mark has faded, so the mark always means "this is the one you just
+  // filed".
+  useEffect(() => {
+    if (highlightTaskId === null) return;
+    const t = setTimeout(() => setHighlightTaskId(null), NEW_TASK_HIGHLIGHT_MS);
+    return () => clearTimeout(t);
+  }, [highlightTaskId]);
 
   const toggleSelect = useCallback((id) => {
     setSelected((prev) => {
@@ -486,6 +523,7 @@ export default function App() {
         onToggleSelect={toggleSelect}
         onSelectAll={setSelection}
         onReorder={reorderTasks}
+        highlightId={highlightTaskId}
       />
       <BatchActionsBar count={selected.size} config={config} onRun={runBatch} onClear={clearSelection} />
     </>

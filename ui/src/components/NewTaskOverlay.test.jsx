@@ -5,7 +5,12 @@ import NewTaskOverlay from "./NewTaskOverlay.jsx";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
 
-vi.mock("../api.js", () => ({ default: vi.fn().mockResolvedValue(null) }));
+// POST /api/tasks answers with the task it just filed, which is where
+// the created id comes from -- both for opening an interactive task's
+// chat straight away and for telling the list behind this overlay which
+// row to point out (grain/task-218) -- so the default response here is a
+// task rather than null.
+vi.mock("../api.js", () => ({ default: vi.fn().mockResolvedValue({ id: "42" }) }));
 // fileToAttachment reads a real File with FileReader -- mocked the same
 // way api.js is, so a test that attaches a file exercises the component's
 // own wiring without depending on jsdom's own FileReader behaviour.
@@ -50,7 +55,9 @@ describe("NewTaskOverlay", () => {
       }),
     });
     expect(onClose).toHaveBeenCalledTimes(1);
-    expect(onCreated).toHaveBeenCalledTimes(1);
+    // Told which task was filed, so the list behind this overlay can
+    // point that row out (grain/task-218).
+    expect(onCreated).toHaveBeenCalledWith("42");
   });
 
   // bwsalmon/agents#612: both checkboxes are seeded from the
