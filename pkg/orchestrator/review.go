@@ -277,8 +277,14 @@ func reviewTaskBody(tmpl model.Template, task model.Task, ref model.PullRequestR
 			"Your own branch is based on `%s`, so what you find you can also fix: commit "+
 			"the fixes and push, and your pull request is merged straight back into `%s` "+
 			"once it reads clean. Task %s does not merge until that has happened, so this "+
-			"is the last look anybody gets at the change before it lands.",
-		task.ID, task.Title, branch, ref, branch, branch, task.ID)
+			"is the last look anybody gets at the change before it lands.\n\n"+
+			"What you should not fix yourself -- a design question, a judgement call, "+
+			"anything that needs whoever asked for the change -- goes in an "+
+			"add_review_comment call instead. Those are posted as a draft review on %s, on "+
+			"the lines they are about, and repeated on task %s's own conversation; a task "+
+			"whose review left findings stops merging automatically and waits for a human "+
+			"to read them. So use them for what a person has to decide, and fix the rest.",
+		task.ID, task.Title, branch, ref, branch, branch, task.ID, ref, task.ID)
 	return b.String()
 }
 
@@ -391,7 +397,7 @@ func reviewStateOf(ctx context.Context, store *model.Store, task model.Task,
 	if err != nil {
 		return reviewState{}, fmt.Errorf("orchestrator: reading review task %s's state: %w", reviewTaskID, err)
 	}
-	if state == model.StateClosed {
+	if state == model.StateClosed || reviewFinishedEmptyHanded(*reviewTask, state) {
 		return reviewState{}, nil
 	}
 	s := reviewState{taskID: reviewTaskID, pending: true}
@@ -399,6 +405,39 @@ func reviewStateOf(ctx context.Context, store *model.Store, task model.Task,
 		s.overdue = overdue(*reviewTask.CreatedAt, now)
 	}
 	return s, nil
+}
+
+// reviewFinishedEmptyHanded reports whether a review task's run is over
+// and left no pull request of its own -- which is the second way a review
+// can be finished, and the one the wait above used to have no answer for.
+//
+// A review that pushed fixes is waited on until its pull request merges
+// back into the branch under review, which closes it (StateClosed, via
+// recordPullRequestEvents). A review that pushed nothing never reaches
+// that state: it completes, with no pull request to merge and so nothing
+// left that could ever close it. Reading that as "still pending" held the
+// change under review for the whole of defaultReviewTaskDeadline and then
+// announced that its review had never finished -- for a review that had
+// finished, on time, having found nothing to change or having written
+// down what it found instead (relayReviewFeedback).
+//
+// Completed and link-less together, rather than either alone.
+// model.LinkFixes and Observation.CompletedAt are written in the same
+// step of the same finish (finishWithPullRequest), so a review that is
+// about to have a pull request is never briefly mistaken for one that
+// will never have one; and a review that is still running, parked on a
+// question, or failing is not finished at all and is still worth waiting
+// for.
+func reviewFinishedEmptyHanded(reviewTask model.Task, state model.State) bool {
+	if state != model.StateCompleted {
+		return false
+	}
+	for _, l := range reviewTask.Links {
+		if l.Kind == model.LinkFixes {
+			return false
+		}
+	}
+	return true
 }
 
 // overdue reports whether a wait that started at from has run past

@@ -105,12 +105,15 @@ func proposedTaskCalls(result *agent.Result) []map[string]any {
 // parking is still keyed to the question, whose comment id is the one
 // PendingQuestionCommentID names.
 //
-// add_review_comment is not relayed here at all: doing so needs a PR
-// already in hand to attach a draft review to, which only a /review-intent
-// dispatch (not yet built -- see directives.go) would have. A run that
-// calls it today gets ProcessResult's ordinary "nothing to act on"
-// ending, which at least names the call in the run's own outcome detail
-// (noActionDetail) rather than losing it in silence.
+// add_review_comment is relayed too, and by the same rule: a run's words
+// belong wherever a human will read them. It needed a pull request in
+// hand to attach a draft review to, which nothing dispatched by grain
+// used to have; a review task does (grain/task-284), two links away --
+// see relayReviewFeedback, which posts the draft review, puts the same
+// findings on the task under review, and takes that task off automatic
+// merge so somebody reads them before the change lands. A run that made
+// the calls with no pull request behind it has them relayed into its own
+// conversation rather than dropped.
 //
 // runID is d.RunID, the very run result came from -- needed only for the
 // "nothing to act on" ending below, to correct that run's own outcome
@@ -136,6 +139,15 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		if _, err := relayComment(ctx, store, task, comment, now); err != nil {
 			return fmt.Errorf("orchestrator: posting comment for %s: %w", task.ID, err)
 		}
+	}
+
+	// Relayed here for the same reason, and before the same two returns:
+	// a review's findings are the whole product of the run that wrote
+	// them, and a run that reported what it found before parking on a
+	// question has said two things rather than one.
+	findings, err := relayReviewFeedback(ctx, store, client, task, result, now)
+	if err != nil {
+		return err
 	}
 
 	parked, err := relayParkingCalls(ctx, store, task, result, now)
@@ -167,7 +179,16 @@ func ProcessResult(ctx context.Context, store *model.Store, client github.Client
 		return nil
 	}
 
-	if hasComment {
+	// A closing comment ends the task, and so does a review that posted
+	// findings: a review dispatched to read a change and write down what
+	// is wrong with it has done its work whether or not it also pushed a
+	// commit, and the findings are already on the pull request and on the
+	// task under review. Left un-completed it would be dispatched again
+	// after its backoff to review the same change a second time, and --
+	// worse -- it would hold that change's own merge until
+	// defaultReviewTaskDeadline ran out and the queue announced that the
+	// review had never finished, which by then would be untrue.
+	if hasComment || findings > 0 {
 		return observeField(ctx, store, task.ID, now, func(o *model.Observation) { o.CompletedAt = &now })
 	}
 

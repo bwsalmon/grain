@@ -26,10 +26,11 @@ type ProposedTask struct {
 	AutoMerge *bool
 }
 
-// ReviewComment is one add_review_comment call, recorded rather than
-// attached to a real draft review -- and, unlike the other three,
-// recorded is all it ever is: nothing downstream relays it (see
-// addReviewCommentTool).
+// ReviewComment is one add_review_comment call as this process recorded
+// it. Turning it into a real draft review on the pull request under
+// review happens elsewhere and later, off agent.Result.ToolCalls
+// (orchestrator.relayReviewFeedback), the same way a proposed task is
+// filed; this is the shape a caller holding a MockSink sees.
 type ReviewComment struct {
 	Body string
 	Path string
@@ -118,12 +119,13 @@ func (s *MockSink) ReviewComments() []ReviewComment {
 // toolnames.go).
 //
 // "Mock" describes this process, not the effect. Nothing outside sink is
-// touched from here, but three of these four really do reach the human:
+// touched from here, but every one of them really does reach the human:
 // ProcessResult recovers each call from agent.Result.ToolCalls once the
 // run finishes and relays it for real -- a question becomes a comment
 // the task is parked on until somebody replies, a closing comment
 // becomes a comment on the task, a proposal becomes an unapproved task
-// with real depends_on edges. So the descriptions and the confirmations
+// with real depends_on edges, a review comment becomes a draft review on
+// the pull request under review. So the descriptions and the confirmations
 // below say *that*, in v2's own vocabulary (task, conversation, task
 // queue), and say nothing about the sink.
 //
@@ -135,12 +137,11 @@ func (s *MockSink) ReviewComments() []ReviewComment {
 // downgrades it into its final text, which nothing relays at all
 // (docs/agent-ergonomics.md, finding 1).
 //
-// add_review_comment is the one exception, and its own text says so:
-// nothing relays it anywhere (ProcessResult's doc comment), because the
-// review dispatch that would have a pull request to attach a draft
-// review to does not exist yet. Rather than promise a draft review no
-// human will ever open, it points anything that needs to be read at
-// comment_on_issue.
+// add_review_comment used to be the one exception -- nothing relayed it
+// anywhere, for want of a pull request to attach a draft review to. A
+// review dispatch has one, so all five are relayed now: see
+// addReviewCommentTool for what a call becomes on a review and on
+// everything else.
 func NewMockTools(sink *MockSink) []Tool {
 	return []Tool{
 		askQuestionTool(sink),
@@ -448,24 +449,29 @@ func proposeTaskTool(sink *MockSink) Tool {
 	}
 }
 
-// addReviewCommentTool is the one escape hatch with nothing downstream
-// of it. Its calls are recovered from agent.Result.ToolCalls like the
-// others', and then relayed nowhere: attaching a draft review needs a
-// pull request in hand, which only a review dispatch would have, and
-// grain does not dispatch reviews yet (orchestrator.ProcessResult's own
-// doc comment). All a call leaves behind is its name in the run's
-// tool-call census.
+// addReviewCommentTool used to be the one escape hatch with nothing
+// downstream of it: its calls were recovered from agent.Result.ToolCalls
+// like the others' and then relayed nowhere, because attaching a draft
+// review needs a pull request in hand and no dispatch had one.
 //
-// So it says so, rather than promising a draft review a human will open
-// (docs/agent-ergonomics.md, finding 2). The alternative that finding
-// offers -- registering it only for a dispatch that is actually a
-// review, behind a `grain mcpserver` flag the way -pr-repo/-pr-branch
-// scope the CI tools -- is the better shape and is not this change:
-// there is no review dispatch to set that flag, so the only thing it
-// could do today is gate the tool off every run, and a run that is going
-// to write review feedback anyway is better served by being told where
-// it lands and what to use instead. The flag is worth adding the day
-// something can set it.
+// A review dispatch does (orchestrator.SyncReviews), so
+// orchestrator.relayReviewFeedback now posts these as a real draft review
+// on the pull request under review, repeats them on that change's own
+// task, and takes it off automatic merge until a human has read them. A
+// run with no pull request behind it has them relayed into its own task's
+// conversation rather than dropped.
+//
+// The description says both halves rather than only the first, because
+// which one a run gets is not something the run can see from here: this
+// process serves every dispatch alike, and whether the task it belongs to
+// is a review is a fact about the store, two packages away. Saying "the
+// pull request under review, or this task's conversation" is true on
+// every run, where a description tailored to one of them would be a
+// promise broken on the other. Narrowing it properly -- registering the
+// review wording only for a dispatch that is actually a review, behind a
+// `grain mcpserver` flag the way -pr-repo/-pr-branch scope the CI tools
+// (docs/agent-ergonomics.md, finding 2) -- is worth doing now that
+// something could set that flag, and is not this change.
 func addReviewCommentTool(sink *MockSink) Tool {
 	return Tool{
 		Name: "add_review_comment",
@@ -473,13 +479,17 @@ func addReviewCommentTool(sink *MockSink) Tool {
 			"and `line` to attach the comment to a specific line of a " +
 			"specific file, as shown in the diff against the base branch; " +
 			"omit both for a general remark that isn't tied to one line. " +
-			"Call this once per point of feedback. Be aware of where the " +
-			"feedback goes: grain has no review dispatch to attach a draft " +
-			"review to yet, so nothing relays these anywhere -- a call is " +
-			"recorded in this run's own tool-call record and reaches no " +
-			"human, no pull request and no task. If the feedback is meant " +
-			"to be read, put it in a comment_on_issue call instead, which " +
-			"is relayed into this task's conversation.",
+			"Call this once per point of feedback. When this run finishes, " +
+			"grain relays every call: if this task is reviewing another " +
+			"task's change (its own description says which pull request), " +
+			"they become a draft review on that pull request, on the lines " +
+			"they name, and are repeated on the reviewed task's own " +
+			"conversation -- and that change stops merging automatically " +
+			"until a human has read them. If this run is not reviewing a " +
+			"pull request, they are relayed into this task's conversation " +
+			"instead. Use this for findings you are deliberately not fixing " +
+			"yourself -- a design question, a judgement call, something " +
+			"that needs a human -- and fix the rest.",
 		InputSchema: map[string]any{
 			"type":                 "object",
 			"additionalProperties": false,
@@ -525,10 +535,11 @@ func addReviewCommentTool(sink *MockSink) Tool {
 			n := len(sink.reviewComments)
 			sink.mu.Unlock()
 
-			return Result{Text: fmt.Sprintf("Recorded (%d review comment(s) so far this run). Nothing "+
-				"relays these: they land in this run's own record and nowhere else -- no draft "+
-				"review, no pull request, no comment on the task. Use comment_on_issue for "+
-				"feedback a human needs to read.", n)}
+			return Result{Text: fmt.Sprintf("Recorded (%d review comment(s) so far this run). When this "+
+				"run finishes, grain posts these as a draft review on the pull request under "+
+				"review and repeats them on that task's conversation, which also stops it "+
+				"merging automatically until a human has read them -- or, if this run is not "+
+				"reviewing a pull request, relays them into this task's own conversation.", n)}
 		},
 	}
 }
