@@ -20,9 +20,10 @@
 // reads the store through the daemon's REST API and pkg/ui imports this
 // package; both are turned on together, by the same grant.
 //
-// How they reach a run is `grain mcpserver -self-debug`, passed by a
-// Framework only for a task holding this grant (agent.RunConfig.
-// SelfDebug, agent.SelfDebugArgs). orchestrator.Config.GrantTools also
+// How they reach a run is `grain mcpserver -grant self-debug`, passed
+// by a Framework only for a task holding this grant
+// (agent.RunConfig.Grants, agent.GrantArgs).
+// orchestrator.Config.GrantTools also
 // adds SourceTools straight to a run's in-process tool set for an
 // Interactive task (see orchestrator/cycle.go's runOne), which is where
 // this started and which no CLI-driving Framework can consume -- the

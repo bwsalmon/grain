@@ -1435,16 +1435,29 @@ registry to hand a forked process. `Config.GrantTools` still assembles these too
 `RunDispatch` still passes them, but no `Framework` consumes them, so
 `selfrepair`'s host tool reaches no running agent today.
 
-`self-debug` is the half that no longer depends on any of that, because
-everything it offers is read-only and so needs no route back into a live
-run's own conversation. `grain mcpserver` takes `-self-debug` (and
-`-grain-src-dir`), and a `Framework` passes both to the subprocess it
-forks exactly when `agent.RunConfig.SelfDebug` says this task holds the
-grant — `RunDispatch` reads that off the task's own `Grants`, and
-`agent.SelfDebugArgs` is the one translation from "what this run may do"
-to "what that process is told", shared by all three frameworks the way
-`RunDeadlineArgs` already is. What the flag turns on is two halves of one
-question. `selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`
+`self-debug` and `bootstrap-playbooks` are the halves that no longer
+depend on any of that, because everything they offer is read-only and so
+needs no route back into a live run's own conversation. `grain mcpserver`
+takes `-grant <name>`, once per grant, and a `Framework` passes one pair
+for each grant on the run's own task — `RunDispatch` reads them off the
+task's `Grants` into `agent.RunConfig.Grants`, and `agent.GrantArgs` is
+the one translation from "what this run may do" to "what that process is
+told", shared by all three frameworks the way `RunDeadlineArgs` already
+is. A repeated name rather than a flag per capability deliberately: which
+tools a name turns on is `mcpserver`'s business alone, so a fourth
+capability wanting this treatment is a name at either end and no new flag,
+no new field and no framework change in between.
+
+`-grant bootstrap-playbooks` is the simpler of the two: `bootstrap.
+PlaybookTools`' `list_bootstrap_playbooks` and `read_bootstrap_playbook`
+read markdown runbooks embedded in the grain binary itself, so the
+subprocess is already holding everything they serve and needs no hop of
+any kind. That matters because `ui.configurationPrompt` has told the
+configuration agent to reach for both tools since bwsalmon/agents#620,
+while `Config.GrantTools` was the only thing assembling them — the prompt
+named a tool that was on no run's roster.
+
+`-grant self-debug` turns on two halves of one question. `selfdebug.SourceTools`' `read_grain_source`/`list_grain_source`
 answer what grain is *built* to do. `mcp.NewTaskTools`'
 `list_grain_tasks`, `read_grain_task`, `read_grain_task_prompt` and
 `read_grain_task_transcript` answer what this deployment actually *did*:
@@ -1572,9 +1585,12 @@ it already did under `agent/claude`.
 `RunConfig.Tools` has no consumer any more. It was read only by the
 in-process runtime, and a forked CLI cannot be handed an in-process
 registry. `orchestrator.Config.GrantTools` still assembles
-`selfrepair.HostCommandTools` and `selfdebug.SourceTools`, and
-`RunDispatch` still passes them, but nothing consumes them -- so an
-Interactive task's `run_host_command` confirmation prompt
+`selfrepair.HostCommandTools`, `selfdebug.SourceTools` and
+`bootstrap.PlaybookTools`, and `RunDispatch` still passes them, but
+nothing consumes them -- the two read-only sets reach a run by
+`mcpserver`'s own `-grant` instead ("configuration mode", above), and
+`selfrepair` is what is left, so an Interactive task's
+`run_host_command` confirmation prompt
 (`selfrepair.Confirm`, which blocks on `Store.Comments` from inside a
 tool call) is not reachable by a running agent today. Closing that gap
 means giving the `mcpserver` subcommand a route back to the store, which

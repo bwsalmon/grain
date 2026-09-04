@@ -88,6 +88,7 @@ import (
 	"time"
 
 	"github.com/bwsalmon/grain/pkg/agent"
+	"github.com/bwsalmon/grain/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/pkg/mcp"
 	"github.com/bwsalmon/grain/pkg/procgroup"
@@ -321,7 +322,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 
 // publishedTools names the exact tools NewSandboxTools, NewMockTools,
 // NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
-// and NewTaskTools register, plus selfdebug.SourceTools' -- bare, as the
+// and NewTaskTools register, plus selfdebug.SourceTools' and
+// bootstrap.PlaybookTools' -- bare, as the
 // "mcpserver" subcommand registers them. Computed from those
 // constructors directly rather than hand-copied, so this can never drift
 // from what that subcommand actually advertises the way v1's
@@ -362,14 +364,17 @@ func publishedTools() []string {
 	for _, t := range mcp.NewRecreateSandboxTools(nil) {
 		names = append(names, t.Name)
 	}
-	// The self-debug capability's own tools, named on the same terms
-	// again: mcpserver registers them only for a run whose task holds
-	// that grant (-self-debug). "" is a source directory and nil a
-	// TaskReader no run ever gets -- this only wants the names.
+	// The capability grants' own tools, named on the same terms again:
+	// mcpserver registers each set only for a run whose task holds that
+	// grant (-grant). "" is a source directory and nil a TaskReader no
+	// run ever gets -- this only wants the names.
 	for _, t := range selfdebug.SourceTools("") {
 		names = append(names, t.Name)
 	}
 	for _, t := range mcp.NewTaskTools(nil) {
+		names = append(names, t.Name)
+	}
+	for _, t := range bootstrap.PlaybookTools() {
 		names = append(names, t.Name)
 	}
 	return names
@@ -398,10 +403,11 @@ func eagerToolNames() []string {
 // pullRequestArgs and grainServerArgs are appended to either, since
 // which repo's CI a run may read, and whether it may ask grain to open
 // its pull request, are both independent of which backend its sandbox
-// runs on. So is agent.SelfDebugArgs, which passes on whether this
-// task holds the self-debug grant -- and so whether that server serves
-// the read-only tools for grain's own source and grain's own task
-// records.
+// runs on. So is agent.GrantArgs, which passes on the tool-granting
+// capabilities this run's task holds -- and so whether that server
+// serves the read-only tools for grain's own source and task records
+// (self-debug) or for grain's own bootstrap playbooks
+// (bootstrap-playbooks).
 //
 // So is agent.RunDeadlineArgs, which is why ctx is here at all: the
 // deadline on the ctx this run was given is what grain will cancel it
@@ -434,7 +440,7 @@ func (f *Framework) mcpServerArgs(ctx context.Context, cfg agent.RunConfig) ([]s
 	}
 	args = append(args, f.pullRequestArgs(cfg)...)
 	args = append(args, f.grainServerArgs(cfg)...)
-	args = append(args, agent.SelfDebugArgs(cfg)...)
+	args = append(args, agent.GrantArgs(cfg)...)
 	return append(args, agent.RunDeadlineArgs(ctx)...), nil
 }
 

@@ -502,17 +502,18 @@ func TestRunWritesMCPConfigPointingAtTheServerBinaryAndSandboxRoot(t *testing.T)
 	}
 }
 
-// Eighteen now: the four sandbox tools, the four escape hatches,
+// Twenty now: the four sandbox tools, the four escape hatches,
 // pull_request_status, wait_for_checks, open_pull_request,
 // recreate_sandbox, the self-debug capability's two source tools and its
-// four task tools. Everything past the eighth is named here for every
-// run even though only a run whose mcpserver was given the flags for
-// them actually gets them, since --allowedTools filters what the server
-// advertises rather than adding to it (allowedTools' own comment).
+// four task tools, and the bootstrap-playbooks capability's two.
+// Everything past the eighth is named here for every run even though
+// only a run whose mcpserver was given the flags for them actually gets
+// them, since --allowedTools filters what the server advertises rather
+// than adding to it (allowedTools' own comment).
 func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	names := allowedTools()
-	if len(names) != 18 {
-		t.Fatalf("allowedTools() = %v, want 18 entries", names)
+	if len(names) != 20 {
+		t.Fatalf("allowedTools() = %v, want 20 entries", names)
 	}
 	for _, n := range names {
 		if !strings.HasPrefix(n, "mcp__grain-sandbox__") {
@@ -524,7 +525,8 @@ func TestAllowedToolsNamesEveryGrainSandboxTool(t *testing.T) {
 	// on its first call to it.
 	for _, tool := range []string{"pull_request_status", "wait_for_checks", "open_pull_request", "recreate_sandbox",
 		"read_grain_source", "list_grain_source",
-		"list_grain_tasks", "read_grain_task", "read_grain_task_prompt", "read_grain_task_transcript"} {
+		"list_grain_tasks", "read_grain_task", "read_grain_task_prompt", "read_grain_task_transcript",
+		"list_bootstrap_playbooks", "read_bootstrap_playbook"} {
 		if !slices.Contains(names, mcp.QualifiedToolName(tool)) {
 			t.Errorf("allowedTools() = %v, want %s admitted", names, tool)
 		}
@@ -578,30 +580,34 @@ func TestRunOmitsTheGrainServerWhenEitherHalfIsMissing(t *testing.T) {
 	}
 }
 
-// The self-debug grant travels to the forked mcpserver as its own
-// flags, since that process is where the capability's tools are actually
-// served from -- a Framework driving a CLI can hand it nothing else.
-func TestRunPassesTheSelfDebugFlagsToTheMCPServer(t *testing.T) {
+// A task's tool-granting capabilities travel to the forked mcpserver as
+// its own arguments, since that process is where those tools are
+// actually served from -- a Framework driving a CLI can hand it nothing
+// else. Every grant the run holds, not just the first: the configuration
+// agent holds both of these at once.
+func TestRunPassesTheGrantsToTheMCPServer(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
 	f := newFramework(fake, "/path/to/grain")
 
 	if _, err := f.Run(context.Background(), agent.RunConfig{
 		Prompt: "go", SandboxRoot: t.TempDir(),
-		SelfDebug: true, GrainSourceDir: "/usr/local/share/grain/src",
+		Grants:         []string{"self-debug", "bootstrap-playbooks"},
+		GrainSourceDir: "/usr/local/share/grain/src",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	args := mcpConfigArgs(t, fake.gotMCPConfig)
-	if !slices.Contains(args, "-self-debug") ||
+	if !argsHave(args, "-grant", "self-debug") ||
+		!argsHave(args, "-grant", "bootstrap-playbooks") ||
 		!argsHave(args, "-grain-src-dir", "/usr/local/share/grain/src") {
-		t.Errorf("mcpserver args = %v, want -self-debug and -grain-src-dir among them", args)
+		t.Errorf("mcpserver args = %v, want both -grant pairs and -grain-src-dir among them", args)
 	}
 }
 
-// A task without the grant gets a roster with nothing of grain's own
+// A task without a grant gets a roster with nothing of grain's own
 // insides in it, whatever the deployment happens to know about where its
 // source lives.
-func TestRunOmitsTheSelfDebugFlagsWithoutTheGrant(t *testing.T) {
+func TestRunOmitsTheGrantsWithoutOne(t *testing.T) {
 	fake := &fakeRunner{stdout: streamJSONLine(t, map[string]any{"type": "result", "result": "ok"})}
 	f := newFramework(fake, "/path/to/grain")
 
@@ -611,8 +617,8 @@ func TestRunOmitsTheSelfDebugFlagsWithoutTheGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := mcpConfigArgs(t, fake.gotMCPConfig)
-	if slices.Contains(args, "-self-debug") || slices.Contains(args, "-grain-src-dir") {
-		t.Errorf("mcpserver args = %v, want neither -self-debug nor -grain-src-dir", args)
+	if slices.Contains(args, "-grant") || slices.Contains(args, "-grain-src-dir") {
+		t.Errorf("mcpserver args = %v, want neither -grant nor -grain-src-dir", args)
 	}
 }
 

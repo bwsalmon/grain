@@ -10,10 +10,21 @@
 // Like selfdebug, it mints nothing and writes no Placement -- Resolve,
 // Materialize, PromptSection and Revoke are all model.BaseCapability's
 // defaults -- because what it grants is not material moved into a
-// sandbox, it is tools (PlaybookTools below) that orchestrator's own
-// dispatch adds straight to a run's tool set once it sees this
-// capability granted on an Interactive task (orchestrator/cycle.go's
-// runOne). A playbook only ever describes commands; it never runs one
+// sandbox, it is tools (PlaybookTools below).
+//
+// How they reach a run is `grain mcpserver -grant bootstrap-playbooks`,
+// passed by a Framework only for a task holding this grant
+// (agent.RunConfig.Grants, agent.GrantArgs) -- the same road self-debug
+// takes, and an even shorter one, since the playbooks are embedded in
+// the grain binary that subprocess already is: no daemon to ask, no
+// directory to be given, nothing but the name of the grant.
+// orchestrator.Config.GrantTools also adds PlaybookTools straight to a
+// run's in-process tool set for an Interactive task
+// (orchestrator/cycle.go's runOne), which is where this started and
+// which no CLI-driving Framework can consume -- the flag is what
+// actually gets these tools to an agent.
+//
+// A playbook only ever describes commands; it never runs one
 // itself -- every command it tells the agent to run still goes through
 // the self-repair grant's own run_host_command tool, which is what
 // actually touches the host, gated on a human's live approval in the

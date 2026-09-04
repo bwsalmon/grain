@@ -46,20 +46,33 @@
 // clean one, and carry on in the turns it has left instead of failing
 // every remaining call in a sandbox it cannot repair from inside.
 //
-// -self-debug adds the self-debug capability's own read-only tools, for
-// a run whose task holds that grant. Two halves: read_grain_source and
-// list_grain_source read the checkout -grain-src-dir names
-// (pkg/capability/selfdebug), and list_grain_tasks, read_grain_task,
-// read_grain_task_prompt and read_grain_task_transcript read grain's
-// *other* tasks -- their prompts, their sessions, and the errors their
-// attempts recorded (pkg/mcp's task_tools.go). The second half reads
-// them through -server, the same daemonTasks-over-REST hop
+// -grant names a capability grant this run's task holds, once per grant,
+// and is how a grant whose whole effect is which tools a run gets
+// reaches a run at all. Until it existed those tools were assembled by
+// orchestrator.Config.GrantTools and consumed by nobody: every framework
+// that remains forks a CLI and ignores agent.RunConfig.Tools, so a
+// capability granted tools no running agent could call.
+//
+// -grant self-debug adds that capability's own read-only tools, in two
+// halves: read_grain_source and list_grain_source read the checkout
+// -grain-src-dir names (pkg/capability/selfdebug), and list_grain_tasks,
+// read_grain_task, read_grain_task_prompt and read_grain_task_transcript
+// read grain's *other* tasks -- their prompts, their sessions, and the
+// errors their attempts recorded (pkg/mcp's task_tools.go). The second
+// half reads them through -server, the same daemonTasks-over-REST hop
 // open_pull_request already takes, since this process holds no store
-// handle and deliberately gains none. Until this flag existed both
-// halves were assembled by orchestrator.Config.GrantTools and consumed
-// by nobody: every framework that remains forks a CLI and ignores
-// agent.RunConfig.Tools, so the capability granted tools no running
-// agent could call.
+// handle and deliberately gains none.
+//
+// -grant bootstrap-playbooks adds list_bootstrap_playbooks and
+// read_bootstrap_playbook, the runbooks for grain's own setup flows
+// (pkg/capability/bootstrap). It needs no hop of any kind: the playbooks
+// are markdown embedded in this very binary, so this process is already
+// holding everything the tools read.
+//
+// Both are read-only, which is why both can be served from here at all.
+// pkg/capability/selfrepair cannot follow: its one tool blocks on a
+// human's reply in the task's own chat, which needs the store handle
+// this process deliberately does not have.
 //
 // -run-deadline is the moment grain will cancel the run this process
 // serves. It adds no tool: it makes every tool result carry how much
@@ -85,8 +98,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
+	"github.com/bwsalmon/grain/pkg/capability/bootstrap"
 	"github.com/bwsalmon/grain/pkg/capability/selfdebug"
 	"github.com/bwsalmon/grain/pkg/github"
 	"github.com/bwsalmon/grain/pkg/gitproxy"
@@ -260,6 +276,81 @@ func (d daemonSandbox) RecreateSandbox(ctx context.Context) (mcp.SandboxRecreati
 	}, nil
 }
 
+// grantNames collects the repeated -grant flag: the capability grants
+// this run's task holds, in the order a Framework wrote them
+// (agent.GrantArgs). A flag.Value rather than one comma-separated
+// string because a grant name is a name, and a list of them reads
+// plainly in the arguments of a process an operator is looking at in ps.
+type grantNames []string
+
+func (g *grantNames) String() string { return strings.Join(*g, " ") }
+
+func (g *grantNames) Set(value string) error {
+	if value == "" {
+		return fmt.Errorf("a grant name cannot be empty")
+	}
+	*g = append(*g, value)
+	return nil
+}
+
+// has reports whether the run holds the named grant, and is the whole of
+// how a grant decides this process's tool roster.
+func (g grantNames) has(name string) bool { return slices.Contains(g, name) }
+
+// servedGrants are the grants this process knows how to serve tools for.
+// A name outside it is a warning on stderr and no more, in the spirit of
+// every other degraded mode here: an unrecognized grant means one tool
+// set is missing, not that the run should lose the sandbox tools it
+// touches every file through. The daemon's own subprocess plumbing
+// carries the line to an operator, and the likeliest cause is a
+// deployment mid-upgrade, whose daemon knows a grant name the binary it
+// forked does not.
+var servedGrants = []string{selfdebug.CapabilityName, bootstrap.CapabilityName}
+
+func warnUnknownGrants(grants grantNames) {
+	for _, name := range grants {
+		if !slices.Contains(servedGrants, name) {
+			fmt.Fprintf(os.Stderr,
+				"grain mcpserver: -grant %q names no capability this binary serves tools for "+
+					"(known: %s); this run gets no tools from it\n",
+				name, strings.Join(servedGrants, ", "))
+		}
+	}
+}
+
+// grantedTools is every tool the grants this run holds are worth, and
+// the only ones here that depend on which *task* the run belongs to
+// rather than only on which sandbox. A run gets each set exactly when a
+// human attached that grant to its task, which is what -grant says (see
+// that flag, and agent.RunConfig.Grants for how a Framework learns it).
+// Everything either set exposes is read-only, so there is no
+// confirmation step, matching pkg/capability/selfdebug and
+// pkg/capability/bootstrap and unlike pkg/capability/selfrepair.
+//
+// self-debug's source and task tools come as a pair, because they are
+// one question asked two ways: the source says what grain is built to
+// do, and the task records say what this deployment actually did. Either
+// half can be unavailable without the other disappearing -- a deployment
+// with no source checkout (srcDir ""), or an mcpserver with no daemon to
+// ask (tasks nil) -- and each tool then says so on the call rather than
+// being absent from the roster (mcp.NewTaskTools' and
+// selfdebug.SourceTools' own doc comments).
+//
+// bootstrap-playbooks has no such half to be missing: its playbooks are
+// markdown embedded in this binary, so its tools read what this process
+// is already holding and depend on no flag but the grant itself.
+func grantedTools(grants grantNames, srcDir string, tasks mcp.TaskReader) []mcp.Tool {
+	var tools []mcp.Tool
+	if grants.has(selfdebug.CapabilityName) {
+		tools = append(tools, selfdebug.SourceTools(srcDir)...)
+		tools = append(tools, mcp.NewTaskTools(tasks)...)
+	}
+	if grants.has(bootstrap.CapabilityName) {
+		tools = append(tools, bootstrap.PlaybookTools()...)
+	}
+	return tools
+}
+
 func mcpserver(args []string) {
 	fs := flag.NewFlagSet("grain mcpserver", flag.ExitOnError)
 	root := fs.String("sandbox-root", "",
@@ -296,16 +387,20 @@ func mcpserver(args []string) {
 	taskID := fs.String("task", "",
 		"id of the task this server's run belongs to (required with -server)")
 
-	selfDebug := fs.Bool("self-debug", false,
-		"serve the self-debug capability's own read-only tools: read_grain_source/list_grain_source "+
-			"over -grain-src-dir, and list_grain_tasks/read_grain_task/read_grain_task_prompt/"+
-			"read_grain_task_transcript over the daemon named by -server. Passed by a Framework only "+
-			"for a run whose task holds the self-debug grant (agent.RunConfig.SelfDebug).")
+	var grants grantNames
+	fs.Var(&grants, "grant",
+		"name of a capability grant this run's task holds, whose tools this server should serve; "+
+			"repeat the flag for each. \"self-debug\" serves read_grain_source/list_grain_source over "+
+			"-grain-src-dir and list_grain_tasks/read_grain_task/read_grain_task_prompt/"+
+			"read_grain_task_transcript over the daemon named by -server; \"bootstrap-playbooks\" "+
+			"serves list_bootstrap_playbooks/read_bootstrap_playbook off the playbooks embedded in "+
+			"this binary. Passed by a Framework from the grants on the run's own task "+
+			"(agent.RunConfig.Grants, agent.GrantArgs).")
 	grainSrcDir := fs.String("grain-src-dir", "",
 		"directory holding grain's own source for read_grain_source/list_grain_source to read, "+
 			"read-only (cmd/grain/daemon.go's sourceDir: the copy baked into the deployment image, "+
-			"or -upgrade-src-dir's checkout). Only used with -self-debug; unset, both tools answer "+
-			"that this deployment has no source checkout to read.")
+			"or -upgrade-src-dir's checkout). Only used with -grant self-debug; unset, both tools "+
+			"answer that this deployment has no source checkout to read.")
 
 	runDeadline := fs.String("run-deadline", "",
 		"RFC3339 time at which grain cancels the run this server serves -- the deadline on "+
@@ -315,6 +410,7 @@ func mcpserver(args []string) {
 			"mcp.RunDeadlineNoticeWindow of it; unset, results read exactly as they "+
 			"otherwise would.")
 	fs.Parse(args)
+	warnUnknownGrants(grants)
 
 	var tools []mcp.Tool
 	switch {
@@ -373,32 +469,11 @@ func mcpserver(args []string) {
 			daemonSandbox{client: client, taskID: *taskID})...)
 	}
 
-	// The self-debug capability's own tools, and the only ones here that
-	// depend on which *task* this run belongs to rather than only on
-	// which sandbox: a run gets them exactly when a human attached the
-	// self-debug grant to its task, which is what -self-debug says (see
-	// that flag, and agent.RunConfig.SelfDebug for how a Framework
-	// learns it). Everything they expose is read-only -- grain's own
-	// source, and the records of grain's own tasks -- so there is no
-	// confirmation step, matching pkg/capability/selfdebug and unlike
-	// pkg/capability/selfrepair.
-	//
-	// Registered together, source and tasks, because they are one
-	// question asked two ways: the source says what grain is built to
-	// do, and the task records say what this deployment actually did.
-	// Either half can be unavailable without the other disappearing -- a
-	// deployment with no source checkout, or an mcpserver with no daemon
-	// to ask -- and each tool then says so on the call rather than being
-	// absent from the roster (mcp.NewTaskTools' and selfdebug.SourceTools'
-	// own doc comments).
-	if *selfDebug {
-		registry.Register(selfdebug.SourceTools(*grainSrcDir)...)
-		var tasks mcp.TaskReader
-		if client != nil {
-			tasks = daemonTasks{client: client}
-		}
-		registry.Register(mcp.NewTaskTools(tasks)...)
+	var tasks mcp.TaskReader
+	if client != nil {
+		tasks = daemonTasks{client: client}
 	}
+	registry.Register(grantedTools(grants, *grainSrcDir, tasks)...)
 
 	// Serve returns io.EOF once its caller closes the write end of our
 	// stdin -- the ordinary way a client signals "done", not a failure.

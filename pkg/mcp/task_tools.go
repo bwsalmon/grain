@@ -24,8 +24,8 @@ package mcp
 // and not a credential.
 //
 // They are registered only for a run whose task holds the self-debug
-// grant (mcpserver's own -self-debug, passed by a Framework only when
-// agent.RunConfig.SelfDebug says so). Everything they expose is
+// grant (mcpserver's own -grant self-debug, passed by a Framework only
+// for a task naming it in agent.RunConfig.Grants). Everything they expose is
 // everything anyone with the UI open can already read, so the gate is
 // the grant a human attached rather than a confirmation per call --
 // exactly the line pkg/capability/selfdebug draws for source reading,
@@ -127,8 +127,8 @@ type TaskReader interface {
 // sentence saying why -- what lets each agent framework's allowedTools
 // enumerate the names this package registers without holding a live
 // reader, exactly as NewPullRequestTools and NewRecreateSandboxTools
-// already do, and what a `grain mcpserver` given -self-debug but no
-// -server (no daemon to ask) serves.
+// already do, and what a `grain mcpserver` given -grant self-debug but
+// no -server (no daemon to ask) serves.
 func NewTaskTools(reader TaskReader) []Tool {
 	return []Tool{
 		listTasksTool(reader),
