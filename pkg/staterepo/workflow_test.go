@@ -397,6 +397,133 @@ func TestAWorkflowPushThatFailsForSomeOtherReasonStrandsNothing(t *testing.T) {
 	}
 }
 
+// The refusal read back out of the repository, which is what the State
+// pane says it with. Until this existed the only trace of it was a line
+// in the journal: a deployment with no CI step on its own state looked,
+// from anywhere an operator was likely to look, exactly like one whose
+// check runs -- syncing happily, nothing in error, because none of that
+// is untrue. The condition has to outlive the log line that reported it,
+// and it has to stop being reported the moment somebody installs the
+// file by hand, which is the fix the pane sends them off to make.
+func TestARefusedWorkflowIsReadableAfterTheJournalLineHasScrolledPast(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	remote := bareRemote(t)
+	refuseWorkflows(t, remote)
+	clock := now
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{
+		Dir: dir, Remote: remote, Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if _, refused := repo.WorkflowRefusedAt(ctx); refused {
+		t.Fatal("a repository nothing has been pushed to yet reports a refusal")
+	}
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading against a remote that refuses workflows: %v", err)
+	}
+
+	at, refused := repo.WorkflowRefusedAt(ctx)
+	if !refused {
+		t.Fatal("a deployment that could not install the check has no way to say so")
+	}
+	if !at.Equal(now) {
+		t.Errorf("refused at %s, want %s", at, now)
+	}
+
+	// The operator does what the pane tells them to: writes the file in a
+	// clone of their own -- `grain state ci` -- and commits it with a
+	// credential that may. The deployment pulls it down, and stops saying
+	// the check is missing.
+	allowWorkflows(t, remote)
+	work := filepath.Join(t.TempDir(), "clone")
+	git(t, "", "clone", "--quiet", remote, work)
+	if _, err := staterepo.EnsureWorkflow(work, staterepo.DefaultCheckImage, false); err != nil {
+		t.Fatalf("writing the workflow by hand: %v", err)
+	}
+	git(t, work, "add", "--all", ".")
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-m", "Install the check by hand")
+	git(t, work, "push", "--quiet", "origin", "main")
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying the merge: %v", err)
+	}
+	if _, refused := repo.WorkflowRefusedAt(ctx); refused {
+		t.Error("the pane still says the check is missing after somebody installed it")
+	}
+
+	// And the refusal is forgotten rather than merely hidden by the file
+	// on top of it. A merge drops the workflow again, within the day grain
+	// would have waited out after that first refusal; the credential can
+	// write workflows now, and grain has to offer it again on this tick
+	// rather than sit out a retry interval belonging to a refusal the
+	// repository has already got past.
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing once the check was installed: %v", err)
+	}
+	git(t, work, "pull", "--quiet")
+	git(t, work, "rm", "--quiet", staterepo.WorkflowFile)
+	git(t, work, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-m", "Drop the workflow")
+	git(t, work, "push", "--quiet", "origin", "main")
+	if _, err := staterepo.Apply(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("applying the merge that dropped it: %v", err)
+	}
+	if err := store.PutTask(ctx, task("c3d4")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after the merge that dropped it: %v", err)
+	}
+	if !strings.Contains(remoteWorkflow(t, remote), "state check /state") {
+		t.Error("grain waited out the old refusal's retry interval before putting the check back")
+	}
+}
+
+// Two deployments with nothing to report: the ones that were never
+// offering the workflow in the first place. A local-only repository has
+// no GitHub to run a check, and an operator who set noWorkflow has said
+// they do not want one -- a pane telling either of them their CI step is
+// missing would be reporting the setting back to the person who chose
+// it.
+func TestNoRefusalIsReportedWhereNoWorkflowWasEverOffered(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		remote bool
+		cfg    staterepo.Config
+	}{
+		{name: "the operator turned it off", remote: true, cfg: staterepo.Config{NoWorkflow: true}},
+		{name: "local-only, with no remote at all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, db := openDB(t)
+			if err := store.PutTask(ctx, task("a1b2")); err != nil {
+				t.Fatalf("putting: %v", err)
+			}
+			cfg := tc.cfg
+			cfg.Dir = filepath.Join(t.TempDir(), "state")
+			if tc.remote {
+				cfg.Remote = bareRemote(t)
+				refuseWorkflows(t, cfg.Remote)
+			}
+			repo, err := staterepo.Open(ctx, cfg)
+			if err != nil {
+				t.Fatalf("opening: %v", err)
+			}
+			if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+				t.Fatalf("loading: %v", err)
+			}
+			if _, refused := repo.WorkflowRefusedAt(ctx); refused {
+				t.Error("a deployment that never wanted a workflow reports one as refused")
+			}
+		})
+	}
+}
+
 func head(t *testing.T, dir string) string {
 	t.Helper()
 	return strings.TrimSpace(git(t, dir, "rev-parse", "HEAD"))

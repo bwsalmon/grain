@@ -322,6 +322,14 @@ func (r *Repo) installWorkflow(ctx context.Context) (bool, error) {
 	path := filepath.Join(r.cfg.Dir, filepath.FromSlash(WorkflowFile))
 	switch _, err := os.Stat(path); {
 	case err == nil:
+		// The file is here -- grain wrote it, somebody ran `grain state
+		// ci` and committed it, or a merge brought it in -- so a refusal
+		// recorded earlier is a refusal that has been dealt with, and the
+		// marker goes. It is what WorkflowRefusedAt answers the State pane
+		// out of, and a pane that went on saying the check is missing
+		// after somebody installed it by hand would be telling an operator
+		// their own fix did not work.
+		r.clearWorkflowRefused(ctx)
 		return false, nil
 	case !os.IsNotExist(err):
 		return false, fmt.Errorf("staterepo: looking for %s in %s: %w", WorkflowFile, r.cfg.Dir, err)
@@ -449,21 +457,69 @@ func workflowRefused(err error) bool {
 	return strings.Contains(msg, "refusing to allow") && strings.Contains(msg, "workflow")
 }
 
+// WorkflowRefusedAt reports whether this deployment is running without
+// the CI step because its credential was refused it, and when it was
+// last refused.
+//
+// This is the journal line above read back out, for the State pane. A
+// deployment that cannot install the check looks, from that pane,
+// exactly like one whose check runs on every pull request: it is syncing
+// happily, its remote is up to date, nothing is in error -- because none
+// of that is untrue, and the refusal is deliberately not an error, since
+// a deployment must not stop syncing over a file worth one CI step. So
+// the one place the fact appears is a line in the journal, seen by
+// whoever was reading it that minute, and "the check is missing" is
+// exactly the sort of thing nobody notices until a change that would not
+// load is merged -- which is the failure the check exists to prevent.
+//
+// False whenever there is nothing to say, which is every ordinary
+// deployment: one not offering the workflow at all (no remote, or
+// noWorkflow set), one whose repository has the file -- installWorkflow
+// clears the marker as soon as it sees one, however it arrived -- and
+// one that has never been refused.
+//
+// The zero time with true is a marker grain wrote and cannot now read.
+// The refusal it records still happened, so it is still reported; only
+// the date is unknown, and the next sync's attempt writes a fresh one
+// either way.
+func (r *Repo) WorkflowRefusedAt(ctx context.Context) (time.Time, bool) {
+	if r.cfg.NoWorkflow || r.cfg.Remote == "" {
+		return time.Time{}, false
+	}
+	if _, err := os.Stat(filepath.Join(r.cfg.Dir, filepath.FromSlash(WorkflowFile))); err == nil {
+		return time.Time{}, false
+	}
+	return r.readWorkflowRefused(ctx)
+}
+
+// readWorkflowRefused reads the marker: when this host's credential was
+// last refused the workflow, and whether there is a marker at all. It
+// answers about the marker alone -- WorkflowRefusedAt is the question an
+// operator is actually asking, and adds the conditions under which a
+// marker means nothing any more.
+func (r *Repo) readWorkflowRefused(ctx context.Context) (time.Time, bool) {
+	path, err := r.gitDirFile(ctx, workflowRefusedFile)
+	if err != nil {
+		return time.Time{}, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		return time.Time{}, true
+	}
+	return at, true
+}
+
 // workflowDue reports whether grain should offer the workflow to this
 // host's credential now. A marker that is missing, empty or unreadable
 // means yes: the cost of trying is one commit that is undone again, and
 // the cost of not trying is a repository with no CI step forever.
 func (r *Repo) workflowDue(ctx context.Context, now time.Time) bool {
-	path, err := r.gitDirFile(ctx, workflowRefusedFile)
-	if err != nil {
-		return true
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return true
-	}
-	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
-	if err != nil {
+	at, refused := r.readWorkflowRefused(ctx)
+	if !refused || at.IsZero() {
 		return true
 	}
 	return !now.Before(at.Add(workflowRetryInterval))
@@ -478,4 +534,19 @@ func (r *Repo) recordWorkflowRefused(ctx context.Context, at time.Time) error {
 		return fmt.Errorf("staterepo: writing %s: %w", path, err)
 	}
 	return nil
+}
+
+// clearWorkflowRefused forgets a refusal the repository has outgrown.
+//
+// Best effort, and deliberately silent: the marker is a note to this
+// host about a file that is now in the tree, and a sync that failed
+// outright because it could not delete one would be a deployment that
+// stopped exporting over bookkeeping. What a marker left behind costs is
+// one stale sentence in the State pane until the next sync tries again.
+func (r *Repo) clearWorkflowRefused(ctx context.Context) {
+	path, err := r.gitDirFile(ctx, workflowRefusedFile)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(path)
 }
