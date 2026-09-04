@@ -37,10 +37,10 @@ import (
 // which is what decides whether its prompt even carried the
 // push/check/repair paragraph, and so who belongs in the denominator of
 // any measurement of that loop -- or whether the merge queue later had to
-// file a fix task for it, which is the recorded form of "a red build was
-// left behind" (Link, LinkFixTask). Both are derived, not stored: one
-// reads a column the task already has, the other an EXISTS over
-// task_link.
+// repair it, which is the recorded form of "a red build was left behind"
+// (Observation.MergeQueueRepairAt, or the older LinkFixTask). Both are
+// derived, not stored: one reads a column the task already has, the other
+// an observation column or an EXISTS over task_link.
 type TaskTiming struct {
 	TaskID      string
 	Reason      OriginReason
@@ -50,11 +50,17 @@ type TaskTiming struct {
 	ClosedAt    *time.Time
 	// Targeted is whether the task named a repo to push to (Task.Target).
 	Targeted bool
-	// FixTaskFiled is whether the merge queue filed a fix task for this
-	// task -- a LinkFixTask on it (orchestrator/sync.go's fileFixTask).
+	// FixTaskFiled is whether the merge queue ever had to repair this
+	// task's branch -- Observation.MergeQueueRepairAt, the repair run it
+	// asks the task itself for, or the LinkFixTask a database written
+	// before that change records for the separate fix task the queue used
+	// to file. Either spelling is the same fact, and both are counted so
+	// that a report spanning the change does not show the rate falling to
+	// zero on the day the recording moved.
+	//
 	// It is a fact about the task rather than about any one of its
-	// attempts: the link records that a red build outlived the run that
-	// pushed it, not which attempt pushed it.
+	// attempts: it records that a red build outlived the run that pushed
+	// it, not which attempt pushed it.
 	FixTaskFiled bool
 }
 
@@ -112,8 +118,8 @@ func (s *Store) TaskTimings(ctx context.Context) ([]TaskTiming, error) {
 			// query gives: a task may carry several links and a join would
 			// return the task once per link, multiplying every other row
 			// here by something that has nothing to do with it.
-			"EXISTS (SELECT 1 FROM `task_link` AS `l` "+
-			"WHERE `l`.`task_id` = `t`.`id` AND `l`.`kind` = ?) "+
+			"(`o`.`merge_queue_repair_at` IS NOT NULL OR EXISTS (SELECT 1 FROM `task_link` AS `l` "+
+			"WHERE `l`.`task_id` = `t`.`id` AND `l`.`kind` = ?)) "+
 			"FROM `task` AS `t` "+
 			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `t`.`id` "+
 			"ORDER BY `t`.`id`", []any{string(LinkFixTask)},

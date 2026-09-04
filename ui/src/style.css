@@ -203,8 +203,14 @@ body {
 
 main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 
+/* Wraps because the task list's toolbar is now search, sort and one
+   Select per task attribute worth narrowing by (TaskList.jsx's FILTERS),
+   which on a wide deployment is more than fits a narrow window in one
+   row. The other list pages carry two controls at most, so they never
+   reach a second row and look no different for it. */
 .task-list-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
   padding: 1rem 1.75rem 0;
@@ -399,6 +405,16 @@ main { flex: 1; min-width: 0; padding: 0 0 2.5rem; overflow-y: auto; }
 @media (prefers-reduced-motion: reduce) {
   .grain-mark-sheet { animation: none; }
 }
+
+/* A run that is the merge queue repairing a task's own pull request
+   branch rather than writing the change (StateDot's own `repairing`,
+   ui.Task.Repairing). The sheet is an alpha mask, so the whole
+   difference is one `background`: the same mark, moving the same way, in
+   state-completed's green instead of the accent's gold -- because a row
+   that has gone back to running has not gone back to the beginning, it
+   is a finished change being unstuck, and the two should not look alike
+   at a glance. */
+.grain-mark-sheet.grain-mark-repair { background: var(--state-completed); }
 
 /* .badge-mark is for a "running" badge showing a task's live status
    (bwsalmon/agents#586): StateDot renders the grain mark's animated

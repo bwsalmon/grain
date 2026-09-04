@@ -216,9 +216,11 @@ func Apply(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) 
 //   - no dump at all: seed the repository from the database. A brand new
 //     install, or a running grain pointed at a fresh empty repository.
 //   - no marker: this working tree was cloned onto a host that has never
-//     loaded it. Import -- which is what makes "clone the repository onto
-//     a new machine" a complete restore.
-//   - HEAD is not the commit we recorded: something arrived. Import.
+//     loaded it. Import all of it -- which is what makes "clone the
+//     repository onto a new machine" a complete restore.
+//   - HEAD is not the commit we recorded: something arrived. Import the
+//     settings out of it, exactly as Apply does on a tick, and leave the
+//     database's own record of what grain did alone.
 //   - otherwise: the repository is exactly where we left it, so the
 //     database is authoritative and nothing is imported. The next sync
 //     exports whatever has happened since.
@@ -290,45 +292,52 @@ func Load(ctx context.Context, r *Repo, db *sql.DB, version int) error {
 	if marker != "" && marker == head {
 		return unreachable
 	}
-	// Which tables the import replaces depends on which of three cases
-	// this is, and the markers are what tell them apart.
+	// Which tables the import replaces depends on which of two cases this
+	// is, and the marker is what tells them apart.
 	//
-	// No marker at all is a working tree this host has never loaded --
-	// a clone onto a new machine, the restore case -- and there the
-	// repository is the only copy of anything, so all of it is imported.
+	// No marker at all is a working tree this host has never loaded -- a
+	// clone onto a new machine, the restore case -- and there the
+	// repository is the only copy of anything, so all of it is imported,
+	// churn included. That case is what makes a clone a whole deployment
+	// rather than a settings file, and nothing below applies to it: there
+	// is no database ahead of the dump to protect.
 	//
-	// A HEAD that RecoverDiverged put there is the opposite extreme. The
-	// working tree was reset onto the remote's branch over local export
-	// commits that could not be pushed, so the dump under it is older
-	// than this database by everything those commits held: importing the
-	// state tier would delete every task, comment, branch and release
-	// written since the pushes started failing. Only the settings are
-	// taken, exactly as Apply takes them on a tick, and the export that
-	// follows writes grain's own record back out on top of the merge.
+	// A marker that disagrees with HEAD is a repository that moved under a
+	// host that already has a database -- a merged pull request, or a
+	// working tree RecoverDiverged reset onto the remote's branch -- and
+	// there only the settings are taken, exactly as Apply takes them on a
+	// tick.
 	//
-	// Otherwise a marker that disagrees with HEAD is a repository that
-	// moved under a host that already had a database: a pull request was
-	// merged and fast-forwarded in. That merge is about state -- nobody
-	// opens a pull request editing task_run -- and this host's database is
-	// ahead of the repository on churn by up to a churn interval, because
-	// that is exactly what exporting churn on a slower clock means.
-	// Importing all of it would throw that away every time a settings
-	// change landed, so only the state tier is replaced and the database
-	// stays authoritative about what grain was doing. The next churn
-	// export writes it back out.
-	switch {
-	case marker == "":
-		if err := ImportTier(ctx, db, r.Dir(), TierState, TierChurn); err != nil {
+	// This used to replace the whole state tier, and that lost data every
+	// time. The dump is whatever the last export wrote, so the database is
+	// ahead of it on the state tier by up to an export interval as a
+	// matter of design; replacing that tier deletes every task, comment,
+	// attachment, grant, branch and release written since. The window is
+	// half a minute in the ordinary case and however long the pushes had
+	// been failing in the recovered one, and an operator lands in it by
+	// habit rather than by accident: merge a settings pull request,
+	// restart grain to make it take effect, lose whatever was filed in the
+	// half minute before the stop.
+	//
+	// Nothing worth having is given up by narrowing it. A merged edit to
+	// task or task_run no longer takes effect at a start -- but it never
+	// took effect reliably, because the tick that pulled it down (Apply)
+	// imported the settings out of it and recorded the commit as loaded,
+	// so whether an edit to grain's own record survived came down to
+	// whether the process happened to restart inside the same half minute.
+	// A deterministic no-op the README can state is a better answer than a
+	// coin toss that eats rows, and it is the answer the rest of this
+	// package already gives: the database is authoritative for what grain
+	// itself did, the repository is authoritative for settings, and the
+	// next export writes the database's version back out over a merged
+	// change to anything else. The import a restart does is now the import
+	// a tick does.
+	if marker == "" {
+		if err := Import(ctx, db, r.Dir()); err != nil {
 			return err
 		}
-	case r.recoveredHead(ctx) == head:
-		if err := ImportTables(ctx, db, r.Dir(), SettingsTables); err != nil {
-			return err
-		}
-	default:
-		if err := ImportTier(ctx, db, r.Dir(), TierState); err != nil {
-			return err
-		}
+	} else if err := ImportTables(ctx, db, r.Dir(), SettingsTables); err != nil {
+		return err
 	}
 	if err := r.setLoadedHead(ctx, head); err != nil {
 		return err
@@ -409,6 +418,14 @@ var ErrRemoteAhead = errors.New("the state repository has changes this deploymen
 // What changed is in the diff, which is the whole reason the dump is
 // text; a message that tried to summarise it would be a second, worse
 // answer that could disagree with the first.
+//
+// A push that failed is not the last word on it either: every call
+// pushes whatever this host holds that the remote has not got, whether
+// or not it had anything of its own to commit, so an outage costs the
+// remote the delay and nothing else. The reported bool stays what it
+// says -- a call that only carried an earlier commit out to the remote
+// committed nothing and reports false -- and a push that goes on failing
+// comes back as an error every time rather than once.
 func Sync(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error) {
 	return sync(ctx, r, db, version, false)
 }
@@ -422,13 +439,19 @@ func SyncAll(ctx context.Context, r *Repo, db *sql.DB, version int) (bool, error
 }
 
 func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool) (bool, error) {
-	// Asked before anything is written, so that a merged change is never
+	// One ls-remote, before anything is written, answering both of this
+	// cycle's questions about the remote (remoteState, staterepo.go): is
+	// it ahead of us, which decides whether we may export at all, and are
+	// we ahead of it, which decides whether we push at the end.
+	//
+	// Asked before anything is written so that a merged change is never
 	// committed over -- see ErrRemoteAhead. An unreachable remote answers
-	// "not ahead" and the push below reports the network in its own
-	// words. It guards both entry points: asking for a sync explicitly
-	// (SyncAll) is no more a reason to commit over a merge than the
-	// timer's own tick is.
-	if ahead, err := r.RemoteAhead(ctx); err == nil && ahead {
+	// "nothing is known" and the push below reports the network in its
+	// own words. It guards both entry points: asking for a sync
+	// explicitly (SyncAll) is no more a reason to commit over a merge
+	// than the timer's own tick is.
+	remote := r.remoteState(ctx)
+	if remote.ahead {
 		return false, ErrRemoteAhead
 	}
 	// The CI step, before anything is exported and as a commit and a push
@@ -480,22 +503,44 @@ func sync(ctx context.Context, r *Repo, db *sql.DB, version int, forceChurn bool
 	if err != nil {
 		return installed, err
 	}
-	if !changed {
+	if changed {
+		// Recorded before the push, not after: the commit exists either
+		// way, and a push that fails (an expired credential, an
+		// unreachable remote) must not leave the next start believing the
+		// repository has moved on without it and importing its own stale
+		// dump back over a database that is ahead.
+		if err := r.recordLoadedHead(ctx); err != nil {
+			return true, err
+		}
+	}
+	// Pushed when this host holds a commit the remote has not got, which
+	// is a different question from whether this cycle made one -- and the
+	// difference is a commit that never leaves the host.
+	//
+	// A push that failed used to be retried only by the next cycle that
+	// had something of its own to commit. On a busy deployment that is
+	// the next one and nobody notices. On an idle one there is no such
+	// cycle at all: nothing files a task, nothing changes a setting, the
+	// churn tier is not due, so every export from here on is
+	// byte-identical, Commit reports nothing to do, and the commit sits
+	// here until the deployment next does something -- which may be
+	// hours, and is exactly the window in which a merged pull request
+	// turns it into the divergence diverge.go exists to clear. The pane
+	// went quiet over it too, since a cycle that pushed nothing reported
+	// nothing.
+	//
+	// Asking the remote instead retries on the very next tick, and goes
+	// on reporting the failure for as long as it lasts. It costs nothing
+	// extra to ask: the answer is the one already fetched at the top of
+	// this function.
+	if !changed && !remote.behind {
 		return installed, nil
 	}
-	// Recorded before the push, not after: the commit exists either way,
-	// and a push that fails (an expired credential, an unreachable
-	// remote) must not leave the next start believing the repository has
-	// moved on without it and importing its own stale dump back over a
-	// database that is ahead.
-	if err := r.recordLoadedHead(ctx); err != nil {
-		return true, err
-	}
 	if err := r.Push(ctx); err != nil {
-		return true, err
+		return installed || changed, err
 	}
 	r.maintain(ctx)
-	return true, nil
+	return installed || changed, nil
 }
 
 func writeReadme(dir string) error {
@@ -546,14 +591,20 @@ any other. On merge, grain pulls -- within half a minute, without a
 restart -- and the merged files replace what is in its database, so a
 deleted row is a deleted row.
 
-That applies live to the settings tables: ` + "`" + `grain_config` + "`" + `,
+That applies to the settings tables, and to them only: ` + "`" + `grain_config` + "`" + `,
 ` + "`" + `repo_config` + "`" + `, the ` + "`" + `template` + "`" + `, ` + "`" + `suite` + "`" + `, ` + "`" + `schedule` + "`" + ` and
 ` + "`" + `qualification` + "`" + ` tables. The rest -- tasks, runs, metrics: grain's own
-record of what it did -- is replaced only when grain starts, because
-replacing it underneath a run that is in flight would delete the very
-rows that run is working on. Editing one of those here while grain is
-running does nothing; the next export writes the database's version back
-over your change.
+record of what it did -- is never replaced from here, at a restart no
+more than on a tick. The database is the live copy of those rows and is
+always ahead of these files by however long it is since the last export,
+so importing them would delete whatever grain had written since. Editing
+one of them here does nothing; the next export writes the database's
+version back over your change.
+
+The exception is a restore, and it is the only one: a clone of this
+repository onto a host that has never loaded it brings back every table,
+which is what makes this a whole deployment to restore from rather than
+a settings file.
 
 That check already runs on your pull request. ` + "`" + WorkflowFile + "`" + `
 runs ` + "`" + `grain state check` + "`" + `, which loads this whole directory into a

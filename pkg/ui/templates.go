@@ -19,16 +19,23 @@ func (e *templateNotFoundError) Error() string { return "no template " + e.ID }
 // Template is a template's JSON shape (bwsalmon/agents#516) --
 // Schedule's own content fields (Title/Description/AutoMerge/Reads/
 // Capabilities), the subset a schedule's ScheduleOverlay.jsx already
-// collects, minus everything about firing on a cadence and minus Repo/
-// Base: a template is never itself something that fires, only something
-// a schedule (or a future caller) fires from, and which repo and branch
-// a firing targets is a property of that caller, not of the template
-// (model.Template's own doc comment on why).
+// collects, minus everything about firing on a cadence: a template is
+// never itself something that fires, only something a schedule (or
+// another caller) fires from.
+//
+// Repo and Base are the optional binding (grain/task-285): empty, which
+// is the ordinary case, means whatever fires this template decides which
+// repo and branch to target; set, they are what every firing targets
+// instead (model.Template's own doc comment on both halves). Base is
+// only ever set alongside Repo, and can be empty even then -- a repo
+// bound with no branch pinned.
 type Template struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
 	Title        string    `json:"title"`
 	Description  string    `json:"description"`
+	Repo         string    `json:"repo,omitempty"`
+	Base         string    `json:"base,omitempty"`
 	AutoMerge    bool      `json:"autoMerge"`
 	Reads        []string  `json:"reads,omitempty"`
 	Capabilities []string  `json:"capabilities"`
@@ -44,6 +51,9 @@ func templateFrom(t model.Template) Template {
 		AutoMerge:    t.AutoMerge,
 		Capabilities: []string{},
 		CreatedAt:    t.CreatedAt,
+	}
+	if t.Target != nil {
+		out.Repo, out.Base = t.Target.String(), t.Base
 	}
 	for _, r := range t.Reads {
 		out.Reads = append(out.Reads, r.String())
@@ -68,17 +78,40 @@ func (c *Client) ListTemplates(ctx context.Context) ([]Template, error) {
 }
 
 // CreateTemplateRequest is a new template's fields --
-// CreateScheduleRequest's own content subset, minus Repo/Base (a
-// template carries no target of its own, model.Template's own doc
-// comment on why) and minus Recurrence/Enabled for the same reason
-// Template itself leaves them out.
+// CreateScheduleRequest's own content subset, minus Recurrence/Enabled
+// for the same reason Template itself leaves them out.
+//
+// Repo is optional, and binds the new template to that repo when given;
+// Base, only meaningful alongside it, pins a branch within that repo and
+// is optional in turn. Blank Repo -- the ordinary case -- leaves the
+// template unbound, deciding nothing about where its firings go.
 type CreateTemplateRequest struct {
 	Name         string   `json:"name"`
 	Title        string   `json:"title"`
 	Description  string   `json:"description"`
+	Repo         string   `json:"repo"`
+	Base         string   `json:"base"`
 	AutoMerge    bool     `json:"autoMerge"`
 	Capabilities []string `json:"capabilities"`
 	Reads        []string `json:"reads"`
+}
+
+// parseBinding turns a request's repo/base pair into the binding
+// model.Template carries: nil and "" for a blank repo (an unbound
+// template, whatever base came with it -- a branch with no repo to name
+// it in binds nothing, so it is dropped rather than half-applied), and
+// the parsed repo with its base otherwise. Shared by CreateTemplate and
+// UpdateTemplate so both read a blank repo the same way: as "not bound",
+// which is also how UpdateTemplate unbinds one.
+func parseBinding(repo, base string) (*model.RepoRef, string, error) {
+	if strings.TrimSpace(repo) == "" {
+		return nil, "", nil
+	}
+	target, err := model.ParseRepo(repo)
+	if err != nil {
+		return nil, "", &ValidationError{err: err}
+	}
+	return &target, strings.TrimSpace(base), nil
 }
 
 // CreateTemplate files a new template straight into the store.
@@ -97,6 +130,10 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 	if err != nil {
 		return Template{}, err
 	}
+	target, base, err := parseBinding(req.Repo, req.Base)
+	if err != nil {
+		return Template{}, err
+	}
 
 	id, err := c.Store.NewTemplateID(ctx)
 	if err != nil {
@@ -107,6 +144,8 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 		Name:      req.Name,
 		Title:     req.Title,
 		Body:      req.Description,
+		Target:    target,
+		Base:      base,
 		AutoMerge: req.AutoMerge,
 		Reads:     reads,
 		Grants:    grants,
@@ -124,10 +163,21 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 // next time that schedule fires (orchestrator.fireTaskSchedule resolves
 // TemplateID fresh each time), with no separate step to "push" the change
 // out to every schedule using it.
+//
+// Repo is how a template is bound and unbound: a repo binds it (and
+// rebinding one already bound just moves it), an empty string unbinds
+// it, dropping any pinned branch with it, and omitting the field leaves
+// the binding exactly as it is. Base pins or clears the branch within
+// whatever repo the template is bound to by the end of this request --
+// naming one for a template that will not be bound at all is refused
+// rather than quietly kept, since a branch with no repo to read it
+// against decides nothing.
 type UpdateTemplateRequest struct {
 	Name         *string   `json:"name,omitempty"`
 	Title        *string   `json:"title,omitempty"`
 	Description  *string   `json:"description,omitempty"`
+	Repo         *string   `json:"repo,omitempty"`
+	Base         *string   `json:"base,omitempty"`
 	AutoMerge    *bool     `json:"autoMerge,omitempty"`
 	Capabilities *[]string `json:"capabilities,omitempty"`
 	Reads        *[]string `json:"reads,omitempty"`
@@ -166,6 +216,43 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 		return Template{}, &templateNotFoundError{ID: id}
 	}
 
+	// The binding this request leaves behind, worked out against what
+	// the template already carries so that Repo and Base can each be
+	// given on their own.
+	target, base := existing.Target, existing.Base
+	if req.Repo != nil {
+		target, base, err = parseBinding(*req.Repo, base)
+		if err != nil {
+			return Template{}, err
+		}
+	}
+	if req.Base != nil {
+		base = strings.TrimSpace(*req.Base)
+	}
+	if target == nil && base != "" {
+		return Template{}, validationErrorf(
+			"base needs a repo to name a branch of: bind this template to a repo, or leave base empty")
+	}
+	// Binding a template a qualification plan already schedules is
+	// refused rather than left to fail that repo's next run, the same
+	// "do not strand a caller that points at this" care DeleteTemplate
+	// takes: a qualification run always targets its own candidate's repo
+	// (model.Store.CreateQualificationRun), so a template bound
+	// elsewhere is one such a plan can no longer use at all.
+	if target != nil && (req.Repo != nil || req.Base != nil) {
+		plans, err := c.Store.QualificationPlansUsingTemplate(ctx, id)
+		if err != nil {
+			return Template{}, err
+		}
+		for _, repo := range plans {
+			if repo != *target {
+				return Template{}, validationErrorf(
+					"template is used by %s's qualification plan, so it cannot be bound to %s; remove it from that plan first",
+					repo, target)
+			}
+		}
+	}
+
 	if err := c.Store.UpdateTemplate(ctx, id, func(t *model.Template) error {
 		if req.Name != nil {
 			t.Name = *req.Name
@@ -175,6 +262,9 @@ func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTempla
 		}
 		if req.Description != nil {
 			t.Body = *req.Description
+		}
+		if req.Repo != nil || req.Base != nil {
+			t.Target, t.Base = target, base
 		}
 		if req.AutoMerge != nil {
 			t.AutoMerge = *req.AutoMerge

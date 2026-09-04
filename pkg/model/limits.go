@@ -4,18 +4,20 @@ package model
 // split into the two kinds of work an agent is dispatched for
 // (grain/task-63).
 //
-// A *merger* is a run of a task the merge queue filed itself to repair a
-// pull request that will not land -- Origin.Reason == ReasonFix, the
-// stacked fix task orchestrator.fileFixTask creates and pre-approves. A
-// *worker* is a run of anything else: the ordinary backlog, a schedule,
-// a qualification, a suite pass, a task somebody just filed.
+// A *merger* is a run that repairs a pull request that will not land --
+// a task the merge queue has sent back to work on its own branch
+// (Observation.MergeQueueRepairAt), or one of the separate fix tasks it
+// used to file for that (Origin.Reason == ReasonFix). Store.mergerTaskSQL
+// is the one definition. A *worker* is a run of anything else: the
+// ordinary backlog, a schedule, a qualification, a suite pass, a task
+// somebody just filed.
 //
 // The split exists because the two compete for the same capacity while
 // being worth very different amounts. A merger is the last step of work
 // that is already done -- committed, pushed, reviewed -- and the longer
 // it waits the more likely something else lands on the branch it repairs
-// and the fix has to be filed again (Store.Ready's own doc comment on
-// why a fix task sits at the head of the backlog). A deployment whose
+// and the repair has to start over (Store.Ready's own doc comment on how
+// the merge queue's own work reaches the head of the backlog). A deployment whose
 // every slot was spent on new work would starve exactly the runs that
 // finish the old, so Mergers is capacity kept back for them.
 //
@@ -36,7 +38,7 @@ type Limits struct {
 	// Workers is the ceiling on ordinary runs, and the floor under how
 	// much of the total a merger can ever be denied.
 	Workers int
-	// Mergers is the extra capacity only a merge-queue fix task may
+	// Mergers is the extra capacity only a merge-queue repair may
 	// reach. 0 -- a meaningful value, not an unset one -- means mergers
 	// contend for Workers alongside everything else, which is what every
 	// deployment did before this split existed.
@@ -100,12 +102,14 @@ func (c RunCounts) Add(merger bool) RunCounts {
 }
 
 // Merger reports whether a run of a task with this origin reason counts
-// against the merger half of Limits: the merge queue's own fix tasks
-// (ReasonFix) and nothing else.
+// against the merger half of Limits by its reason alone: a task the merge
+// queue filed to repair another task's branch (ReasonFix) and nothing
+// else.
 //
-// A method on the reason rather than on Task because the two places that
-// have to answer it hold different things -- dispatch.Cycle has a task
-// this store classified for it (Store.ReadyMergers), and StartRun has
-// only the origin_reason column of the task it is about to record a run
-// for.
+// It is no longer the whole of the question. A repair now runs as another
+// attempt of the task whose branch is broken (Observation.
+// MergeQueueRepairAt), whose reason is whatever it was filed as, so the
+// store answers "is this run a merger" with both halves at once
+// (mergerTaskSQL) and nothing here reads this. It stays as the reason
+// half's own name, for a caller holding an origin and no database.
 func (r OriginReason) Merger() bool { return r == ReasonFix }

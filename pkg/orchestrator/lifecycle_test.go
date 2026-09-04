@@ -83,7 +83,7 @@ func TestRunCycleReleasesTheSandboxAfterASuccessfulDispatch(t *testing.T) {
 	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 
@@ -114,8 +114,8 @@ func TestRunCycleReleasesTheSandboxAfterAFailedDispatch(t *testing.T) {
 	cap := &fakeCapability{name: "locked", refuse: "not for you"}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
-		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
+		Framework:  completesWithAComment(),
+		Config:     orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
 		MaxWorkers: 1,
 	}
 
@@ -150,8 +150,8 @@ func TestRunCycleDispatchesAGrantWithNoPlacementOntoANonRootedSandbox(t *testing
 	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
-		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(selfdebug.New())},
+		Framework:  completesWithAComment(),
+		Config:     orchestrator.Config{Capabilities: model.NewCapabilityRegistry(selfdebug.New())},
 		MaxWorkers: 1,
 	}
 
@@ -180,8 +180,8 @@ func TestRunCycleFailsAGrantThatPlacesSomethingOntoANonRootedSandbox(t *testing.
 	cap := &fakeCapability{name: "keyed", path: "/etc/keyed/key.json", content: "secret"}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
-		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
+		Framework:  completesWithAComment(),
+		Config:     orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
 		MaxWorkers: 1,
 	}
 
@@ -299,8 +299,8 @@ func TestRunCyclePlacesIntoASandboxThatCanOnlyBeReachedRemotely(t *testing.T) {
 	cap := &fakeCapability{name: "keyed", path: "/home/debian/.gcp-service-account.json", content: "minted-key"}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
-		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
+		Framework:  completesWithAComment(),
+		Config:     orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
 		MaxWorkers: 1,
 	}
 
@@ -340,8 +340,8 @@ func TestRunCyclePrefersARemotePlacementOverALocalRoot(t *testing.T) {
 	cap := &fakeCapability{name: "keyed", path: "/home/debian/.gcp-service-account.json", content: "minted-key"}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
-		Config:        orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
+		Framework:  completesWithAComment(),
+		Config:     orchestrator.Config{Capabilities: model.NewCapabilityRegistry(cap)},
 		MaxWorkers: 1,
 	}
 
@@ -382,7 +382,7 @@ func TestRunCycleAcquiresTheSandboxWithTheTasksOwnShape(t *testing.T) {
 	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 
@@ -408,7 +408,7 @@ func TestRunCycleAcquiresWithNoShapeForATaskThatSetsNeitherField(t *testing.T) {
 	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 
@@ -468,8 +468,8 @@ func TestRunCycleFinishesARunWhoseSandboxCouldNotBeAcquired(t *testing.T) {
 
 	deps := orchestrator.Deps{
 		Store: store, Client: client,
-		Sandboxes:     unbuildableSandboxes{err: errors.New("guest never became reachable")},
-		Framework:     completesWithAComment(),
+		Sandboxes:  unbuildableSandboxes{err: errors.New("guest never became reachable")},
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 
@@ -525,8 +525,8 @@ func TestATaskWhoseSandboxFailedIsDispatchedAgainAfterItsBackoff(t *testing.T) {
 
 	failing := orchestrator.Deps{
 		Store: store, Client: client,
-		Sandboxes:     unbuildableSandboxes{err: errors.New("docker daemon is down")},
-		Framework:     completesWithAComment(),
+		Sandboxes:  unbuildableSandboxes{err: errors.New("docker daemon is down")},
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 	if err := orchestrator.RunCycle(ctx, failing, baseTime); err == nil {
@@ -538,7 +538,7 @@ func TestATaskWhoseSandboxFailedIsDispatchedAgainAfterItsBackoff(t *testing.T) {
 	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	working := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 	if err := orchestrator.RunCycle(ctx, working, later); err != nil {
@@ -595,7 +595,7 @@ func TestRunCycleRevokesTheSandboxTokenAfterReleasingTheSandbox(t *testing.T) {
 	sandboxes := &recordingSandboxes{HostSandboxes: orchestrator.NewHostSandboxes(t.TempDir())}
 	deps := orchestrator.Deps{
 		Store: store, Client: client, Sandboxes: sandboxes,
-		Framework:     completesWithAComment(),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 		// An absolute base, because runOne points the sandbox's git at
 		// GitRemoteBase+"/placeholder/placeholder.git" as soon as a token
@@ -649,8 +649,8 @@ func TestRunCycleFinishesARunWhoseShapeTheBackendRefuses(t *testing.T) {
 
 	deps := orchestrator.Deps{
 		Store: store, Client: client,
-		Sandboxes:     orchestrator.NewHostSandboxes(t.TempDir()),
-		Framework:     completesWithAComment(),
+		Sandboxes:  orchestrator.NewHostSandboxes(t.TempDir()),
+		Framework:  completesWithAComment(),
 		MaxWorkers: 1,
 	}
 

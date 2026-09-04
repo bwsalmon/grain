@@ -426,6 +426,16 @@ func TestBuildPromptTellsAnAgentWhatItsProposalsCanSay(t *testing.T) {
 	if !strings.Contains(prompt, "auto_merge") {
 		t.Errorf("prompt does not tell an auto-merge job it can pass that on: %q", prompt)
 	}
+
+	// An auto-merge job on a base branch of its own passes nothing on:
+	// its proposals are filed against the default branch, which is not
+	// the branch a human gave it (model.SameBranch). Told only the first
+	// half, a run would split work out expecting it to land the same way.
+	task.Base = "release/2.0"
+	prompt = orchestrator.BuildPrompt(task, "", false, orchestrator.DefaultMaxRunRuntime, orchestrator.History{}, nil)
+	if !strings.Contains(prompt, "Nothing you propose inherits") {
+		t.Errorf("prompt lets an auto-merge job on its own base branch think it can pass that on: %q", prompt)
+	}
 }
 
 // The wall-clock budget is grain's own fact and unreachable from inside

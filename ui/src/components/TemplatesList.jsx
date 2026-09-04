@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button } from "@mui/material";
+import { Button, Chip } from "@mui/material";
 import { knownRepos } from "../state.js";
 import TemplateOverlay from "./TemplateOverlay.jsx";
 import { ListEmpty, ListHeader, ListSearchField, ListSortSelect, ListToolbar } from "./ListPrimitives.jsx";
@@ -16,9 +16,9 @@ const SORTS = {
 };
 
 // TemplatesList is the templates page's main pane (bwsalmon/agents#545):
-// a flat list of every template's key details -- name and task title,
-// no target repo (a template carries no target of its own,
-// model.TaskTemplate's own doc comment on why) -- with its own
+// a flat list of every template's key details -- name, task title, and
+// the repo it is bound to for the templates that are bound to one at
+// all (grain/task-285; most are not, and show no chip) -- with its own
 // search/sort toolbar, TaskList's own shape. Nothing about any one
 // template (description, reads, capabilities, editing, deleting) lives
 // here any more; all of that moved into TemplateOverlay, opened either
@@ -32,15 +32,16 @@ export default function TemplatesList({ templates, config, tasks, openTemplateId
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState("name");
   const [showNew, setShowNew] = useState(false);
-  // Only so the overlay's read-only repos picker has repos to suggest --
-  // a template still has no target repo of its own. Same list the repo
-  // dropdowns elsewhere offer (SchedulesList, SuitesList).
+  // Behind both of the overlay's repo pickers: the read-only repos it
+  // reads, and the one repo it can optionally be bound to. Same list the
+  // repo dropdowns elsewhere offer (SchedulesList, SuitesList).
   const repoOptions = knownRepos(config, tasks);
   const editing = templates.find((t) => t.id === openTemplateId) || null;
 
   const q = search.trim().toLowerCase();
   const matches = (t) =>
-    q === "" || t.name.toLowerCase().includes(q) || t.title.toLowerCase().includes(q);
+    q === "" || t.name.toLowerCase().includes(q) || t.title.toLowerCase().includes(q) ||
+    (t.repo || "").toLowerCase().includes(q);
 
   const visible = templates.filter(matches).sort(SORTS[sortBy].cmp);
 
@@ -61,6 +62,7 @@ export default function TemplatesList({ templates, config, tasks, openTemplateId
         {visible.map((tmpl) => (
           <li className="template-row" key={tmpl.id} onClick={() => onOpenTemplate(tmpl.id)}>
             <span className="template-name">{tmpl.name}</span>
+            {tmpl.repo && <Chip size="small" label={tmpl.base ? `${tmpl.repo} @ ${tmpl.base}` : tmpl.repo} />}
             <span className="template-title hint">{tmpl.title}</span>
           </li>
         ))}

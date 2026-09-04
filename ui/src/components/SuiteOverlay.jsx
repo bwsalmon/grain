@@ -85,7 +85,10 @@ export default function SuiteOverlay({ suite, templates = [], repoOptions = [], 
             {templates.map((t) => (
               <MenuItem key={t.id} value={t.id}>
                 <Checkbox checked={templateIds.includes(t.id)} size="small" />
-                <ListItemText primary={t.name} secondary={t.title} />
+                {/* A bound template runs against its own repo wherever
+                    this suite is run (grain/task-285), so the picker
+                    says which rather than leaving that to a click. */}
+                <ListItemText primary={t.name} secondary={t.repo ? `${t.title} -- ${t.repo}` : t.title} />
               </MenuItem>
             ))}
           </Select>

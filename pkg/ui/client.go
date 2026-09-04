@@ -241,9 +241,16 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	// And once more for "the merge queue is having this one repaired",
+	// which is the other thing a row has to say about a task the queue is
+	// driving rather than merely watching.
+	repairing, err := c.Store.MergeQueueRepairing(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// And once more for what each running task says it is doing: one
 	// query over the live runs that have a synopsis, rather than a read
-	// per task, on the same reasoning as the two above.
+	// per task, on the same reasoning as the three above.
 	activity, err := c.Store.TaskActivity(ctx)
 	if err != nil {
 		return nil, err
@@ -258,7 +265,7 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 		if a, ok := activity[t.ID]; ok {
 			doing = &a
 		}
-		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, doing))
+		out = append(out, taskFrom(t, states[t.ID], closed, blockedAt, repairing[t.ID], doing))
 	}
 	return out, nil
 }
@@ -320,7 +327,7 @@ func (c *Client) Task(ctx context.Context, id string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	return taskFrom(*t, state, closed, blockedAt, activity), nil
+	return taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity), nil
 }
 
 // closedTargets resolves whether each of a task's own blocking-link
@@ -396,7 +403,7 @@ func (c *Client) GetTask(ctx context.Context, id string) (TaskDetail, error) {
 		return TaskDetail{}, err
 	}
 	detail := TaskDetail{
-		Task:        taskFrom(*t, state, closed, blockedAt, activity),
+		Task:        taskFrom(*t, state, closed, blockedAt, obs.RepairInFlight(), activity),
 		Comments:    make([]Comment, 0, len(comments)),
 		Attachments: taskAttachments,
 	}
