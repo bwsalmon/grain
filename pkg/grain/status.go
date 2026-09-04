@@ -256,4 +256,28 @@ type GuestHealth struct {
 	MemoryTotalMB int
 	DiskUsedMB    int
 	DiskTotalMB   int
+	// ConntrackCount and ConntrackMax are the pod namespace's connection
+	// tracking table, which the guest's traffic fills and the guest
+	// cannot see.
+	//
+	// They are here because of what the network decision costs
+	// (docs/grain.md, "The network: NAT mode"). Under NAT every flow
+	// leaving the guest takes an entry, and a full table drops packets
+	// rather than slowing them down -- which inside the guest reads as
+	// connection timeouts and hanging fetches, indistinguishable from a
+	// flaky test or a registry having a bad day. The table lives in the
+	// pod's namespace, outside the VM, so nothing the agent can run will
+	// show it: without this field the agent forms the wrong hypothesis
+	// and spends turns on it, and the transcript gives a human the same
+	// misleading evidence.
+	//
+	// Reported rather than merely recorded: the shim is expected to tell
+	// the agent when the table is under pressure, which is the difference
+	// between a failure it can reason about and one it cannot.
+	//
+	// 0/0 on a backend with no such table -- HostGrains, and a kontur
+	// deployment still running the spliced flat mode, which puts no
+	// guest traffic through netfilter at all.
+	ConntrackCount int
+	ConntrackMax   int
 }

@@ -3,8 +3,8 @@
 > **Proposal.** Nothing in this document ships yet. `pkg/grain` carries
 > the interface and the controller's decision table (`Reconcile`) as
 > compiling, tested Go; everything else here is the argument for them and
-> the work they imply. The open question in "The network problem" gates
-> the rest.
+> the work they imply. The network decision is recorded in "The network:
+> NAT mode", with the alternatives kept beside it.
 
 ## What runs today
 
@@ -239,48 +239,243 @@ whole grain is gone and there is nothing left to ask.
 The `pkg/orchestrator` equivalent is `runOne` plus `RunDispatch`, ~730
 lines whose behaviour can only be observed by dispatching a real run.
 
-## The network problem
+## The network: NAT mode
 
-**This gates everything above.** `internal/netshim/setup.go` in kontur:
+**Decision: NAT.** It is the only option with one story in every
+environment — docker, kontur's standalone kubelet, and a managed cluster
+alike — needing no cluster provisioning and no bespoke component. That
+uniformity is the deciding property: a deployment consuming grain gets an
+ordinary network, with nothing to set up beside it and nothing to operate.
+The two alternatives below are each cheaper in one environment and absent
+in another.
+
+### Why the container has no network today
+
+`internal/netshim/setup.go:29`:
 
 > The external interface keeps its address: **the splice steals the
 > interface's ingress**, so the namespace's own stack can never receive a
 > reply and cannot hold a connection over it…
 
-In flat mode the container keeps its address cosmetically only. Egress
-goes to the veth peer; replies go to the tap, and thence to the guest. And
-grain defaults to flat — `cmd/grain/daemon.go:310`.
+`splice.go` does that with a tc ingress qdisc plus a match-everything
+filter with `mirred` egress-redirect, so frames arriving on `eth0` reach
+the tap at L2 and the namespace's IP stack never sees them. The container
+keeps its address cosmetically; egress goes to the veth peer and every
+reply goes to the guest.
 
-That is harmless today, because nothing in the container needs network.
-The moment the agent CLI moves in, it needs `api.anthropic.com` and cannot
-reach it. Four ways out:
+That is harmless while nothing in the container needs network. The moment
+the agent CLI moves in, it needs the model API and cannot reach it.
 
-**A. Tunnel the model API over the exec channel.** *(recommended)* The
-shim dials a container-local listener; the controller attaches over
-`docker exec` stdio and proxies out. Exactly the `pkg/gitproxy` pattern,
-already proven here for git. Keeps flat mode, keeps container egress at
-zero, and the model credential never leaves the controller — per-grain and
-revocable, strictly better than shipping a copy into each container. Cost:
-a long-lived exec per running grain. That is a data plane alongside the
-polled control plane, reconnectable on any tick, but it is the one piece
-that is not poll-shaped.
+There is no cheap carve-out. Discriminating replies-for-the-namespace from
+replies-for-the-guest would need L3/conntrack-aware classification inside
+what is deliberately a match-all L2 wire — and the two ends share a MAC by
+design ("both ends may carry the same MAC address — which is the entire
+point"), so there is nothing to match on at L2 either.
 
-**B. Switch to NAT mode.** The namespace keeps its own stack and the guest
-sits behind DNAT/masquerade, so container egress just works.
-`-kontur-base-ip` and `-kontur-base-port` (`daemon.go:318`) already exist
-for the per-VM allocation NAT needs. Simplest change; loses flat mode's
-"the guest is an ordinary container on the segment" property, which grain
-chose deliberately.
+### What NAT mode is
 
-**C. A second NIC on the pod** — container keeps one, guest takes the
-other. Correct, but Multus/CNI chaining on the Kubernetes side and nothing
-equivalent under plain docker.
+Inside the pod's netns:
 
-**D. Leave the agent on the controller.** The null option, worth keeping
-on the table: the win here is latency and isolation, not correctness.
+- a bridge (`10.0.2.1/24`, say) with the guest's tap enslaved, the guest
+  on `10.0.2.2/24` default-via-`.1`
+- **`eth0` left unspliced**, so the namespace keeps its address *and* its
+  ingress — which is the whole point
+- `net.ipv4.ip_forward=1`
+- nftables: `postrouting … oifname eth0 ip saddr 10.0.2.0/24 masquerade`
 
-Recommendation: **A**, falling back to **B** if the long-lived exec proves
-fragile.
+After that the data path is entirely kernel — netfilter hooks rewrite,
+`nf_conntrack` tracks, no userspace in the path. netshim programs it once
+and exits, the same lifecycle its splice already has.
+
+**Note this mode does not currently exist.** kontur deleted it:
+`internal/cli/vm.go:245` rejects `-net nat` outright, and `-ip`, `-port`,
+`-guest-port` and `-bridge-cidr` are deprecated-and-ignored beside it. So
+this is a kontur feature request, not a flag — see "Asks of kontur".
+
+### Why it works everywhere
+
+The requirement that looks like it should block on a managed cluster is
+writing `net.ipv4.ip_forward`: Kubernetes classes it unsafe and gates
+`securityContext.sysctls` behind a kubelet flag you cannot set on a
+managed cluster. **netshim is already `privileged: true` in every
+manifest**, for an unrelated reason —
+`deploy/k8s/gke-pod-exec-example.yaml:52`, "the netlink library creates a
+tap by opening `/dev/net/tun` and a pod has no per-device grant to hand
+it" — so it has a writable `/proc/sys` in the pod's own netns and can
+write it directly.
+
+| requirement | docker | static kubelet | managed cluster |
+| --- | --- | --- | --- |
+| `ip_forward` in the pod netns | `--sysctl` on the netns-holder | kubelet-config (kontur's own) | privileged netshim writes `/proc/sys` |
+| nftables in the pod netns | CAP_NET_ADMIN | privileged | privileged |
+| netfilter modules on the host | yes | yes | yes — kube-proxy needs them |
+| **cluster-level provisioning** | none | none | **none** |
+
+### What it costs
+
+**1. No infrastructure-level differentiation.** Agent traffic and sandbox
+traffic leave with the same source address, so a cloud firewall, VPC flow
+logs and NetworkPolicy cannot tell them apart. Enforcement is still
+possible with in-namespace nftables keyed on `ip saddr 10.0.2.0/24` versus
+locally-generated, and that enforcement is as strong as the VM boundary —
+the rules sit outside the VM, and subverting them means escaping
+cloud-hypervisor into the container, at which point the agent's credential
+is available anyway. What is genuinely lost is defence in depth and the
+audit trail, and that the separation becomes something configured rather
+than structural. **Writing those egress rules is part of the work, not a
+follow-up:** without them the sandbox inherits the agent's egress.
+
+**2. Conntrack as a new failure mode.** Not a performance cost — the
+per-packet price is a hash lookup and a header rewrite, the same one every
+container network already pays. The change is that flat mode has *zero*
+netfilter in the path (tc ingress runs before netfilter's hooks, and the
+frame never enters the IP stack) while NAT introduces a finite, stateful
+table.
+
+When it fills the kernel drops: `nf_conntrack: table full, dropping
+packet`. Steady-state occupancy is roughly connections/second × how long
+entries linger (`nf_conntrack_tcp_timeout_time_wait`, 120s by default), so
+an ordinary clone-and-build is nowhere near it and a test suite opening a
+thousand outbound connections a second is in range. Traffic that stays
+inside the guest is never tracked, which cuts the exposure considerably.
+
+What makes it worth naming despite being a tail risk is **who has to
+diagnose it**. Inside the guest it reads as connection timeouts, TLS
+handshake failures and hanging fetches — indistinguishable from a flaky
+test or a registry having a bad day — and the conntrack table is in the
+pod's namespace, outside the VM, so nothing the agent can run will show
+it. The agent forms the wrong hypothesis and burns turns on it, and the
+transcript gives a human the same misleading evidence.
+
+Mitigations, all part of the work:
+
+- set `nf_conntrack_max` explicitly per netns rather than inheriting a
+  memory-derived default that has nothing to do with this workload
+- `notrack` locally-generated traffic: once any conntrack-using rule
+  exists everything traversing netfilter is tracked, including the
+  container's own connections, which need no NAT since they already carry
+  the right source address
+- **report `nf_conntrack_count` against `nf_conntrack_max` in
+  `GuestHealth`**, beside load, memory and disk. This is the one that
+  fixes the diagnosis problem: it makes an invisible failure a reported
+  one, and lets the agent be told rather than left to guess.
+
+**3. It is net-new packet-path code in kontur, reversing a deliberate
+deletion.** The bridge and tap primitives exist already (`ensureBridge`,
+`ensureTap`, used for the control link). What is new is nftables
+programming — a dependency kontur does not have today — with idempotent
+teardown matching netshim's existing "a retried init container converges
+on the same end state" discipline, plus revising several load-bearing doc
+comments and the README.
+
+**4. netshim loses its minimal-capability property under docker.**
+`internal/staticpod/manifest.go:101` currently says "netshim writes no
+sysctl and installs no nftables rules, so under docker it runs with
+CAP_NET_ADMIN and an explicitly granted `/dev/net/tun`". That stops being
+true. No change under Kubernetes, where it is privileged already.
+
+### What it does not cost
+
+- **Guest egress is unaffected** — git proxy, package registries and
+  module proxies all work identically through masquerade.
+- **Attribution survives.** The git proxy identifies callers by bearer
+  token, not source IP; there is no `RemoteAddr` or `X-Forwarded-For`
+  anywhere in `pkg/gitproxy`.
+- **`kontur exec` is unaffected** — vsock, not networking. grain never
+  needs inbound to a guest for the same reason.
+- **The control link and memory agent are unaffected** — a separate NIC
+  in either mode.
+- **grain resolves no VM address at all** (`pkg/kontur`'s doc comment: the
+  `PodIP`/`DockerPodIP` fields "went away" with the SSH transport), so
+  nothing breaks for want of one.
+- **Address allocation is close to free.** The old `-ip`/`-port` flags
+  existed for a topology with several VMs sharing a namespace. kontur is
+  one VM per pod, so every guest can use the same private subnet with no
+  collision, and port allocation only matters for inbound, which grain
+  does not need.
+- **PMTU improves.** Flat is explicit that a splice has "no bridge or
+  router in between to fragment an oversized frame or to answer with an
+  ICMP 'fragmentation needed', so a mismatch here silently blackholes
+  large packets". NAT has a router in the path.
+
+## Alternatives, kept for the future
+
+Neither is chosen, and both remain viable if NAT proves wrong.
+
+### A second NIC on the netns-holder
+
+Attach a second network to the netns-holder container; `eth0` is spliced
+to the guest and `eth1` stays the container's own. netshim splices exactly
+`NETSHIM_EXTERNAL_IFACE` (default `eth0`, settable per VM), and tc filters
+are per-device, so the second interface is untouched.
+
+Under docker this is a few lines in `KonturGrains.Acquire` and **no kontur
+change at all** — `-docker-run-opt` exists because the holder "is the only
+place a caller's own docker options can go"
+(`internal/dockervm/docker.go:175`). Prefer `docker network connect` after
+netshim has run over a second `--network` at create: with two networks at
+create time docker does not guarantee which becomes `eth0`, and splicing
+the wrong one hands the guest the wrong network *and* leaves the container
+spliced.
+
+It keeps what NAT gives up — two interfaces means two addresses, so
+infrastructure-level policy can distinguish agent from sandbox — and it
+adds no conntrack.
+
+Why it is not the choice: it does not generalise. On kontur's standalone
+kubelet the CNI conflist is kontur's own, but a conflist is a chain over
+*one* interface, so a second NIC needs either a small custom chained
+plugin (~200 lines; kontur already vendors `vishvananda/netlink`) or
+Multus. On a managed cluster it is cluster provisioning — additional VPC
+subnets, node pool configuration, Dataplane V2 — which is exactly the
+"something to set up beside it" the decision above rejects.
+
+**Take this if grain stays on the docker backend permanently**, where it
+is strictly cheaper and strictly better-separated than NAT.
+
+### An exec tunnel
+
+The shim binds a loopback listener (loopback is untouched by the splice);
+the agent's framework is pointed at it with a base-URL override. The
+controller attaches with `docker exec -i` — never `-t`, which would break
+8-bit cleanliness — and multiplexes streams over that pipe with yamux or
+similar, the in-container side opening and the controller accepting.
+
+Two variants, and the difference matters:
+
+- **A dumb TCP tunnel** forwards bytes; the agent does TLS end to end and
+  holds the credential itself. Solves connectivity only.
+- **A terminating proxy** takes plain HTTP on loopback, and the controller
+  adds the `Authorization` header from its own store before re-issuing
+  upstream. **The credential never enters the container** — strictly
+  better than any other option here. It needs the CLI to accept a base-URL
+  override (`claude` and `codex` have the standard env vars; `agy` needs
+  checking), so it degrades to the dumb variant per framework.
+
+It mirrors `pkg/gitproxy`, with one simplification and one complication:
+no token is needed, because the exec's far end is unforgeable — the
+controller chose which container to exec into, so the pipe *is* the
+authentication. But `gitproxy` buffers `UpstreamResponse.Body []byte`,
+which is right for git and fatal for SSE, so the forwarder needs streaming
+`io.Copy` through a flushing writer in both directions.
+
+Why it is not the choice: it is a bespoke data plane, and on a managed
+cluster every model call — full prompts and streamed responses, for every
+grain at once — traverses the API server, which has its own timeouts and
+connection limits. That is the opposite of simple to consume.
+
+**Take this if NAT's conntrack behaviour bites in practice**, or wherever
+a cluster's CNI cannot be modified and NAT's privileged path is
+unavailable.
+
+### Routing the container's egress through the guest
+
+Rejected, and worth recording as rejected on purpose rather than
+overlooked. The guest has working network and the control link already
+exists, so a route would need no new machinery, and TLS protects the
+traffic end to end. But it puts the sandboxed thing in the path of the
+thing sandboxing it: guest-side code could observe or block the agent's
+own control channel.
 
 ## Costs and open items
 
@@ -305,11 +500,25 @@ fragile.
    `setup-failed` naming both, never interpret it on a best effort.
 5. **`HostGrains` is not optional.** Without a backend that runs the agent
    as a plain subprocess against a directory, every test needs a VM.
+6. **grain's own `-kontur-net` handling is broken today.**
+   `cmd/grain/daemon.go:310` still offers the flag and `createArgs` passes
+   it through, so `-kontur-net nat` would make *every* `vm create` fail
+   against current kontur; `-kontur-base-ip` and `-kontur-base-port` feed
+   flags that are now silently ignored. Worth fixing regardless — and
+   under the decision above they come back to life, though the base-ip/
+   base-port pair stays unnecessary (one VM per namespace, so every guest
+   can share a private subnet).
 
 ### Asks of kontur
 
-Neither blocks starting; both are small.
+The first blocks the sandbox image; the other two are small and do not.
 
+- **Re-add a NAT network mode.** This is the network decision above, and
+  it is the one piece of this proposal that cannot be built entirely
+  inside grain. Scope: bridge and tap (primitives exist), the `ip_forward`
+  write, nftables masquerade with idempotent teardown, and the egress
+  rules that keep the sandbox from inheriting the agent's reach. See "What
+  it costs" for what to get right.
 - Promote `internal/execwire` and a thin client to `pkg/`, so a
   co-located shim can dial the guest without forking `kontur exec`.
 - Document whether the VMM run mode is PID-1-agnostic (item 3 above).
@@ -325,7 +534,10 @@ path and the agent's location, not of the task model.
    and the decision table against the existing suite.
 3. The controller loop — `Tick` over `List` + `Reconcile`, alongside the
    existing dispatch path behind a flag.
-4. Settle the network question, then `grain-shim` and the sandbox image.
+4. kontur's NAT mode (the blocking ask above), then `grain-shim` and the
+   sandbox image. Steps 1–3 do not wait on it: `HostGrains` needs no
+   network of its own, so the interface and the controller loop can be
+   proven while that lands.
 5. `KonturGrains`.
 6. Delete: `recreate.go`, `orphan.go`, `recover.go`, `InFlight`,
    `runOne`, `RunDispatch`'s sandbox half, `pkg/ui/sandbox_recreate.go`.
