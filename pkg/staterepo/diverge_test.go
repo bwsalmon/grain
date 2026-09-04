@@ -421,11 +421,9 @@ func TestBeingAheadOfTheRemoteIsNotADivergence(t *testing.T) {
 	if recovered || err != nil {
 		t.Fatalf("an unpushed export was treated as a divergence: %v %v", recovered, err)
 	}
-	// The commit is still here to be pushed, and the next sync that has
-	// anything to say pushes it along with its own.
-	if err := store.PutTask(ctx, task("c3d4")); err != nil {
-		t.Fatalf("putting: %v", err)
-	}
+	// The commit is still here to be pushed, and the next sync carries it
+	// out -- not a row has changed in the database since, so this is a
+	// tick with nothing whatever of its own to commit (push_test.go).
 	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
 		t.Fatalf("syncing after the remote came back: %v", err)
 	}

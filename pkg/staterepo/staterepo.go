@@ -467,46 +467,84 @@ func (r *Repo) Pull(ctx context.Context) (bool, error) {
 	return strings.TrimSpace(before) != strings.TrimSpace(after), nil
 }
 
-// RemoteAhead reports whether origin holds commits this working tree
-// does not -- which, for this repository, means exactly one thing: a
-// pull request against grain's own state was merged.
+// remoteState is where origin's branch sits relative to this working
+// tree, and it is both of the questions a sync cycle has to ask about
+// the remote rather than one, because one ls-remote answers them both.
 //
-// It is asked before every export (see Sync) because of what would
-// otherwise happen. The daemon would commit its own dump on top of a
-// history the remote has moved past, the push would be rejected as a
+// ahead means origin holds commits this working tree does not -- which,
+// for this repository, means exactly one thing: a pull request against
+// grain's own state was merged. behind means the opposite: this host
+// holds commits origin has not got, which is what an export that was
+// committed and could not be pushed leaves behind. Neither is the
+// ordinary tick, where the two agree.
+//
+// known is false when there was nothing to ask -- a local-only install
+// with no remote -- and when the asking itself failed: a network blip, a
+// credential that expired. Nothing at all is known then, so a caller
+// carries on exactly as it would have without this check, and the push
+// reports the network in its own words. That is also why an unreachable
+// remote is not reported as an error here: no answer and "no, neither"
+// lead to the same place, and the pull half of the cycle is where an
+// operator is told the remote has gone (Apply, and ErrUnreachable
+// above).
+type remoteState struct {
+	known  bool
+	ahead  bool
+	behind bool
+}
+
+// remoteState asks origin where its branch is, in one ls-remote and
+// without fetching an object.
+//
+// The ahead half is asked before every export (see sync) because of what
+// would otherwise happen. The daemon would commit its own dump on top of
+// a history the remote has moved past, the push would be rejected as a
 // non-fast-forward on that tick and on every tick after it, and the next
 // start would find the two diverged and refuse to load at all -- a grain
 // that will not come up because somebody merged the change it asked
 // them to. Noticing first costs one ls-remote and turns all of that into
 // a sentence an operator can act on.
 //
-// A remote that cannot be reached is not "ahead": nothing is known, so
-// the caller carries on exactly as it did before this check existed and
-// the push reports the network for itself.
-func (r *Repo) RemoteAhead(ctx context.Context) (bool, error) {
+// The behind half is what that same answer says about the other
+// direction, for free, and sync uses it to decide whether to push: see
+// the note there on why "did this cycle commit something" is the wrong
+// question to hang a push on.
+func (r *Repo) remoteState(ctx context.Context) remoteState {
 	if r.cfg.Remote == "" {
-		return false, nil
+		return remoteState{}
 	}
 	out, err := r.gitAuthed(ctx, "ls-remote", "--heads", "origin", r.branch)
 	if err != nil {
-		return false, err
+		return remoteState{}
 	}
+	empty, _ := r.isEmpty(ctx)
 	fields := strings.Fields(strings.TrimSpace(out))
 	if len(fields) == 0 {
 		// No such branch on the remote yet: an empty repository, which is
-		// behind rather than ahead.
-		return false, nil
+		// behind us by every commit we have, and behind us by nothing at
+		// all if we have none either.
+		return remoteState{known: true, behind: !empty}
 	}
 	head := fields[0]
-	// A commit this clone has never fetched cannot be one of ours.
+	// A commit this clone has never fetched cannot be one of ours, and a
+	// working tree with no commits at all has nothing it could be.
+	if empty {
+		return remoteState{known: true, ahead: true}
+	}
 	if _, err := r.git(ctx, "cat-file", "-e", head+"^{commit}"); err != nil {
-		return true, nil
+		return remoteState{known: true, ahead: true}
 	}
 	// We have it: ahead only if it is not already in our history.
 	if _, err := r.git(ctx, "merge-base", "--is-ancestor", head, "HEAD"); err != nil {
-		return true, nil
+		return remoteState{known: true, ahead: true}
 	}
-	return false, nil
+	// It is in our history, so we are level with it or ahead of it: the
+	// second exactly when it is not where we are standing.
+	ours, err := r.Head(ctx)
+	if err != nil {
+		return remoteState{known: true}
+	}
+	return remoteState{known: true, behind: ours != head}
 }
 
 func (r *Repo) remoteBranchMissing(ctx context.Context) bool {
