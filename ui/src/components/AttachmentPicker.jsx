@@ -1,13 +1,14 @@
 import { useRef } from "react";
-import { Box, Button, Chip } from "@mui/material";
+import AttachFileIcon from "@mui/icons-material/AttachFile";
+import { Box, Chip, IconButton, Tooltip } from "@mui/material";
 
 // AttachmentPicker is the file-attach control NewTaskOverlay and the
-// Timeline's own reply box both need (bwsalmon/agents#522): a button that
-// opens the browser's file picker, a chip per file already chosen (with
-// its own remove button), and onChange(files) -- plain File objects, not
-// yet read -- so a caller decides when to actually convert them (on
-// submit, via fileToAttachment) rather than paying to read one that might
-// still be removed before Send is ever clicked.
+// Timeline's own reply box both need (bwsalmon/agents#522): a paperclip
+// button that opens the browser's file picker, a chip per file already
+// chosen (with its own remove button), and onChange(files) -- plain File
+// objects, not yet read -- so a caller decides when to actually convert
+// them (on submit, via fileToAttachment) rather than paying to read one
+// that might still be removed before Send is ever clicked.
 export default function AttachmentPicker({ files, onChange }) {
   const inputRef = useRef(null);
 
@@ -23,10 +24,16 @@ export default function AttachmentPicker({ files, onChange }) {
 
   return (
     <Box sx={{ mt: 1 }}>
-      <input ref={inputRef} type="file" multiple hidden onChange={add} aria-label="Attach files" />
-      <Button size="small" variant="text" onClick={() => inputRef.current.click()}>
-        Attach files
-      </Button>
+      {/* The paperclip carries the control's whole accessible name: the
+          input behind it is hidden plumbing, clicked through the ref
+          rather than by the user, so labelling both would just give
+          "Attach files" two elements to mean. */}
+      <input ref={inputRef} type="file" multiple hidden onChange={add} />
+      <Tooltip title="Attach files">
+        <IconButton size="small" aria-label="Attach files" onClick={() => inputRef.current.click()}>
+          <AttachFileIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
       {files.length > 0 && (
         <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5, mt: 0.5 }}>
           {files.map((f, i) => (

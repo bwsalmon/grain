@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Box, Button, Checkbox, Chip, FormControl, FormControlLabel, InputLabel, ListItemText, MenuItem, Select, Stack, TextField, Typography } from "@mui/material";
 import api from "../api.js";
 import Overlay from "./Overlay.jsx";
+import ReadOnlyReposField from "./ReadOnlyReposField.jsx";
 import RepoField from "./RepoField.jsx";
 
 const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
@@ -123,6 +124,10 @@ function RecurrenceFields({ defaultValue, kind, setKind, weekday, setWeekday }) 
 export default function ScheduleOverlay({ schedule, repoOptions, templates = [], suites = [], config, onClose, onSaved, showError }) {
   const isNew = !schedule;
   const [capabilities, setCapabilities] = useState(schedule?.capabilities || []);
+  // reads is state for the reason capabilities is: its picker
+  // (ReadOnlyReposField) is a search box, not a form field submit could
+  // read the answer off.
+  const [reads, setReads] = useState(schedule?.reads || []);
   const [kind, setKind] = useState(schedule?.recurrence?.kind || "everyNHours");
   const [weekday, setWeekday] = useState(schedule?.recurrence?.weekday || "monday");
   const [templateId, setTemplateId] = useState(schedule?.templateId || "");
@@ -170,8 +175,6 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
       base: data.get("base") || "",
     };
     if (!firesSuite && templateId === "") {
-      const reads = (data.get("reads") || "")
-        .split(",").map((r) => r.trim()).filter((r) => r !== "");
       payload.title = data.get("title");
       payload.description = data.get("description") || "";
       payload.autoMerge = form.elements.autoMerge.checked;
@@ -297,16 +300,7 @@ export default function ScheduleOverlay({ schedule, repoOptions, templates = [],
           <>
             <TextField name="title" label="Title" defaultValue={schedule?.title} required InputLabelProps={{ required: false }} autoComplete="off" fullWidth margin="normal" />
             <TextField name="description" label="Description" defaultValue={schedule?.description} multiline rows={4} fullWidth margin="normal" />
-            <TextField
-              name="reads"
-              label="Read-only repos"
-              defaultValue={(schedule?.reads || []).join(", ")}
-              helperText="owner/name, comma-separated, optional"
-              placeholder="owner/shared-lib, owner/schema"
-              autoComplete="off"
-              fullWidth
-              margin="normal"
-            />
+            <ReadOnlyReposField options={repoOptions} value={reads} onChange={setReads} />
             <FormControlLabel
               control={<Checkbox name="autoMerge" defaultChecked={schedule?.autoMerge} />}
               label="Auto-merge once checks pass"

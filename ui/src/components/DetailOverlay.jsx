@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { Alert, Box, Button, Checkbox, Chip, FormControl, FormControlLabel, Link, ListItemText, MenuItem, Select, Stack, TextField, Tooltip, Typography } from "@mui/material";
 import api from "../api.js";
 import fileToAttachment from "../attachments.js";
-import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, frameworkLabel, orphanedPullRequest } from "../state.js";
+import { STATE_LABELS, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, frameworkLabel, orphanedPullRequest, runActivity } from "../state.js";
 import AttachmentLinks from "./AttachmentLinks.jsx";
 import AttachmentPicker from "./AttachmentPicker.jsx";
 import AttemptTranscriptOverlay from "./AttemptTranscriptOverlay.jsx";
@@ -22,6 +22,7 @@ import TaskPicker from "./TaskPicker.jsx";
 export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenTask, act, showError }) {
   const phase = completionPhase(t);
   const orphaned = orphanedPullRequest(t);
+  const activity = runActivity(t);
   // editing is local to DetailOverlay, not lifted to App.jsx, the same
   // as Timeline's own openAttempt -- nothing outside this overlay needs
   // to know a task's title and description are mid-edit, and closing
@@ -111,6 +112,18 @@ export default function DetailOverlay({ task: t, tasks, config, onClose, onOpenT
             {phase && <Chip size="small" color={phase.color} title={phase.title} label={phase.label} />}
             {t.blocked && <Chip size="small" color="error" label="Blocked" />}
           </div>
+          {/* What the run says it is doing, under the badge that says
+              only that it is running (state.js's runActivity, written by
+              the run through update_status). The same line the task list
+              shows, kept here so the page somebody opens *because* the
+              list said "running" does not answer with less than the list
+              did. */}
+          {activity && (
+            <div className="detail-activity">
+              {activity.note}
+              {activity.age && <span className="task-activity-age">{activity.age}</span>}
+            </div>
+          )}
 
           <Actions t={t} config={config} act={act} />
           <Declared t={t} />

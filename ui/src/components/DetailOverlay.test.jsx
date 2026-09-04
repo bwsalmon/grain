@@ -45,6 +45,25 @@ describe("DetailOverlay", () => {
     expect(document.querySelector(".overlay-pane .detail-layout")).toBeInTheDocument();
   });
 
+  // The page somebody opens *because* the list said "running" must not
+  // answer with less than the list did: the same status line, under the
+  // badge that only says it is running (grain/task-240).
+  it("shows what a running task's agent says it is doing", () => {
+    render(<DetailOverlay
+      task={{ ...baseTask, state: "running", activity: "running the test suite", activityAt: new Date().toISOString() }}
+      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+    />);
+    expect(screen.getByText("running the test suite")).toBeInTheDocument();
+  });
+
+  it("shows no status line for a task that is not running", () => {
+    render(<DetailOverlay
+      task={{ ...baseTask, state: "completed", activity: "running the test suite" }}
+      tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()}
+    />);
+    expect(document.querySelector(".detail-activity")).not.toBeInTheDocument();
+  });
+
   it("shows a placeholder when there is no description", () => {
     render(<DetailOverlay task={{ ...baseTask, description: "" }} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={vi.fn()} />);
     expect(screen.getByText("(no description)")).toBeInTheDocument();
@@ -1143,7 +1162,7 @@ describe("DetailOverlay", () => {
     render(<DetailOverlay task={baseTask} tasks={[]} config={config} onClose={() => {}} onOpenTask={() => {}} act={act} />);
 
     const file = new File(["fake"], "screenshot.png", { type: "image/png" });
-    await user.upload(screen.getByLabelText("Attach files"), file);
+    await user.upload(document.querySelector('input[type="file"]'), file);
     await user.click(screen.getByRole("button", { name: "Comment" }));
 
     expect(act).toHaveBeenCalledWith(expect.any(Function), "12");

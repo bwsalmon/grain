@@ -74,6 +74,7 @@ func (s *Server) routes() {
 	s.route("POST /api/tasks/{id}/retry", s.handleRetry)
 	s.route("POST /api/tasks/{id}/pull-request", s.handleOpenPullRequest)
 	s.route("POST /api/tasks/{id}/sandbox/recreate", s.handleRecreateSandbox)
+	s.route("POST /api/tasks/{id}/activity", s.handleSetTaskActivity)
 	s.route("GET /api/tasks/{id}/attempts/{number}/transcript", s.handleGetAttemptTranscript)
 	s.route("GET /api/tasks/{id}/prompt", s.handleGetTaskPrompt)
 

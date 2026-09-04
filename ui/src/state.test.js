@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, repoRows, unionCapabilities } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, relativeAge, repoRows, runActivity, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task whose run is not over", () => {
@@ -373,5 +373,52 @@ describe("closablePullRequest", () => {
   // orphanedPullRequest drives is what that task gets instead.
   it("names nothing on a task that is already closed", () => {
     expect(closablePullRequest({ state: "closed", pullRequest: "acme/widgets#1" })).toBeNull();
+  });
+});
+
+describe("runActivity", () => {
+  const at = (msAgo) => new Date(Date.UTC(2026, 8, 4, 12, 0, 0) - msAgo).toISOString();
+  const now = Date.UTC(2026, 8, 4, 12, 0, 0);
+
+  it("gives back what a running task's own agent said, and how old it is", () => {
+    expect(runActivity({ state: "running", activity: "waiting for CI", activityAt: at(4 * 60_000) }, now))
+      .toEqual({ note: "waiting for CI", age: "4m" });
+  });
+
+  // The API only carries a synopsis for a live run, but a poll's answer
+  // can be a few seconds old -- and a phrase left beside a "Completed"
+  // badge reads as a run still going.
+  it("says nothing once the task has stopped running", () => {
+    expect(runActivity({ state: "completed", activity: "waiting for CI", activityAt: at(0) }, now)).toBeNull();
+    expect(runActivity({ state: "failed", activity: "waiting for CI", activityAt: at(0) }, now)).toBeNull();
+  });
+
+  it("says nothing for a running task whose agent has not said anything", () => {
+    expect(runActivity({ state: "running" }, now)).toBeNull();
+  });
+
+  // A row written before the timestamp column existed has a note and no
+  // time; showing the note alone beats inventing an age for it.
+  it("shows a note with no timestamp on its own", () => {
+    expect(runActivity({ state: "running", activity: "reading the code" }, now))
+      .toEqual({ note: "reading the code", age: null });
+  });
+});
+
+describe("relativeAge", () => {
+  const now = Date.UTC(2026, 8, 4, 12, 0, 0);
+  const ago = (ms) => new Date(now - ms).toISOString();
+
+  it("is coarse on purpose: now, minutes, hours, days", () => {
+    expect(relativeAge(ago(5_000), now)).toBe("now");
+    expect(relativeAge(ago(90_000), now)).toBe("1m");
+    expect(relativeAge(ago(3 * 3_600_000), now)).toBe("3h");
+    expect(relativeAge(ago(50 * 3_600_000), now)).toBe("2d");
+  });
+
+  // A browser clock a second ahead of the daemon's is not worth showing
+  // anybody a negative age over.
+  it("never renders a future timestamp as negative", () => {
+    expect(relativeAge(new Date(now + 5_000).toISOString(), now)).toBe("now");
   });
 });

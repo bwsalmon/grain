@@ -36,7 +36,7 @@
 // docs/design.md's split surface -- "Sandboxes: git transport only" --
 // is untouched. See pkg/mcp/pullrequest_tools.go's own doc comment.
 //
-// -server and -task add two further tools. open_pull_request: a run that
+// -server and -task add three further tools. open_pull_request: a run that
 // has pushed its branch can have grain open its pull request there and
 // then, and read back what the repo's own CI makes of it, rather than
 // exiting blind and leaving the pull request to the finish path. And
@@ -44,7 +44,13 @@
 // guest, a full disk, a filesystem an interrupted install left in a
 // state no command can untangle -- can have grain destroy it and build a
 // clean one, and carry on in the turns it has left instead of failing
-// every remaining call in a sandbox it cannot repair from inside.
+// every remaining call in a sandbox it cannot repair from inside. And
+// update_status: a run can put one short phrase on its own task's row --
+// "waiting for CI", "running the test suite" -- so a person watching a
+// task that has read 'running' for half an hour can see what that half
+// hour is going on, rather than reading the transcript afterwards. It is
+// the only one of the three that changes nothing: grain shows the phrase
+// and never reads it back.
 //
 // -grant names a capability grant this run's task holds, once per grant,
 // and is how a grant whose whole effect is which tools a run gets
@@ -188,6 +194,30 @@ func (d daemonSandbox) RecreateSandbox(ctx context.Context) (mcp.SandboxRecreati
 	}, nil
 }
 
+// daemonStatus implements mcp.StatusReporter by asking a running "grain
+// daemon" to record what this run says it is doing (pkg/ui's POST
+// /api/tasks/{id}/activity) -- the third of the REST hops
+// daemonPullRequests and daemonSandbox above make, over the same client.
+//
+// The hop is not about authority here, unlike those two: recording a
+// phrase authorizes nothing and destroys nothing. It is about where the
+// row is. A run's status is shown on its task, the task is a row in the
+// daemon's store, and this process holds a transport into a sandbox and
+// nothing else. Which task it lands on is fixed by -task at process
+// start, so a run can only ever narrate itself.
+type daemonStatus struct {
+	client *ui.HTTPClient
+	taskID string
+}
+
+func (d daemonStatus) ReportStatus(ctx context.Context, note string) (mcp.StatusReport, error) {
+	activity, err := d.client.SetTaskActivity(ctx, d.taskID, note)
+	if err != nil {
+		return mcp.StatusReport{}, err
+	}
+	return mcp.StatusReport{Live: activity.Live}, nil
+}
+
 // grantNames collects the repeated -grant flag: the capability grants
 // this run's task holds, in the order a Framework wrote them
 // (agent.GrantArgs). A flag.Value rather than one comma-separated
@@ -292,8 +322,8 @@ func mcpserver(args []string) {
 
 	server := fs.String("server", "",
 		"base URL of the \"grain daemon\" this server's run was dispatched by, e.g. http://127.0.0.1:8420 "+
-			"-- with -task, adds the open_pull_request tool, which asks that daemon to open the run's own "+
-			"pull request rather than opening one from here")
+			"-- with -task, adds the open_pull_request, recreate_sandbox and update_status tools, each "+
+			"of which asks that daemon to act on the run's own task rather than acting from here")
 	taskID := fs.String("task", "",
 		"id of the task this server's run belongs to (required with -server)")
 
@@ -355,13 +385,14 @@ func mcpserver(args []string) {
 	// the file's doc comment.
 	registry.Register(pullRequestTools(*dataDir, *githubHost, *githubInsecureHTTP, *prRepo, *prBranch)...)
 
-	// open_pull_request and recreate_sandbox are the two tools here whose
-	// effect is real and immediate, and both happen by asking the daemon
-	// rather than from this process, so both are registered only when
-	// this process was actually told which daemon and which task it
-	// serves -- a run driven from a bare `grain mcpserver -sandbox-root`
-	// (pkg/mcp's own tests, tests/e2e/) has no daemon to ask and is
-	// better off not advertising tools that could only ever refuse.
+	// open_pull_request, recreate_sandbox and update_status are the three
+	// tools here that act while the run is still going, and all three do
+	// it by asking the daemon rather than from this process, so all three
+	// are registered only when this process was actually told which
+	// daemon and which task it serves -- a run driven from a bare `grain
+	// mcpserver -sandbox-root` (pkg/mcp's own tests, tests/e2e/) has no
+	// daemon to ask and is better off not advertising tools that could
+	// only ever refuse.
 	var client *ui.HTTPClient
 	switch {
 	case *server != "" && *taskID == "":
@@ -376,6 +407,8 @@ func mcpserver(args []string) {
 			daemonPullRequests{client: client, taskID: *taskID})...)
 		registry.Register(mcp.NewRecreateSandboxTools(
 			daemonSandbox{client: client, taskID: *taskID})...)
+		registry.Register(mcp.NewStatusTools(
+			daemonStatus{client: client, taskID: *taskID})...)
 	}
 
 	registry.Register(grantedTools(grants, *grainSrcDir)...)

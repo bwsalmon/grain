@@ -284,8 +284,8 @@ func newFramework(run runner, grainBinaryPath string, opts ...Option) *Framework
 }
 
 // allowedTools names the exact tools NewSandboxTools, NewMockTools,
-// NewPullRequestTools, NewOpenPullRequestTools and
-// NewRecreateSandboxTools register, plus selfdebug.SourceTools' and
+// NewPullRequestTools, NewOpenPullRequestTools, NewRecreateSandboxTools
+// and NewStatusTools register, plus selfdebug.SourceTools' and
 // bootstrap.PlaybookTools', mcp__-prefixed
 // the way claude reports them once loaded from --mcp-config -- computed
 // from those constructors
@@ -326,6 +326,12 @@ func allowedTools() []string {
 	// server advertises rather than adding to it. nil is a
 	// SandboxRecreator no run ever gets -- this only wants the name.
 	for _, t := range mcp.NewRecreateSandboxTools(nil) {
+		names = append(names, mcp.QualifiedToolName(t.Name))
+	}
+	// update_status comes from that same -server/-task pair as well, and
+	// is admitted on the same terms for the same reason. nil is a
+	// StatusReporter no run ever gets -- this only wants the name.
+	for _, t := range mcp.NewStatusTools(nil) {
 		names = append(names, mcp.QualifiedToolName(t.Name))
 	}
 	// The capability grants' own tools, named on the same terms again:

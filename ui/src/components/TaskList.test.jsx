@@ -461,4 +461,49 @@ describe("TaskList", () => {
     renderList();
     expect(screen.queryByRole("button", { name: /prompt/i })).not.toBeInTheDocument();
   });
+
+  // What the run itself says it is doing (grain/task-240, the
+  // update_status tool): the one thing on a row that changes while you
+  // watch it, and the only answer to "what has this task been doing for
+  // the last half hour?" short of reading a transcript.
+  describe("a running task's own status", () => {
+    const running = (extra) => ({
+      id: 7, title: "Ship the other thing", state: "running", capabilities: [], blocked: false, ...extra,
+    });
+
+    it("shows what the run says it is doing, with how long ago it said it", () => {
+      renderList({
+        tasks: [running({
+          activity: "waiting for CI on the second push",
+          activityAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+        })],
+      });
+      expect(screen.getByText("waiting for CI on the second push")).toBeInTheDocument();
+      expect(screen.getByText("5m")).toBeInTheDocument();
+    });
+
+    // A synopsis with no timestamp -- a row written by an older build --
+    // is shown alone rather than with an invented age.
+    it("shows a status with no timestamp on its own", () => {
+      renderList({ tasks: [running({ activity: "running the test suite" })] });
+      expect(screen.getByText("running the test suite")).toBeInTheDocument();
+      expect(document.querySelector(".task-activity-age")).not.toBeInTheDocument();
+    });
+
+    // The API only carries one for a live run, but a poll's answer is up
+    // to three seconds old: a task that has just finished must not keep
+    // showing what it was doing, which beside a "Completed" badge would
+    // read as a run still going.
+    it("drops the status the moment the task stops running", () => {
+      renderList({
+        tasks: [running({ state: "completed", activity: "waiting for CI on the second push" })],
+      });
+      expect(screen.queryByText("waiting for CI on the second push")).not.toBeInTheDocument();
+    });
+
+    it("says nothing at all for a run that has not said anything", () => {
+      renderList({ tasks: [running()] });
+      expect(document.querySelector(".task-activity")).not.toBeInTheDocument();
+    });
+  });
 });
