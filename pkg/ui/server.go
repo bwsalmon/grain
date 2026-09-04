@@ -3,8 +3,10 @@ package ui
 import (
 	"bytes"
 	"embed"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -21,11 +23,15 @@ var staticFS embed.FS
 type Server struct {
 	tasks *Client
 	mux   *http.ServeMux
+	// paths carries the same API paths as mux with the method dropped,
+	// so an unmatched /api/ request can say whether the path exists at
+	// all -- see apiFallback.
+	paths *http.ServeMux
 }
 
 // NewServer builds a Server over a store.
 func NewServer(cfg Config, store *model.Store) *Server {
-	s := &Server{tasks: NewClient(cfg, store), mux: http.NewServeMux()}
+	s := &Server{tasks: NewClient(cfg, store), mux: http.NewServeMux(), paths: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -34,7 +40,7 @@ func NewServer(cfg Config, store *model.Store) *Server {
 // -- for a caller that needs to set its clock, or share one Client with a
 // non-HTTP path.
 func NewServerWithClient(client *Client) *Server {
-	s := &Server{tasks: client, mux: http.NewServeMux()}
+	s := &Server{tasks: client, mux: http.NewServeMux(), paths: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -42,111 +48,111 @@ func NewServerWithClient(client *Client) *Server {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /api/config", s.handleConfig)
-	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
-	s.mux.HandleFunc("PUT /api/settings", s.handleUpdateSettings)
-	s.mux.HandleFunc("POST /api/capabilities/{id}/check", s.handleCheckCapability)
-	s.mux.HandleFunc("GET /api/tasks", s.handleListTasks)
-	s.mux.HandleFunc("POST /api/tasks", s.handleCreateTask)
-	s.mux.HandleFunc("POST /api/tasks/reorder", s.handleReorder)
-	s.mux.HandleFunc("GET /api/tasks/{id}", s.handleGetTask)
-	s.mux.HandleFunc("PATCH /api/tasks/{id}", s.handleUpdateTask)
-	s.mux.HandleFunc("POST /api/tasks/{id}/capabilities", s.handleSetCapability)
-	s.mux.HandleFunc("POST /api/tasks/{id}/depends-on", s.handleSetDependency)
-	s.mux.HandleFunc("POST /api/tasks/{id}/approve", s.handleApprove)
-	s.mux.HandleFunc("POST /api/tasks/{id}/withdraw-approval", s.handleWithdrawApproval)
-	s.mux.HandleFunc("POST /api/tasks/{id}/submit", s.handleSubmit)
-	s.mux.HandleFunc("POST /api/tasks/{id}/comments", s.handleAddComment)
+	s.route("GET /api/config", s.handleConfig)
+	s.route("GET /api/settings", s.handleGetSettings)
+	s.route("PUT /api/settings", s.handleUpdateSettings)
+	s.route("POST /api/capabilities/{id}/check", s.handleCheckCapability)
+	s.route("GET /api/tasks", s.handleListTasks)
+	s.route("POST /api/tasks", s.handleCreateTask)
+	s.route("POST /api/tasks/reorder", s.handleReorder)
+	s.route("GET /api/tasks/{id}", s.handleGetTask)
+	s.route("PATCH /api/tasks/{id}", s.handleUpdateTask)
+	s.route("POST /api/tasks/{id}/capabilities", s.handleSetCapability)
+	s.route("POST /api/tasks/{id}/depends-on", s.handleSetDependency)
+	s.route("POST /api/tasks/{id}/approve", s.handleApprove)
+	s.route("POST /api/tasks/{id}/withdraw-approval", s.handleWithdrawApproval)
+	s.route("POST /api/tasks/{id}/submit", s.handleSubmit)
+	s.route("POST /api/tasks/{id}/comments", s.handleAddComment)
 	// PUT, not POST: setting the one secret a parked run asked for is an
 	// idempotent write of a value at a name the task already fixed --
 	// the same shape (and the same verb) /api/secrets/{secret}/{key}
 	// already uses for the write this one delegates to.
-	s.mux.HandleFunc("PUT /api/tasks/{id}/secret", s.handleSetTaskSecret)
-	s.mux.HandleFunc("GET /api/tasks/{id}/attachments/{attachmentId}", s.handleGetAttachment)
-	s.mux.HandleFunc("POST /api/tasks/{id}/close", s.handleClose)
-	s.mux.HandleFunc("POST /api/tasks/{id}/reopen", s.handleReopen)
-	s.mux.HandleFunc("POST /api/tasks/{id}/retry", s.handleRetry)
-	s.mux.HandleFunc("POST /api/tasks/{id}/pull-request", s.handleOpenPullRequest)
-	s.mux.HandleFunc("POST /api/tasks/{id}/sandbox/recreate", s.handleRecreateSandbox)
-	s.mux.HandleFunc("GET /api/tasks/{id}/attempts/{number}/transcript", s.handleGetAttemptTranscript)
-	s.mux.HandleFunc("GET /api/tasks/{id}/prompt", s.handleGetTaskPrompt)
+	s.route("PUT /api/tasks/{id}/secret", s.handleSetTaskSecret)
+	s.route("GET /api/tasks/{id}/attachments/{attachmentId}", s.handleGetAttachment)
+	s.route("POST /api/tasks/{id}/close", s.handleClose)
+	s.route("POST /api/tasks/{id}/reopen", s.handleReopen)
+	s.route("POST /api/tasks/{id}/retry", s.handleRetry)
+	s.route("POST /api/tasks/{id}/pull-request", s.handleOpenPullRequest)
+	s.route("POST /api/tasks/{id}/sandbox/recreate", s.handleRecreateSandbox)
+	s.route("GET /api/tasks/{id}/attempts/{number}/transcript", s.handleGetAttemptTranscript)
+	s.route("GET /api/tasks/{id}/prompt", s.handleGetTaskPrompt)
 
-	s.mux.HandleFunc("POST /api/repos", s.handleAddTargetRepo)
-	s.mux.HandleFunc("DELETE /api/repos/{owner}/{name}", s.handleRemoveTargetRepo)
+	s.route("POST /api/repos", s.handleAddTargetRepo)
+	s.route("DELETE /api/repos/{owner}/{name}", s.handleRemoveTargetRepo)
 
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/capabilities", s.handleGetRepoCapabilities)
-	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/capabilities", s.handleSetRepoCapabilities)
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/prompt-extension", s.handleGetRepoPromptExtension)
-	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/prompt-extension", s.handleSetRepoPromptExtension)
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/setup-command", s.handleGetRepoSetupCommand)
-	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/setup-command", s.handleSetRepoSetupCommand)
+	s.route("GET /api/repos/{owner}/{name}/capabilities", s.handleGetRepoCapabilities)
+	s.route("PUT /api/repos/{owner}/{name}/capabilities", s.handleSetRepoCapabilities)
+	s.route("GET /api/repos/{owner}/{name}/prompt-extension", s.handleGetRepoPromptExtension)
+	s.route("PUT /api/repos/{owner}/{name}/prompt-extension", s.handleSetRepoPromptExtension)
+	s.route("GET /api/repos/{owner}/{name}/setup-command", s.handleGetRepoSetupCommand)
+	s.route("PUT /api/repos/{owner}/{name}/setup-command", s.handleSetRepoSetupCommand)
 
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases", s.handleListReleases)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases", s.handleCreateRelease)
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases/{release}", s.handleGetRelease)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases/{release}/merge", s.handleRequestReleaseMerge)
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/releases/{release}/candidates", s.handleListCandidates)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases/{release}/candidates", s.handleCutCandidate)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote", s.handlePromoteCandidate)
+	s.route("GET /api/repos/{owner}/{name}/releases", s.handleListReleases)
+	s.route("POST /api/repos/{owner}/{name}/releases", s.handleCreateRelease)
+	s.route("GET /api/repos/{owner}/{name}/releases/{release}", s.handleGetRelease)
+	s.route("POST /api/repos/{owner}/{name}/releases/{release}/merge", s.handleRequestReleaseMerge)
+	s.route("GET /api/repos/{owner}/{name}/releases/{release}/candidates", s.handleListCandidates)
+	s.route("POST /api/repos/{owner}/{name}/releases/{release}/candidates", s.handleCutCandidate)
+	s.route("POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote", s.handlePromoteCandidate)
 
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/branches", s.handleListBranches)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/branches", s.handleCreateBranch)
+	s.route("GET /api/repos/{owner}/{name}/branches", s.handleListBranches)
+	s.route("POST /api/repos/{owner}/{name}/branches", s.handleCreateBranch)
 
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/qualification-plan", s.handleGetQualificationPlan)
-	s.mux.HandleFunc("PUT /api/repos/{owner}/{name}/qualification-plan", s.handlePutQualificationPlan)
-	s.mux.HandleFunc("GET /api/repos/{owner}/{name}/candidates/{id}/qualification", s.handleGetCandidateQualification)
-	s.mux.HandleFunc("POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve", s.handleApproveQualificationRun)
+	s.route("GET /api/repos/{owner}/{name}/qualification-plan", s.handleGetQualificationPlan)
+	s.route("PUT /api/repos/{owner}/{name}/qualification-plan", s.handlePutQualificationPlan)
+	s.route("GET /api/repos/{owner}/{name}/candidates/{id}/qualification", s.handleGetCandidateQualification)
+	s.route("POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve", s.handleApproveQualificationRun)
 
-	s.mux.HandleFunc("GET /api/schedules", s.handleListSchedules)
-	s.mux.HandleFunc("POST /api/schedules", s.handleCreateSchedule)
-	s.mux.HandleFunc("PATCH /api/schedules/{id}", s.handleUpdateSchedule)
-	s.mux.HandleFunc("DELETE /api/schedules/{id}", s.handleDeleteSchedule)
+	s.route("GET /api/schedules", s.handleListSchedules)
+	s.route("POST /api/schedules", s.handleCreateSchedule)
+	s.route("PATCH /api/schedules/{id}", s.handleUpdateSchedule)
+	s.route("DELETE /api/schedules/{id}", s.handleDeleteSchedule)
 
-	s.mux.HandleFunc("GET /api/templates", s.handleListTemplates)
-	s.mux.HandleFunc("POST /api/templates", s.handleCreateTemplate)
-	s.mux.HandleFunc("PATCH /api/templates/{id}", s.handleUpdateTemplate)
-	s.mux.HandleFunc("DELETE /api/templates/{id}", s.handleDeleteTemplate)
+	s.route("GET /api/templates", s.handleListTemplates)
+	s.route("POST /api/templates", s.handleCreateTemplate)
+	s.route("PATCH /api/templates/{id}", s.handleUpdateTemplate)
+	s.route("DELETE /api/templates/{id}", s.handleDeleteTemplate)
 
-	s.mux.HandleFunc("GET /api/suites", s.handleListSuites)
-	s.mux.HandleFunc("POST /api/suites", s.handleCreateSuite)
-	s.mux.HandleFunc("PATCH /api/suites/{id}", s.handleUpdateSuite)
-	s.mux.HandleFunc("DELETE /api/suites/{id}", s.handleDeleteSuite)
-	s.mux.HandleFunc("GET /api/suite-runs", s.handleListSuiteRuns)
-	s.mux.HandleFunc("POST /api/suite-runs", s.handleCreateSuiteRun)
-	s.mux.HandleFunc("GET /api/suite-runs/{id}", s.handleGetSuiteRun)
+	s.route("GET /api/suites", s.handleListSuites)
+	s.route("POST /api/suites", s.handleCreateSuite)
+	s.route("PATCH /api/suites/{id}", s.handleUpdateSuite)
+	s.route("DELETE /api/suites/{id}", s.handleDeleteSuite)
+	s.route("GET /api/suite-runs", s.handleListSuiteRuns)
+	s.route("POST /api/suite-runs", s.handleCreateSuiteRun)
+	s.route("GET /api/suite-runs/{id}", s.handleGetSuiteRun)
 
-	s.mux.HandleFunc("GET /api/agent-keys", s.handleListAgentKeys)
-	s.mux.HandleFunc("PUT /api/agent-keys/{framework}", s.handleSetAgentKey)
-	s.mux.HandleFunc("DELETE /api/agent-keys/{framework}", s.handleDeleteAgentKey)
+	s.route("GET /api/agent-keys", s.handleListAgentKeys)
+	s.route("PUT /api/agent-keys/{framework}", s.handleSetAgentKey)
+	s.route("DELETE /api/agent-keys/{framework}", s.handleDeleteAgentKey)
 
-	s.mux.HandleFunc("GET /api/github-tokens", s.handleListGitHubTokens)
-	s.mux.HandleFunc("PUT /api/github-tokens/{name}", s.handleSetGitHubToken)
-	s.mux.HandleFunc("DELETE /api/github-tokens/{name}", s.handleDeleteGitHubToken)
+	s.route("GET /api/github-tokens", s.handleListGitHubTokens)
+	s.route("PUT /api/github-tokens/{name}", s.handleSetGitHubToken)
+	s.route("DELETE /api/github-tokens/{name}", s.handleDeleteGitHubToken)
 
-	s.mux.HandleFunc("GET /api/secrets", s.handleListSecrets)
-	s.mux.HandleFunc("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
-	s.mux.HandleFunc("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
-	s.mux.HandleFunc("DELETE /api/secrets/{secret}", s.handleDeleteSecret)
+	s.route("GET /api/secrets", s.handleListSecrets)
+	s.route("PUT /api/secrets/{secret}/{key}", s.handleSetSecret)
+	s.route("DELETE /api/secrets/{secret}/{key}", s.handleDeleteSecretKey)
+	s.route("DELETE /api/secrets/{secret}", s.handleDeleteSecret)
 
-	s.mux.HandleFunc("GET /api/state-repo", s.handleGetStateRepo)
-	s.mux.HandleFunc("POST /api/state-repo", s.handleSetStateRepo)
-	s.mux.HandleFunc("POST /api/state-repo/sync", s.handleSyncStateRepo)
-	s.mux.HandleFunc("POST /api/state-repo/secrets-key", s.handleImportSecretsKey)
+	s.route("GET /api/state-repo", s.handleGetStateRepo)
+	s.route("POST /api/state-repo", s.handleSetStateRepo)
+	s.route("POST /api/state-repo/sync", s.handleSyncStateRepo)
+	s.route("POST /api/state-repo/secrets-key", s.handleImportSecretsKey)
 
-	s.mux.HandleFunc("POST /api/host/reboot", s.handleRebootHost)
-	s.mux.HandleFunc("GET /api/host/top", s.handleGetHostTop)
-	s.mux.HandleFunc("GET /api/upgrade", s.handleGetUpgradeStatus)
-	s.mux.HandleFunc("POST /api/upgrade", s.handleStartUpgrade)
+	s.route("POST /api/host/reboot", s.handleRebootHost)
+	s.route("GET /api/host/top", s.handleGetHostTop)
+	s.route("GET /api/upgrade", s.handleGetUpgradeStatus)
+	s.route("POST /api/upgrade", s.handleStartUpgrade)
 
-	s.mux.HandleFunc("GET /api/logs", s.handleListLogSources)
-	s.mux.HandleFunc("GET /api/logs/{source}", s.handleGetLogLines)
+	s.route("GET /api/logs", s.handleListLogSources)
+	s.route("GET /api/logs/{source}", s.handleGetLogLines)
 
-	s.mux.HandleFunc("GET /api/sandboxes", s.handleGetSandboxHealth)
+	s.route("GET /api/sandboxes", s.handleGetSandboxHealth)
 
-	s.mux.HandleFunc("GET /api/metrics", s.handleGetMetrics)
+	s.route("GET /api/metrics", s.handleGetMetrics)
 
-	s.mux.HandleFunc("GET /api/pause", s.handleGetAgentPause)
-	s.mux.HandleFunc("DELETE /api/pause", s.handleLiftAgentPause)
+	s.route("GET /api/pause", s.handleGetAgentPause)
+	s.route("DELETE /api/pause", s.handleLiftAgentPause)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
@@ -155,7 +161,58 @@ func (s *Server) routes() {
 		// condition a caller can do anything about.
 		panic("ui: embedding static/: " + err.Error())
 	}
-	s.mux.Handle("/", spaHandler(static))
+	s.mux.Handle("/", s.apiFallback(spaHandler(static)))
+}
+
+// route registers one "METHOD /path" handler, and records the path on
+// its own mux so apiFallback can tell a path that does not exist from
+// one reached with the wrong method.
+func (s *Server) route(pattern string, handler http.HandlerFunc) {
+	s.mux.HandleFunc(pattern, handler)
+	_, path, ok := strings.Cut(pattern, " ")
+	if !ok {
+		return
+	}
+	if _, matched := s.paths.Handler(&http.Request{Method: http.MethodGet, URL: &url.URL{Path: path}}); matched == path {
+		return // a second method on a path already recorded
+	}
+	s.paths.Handle(path, knownAPIPath{})
+}
+
+// knownAPIPath is the sentinel Server.paths is filled with: it is never
+// served, only recognised, and being a named type rather than a closure
+// is what lets apiFallback tell it apart from the redirect handler a
+// ServeMux can return instead.
+type knownAPIPath struct{}
+
+func (knownAPIPath) ServeHTTP(http.ResponseWriter, *http.Request) {}
+
+// apiFallback answers an /api/ request no route matched, instead of
+// letting it fall through to next -- the SPA, which would answer any
+// wrong path or wrong method with 200 and a page of HTML.
+//
+// That mattered beyond tidiness (found by hand, task 244): every caller
+// of this API expects JSON. A CLI a version out of step with its daemon,
+// an MCP tool hop like open_pull_request landing on a daemon that has no
+// such route, or a typo in a curl -- each got "200 OK" and then failed
+// somewhere further on parsing "<!doctype html>", naming a character
+// rather than the endpoint.
+func (s *Server) apiFallback(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if h, _ := s.paths.Handler(r); h != nil {
+			if _, known := h.(knownAPIPath); known {
+				writeError(w, http.StatusMethodNotAllowed,
+					fmt.Errorf("%s is not allowed on %s", r.Method, r.URL.Path))
+				return
+			}
+		}
+		writeError(w, http.StatusNotFound,
+			fmt.Errorf("no such API endpoint: %s %s", r.Method, r.URL.Path))
+	})
 }
 
 // spaHandler serves static assets straight out of fsys, the same as

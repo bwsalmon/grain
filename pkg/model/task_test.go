@@ -88,3 +88,52 @@ func TestGrantsSubsetOfIsFalseForAWiderRequest(t *testing.T) {
 		t.Error("a capability not in allowed should make this false")
 	}
 }
+
+// ParseRepo's own gate: a paste that is not owner/name is either
+// normalised to it or refused here, because nothing downstream of this
+// function looks at a RepoRef again before building a clone URL out of
+// it. Found by hand (task 244): `grain create -repo
+// https://github.com/bwsalmon/grain` used to file a task whose owner
+// was "https:".
+func TestParseRepoNormalisesTheFormsAnOperatorPastes(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"acme/widgets", "acme/widgets"},
+		{"  acme/widgets  ", "acme/widgets"},
+		{"https://github.com/acme/widgets", "acme/widgets"},
+		{"https://github.com/acme/widgets/", "acme/widgets"},
+		{"https://github.com/acme/widgets.git", "acme/widgets"},
+		{"http://github.example.com/acme/widgets", "acme/widgets"},
+		{"git@github.com:acme/widgets.git", "acme/widgets"},
+		{"ssh://git@github.com/acme/widgets.git", "acme/widgets"},
+	} {
+		got, err := ParseRepo(tc.in)
+		if err != nil {
+			t.Errorf("ParseRepo(%q): %v", tc.in, err)
+			continue
+		}
+		if got.String() != tc.want {
+			t.Errorf("ParseRepo(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestParseRepoRefusesWhatWouldNotSurviveBeingPutInAURL(t *testing.T) {
+	for _, in := range []string{
+		"",
+		"not-a-repo",
+		"acme/",
+		"/widgets",
+		"acme/widgets/extra",
+		"https://github.com/acme",
+		"acme/wid gets",
+		"acme/../etc",
+		"../acme/widgets",
+		"acme/widgets#fragment",
+		"acme/widgets?query",
+		"acme/wid\ngets",
+	} {
+		if got, err := ParseRepo(in); err == nil {
+			t.Errorf("ParseRepo(%q) = %q, want an error", in, got)
+		}
+	}
+}

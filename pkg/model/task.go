@@ -118,12 +118,72 @@ type RepoRef struct {
 
 func (r RepoRef) String() string { return r.Owner + "/" + r.Name }
 
+// ParseRepo reads the one written form of a repository: owner/name.
+//
+// It also accepts the two shapes an operator most often has in the
+// clipboard instead -- a browser URL (https://github.com/owner/name,
+// with or without a trailing .git or /) and an SSH remote
+// (git@github.com:owner/name.git) -- and normalises both to owner/name,
+// because the alternative was worse than either accepting or rejecting
+// them: a bare strings.Cut on the first "/" took
+// "https://github.com/owner/name" as owner "https:", name
+// "/github.com/owner/name", stored it, and left the task to fail much
+// later at clone time with an error naming neither the paste nor the
+// field it went into.
+//
+// Everything else is refused here rather than downstream. What comes out
+// of this function is used to build clone URLs, GitHub API paths and
+// branch refs, so a segment carrying a slash, a space, a colon or a
+// control character is not a repository grain can act on however it was
+// typed.
 func ParseRepo(text string) (RepoRef, error) {
-	owner, name, ok := strings.Cut(text, "/")
-	if !ok || owner == "" || name == "" {
-		return RepoRef{}, fmt.Errorf("repo must be owner/name, got %q", text)
+	trimmed := strings.TrimSpace(text)
+	spec := trimmed
+	// scp-style SSH remotes: everything up to the colon is the host.
+	if at := strings.Index(spec, "@"); at >= 0 && !strings.Contains(spec, "://") {
+		if colon := strings.Index(spec[at:], ":"); colon >= 0 {
+			spec = spec[at+colon+1:]
+		}
+	}
+	if scheme := strings.Index(spec, "://"); scheme >= 0 {
+		spec = spec[scheme+len("://"):]
+		// Drop the host (and any userinfo already folded into it), which
+		// is everything up to the first slash.
+		if slash := strings.Index(spec, "/"); slash >= 0 {
+			spec = spec[slash+1:]
+		} else {
+			spec = ""
+		}
+	}
+	spec = strings.TrimSuffix(strings.TrimSuffix(strings.Trim(spec, "/"), ".git"), "/")
+
+	owner, name, ok := strings.Cut(spec, "/")
+	if !ok || !validRepoSegment(owner) || !validRepoSegment(name) {
+		return RepoRef{}, fmt.Errorf("repo must be owner/name, got %q", trimmed)
 	}
 	return RepoRef{Owner: owner, Name: name}, nil
+}
+
+// validRepoSegment reports whether one half of an owner/name pair is a
+// segment grain can safely put in a URL or a ref. GitHub is stricter
+// than this (its own owner names are alphanumerics and hyphens); the
+// point here is not to re-implement its rules but to refuse anything
+// that would change the *shape* of a URL built from it, plus the two
+// path segments that would escape it.
+func validRepoSegment(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	for _, r := range s {
+		switch r {
+		case '/', '\\', ':', '?', '#', '@', '[', ']', '%', '~', '^':
+			return false
+		}
+		if r <= ' ' || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 type RepoBinding string
