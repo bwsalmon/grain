@@ -2230,6 +2230,71 @@ func TestInitMigratesAnExistingDatabaseMissingMergeQueueRefreshedAt(t *testing.T
 	}
 }
 
+// release.merge_note -- why a release merged without a pull request of
+// its own -- was added to a table a deployment already has releases in,
+// and CREATE TABLE IF NOT EXISTS never alters one of those. This
+// simulates a database built without the column, directly, and checks
+// Store.Init's own migration step (ensureReleaseMergeNoteColumn) leaves
+// the pre-existing release readable and makes the note durable
+// afterwards.
+func TestInitMigratesAnExistingDatabaseMissingReleaseMergeNote(t *testing.T) {
+	db, err := sqlite.Open(sqlite.DefaultConfig(t.TempDir()))
+	if err != nil {
+		t.Fatalf("opening embedded sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE `+"`release`"+` (
+  `+"`id`"+`                INTEGER PRIMARY KEY AUTOINCREMENT,
+  `+"`owner`"+`             TEXT     NOT NULL,
+  `+"`repo`"+`              TEXT     NOT NULL,
+  `+"`name`"+`              TEXT     NOT NULL,
+  `+"`status`"+`            TEXT     NOT NULL,
+  `+"`created_at`"+`        DATETIME NOT NULL,
+  `+"`merged_at`"+`         DATETIME NULL,
+  `+"`pull_request_url`"+`  TEXT     NULL,
+  `+"`last_error`"+`        TEXT     NULL
+)`); err != nil {
+		t.Fatalf("creating the release table as it was before the merge_note column: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO `release` (`owner`,`repo`,`name`,`status`,`created_at`) VALUES ('acme','widgets','myfeat','merge_requested',?)",
+		now); err != nil {
+		t.Fatalf("seeding a release recorded before the column existed: %v", err)
+	}
+
+	store := model.New(db)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("Init against an existing database missing release.merge_note: %v", err)
+	}
+
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	got, err := store.GetRelease(ctx, repo, "myfeat")
+	if err != nil || got == nil {
+		t.Fatalf("get release after migrating: (%+v, %v)", got, err)
+	}
+	if got.Status != model.ReleaseMergeRequested || got.MergeNote != "" {
+		t.Fatalf("got %+v, want the seeded row intact and no note", *got)
+	}
+
+	// And durable afterwards, which is the whole point: a release the
+	// reconciler settles as having nothing to merge back keeps its
+	// explanation across a restart, instead of the reconciler having
+	// nowhere to put it.
+	const note = "myfeat carried no commits main did not already have"
+	if err := store.MarkReleaseNothingToMerge(ctx, got.ID, note, now.Add(time.Hour)); err != nil {
+		t.Fatalf("mark nothing to merge after migrating: %v", err)
+	}
+	got, err = store.GetRelease(ctx, repo, "myfeat")
+	if err != nil || got == nil {
+		t.Fatalf("get release: (%+v, %v)", got, err)
+	}
+	if got.MergeNote != note || got.Status != model.ReleaseMerged {
+		t.Fatalf("got %+v, want it merged with the note recorded", *got)
+	}
+}
+
 // bwsalmon/agents#461: grain_config.slots (a comma-separated list of
 // operator-chosen concurrency-slot names) became max_concurrent (a plain
 // count) instead. This simulates a database built with the pre-#461

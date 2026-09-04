@@ -35,8 +35,22 @@ type Release struct {
 	CreatedAt time.Time
 	MergedAt  *time.Time
 	// PullRequestURL is the merge-back pull request RequestReleaseMerge's
-	// own reconciler opened -- empty until Status reaches ReleaseMerged.
+	// own reconciler opened -- empty until Status reaches ReleaseMerged,
+	// and empty at ReleaseMerged too for a release that had nothing to
+	// merge back (MergeNote).
 	PullRequestURL string
+	// MergeNote is why this release reached ReleaseMerged with no pull
+	// request of its own: its ProdBranch carried no commits the default
+	// branch did not already have, so GitHub had nothing to open one
+	// from. Empty on the ordinary path, where PullRequestURL names the
+	// pull request instead -- exactly one of the two is ever set, and
+	// which one is what a release page shows under "merge back to
+	// default" (Store.MarkReleaseNothingToMerge).
+	//
+	// Not LastError: a release in this shape has nothing wrong with it
+	// and nothing left to retry, and a 422 quoted onto LastError is both
+	// (see orchestrator's own requestMergeOnGitHub).
+	MergeNote string
 	// LastError is the releases reconciler's own account of why
 	// provisioning or a requested merge has not landed yet, cleared the
 	// instant that step succeeds -- Candidate's own LastError, applied to
@@ -72,8 +86,10 @@ const (
 	// pull request.
 	ReleaseMergeRequested ReleaseStatus = "merge_requested"
 	// ReleaseMerged is a release whose merge-back pull request has been
-	// opened -- PullRequestURL names it. Terminal: nothing here polls
-	// GitHub for whether that pull request itself has since been merged,
+	// opened -- PullRequestURL names it -- or one that turned out to need
+	// no such pull request at all, its ProdBranch carrying nothing the
+	// default branch did not already have (MergeNote). Terminal: nothing
+	// here polls GitHub for whether that pull request has since been merged,
 	// the same way nothing here polls a task's own PR once one is open --
 	// a human merges it (or doesn't) on GitHub itself, and this Name is
 	// free again the moment this status is reached.

@@ -196,6 +196,9 @@ func (s *Store) Init(ctx context.Context) error {
 	if err := s.ensureTaskPromptExtensionColumn(ctx); err != nil {
 		return fmt.Errorf("migrating task: %w", err)
 	}
+	if err := s.ensureReleaseMergeNoteColumn(ctx); err != nil {
+		return fmt.Errorf("migrating release: %w", err)
+	}
 	var version int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `version` FROM `grain_schema` WHERE `id` = 1").Scan(&version)
@@ -835,6 +838,26 @@ func (s *Store) ensureTaskPromptExtensionColumn(ctx context.Context) error {
 	}
 	_, err = s.db.ExecContext(ctx,
 		"ALTER TABLE `task` ADD COLUMN `prompt_extension` TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
+// ensureReleaseMergeNoteColumn adds release.merge_note
+// (Release.MergeNote's own doc comment has the reasoning) to a database
+// created before it existed, the same probe-then-ALTER approach every
+// other ensure*Column migration here uses.
+//
+// No SchemaVersion bump goes with it: the column is nullable and added
+// here, so an existing database migrates into the new shape rather than
+// being one this build "cannot simply be re-created into" (SchemaVersion's
+// own doc comment). Every release recorded before it existed reads back
+// with no note, which is what a release that merged through an actual
+// pull request has anyway.
+func (s *Store) ensureReleaseMergeNoteColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT `merge_note` FROM `release` WHERE 1 = 0")
+	if err == nil {
+		return rows.Close()
+	}
+	_, err = s.db.ExecContext(ctx, "ALTER TABLE `release` ADD COLUMN `merge_note` TEXT NULL")
 	return err
 }
 
