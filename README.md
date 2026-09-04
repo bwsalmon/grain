@@ -1682,7 +1682,15 @@ at all.
 
 **agy 1.1.26 has no denylist for its own native tools, and this is now
 read off the binary rather than assumed.** The whole of what it offers,
-with the evidence:
+with the evidence -- which is in the tree as of the first capture:
+`docs/agy-surface.md` is the binary's own answer to every question below,
+regenerated on demand by `.github/workflows/agy-surface.yml`, and every
+claim in this section has been checked against it. Three needed changing
+when it landed, and they are marked where they appear: the roster is 57
+tools rather than the 55 written here before there was a capture, agents
+are discovered from a third directory as well as the two named here, and
+`agy -p /permissions` wants a credential set before it will answer, even
+though it never checks that one. The rest stood.
 
 - **No flag.** `agy --help` lists `--add-dir`, `--agent`, `--continue`,
   `--conversation`, `--dangerously-skip-permissions`,
@@ -1701,7 +1709,16 @@ with the evidence:
   fields of that file. Naming agy's tools there is a trap rather than a
   near miss: grain's tools and agy's share names, so listing
   `run_command` would deny the run *grain's* `run_command` and leave
-  agy's in place.
+  agy's in place. The capture surfaces the near misses too, and they stay
+  near misses: `allowedTools`, `deniedTools`, `allowedToolPrefixes`,
+  `deniedToolPrefixes`, `deniedCommandPatterns` and
+  `sandboxSystemAllowlist` are all in the binary's string table, and not
+  one of them carries a `json`, `yaml` or `mapstructure` tag -- they are
+  internal Go identifiers rather than keys any file this repository writes
+  can reach. `excludeTools` does carry a tag, which makes it the closest
+  thing to the switch this section is looking for; it sits among Gemini
+  *extension* settings, and putting it in `settings.json` leaves the
+  roster at 57.
 - **The settings file is where the permission system lives, not a
   roster.** `settings.json` carries `permissionPreset`,
   `agentPermissions`, `fileAccessPolicy` and `toolConfirmation`
@@ -1710,10 +1727,11 @@ with the evidence:
   `--dangerously-skip-permissions` switches off. Nothing there removes a
   tool from the roster.
 - **A custom agent replaces the prompt, not the toolset.** A Markdown
-  file with YAML frontmatter under `~/.gemini/antigravity-cli/agents/`
-  (or `~/.gemini/agents/`) is discovered even in an otherwise empty
-  private `HOME` -- the shape `writeAgyHome` builds -- and `--agent
-  <name>` selects it. Its frontmatter keys are `name`, `description`,
+  file with YAML frontmatter under `~/.gemini/antigravity-cli/agents/`,
+  `~/.gemini/agents/` or `~/.gemini/config/agents/` -- all three, on
+  1.1.26, planted together or one at a time -- is discovered even in an
+  otherwise empty private `HOME`, the shape `writeAgyHome` builds, and
+  `--agent <name>` selects it. Its frontmatter keys are `name`, `description`,
   `mainAgent`, `subagent`, `hidden`, `inheritMcp`,
   `inheritCustomizations`, `commandExecutionPolicy`, `model`, `rules`,
   `skills`, `plugins` and `mcpServers`. None of them names the native
@@ -1745,7 +1763,8 @@ against a real credential and reading the tool steps back off its
 - **`settings.json` takes `permissions.allow` / `permissions.deny`, and
   they load.** Write the block, ask the binary what it read
   (`agy -p /permissions`, which print mode answers without an agent turn
-  or a credential), and it prints one record per rule:
+  and without a *valid* credential, though not without one at all --
+  `docs/agy-surface.md`), and it prints one record per rule:
   `global<TAB>deny<TAB>run_command`. Bare names, `run_command(*)` and
   `regex:` forms all survive; a malformed value (`"deny": 12345`) is
   dropped in silence, no rule and no complaint -- the failure mode this
@@ -1759,8 +1778,13 @@ against a real credential and reading the tool steps back off its
   runs agy -- `writeAgyHome` builds a fresh `HOME` per run and `Run`
   starts the binary once in it -- and a trap for any future change that
   reuses one or starts agy again to resume a run. What the rules do *not*
-  do is change the roster: the `init` event of a real stream-json session advertises the
-  same 55 native tools with the block and without it. And `Run` passes
+  do is change the roster: the `init` event of a real stream-json session
+  advertises the same 57 native tools with the block and without it, and
+  the same 57 again for `excludeTools`, `permissionPreset`,
+  `agentPermissions`, `toolConfirmation` and the `--sandbox` flag
+  (`docs/agy-surface.md`; the count was written as 55 here and in
+  `withheldNativeTools` before there was a capture to check it against).
+  And `Run` passes
   `--dangerously-skip-permissions`, which that same event reports as
   permission mode `always-proceed`, while agy's own prompt calls an
   always-deny decision "overridden by dangerously-skip-permissions". That
