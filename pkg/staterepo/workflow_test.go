@@ -329,6 +329,74 @@ func TestAWorkflowTheRemoteRefusesIsUndoneAndTriedAgainLater(t *testing.T) {
 	}
 }
 
+// The refusal above is not the only way a workflow push fails, and the
+// other ways used to be the dangerous ones. A push that fails for a
+// reason grain cannot recognise as GitHub's refusal -- an unreachable
+// remote, an expired token, a proxy between the two -- left the commit
+// where it was, on the reasoning that the next push that works would
+// carry it. It would: the next push is the *export's*, and it carries the
+// workflow commit with it. So a deployment whose credential turns out not
+// to have the permission gets the refusal on that push instead, where
+// there is no undo -- and the commit is then in front of every push it
+// will ever make. Its settings stop reaching its remote entirely, over a
+// file that was only ever worth a CI step, and no later tick can clear
+// it because installWorkflow sees the file in the tree and does nothing.
+//
+// Two ordinary things in sequence, neither of them exotic: one failed
+// push, and a credential that cannot write workflows -- which is the very
+// case this whole shape exists for.
+func TestAWorkflowPushThatFailsForSomeOtherReasonStrandsNothing(t *testing.T) {
+	ctx := context.Background()
+	store, db := openDB(t)
+	remote := bareRemote(t)
+	// The remote takes the seed and not the workflow, in words grain has
+	// no business reading as the permission refusal.
+	rejectWorkflowPush(t, remote, "internal server error, try again later")
+	dir := filepath.Join(t.TempDir(), "state")
+	repo, err := staterepo.Open(ctx, staterepo.Config{Dir: dir, Remote: remote})
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	if err := store.PutTask(ctx, task("a1b2")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	// The seed itself lands whatever happens to the workflow: that is the
+	// property the workflow's own commit and push exist to protect.
+	if err := staterepo.Load(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("loading against a remote that rejected the workflow push: %v", err)
+	}
+	if out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json"); !strings.Contains(out, "a1b2") {
+		t.Fatalf("the dump did not reach the remote:\n%s", out)
+	}
+	// Nothing of the workflow is left behind: not in the tree, and not as
+	// a commit in front of the next push.
+	if _, err := os.Stat(workflowPath(dir)); err == nil {
+		t.Error("the workflow grain could not push was left in the working tree")
+	}
+	if local, want := head(t, dir), head(t, remote); local != want {
+		t.Errorf("a commit the remote has not got is in the way: local %s, remote %s", local, want)
+	}
+
+	// And the credential turns out to be one that may not write
+	// workflows, which is what it always was. grain offers the file again
+	// -- it did not spend its retry on a failure that said nothing about
+	// the permission -- is refused, undoes it, and the export goes on
+	// reaching the remote.
+	refuseWorkflows(t, remote)
+	if err := store.PutTask(ctx, task("c3d4")); err != nil {
+		t.Fatalf("putting: %v", err)
+	}
+	if _, err := staterepo.Sync(ctx, repo, db, model.SchemaVersion); err != nil {
+		t.Fatalf("syncing after a workflow push that never landed: %v", err)
+	}
+	if out := git(t, remote, "show", "main:"+staterepo.TablesDir+"/task.json"); !strings.Contains(out, "c3d4") {
+		t.Errorf("this deployment's settings stopped reaching its remote:\n%s", out)
+	}
+	if remoteWorkflow(t, remote) != "" {
+		t.Error("the remote holds a workflow it refused")
+	}
+}
+
 func head(t *testing.T, dir string) string {
 	t.Helper()
 	return strings.TrimSpace(git(t, dir, "rev-parse", "HEAD"))
@@ -341,7 +409,18 @@ func head(t *testing.T, dir string) string {
 // grain can recognise it by.
 func refuseWorkflows(t *testing.T, remote string) {
 	t.Helper()
-	const hook = "#!/bin/sh\n" +
+	rejectWorkflowPush(t, remote, "refusing to allow a GitHub App to create or update workflow "+
+		"`.github/workflows/grain-state-check.yml` without `workflows` permission")
+}
+
+// rejectWorkflowPush is refuseWorkflows with the remote's own words as an
+// argument, for the case that is not GitHub's refusal: a proxy, a hook of
+// somebody's own, a remote that was there a second ago. grain must not
+// read one as the other, and what it does about the second is what
+// TestAWorkflowPushThatFailsForSomeOtherReasonStrandsNothing is about.
+func rejectWorkflowPush(t *testing.T, remote, message string) {
+	t.Helper()
+	hook := "#!/bin/sh\n" +
 		"while read -r old new ref; do\n" +
 		"  if [ \"$old\" = \"0000000000000000000000000000000000000000\" ]; then\n" +
 		"    files=$(git ls-tree -r --name-only \"$new\")\n" +
@@ -350,8 +429,7 @@ func refuseWorkflows(t *testing.T, remote string) {
 		"  fi\n" +
 		"  case \"$files\" in\n" +
 		"    *.github/workflows/*)\n" +
-		"      echo 'refusing to allow a GitHub App to create or update workflow " +
-		"`.github/workflows/grain-state-check.yml` without `workflows` permission' >&2\n" +
+		"      echo '" + message + "' >&2\n" +
 		"      exit 1\n" +
 		"      ;;\n" +
 		"  esac\n" +
