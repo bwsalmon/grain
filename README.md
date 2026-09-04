@@ -4223,9 +4223,17 @@ direction: a run never told about a tool it happens to have loses one
 convenience, where a run told to call one it does not have burns turns on
 an error it cannot fix.
 
-What that leaves worth measuring, rather than assuming, is whether runs
-actually start calling it, and whether a run that sees a failing check
-fixes it instead of opening the pull request and stopping there.
+Whether runs actually start calling it, and whether a run that sees a
+failing check fixes it instead of opening the pull request and stopping
+there, are measured rather than assumed — see "Measuring what a run does
+with its tools" below, whose `mid-run pull requests` section is exactly
+those two questions. One caveat belongs here rather than there: that
+number is the tool's uptake overall and not prompt wording against a bare
+tool description. The change that added the tool and the change that made
+`BuildPrompt` name it landed half an hour apart, so no run in this
+deployment's history has ever had the one without the other, and the
+contrast the question originally wanted is not available from production
+data at all.
 
 ## What a pull request says it does
 
@@ -5254,6 +5262,12 @@ CI waits (84 wait(s) across 18 run(s))
   verdicts                 passed=41 failed=28 timed_out=13 no_checks=2
   blocked                  p50 3m20s, p90 14m0s, max 15m0s
   pushes before green      2.4 on average, 7 at worst (over 16 run(s) that went green)
+
+mid-run pull requests (34 run(s) in the window could have opened one)
+  opened one themselves        21  (62% of them, 48 call(s) in all)
+  fix task filed after         10% of the 21 that did, 31% of the 13 that did not
+  (a fix task is the merge queue cleaning up a red build the run left behind.
+   The link is on the task, not the attempt: read the difference, not either rate.)
 ```
 
 **This is the one measurement that had to be stored,** and it is stored
@@ -5320,12 +5334,50 @@ did not error, because a rejected push is not a push: it under-counts
 rather than over-counts, which is the right direction for a number whose
 point is how much rework there was.
 
+**The last stretch of that loop is `open_pull_request`,** and it gets a
+section of its own because its two questions are different shapes. The
+first is a share: of the runs that were offered the loop at all, how many
+took it. "Offered" is the whole of what makes that number mean anything,
+so the denominator is stated beside the rate and is narrow — a run that
+finished inside the window, recorded a census, and belonged to a task
+with a repo to push to, since `BuildPrompt` puts the push/check/repair
+paragraph and the sentence naming the tool inside `task.Target != nil`
+and a task with no target was never asked.
+
+The second is a comparison and is deliberately not reported as a rate.
+"A run opened its pull request and its task still needed a fix task"
+means nothing alone: some share of branches go red for reasons no amount
+of watching would have caught. So both cohorts are printed with their own
+denominators — the runs that called the tool and the runs that did not,
+each with the share whose task the merge queue later filed a fix task
+against (`model.LinkFixTask`, `fileFixTask`), which is the recorded form
+of a red build outliving the run that pushed it. Read the difference, not
+either number. The signal is coarse in two known ways, both stated where
+the number is read: the fix-task link is on the task rather than the
+attempt, so every finished attempt of a task that ever went red counts as
+having gone red; and a fix task can only exist for a task that got as far
+as a pull request, which flatters any cohort holding runs that pushed
+nothing.
+
+**The fine-grained version of that question is not counted in bulk, on
+purpose.** "Did a push follow the last failing report" is answerable by
+eye from one run's persisted transcript, which is ordered — but a
+transcript renders a call as a `> name(args)` line that a tool's own
+*output* can contain verbatim (`agent/claude/transcript.go`), so a count
+taken over transcripts would measure forgeries alongside calls. Both
+numbers above come from the census rows instead, which are written by
+grain from `agent.Result` and are not text an agent can author. Nothing
+new is stored for either: `model.TaskTiming` reads two derived columns it
+did not before — whether the task had a target, and whether it carries a
+fix-task link — because a run's own row says nothing about the task it
+was for and both questions are about the task.
+
 **Everything else about it follows this package's existing rules.** A
 census row has no moment of its own, so it belongs to a window when its
 *run* finished inside it. A run that recorded none contributes to nothing
 rather than to a zero — which is why `tool use` states how many runs are
-behind it, and why neither section renders at all, in the CLI or the UI,
-until something has recorded one. A deployment upgraded into this reports
+behind it, and why none of the three sections renders at all, in the CLI
+or the UI, until something has recorded one. A deployment upgraded into this reports
 no tool use for its older runs, and that is the honest answer: nobody was
 measuring.
 

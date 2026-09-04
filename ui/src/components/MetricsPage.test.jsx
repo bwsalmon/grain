@@ -64,11 +64,11 @@ function report(over = {}) {
   };
 }
 
-// tools and checks are the two sections a deployment only has once its
-// runs have recorded a census: report() above deliberately carries
-// neither, so that every test written before they existed still describes
-// a report the API really sends -- one from a store whose runs all
-// predate them.
+// tools, checks and pullRequests are the three sections a deployment only
+// has once its runs have recorded a census: report() above deliberately
+// carries none of them, so that every test written before they existed
+// still describes a report the API really sends -- one from a store whose
+// runs all predate them.
 function withCensus(over = {}) {
   return report({
     tools: {
@@ -93,6 +93,11 @@ function withCensus(over = {}) {
       blocked: { n: 4, minSeconds: 240, p50Seconds: 540, p90Seconds: 900, p99Seconds: 900, maxSeconds: 900, meanSeconds: 660 },
       pushesToGreen: { n: 1, min: 2, p50: 2, p90: 2, p99: 2, max: 2, mean: 2, total: 2 },
       greenRuns: 1,
+    },
+    pullRequests: {
+      runs: 8, opened: 3, calls: 7, adoptionRate: 3 / 8,
+      withTool: { runs: 3, fixTasks: 0, rate: 0 },
+      withoutTool: { runs: 5, fixTasks: 2, rate: 0.4 },
     },
     ...over,
   });
@@ -435,6 +440,37 @@ describe("MetricsPage", () => {
     expect(screen.getByText(/p90 15m 0s . max 15m 0s/)).toBeInTheDocument();
     expect(screen.getByText("2.0")).toBeInTheDocument();
     expect(screen.getByText(/over 1 attempt that went green/i)).toBeInTheDocument();
+  });
+
+  it("reports mid-run pull requests as an adoption rate and a comparison", async () => {
+    api.mockResolvedValue(withCensus());
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Mid-run pull requests");
+
+    expect(screen.getByText("38%")).toBeInTheDocument();
+    expect(screen.getByText(/3 attempts . 7 calls in all/)).toBeInTheDocument();
+    // The two fix-task rates are only readable against each other, so
+    // both are on screen with their own denominators under them.
+    expect(screen.getByText("0%")).toBeInTheDocument();
+    expect(screen.getByText("0 of 3")).toBeInTheDocument();
+    expect(screen.getByText("40%")).toBeInTheDocument();
+    expect(screen.getByText("2 of 5")).toBeInTheDocument();
+  });
+
+  // A window in which no run could have opened its own pull request gets
+  // no section at all: zeroes there would read as "no run ever calls it".
+  it("says nothing about mid-run pull requests when nobody was offered one", async () => {
+    api.mockResolvedValue(withCensus({
+      pullRequests: {
+        runs: 0, opened: 0, calls: 0, adoptionRate: 0,
+        withTool: { runs: 0, fixTasks: 0, rate: 0 },
+        withoutTool: { runs: 0, fixTasks: 0, rate: 0 },
+      },
+    }));
+    render(<MetricsPage showError={() => {}} />);
+    await screen.findByText("Tool use");
+
+    expect(screen.queryByText("Mid-run pull requests")).not.toBeInTheDocument();
   });
 
   it("splits the endings out of the outcome words", async () => {
