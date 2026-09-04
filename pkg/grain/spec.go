@@ -82,15 +82,35 @@ type Spec struct {
 	// -- and parse its own output. The shim stays ignorant of all of it.
 	Setup string `json:"setup,omitempty"`
 
-	// Placements is everything written into this grain before the agent
+	// Placements is everything written into the guest before the agent
 	// starts: credentials, and any other file a run needs that the image
 	// does not already carry.
+	//
+	// Into the guest, with no other side to choose. Every capability
+	// grain has that places anything places it in the sandbox --
+	// githubsandbox, gcpkey and geminikey, all model.SideSandbox -- and
+	// each is material the *work* needs: geminikey's own doc comment
+	// mints its key for a task and names the path in the prompt so the
+	// work can find it. model.SideController exists and nothing produces
+	// one; orchestrator/run.go skips it, "not written anywhere". A
+	// discriminator whose second value has never occurred is not worth
+	// carrying across a versioned wire.
+	//
+	// The agent's own credential is the case that looks like it wants the
+	// other side, and does not: it is deployment-wide rather than
+	// per-run -- a Claude Code OAuth token or a Gemini key set once in
+	// Settings, which is why Deps.Framework can fail for want of it -- so
+	// it reaches the container as configuration at create, beside the
+	// framework profile that reads it, and never travels in a Spec at
+	// all. The sandbox still cannot read it. That property comes from
+	// where the agent runs, not from a field here.
 	//
 	// Git's credential is one of these, rather than a field of its own.
 	// It is the same work pkg/orchestrator does today in
 	// ConfigureGitCredentials -- write git's config with a token -- said
 	// uniformly, which takes a method off the sandbox interface and a
-	// special case out of the setup path.
+	// special case out of the setup path. Guest-side, because the clone
+	// runs there.
 	Placements []Placement `json:"placements,omitempty"`
 
 	// MaxRuntime is how long the agent may run before the shim stops it
@@ -124,26 +144,15 @@ type Shape struct {
 // what a task with no override produces.
 func (s Shape) IsZero() bool { return s.CPUs == 0 && s.MemoryMB == 0 && s.DiskGB == 0 }
 
-// Dest is which side of the vsock boundary a placement lands on.
-type Dest string
-
-const (
-	// DestContainer is beside the agent: the model API credential, its
-	// framework config, anything the agent process itself reads. The
-	// guest cannot reach it, which is the whole point of the split.
-	DestContainer Dest = "container"
-	// DestGuest is inside the sandbox: what the checkout, the build or
-	// the test suite needs -- git's credential most of all. Everything
-	// here is readable by whatever code the repo runs, so it should hold
-	// only what that code legitimately needs.
-	DestGuest Dest = "guest"
-)
-
-// Placement is one file written into a grain and where it goes. Mode is
-// an octal string (model.Placement.EffectiveMode's shape) and must never
-// be widened in transit.
+// Placement is one file written into the guest. Mode is an octal string
+// (model.Placement.EffectiveMode's shape) and must never be widened in
+// transit.
+//
+// Everything placed here is readable by whatever code the repo runs, so
+// it should hold only what that code legitimately needs. That is not a
+// weakening: it is the same rule model.Placement already implies by
+// having no destination but the sandbox that any provider uses.
 type Placement struct {
-	Dest    Dest   `json:"dest"`
 	Path    string `json:"path"`
 	Content string `json:"content"`
 	Mode    string `json:"mode"`

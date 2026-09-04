@@ -62,10 +62,25 @@ process holds every run's secrets alongside the store, the GitHub app key
 and the git proxy's signing key. Per-grain containers cut the blast radius
 of any one compromise to one run.
 
-It also makes a distinction the current code cannot express. `PlaceFile`
-has exactly one destination, so every capability a task is granted lands
-in the sandbox — including the model-facing keys the agent itself needs.
-`grain.Placement` carries a `Dest`, and those go container-side.
+**The boundary comes from where the agent runs, not from anything in the
+Spec.** An earlier draft of this had `Placement` carry a destination so
+that model-facing keys could land container-side; that was wrong on the
+facts. Every capability grain has that places anything places it in the
+sandbox — `githubsandbox`, `gcpkey` and `geminikey`, all
+`model.SideSandbox` — and each is material the *work* needs.
+`geminikey` is the one that looks like a counterexample: it mints a key
+for a task and names the path in the prompt so the work can find it, which
+is the sandbox's business and not the agent's. `model.SideController`
+exists and nothing produces one; `run.go:1832` skips it, "not written
+anywhere".
+
+So placements are all guest-side and carry no side at all. The agent's own
+credential never travels in a Spec: it is deployment-wide rather than
+per-run — a Claude Code OAuth token or a Gemini key set once in Settings,
+which is why `Deps.Framework` can fail for want of it — so it reaches the
+container as configuration at create, beside the framework profile that
+reads it. The sandbox still cannot read it, for the structural reason
+above.
 
 The residual: the agent process can read its own token and could write it
 into the guest. That is unchanged from today, and it is not what the VM
@@ -103,7 +118,7 @@ problem dissolves with them: `setMaterialized` exists today so a rebuild
 replays already-minted credentials rather than minting a second set behind
 the back of a single revoke, and with the `Spec` sitting in the container
 next to the thing being rebuilt, a rebuild is "fresh guest, replay
-`Spec.Placements[DestGuest]`, redo the checkout". No registry, no re-mint,
+`Spec.Placements`, re-run `Spec.Setup`". No registry, no re-mint,
 no cross-goroutine coordination.
 
 Two more things move inside by the same rule:
@@ -344,8 +359,9 @@ Everything task-shaped reaches it in one of three shapes instead:
 - **in the prompt**, assembled by the controller from its store and
   delivered by `Signal` once the sandbox is real;
 - **in `setup`**, a script the controller composes — the clone included;
-- **in a `placement`**, which is where a credential goes, git's among
-  them.
+- **in a `placement`**, which is where a credential the work needs goes,
+  git's among them — all guest-side, since that is the only side any of
+  grain's capabilities has ever used.
 
 The boundary is worth more than the fields it saves. A shim that
 understood repositories would have to agree with the controller about

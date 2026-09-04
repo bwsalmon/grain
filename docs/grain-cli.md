@@ -122,8 +122,8 @@ Written once, at create. Four things and a name:
   "shape": { "cpus": 2, "memoryMB": 8192, "diskGB": 30 },
   "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && git checkout -b grain/task-311 && ./scripts/setup.sh && git rev-parse HEAD",
   "placements": [
-    { "dest": "container", "path": "/root/.claude/.credentials.json", "content": "{...}", "mode": "0600" },
-    { "dest": "guest", "path": "/home/agent/.git-credentials", "content": "https://x:sbx_9f3c1a@10.0.2.1:8080", "mode": "0600" }
+    { "path": "/home/agent/.git-credentials", "content": "https://x:sbx_9f3c1a@10.0.2.1:8080", "mode": "0600" },
+    { "path": "/home/debian/.gemini-api-key", "content": "AIza...", "mode": "0600" }
   ],
   "maxRuntime": "2h0m0s"
 }
@@ -144,10 +144,20 @@ script and places files has no opinions to keep in sync.
 `wire_test.go`'s `TestSpecCarriesNoTaskModel` asserts on the marshalled
 document that none of it has crept back.
 
-**`dest` is the credential boundary.** `container` lands beside the agent
-where the guest cannot read it; `guest` lands where the repo's own build
-can. The current `PlaceFile` has one destination, so today everything a
-capability mints goes into the sandbox — model-facing keys included.
+**Placements are all guest-side, and carry no side.** Every capability
+grain has that places anything places it in the sandbox —
+`githubsandbox`, `gcpkey`, `geminikey`, all `model.SideSandbox` — and each
+is material the *work* needs; `geminikey` mints a key for a task and names
+its path in the prompt so the work can find it. `model.SideController`
+exists and nothing produces one, and `run.go:1832` skips it, "not written
+anywhere". A discriminator whose second value has never occurred is not
+worth carrying across a versioned wire.
+
+The agent's own credential is the case that looks like it wants the other
+side and does not: it is deployment-wide, not per-run, so it reaches the
+container as configuration at create and never travels in a Spec. The
+sandbox cannot read it because of where the agent runs, not because of a
+field here.
 
 **`framework` is a name, not a configuration.** How that CLI is launched,
 which flags it takes and whether it needs a private HOME are facts about

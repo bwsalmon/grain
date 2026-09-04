@@ -32,8 +32,8 @@ func TestSpecWireFormat(t *testing.T) {
 		Shape:     grain.Shape{CPUs: 2, MemoryMB: 8192, DiskGB: 30},
 		Setup:     "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w && cd /w && ./scripts/setup.sh",
 		Placements: []grain.Placement{
-			{Dest: grain.DestContainer, Path: "/root/.claude/.credentials.json", Content: "{...}", Mode: "0600"},
-			{Dest: grain.DestGuest, Path: "/home/agent/.git-credentials", Content: "https://x:sbx_9f3c1a@10.0.2.1:8080", Mode: "0600"},
+			{Path: "/home/agent/.git-credentials", Content: "https://x:sbx_9f3c1a@10.0.2.1:8080", Mode: "0600"},
+			{Path: "/home/debian/.gemini-api-key", Content: "AIza...", Mode: "0600"},
 		},
 		MaxRuntime: grain.Duration(2 * time.Hour),
 	}
@@ -50,15 +50,13 @@ func TestSpecWireFormat(t *testing.T) {
   "setup": "git clone http://10.0.2.1:8080/bwsalmon/grain.git /w \u0026\u0026 cd /w \u0026\u0026 ./scripts/setup.sh",
   "placements": [
     {
-      "dest": "container",
-      "path": "/root/.claude/.credentials.json",
-      "content": "{...}",
+      "path": "/home/agent/.git-credentials",
+      "content": "https://x:sbx_9f3c1a@10.0.2.1:8080",
       "mode": "0600"
     },
     {
-      "dest": "guest",
-      "path": "/home/agent/.git-credentials",
-      "content": "https://x:sbx_9f3c1a@10.0.2.1:8080",
+      "path": "/home/debian/.gemini-api-key",
+      "content": "AIza...",
       "mode": "0600"
     }
   ],
@@ -75,8 +73,8 @@ func TestSpecWireFormat(t *testing.T) {
 	if time.Duration(back.MaxRuntime) != 2*time.Hour {
 		t.Errorf("MaxRuntime round-tripped as %s, want 2h0m0s", back.MaxRuntime)
 	}
-	if back.Placements[1].Dest != grain.DestGuest {
-		t.Errorf("Dest round-tripped as %q, want %q", back.Placements[1].Dest, grain.DestGuest)
+	if back.Placements[1].Path != "/home/debian/.gemini-api-key" {
+		t.Errorf("Placement round-tripped as %q", back.Placements[1].Path)
 	}
 }
 
@@ -94,12 +92,16 @@ func TestSpecCarriesNoTaskModel(t *testing.T) {
 	full := marshal(t, grain.Spec{
 		Contract: grain.Contract, ID: "task-311-2", Framework: "claude",
 		Shape: grain.Shape{CPUs: 2}, Setup: "true",
-		Placements: []grain.Placement{{Dest: grain.DestGuest, Path: "/p", Mode: "0600"}},
+		Placements: []grain.Placement{{Path: "/p", Mode: "0600"}},
 		MaxRuntime: grain.Duration(time.Hour),
 	})
 	for _, absent := range []string{
 		"\"task\"", "\"repo\"", "\"branch\"", "\"base\"", "\"target\"",
 		"\"gitToken\"", "\"grants\"", "\"proxyBase\"", "\"attempt\"", "\"maxTurns\"",
+		// Every capability grain has places into the sandbox, and
+		// model.SideController has never had a producer, so a placement
+		// needs no side to land on.
+		"\"dest\"",
 	} {
 		if strings.Contains(full, absent) {
 			t.Errorf("Spec carries %s; a grain has no use for it "+
