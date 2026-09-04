@@ -245,12 +245,15 @@ func (s *Store) QualifiableActiveCandidates(ctx context.Context) ([]Candidate, e
 // like any other store error reconcileQualifications already tolerates.
 //
 // Every instance's Target is candidate.Repo and Base is
-// candidate.Branch -- a template carries no target of its own
-// (model.Template's own doc comment on why), so there is nothing to
-// reconcile it against: the entire point of a qualification task is
-// running against a branch that did not exist until this candidate was
-// cut, which only the plan's own repo and this candidate's own branch
-// can ever say.
+// candidate.Branch, never a template's own binding: the entire point of
+// a qualification task is running against a branch that did not exist
+// until this candidate was cut, which only the plan's own repo and this
+// candidate's own branch can ever say. A template bound to some other
+// repo (model.Template.Target) therefore cannot be qualified here at
+// all, and fails the whole run's creation rather than being quietly
+// aimed somewhere its binding says it does not belong --
+// ui.Client.PutQualificationPlan already refuses to save such a plan,
+// so this is the backstop for a template bound after the fact.
 //
 // A dependency between two items becomes a depends-on link from every
 // instance of the dependent to every instance of the dependency, so the
@@ -286,6 +289,11 @@ func (s *Store) CreateQualificationRun(ctx context.Context, candidate Candidate,
 		}
 		if tmpl == nil {
 			return QualificationRun{}, fmt.Errorf("template %s no longer exists", it.TemplateID)
+		}
+		if tmpl.Target != nil && *tmpl.Target != candidate.Repo {
+			return QualificationRun{}, fmt.Errorf(
+				"template %s is bound to %s, which is not the repo being qualified (%s)",
+				it.TemplateID, tmpl.Target, candidate.Repo)
 		}
 		templates[it.TemplateID] = *tmpl
 	}
