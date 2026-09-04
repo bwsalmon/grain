@@ -258,8 +258,9 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 	// -- but the sentences above read as one final act, and a run that
 	// treats them that way has no reason to ever look at CI at all.
 	// Leaving that loop implicit is what left a red build to the merge
-	// queue's separate fix task (sync.go's fileFixTask) even when the run
-	// that caused it was still running.
+	// queue's own repair of the branch a whole dispatch later (sync.go's
+	// requeueForRepair) even when the run that caused it was still
+	// running.
 	//
 	// wait_for_checks is named first, and pull_request_status only as the
 	// thing it saves: a run told to "check CI" reaches for the status read
@@ -322,8 +323,8 @@ func BuildPrompt(task model.Task, checkoutDir string, canOpenPullRequest bool, m
 		// merges however green its checks are (healthFrom reads
 		// PrConflicted off the pull request before it looks at a single
 		// check), which the run still holding the checkout can fix in a
-		// turn, rather than leaving it to the fix task the merge queue
-		// files minutes later in a cold sandbox (sync.go's fileFixTask).
+		// turn, rather than leaving it to the repair the merge queue asks
+		// for minutes later in a cold sandbox (sync.go's requeueForRepair).
 		base := baseDescription(task)
 		prompt += fmt.Sprintf(
 			"\n\nYour job is not done at the moment you push: it is done when those "+
@@ -740,9 +741,9 @@ func promptExtensionSection(text string) string {
 
 // baseDescription names the branch a run's own branch has to keep
 // merging into, for the sentence above -- task.Base when the task fixes
-// one (directives.go's `/base`, and every merge queue fix task, which
-// fileFixTask points back at the branch it repairs), and otherwise the
-// repo's default branch, which is whatever prepareCheckout's clone left
+// one (directives.go's `/base`, and the stacked fix tasks the merge
+// queue used to file, whose base was the branch they repaired), and
+// otherwise the repo's default branch, which is whatever prepareCheckout's clone left
 // at origin/HEAD. Unnamed rather than guessed in that second case:
 // grain does not know the repo's default branch here, and naming the
 // wrong one would send a run merging a branch that does not exist.
@@ -1181,10 +1182,24 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	if err != nil {
 		return nil, err
 	}
+	// The rest of this run's setup, narrated on the task's own row for
+	// whoever is watching it -- runOne has already said what it was doing
+	// while the sandbox was being built, and this picks the story up from
+	// the clone. See setupNotes.
+	notes := setupNotes{store: store, taskID: task.ID, now: cfg.now}
+
 	var prepared checkout
 	var checkoutErr error
 	if closed, err := taskClosed(ctx, store, task.ID); err != nil || !closed {
-		prepared, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task, setupCommand)
+		// Named, because on a deployment with several repos "cloning" on
+		// its own says nothing the row did not already say. Only where
+		// there is actually a clone to make: prepareCheckout returns a
+		// zero checkout and does nothing at all for a task with no target
+		// or a deployment running no git proxy.
+		if cfg.GitRemoteBase != "" && task.Target != nil {
+			notes.say(ctx, cloningNote(*task.Target))
+		}
+		prepared, checkoutErr = prepareCheckout(ctx, tools, cfg.GitRemoteBase, task, setupCommand, notes)
 	}
 
 	// The commits those earlier attempts pushed, read out of the checkout
@@ -1201,6 +1216,13 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var prompt string
 	var prepErr error
 	if checkoutErr == nil {
+		// Only for a task that actually holds grants: prepareCapabilities
+		// runs for every task -- it is what assembles the prompt -- but
+		// there is nothing to mint for a task that was granted nothing,
+		// and saying so would be a phrase about somebody else's run.
+		if len(task.Grants) > 0 {
+			notes.say(ctx, capabilityCredentialsNote)
+		}
 		materialized, prompt, prepErr = prepareCapabilities(ctx, cfg.Capabilities, cc, sandboxRoot, placer, tools, history,
 			attachments, prepared, cfg.settingsRepo(), frameworkOpensPullRequests(framework), promptExtension, cfg.maxRunRuntime())
 	}
@@ -1323,6 +1345,13 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if err := store.SetRunAgentStarted(ctx, d.RunID, cfg.now()); err != nil {
 			log.Printf("orchestrator: run %s: recording when its agent started: %v", d.RunID, err)
 		}
+
+		// The other half of that line: the row stops being grain's to
+		// narrate here, so grain's last setup phrase comes off it rather
+		// than standing over the agent's first quiet half-hour as if it
+		// were still true. From here only update_status writes it. See
+		// setupNotes.handOver.
+		notes.handOver(ctx)
 
 		// The prompt itself, recorded here rather than reconstructed
 		// later: it is assembled once, out of a task that may since be

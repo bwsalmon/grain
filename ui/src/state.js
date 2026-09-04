@@ -42,6 +42,26 @@ export const STATE_LABELS = {
   closed: "Closed",
 };
 
+// stateLabel is STATE_LABELS for one task, plus the single thing a task's
+// state cannot say on its own: that the run it is in, or waiting for, is
+// the merge queue repairing its own pull request branch rather than
+// writing the change (ui.Task.Repairing, model.Observation.
+// MergeQueueRepairAt).
+//
+// The state really is "running" or "queued" -- the task went back to
+// working, on the same branch, and that is what the repair *is* now that
+// it no longer happens on a branch of its own. But a row that reads
+// "Running" days after its pull request opened looks like a task starting
+// over, so the label says which kind of work it is, and StateDot colours
+// the mark to match.
+export function stateLabel(t) {
+  const label = STATE_LABELS[t.state] || t.state;
+  if (!t.repairing) return label;
+  if (t.state === "running") return "Repairing";
+  if (t.state === "queued") return "Queued for repair";
+  return label;
+}
+
 // completionPhase names what a task whose run is over is waiting on when
 // that is not what its state badge already says. There is one such case
 // left: a pull request the merge queue has given up on, which is still
@@ -72,9 +92,8 @@ export function completionPhase(t) {
   return null;
 }
 
-// runActivity is what a task's live run says it is doing right now
-// (ui.Task.Activity, written by the run itself through the update_status
-// tool), or null when there is nothing to show.
+// runActivity is what a task's live run is doing right now
+// (ui.Task.Activity), or null when there is nothing to show.
 //
 // The state check is the whole of the filtering. The API only ever
 // carries a synopsis for a task with a live run, but a poll's answer is
@@ -87,9 +106,20 @@ export function completionPhase(t) {
 // and only the age tells them apart. It is null for a synopsis with no
 // timestamp -- a row written by an older build -- in which case the note
 // is shown alone rather than with a made-up age.
+//
+// bySetup says the phrase is grain's own rather than the agent's: what
+// the dispatch path is doing to get this run started, over the minutes
+// before there is an agent to say anything (ui.Task.ActivityBySetup,
+// orchestrator.setupNotes). Everything else that appears here is
+// something an agent wrote, so the two are marked apart rather than left
+// to be told apart by their wording.
 export function runActivity(t, now = Date.now()) {
   if (!t.activity || t.state !== "running") return null;
-  return { note: t.activity, age: t.activityAt ? relativeAge(t.activityAt, now) : null };
+  return {
+    note: t.activity,
+    age: t.activityAt ? relativeAge(t.activityAt, now) : null,
+    bySetup: !!t.activityBySetup,
+  };
 }
 
 // relativeAge renders how long ago an ISO timestamp was, as short as it
@@ -462,4 +492,33 @@ const FRAMEWORK_LABELS = { claude: "Claude", codex: "Codex" };
 
 export function frameworkLabel(framework) {
   return FRAMEWORK_LABELS[framework] || "Antigravity";
+}
+
+// stackedChip is the label and hover text for the chip a stacked task
+// carries -- a task branched off another task's branch and merged back
+// into it rather than into a repo's own base. Two things are stacked
+// that way, and the chip says which: a review (grain/task-284), run over
+// a change before it merges, and the merge queue's own automatic fix for
+// a pull request. Both are stacked; only one of them is a repair of a
+// red build.
+//
+// It lives here rather than in either view because both of them show it:
+// the task list's rows and the board's cards would otherwise each spell
+// out the same two labels and drift apart the first time one of them was
+// edited.
+export function stackedChip(t) {
+  if (t.review) {
+    return {
+      label: "review",
+      title: t.generatedFrom
+        ? `a review of ${t.generatedFrom}'s own code, run before it merges`
+        : "a review of another task's own code, run before it merges",
+    };
+  }
+  return {
+    label: "merge fix",
+    title: t.generatedFrom
+      ? `the merge queue's own automatic fix for ${t.generatedFrom}`
+      : "the merge queue's own automatic fix for another task's pull request",
+  };
 }

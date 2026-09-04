@@ -110,6 +110,16 @@ func BuildArgs(cfg config.Config) []string {
 	args = append(args, "--serial", "tty")
 	args = append(args, "--console", "off")
 
+	// The vsock device "kontur exec" reaches the guest's kontur-agent
+	// over. The host end is a unix socket cloud-hypervisor creates at
+	// this path ("hybrid" vsock, the same shape firecracker's is), which
+	// is why exec needs nothing addressable and nothing routed. See
+	// internal/guestexec's package comment for what is and is not
+	// established about the host kernel's part in that.
+	if cfg.VsockSocket != "" {
+		args = append(args, "--vsock", fmt.Sprintf("cid=%d,socket=%s", cfg.VsockCID, cfg.VsockSocket))
+	}
+
 	args = append(args, cfg.ExtraArgs...)
 
 	return args

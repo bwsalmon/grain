@@ -347,6 +347,79 @@ func TestKonturSandboxesWaitsForVMToBecomeReady(t *testing.T) {
 	}
 }
 
+// A guest that answers is not yet a guest a task can be dispatched into,
+// and these two cover the gap that opened when `kontur exec` moved from
+// SSH to vsock (bwsalmon/kontur#46).
+//
+// Under SSH, reaching the guest at all *was* its network coming up, so
+// "the agent answers" and "the guest is on the network" were one event.
+// Over vsock they are not: kontur-agent is ordered before sysinit.target
+// precisely so a guest whose networking failed can still be got into, so
+// it answers seconds before the units that configure the NIC from the
+// ip= parameter have run. Confirmed against a real VM, which is how this
+// was found: the guest ran commands happily with an empty routing table,
+// and a dispatched run inside it could reach neither the git proxy nor
+// any package registry.
+func TestKonturSandboxesWaitsForTheGuestToBeOnTheNetwork(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
+	// The agent answers from the first probe; the default route only
+	// arrives on the fourth.
+	dockerLog := filepath.Join(t.TempDir(), "docker-argv.log")
+	writeFakeDockerGuestNetwork(t, dockerLog, filepath.Join(t.TempDir(), "counter"), 0, "", 3)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+		ReadyTimeout:      time.Second,
+	})
+
+	if _, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{}); err != nil {
+		t.Fatalf("Acquire() did not wait for the guest's network: %v", err)
+	}
+
+	// Asserted rather than inferred from the absence of an error: a
+	// readiness wait that asked the guest for nothing would return
+	// against this same fake just as happily, and the difference between
+	// the two is exactly what this test is for.
+	log, err := os.ReadFile(dockerLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "/proc/net/route") {
+		t.Errorf("docker argv log = %q, want a readiness probe that asked the guest about its routing table", log)
+	}
+}
+
+func TestKonturSandboxesSaysSoWhenTheGuestNeverGetsADefaultRoute(t *testing.T) {
+	stateDir := t.TempDir()
+	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
+	writeFakeDockerGuestNetwork(t, filepath.Join(t.TempDir(), "docker-argv.log"),
+		filepath.Join(t.TempDir(), "counter"), 0, "", 1000)
+
+	k := orchestrator.NewKonturSandboxes(orchestrator.KonturConfig{
+		StateDir:          stateDir,
+		SSHUser:           "debian",
+		Workspace:         "/workspace",
+		ReadyPollInterval: time.Millisecond,
+		ReadyTimeout:      10 * time.Millisecond,
+	})
+
+	_, err := k.Acquire(context.Background(), "t1-1", orchestrator.Shape{})
+	if err == nil {
+		t.Fatal("Acquire() on a guest that never gets a default route: got nil error, want one")
+	}
+	// The distinction is the whole value of the message: a guest that
+	// cannot be reached and a guest that answers but has no route are
+	// different faults, in different halves of the boot, and an operator
+	// reading this is deciding which one to go and look at.
+	if !strings.Contains(err.Error(), "no default route") {
+		t.Errorf("Acquire() error = %v, want it to say the guest answers but has no default route", err)
+	}
+}
+
 func TestKonturSandboxesGivesUpAfterReadyTimeout(t *testing.T) {
 	stateDir := t.TempDir()
 	writeFakeKontur(t, filepath.Join(t.TempDir(), "kontur-argv.log"), 30080)
@@ -717,6 +790,22 @@ esac
 // survives across the separate processes each exec is.
 func writeFakeDockerGuest(t *testing.T, argvLog, counterFile string, readyAfter int, homeDir string) {
 	t.Helper()
+	writeFakeDockerGuestNetwork(t, argvLog, counterFile, readyAfter, homeDir, 0)
+}
+
+// writeFakeDockerGuestNetwork is writeFakeDockerGuest with the guest's
+// *network* modelled separately from its agent, which is the distinction
+// waitForGuestReady exists for: the two come up at different instants in
+// a real guest, the agent first, and readiness needs both.
+//
+// netReadyAfter is how many readiness probes fail before the guest has a
+// default route. The probe is recognized by the file it reads
+// (guestReadyProbe's /proc/net/route) and answered here rather than run,
+// which also keeps these tests off the *host's* routing table -- a fake
+// that exec'd the probe for real would be asserting that whatever
+// machine runs the suite has a default route.
+func writeFakeDockerGuestNetwork(t *testing.T, argvLog, counterFile string, readyAfter int, homeDir string, netReadyAfter int) {
+	t.Helper()
 	run := "exit 0"
 	if homeDir != "" {
 		run = fmt.Sprintf(`cd %q && exec "$@"`, homeDir)
@@ -733,8 +822,20 @@ func writeFakeDockerGuest(t *testing.T, argvLog, counterFile string, readyAfter 
   shift
   while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
   shift
+  case "$*" in
+  */proc/net/route*)
+    m=0
+    [ -f %[4]q ] && m=$(cat %[4]q)
+    m=$((m+1))
+    echo "$m" > %[4]q
+    if [ "$m" -le %[5]d ]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  esac
   %[3]s
-`, counterFile, readyAfter, run))
+`, counterFile, readyAfter, run, counterFile+".net", netReadyAfter))
 }
 
 func konturTestConfig(stateDir string) orchestrator.KonturConfig {

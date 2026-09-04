@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, relativeAge, repoRows, runActivity, unionCapabilities } from "./state.js";
+import { RETIRED_CAPABILITY_HINT, capabilityName, capabilityRows, capabilityUnavailableHint, closablePullRequest, completionPhase, defaultCapabilitiesFor, knownRepos, lastBaseForRepo, orphanedPullRequest, relativeAge, repoRows, runActivity, stateLabel, unionCapabilities } from "./state.js";
 
 describe("completionPhase", () => {
   it("returns null for a task whose run is not over", () => {
@@ -376,13 +376,49 @@ describe("closablePullRequest", () => {
   });
 });
 
+// A task the merge queue is repairing is running (or queued) like any
+// other attempt, and the state alone cannot say which kind of work it is
+// -- so the label does, and StateDot colours the mark to match.
+describe("stateLabel", () => {
+  it("uses the plain state label when nothing is being repaired", () => {
+    expect(stateLabel({ state: "running" })).toBe("Running");
+    expect(stateLabel({ state: "queued" })).toBe("Queued");
+    expect(stateLabel({ state: "completed" })).toBe("Queued for merge");
+  });
+
+  it("says what a merge-queue repair is doing instead", () => {
+    expect(stateLabel({ state: "running", repairing: true })).toBe("Repairing");
+    expect(stateLabel({ state: "queued", repairing: true })).toBe("Queued for repair");
+  });
+
+  // Only those two states are ever a repair in flight, so anything else
+  // arriving with the flag set keeps the badge honest rather than
+  // inventing a phrase for a combination the backend does not produce.
+  it("leaves any other state's label alone", () => {
+    expect(stateLabel({ state: "awaiting_reply", repairing: true })).toBe("Awaiting reply");
+  });
+
+  it("falls back to the raw state for one it has no label for", () => {
+    expect(stateLabel({ state: "invented" })).toBe("invented");
+  });
+});
+
 describe("runActivity", () => {
   const at = (msAgo) => new Date(Date.UTC(2026, 8, 4, 12, 0, 0) - msAgo).toISOString();
   const now = Date.UTC(2026, 8, 4, 12, 0, 0);
 
   it("gives back what a running task's own agent said, and how old it is", () => {
     expect(runActivity({ state: "running", activity: "waiting for CI", activityAt: at(4 * 60_000) }, now))
-      .toEqual({ note: "waiting for CI", age: "4m" });
+      .toEqual({ note: "waiting for CI", age: "4m", bySetup: false });
+  });
+
+  // grain writes this field too, for the stretch before the agent's
+  // first turn (orchestrator.setupNotes) -- and says so, since every
+  // other phrase that appears here is something an agent wrote.
+  it("carries whether the phrase is grain's own rather than the run's", () => {
+    expect(runActivity({
+      state: "running", activity: "building a sandbox", activityAt: at(30_000), activityBySetup: true,
+    }, now)).toEqual({ note: "building a sandbox", age: "now", bySetup: true });
   });
 
   // The API only carries a synopsis for a live run, but a poll's answer
@@ -401,7 +437,7 @@ describe("runActivity", () => {
   // time; showing the note alone beats inventing an age for it.
   it("shows a note with no timestamp on its own", () => {
     expect(runActivity({ state: "running", activity: "reading the code" }, now))
-      .toEqual({ note: "reading the code", age: null });
+      .toEqual({ note: "reading the code", age: null, bySetup: false });
   });
 });
 

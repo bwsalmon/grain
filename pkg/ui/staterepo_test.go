@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bwsalmon/grain/pkg/ui"
 )
@@ -84,6 +85,36 @@ func TestStateRepoStatusReportsWhereStateLives(t *testing.T) {
 	// a secret ever comes back through here.
 	if got.SecretsPublicKey == "" || got.SecretsKeyFile == "" {
 		t.Fatalf("the pane cannot tell an operator which key to back up: %+v", got)
+	}
+}
+
+// A condition the pane has to be able to render, and one that reaches it
+// through no error at all: grain goes on syncing when its credential may
+// not push a workflow, so a status that carried only Error would show
+// this deployment as entirely healthy while nothing checks a change to
+// its state.
+func TestStateRepoStatusSaysTheCheckCouldNotBeInstalled(t *testing.T) {
+	at := time.Date(2026, 9, 4, 9, 30, 0, 0, time.UTC)
+	fake := &fakeStateRepo{status: ui.StateRepoStatus{
+		Mode: "remote", Remote: "https://github.com/owner/grain-state.git",
+		WorkflowRefused: true, WorkflowRefusedAt: &at,
+		WorkflowFile: ".github/workflows/grain-state-check.yml",
+	}}
+	rec := do(t, stateRepoServer(t, fake), http.MethodGet, "/api/state-repo", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	got := decode[ui.StateRepoStatus](t, rec)
+	if !got.WorkflowRefused || got.WorkflowFile == "" {
+		t.Fatalf("the pane cannot tell an operator the check is missing: %+v", got)
+	}
+	if got.WorkflowRefusedAt == nil || !got.WorkflowRefusedAt.Equal(at) {
+		t.Fatalf("the pane cannot say when grain was last refused: %+v", got)
+	}
+	// Nothing here is a failed sync, and the pane says a different thing
+	// about those.
+	if got.Error != "" {
+		t.Fatalf("a refused workflow arrived as a sync failure: %+v", got)
 	}
 }
 

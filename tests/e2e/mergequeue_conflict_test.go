@@ -1,20 +1,22 @@
 package e2e
 
-// TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead is
+// TestSyncPullRequestsRepairsAndLandsAConflictedMergeQueueHead is
 // bwsalmon/agents#328's own scenario: the one merge-queue flow
-// pkg/orchestrator/mergequeue_test.go cannot prove by itself, because that
-// file's own TestSyncPullRequestsFilesAnAutomaticFixForAConflictedQueueHead
-// stops at filing the fix -- it never dispatches it, so it never has to
+// pkg/orchestrator/mergequeue_test.go cannot prove by itself, because
+// that file's own
+// TestSyncPullRequestsSendsAConflictedQueueHeadBackForRepair stops at
+// asking for the repair -- it never dispatches it, so it never has to
 // resolve anything. Here the conflict is a genuine one: an AutoMerge
 // task's branch and a commit pushed straight to main both add the same
 // file with different content, so a real `git merge` between them really
 // fails. SyncPullRequests notices that (through a Mergeable flag this test
-// computes with a real merge attempt, not one it simply asserts), files a
-// stacked fix task the same way the orchestrator package's own unit test
-// checks, and then a second, scripted agent run actually merges main into
-// the fix branch and pushes it. The payoff this file adds is checking that
-// the real content that lands on main afterward is the one the fix
-// resolved to -- not just that some merge commit exists.
+// computes with a real merge attempt, not one it simply asserts), sends
+// the task itself back to work, and a second, scripted run of that same
+// task really merges main into the branch its pull request is already
+// open from and pushes it there. The payoff this file adds is checking
+// that the real content that lands on main afterward is the one the
+// repair resolved to -- not just that some merge commit exists, and not
+// on a second branch that had to be merged in first.
 import (
 	"context"
 	"os"
@@ -37,8 +39,8 @@ import (
 // sandbox's proxy token and points its git config at this world's real
 // gitproxy) rather than through orchestrator.HostSandboxes, which hands
 // out uncredentialed ones -- the wrong tool here, since this test needs
-// every push RunCycle makes, including the fix task's own, to actually go
-// through the proxy.
+// every push RunCycle makes, including the repair run's own, to actually
+// go through the proxy.
 type worldSandboxes struct{ w *world }
 
 func (s worldSandboxes) Acquire(ctx context.Context, name string, shape orchestrator.Shape) (orchestrator.Sandbox, error) {
@@ -81,23 +83,23 @@ func configPushScript(remote, branch, content string) []antigravity.Step {
 	}
 }
 
-// resolveScript is the scripted turn the fix task's own agent takes: check
-// out baseBranch -- the conflicted task's own branch, per fileFixTask's
-// doc comment on why a fix task's Base is the branch it repairs rather
-// than main -- branch off it, and really merge main into it, favoring
-// baseBranch's own side of the conflict SyncPullRequests detected. This is
-// a real git merge that has to resolve a real conflict, not a canned file
-// write standing in for one.
-func resolveScript(remote, baseBranch, fixBranch string) []antigravity.Step {
+// resolveScript is the scripted turn the repair run takes: check out the
+// task's own branch -- the one its pull request is already open from,
+// which is the whole of what requeueForRepair changed -- and really merge
+// main into it, favoring the branch's own side of the conflict
+// SyncPullRequests detected, then push it back. This is a real git merge
+// that has to resolve a real conflict, not a canned file write standing
+// in for one, and it lands on the branch under review rather than on a
+// second one somebody would then have to merge.
+func resolveScript(remote, branch string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
-		"git checkout -b " + baseBranch + " origin/" + baseBranch + " && " +
-		"git checkout -b " + fixBranch + " && " +
+		"git checkout -b " + branch + " origin/" + branch + " && " +
 		"git fetch origin main && " +
 		"git merge origin/main -X ours -m 'resolve conflict with main' && " +
-		"git push origin " + fixBranch
+		"git push origin " + branch
 	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
-		finalText("resolved the conflict and pushed " + fixBranch),
+		finalText("resolved the conflict on " + branch),
 	}
 }
 
@@ -164,7 +166,7 @@ func (w *world) fileAt(owner, name, ref, path string) string {
 	return strings.TrimSpace(runOutput(w.t, w.upstreamDir, "git", "--git-dir", bare, "show", ref+":"+path))
 }
 
-func TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead(t *testing.T) {
+func TestSyncPullRequestsRepairsAndLandsAConflictedMergeQueueHead(t *testing.T) {
 	w := newWorld(t)
 	const owner, repoName = "acme", "widgets"
 	w.newRepo(owner, repoName)
@@ -224,100 +226,88 @@ func TestSyncPullRequestsFilesAndLandsARealFixForAConflictedMergeQueueHead(t *te
 	}
 	setMergeable(sim, branch1, false)
 
-	// Step 3: SyncPullRequests notices the real conflict and files a
-	// stacked fix task for it.
+	// Step 3: SyncPullRequests notices the real conflict -- its own merge
+	// of main into the branch is what proves it -- and sends task1 itself
+	// back to work on that branch.
 	clock = clock.Add(time.Minute)
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (files the fix): %v", err)
+		t.Fatalf("RunCycle (asks for the repair): %v", err)
 	}
-	got, err := w.store.GetTask(w.ctx, task1.ID)
+	obs, err := w.store.GetObservation(w.ctx, task1.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixTaskID, hasFix := "", false
-	for _, l := range got.Links {
-		if l.Kind == model.LinkFixTask {
-			fixTaskID, hasFix = l.Target, true
-		}
+	if obs == nil || obs.MergeQueueRepairAt == nil {
+		t.Fatalf("observation = %+v, want the repair recorded", obs)
 	}
-	if !hasFix {
-		t.Fatalf("expected a LinkFixTask on %+v", got.Links)
+	if !obs.RepairInFlight() {
+		t.Fatal("the repair does not read as in flight")
 	}
-	fixTask, err := w.store.GetTask(w.ctx, fixTaskID)
-	if err != nil || fixTask == nil {
-		t.Fatalf("GetTask(fix task): %v", err)
+	if st, err := w.store.State(w.ctx, task1.ID); err != nil || st != model.StateQueued {
+		t.Fatalf("task1 state = %q (%v), want queued: the task itself repairs its branch", st, err)
 	}
-	if fixTask.Base != branch1 {
-		t.Fatalf("fix task base = %q, want %q (task1's own branch)", fixTask.Base, branch1)
+	tasks, err := w.store.ListTasks(w.ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !fixTask.AutoMerge {
-		t.Fatal("fix task should carry auto-merge")
-	}
-	if fixTask.Approval == nil {
-		t.Fatal("fix task should be pre-approved, needing no human")
-	}
-	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateQueued {
-		t.Fatalf("fix task state = %q (%v), want queued", st, err)
+	if len(tasks) != 1 {
+		t.Fatalf("expected no separate fix task to have been filed, got %d tasks", len(tasks))
 	}
 
-	// Step 4: dispatch the fix task with a scripted agent that actually
+	// Step 4: dispatch task1 again, with a scripted agent that actually
 	// resolves the conflict -- merges main into task1's own branch, for
-	// real, and pushes.
-	fixBranch := model.BranchName(fixTaskID)
-	deps.Framework = scriptedFramework(resolveScript(w.remote(owner, repoName), branch1, fixBranch))
+	// real, and pushes it back to that same branch.
+	deps.Framework = scriptedFramework(resolveScript(w.remote(owner, repoName), branch1))
 	clock = clock.Add(time.Minute)
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (dispatches the fix): %v", err)
+		t.Fatalf("RunCycle (dispatches the repair): %v", err)
 	}
-	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateCompleted {
-		t.Fatalf("fix task state = %q (%v), want completed", st, err)
+	if st, err := w.store.State(w.ctx, task1.ID); err != nil || st != model.StateCompleted {
+		t.Fatalf("task1 state = %q (%v), want completed once the repair ran", st, err)
 	}
-	if len(sim.PullRequests) != 2 {
-		t.Fatalf("expected the fix's own pull request too, got %+v", sim.PullRequests)
+	// The whole point: one pull request, still, and the resolution is on
+	// its own head branch rather than on a second one waiting to be
+	// merged in.
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("expected still exactly one pull request, got %+v", sim.PullRequests)
+	}
+	if got := w.fileAt(owner, repoName, branch1, "CONFIG.md"); got != "setting: from-task1" {
+		t.Fatalf("CONFIG.md on %s after the repair = %q, want the resolved content", branch1, got)
 	}
 
 	// Step 5: GitHub -- played by the test, the same way
-	// mergeBranchIntoDefault always has to for the git side of any merge in
-	// this harness -- actually merges the fix's PR into task1's own
-	// branch, and then task1's own branch into main.
-	w.mergeBranchIntoDefault(owner, repoName, fixBranch, branch1)
-	if got := w.fileAt(owner, repoName, branch1, "CONFIG.md"); got != "setting: from-task1" {
-		t.Fatalf("CONFIG.md on %s after the real fix merge = %q, want the resolved content", branch1, got)
-	}
-	setMergeable(sim, fixBranch, true)
-
+	// mergeBranchIntoDefault always has to for the git side of any merge
+	// in this harness -- merges task1's own branch into main, which now
+	// really is possible.
 	if w.realConflict(owner, repoName, "main", branch1) {
-		t.Fatal("expected task1's branch to be genuinely mergeable into main once the fix landed")
+		t.Fatal("expected task1's branch to be genuinely mergeable into main once the repair landed")
 	}
 	w.mergeBranchIntoDefault(owner, repoName, branch1, "main")
 	setMergeable(sim, branch1, true)
 
-	// Step 6: SyncPullRequests closes both the fix and the original task
-	// out, having really merged -- no human ever needed to step in.
+	// Step 6: SyncPullRequests closes the task out, having really merged
+	// -- no human ever needed to step in.
 	clock = clock.Add(time.Minute)
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
 		t.Fatalf("RunCycle (closes out): %v", err)
-	}
-	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateClosed {
-		t.Fatalf("fix task state = %q (%v), want closed", st, err)
 	}
 	if st, err := w.store.State(w.ctx, task1.ID); err != nil || st != model.StateClosed {
 		t.Fatalf("task1 state = %q (%v), want closed", st, err)
 	}
 
-	obs, err := w.store.GetObservation(w.ctx, task1.ID)
+	obs, err = w.store.GetObservation(w.ctx, task1.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if obs != nil && obs.MergeQueueBlockedAt != nil {
-		t.Fatal("task1 should never have been escalated to a human -- the automatic fix genuinely resolved it")
+		t.Fatal("task1 should never have been escalated to a human -- the automatic repair genuinely resolved it")
 	}
 	comments, err := w.store.Comments(w.ctx, task1.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(comments) != 1 {
-		t.Fatalf("expected exactly the one fix-filed comment (no escalation), got %d: %+v", len(comments), comments)
+		t.Fatalf("expected exactly the one repair comment (no escalation), got %d: %+v", len(comments), comments)
 	}
 
 	if got := w.fileAt(owner, repoName, "main", "CONFIG.md"); got != "setting: from-task1" {

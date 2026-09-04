@@ -25,12 +25,13 @@ func DisableBranchExistsSleep() func() {
 	return func() { branchExistsSleep = prev }
 }
 
-// FixTaskDeadline is defaultFixTaskDeadline, for the merge-queue tests in
+// RepairDeadline is defaultRepairDeadline, for the merge-queue tests in
 // orchestrator_test.
 //
 // The other two merge-queue clocks have setters (SetCheckStallDeadline,
 // SetCheckRegistrationWindow) because their sightings live in memory and
-// a test has no other way to reach them. This one is measured off the fix
-// task's own CreatedAt, so a test drives it by moving the clock it hands
-// SyncPullRequests -- and only needs to know how far to move it.
-const FixTaskDeadline = defaultFixTaskDeadline
+// a test has no other way to reach them. This one is measured off the
+// task's own Observation.MergeQueueRepairAt, so a test drives it by
+// moving the clock it hands SyncPullRequests -- and only needs to know
+// how far to move it.
+const RepairDeadline = defaultRepairDeadline

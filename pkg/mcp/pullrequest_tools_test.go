@@ -151,7 +151,7 @@ func TestPullRequestStatusNamesFailingChecks(t *testing.T) {
 // says only that a job called "go" did not pass, which is enough to know
 // the build is red and not enough to fix it, so the run would otherwise
 // spend its next turns guessing at the failure and trying to reproduce it
-// in a sandbox that is not the runner -- the same gap fileFixTask already
+// in a sandbox that is not the runner -- the same gap requeueForRepair already
 // closes for the fix task the merge queue files.
 func TestPullRequestStatusQuotesTheFailingJobsLog(t *testing.T) {
 	client := &fakePullRequests{

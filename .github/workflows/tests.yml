@@ -1,7 +1,7 @@
 # Everything that can be checked without a credential, on every pull
 # request and every push to main: the Go suite, the frontend, the
-# Playwright UI suite, the real-KVM sandbox suite, and the Terraform
-# module.
+# Playwright UI suite, the real-KVM sandbox suite, the workflow files in
+# this directory, and the Terraform module.
 #
 # `/dev/kvm` was once assumed to be something "a hosted runner does not
 # have". It is not: GitHub's Linux runners expose it (nested
@@ -251,6 +251,82 @@ jobs:
             echo "===== $(docker inspect -f '{{.Name}}' "$c") ====="
             docker logs "$c" 2>&1 | tail -100
           done
+
+  # Nothing in this repository read a workflow file before GitHub ran it,
+  # and three of these five are never run by a pull request at all:
+  # gcp-smoke.yml and live-agent.yml trigger on `schedule` and
+  # `workflow_dispatch` only, deliberately, because each holds a
+  # credential no branch may be allowed to reach; agy-surface.yml on
+  # `workflow_dispatch` alone, because what it captures is the agy a
+  # runner installs rather than anything about the commit under test.
+  # What that costs is that a YAML error, a typo'd
+  # `steps.<id>.outputs.<name>`, or an `if:` naming a context that is not
+  # available in that position is invisible to `go test ./...`, to
+  # tests/deploy's cross-file assertions and to this workflow's own runs
+  # -- and first reports itself as a red scheduled run on main at 04:41
+  # UTC, some days after the commit that broke it, with no pull request
+  # left to attach the blame to. agy-surface.yml does not even get that
+  # much: no clock runs it, so a break in it would sit in the tree until
+  # whoever next dispatched it wore the failure.
+  #
+  # actionlint parses all five of them here instead, on every pull
+  # request, and shells out to shellcheck for every `run:` block -- which
+  # is where these workflows keep most of their logic
+  # (build-artifacts.yml's tag pushes, gcp-smoke.yml's mint/sweep/revoke
+  # steps, agy-surface.yml's capture and publish).
+  #
+  # It needs no credential of its own to check the two that hold one, so
+  # it belongs here with everything else that runs on a pull request.
+  actionlint:
+    name: workflows
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # actionlint skips the shell checks when shellcheck is not on PATH,
+      # silently: no error, exit 0, a green tick for a job that checked
+      # half of what it looks like it checked. ubuntu-latest preinstalls
+      # shellcheck, so this is asserting what is already true rather than
+      # installing anything -- for the same reason the real-vm job above
+      # asserts /dev/kvm instead of trusting the runner to have it.
+      - name: Require shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            echo "::error::shellcheck is not on this runner, so actionlint would skip the shell checks over every run: block without saying so. A green tick here would mean much less than it appears to." >&2
+            exit 1
+          fi
+          shellcheck --version
+
+      # Pinned, for the reason the terraform job below pins
+      # terraform_version: a new lint release must not be able to redden a
+      # pull request that touched nothing. Moving to a newer actionlint is
+      # then a commit someone makes on purpose, with whatever it newly
+      # reports in front of them.
+      #
+      # The checksum is the one published beside the release asset. It
+      # makes a pinned version mean the pinned bytes, rather than whatever
+      # that URL serves on the day.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tarball}" | sha256sum -c -
+          tar -xzf "$tarball" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      # The glob rather than actionlint's own default of "every workflow
+      # it can find": the point of this job is the files that no other
+      # check reads, so name where they live and let a path that matches
+      # nothing fail loudly.
+      - name: Lint workflows
+        run: actionlint -color .github/workflows/*.yml
 
   # terraform/gcp had no machine check of any kind until this job.
   # Nothing else in this workflow reads a .tf file, so a typo'd variable

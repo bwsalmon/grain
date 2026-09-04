@@ -8,59 +8,112 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/google/nftables"
-	"github.com/google/nftables/binaryutil"
-	"github.com/google/nftables/expr"
 	"github.com/vishvananda/netlink"
-	"golang.org/x/sys/unix"
 )
 
-// natTable is the name of the dedicated nftables table Setup creates for
-// all the NAT/forwarding rules it needs. Setup owns this table outright:
-// every run deletes and recreates it from scratch (see ensureNftRules),
-// rather than trying to diff against whatever rules happen to already be
-// there, so a stale rule from a previous run with a different set of VMs
-// can never linger.
-const natTable = "kontur"
-
-// Setup brings up the bridge, one tap per VM, and the NAT rules that let
-// every VM share the pod's IP. It is idempotent: run twice (e.g. because
-// Kubernetes retried a failed init container), it leaves the same end
+// Setup wires up the guest's networking: it is spliced directly onto the
+// container's own network segment and inherits its identity, so from
+// outside the namespace there is still exactly one endpoint, with the
+// address and MAC the runtime allocated.
+//
+// Nothing here rewrites, routes or filters a packet. Once the splice is
+// programmed the kernel moves every frame between the external interface
+// and the tap on its own, so this runs once to completion (as an init
+// container, or as one "docker run" before the VM container's) and exits,
+// leaving state that lives as long as the namespace does.
+//
+// Two things it deliberately does not do: it never writes
+// net.ipv4.ip_forward (there is no routing), and it installs no nftables
+// rules (there is no NAT). netshim therefore needs only CAP_NET_ADMIN and
+// access to /dev/net/tun, not a fully privileged container.
+//
+// The external interface keeps its address: the splice steals the
+// interface's ingress, so the namespace's own stack can never receive a
+// reply and cannot hold a connection over it, and leaving the address in
+// place keeps the namespace looking normal to anything that inspects it
+// -- including the VM container, which reads its own guest configuration
+// back off that interface (DiscoverIdentity).
+//
+// It is idempotent, so a retried init container converges on the same end
 // state rather than erroring on things that already exist.
 func Setup(cfg Config) error {
-	if err := enableIPForward(); err != nil {
-		return err
-	}
-
-	if err := ensureBridge(cfg.Bridge, cfg.BridgeAddr, cfg.BridgeNet); err != nil {
-		return err
-	}
-
-	for _, vm := range cfg.VMs {
-		if err := ensureTap(vm.TapName(), cfg.Bridge); err != nil {
-			return err
-		}
-	}
-
-	podIP, err := primaryAddr(cfg.ExternalIface)
+	id, err := DiscoverIdentity(cfg.ExternalIface)
 	if err != nil {
 		return err
 	}
-	log.Printf("pod IP on %s is %s", cfg.ExternalIface, podIP)
+	log.Printf("%s identity: %s/%d mac %s mtu %d", id.Iface, id.IP,
+		maskBits(id.Mask), id.MAC, id.MTU)
 
-	if err := ensureNftRules(cfg, podIP); err != nil {
+	// The tap has to match the external interface's MTU exactly. A
+	// splice is a wire: there is no bridge or router in between to
+	// fragment an oversized frame or to answer with an ICMP
+	// "fragmentation needed", so a mismatch here silently blackholes
+	// large packets on any segment that isn't 1500 (a VXLAN overlay, or
+	// most CNIs).
+	tap, err := ensureTapMTU(cfg.TapName(), id.MTU)
+	if err != nil {
 		return err
 	}
+
+	ext, err := netlink.LinkByName(cfg.ExternalIface)
+	if err != nil {
+		return fmt.Errorf("looking up %s: %w", cfg.ExternalIface, err)
+	}
+
+	if err := splice(ext, tap); err != nil {
+		return err
+	}
+	log.Printf("spliced %s <-> %s", cfg.ExternalIface, cfg.TapName())
+
+	if cfg.ControlNet == nil {
+		log.Printf("no control link configured; %q and the memory agent will not reach this guest", "kontur exec")
+		return nil
+	}
+
+	// The control link is a second, private segment purely for traffic
+	// between this namespace and the guest. It cannot share the spliced
+	// interface: that interface's *egress* still goes to the veth peer,
+	// not to the tap, so anything the namespace sends over it reaches
+	// the container network rather than the guest. And the guest now
+	// holds the namespace's own address, so dialing that address from
+	// in here reaches the local stack instead. A separate NIC is the
+	// only path back in.
+	if err := ensureBridge(cfg.Bridge, cfg.ControlAddr, cfg.ControlNet); err != nil {
+		return err
+	}
+	if err := ensureTap(cfg.ControlTapName(), cfg.Bridge); err != nil {
+		return err
+	}
+	log.Printf("control link %s on %s via %s", cfg.ControlAddr, cfg.Bridge, cfg.ControlTapName())
 
 	return nil
 }
 
-func enableIPForward() error {
-	const path = "/proc/sys/net/ipv4/ip_forward"
-	if err := os.WriteFile(path, []byte("1\n"), 0o644); err != nil {
-		return fmt.Errorf("enabling IPv4 forwarding: %w", err)
+// ensureTapMTU creates the tap if it does not exist, sets its MTU and
+// brings it up, returning the link. Unlike ensureTap it attaches the tap
+// to no bridge: the spliced tap's only peer is the external interface.
+func ensureTapMTU(name string, mtu int) (netlink.Link, error) {
+	if !linkExists(name) {
+		tap := &netlink.Tuntap{
+			LinkAttrs: netlink.LinkAttrs{Name: name},
+			Mode:      netlink.TUNTAP_MODE_TAP,
+		}
+		if err := netlink.LinkAdd(tap); err != nil {
+			return nil, fmt.Errorf("creating tap %s: %w", name, err)
+		}
 	}
-	return nil
+
+	link, err := netlink.LinkByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("looking up tap %s: %w", name, err)
+	}
+	if err := netlink.LinkSetMTU(link, mtu); err != nil {
+		return nil, fmt.Errorf("setting tap %s MTU to %d: %w", name, mtu, err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return nil, fmt.Errorf("bringing up tap %s: %w", name, err)
+	}
+	return link, nil
 }
 
 func ensureBridge(name string, addr net.IP, subnet *net.IPNet) error {
@@ -117,234 +170,6 @@ func ensureTap(name, bridge string) error {
 		return fmt.Errorf("bringing up tap %s: %w", name, err)
 	}
 	return nil
-}
-
-// ensureNftRules (re)installs the NAT/forwarding rules that let every VM
-// share the pod's IP, in a dedicated "kontur" nftables table:
-//
-//   - postrouting: MASQUERADEs VM-initiated outbound traffic (source in
-//     bridgeNet, leaving via extIface) so it looks like it came from the
-//     pod IP, since VMs don't have a routable address of their own.
-//   - forward: some CNIs default the FORWARD hook to drop, so traffic
-//     to/from the bridge has to be explicitly accepted.
-//   - prerouting/output: DNAT vm.Port on the pod IP to guestPort inside
-//     the VM. prerouting covers traffic arriving from outside the pod;
-//     output covers traffic originated locally within the pod's own
-//     network namespace (which prerouting never sees).
-//
-// The table is deleted and rebuilt from scratch on every call rather than
-// diffed against its previous contents, so Setup stays idempotent (no
-// duplicate rules on a second run) without having to compare individual
-// rules, and a VM removed from cfg since the last run never leaves a
-// stale rule behind.
-func ensureNftRules(cfg Config, podIP net.IP) error {
-	conn := &nftables.Conn{}
-
-	if old, err := conn.ListTables(); err == nil {
-		for _, t := range old {
-			if t.Name == natTable && t.Family == nftables.TableFamilyIPv4 {
-				conn.DelTable(t)
-			}
-		}
-		if err := conn.Flush(); err != nil {
-			return fmt.Errorf("removing existing %s nftables table: %w", natTable, err)
-		}
-	}
-
-	table := conn.AddTable(&nftables.Table{
-		Family: nftables.TableFamilyIPv4,
-		Name:   natTable,
-	})
-
-	postrouting := conn.AddChain(&nftables.Chain{
-		Name:     "postrouting",
-		Table:    table,
-		Type:     nftables.ChainTypeNAT,
-		Hooknum:  nftables.ChainHookPostrouting,
-		Priority: nftables.ChainPriorityNATSource,
-	})
-	conn.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: postrouting,
-		Exprs: masqueradeExprs(cfg.BridgeNet, cfg.ExternalIface),
-	})
-
-	forward := conn.AddChain(&nftables.Chain{
-		Name:     "forward",
-		Table:    table,
-		Type:     nftables.ChainTypeFilter,
-		Hooknum:  nftables.ChainHookForward,
-		Priority: nftables.ChainPriorityFilter,
-	})
-	conn.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: forward,
-		Exprs: acceptIifExprs(expr.MetaKeyIIFNAME, cfg.Bridge),
-	})
-	conn.AddRule(&nftables.Rule{
-		Table: table,
-		Chain: forward,
-		Exprs: acceptIifExprs(expr.MetaKeyOIFNAME, cfg.Bridge),
-	})
-
-	prerouting := conn.AddChain(&nftables.Chain{
-		Name:     "prerouting",
-		Table:    table,
-		Type:     nftables.ChainTypeNAT,
-		Hooknum:  nftables.ChainHookPrerouting,
-		Priority: nftables.ChainPriorityNATDest,
-	})
-	output := conn.AddChain(&nftables.Chain{
-		Name:     "output",
-		Table:    table,
-		Type:     nftables.ChainTypeNAT,
-		Hooknum:  nftables.ChainHookOutput,
-		Priority: nftables.ChainPriorityNATDest,
-	})
-
-	for _, vm := range cfg.VMs {
-		for _, proto := range []uint8{unix.IPPROTO_TCP, unix.IPPROTO_UDP} {
-			conn.AddRule(&nftables.Rule{
-				Table: table,
-				Chain: prerouting,
-				Exprs: dnatExprs(cfg.ExternalIface, podIP, vm, cfg.GuestPort, proto, true),
-			})
-			conn.AddRule(&nftables.Rule{
-				Table: table,
-				Chain: output,
-				Exprs: dnatExprs(cfg.ExternalIface, podIP, vm, cfg.GuestPort, proto, false),
-			})
-		}
-	}
-
-	if err := conn.Flush(); err != nil {
-		return fmt.Errorf("installing %s nftables rules: %w", natTable, err)
-	}
-	return nil
-}
-
-// masqueradeExprs matches packets whose source address is in bridgeNet and
-// which are leaving via extIface.
-func masqueradeExprs(bridgeNet *net.IPNet, extIface string) []expr.Any {
-	return []expr.Any{
-		&expr.Payload{
-			DestRegister: 1,
-			Base:         expr.PayloadBaseNetworkHeader,
-			Offset:       12, // IPv4 source address
-			Len:          4,
-		},
-		&expr.Bitwise{
-			SourceRegister: 1,
-			DestRegister:   1,
-			Len:            4,
-			Mask:           []byte(bridgeNet.Mask),
-			Xor:            []byte{0, 0, 0, 0},
-		},
-		&expr.Cmp{
-			Op:       expr.CmpOpEq,
-			Register: 1,
-			Data:     bridgeNet.IP.To4(),
-		},
-		&expr.Meta{Key: expr.MetaKeyOIFNAME, Register: 1},
-		&expr.Cmp{
-			Op:       expr.CmpOpEq,
-			Register: 1,
-			Data:     ifname(extIface),
-		},
-		&expr.Masq{},
-	}
-}
-
-// acceptIifExprs matches packets whose interface (as selected by key,
-// MetaKeyIIFNAME or MetaKeyOIFNAME) is iface, and accepts them.
-func acceptIifExprs(key expr.MetaKey, iface string) []expr.Any {
-	return []expr.Any{
-		&expr.Meta{Key: key, Register: 1},
-		&expr.Cmp{
-			Op:       expr.CmpOpEq,
-			Register: 1,
-			Data:     ifname(iface),
-		},
-		&expr.Verdict{Kind: expr.VerdictAccept},
-	}
-}
-
-// dnatExprs matches proto traffic addressed to podIP:vm.Port and DNATs it
-// to vm.IP:guestPort. If matchIface, the match additionally requires the
-// packet to have arrived on extIface (for the prerouting chain); the
-// output chain, which only ever sees locally-originated traffic, omits
-// that check since it has no meaningful incoming interface.
-func dnatExprs(extIface string, podIP net.IP, vm VM, guestPort int, proto uint8, matchIface bool) []expr.Any {
-	exprs := []expr.Any{}
-	if matchIface {
-		exprs = append(exprs,
-			&expr.Meta{Key: expr.MetaKeyIIFNAME, Register: 1},
-			&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ifname(extIface)},
-		)
-	}
-	exprs = append(exprs,
-		&expr.Payload{
-			DestRegister: 1,
-			Base:         expr.PayloadBaseNetworkHeader,
-			Offset:       9, // IPv4 protocol
-			Len:          1,
-		},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{proto}},
-		&expr.Payload{
-			DestRegister: 1,
-			Base:         expr.PayloadBaseNetworkHeader,
-			Offset:       16, // IPv4 destination address
-			Len:          4,
-		},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: podIP.To4()},
-		&expr.Payload{
-			DestRegister: 1,
-			Base:         expr.PayloadBaseTransportHeader,
-			Offset:       2, // destination port (tcp and udp agree on this offset)
-			Len:          2,
-		},
-		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(uint16(vm.Port))},
-		&expr.Immediate{Register: 2, Data: vm.IP.To4()},
-		&expr.Immediate{Register: 3, Data: binaryutil.BigEndian.PutUint16(uint16(guestPort))},
-		&expr.NAT{
-			Type:        expr.NATTypeDestNAT,
-			Family:      unix.NFPROTO_IPV4,
-			RegAddrMin:  2,
-			RegProtoMin: 3,
-		},
-	)
-	return exprs
-}
-
-// ifname encodes iface the way nftables interface-name matches expect: a
-// fixed 16-byte (IFNAMSIZ), NUL-padded buffer.
-func ifname(iface string) []byte {
-	b := make([]byte, 16)
-	copy(b, iface)
-	return b
-}
-
-// primaryAddr returns the first IPv4 address configured on iface, i.e. the
-// pod's IP as assigned by the cluster's CNI.
-func primaryAddr(iface string) (net.IP, error) {
-	ifi, err := net.InterfaceByName(iface)
-	if err != nil {
-		return nil, fmt.Errorf("looking up interface %s: %w", iface, err)
-	}
-	addrs, err := ifi.Addrs()
-	if err != nil {
-		return nil, fmt.Errorf("reading addresses on %s: %w", iface, err)
-	}
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		if ip4 := ipnet.IP.To4(); ip4 != nil {
-			return ip4, nil
-		}
-	}
-	return nil, fmt.Errorf("no IPv4 address found on %s", iface)
 }
 
 func linkExists(name string) bool {

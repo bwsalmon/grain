@@ -200,6 +200,111 @@ func TestRunner_Suspend_PublishesSnapshotAndResumes(t *testing.T) {
 	}
 }
 
+// The snapshot has to carry the guest's writable disk with it: a
+// restored VM's memory believes in whatever the guest had written by the
+// time it was paused, and in the default disk mode that lives in a qcow2
+// inside this container, which the next run (a new container, the whole
+// reason for snapshotting to a volume) does not have.
+func TestRunner_Suspend_SavesTheDiskOverlayIntoTheSnapshot(t *testing.T) {
+	cfg := testConfig(t)
+	dir := t.TempDir()
+	cfg.SnapshotPath = filepath.Join(dir, "snapshot")
+	cfg.DiskMode = config.DiskModeOverlay
+	cfg.OverlayPath = filepath.Join(dir, "overlay", "disk.qcow2")
+	if err := os.MkdirAll(filepath.Dir(cfg.OverlayPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.OverlayPath, []byte("guest wrote this"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := startRunner(t, cfg, nil)
+	readyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := r.api.WaitReady(readyCtx); err != nil {
+		t.Fatalf("waiting for fakechv's api socket: %v", err)
+	}
+	if err := r.Suspend(context.Background()); err != nil {
+		t.Fatalf("Suspend() error = %v", err)
+	}
+
+	saved, err := os.ReadFile(filepath.Join(cfg.SnapshotPath, SnapshotDiskOverlayName))
+	if err != nil {
+		t.Fatalf("the snapshot carries no disk overlay: %v", err)
+	}
+	if string(saved) != "guest wrote this" {
+		t.Errorf("saved overlay = %q, want the overlay's own contents", saved)
+	}
+
+	// The next run's half of it: the saved overlay goes back where the
+	// snapshot's own config.json expects to find the disk.
+	dst := filepath.Join(t.TempDir(), "overlay", "disk.qcow2")
+	restored, err := RestoreDiskOverlay(cfg.SnapshotPath, dst)
+	if err != nil {
+		t.Fatalf("RestoreDiskOverlay() error = %v", err)
+	}
+	if !restored {
+		t.Fatal("RestoreDiskOverlay() reported no overlay in a snapshot that has one")
+	}
+	back, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(back) != "guest wrote this" {
+		t.Errorf("restored overlay = %q, want the overlay's own contents", back)
+	}
+	if _, err := os.Stat(dst + ".restoring"); !os.IsNotExist(err) {
+		t.Errorf("the staging copy at %s.restoring was left behind", dst)
+	}
+}
+
+// A snapshot from before kontur saved the overlay, or one of a VM whose
+// disk was never an overlay to begin with, has nothing to put back --
+// and says so rather than failing the boot that asked.
+func TestRestoreDiskOverlay_SnapshotWithoutOne(t *testing.T) {
+	snap := filepath.Join(t.TempDir(), "snapshot")
+	if err := os.Mkdir(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "disk.qcow2")
+
+	restored, err := RestoreDiskOverlay(snap, dst)
+	if err != nil {
+		t.Fatalf("RestoreDiskOverlay() error = %v", err)
+	}
+	if restored {
+		t.Error("RestoreDiskOverlay() claimed to restore an overlay that isn't in the snapshot")
+	}
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("something was written to %s anyway", dst)
+	}
+}
+
+// Only the overlay is kontur's to carry: the other two disk modes write
+// to (or refuse to write to) an image that lives outside the container
+// and is still there on the next run.
+func TestRunner_Suspend_LeavesAPersistentDiskAlone(t *testing.T) {
+	cfg := testConfig(t)
+	dir := t.TempDir()
+	cfg.SnapshotPath = filepath.Join(dir, "snapshot")
+	cfg.DiskMode = config.DiskModePersistent
+	cfg.OverlayPath = filepath.Join(dir, "overlay", "disk.qcow2")
+
+	r := startRunner(t, cfg, nil)
+	readyCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := r.api.WaitReady(readyCtx); err != nil {
+		t.Fatalf("waiting for fakechv's api socket: %v", err)
+	}
+	if err := r.Suspend(context.Background()); err != nil {
+		t.Fatalf("Suspend() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(cfg.SnapshotPath, SnapshotDiskOverlayName)); !os.IsNotExist(err) {
+		t.Errorf("a persistent-disk VM's snapshot has an overlay in it (stat err = %v)", err)
+	}
+}
+
 func TestRunner_Restored_TrueWhenSnapshotAlreadyExists(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.SnapshotPath = filepath.Join(t.TempDir(), "snapshot")

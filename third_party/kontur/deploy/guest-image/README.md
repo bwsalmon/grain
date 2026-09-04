@@ -10,20 +10,30 @@ doesn't set `CHV_DISK_IMAGE` (see `internal/config`). `GUEST_DISTRO`
 (default `debian`) picks which of the two rootfs stages runs:
 
 - `debian` (default): a minimal Debian rootfs (`debootstrap
-  --variant=minbase`) with `openssh-server`, `systemd-sysv` (for
-  `/sbin/init`), `iproute2`, `acpid` and `udev`. `GUEST_SUITE` (default
-  `bookworm`) picks the Debian suite. `udev` has to be listed explicitly
-  -- `--variant=minbase` skips Recommends, and without `systemd-udevd`
-  running, `dev-ttyS0.device` never gets marked ready, which stalls boot
-  for `DefaultDeviceTimeoutSec` (systemd's default: 90s) before
-  `serial-getty@ttyS0.service` gives up on it; SSH itself doesn't depend
-  on that device unit and isn't affected, but the console (this guest's
-  only other point of entry) would otherwise never show a login prompt.
+  --variant=minbase`) with `systemd-sysv` (for `/sbin/init`), `iproute2`,
+  `acpid`, `udev` and `kmod`. `GUEST_SUITE` (default `bookworm`) picks the
+  Debian suite. `kmod` is listed explicitly because `--variant=minbase`
+  installs priority-required packages and nothing else, so there is no
+  `/sbin/modprobe` -- which `kontur-agent.service` uses to load the
+  virtio-vsock driver before it starts. `udev` has to be listed
+  explicitly too -- `--variant=minbase` skips
+  Recommends, and without `systemd-udevd` running, `dev-ttyS0.device`
+  never gets marked ready, which stalls boot for
+  `DefaultDeviceTimeoutSec` (systemd's default: 90s) before
+  `serial-getty@ttyS0.service` gives up on it; `kontur exec` doesn't
+  depend on that device unit and isn't affected, but the console would
+  otherwise never show a login prompt.
 - `alpine`: a minimal Alpine rootfs (`apk add --root`, the same technique
-  Alpine's own official base image is built with) with `openssh-server`,
-  `alpine-base` (for `busybox`/`openrc`, standing in for `systemd-sysv`),
-  `iproute2` and `acpid`. `GUEST_ALPINE_VERSION` (default `3.20`) picks
-  the Alpine version.
+  Alpine's own official base image is built with) with `alpine-base` (for
+  `busybox`/`openrc`, standing in for `systemd-sysv`), `iproute2` and
+  `acpid`. `GUEST_ALPINE_VERSION` (default `3.20`) picks the Alpine
+  version.
+
+Neither carries an SSH server. `kontur exec` reaches the guest over its
+virtio-vsock device instead, answered by `kontur-agent`
+(`cmd/kontur-agent`, copied into both variants from the Dockerfile's own
+`build` stage) -- see "Getting a shell in the guest" below, and
+`internal/guestexec` for why that replaced SSH.
 
 Both variants pack their rootfs directly into an ext4 filesystem image
 with `mke2fs -d` -- no loop-mount or `chroot` needed on the build host
@@ -43,29 +53,20 @@ Copied verbatim into the rootfs before it's packed into `disk.img`:
 
 | File | Purpose |
 |---|---|
-| `overlay-common/etc/ssh/sshd_config.d/10-console.conf` | Disables password auth (root has no password at all -- only the key `kontur run` generates per boot, plus whatever `GUEST_SSH_AUTHORIZED_KEY` bakes in at build time). |
-| `overlay-common/etc/ssh/sshd_config.d/20-console-wrap.conf` | Forces every SSH session through the wrapper below. Removed at build time by `GUEST_CONSOLE_WRAP=0`; see "Why SSH output goes to the console". |
-| `overlay-common/usr/local/libexec/kontur-authorized-key` | Installs the per-boot `kontur exec` key from the kernel command line, before sshd starts. Run by `kontur-authorized-key.service` (Debian) / `/etc/init.d/kontur-authorized-key` (Alpine). |
-| `overlay-common/usr/local/libexec/kontur-ssh-console-wrap` | Runs the session under `script`, which mirrors its output to `/dev/console` (ttyS0) in addition to the real SSH client. |
+| `overlay-debian/etc/systemd/system/kontur-agent.service`, `overlay-alpine/etc/init.d/kontur-agent` | Run `kontur-agent` (copied into both variants straight from the top-level Dockerfile's own `build` stage, not part of either overlay) as a restart-always service, and `modprobe` the virtio-vsock driver first. Started in early boot and deliberately not ordered after the network -- see "Getting a shell in the guest". |
 | `overlay-common/etc/acpi/events/powerbtn` | `acpid` event config matching the ACPI power button, pointing at `/etc/acpi/powerbtn.sh` -- see "Graceful shutdown" below for why that script's own contents differ per variant. |
 | `overlay-debian/etc/acpi/powerbtn.sh` | Runs `systemctl poweroff`. |
-| `overlay-debian/etc/systemd/system/kontur-ssh-host-keys.service` | Regenerates SSH host keys on first boot (`ssh-keygen -A`, `Before=ssh.service`), since the Dockerfile deletes whatever `openssh-server`'s postinst generated at build time -- otherwise every VM booted from this image would share the same host keys. |
 | `overlay-alpine/etc/acpi/powerbtn.sh` | Runs `poweroff` (busybox's applet, which signals `/sbin/init` rather than powering off directly -- see "Graceful shutdown"). |
 | `overlay-debian/etc/systemd/system/kontur-mem-agent.service`, `overlay-alpine/etc/init.d/kontur-mem-agent` | Run `kontur-mem-agent` (copied into both variants straight from the top-level Dockerfile's own `build` stage, not part of either overlay) as a restart-always service. See the top-level README's "Memory hotplug". |
-| `overlay-common/usr/local/libexec/kontur-control-net` | Configures the guest's end of a flat-mode control link: brings up the second NIC at `169.254.100.2/24` and writes `KONTUR_MEM_AGENT_HOST` to `/run/kontur-control-net.env` for `kontur-mem-agent` to pick up. A guest with no second NIC (NAT mode, or flat mode with the control link disabled) has nothing to do and exits successfully, so the same image boots unchanged either way. See the top-level README's "Flat mode". |
+| `overlay-common/usr/local/libexec/kontur-control-net` | Configures the guest's end of netshim's control link: brings up the second NIC at `169.254.100.2/24` and writes `KONTUR_MEM_AGENT_HOST` to `/run/kontur-control-net.env` for `kontur-mem-agent` to pick up. A guest with no second NIC (the control link disabled, or no netshim at all) has nothing to do and exits successfully, so the same image boots unchanged either way. See the top-level README's "Container networking". |
 | `overlay-debian/etc/systemd/system/kontur-control-net.service`, `overlay-alpine/etc/init.d/kontur-control-net` | Run that script once at boot, ordered before `kontur-mem-agent` so the address it writes is in place before the agent starts. |
+| `overlay-common/usr/local/libexec/kontur-configure-dns` | Writes `/etc/resolv.conf` from the nameservers on the `ip=` kernel command line (its `dns0`/`dns1` fields). Run by `kontur-configure-dns.service` (Debian) / `/etc/init.d/kontur-configure-dns` (Alpine), in early boot. A command line naming no nameservers leaves the file alone. See "The resolver". |
 | `overlay-debian/usr/local/libexec/kontur-configure-net` | Configures the primary NIC from the kernel command line's `ip=` for a guest whose kernel lacks `CONFIG_IP_PNP` -- i.e. a `GUEST_KERNEL_PACKAGE` build. Exits immediately when the interface is already addressed, so it is a no-op under the bundled kernel. See "Networking". |
-| `overlay-debian/etc/systemd/system/kontur-net-cmdline.service` | Runs that script after udev settles and before `sshd`. Debian only: it exists to compensate for a distro kernel, which is a Debian-variant option. |
-| `overlay-common/usr/local/libexec/kontur-configure-dns` | Writes `/etc/resolv.conf` from the `dns0`/`dns1` fields of the same `ip=` parameter. Both variants and both kernels: nothing else in this guest ever writes that file. Leaves it alone when the command line names no nameserver. See "DNS" below. |
-| `overlay-debian/etc/systemd/system/kontur-configure-dns.service`, `overlay-alpine/etc/init.d/kontur-configure-dns` | Run that script once at boot, before `sshd` (Debian: `sysinit.target`, like `kontur-net-cmdline.service`; Alpine: the `boot` runlevel). |
-
-The Alpine variant has no equivalent of `kontur-ssh-host-keys.service`:
-unlike Debian's, Alpine's `openssh-server` package doesn't generate host
-keys at install time at all (nothing to delete), and its own `sshd`
-OpenRC init script (`checkconfig` -> `generate_host_keys`) already runs
-`ssh-keygen -A` on every start, filling in whatever's missing -- so the
-same first-boot regeneration Debian needs a dedicated unit for comes for
-free on Alpine.
+| `overlay-debian/etc/systemd/system/kontur-net-cmdline.service` | Runs that script after udev settles, early enough that anything needing an address has one. Debian only: it exists to compensate for a distro kernel, which is a Debian-variant option. |
+| `overlay-common/usr/local/libexec/kontur-configure-routes` | Installs the routes the container runtime had on the sandbox's own interface, carried down the kernel command line as `kontur.routes=` because `ip=` can carry an address, a netmask and a gateway and nothing else. That is the whole difference between a bridge CNI, where the netmask is right, and a point-to-point one, where the subnet is deliberately not on-link. A command line with no `kontur.routes=` on it (no netshim in front of this guest, or an operator's own `ip=`) leaves the table alone and exits successfully. See the top-level README's "Container networking". |
+| `overlay-debian/etc/systemd/system/kontur-net-routes.service`, `overlay-alpine/etc/init.d/kontur-net-routes` | Run that script once at boot, after the address exists and before anything uses it. |
+| `overlay-common/usr/local/libexec/kontur-growfs` | Grows the root filesystem onto whatever `/dev/vda` turned out to be, so `CHV_DISK_SIZE_MB` yields free space and not just a bigger block device. See "Growing the filesystem" below. |
+| `overlay-debian/etc/systemd/system/kontur-growfs.service`, `overlay-alpine/etc/init.d/kontur-growfs` | Run that script in early boot, before anything starts writing into the space it makes. |
 
 ## Enabling services
 
@@ -75,12 +76,17 @@ normal tooling (`systemctl enable`, `rc-update add`), since neither has
 a running service manager during the build to ask -- each is just a
 symlink, written directly:
 
-- Debian: `kontur-ssh-host-keys.service`, `kontur-mem-agent.service` and
-  `kontur-control-net.service` are all symlinked into
-  `multi-user.target.wants/`. `kontur-net-cmdline.service` goes into
-  `sysinit.target.wants/` instead, with `DefaultDependencies=no`: it
-  establishes the guest's address, so it has to have run before `sshd`
-  rather than alongside it. `acpid.socket`/
+- Debian: `kontur-mem-agent.service` and `kontur-control-net.service` are
+  symlinked into `multi-user.target.wants/`. `kontur-agent.service`,
+  `kontur-net-cmdline.service`, `kontur-net-routes.service` and
+  `kontur-growfs.service` go into
+  `sysinit.target.wants/` instead, with `DefaultDependencies=no`: the
+  first answers `kontur exec` and is wanted before anything that could
+  fail later in the boot has had the chance to, the second establishes
+  the guest's address, the third gives it the routes that address is
+  only usable off its own segment with, and the last grows the root
+  filesystem, which has to happen before anything starts writing into
+  the space. `acpid.socket`/
   `acpid.path` don't need the same treatment -- `acpid`'s own postinst
   already enables them via `deb-systemd-helper`, which (like `systemctl
   enable`) just writes symlinks and doesn't need a running systemd to do
@@ -91,68 +97,65 @@ symlink, written directly:
   `sysinit`/`boot` for the baseline a busybox-init/OpenRC system needs to
   reach a usable state at all (device nodes, `/proc`/`/sys`, hostname,
   clearing `/tmp`, syslog -- Debian's systemd does the equivalent
-  internally, with nothing to enable by hand for it), and `default` for
-  `sshd`/`acpid`/`kontur-control-net`/`kontur-mem-agent` themselves. See the
+  internally, with nothing to enable by hand for it) plus `kontur-growfs`,
+  `kontur-net-routes` and `kontur-agent`, and `default` for
+  `acpid`/`kontur-control-net`/`kontur-mem-agent` themselves. See the
   `guest-rootfs-alpine` stage in the top-level `Dockerfile` for the exact
   list.
 
-## Why SSH output goes to the console
+## Getting a shell in the guest
 
-kontur's "run" mode (`cmd/kontur`) streams the VM's serial console
-straight to the container's own stdout/stderr, so `kubectl logs` on a VM
-container *is* that VM's console output. The guest has no other log
-shipper, and there is no direct network path into a VM's pod from outside
-Kubernetes port-forwarding/netshim's forwarded port -- so mirroring SSH
-session output onto the console is what makes SSH activity on this guest
-observable the same way everything else about the VM already is, without
-adding a separate logging pipeline inside the guest.
+`kontur exec` (see the top-level README's "Execing into a VM") always has
+a way in, and needs nothing set up: it connects to the VM's virtio-vsock
+device, where `kontur-agent` answers. There is no account to log into, no
+key to authorize and no daemon to configure, because there is no login
+involved -- the agent runs as root and runs each command as whichever
+account the request names (`KONTUR_EXEC_USER`, defaulting to root).
 
-It is not free, which is why it is its own drop-in
-(`20-console-wrap.conf`) and why `GUEST_CONSOLE_WRAP=0` leaves that file
-out. The wrapper runs each command under `script`, i.e. under a pty, and
-a pty is not a transparent pipe:
+That is a deliberate change from how this image used to work, and the
+reason is worth knowing before adding sshd back out of habit. Exec used
+to be SSH to a daemon in the guest, over netshim's control link, so
+everything that brought that link up was load-bearing for being able to
+get in at all: a guest whose networking had not come up was one kontur
+could not ask *why*. vsock is carried by the virtio device itself, so it
+works before the guest has an address, while its network is broken, and
+with no NIC attached -- which is exactly when you want a shell.
+`kontur-agent` is started in early boot for the same reason, ahead of
+anything that could go wrong later in it.
 
-| | through the wrapper |
-|---|---|
-| output with `\n` line endings | comes back `\r\n` |
-| stdout vs stderr | merged onto the one pty |
-| exit status | survives (`script --return`) |
-| stdin | survives byte for byte |
+It also means this image ships no SSH server, no host keys, no
+`authorized_keys` and no per-boot keypair, all of which existed only to
+serve that transport.
 
-For a human reading `kubectl logs` that is a good trade. For anything
-driving the guest programmatically over `kontur exec` -- reading a file
-back, or reporting a command's stderr separately -- it silently corrupts
-content and empties error messages, so such a guest wants
-`GUEST_CONSOLE_WRAP=0`. The wrapper script itself stays in the image
-either way, unreferenced, for anyone who wants to invoke it deliberately.
+### If you want sshd anyway
 
-## Getting SSH access
-
-Root login is key-only (`PermitRootLogin prohibit-password` plus no
-password set), and this image authorizes **no key at build time**.
-
-`kontur exec` (see the top-level README's "Execing into a VM") still
-always has a way in without any of this section's setup, but the key it
-uses is generated per boot rather than baked in: `kontur run` creates an
-ed25519 keypair in the VM's own container, passes the public half to the
-guest on the kernel command line, and `kontur-authorized-key.service`
-installs it before sshd starts. See `internal/guestkey`.
-
-That is what makes this image publishable. A baked keypair was one secret
-shared by every VM ever booted from a given build, shipped inside the
-image; it also only worked when the guest image and the runtime image
-that boots it came out of the *same* `docker build`, since each build
-generated its own -- so a separately published guest silently authorized
-a key nobody held.
-
-Pass your own public key at build time to allow your own key-based root
-login alongside the generated one:
+For an operator's own interactive access, install it the way you would
+install anything else in a guest -- in a setup script (see "Running a
+custom setup script" below), which is also where the key to authorize
+belongs:
 
 ```sh
-docker build --build-arg GUEST_SSH_AUTHORIZED_KEY="$(cat ~/.ssh/id_ed25519.pub)" -t kontur .
+cat > setup.sh <<'EOF'
+#!/bin/sh
+set -eux
+apt-get update
+apt-get install -y --no-install-recommends openssh-server
+install -d -m0700 /root/.ssh
+printf '%s\n' "ssh-ed25519 AAAA... you@example" > /root/.ssh/authorized_keys
+chmod 0600 /root/.ssh/authorized_keys
+EOF
+konturctl guest build -from ghcr.io/bwsalmon/kontur:debian12 -setup setup.sh -t my-guest
 ```
 
-This works the same way on both `GUEST_DISTRO` variants.
+Reaching it is then your own business, the same as any other service the
+guest runs: the guest holds the pod's own address under flat mode, so an
+sshd on it is reachable wherever that address is.
+
+Note that a guest built this way needs its host keys scrubbed before the
+image is shared, or every VM cloned from it has the same ones.
+`konturctl guest build` already does this (see `internal/guestbuild`'s
+own `scrub`), which is why the recipe above is the recommended route
+rather than committing a running guest by hand.
 
 ## Running a custom setup script
 
@@ -166,8 +169,7 @@ to reach for if you are deriving a guest from a published image rather
 than building kontur yourself.
 
 `GUEST_SETUP_SCRIPT` is a build arg holding the script's own text (not a
-path, the same way `GUEST_SSH_AUTHORIZED_KEY` holds a key rather than a
-filename), run inside the guest rootfs while the image is being built:
+path), run inside the guest rootfs while the image is being built:
 
 ```sh
 docker build --build-arg GUEST_SETUP_SCRIPT="$(cat my-setup.sh)" -t kontur .
@@ -200,7 +202,7 @@ guest: no booted kernel, no service manager actually running, so
 
 `CHV_SETUP_SCRIPT` (see the top-level README's "Suspend and resume") is
 the boot-time counterpart: it boots the actual guest and runs your script
-over SSH once, so it gets a running kernel, service manager and network
+inside it once, so it gets a running kernel, service manager and network
 stack, and there's nothing it can't do that an interactively-administered
 guest could. Pair it with `CHV_SNAPSHOT_PATH` to pay that cost only once:
 the suspended snapshot after the first run stands in for what would
@@ -255,9 +257,12 @@ What it costs:
   deep is fine; a long chain wants squashing.
 
 The scrub is not optional and not the caller's to remember: `/etc/machine-id`,
-`/var/lib/dbus/machine-id`, the SSH host keys, systemd's random seed, DHCP
-leases and `/var/log` are emptied after the setup script and before
-shutdown. All of it is per-boot identity, and an image is cloned into many
+`/var/lib/dbus/machine-id`, any SSH host keys, systemd's random seed,
+DHCP leases and `/var/log` are emptied after the setup script and before
+shutdown. The host keys are on that list even though this image runs no
+sshd, because a setup script is free to install one -- and a shared image
+that carried its host keys would hand every VM cloned from it the same
+identity. All of it is per-boot identity, and an image is cloned into many
 VMs -- a baked machine-id gives every one of them the same journald
 identity and DHCP DUID, and baked host keys make host-key verification
 meaningless across the fleet. What the setup script installed or left
@@ -315,6 +320,52 @@ directory holds exactly those files rather than a whole builder
 filesystem. None of it bloats the `kontur` runtime image: `final` is
 still the Dockerfile's last stage and so still the default build target.
 
+## Growing the filesystem
+
+`CHV_DISK_SIZE_MB` (`konturctl vm create -disk-size-mb`; see the
+top-level README's "Disk size") sizes the qcow2 overlay before the VM
+boots, which grows the *block device* the guest is offered and nothing
+else. The ext4 inside it is still exactly what `mke2fs -d` made when the
+image was built, so on its own that setting gives a guest an 8GiB
+`/dev/vda` with the same few hundred MiB of free space it always had.
+
+`kontur-growfs` closes that on both variants: it runs `resize2fs` on the
+root device in early boot, so free space in the guest reflects
+`-disk-size-mb` without anyone logging in to do it by hand. Two things
+make it a single command rather than a growpart-then-resize dance:
+
+- this image puts ext4 **directly on `/dev/vda`, with no partition
+  table** (the `guest-image` stage's `mke2fs` writes to the whole disk),
+  so there is no partition whose end has to be moved first;
+- ext4 grows **online**, with the filesystem mounted as root, so there is
+  no initramfs hook and no unmount to arrange -- which also means a
+  `GUEST_KERNEL_PACKAGE` guest needs nothing extra.
+
+It runs on every boot and is a no-op on almost all of them: `resize2fs`
+finds the filesystem already as long as the device and reports "Nothing
+to do!". It also declines, successfully and with a line on the console
+saying so, when the root is mounted read-only (`CHV_DISK_MODE=readonly`),
+when the root filesystem isn't ext2/3/4, or when `resize2fs` isn't
+installed -- and it treats a failed resize as a smaller disk rather than
+a failed boot, since a guest with less free space than asked for is still
+a guest you can log into and look at.
+
+Ordering is what the service units add: `sysinit.target` on Debian
+(`DefaultDependencies=no`, after `systemd-remount-fs.service`, the same
+shape as systemd's own `systemd-growfs-root.service`) and the `boot`
+runlevel on Alpine. Either way it is done before anything is writing
+into the space it just made.
+
+The Alpine rootfs installs `e2fsprogs-extra` for this, not just
+`e2fsprogs`: Alpine splits `resize2fs` out of the base package. Debian's
+`e2fsprogs` is unsplit and already there via `debootstrap`. Both rootfs
+stages fail the build if `resize2fs` is missing, so a guest that would
+silently never grow doesn't get built.
+
+A guest that is *not* this one -- a `CHV_DISK_IMAGE` of your own, with a
+partition table or a non-ext4 root -- has to do its own growing, exactly
+as before.
+
 ## Graceful shutdown
 
 `kontur run`'s shutdown path (see the top-level README's "Shutdown"
@@ -347,9 +398,12 @@ The guest itself doesn't run a DHCP client: it relies on the kernel's
 `ip=` boot-time autoconfiguration (see the top-level README's
 `CHV_CMDLINE` default and `deploy/k8s/pod-example.yaml`), same as every
 other guest example in this repo, so no extra guest-side networking setup
-is needed for SSH to be reachable once a caller has configured
-`CHV_CMDLINE`/`netshim` port forwarding. This is also why neither
-variant enables an OpenRC/systemd `networking` service.
+is needed for a guest's own services to be reachable once a caller has
+configured `CHV_CMDLINE` (or let `netshim` derive the `ip=` parameter for
+it). This is also why neither variant enables an OpenRC/systemd
+`networking` service. Note that `kontur exec` needs none of this: it goes
+over vsock, which is why a guest that gets this wrong is still one you
+can get into and fix.
 
 That is the *kernel's* built-in autoconfiguration, and it holds only for
 a kernel with `CONFIG_IP_PNP` -- which the bundled `fetch-kernel` build
@@ -358,45 +412,21 @@ with `GUEST_KERNEL_PACKAGE` has nothing acting on `ip=` at all, and would
 come up with no address and simply never be reachable.
 `kontur-net-cmdline.service` closes that: it reads `ip=` out of
 `/proc/cmdline` and hands the spec to klibc's `ipconfig(8)`, which
-implements the same syntax in userspace. It runs before `sshd`, and exits
+implements the same syntax in userspace. It runs early, and exits
 immediately when the interface is already addressed -- so on a guest
 booting the bundled kernel it does nothing at all.
 
-### DNS
+`ip=` is also not the whole of what a container's interface carries. It
+has one netmask and no route list, so a guest configured from it alone
+believes its whole subnet is on-link -- true on a bridge CNI, and
+exactly what a point-to-point one (kind's default, GKE's) arranges for
+it not to be. `netshim` therefore passes the interface's actual routing
+table down as a `kontur.routes=` parameter of kontur's own, and
+`kontur-net-routes.service` installs it. Both variants carry it, since
+the kernel that acts on `ip=` has no equivalent for routes and never
+will. See the top-level README's "Container networking".
 
-The address is only half of a working network, and the other half used to
-be missing. `debootstrap` copies the *build host's* `/etc/resolv.conf`
-into the rootfs, so an image built on a machine whose resolver is
-namespace-local -- a cloud metadata resolver, docker's own `127.0.0.11`
--- produced guests that could open a TCP connection to any address in the
-world and hang forever on every name they looked up. Nothing about it
-looked like DNS: kontur reaches the guest by address rather than by name,
-so a VM comes up, `kontur exec` works and everything this repo tests is
-fine -- and the first symptom is `apt` or `curl` inside the guest timing
-out, which reads as a blocked network rather than as a missing resolver.
-
-Two things close it, and they are layered on purpose:
-
-- `GUEST_DNS` (default `8.8.8.8`, comma separated, empty to leave it
-  alone) writes `/etc/resolv.conf` at build time, so the image carries a
-  resolver that was chosen rather than inherited, and is the same
-  wherever it was built.
-- `kontur-configure-dns` rewrites that file on every boot from the
-  nameservers on the kernel command line -- `NETSHIM_DNS` in flat mode,
-  `konturctl vm create -dns` in either, both landing in the `ip=`
-  parameter's own `dns0`/`dns1` fields. That is what makes the resolver a
-  per-deployment setting: a network where `8.8.8.8` is wrong (a
-  restricted or air-gapped one, or simply one with its own resolver)
-  names its own, without rebuilding this image.
-
-Neither the kernel's `CONFIG_IP_PNP` handling nor `ipconfig(8)` writes
-`resolv.conf` -- the kernel only exposes what it was given in
-`/proc/net/pnp`, and `ipconfig` writes `/run/net-<dev>.conf` and leaves
-the file to an initramfs script this guest doesn't run -- which is why
-this is a step of its own rather than something `kontur-configure-net`
-gets for free.
-
-Two details `ip=` autoconfiguration depends on, both easy to lose:
+Two details `ip=` depends on, both easy to lose:
 
 - The NIC has to keep the name the `ip=` spec gives it. `konturctl`
   hard-codes `eth0` (`internal/staticpod/spec.go`), and udev's
@@ -409,3 +439,37 @@ Two details `ip=` autoconfiguration depends on, both easy to lose:
   postinst generates already has the mask -- see the `guest-customized`
   stage. A setup script that writes udev rules of its own has to run
   `update-initramfs -u` itself.
+
+
+### The resolver
+
+`debootstrap` copies the *build host's* `/etc/resolv.conf` into the
+rootfs, and a build host's resolver is routinely an address that only
+exists in its own network namespace -- docker's embedded `127.0.0.11`, a
+cloud metadata service, a link-local stub. From a guest on a tap that is
+simply unroutable, so an image built that way comes up with completely
+open IP egress and no DNS at all: every name lookup hangs until it times
+out, which reads as a blocked network rather than as a missing resolver.
+It also makes the image unreproducible -- whichever machine built it
+contributes its own unreachable resolver to every guest booted from it.
+
+Two things settle it, deliberately at different levels:
+
+- `GUEST_DNS` (a build arg, default `8.8.8.8`) is the baseline written
+  into the image's own `/etc/resolv.conf`, so the image is the same
+  wherever it was built. Set it empty to leave whatever `debootstrap`
+  copied in.
+- The nameservers on the guest's `ip=` boot parameter are what a guest
+  actually resolves through, and `kontur-configure-dns` writes them over
+  that baseline on every boot. They come from `NETSHIM_DNS` (konturctl's
+  `-dns`), so a deployment names the resolver its own network has without
+  rebuilding anything. `-dns ''` leaves the baseline in place.
+
+Nothing else in a kontur guest writes that file: there is no
+systemd-resolved and no DHCP client, since the address is static on the
+command line. Neither the kernel's own `CONFIG_IP_PNP` handling nor
+klibc's `ipconfig(8)` writes `resolv.conf` either -- the kernel only
+exposes what it was given in `/proc/net/pnp`, and `ipconfig` writes
+`/run/net-<dev>.conf` and leaves the file to an initramfs script this
+guest does not run. Hence a step of its own, applying to every guest
+kontur builds, bundled kernel or distro kernel, Debian or Alpine.

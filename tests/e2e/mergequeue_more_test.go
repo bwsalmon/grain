@@ -3,19 +3,19 @@
 // the one scenario it proves (a conflict a single automatic fix
 // resolves):
 //
-//   - TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask
+//   - TestMergeQueueEscalatesAfterAFailedRepairAndAdvancesToTheNextQueuedTask
 //     is sync.go's other exit from advanceMergeQueueHead --
 //     escalateToUser -- which pkg/orchestrator/mergequeue_test.go already
 //     proves against a hand-built store/sim state, but which nothing had
-//     driven through a real dispatch, a real failed fix and a real second
-//     queued task actually taking the freed-up head position before this.
-//   - TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts
-//     is the same fix-and-resolve happy path mergequeue_conflict_test.go
-//     already proves, but reached through a failing CI check
-//     (healthFrom's ListCheckRuns half) rather than a git conflict
-//     (healthFrom's Mergeable half) -- the only e2e coverage of that half
-//     before this was auto_merge_test.go's own single already-passing
-//     check.
+//     driven through a real dispatch, a real repair run that did not
+//     resolve anything and a real second queued task actually taking the
+//     freed-up head position before this.
+//   - TestMergeQueueRepairsFailingCheckRunsNotJustConflicts is the same
+//     repair-and-resolve happy path mergequeue_conflict_test.go already
+//     proves, but reached through a failing CI check (healthFrom's
+//     ListCheckRuns half) rather than a git conflict (healthFrom's
+//     Mergeable half) -- the only e2e coverage of that half before this
+//     was auto_merge_test.go's own single already-passing check.
 //   - TestClosingATaskWithAnOpenPullRequestDropsItFromTheMergeQueueForGood
 //     is a safety property nothing exercised before: a task a human
 //     closed while its pull request was still open must never be
@@ -65,48 +65,41 @@ func cleanPushScript(remote, branch, taskID string) []antigravity.Step {
 	}
 }
 
-// fixPushScript is a fix task's own scripted turn that builds fixBranch
-// on top of baseBranch (fileFixTask's own contract: a fix task's Base is
-// the branch it repairs) and pushes a trivial, unrelated file -- for
-// tests where the fix's own content does not matter, only that it merges
-// back into baseBranch cleanly. Building atop origin/baseBranch, rather
-// than cloning and branching from whatever HEAD happens to be, is what
-// keeps this from conflicting with whatever the task it repairs already
-// pushed to the same file names.
-func fixPushScript(remote, baseBranch, fixBranch string) []antigravity.Step {
+// repairPushScript is a repair run's own scripted turn: continue the
+// task's own branch -- the one its pull request is open from, which is
+// where a repair works now -- and push a trivial, unrelated file, for
+// tests where the repair's own content does not matter, only that
+// something landed on the branch under review.
+func repairPushScript(remote, branch string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
-		"git checkout -b " + baseBranch + " origin/" + baseBranch + " && " +
-		"git checkout -b " + fixBranch + " && " +
+		"git checkout -b " + branch + " origin/" + branch + " && " +
 		"echo 'fix' > FIX.md && " +
-		"git add FIX.md && git commit -q -m 'fix for " + fixBranch + "' && " +
-		"git push origin " + fixBranch
+		"git add FIX.md && git commit -q -m 'repair for " + branch + "' && " +
+		"git push origin " + branch
 	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
-		finalText("pushed a fix to " + fixBranch),
+		finalText("pushed a repair to " + branch),
 	}
 }
 
-// fixDoesNotResolveScript is a fix task's own scripted turn that pushes
-// something -- but never merges main into itself, unlike resolveScript's
-// own real conflict resolution -- so whatever it repairs stays broken.
-// Built off baseBranch (the task it repairs' own branch, per
-// fileFixTask's own doc comment on why a fix task's Base is that branch
-// rather than main), the same as resolveScript, so its own pull request
-// is trivially mergeable back into it.
-func fixDoesNotResolveScript(remote, baseBranch, fixBranch string) []antigravity.Step {
+// repairDoesNotResolveScript is a repair run that pushes something to the
+// branch -- but never merges main into it, unlike resolveScript's own
+// real conflict resolution -- so what it was sent to repair stays broken.
+// That is the shape escalateToUser exists for: a repair that ran, and
+// finished, and did not work.
+func repairDoesNotResolveScript(remote, branch string) []antigravity.Step {
 	cmd := "rm -rf work && git clone " + remote + " work && cd work && " +
-		"git checkout -b " + baseBranch + " origin/" + baseBranch + " && " +
-		"git checkout -b " + fixBranch + " && " +
+		"git checkout -b " + branch + " origin/" + branch + " && " +
 		"echo 'attempted a fix' > ATTEMPT.md && " +
 		"git add ATTEMPT.md && git commit -q -m 'attempted a fix, does not touch the real conflict' && " +
-		"git push origin " + fixBranch
+		"git push origin " + branch
 	return []antigravity.Step{
 		toolCall("run_command", map[string]any{"command": cmd}),
-		finalText("pushed an attempted fix to " + fixBranch),
+		finalText("pushed an attempted fix to " + branch),
 	}
 }
 
-func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *testing.T) {
+func TestMergeQueueEscalatesAfterAFailedRepairAndAdvancesToTheNextQueuedTask(t *testing.T) {
 	w := newWorld(t)
 	const owner, repoName = "acme", "widgets"
 	w.newRepo(owner, repoName)
@@ -174,23 +167,18 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	setMergeable(sim, branch2, true)
 
 	// Step 3: sync notices task1 -- the queue's head -- is broken and
-	// files a fix. task2 is clean but not yet head, so it must not merge.
+	// sends it back for repair. task2 is clean but not yet head, so it
+	// must not merge.
 	clock = clock.Add(time.Minute)
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (files a fix): %v", err)
+		t.Fatalf("RunCycle (asks for the repair): %v", err)
 	}
-	got1, err := w.store.GetTask(w.ctx, "t1")
+	obs1, err := w.store.GetObservation(w.ctx, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixTaskID, hasFix := "", false
-	for _, l := range got1.Links {
-		if l.Kind == model.LinkFixTask {
-			fixTaskID, hasFix = l.Target, true
-		}
-	}
-	if !hasFix {
-		t.Fatalf("expected a LinkFixTask on t1, got %+v", got1.Links)
+	if !obs1.RepairInFlight() {
+		t.Fatalf("observation = %+v, want t1 sent back for repair", obs1)
 	}
 	if st, err := w.store.State(w.ctx, "t2"); err != nil || st != model.StateCompleted {
 		t.Fatalf("t2 state = %q (%v), want still completed (not yet its turn)", st, err)
@@ -199,43 +187,31 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 		t.Fatalf("t2's own pull request must still be open, got %+v", sim.PullRequests[1])
 	}
 
-	// Step 4: the fix is dispatched, but its own attempted fix never
-	// actually resolves the real conflict with main.
-	fixBranch := model.BranchName(fixTaskID)
+	// Step 4: the repair is dispatched -- as another attempt of task1
+	// itself, on task1's own branch -- but what it pushes never actually
+	// resolves the real conflict with main.
 	clock = clock.Add(time.Minute)
-	deps.Framework = scriptedFramework(fixDoesNotResolveScript(w.remote(owner, repoName), branch1, fixBranch))
+	deps.Framework = scriptedFramework(repairDoesNotResolveScript(w.remote(owner, repoName), branch1))
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (dispatch the fix): %v", err)
+		t.Fatalf("RunCycle (dispatch the repair): %v", err)
 	}
-	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateCompleted {
-		t.Fatalf("fix task state = %q (%v), want completed", st, err)
+	if st, err := w.store.State(w.ctx, "t1"); err != nil || st != model.StateCompleted {
+		t.Fatalf("t1 state = %q (%v), want completed once the repair ran", st, err)
 	}
-
-	// Step 5: the fix's own pull request -- trivially mergeable into
-	// task1's branch, since it never touched main -- auto-merges for
-	// real, and the fix task closes.
-	setMergeable(sim, fixBranch, true)
-	clock = clock.Add(time.Minute)
-	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (fix's own PR merges): %v", err)
-	}
-	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateClosed {
-		t.Fatalf("fix task state = %q (%v), want closed", st, err)
+	if len(sim.PullRequests) != 2 {
+		t.Fatalf("the repair opened a pull request of its own: %+v", sim.PullRequests)
 	}
 	if !w.realConflict(owner, repoName, "main", branch1) {
-		t.Fatal("expected task1's branch to still genuinely conflict with main -- the fix never addressed it")
+		t.Fatal("expected task1's branch to still genuinely conflict with main -- the repair never addressed it")
 	}
-	setMergeable(sim, branch1, false)
 
-	// Step 6: further cycles let the merge queue notice the fix didn't
+	// Step 5: further cycles let the merge queue notice the repair didn't
 	// take, escalate task1 to a human, and move on to merge task2.
 	// Exactly which single cycle notices which is not a contract this
-	// test pins down: advanceMergeQueueHead's read of the fix task's own
-	// state, and queueHeads' read of task1's blocked flag, are each a
-	// snapshot taken once at the start of a cycle, so both can settle in
-	// the same cycle or across two depending on what order task_link's
-	// rows happen to sort in -- what matters is that a few ticks later,
-	// both have settled correctly.
+	// test pins down: the queue waits a cycle after a repair finishes
+	// before judging it, and queueHeads' read of task1's blocked flag is
+	// a snapshot taken once at the start of a cycle -- what matters is
+	// that a few ticks later, both have settled correctly.
 	for i := 0; i < 3; i++ {
 		clock = clock.Add(time.Minute)
 		if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
@@ -246,12 +222,12 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	if st, err := w.store.State(w.ctx, "t1"); err != nil || st != model.StateCompleted {
 		t.Fatalf("t1 state = %q (%v), want completed -- still open, waiting on a human, never merged or closed", st, err)
 	}
-	obs1, err := w.store.GetObservation(w.ctx, "t1")
+	obs1, err = w.store.GetObservation(w.ctx, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if obs1 == nil || obs1.MergeQueueBlockedAt == nil {
-		t.Fatal("expected t1 to be marked blocked on the merge queue after its one fix attempt failed")
+		t.Fatal("expected t1 to be marked blocked on the merge queue after its one repair attempt failed")
 	}
 	comments1, err := w.store.Comments(w.ctx, "t1")
 	if err != nil {
@@ -277,7 +253,7 @@ func TestMergeQueueEscalatesAfterAFailedFixAndAdvancesToTheNextQueuedTask(t *tes
 	}
 }
 
-func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *testing.T) {
+func TestMergeQueueRepairsFailingCheckRunsNotJustConflicts(t *testing.T) {
 	w := newWorld(t)
 	const owner, repoName = "acme", "checks"
 	w.newRepo(owner, repoName)
@@ -316,20 +292,14 @@ func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *te
 
 	clock = clock.Add(time.Minute)
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (files a fix for failing checks): %v", err)
+		t.Fatalf("RunCycle (asks for a repair of failing checks): %v", err)
 	}
-	got1, err := w.store.GetTask(w.ctx, "t1")
+	obs1, err := w.store.GetObservation(w.ctx, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixTaskID, hasFix := "", false
-	for _, l := range got1.Links {
-		if l.Kind == model.LinkFixTask {
-			fixTaskID, hasFix = l.Target, true
-		}
-	}
-	if !hasFix {
-		t.Fatalf("expected a LinkFixTask on t1 after a failing check, got %+v", got1.Links)
+	if !obs1.RepairInFlight() {
+		t.Fatalf("observation = %+v, want t1 sent back for repair after a failing check", obs1)
 	}
 	comments1, err := w.store.Comments(w.ctx, "t1")
 	if err != nil {
@@ -342,51 +312,42 @@ func TestMergeQueueFilesAndResolvesAFixForFailingCheckRunsNotJustConflicts(t *te
 		}
 	}
 	if !foundReason {
-		t.Fatalf("expected the fix-filed comment to name failing checks, got %+v", comments1)
+		t.Fatalf("expected the repair comment to name failing checks, got %+v", comments1)
 	}
 
-	// The fix is dispatched and pushes -- content does not matter here,
-	// since this test's own sim.CheckRuns is what stands in for CI.
-	fixBranch := model.BranchName(fixTaskID)
+	// The repair is dispatched and pushes to task1's own branch --
+	// content does not matter here, since this test's own sim.CheckRuns
+	// is what stands in for CI.
 	clock = clock.Add(time.Minute)
-	deps.Framework = scriptedFramework(fixPushScript(w.remote(owner, repoName), branch1, fixBranch))
+	deps.Framework = scriptedFramework(repairPushScript(w.remote(owner, repoName), branch1))
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (dispatch the fix): %v", err)
+		t.Fatalf("RunCycle (dispatch the repair): %v", err)
 	}
-	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateCompleted {
-		t.Fatalf("fix task state = %q (%v), want completed", st, err)
+	if st, err := w.store.State(w.ctx, "t1"); err != nil || st != model.StateCompleted {
+		t.Fatalf("t1 state = %q (%v), want completed once the repair ran", st, err)
+	}
+	if len(sim.PullRequests) != 1 {
+		t.Fatalf("the repair opened a second pull request: %+v", sim.PullRequests)
 	}
 
-	// CI re-runs on the fix and passes, and -- since merging it is what
-	// lands its content on task1's own branch -- CI re-running on task1's
-	// branch itself goes green in the same moment: both are set before
-	// the cycle that merges the fix, not after, so nothing here ever
-	// reads task1 as still broken once its fix has actually landed.
-	setMergeable(sim, fixBranch, true)
-	delete(sim.CheckRuns, branch1)
+	// CI re-runs against what the repair pushed -- on the same pull
+	// request, which is the whole saving -- and passes. The next cycle
+	// merges it.
+	success := "success"
+	sim.CheckRuns[branch1] = []github.CheckRun{{Name: "ci", Status: "completed", Conclusion: &success}}
 	clock = clock.Add(time.Minute)
 	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (fix's own PR merges, then t1 itself): %v", err)
-	}
-	if st, err := w.store.State(w.ctx, fixTaskID); err != nil || st != model.StateClosed {
-		t.Fatalf("fix task state = %q (%v), want closed", st, err)
-	}
-
-	// A further tick in case the fix's own close and task1's own re-read
-	// landed on either side of this cycle's single pass over the queue.
-	clock = clock.Add(time.Minute)
-	if err := orchestrator.RunCycle(w.ctx, deps, clock); err != nil {
-		t.Fatalf("RunCycle (settling): %v", err)
+		t.Fatalf("RunCycle (t1 merges): %v", err)
 	}
 	if st, err := w.store.State(w.ctx, "t1"); err != nil || st != model.StateClosed {
 		t.Fatalf("t1 state = %q (%v), want closed", st, err)
 	}
-	obs1, err := w.store.GetObservation(w.ctx, "t1")
+	obs1, err = w.store.GetObservation(w.ctx, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if obs1 != nil && obs1.MergeQueueBlockedAt != nil {
-		t.Fatal("t1 should never have been escalated -- the automatic fix genuinely resolved it before any cycle ever read it as still broken")
+		t.Fatal("t1 should never have been escalated -- the automatic repair genuinely resolved it before any cycle ever read it as still broken")
 	}
 }
 
@@ -504,14 +465,12 @@ func TestAutoMergeLeavesAPullRequestOfUnknownMergeabilityAloneUntilItResolves(t 
 			t.Fatalf("tick %d: pull request state = %q, want still open", i, sim.PullRequests[0].State)
 		}
 	}
-	got, err := w.store.GetTask(w.ctx, "t-pending")
+	obs, err := w.store.GetObservation(w.ctx, "t-pending")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, l := range got.Links {
-		if l.Kind == model.LinkFixTask {
-			t.Fatalf("expected no fix task filed while mergeability was merely unknown, got link %+v", l)
-		}
+	if obs != nil && obs.MergeQueueRepairAt != nil {
+		t.Fatal("asked for a repair while mergeability was merely unknown")
 	}
 	comments, err := w.store.Comments(w.ctx, "t-pending")
 	if err != nil {

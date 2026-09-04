@@ -21,6 +21,19 @@
 //                                   the rosette at hero scale as grains,
 //                                   for anywhere a large still is wanted
 //                                   (README, slides, print).
+//   src/brand/item-glyph-paths.js   the four item glyphs (src/brand/
+//                                   item-glyphs.js -- repos, schedules,
+//                                   templates, suites) traced the same
+//                                   way. A module rather than a file
+//                                   under public/ because those icons
+//                                   are drawn inline in `currentColor`,
+//                                   so they take the colour of the nav
+//                                   entry they sit in; an <img> could
+//                                   not, and one theme's worth of files
+//                                   would be the wrong colour in the
+//                                   other. Generated, and pinned back
+//                                   to the field by item-glyphs.test.js
+//                                   the way the still is.
 //
 // All three are committed: `npm run build` copies public/ verbatim and
 // the docs are read straight out of the repo, so neither has a build
@@ -45,10 +58,15 @@ import {
   grainSpec,
   sampleGlyph,
 } from "../src/brand/grain-mark.js";
+import { ITEM_GLYPHS, itemFillAt } from "../src/brand/item-glyphs.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const frontend = join(here, "..");
-const repoRoot = join(frontend, "..", "..", "..", "..");
+// ui/ sits at the repo root, so the docs tree is one level up from here.
+// (It was four for as long as the frontend lived deeper in the tree; a
+// stale count wrote the hero SVGs outside the checkout, or failed on the
+// mkdir when it landed somewhere unwritable.)
+const repoRoot = join(frontend, "..");
 
 // The static logo: 2·3 (−), pulled out to 0.78 of the frame so the
 // rosette sits inside the circle rather than running off it.
@@ -62,6 +80,15 @@ const VECTOR_PX = 128;
 // (16px tab, 32px bookmark, larger for an installed shortcut), and one
 // oversized source scales down cleanly where a 32px one cannot scale up.
 const ICON_PX = 128;
+// The item glyphs are authored in the same box as the still, and traced
+// at the same resolution and tolerance -- so what item-glyphs.test.js
+// can assert of them is what grain-mark.test.js asserts of the still:
+// exact agreement with the field everywhere a straight segment is not
+// cutting a corner.
+const ITEM_PX = 128;
+const ITEM_RES = 512;
+const ITEM_TOL = ITEM_PX / 640;
+
 // The hero export's size, and the pack's own: `node export-svg.mjs` in
 // the pack writes svg/grain-logo-{light,dark}.svg at exactly this size
 // and seed, and this file reproduces those two byte for byte. That is
@@ -103,7 +130,9 @@ function fillAt(W, x, y) {
 }
 
 /**
- * Marching squares over `fillAt`, as closed loops in the W box.
+ * Marching squares over `scalar`, as closed loops in the W box. The
+ * still passes `fillAt`; the item glyphs pass their own field, which is
+ * met with the frame rather than clamped just outside it.
  *
  * The standard 16-case table, with the two saddles (5 and 10) resolved
  * by the cell's mean value so a saddle is cut the way the field actually
@@ -114,11 +143,11 @@ function fillAt(W, x, y) {
  * between neighbouring cells are bit-identical, so the chaining is an
  * exact key lookup rather than a nearest-point search.
  */
-function contours(W, res) {
+function contours(W, res, scalar) {
   const step = W / res;
   const v = new Float64Array((res + 1) * (res + 1));
   for (let j = 0; j <= res; j++) {
-    for (let i = 0; i <= res; i++) v[j * (res + 1) + i] = fillAt(W, i * step, j * step);
+    for (let i = 0; i <= res; i++) v[j * (res + 1) + i] = scalar(i * step, j * step);
   }
   const at = (i, j) => v[j * (res + 1) + i];
   // Zero crossing along a cell edge, linearly interpolated.
@@ -248,8 +277,13 @@ function simplify(points, tol) {
  */
 function logoPath() {
   const W = VECTOR_PX;
-  return contours(W, 512)
-    .map((loop) => simplify(loop, W / 640))
+  return tracePath(W, 512, W / 640, (x, y) => fillAt(W, x, y));
+}
+
+/** One glyph as one `d` string: traced, simplified, closed loops. */
+function tracePath(W, res, tol, scalar) {
+  return contours(W, res, scalar)
+    .map((loop) => simplify(loop, tol))
     .filter((loop) => loop.length > 3)
     .map((loop) => `M ${loop.map(([x, y]) => `${x.toFixed(2)} ${y.toFixed(2)}`).join(" L ")} Z`)
     .join(" ");
@@ -283,6 +317,42 @@ function renderHeroSVG(theme) {
     ${circles}
   </g>
 </svg>
+`;
+}
+
+// ---------- the item glyphs, as a module ----------
+
+/**
+ * src/brand/item-glyph-paths.js: the four list icons as `d` strings.
+ *
+ * A module and not four SVG files because ItemGlyph.jsx draws them
+ * inline in `currentColor` -- a nav icon has to take the colour of the
+ * entry it sits in, which an <img> cannot do and which would otherwise
+ * cost a file per theme per glyph. Inline also means no request per
+ * icon on a page that renders several.
+ */
+function renderItemGlyphModule() {
+  const entries = Object.entries(ITEM_GLYPHS)
+    .map(([kind, spec]) => {
+      const d = tracePath(ITEM_PX, ITEM_RES, ITEM_TOL, (x, y) => itemFillAt(spec, ITEM_PX, x, y));
+      const [n, m, sg] = spec.glyph;
+      return `  // ${n}·${m} (${sg > 0 ? "+" : "−"}) at ${spec.zoom} -- ${spec.figure}\n  ${kind}:\n    "${d}",`;
+    })
+    .join("\n");
+  return `// Generated by scripts/export-brand-assets.mjs (npm run brand:assets).
+// Do not edit: the figures live in item-glyphs.js, and re-running the
+// export is what brings this file back in line with them.
+//
+// Each glyph is one closed path, already met with the circular frame,
+// so it needs no clip -- see item-glyphs.js's itemFillAt. Filled
+// even-odd, which is what makes the ring's hole a hole.
+
+/** The box the paths are authored in; they carry no other pixel size. */
+export const ITEM_GLYPH_BOX = ${ITEM_PX};
+
+export const ITEM_GLYPH_PATHS = {
+${entries}
+};
 `;
 }
 
@@ -389,3 +459,7 @@ for (const [name, theme] of Object.entries(THEMES)) {
   writeFileSync(hero, renderHeroSVG(theme));
   console.log("wrote", hero);
 }
+
+const items = join(frontend, "src", "brand", "item-glyph-paths.js");
+writeFileSync(items, renderItemGlyphModule());
+console.log("wrote", items);

@@ -1,47 +1,230 @@
 package guestexec
 
 import (
+	"bufio"
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/pem"
 	"errors"
-	"io"
+	"flag"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/ssh"
+	"github.com/bwsalmon/kontur/internal/agent"
+	"github.com/bwsalmon/kontur/internal/execwire"
 )
 
-func TestFromEnv_RequiresAddr(t *testing.T) {
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want an error when KONTUR_EXEC_ADDR is unset")
+// fakeCHV stands in for cloud-hypervisor's hybrid-vsock endpoint: a unix
+// socket that answers the CONNECT handshake and then hands the
+// connection to the real guest-side agent.
+//
+// Using the real internal/agent rather than a scripted responder is the
+// point. What these tests are for is the seam between the two halves --
+// the handshake, the framing, which stream carries what, where the exit
+// code comes from -- and a fake on the far side would only ever agree
+// with whatever this side happens to do. There is no VM here, so the
+// commands run on the build machine; everything else is the production
+// path.
+type fakeCHV struct {
+	socket string
+
+	// refuse makes the endpoint answer the handshake the way
+	// cloud-hypervisor does when nothing inside the guest is listening
+	// on the port yet: by closing the connection.
+	refuse bool
+
+	// hangUpMidSession closes the connection after the first output
+	// frame instead of letting the session finish, standing in for a VM
+	// that died with a command still running.
+	hangUpMidSession bool
+
+	// olderAgent stands in for a guest image built before Request.Dir
+	// and Request.Env existed: it runs the command line and nothing
+	// else, and its response names no features -- which is what an agent
+	// that ignored those fields looks like from the client's side.
+	olderAgent bool
+
+	// agentWithoutSignal answers the way an agent built before the
+	// signal frame existed would: a response naming no features, and a
+	// session that steps over frames it has no idea what to do with. It
+	// stands in for a guest image and a kontur binary from different
+	// commits.
+	agentWithoutSignal bool
+}
+
+func startFakeCHV(t *testing.T, f *fakeCHV) *fakeCHV {
+	t.Helper()
+	if f == nil {
+		f = &fakeCHV{}
+	}
+	// Short path: a unix socket's address has a hard length limit
+	// (~108 bytes) that a nested t.TempDir() under a long test name can
+	// exceed, which fails as a confusing "invalid argument" on bind.
+	dir, err := os.MkdirTemp("", "chv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	f.socket = filepath.Join(dir, "vsock.sock")
+
+	ln, err := net.Listen("unix", f.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go f.serve(conn)
+		}
+	}()
+	return f
+}
+
+func (f *fakeCHV) serve(conn net.Conn) {
+	defer conn.Close()
+
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "CONNECT ") {
+		return
+	}
+	if f.refuse {
+		return
+	}
+	if _, err := fmt.Fprintf(conn, "OK %d\n", 4242); err != nil {
+		return
+	}
+
+	if f.hangUpMidSession {
+		f.serveThenHangUp(conn, br)
+		return
+	}
+	if f.olderAgent {
+		f.serveAsOlderAgent(conn, br)
+		return
+	}
+	if f.agentWithoutSignal {
+		f.serveAsAnAgentWithoutSignal(conn, br)
+		return
+	}
+	// br may hold bytes already read off the socket, so the agent has to
+	// be given the buffered reader rather than the connection.
+	_ = agent.Serve(context.Background(), bufConn{r: br, Conn: conn})
+}
+
+// bufConn reads through a buffer that has already consumed part of the
+// stream, while writing straight to the connection.
+type bufConn struct {
+	r *bufio.Reader
+	net.Conn
+}
+
+func (c bufConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// serveAsOlderAgent runs the command line, ignoring every optional field
+// on the request, and answers with the featureless response an agent
+// built before those fields would have sent.
+func (f *fakeCHV) serveAsOlderAgent(conn net.Conn, br *bufio.Reader) {
+	req, err := execwire.ReadRequest(br)
+	if err != nil {
+		return
+	}
+	out, err := exec.Command("/bin/sh", "-c", req.Line).Output()
+	if err != nil {
+		_ = execwire.WriteResponse(conn, execwire.Response{OK: false, Error: err.Error()})
+		return
+	}
+	_ = execwire.WriteResponse(conn, execwire.Response{OK: true})
+	_ = execwire.WriteFrame(conn, execwire.TypeStdout, out)
+	_ = execwire.WriteFrame(conn, execwire.TypeExit, execwire.EncodeExit(0))
+}
+
+// serveThenHangUp answers the request, writes one output frame, and
+// drops the connection without ever sending an exit frame.
+func (f *fakeCHV) serveThenHangUp(conn net.Conn, br *bufio.Reader) {
+	if _, err := execwire.ReadRequest(br); err != nil {
+		return
+	}
+	_ = execwire.WriteResponse(conn, execwire.Response{OK: true})
+	_ = execwire.WriteFrame(conn, execwire.TypeStdout, []byte("partial output"))
+}
+
+// serveAsAnAgentWithoutSignal accepts a session, names no features, and
+// then steps over every frame the client sends -- which is precisely
+// what an agent that does not know TypeSignal would do with one.
+func (f *fakeCHV) serveAsAnAgentWithoutSignal(conn net.Conn, br *bufio.Reader) {
+	if _, err := execwire.ReadRequest(br); err != nil {
+		return
+	}
+	if err := execwire.WriteResponse(conn, execwire.Response{OK: true}); err != nil {
+		return
+	}
+	for {
+		if _, _, err := execwire.ReadFrame(br); err != nil {
+			return
+		}
 	}
 }
 
-func TestFromEnv_RejectsAddrWithoutPort(t *testing.T) {
-	t.Setenv(envAddr, "169.254.100.2")
-	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want an error for an address with no port")
-	}
+func testConfig(t *testing.T, f *fakeCHV) Config {
+	t.Helper()
+	return Config{Socket: f.socket, User: currentAccount(t), ConnectTimeout: 2 * time.Second}
 }
 
-func TestFromEnv_Defaults(t *testing.T) {
-	t.Setenv(envAddr, "169.254.100.2:22")
+// currentAccount names the account this test process runs as. The agent
+// switches to whichever account a request names, and switching to a
+// different one needs privileges a test runner does not have -- so a
+// test can only ask for the one it already has. The production default
+// (root) is what the agent gets in a guest, where it runs as root.
+func currentAccount(t *testing.T) string {
+	t.Helper()
+	f, err := os.Open("/etc/passwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	uid := strconv.Itoa(os.Getuid())
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fields := strings.Split(sc.Text(), ":")
+		if len(fields) >= 7 && fields[2] == uid {
+			return fields[0]
+		}
+	}
+	t.Fatalf("no account in /etc/passwd for uid %s", uid)
+	return ""
+}
+
+func TestFromEnv_DefaultsNeedNothingSetPerVM(t *testing.T) {
+	// The SSH transport required KONTUR_EXEC_ADDR, which every backend
+	// had to compute and set. Needing nothing is the point of the
+	// replacement, so it is worth asserting rather than assuming.
+	t.Setenv(envSocket, "")
+	t.Setenv(envUser, "")
+	t.Setenv(envConnectTimeout, "")
+
 	cfg, err := FromEnv()
 	if err != nil {
-		t.Fatalf("FromEnv() error = %v", err)
+		t.Fatalf("FromEnv with nothing set = %v, want a usable default config", err)
+	}
+	if cfg.Socket != DefaultSocket {
+		t.Errorf("Socket = %q, want %q", cfg.Socket, DefaultSocket)
 	}
 	if cfg.User != defaultUser {
 		t.Errorf("User = %q, want %q", cfg.User, defaultUser)
-	}
-	if cfg.KeyPath != defaultKeyPath {
-		t.Errorf("KeyPath = %q, want %q", cfg.KeyPath, defaultKeyPath)
 	}
 	if cfg.ConnectTimeout != defaultConnectTimeout {
 		t.Errorf("ConnectTimeout = %v, want %v", cfg.ConnectTimeout, defaultConnectTimeout)
@@ -49,31 +232,346 @@ func TestFromEnv_Defaults(t *testing.T) {
 }
 
 func TestFromEnv_Overrides(t *testing.T) {
-	t.Setenv(envAddr, "169.254.100.2:22")
-	t.Setenv(envUser, "debug")
-	t.Setenv(envKeyPath, "/tmp/other-key")
-	t.Setenv(envConnectTimeout, "5s")
+	t.Setenv(envSocket, "/tmp/other.sock")
+	t.Setenv(envUser, "debian")
+	t.Setenv(envConnectTimeout, "90s")
 
 	cfg, err := FromEnv()
 	if err != nil {
-		t.Fatalf("FromEnv() error = %v", err)
+		t.Fatal(err)
 	}
-	if cfg.User != "debug" {
-		t.Errorf("User = %q, want %q", cfg.User, "debug")
-	}
-	if cfg.KeyPath != "/tmp/other-key" {
-		t.Errorf("KeyPath = %q, want %q", cfg.KeyPath, "/tmp/other-key")
-	}
-	if cfg.ConnectTimeout != 5*time.Second {
-		t.Errorf("ConnectTimeout = %v, want 5s", cfg.ConnectTimeout)
+	if cfg.Socket != "/tmp/other.sock" || cfg.User != "debian" || cfg.ConnectTimeout != 90*time.Second {
+		t.Fatalf("config = %+v", cfg)
 	}
 }
 
 func TestFromEnv_InvalidConnectTimeout(t *testing.T) {
-	t.Setenv(envAddr, "169.254.100.2:22")
 	t.Setenv(envConnectTimeout, "not-a-duration")
 	if _, err := FromEnv(); err == nil {
-		t.Fatal("FromEnv() error = nil, want an error for an invalid duration")
+		t.Fatal("FromEnv = nil, want an error naming the bad duration")
+	}
+}
+
+func TestRun_ExecutesGivenCommandAndReportsExitCode(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	var stdout, stderr bytes.Buffer
+	code, err := Run(context.Background(), testConfig(t, f), []string{"echo", "hello world"}, nil, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v (stderr %q)", err, stderr.String())
+	}
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	// Shell-quoted and joined, so an argument with a space stays one
+	// argument rather than becoming two.
+	if stdout.String() != "hello world\n" {
+		t.Errorf("stdout = %q, want %q", stdout.String(), "hello world\n")
+	}
+}
+
+// A command's non-zero exit is the command's answer, not a failure of
+// "kontur exec" -- the caller reads it from the code, and an error here
+// would make every failing command look like a broken transport.
+func TestRun_NonZeroExitIsNotAnError(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	code, err := RunLine(context.Background(), testConfig(t, f), "exit 17", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("RunLine returned an error for a non-zero exit: %v", err)
+	}
+	if code != 17 {
+		t.Errorf("exit code = %d, want 17", code)
+	}
+}
+
+// The two streams stay apart end to end. grain's sandbox tools read them
+// separately, and merging them is exactly the corruption the guest's old
+// SSH console wrapper caused.
+func TestRun_KeepsStdoutAndStderrApart(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := RunLine(context.Background(), testConfig(t, f), "echo out; echo err >&2", nil, &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "out\n" {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+	if stderr.String() != "err\n" {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunLine_SendsLineVerbatim(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	// A line RunLine must not re-quote: the guest's shell has to see the
+	// pipe and the variable, not a single literal argument.
+	var stdout bytes.Buffer
+	if _, err := RunLine(context.Background(), testConfig(t, f), "echo one two three | wc -w", nil, &stdout, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(stdout.String()) != "3" {
+		t.Fatalf("stdout = %q, want the pipeline to have run guest-side", stdout.String())
+	}
+}
+
+func TestRun_ForwardsStdin(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	var stdout bytes.Buffer
+	code, err := Run(context.Background(), testConfig(t, f), []string{"cat"}, strings.NewReader("from the caller\n"), &stdout, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d: cat never saw end of input", code)
+	}
+	if stdout.String() != "from the caller\n" {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// A guest still booting has no agent listening yet, and
+// cloud-hypervisor answers by closing the connection. That is the
+// ordinary case the retry loop exists for, so it must be bounded by
+// ConnectTimeout rather than either giving up at once or retrying
+// forever.
+func TestRun_RetriesUntilTheTimeoutWhenNothingIsListeningInTheGuest(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{refuse: true})
+
+	cfg := testConfig(t, f)
+	cfg.ConnectTimeout = 750 * time.Millisecond
+
+	start := time.Now()
+	_, err := Run(context.Background(), cfg, []string{"true"}, nil, nil, nil)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Run = nil, want a timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %v, want it to name the timeout", err)
+	}
+	if elapsed < cfg.ConnectTimeout {
+		t.Errorf("gave up after %v, before the %v timeout: it is not retrying", elapsed, cfg.ConnectTimeout)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("took %v to give up on a %v timeout", elapsed, cfg.ConnectTimeout)
+	}
+}
+
+// A VM that dies mid-command must not look like a command that
+// succeeded. The exit frame is the only thing that ends a session, so a
+// stream that stops without one is an error rather than exit 0.
+func TestRun_AGuestThatVanishesMidCommandIsAnError(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{hangUpMidSession: true})
+
+	var stdout bytes.Buffer
+	code, err := RunLine(context.Background(), testConfig(t, f), "does not matter", nil, &stdout, nil)
+	if err == nil {
+		t.Fatalf("Run = nil (code %d), want an error for a session with no exit status", code)
+	}
+	if code != 0 {
+		t.Errorf("code = %d, want 0 alongside the error", code)
+	}
+	if !strings.Contains(err.Error(), "exit status") {
+		t.Errorf("error = %v, want it to say no exit status arrived", err)
+	}
+}
+
+// A socket that is not there at all is the other shape of "the VM is not
+// ready", and has to be retried rather than failing on the first dial:
+// cloud-hypervisor creates the socket when it starts, which is after the
+// container does.
+func TestRun_AMissingSocketIsRetriedAndThenReported(t *testing.T) {
+	cfg := Config{Socket: filepath.Join(t.TempDir(), "never-created.sock"), ConnectTimeout: 300 * time.Millisecond}
+
+	_, err := Run(context.Background(), cfg, []string{"true"}, nil, nil, nil)
+	if err == nil {
+		t.Fatal("Run = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "never-created.sock") {
+		t.Errorf("error = %v, want it to name the socket it could not reach", err)
+	}
+}
+
+// Cancelling the context ends the session rather than leaving the caller
+// waiting on a command that may never finish.
+func TestRun_ContextCancellationEndsTheSession(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = RunLine(ctx, testConfig(t, f), "sleep 30", nil, nil, nil)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelling the context did not end the session")
+	}
+}
+
+// Cancelling is not the same as walking away. The client asks the guest
+// to interrupt the command and keeps the session open long enough to
+// carry the answer, so a cancelled call still gets the command's own
+// last words and its real exit code rather than a dropped connection.
+func TestRun_CancellationInterruptsTheCommandAndStillCollectsItsAnswer(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &trigger{want: "ready", hit: make(chan struct{})}
+	go func() {
+		<-out.hit
+		cancel()
+	}()
+
+	code, err := RunLine(ctx, testConfig(t, f),
+		"trap 'echo interrupted; exit 7' INT; echo ready; while :; do sleep 1; done",
+		nil, out, nil)
+	if err != nil {
+		t.Fatalf("RunLine = %v, want the session to have ended cleanly with an exit code", err)
+	}
+	if code != 7 {
+		t.Errorf("exit = %d, want 7 from the command's own INT handler", code)
+	}
+	if !strings.Contains(out.String(), "interrupted") {
+		t.Errorf("output = %q, want what the command printed on its way out", out.String())
+	}
+}
+
+// Against an agent too old to know the signal frame, cancelling falls
+// straight back to what a client could always do -- close the connection
+// -- rather than spending cancelGrace waiting for an answer that is
+// never coming.
+func TestRun_CancellationDoesNotWaitOnAnAgentThatCannotBeSignalled(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{agentWithoutSignal: true})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	if _, err := RunLine(ctx, testConfig(t, f), "does not matter", nil, nil, nil); err == nil {
+		t.Fatal("RunLine = nil, want an error for a session with no exit status")
+	}
+	if elapsed := time.Since(start); elapsed >= cancelGrace {
+		t.Errorf("took %v to give up, want less than the %v grace an agent that can be signalled gets", elapsed, cancelGrace)
+	}
+}
+
+// trigger is an io.Writer that closes hit the first time everything
+// written to it contains want, so a test can act on a command reaching a
+// known point rather than on a sleep.
+type trigger struct {
+	want string
+	hit  chan struct{}
+
+	mu   sync.Mutex
+	seen strings.Builder
+}
+
+func (w *trigger) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.seen.Write(p)
+	if strings.Contains(w.seen.String(), w.want) {
+		select {
+		case <-w.hit:
+		default:
+			close(w.hit)
+		}
+	}
+	return len(p), nil
+}
+
+func (w *trigger) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.seen.String()
+}
+
+// TestReady_AnswersWhenTheGuestRunsACommand is the whole of "kontur
+// ready": no output, no session, just the fact that the guest ran
+// something.
+func TestReady_AnswersWhenTheGuestRunsACommand(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	if err := Ready(context.Background(), testConfig(t, f)); err != nil {
+		t.Fatalf("Ready = %v, want nil against a guest that answers", err)
+	}
+}
+
+// A guest still booting refuses the vsock port, which is the ordinary
+// case the retry exists for: Ready has to keep asking until its timeout
+// rather than reporting the first refusal as a verdict.
+func TestReady_RetriesAGuestThatIsStillBooting(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{refuse: true})
+
+	cfg := testConfig(t, f)
+	cfg.ConnectTimeout = 750 * time.Millisecond
+
+	start := time.Now()
+	err := Ready(context.Background(), cfg)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Ready = nil, want a timeout")
+	}
+	if elapsed < cfg.ConnectTimeout {
+		t.Errorf("gave up after %v, before the %v timeout: it is not retrying", elapsed, cfg.ConnectTimeout)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("took %v to give up on a %v timeout", elapsed, cfg.ConnectTimeout)
+	}
+}
+
+// A zero timeout is what a container readiness probe passes: one
+// attempt, answered now, because whatever runs the probe does the
+// retrying itself.
+func TestReady_ZeroTimeoutIsASingleAttempt(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{refuse: true})
+
+	cfg := testConfig(t, f)
+	cfg.ConnectTimeout = 0
+
+	start := time.Now()
+	err := Ready(context.Background(), cfg)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Ready = nil, want the refusal reported")
+	}
+	if elapsed > retryInterval {
+		t.Errorf("took %v for a single attempt: it retried", elapsed)
+	}
+}
+
+// A guest whose agent answers but cannot actually run the command is
+// not ready either -- an agent up before the account it has to switch to
+// exists looks exactly like this -- so the probe has to be a command
+// that ran, not merely a connection that was accepted.
+func TestReady_AGuestThatCannotRunTheProbeIsNotReady(t *testing.T) {
+	f := startFakeCHV(t, nil)
+
+	cfg := testConfig(t, f)
+	cfg.ConnectTimeout = 0
+	cfg.User = "no-such-account-here"
+
+	if err := Ready(context.Background(), cfg); err == nil {
+		t.Fatal("Ready = nil for a guest that could not run the probe, want an error")
 	}
 }
 
@@ -130,353 +628,148 @@ func TestShellCommandLine(t *testing.T) {
 	}
 }
 
-func TestExitCode(t *testing.T) {
-	if got := exitCode(nil); got != 0 {
-		t.Errorf("exitCode(nil) = %d, want 0", got)
-	}
-	if got := exitCode(errors.New("boom")); got != 1 {
-		t.Errorf("exitCode(non-exit error) = %d, want 1", got)
-	}
-	// The *ssh.ExitError branch (a genuine remote exit code) is covered
-	// end-to-end by TestRun_ExecutesGivenCommandAndReportsExitCode and
-	// TestRun_NonZeroExitIsNotAnError below, against a real (fake) sshd
-	// -- constructing one by hand here would just restate ssh.Waitmsg's
-	// own wire format.
-}
-
-// --- end-to-end tests against a fake in-process sshd ---
-
-// fakeGuestSSHD starts a minimal SSH server on loopback that accepts
-// publicKey (any other key is rejected, the same way the reference guest
-// image only trusts its own baked-in keys), and for each session either
-// runs handleExec (when the client sends an "exec" request) or
-// handleShell (a bare "shell" request, no command) -- standing in for
-// deploy/guest-image's ForceCommand wrapper without needing a real guest
-// to test against.
-func fakeGuestSSHD(t *testing.T, publicKey ssh.PublicKey, handleExec func(cmd string, ch ssh.Channel), handleShell func(ch ssh.Channel)) (addr string) {
-	t.Helper()
-
-	hostSigner, err := ssh.NewSignerFromKey(genEd25519(t))
+// Config.Dir and Config.Env are what "kontur exec -w/-e" set, and what
+// they buy is a command that does not have to carry "cd ... &&" and an
+// "export" of its own.
+func TestRun_WorkingDirectoryAndEnvironmentReachTheCommand(t *testing.T) {
+	f := startFakeCHV(t, nil)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
-		t.Fatalf("creating host key: %v", err)
+		t.Fatal(err)
 	}
 
-	config := &ssh.ServerConfig{
-		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if !bytes.Equal(key.Marshal(), publicKey.Marshal()) {
-				return nil, errors.New("unauthorized key")
-			}
-			return nil, nil
-		},
+	cfg := testConfig(t, f)
+	cfg.Dir = dir
+	cfg.Env = []string{"GOFLAGS=-mod=vendor"}
+
+	var stdout bytes.Buffer
+	if _, err := RunLine(context.Background(), cfg, `pwd; echo "$GOFLAGS"`, nil, &stdout, nil); err != nil {
+		t.Fatal(err)
 	}
-	config.AddHostKey(hostSigner)
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening: %v", err)
-	}
-	t.Cleanup(func() { l.Close() })
-
-	// Loops over every connection (not just the first) so a test that
-	// deliberately fails auth, forcing guestexec's own retry loop to
-	// dial again, doesn't hang waiting for a second connection nothing
-	// would ever accept.
-	go func() {
-		for {
-			nConn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				sConn, chans, reqs, err := ssh.NewServerConn(nConn, config)
-				if err != nil {
-					return
-				}
-				defer sConn.Close()
-				go ssh.DiscardRequests(reqs)
-
-				for newCh := range chans {
-					if newCh.ChannelType() != "session" {
-						newCh.Reject(ssh.UnknownChannelType, "only session channels supported")
-						continue
-					}
-					ch, requests, err := newCh.Accept()
-					if err != nil {
-						return
-					}
-					go func() {
-						defer ch.Close()
-						for req := range requests {
-							switch req.Type {
-							case "exec":
-								var payload struct{ Command string }
-								ssh.Unmarshal(req.Payload, &payload)
-								if req.WantReply {
-									req.Reply(true, nil)
-								}
-								handleExec(payload.Command, ch)
-								return
-							case "shell":
-								if req.WantReply {
-									req.Reply(true, nil)
-								}
-								handleShell(ch)
-								return
-							case "pty-req", "window-change":
-								if req.WantReply {
-									req.Reply(true, nil)
-								}
-							default:
-								if req.WantReply {
-									req.Reply(false, nil)
-								}
-							}
-						}
-					}()
-				}
-			}()
-		}
-	}()
-
-	return l.Addr().String()
-}
-
-func genEd25519(t *testing.T) ed25519.PrivateKey {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generating key: %v", err)
-	}
-	return priv
-}
-
-// writeClientKey generates a fresh ed25519 keypair, writes the private
-// half (in the OpenSSH format ssh.ParsePrivateKey/loadKey expects) to a
-// file under t.TempDir, and returns its path plus the public key so the
-// test's fake sshd can authorize exactly that key.
-func writeClientKey(t *testing.T) (path string, pub ssh.PublicKey) {
-	t.Helper()
-	priv := genEd25519(t)
-	signer, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatalf("creating signer: %v", err)
-	}
-
-	block, err := ssh.MarshalPrivateKey(priv, "")
-	if err != nil {
-		t.Fatalf("marshaling private key: %v", err)
-	}
-	path = filepath.Join(t.TempDir(), "id_ed25519")
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatalf("writing private key: %v", err)
-	}
-	return path, signer.PublicKey()
-}
-
-func TestRun_ExecutesGivenCommandAndReportsExitCode(t *testing.T) {
-	keyPath, pub := writeClientKey(t)
-
-	var gotCmd string
-	addr := fakeGuestSSHD(t, pub,
-		func(cmd string, ch ssh.Channel) {
-			gotCmd = cmd
-			io.WriteString(ch, "hello from guest\n")
-			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 7}))
-		},
-		func(ch ssh.Channel) {
-			t.Error("handleShell called, want handleExec for a non-empty command")
-		},
-	)
-
-	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
-	var stdout, stderr bytes.Buffer
-	code, err := Run(context.Background(), cfg, []string{"echo", "hello world"}, strings.NewReader(""), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if code != 7 {
-		t.Errorf("Run() code = %d, want 7", code)
-	}
-	if want := "'echo' 'hello world'"; gotCmd != want {
-		t.Errorf("guest received command %q, want %q", gotCmd, want)
-	}
-	if got := stdout.String(); got != "hello from guest\n" {
-		t.Errorf("stdout = %q, want %q", got, "hello from guest\n")
+	want := dir + "\n-mod=vendor\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
 }
 
-func TestRunLine_SendsLineVerbatim(t *testing.T) {
-	keyPath, pub := writeClientKey(t)
+// The mismatch this protocol cannot afford to be quiet about: an agent
+// that predates the fields runs the command anyway, in the wrong
+// directory, and says OK. The client has to notice from the features the
+// response does not name, and say so.
+func TestRun_AnAgentThatIgnoredTheWorkingDirectoryIsNotTakenAtItsWord(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{olderAgent: true})
 
-	var gotCmd string
-	addr := fakeGuestSSHD(t, pub,
-		func(cmd string, ch ssh.Channel) {
-			gotCmd = cmd
-			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 0}))
-		},
-		func(ch ssh.Channel) {
-			t.Error("handleShell called, want handleExec for a non-empty line")
-		},
-	)
+	cfg := testConfig(t, f)
+	cfg.Dir = t.TempDir()
 
-	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
-	// A line like this, round-tripped through Run's own shellJoin (which
-	// quotes it as a single literal argument), would reach the guest as
-	// a single-quoted string instead of a command the guest's own shell
-	// expands and word-splits -- see RunLine's doc comment for why it
-	// needs to skip that quoting instead.
-	line := "ls -la $HOME | wc -l"
-	if _, err := RunLine(context.Background(), cfg, line, strings.NewReader(""), io.Discard, io.Discard); err != nil {
-		t.Fatalf("RunLine() error = %v", err)
-	}
-	if gotCmd != line {
-		t.Errorf("guest received command %q, want %q", gotCmd, line)
-	}
-}
-
-func TestRunLine_EmptyLineRequestsShell(t *testing.T) {
-	keyPath, pub := writeClientKey(t)
-
-	shellCalled := false
-	addr := fakeGuestSSHD(t, pub,
-		func(cmd string, ch ssh.Channel) {
-			t.Error("handleExec called, want handleShell for an empty line")
-		},
-		func(ch ssh.Channel) {
-			shellCalled = true
-			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 0}))
-		},
-	)
-
-	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
-	if _, err := RunLine(context.Background(), cfg, "", strings.NewReader(""), io.Discard, io.Discard); err != nil {
-		t.Fatalf("RunLine() error = %v", err)
-	}
-	if !shellCalled {
-		t.Error("guest never received a shell request")
-	}
-}
-
-func TestRun_EmptyCommandRequestsShell(t *testing.T) {
-	keyPath, pub := writeClientKey(t)
-
-	shellCalled := false
-	addr := fakeGuestSSHD(t, pub,
-		func(cmd string, ch ssh.Channel) {
-			t.Error("handleExec called, want handleShell for an empty command")
-		},
-		func(ch ssh.Channel) {
-			shellCalled = true
-			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 0}))
-		},
-	)
-
-	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
-	var stdout, stderr bytes.Buffer
-	code, err := Run(context.Background(), cfg, nil, strings.NewReader(""), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if code != 0 {
-		t.Errorf("Run() code = %d, want 0", code)
-	}
-	if !shellCalled {
-		t.Error("guest never received a shell request")
-	}
-}
-
-func TestRun_ForwardsStdin(t *testing.T) {
-	keyPath, pub := writeClientKey(t)
-
-	var got bytes.Buffer
-	addr := fakeGuestSSHD(t, pub,
-		func(cmd string, ch ssh.Channel) {
-			io.Copy(&got, ch)
-			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 0}))
-		},
-		func(ch ssh.Channel) {},
-	)
-
-	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
-	var stdout, stderr bytes.Buffer
-	_, err := Run(context.Background(), cfg, []string{"cat"}, strings.NewReader("piped in"), &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if got.String() != "piped in" {
-		t.Errorf("guest received stdin %q, want %q", got.String(), "piped in")
-	}
-}
-
-func TestRun_RejectsWrongKey(t *testing.T) {
-	_, wantPub := writeClientKey(t)
-	wrongKeyPath, _ := writeClientKey(t)
-
-	addr := fakeGuestSSHD(t, wantPub,
-		func(cmd string, ch ssh.Channel) {},
-		func(ch ssh.Channel) {},
-	)
-
-	cfg := Config{Addr: addr, User: "root", KeyPath: wrongKeyPath, ConnectTimeout: 500 * time.Millisecond}
-	_, err := Run(context.Background(), cfg, []string{"true"}, strings.NewReader(""), io.Discard, io.Discard)
+	_, err := RunLine(context.Background(), cfg, "pwd", nil, nil, nil)
 	if err == nil {
-		t.Fatal("Run() error = nil, want an error when authenticating with an unauthorized key")
+		t.Fatal("RunLine accepted a session that silently dropped the working directory")
+	}
+	if !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("error = %v, want one naming the guest agent as too old", err)
 	}
 }
 
-// TestRun_HandshakeHangIsBounded exercises a server that accepts the TCP
-// connection but never speaks SSH at all -- regression coverage for
-// dialOnce needing its own deadline, since ssh.Dial's own
-// ClientConfig.Timeout only bounds the TCP connect, not the handshake
-// (see dialOnce's doc comment).
-func TestRun_HandshakeHangIsBounded(t *testing.T) {
-	keyPath, _ := writeClientKey(t)
+// And a request that asked for nothing optional is still served by that
+// same older agent: every added field is "omitempty" so that a client
+// not using one stays compatible with a guest image that does not have
+// it.
+func TestRun_AnOlderAgentStillServesAPlainCommand(t *testing.T) {
+	f := startFakeCHV(t, &fakeCHV{olderAgent: true})
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listening: %v", err)
+	var stdout bytes.Buffer
+	if _, err := RunLine(context.Background(), testConfig(t, f), "echo plain", nil, &stdout, nil); err != nil {
+		t.Fatalf("RunLine against an older agent: %v", err)
 	}
-	t.Cleanup(func() { l.Close() })
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
+	if stdout.String() != "plain\n" {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestParseArgs_FlagsThenCommand(t *testing.T) {
+	opts, err := ParseArgs([]string{"-w", "/src", "-e", "A=1", "--env", "B=2", "--", "go", "build", "./..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Workdir != "/src" {
+		t.Errorf("workdir = %q", opts.Workdir)
+	}
+	if strings.Join(opts.Env, ",") != "A=1,B=2" {
+		t.Errorf("env = %v, want both entries in the order given", opts.Env)
+	}
+	if strings.Join(opts.Command, " ") != "go build ./..." {
+		t.Errorf("command = %v", opts.Command)
+	}
+}
+
+// The invocation every doc, script and README line uses has to keep
+// meaning exactly what it did before this mode had any flags at all.
+func TestParseArgs_TheDocumentedInvocationIsUnchanged(t *testing.T) {
+	opts, err := ParseArgs([]string{"--", "sh", "-c", "exit 42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(opts.Command, "|") != "sh|-c|exit 42" {
+		t.Fatalf("command = %v, want the command's own flags left alone", opts.Command)
+	}
+	if opts.Workdir != "" || len(opts.Env) != 0 {
+		t.Fatalf("opts = %+v, want nothing set", opts)
+	}
+
+	// No "--" either: flags stop at the first thing that is not one, so
+	// a command's own arguments are still its own.
+	opts, err = ParseArgs([]string{"uname", "-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(opts.Command, "|") != "uname|-a" {
+		t.Fatalf("command = %v", opts.Command)
+	}
+
+	// And no arguments at all is still the interactive login shell.
+	opts, err = ParseArgs(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opts.Command) != 0 {
+		t.Fatalf("command = %v, want none", opts.Command)
+	}
+}
+
+func TestParseArgs_RejectsWhatWouldGoWrongLater(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		// docker exec reads a bare name from the client's environment;
+		// this container's environment is not one anybody set up, so a
+		// variable that quietly did not arrive is the likelier outcome.
+		{"a bare variable name", []string{"-e", "GOFLAGS", "--", "true"}, "KEY=value"},
+		{"an empty key", []string{"-e", "=1", "--", "true"}, "KEY=value"},
+		{"a relative working directory", []string{"-w", "src", "--", "true"}, "absolute"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseArgs(tc.args)
+			if err == nil {
+				t.Fatalf("ParseArgs(%q) = nil, want an error", tc.args)
 			}
-			// Accept and hold the connection open without ever sending
-			// an SSH version banner.
-			t.Cleanup(func() { conn.Close() })
-		}
-	}()
-
-	cfg := Config{Addr: l.Addr().String(), User: "root", KeyPath: keyPath, ConnectTimeout: 500 * time.Millisecond}
-	start := time.Now()
-	_, err = Run(context.Background(), cfg, []string{"true"}, strings.NewReader(""), io.Discard, io.Discard)
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatal("Run() error = nil, want an error when the server never completes the SSH handshake")
-	}
-	if elapsed > 5*time.Second {
-		t.Errorf("Run() took %s to give up, want it bounded by ConnectTimeout/dialTimeout", elapsed)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not mention %q", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), Usage) {
+				t.Error("the error does not carry the usage a caller needs to fix it")
+			}
+		})
 	}
 }
 
-func TestRun_NonZeroExitIsNotAnError(t *testing.T) {
-	keyPath, pub := writeClientKey(t)
-
-	addr := fakeGuestSSHD(t, pub,
-		func(cmd string, ch ssh.Channel) {
-			ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{Status: 42}))
-		},
-		func(ch ssh.Channel) {},
-	)
-
-	cfg := Config{Addr: addr, User: "root", KeyPath: keyPath, ConnectTimeout: 2 * time.Second}
-	code, err := Run(context.Background(), cfg, []string{"false"}, strings.NewReader(""), io.Discard, io.Discard)
-	if err != nil {
-		t.Fatalf("Run() error = %v, want nil for a mere non-zero remote exit", err)
-	}
-	if code != 42 {
-		t.Errorf("Run() code = %d, want 42", code)
+// "kontur exec -h" is a question, and cmd/kontur answers it with Usage
+// on stdout rather than as a failure.
+func TestParseArgs_HelpIsNotAnError(t *testing.T) {
+	_, err := ParseArgs([]string{"-h"})
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("ParseArgs(-h) = %v, want flag.ErrHelp", err)
 	}
 }

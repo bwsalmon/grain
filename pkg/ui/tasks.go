@@ -154,9 +154,18 @@ type Task struct {
 	// own State now (model.StateAwaitingSubmit), so the badge says it
 	// rather than contradicting it.
 	MergeQueueBlockedAt *time.Time `json:"mergeQueueBlockedAt,omitempty"`
-	// Activity is what this task's live run says it is doing right now --
-	// one short phrase the run wrote for itself through the update_status
-	// tool (model.Run.Activity), with ActivityAt the moment it wrote it.
+	// Repairing is true for a task the merge queue has sent back to an
+	// agent to repair its own pull request branch, and whose repair has
+	// not finished (model.Observation.MergeQueueRepairAt,
+	// orchestrator.repairInFlight). Such a task reads 'running' or
+	// 'queued' like any other attempt, and from the state alone a person
+	// watching cannot tell "still being written" from "written, merged
+	// nowhere, and now being unstuck" -- so the frontend colours the
+	// running mark differently for it (ui/src/components/StateDot.jsx).
+	Repairing bool `json:"repairing,omitempty"`
+	// Activity is what this task's live run is doing right now -- one
+	// short phrase (model.Run.Activity), with ActivityAt the moment it
+	// was written.
 	//
 	// Both are empty for every task that is not running, and for a running
 	// task whose agent has not said anything yet: a run is under no
@@ -172,6 +181,21 @@ type Task struct {
 	// tasks doing?", asked of all of them at once.
 	Activity   string     `json:"activity,omitempty"`
 	ActivityAt *time.Time `json:"activityAt,omitempty"`
+	// ActivityBySetup says the phrase is grain's own rather than the
+	// run's: what the dispatch path is doing to get this run started --
+	// building its sandbox, cloning its repo, minting its credentials --
+	// over the stretch before its agent's first turn, which is the one
+	// part of a run nothing could narrate before (orchestrator.setupNotes,
+	// model.RunActivity.BySetup).
+	//
+	// It is carried rather than blurred because everything else that has
+	// ever appeared in this field is something an agent wrote, and a
+	// reader who has learnt to read the phrase as the agent's voice should
+	// not have to guess which of the two is speaking. The frontend marks
+	// such a phrase as grain's (TaskList.jsx, DetailOverlay.jsx); it is
+	// never true for a phrase written through update_status, because
+	// grain's own are cleared the moment the agent starts.
+	ActivityBySetup bool `json:"activityBySetup,omitempty"`
 }
 
 // Comment is one entry in a task's conversation.
@@ -314,7 +338,7 @@ type Attempt struct {
 // once for a whole list; Client.Task reads the one it needs), empty for
 // a task with no review and for one whose template has since gone.
 func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueueBlockedAt *time.Time,
-	activity *model.RunActivity, reviewTemplateName string) Task {
+	repairing bool, activity *model.RunActivity, reviewTemplateName string) Task {
 	out := Task{
 		ID:                  t.ID,
 		Title:               t.Title,
@@ -339,9 +363,11 @@ func taskFrom(t model.Task, state model.State, closed map[string]bool, mergeQueu
 		SuiteRun:            t.Origin.Reason == model.ReasonSuite,
 		CreatedAt:           t.CreatedAt,
 		MergeQueueBlockedAt: mergeQueueBlockedAt,
+		Repairing:           repairing,
 	}
 	if activity != nil {
 		out.Activity, out.ActivityAt = activity.Note, activity.At
+		out.ActivityBySetup = activity.BySetup
 	}
 	if t.Target != nil {
 		out.Repo = t.Target.String()
